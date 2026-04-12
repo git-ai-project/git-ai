@@ -1,9 +1,96 @@
-# git-ai   <a href="https://discord.gg/XJStYvkb5U"><img alt="Discord" src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" /></a>        
+# git-ai (Tazapay Fork) <a href="https://discord.gg/XJStYvkb5U"><img alt="Discord" src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white" /></a>
 
 <img src="https://github.com/git-ai-project/git-ai/raw/main/assets/docs/git-ai.png" align="right"
      alt="Git AI Logo" width="200" height="200">
 
 Git AI is an open source git extension that tracks AI-generated code in your repositories.
+
+**This is the Tazapay fork of [git-ai-project/git-ai](https://github.com/git-ai-project/git-ai).** It adds two changes on top of upstream. All changes are purely additive — no existing behavior is modified and upstream ignores unknown fields.
+
+## What This Fork Adds
+
+### Change A: Fix `mixed_additions` loss during squash merges
+
+Upstream drops `overriden_lines` (and therefore `mixed_additions`) when PRs are squash-merged. When an AI-generated line is edited by a human before commit, the squash reconstruction loses that override attribution. This fork detects those lost AI lines during reconstruction and correctly populates `overriden_lines` in the prompt records.
+
+### Change B: Per-developer `contributors` section
+
+Adds a `contributors` map to both git notes metadata and `git-ai stats --json` output, breaking down AI usage per developer.
+
+#### `contributors` in `git-ai stats --json` and `git notes`
+
+```json
+{
+  "human_additions": 3,
+  "ai_additions": 4,
+  "mixed_additions": 1,
+  "ai_accepted": 3,
+  "contributors": {
+    "alice@tazapay.com": {
+      "name": "alice",
+      "human_additions": 3,
+      "manual_additions": 2,
+      "ai_additions": 4,
+      "ai_accepted": 3,
+      "mixed_additions": 1,
+      "ai_acceptance_rate": 75.0,
+      "tool_model_breakdown": {
+        "claude::claude-opus-4-6": {
+          "ai_additions": 4,
+          "ai_accepted": 3,
+          "mixed_additions": 1,
+          "ai_acceptance_rate": 75.0
+        }
+      }
+    }
+  }
+}
+```
+
+#### Field definitions
+
+| Field | Definition |
+| ----- | ---------- |
+| `human_additions` | Lines attributed to humans, includes mixed (upstream-compatible) |
+| `manual_additions` | Lines written purely by humans, excludes mixed |
+| `ai_additions` | Total AI-generated lines = `ai_accepted + mixed_additions` |
+| `ai_accepted` | AI lines committed without human edits |
+| `mixed_additions` | AI lines edited by human before commit |
+| `ai_acceptance_rate` | `ai_accepted / ai_additions * 100` when `ai_additions > 0`, else `0.0` |
+| `tool_model_breakdown` | Per `tool::model` stats: ai_additions, ai_accepted, mixed_additions, ai_acceptance_rate |
+
+Exclusive buckets: `manual_additions + ai_accepted + mixed_additions = git_diff_added_lines`
+
+#### Cascading through the branching model
+
+```
+task-branch-A (dev Alice) --+
+                             +--> feature-branch --> main
+task-branch-B (dev Bob)   --+
+```
+
+- **Task -> Feature squash**: `build_contributors()` reads per-commit prompt records + raw git diff to attribute lines to individual developers.
+- **Feature -> Main squash**: Source commits already have a `contributors` section from the previous level. `build_contributors()` merges them by summing all numeric fields and recalculating acceptance rates.
+
+#### Upstream compatibility
+
+- The `contributors` field uses `skip_serializing_if = "Option::is_none"` — omitted when absent.
+- Upstream git-ai ignores unknown JSON fields during deserialization.
+- No existing fields or behaviors are modified.
+
+### Deployment
+
+**Only CI uses this fork.** Developers keep upstream git-ai installed locally.
+
+Update CI to install from the Tazapay fork release:
+
+```bash
+curl -fsSL https://github.com/tazapay/git-ai/releases/latest/download/install.sh | bash
+```
+
+No changes needed for developer workstations.
+
+---
 
 Once installed, it automatically links every AI-written line to the agent, model, and transcripts that generated it — so you never lose the intent, requirements, and architecture decisions behind your code.
 

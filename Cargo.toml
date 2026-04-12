@@ -52,6 +52,7 @@ winreg = "0.55"
 [features]
 test-support = ["dep:tempfile"]
 keyring = ["dep:keyring"]
+daemon-tests = []
 
 [dev-dependencies]
 git-ai = { path = ".", features = ["test-support"] }

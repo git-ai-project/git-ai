@@ -63,5 +63,6 @@ AuthorshipLogV3 {
         prompts: {},
         humans: {},
         sessions: {},
+        contributors: None,
     },
 }

@@ -1,5 +1,5 @@
 use crate::authorship::authorship_log::{
-    Author, HumanRecord, LineRange, PromptRecord, SessionRecord,
+    Author, ContributorStats, HumanRecord, LineRange, PromptRecord, SessionRecord,
 };
 use crate::authorship::working_log::CheckpointKind;
 use crate::git::repository::Repository;
@@ -34,6 +34,8 @@ pub struct AuthorshipMetadata {
     pub humans: BTreeMap<String, HumanRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sessions: BTreeMap<String, SessionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contributors: Option<BTreeMap<String, ContributorStats>>,
 }
 
 impl AuthorshipMetadata {
@@ -45,6 +47,7 @@ impl AuthorshipMetadata {
             prompts: BTreeMap::new(),
             humans: BTreeMap::new(),
             sessions: BTreeMap::new(),
+            contributors: None,
         }
     }
 }

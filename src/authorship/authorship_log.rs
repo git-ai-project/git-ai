@@ -1,12 +1,90 @@
 use crate::authorship::working_log::AgentId;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Author {
     pub username: String,
     pub email: String,
+}
+
+/// Per tool::model contributor stats breakdown
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ToolModelContributorStats {
+    #[serde(default)]
+    pub ai_additions: u32,
+    #[serde(default)]
+    pub ai_accepted: u32,
+    #[serde(default)]
+    pub mixed_additions: u32,
+    #[serde(default)]
+    pub ai_acceptance_rate: f64,
+}
+
+/// Per-developer contribution stats, keyed by email in the contributors map
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ContributorStats {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub human_additions: u32,
+    #[serde(default)]
+    pub manual_additions: u32,
+    #[serde(default)]
+    pub ai_additions: u32,
+    #[serde(default)]
+    pub ai_accepted: u32,
+    #[serde(default)]
+    pub mixed_additions: u32,
+    #[serde(default)]
+    pub ai_acceptance_rate: f64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_model_breakdown: BTreeMap<String, ToolModelContributorStats>,
+}
+
+impl ContributorStats {
+    /// Merge another ContributorStats into this one by summing all numeric fields.
+    /// Acceptance rates are NOT summed — they must be recalculated after all merges.
+    pub fn merge_from(&mut self, other: &ContributorStats) {
+        if self.name.is_empty() {
+            self.name = other.name.clone();
+        }
+        self.human_additions += other.human_additions;
+        self.manual_additions += other.manual_additions;
+        self.ai_additions += other.ai_additions;
+        self.ai_accepted += other.ai_accepted;
+        self.mixed_additions += other.mixed_additions;
+        // ai_acceptance_rate recalculated after all merges, not summed
+
+        for (key, other_tm) in &other.tool_model_breakdown {
+            let tm = self.tool_model_breakdown.entry(key.clone()).or_default();
+            tm.ai_additions += other_tm.ai_additions;
+            tm.ai_accepted += other_tm.ai_accepted;
+            tm.mixed_additions += other_tm.mixed_additions;
+        }
+    }
+
+    /// Recalculate acceptance rates from current totals.
+    /// Must be called after all merge_from operations.
+    pub fn recalculate_acceptance_rates(&mut self) {
+        if self.ai_additions > 0 {
+            self.ai_acceptance_rate =
+                ((self.ai_accepted as f64 / self.ai_additions as f64) * 10000.0).round() / 100.0;
+        } else {
+            self.ai_acceptance_rate = 0.0;
+        }
+        for tm_stats in self.tool_model_breakdown.values_mut() {
+            if tm_stats.ai_additions > 0 {
+                tm_stats.ai_acceptance_rate =
+                    ((tm_stats.ai_accepted as f64 / tm_stats.ai_additions as f64) * 10000.0)
+                        .round()
+                        / 100.0;
+            } else {
+                tm_stats.ai_acceptance_rate = 0.0;
+            }
+        }
+    }
 }
 
 /// Represents either a single line or a range of lines
@@ -294,4 +372,115 @@ mod tests {
             "u32::MAX + 1 should overflow u32 and return None"
         );
     }
+
+    // --- PromptRecord::Ord transitivity test ---
+
+    #[test]
+    fn test_prompt_record_ord_transitivity() {
+        let a = create_prompt_record(1, 0, 0); // 1 message
+        let b = create_prompt_record(2, 0, 0); // 2 messages
+        let c = create_prompt_record(3, 0, 0); // 3 messages
+
+        assert!(a < b, "a should be less than b");
+        assert!(b < c, "b should be less than c");
+        assert!(a < c, "transitivity: a should be less than c");
+    }
+
+    // --- recalculate_acceptance_rates tests ---
+
+    fn make_stats(ai_additions: u32, ai_accepted: u32) -> ContributorStats {
+        let mut s = ContributorStats {
+            ai_additions,
+            ai_accepted,
+            ..Default::default()
+        };
+        s.recalculate_acceptance_rates();
+        s
+    }
+
+    #[test]
+    fn test_rate_perfect_acceptance() {
+        // 4/4 = 100.0
+        assert_eq!(make_stats(4, 4).ai_acceptance_rate, 100.0);
+    }
+
+    #[test]
+    fn test_rate_zero_when_no_ai_additions() {
+        // 0 additions → rate is 0.0, no division
+        assert_eq!(make_stats(0, 0).ai_acceptance_rate, 0.0);
+    }
+
+    #[test]
+    fn test_rate_partial_acceptance() {
+        // 3/4 = 75.0
+        assert_eq!(make_stats(4, 3).ai_acceptance_rate, 75.0);
+    }
+
+    #[test]
+    fn test_rate_half_acceptance() {
+        // 1/2 = 50.0
+        assert_eq!(make_stats(2, 1).ai_acceptance_rate, 50.0);
+    }
+
+    #[test]
+    fn test_rate_two_thirds_rounds_to_two_decimals() {
+        // 2/3 * 100 = 66.666... → rounded to 66.67
+        assert_eq!(make_stats(3, 2).ai_acceptance_rate, 66.67);
+    }
+
+    #[test]
+    fn test_rate_non_trivial_two_decimals() {
+        // 59/90 = 65.555... → 65.56
+        assert_eq!(make_stats(90, 59).ai_acceptance_rate, 65.56);
+    }
+
+    #[test]
+    fn test_rate_tool_model_breakdown_recalculated() {
+        let mut s = ContributorStats {
+            ai_additions: 10,
+            ai_accepted: 10,
+            ..Default::default()
+        };
+        let tm = ToolModelContributorStats {
+            ai_additions: 3,
+            ai_accepted: 2,
+            ..Default::default()
+        };
+        // pre-condition: rate not yet set
+        assert_eq!(tm.ai_acceptance_rate, 0.0);
+        s.tool_model_breakdown
+            .insert("cursor::gpt-4o".to_string(), tm);
+        s.recalculate_acceptance_rates();
+
+        assert_eq!(s.ai_acceptance_rate, 100.0);
+        assert_eq!(
+            s.tool_model_breakdown["cursor::gpt-4o"].ai_acceptance_rate,
+            66.67
+        );
+    }
+
+    #[test]
+    fn test_rate_tool_model_zero_additions() {
+        let mut s = ContributorStats {
+            ai_additions: 0,
+            ai_accepted: 0,
+            ..Default::default()
+        };
+        s.tool_model_breakdown.insert(
+            "cursor::gpt-4o".to_string(),
+            ToolModelContributorStats {
+                ai_additions: 0,
+                ai_accepted: 0,
+                ..Default::default()
+            },
+        );
+        s.recalculate_acceptance_rates();
+
+        assert_eq!(s.ai_acceptance_rate, 0.0);
+        assert_eq!(
+            s.tool_model_breakdown["cursor::gpt-4o"].ai_acceptance_rate,
+            0.0
+        );
+    }
 }
+

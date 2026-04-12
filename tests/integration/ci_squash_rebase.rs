@@ -1332,6 +1332,200 @@ fn test_ci_rebase_merge_multiple_commits_standard_human() {
     ]);
 }
 
+/// Test that CI squash merge populates the contributors field in the authorship note.
+/// After squash-merging a feature branch with AI commits, the merge commit's note
+/// should contain a contributors map keyed by developer email with per-developer stats.
+#[test]
+fn test_ci_squash_merge_populates_contributors() {
+    let repo = direct_test_repo();
+    let mut file = repo.filename("widget.ts");
+
+    // Create initial commit on main
+    file.set_contents(crate::lines!["export class Widget {", "  render() {}", "}"]);
+    let _base_commit = repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Create feature branch with AI commits
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit 1: AI adds 2 lines
+    file.insert_at(
+        1,
+        crate::lines!["  color = 'blue';".ai(), "  size = 42;".ai()],
+    );
+    repo.stage_all_and_commit("AI adds color and size").unwrap();
+
+    // Commit 2: Human adds 1 line
+    file.insert_at(3, crate::lines!["  label = 'hello';"]);
+    let feature_commit = repo.stage_all_and_commit("Human adds label").unwrap();
+    let feature_sha = feature_commit.commit_sha;
+
+    // Simulate CI squash merge
+    repo.git(&["checkout", "main"]).unwrap();
+    file.set_contents(crate::lines![
+        "export class Widget {",
+        "  color = 'blue';",
+        "  size = 42;",
+        "  label = 'hello';",
+        "  render() {}",
+        "}"
+    ]);
+    let merge_commit = repo.stage_all_and_commit("Squashed feature").unwrap();
+    let merge_sha = merge_commit.commit_sha;
+
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "feature",
+        "main",
+        &feature_sha,
+        &merge_sha,
+        false,
+    )
+    .unwrap();
+
+    let squash_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha)
+        .expect("Squash commit should have authorship log");
+
+    // KEY ASSERTION: contributors must be populated
+    assert!(
+        squash_log.metadata.contributors.is_some(),
+        "Squash merge note should have contributors field populated"
+    );
+    let contributors = squash_log.metadata.contributors.unwrap();
+    assert!(
+        !contributors.is_empty(),
+        "Contributors map should not be empty"
+    );
+
+    // The test repo uses "Test User" as the committer — all contributions should be under one email
+    let (email, stats) = contributors.iter().next().unwrap();
+    assert!(!email.is_empty(), "Contributor email should not be empty");
+    assert!(
+        stats.ai_accepted > 0,
+        "Contributor should have ai_accepted > 0, got: {}",
+        stats.ai_accepted
+    );
+    assert!(
+        stats.manual_additions > 0 || stats.human_additions > 0,
+        "Contributor should have some human/manual additions"
+    );
+}
+
+/// Test that CI rebase merge populates the contributors field on each rebased commit's note.
+/// Unlike squash (N→1), rebase creates N new commits — each should have its own contributors.
+#[test]
+fn test_ci_rebase_merge_populates_contributors() {
+    use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+    use git_ai::ci::ci_context::{CiContext, CiEvent, CiRunOptions};
+
+    let repo = direct_test_repo();
+
+    // Create initial commit on main
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    let base_sha = repo
+        .stage_all_and_commit("Initial commit")
+        .unwrap()
+        .commit_sha;
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Create feature branch with 2 AI commits
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    let mut file_a = repo.filename("file_a.txt");
+    file_a.set_contents(crate::lines!["ai content in file_a".ai()]);
+    let feature_sha1 = repo.stage_all_and_commit("Add file_a").unwrap().commit_sha;
+
+    let mut file_b = repo.filename("file_b.txt");
+    file_b.set_contents(crate::lines!["ai content in file_b".ai()]);
+    let feature_sha2 = repo.stage_all_and_commit("Add file_b").unwrap().commit_sha;
+
+    // Simulate rebase merge: cherry-pick each commit onto main
+    repo.git(&["checkout", "main"]).unwrap();
+
+    repo.git_og(&["cherry-pick", &feature_sha1]).unwrap();
+    let new_sha1 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    repo.git_og(&["cherry-pick", &feature_sha2]).unwrap();
+    let new_sha2 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Set up bare origin for CiContext
+    let origin_dir = tempfile::tempdir().unwrap();
+    let origin_path = origin_dir.path().join("origin.git");
+    repo.git_og(&[
+        "clone",
+        "--bare",
+        repo.path().to_str().unwrap(),
+        origin_path.to_str().unwrap(),
+    ])
+    .unwrap();
+    repo.git_og(&["remote", "add", "origin", origin_path.to_str().unwrap()])
+        .unwrap();
+
+    // Run CiContext (detects rebase merge and calls rewrite_authorship_after_rebase_v2)
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    let event = CiEvent::Merge {
+        merge_commit_sha: new_sha2.clone(),
+        head_ref: "feature".to_string(),
+        head_sha: feature_sha2.clone(),
+        base_ref: "main".to_string(),
+        base_sha,
+    };
+
+    let ctx = CiContext::with_repository(git_ai_repo, event);
+    ctx.run_with_options(CiRunOptions {
+        skip_fetch_notes: true,
+        skip_fetch_base: true,
+    })
+    .expect("CiContext run should succeed");
+
+    // Verify each rebased commit has contributors in its note
+    let note1_raw = repo
+        .read_authorship_note(&new_sha1)
+        .expect("rebased commit 1 should have authorship note");
+    let log1 = AuthorshipLog::deserialize_from_string(&note1_raw).unwrap();
+
+    let note2_raw = repo
+        .read_authorship_note(&new_sha2)
+        .expect("rebased commit 2 should have authorship note");
+    let log2 = AuthorshipLog::deserialize_from_string(&note2_raw).unwrap();
+
+    // KEY ASSERTION: both rebased commits should have contributors
+    assert!(
+        log1.metadata.contributors.is_some(),
+        "Rebased commit 1's note should have contributors. Metadata: {:?}",
+        log1.metadata
+    );
+    assert!(
+        log2.metadata.contributors.is_some(),
+        "Rebased commit 2's note should have contributors. Metadata: {:?}",
+        log2.metadata
+    );
+
+    let contributors1 = log1.metadata.contributors.unwrap();
+    let contributors2 = log2.metadata.contributors.unwrap();
+
+    // Each commit should have at least one contributor with ai_accepted > 0
+    let has_ai_1 = contributors1.values().any(|s| s.ai_accepted > 0);
+    let has_ai_2 = contributors2.values().any(|s| s.ai_accepted > 0);
+    assert!(
+        has_ai_1,
+        "Rebased commit 1 contributors should have ai_accepted > 0. Got: {:?}",
+        contributors1
+    );
+    assert!(
+        has_ai_2,
+        "Rebased commit 2 contributors should have ai_accepted > 0. Got: {:?}",
+        contributors2
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_basic,
     test_ci_squash_merge_multiple_files,
@@ -1347,4 +1541,6 @@ crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_mixed_content_standard_human,
     test_ci_squash_merge_with_manual_changes_standard_human,
     test_ci_rebase_merge_multiple_commits_standard_human,
+    test_ci_squash_merge_populates_contributors,
+    test_ci_rebase_merge_populates_contributors,
 );

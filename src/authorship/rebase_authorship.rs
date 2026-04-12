@@ -694,14 +694,17 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     let mut authorship_log = merged_va.to_authorship_log()?;
     authorship_log.metadata.base_commit_sha = merge_commit_sha.to_string();
 
-    // Preserve accumulated totals from source commits (squash/rebase should not drop session totals).
-    let mut summed_totals: HashMap<String, (u32, u32)> = HashMap::new();
+    // Preserve accumulated totals and overriden_lines from source commits.
+    // Squash reconstruction via blame loses overriden_lines because blame attributes
+    // human-edited AI lines to the human, not the AI. We propagate the source values.
+    let mut summed_totals: HashMap<String, (u32, u32, u32)> = HashMap::new();
     for commit_sha in &source_commits {
         if let Ok(log) = get_reference_as_authorship_log_v3(repo, commit_sha) {
             for (prompt_id, record) in log.metadata.prompts {
-                let entry = summed_totals.entry(prompt_id).or_insert((0, 0));
+                let entry = summed_totals.entry(prompt_id).or_insert((0, 0, 0));
                 entry.0 = entry.0.saturating_add(record.total_additions);
                 entry.1 = entry.1.saturating_add(record.total_deletions);
+                entry.2 = entry.2.saturating_add(record.overriden_lines);
             }
             for (hash, record) in log.metadata.humans {
                 authorship_log.metadata.humans.entry(hash).or_insert(record);
@@ -713,17 +716,32 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     }
 
     for (prompt_id, record) in authorship_log.metadata.prompts.iter_mut() {
-        if let Some((additions, deletions)) = summed_totals.get(prompt_id) {
+        if let Some((additions, deletions, overriden)) = summed_totals.get(prompt_id) {
             record.total_additions = *additions;
             record.total_deletions = *deletions;
+            // Use the max of VA-calculated and source notes value.
+            // VA-based detection may find some overrides; source notes carry
+            // overrides that blame can't detect. Take whichever is larger.
+            record.overriden_lines = record.overriden_lines.max(*overriden);
         }
     }
 
-    tracing::debug!(
-        "Created authorship log with {} attestations, {} prompts",
+    // Step 6b: Build per-developer contributors section
+    let contributors = build_contributors(repo, &source_commits);
+    if !contributors.is_empty() {
+        authorship_log.metadata.contributors = Some(contributors);
+    }
+
+    tracing::debug!(&format!(
+        "Created authorship log with {} attestations, {} prompts, contributors={}",
         authorship_log.attestations.len(),
-        authorship_log.metadata.prompts.len()
-    );
+        authorship_log.metadata.prompts.len(),
+        authorship_log
+            .metadata
+            .contributors
+            .as_ref()
+            .map_or(0, |c| c.len()),
+    ));
 
     // Step 7: Save authorship log to git notes
     let authorship_json = authorship_log
@@ -1444,7 +1462,7 @@ pub fn rewrite_authorship_after_rebase_v2(
     // metadata_json_template_parts below).  Attestations will be empty because
     // existing_files is empty, but that's fine — cached_file_attestation_text is also
     // empty and gets rebuilt per-commit.
-    let current_authorship_log = build_authorship_log_from_state(
+    let mut current_authorship_log = build_authorship_log_from_state(
         original_head,
         &current_prompts,
         &initial_humans,
@@ -1759,6 +1777,17 @@ pub fn rewrite_authorship_after_rebase_v2(
                 || delta_sessions != prev_delta_sessions
             {
                 let active_ids: HashSet<String> = active_prompt_key.keys().cloned().collect();
+                // Build per-commit contributors from the original commit's note + diff
+                if let Some(orig_sha) = current_original_commit {
+                    let contributors = build_contributors(repo, &[orig_sha.to_string()]);
+                    if !contributors.is_empty() {
+                        current_authorship_log.metadata.contributors = Some(contributors);
+                    } else {
+                        current_authorship_log.metadata.contributors = None;
+                    }
+                } else {
+                    current_authorship_log.metadata.contributors = None;
+                }
                 metadata_json_template_parts = build_metadata_template_parts_filtered(
                     &current_authorship_log.metadata,
                     &current_prompts,
@@ -3681,10 +3710,21 @@ pub fn try_fast_path_rebase_note_remap_cached(
         let Some(raw_note) = note_cache.original_note_contents.get(original_commit) else {
             return Ok(false);
         };
-        remapped_note_entries.push((
-            new_commit.clone(),
-            remap_note_content_for_target_commit(raw_note, new_commit),
-        ));
+        let mut remapped = remap_note_content_for_target_commit(raw_note, new_commit);
+
+        // Inject per-commit contributors into the fast-path remapped note
+        let contributors = build_contributors(repo, std::slice::from_ref(original_commit));
+        if !contributors.is_empty()
+            && let Ok(mut log) =
+                crate::authorship::authorship_log_serialization::AuthorshipLog::deserialize_from_string(&remapped)
+        {
+            log.metadata.contributors = Some(contributors);
+            if let Ok(updated) = log.serialize_to_string() {
+                remapped = updated;
+            }
+        }
+
+        remapped_note_entries.push((new_commit.clone(), remapped));
     }
 
     let remapped_count = remapped_note_entries.len();
@@ -4783,4 +4823,2678 @@ pub fn transform_attributions_to_final_state(
         prompts,
         ts,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Contributors: per-developer stats aggregation for squash-merged commits
+// ---------------------------------------------------------------------------
+
+use crate::authorship::authorship_log::ContributorStats;
+
+/// Build per-developer contributor stats from source commits being squash-merged.
+///
+/// Three priority levels per commit:
+/// 1. If the commit already has a `contributors` section (from a previous squash), merge those.
+/// 2. If the commit has notes with prompts, derive AI vs human stats from prompt records + git diff.
+/// 3. If the commit has no notes, all added lines are attributed as manual to the commit author.
+fn build_contributors(
+    repo: &Repository,
+    source_commits: &[String],
+) -> BTreeMap<String, ContributorStats> {
+    let (noreply_normalizer, name_to_email) = build_email_normalizer(repo, source_commits);
+    let mut contributors: HashMap<String, ContributorStats> = HashMap::new();
+
+    for sha in source_commits {
+        // Priority 1: existing contributors from a previous squash level
+        if let Ok(note) = get_reference_as_authorship_log_v3(repo, sha) {
+            if let Some(existing_contributors) = &note.metadata.contributors {
+                for (email, stats) in existing_contributors {
+                    contributors
+                        .entry(email.clone())
+                        .or_default()
+                        .merge_from(stats);
+                }
+                continue;
+            }
+
+            // Priority 2: notes with prompts
+            if !note.metadata.prompts.is_empty() {
+                let commit_author_email = get_commit_author_email(repo, sha);
+                let commit_author_name = get_commit_author_name(repo, sha);
+                let normalized_commit_email =
+                    normalize_email(&commit_author_email, &noreply_normalizer);
+                let git_diff_added_lines = get_commit_diff_added_lines(repo, sha);
+
+                let mut total_ai_accepted: u32 = 0;
+                let mut total_mixed: u32 = 0;
+
+                for prompt in note.metadata.prompts.values() {
+                    let dev_email = resolve_contributor_email(
+                        &prompt.human_author,
+                        &commit_author_email,
+                        &name_to_email,
+                    );
+                    let dev_email = normalize_email(&dev_email, &noreply_normalizer);
+                    let dev_name = parse_name_from_human_author(&prompt.human_author);
+                    let tool_model = format!("{}::{}", prompt.agent_id.tool, prompt.agent_id.model);
+
+                    let c = contributors.entry(dev_email).or_default();
+                    if !dev_name.is_empty() && dev_name != "unknown" {
+                        c.name = dev_name;
+                    }
+
+                    c.ai_accepted += prompt.accepted_lines;
+                    c.mixed_additions += prompt.overriden_lines;
+                    c.ai_additions += prompt.accepted_lines + prompt.overriden_lines;
+                    c.human_additions += prompt.overriden_lines; // mixed counts as human (upstream)
+
+                    let tm = c.tool_model_breakdown.entry(tool_model).or_default();
+                    tm.ai_accepted += prompt.accepted_lines;
+                    tm.mixed_additions += prompt.overriden_lines;
+                    tm.ai_additions += prompt.accepted_lines + prompt.overriden_lines;
+
+                    total_ai_accepted += prompt.accepted_lines;
+                    total_mixed += prompt.overriden_lines;
+                }
+
+                // Manual lines = raw git total - ai_accepted - mixed
+                let manual_for_commit = git_diff_added_lines
+                    .saturating_sub(total_ai_accepted)
+                    .saturating_sub(total_mixed);
+
+                let c = contributors.entry(normalized_commit_email).or_default();
+                if c.name.is_empty() {
+                    c.name = commit_author_name;
+                }
+                c.manual_additions += manual_for_commit;
+                c.human_additions += manual_for_commit;
+
+                continue;
+            }
+        }
+
+        // Priority 3: no notes — all lines are manual
+        let commit_author_email = get_commit_author_email(repo, sha);
+        let commit_author_name = get_commit_author_name(repo, sha);
+        let normalized_commit_email = normalize_email(&commit_author_email, &noreply_normalizer);
+        let git_diff_added_lines = get_commit_diff_added_lines(repo, sha);
+
+        if git_diff_added_lines > 0 {
+            let c = contributors.entry(normalized_commit_email).or_default();
+            if c.name.is_empty() {
+                c.name = commit_author_name;
+            }
+            c.manual_additions += git_diff_added_lines;
+            c.human_additions += git_diff_added_lines;
+        }
+    }
+
+    // Recalculate acceptance rates
+    for stats in contributors.values_mut() {
+        stats.recalculate_acceptance_rates();
+    }
+
+    contributors.into_iter().collect()
+}
+
+/// Get the author email for a commit via `git show`.
+fn get_commit_author_email(repo: &Repository, commit_sha: &str) -> String {
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "show".to_string(),
+        "-s".to_string(),
+        "--no-notes".to_string(),
+        "--format=%ae".to_string(),
+        commit_sha.to_string(),
+    ]);
+    exec_git(&args)
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Get the author name for a commit via `git show`.
+fn get_commit_author_name(repo: &Repository, commit_sha: &str) -> String {
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "show".to_string(),
+        "-s".to_string(),
+        "--no-notes".to_string(),
+        "--format=%an".to_string(),
+        commit_sha.to_string(),
+    ]);
+    exec_git(&args)
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Get the number of added lines for a single commit via `git diff --numstat`.
+fn get_commit_diff_added_lines(repo: &Repository, commit_sha: &str) -> u32 {
+    let parent_ref = {
+        let mut args = repo.global_args_for_exec();
+        args.extend_from_slice(&["rev-parse".to_string(), format!("{}^", commit_sha)]);
+        exec_git(&args)
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            // Empty tree for initial commits
+            .unwrap_or_else(|| "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string())
+    };
+
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "diff".to_string(),
+        "--numstat".to_string(),
+        parent_ref,
+        commit_sha.to_string(),
+    ]);
+
+    let output = match exec_git(&args) {
+        Ok(o) => o,
+        Err(_) => return 0,
+    };
+    let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+
+    let mut total = 0u32;
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 2
+            && let Ok(added) = parts[0].parse::<u32>()
+        {
+            total += added;
+        }
+    }
+    total
+}
+
+/// Resolve contributor email from a prompt's `human_author` field.
+///
+/// 1. `"Name <email>"` → extract email from angle brackets
+/// 2. `"Name"` (bare) → look up in name_to_email → else fallback to commit_author_email
+/// 3. `None` → commit_author_email
+fn resolve_contributor_email(
+    human_author: &Option<String>,
+    commit_author_email: &str,
+    name_to_email: &HashMap<String, String>,
+) -> String {
+    if let Some(author) = human_author {
+        if let Some(start) = author.find('<')
+            && let Some(end) = author.find('>')
+            && start < end
+        {
+            return author[start + 1..end].to_string();
+        }
+        let name_lower = author.trim().to_lowercase();
+        if let Some(email) = name_to_email.get(&name_lower) {
+            return email.clone();
+        }
+        return commit_author_email.to_string();
+    }
+    commit_author_email.to_string()
+}
+
+/// Parse the display name from `"Name <email>"` or bare `"Name"`.
+fn parse_name_from_human_author(human_author: &Option<String>) -> String {
+    if let Some(author) = human_author {
+        if let Some(start) = author.find('<') {
+            return author[..start].trim().to_string();
+        }
+        return author.clone();
+    }
+    "unknown".to_string()
+}
+
+/// Extract GitHub username from a noreply email, e.g.
+/// `"12345+alice@users.noreply.github.com"` → `"alice"`.
+fn extract_github_username(email: &str) -> Option<String> {
+    let suffix = "@users.noreply.github.com";
+    if !email.ends_with(suffix) {
+        return None;
+    }
+    let local = &email[..email.len() - suffix.len()];
+    // Format: "12345+username" or just "username"
+    let username = if let Some(pos) = local.find('+') {
+        &local[pos + 1..]
+    } else {
+        local
+    };
+    if username.is_empty() {
+        None
+    } else {
+        Some(username.to_lowercase())
+    }
+}
+
+/// Build email normalization maps by scanning notes and commit metadata across source commits.
+///
+/// Returns `(noreply_normalizer, name_to_email)`:
+/// - `noreply_normalizer`: maps GitHub noreply emails → corporate emails
+/// - `name_to_email`: maps lowercase name → corporate email
+fn build_email_normalizer(
+    repo: &Repository,
+    source_commits: &[String],
+) -> (HashMap<String, String>, HashMap<String, String>) {
+    let mut name_to_email: HashMap<String, String> = HashMap::new();
+    let mut username_to_noreply: HashMap<String, String> = HashMap::new();
+
+    for sha in source_commits {
+        // From notes
+        if let Ok(note) = get_reference_as_authorship_log_v3(repo, sha) {
+            if let Some(existing_contributors) = &note.metadata.contributors {
+                for (email, stats) in existing_contributors {
+                    if email.contains('@') {
+                        name_to_email.insert(stats.name.to_lowercase(), email.clone());
+                    }
+                }
+            }
+            for prompt in note.metadata.prompts.values() {
+                if let Some(ref author) = prompt.human_author
+                    && let Some(start) = author.find('<')
+                    && let Some(end) = author.find('>')
+                    && start < end
+                {
+                    let email = author[start + 1..end].to_string();
+                    let name = author[..start].trim().to_lowercase();
+                    if !name.is_empty() {
+                        name_to_email.insert(name, email);
+                    }
+                }
+            }
+        }
+
+        // From commit metadata
+        let commit_email = get_commit_author_email(repo, sha);
+        let commit_name = get_commit_author_name(repo, sha);
+        if commit_email.contains('@') && !commit_name.is_empty() {
+            name_to_email.insert(commit_name.to_lowercase(), commit_email.clone());
+        }
+        if let Some(username) = extract_github_username(&commit_email) {
+            username_to_noreply.insert(username, commit_email);
+        }
+    }
+
+    let mut noreply_normalizer: HashMap<String, String> = HashMap::new();
+    for (username, noreply_email) in &username_to_noreply {
+        if let Some(real_email) = name_to_email.get(username) {
+            noreply_normalizer.insert(noreply_email.clone(), real_email.clone());
+        }
+    }
+
+    (noreply_normalizer, name_to_email)
+}
+
+/// Normalize an email using the noreply lookup map.
+fn normalize_email(email: &str, normalizer: &HashMap<String, String>) -> String {
+    normalizer
+        .get(email)
+        .cloned()
+        .unwrap_or_else(|| email.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        collect_changed_file_contents_from_diff, extract_github_username,
+        get_pathspecs_from_commits, normalize_email, parse_cat_file_batch_output_with_oids,
+        parse_name_from_human_author, resolve_contributor_email,
+        rewrite_authorship_after_cherry_pick, transform_attributions_to_final_state,
+        try_fast_path_rebase_note_remap, walk_commits_to_base,
+    };
+    use crate::authorship::attribution_tracker::{Attribution, LineAttribution};
+    use crate::authorship::authorship_log::{LineRange, PromptRecord};
+    use crate::authorship::authorship_log_serialization::{
+        AttestationEntry, AuthorshipLog, FileAttestation,
+    };
+    use crate::authorship::virtual_attribution::VirtualAttributions;
+    use crate::authorship::working_log::{AgentId, Checkpoint, CheckpointKind};
+    use crate::git::refs::{notes_add, show_authorship_note};
+    use crate::git::rewrite_log::{RebaseCompleteEvent, RewriteLogEvent};
+    use crate::git::test_utils::TmpRepo;
+    use std::collections::{HashMap, HashSet};
+
+    fn write_minimal_authorship_note(
+        repo: &TmpRepo,
+        commit_sha: &str,
+        file_path: &str,
+        author_id: &str,
+    ) {
+        let mut log = AuthorshipLog::new();
+        log.metadata.base_commit_sha = commit_sha.to_string();
+        let mut file = FileAttestation::new(file_path.to_string());
+        file.add_entry(AttestationEntry::new(
+            author_id.to_string(),
+            vec![LineRange::Range(1, 1)],
+        ));
+        log.attestations.push(file);
+
+        let note = log
+            .serialize_to_string()
+            .expect("serialize authorship note");
+        notes_add(repo.gitai_repo(), commit_sha, &note).expect("write authorship note");
+    }
+
+    #[test]
+    fn walk_commits_to_base_linear_history_is_bounded_and_ordered() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        repo.write_file("f.txt", "a\n", true).expect("write base");
+        repo.commit_with_message("base").expect("commit base");
+        let base = repo.get_head_commit_sha().expect("base sha");
+
+        repo.write_file("f.txt", "a\nb\n", true).expect("write mid");
+        repo.commit_with_message("mid").expect("commit mid");
+        let mid = repo.get_head_commit_sha().expect("mid sha");
+
+        repo.write_file("f.txt", "a\nb\nc\n", true)
+            .expect("write head");
+        repo.commit_with_message("head").expect("commit head");
+        let head = repo.get_head_commit_sha().expect("head sha");
+
+        let commits =
+            walk_commits_to_base(repo.gitai_repo(), &head, &base).expect("walk should succeed");
+
+        // Newest -> oldest; callers reverse() for chronological order.
+        assert_eq!(commits, vec![head, mid]);
+    }
+
+    #[test]
+    fn walk_commits_to_base_merge_history_includes_both_sides_without_full_dag_walk() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        repo.write_file("base.txt", "base\n", true)
+            .expect("write base");
+        repo.commit_with_message("base").expect("commit base");
+        let base = repo.get_head_commit_sha().expect("base sha");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("side").expect("create side branch");
+        repo.write_file("side.txt", "side\n", true)
+            .expect("write side");
+        repo.commit_with_message("side commit")
+            .expect("commit side");
+        let side_commit = repo.get_head_commit_sha().expect("side sha");
+
+        repo.switch_branch(&default_branch)
+            .expect("switch default branch");
+        repo.write_file("main.txt", "main\n", true)
+            .expect("write main");
+        repo.commit_with_message("main commit")
+            .expect("commit main");
+        let main_commit = repo.get_head_commit_sha().expect("main sha");
+
+        repo.git_command(&["merge", "--no-ff", "side", "-m", "merge side"])
+            .expect("merge side");
+        let merge_head = repo.get_head_commit_sha().expect("merge sha");
+
+        let commits = walk_commits_to_base(repo.gitai_repo(), &merge_head, &base)
+            .expect("walk should succeed");
+
+        assert_eq!(commits.first(), Some(&merge_head));
+        assert_eq!(commits.len(), 3);
+        assert!(commits.contains(&main_commit));
+        assert!(commits.contains(&side_commit));
+        assert!(!commits.contains(&base));
+    }
+
+    #[test]
+    fn walk_commits_to_base_rejects_non_ancestor_base() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        repo.write_file("f.txt", "a\n", true).expect("write base");
+        repo.commit_with_message("base").expect("commit base");
+
+        repo.write_file("f.txt", "a\nb\n", true)
+            .expect("write middle");
+        repo.commit_with_message("middle").expect("commit middle");
+        let middle = repo.get_head_commit_sha().expect("middle sha");
+
+        repo.write_file("f.txt", "a\nb\nc\n", true)
+            .expect("write top");
+        repo.commit_with_message("top").expect("commit top");
+        let top = repo.get_head_commit_sha().expect("top sha");
+
+        let err = walk_commits_to_base(repo.gitai_repo(), &middle, &top).expect_err("should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not an ancestor"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn rewrite_authorship_after_cherry_pick_errors_on_mismatched_commit_counts() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        let err = rewrite_authorship_after_cherry_pick(
+            repo.gitai_repo(),
+            &["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()],
+            &[
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                "cccccccccccccccccccccccccccccccccccccccc".to_string(),
+            ],
+            "human",
+        )
+        .expect_err("mismatched cherry-pick mapping should fail");
+
+        assert!(
+            err.to_string()
+                .contains("cherry-pick rewrite commit count mismatch")
+        );
+    }
+
+    #[test]
+    fn get_pathspecs_from_commits_keeps_hex_filenames() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        repo.write_file("base.txt", "base\n", true)
+            .expect("write base file");
+        repo.commit_with_message("base commit")
+            .expect("commit base file");
+
+        let hex_name = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        repo.write_file(hex_name, "x\n", true)
+            .expect("write hex file");
+        repo.commit_with_message("hex file commit")
+            .expect("commit hex file");
+        let commit_sha = repo.get_head_commit_sha().expect("head sha");
+
+        let paths = get_pathspecs_from_commits(repo.gitai_repo(), &[commit_sha])
+            .expect("collect pathspecs from commit");
+
+        assert!(
+            paths.iter().any(|p| p == hex_name),
+            "hex filename should be retained in pathspecs: {:?}",
+            paths
+        );
+    }
+
+    #[test]
+    fn collect_changed_file_contents_from_diff_handles_add_modify_delete_and_filtering() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        repo.write_file("a.txt", "a1\n", true)
+            .expect("write a base");
+        repo.write_file("c.txt", "c1\n", true)
+            .expect("write c base");
+        repo.commit_with_message("base").expect("commit base");
+
+        repo.write_file("a.txt", "a2\n", true).expect("modify a");
+        repo.write_file("b.txt", "b1\n", true).expect("add b");
+        repo.git_command(&["rm", "c.txt"]).expect("delete c");
+        repo.commit_with_message("rewrite").expect("commit rewrite");
+
+        let repo_ref = repo.gitai_repo();
+        let head_sha = repo.get_head_commit_sha().expect("head sha");
+        let head = repo_ref.find_commit(head_sha).expect("head commit");
+        let parent = head.parent(0).expect("parent commit");
+        let head_tree = head.tree().expect("head tree");
+        let parent_tree = parent.tree().expect("parent tree");
+        let diff = repo_ref
+            .diff_tree_to_tree(Some(&parent_tree), Some(&head_tree), None, None)
+            .expect("diff tree-to-tree");
+
+        let tracked_all: HashSet<&str> = ["a.txt", "b.txt", "c.txt"].into_iter().collect();
+        let (changed, contents) =
+            collect_changed_file_contents_from_diff(repo_ref, &diff, &tracked_all)
+                .expect("collect changed contents");
+
+        assert_eq!(changed.len(), 3);
+        assert!(changed.contains("a.txt"));
+        assert!(changed.contains("b.txt"));
+        assert!(changed.contains("c.txt"));
+        assert_eq!(contents.get("a.txt").map(String::as_str), Some("a2\n"));
+        assert_eq!(contents.get("b.txt").map(String::as_str), Some("b1\n"));
+        assert_eq!(contents.get("c.txt").map(String::as_str), Some(""));
+
+        let tracked_subset: HashSet<&str> = ["a.txt"].into_iter().collect();
+        let (subset_changed, subset_contents) =
+            collect_changed_file_contents_from_diff(repo_ref, &diff, &tracked_subset)
+                .expect("collect subset");
+        assert_eq!(subset_changed.len(), 1);
+        assert!(subset_changed.contains("a.txt"));
+        assert_eq!(subset_contents.len(), 1);
+        assert_eq!(
+            subset_contents.get("a.txt").map(String::as_str),
+            Some("a2\n")
+        );
+    }
+
+    #[test]
+    fn parse_cat_file_batch_output_with_oids_parses_empty_and_multiline_blobs() {
+        let data = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa blob 6\nx\ny\nz\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb blob 0\n\n";
+        let parsed =
+            parse_cat_file_batch_output_with_oids(data).expect("parse cat-file batch output");
+
+        assert_eq!(
+            parsed
+                .get("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .map(String::as_str),
+            Some("x\ny\nz\n")
+        );
+        assert_eq!(
+            parsed
+                .get("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .map(String::as_str),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn parse_cat_file_batch_output_with_oids_errors_on_truncated_payload() {
+        let truncated = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa blob 5\nabc";
+        let err = parse_cat_file_batch_output_with_oids(truncated).expect_err("should fail");
+        assert!(
+            err.to_string().contains("truncated"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn fast_path_rebase_note_remap_copies_logs_when_tracked_blobs_match() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        repo.write_file("ai.txt", "base\n", true)
+            .expect("write ai base");
+        repo.commit_with_message("base").expect("commit base");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature")
+            .expect("create feature branch");
+        repo.write_file("ai.txt", "base\nfeature\n", true)
+            .expect("write feature ai");
+        repo.commit_with_message("feature ai commit")
+            .expect("commit feature ai");
+        let original_commit = repo.get_head_commit_sha().expect("feature sha");
+        write_minimal_authorship_note(&repo, &original_commit, "ai.txt", "mock_ai");
+
+        repo.switch_branch(&default_branch)
+            .expect("switch default branch");
+        repo.write_file("unrelated.txt", "main\n", true)
+            .expect("write unrelated");
+        repo.commit_with_message("main unrelated")
+            .expect("commit unrelated");
+
+        repo.git_command(&["cherry-pick", &original_commit])
+            .expect("cherry-pick feature commit");
+        let new_commit = repo.get_head_commit_sha().expect("new sha");
+
+        let commits_to_process_lookup: HashSet<&str> = [new_commit.as_str()].into_iter().collect();
+        let did_remap = try_fast_path_rebase_note_remap(
+            repo.gitai_repo(),
+            std::slice::from_ref(&original_commit),
+            std::slice::from_ref(&new_commit),
+            &commits_to_process_lookup,
+            &["ai.txt".to_string()],
+        )
+        .expect("fast-path remap result");
+
+        assert!(did_remap, "expected fast-path remap to trigger");
+
+        let remapped_note_raw =
+            show_authorship_note(repo.gitai_repo(), &new_commit).expect("new note content");
+        let remapped =
+            AuthorshipLog::deserialize_from_string(&remapped_note_raw).expect("parse new note");
+        assert_eq!(remapped.metadata.base_commit_sha, new_commit);
+        assert_eq!(remapped.attestations.len(), 1);
+        assert_eq!(remapped.attestations[0].file_path, "ai.txt");
+    }
+
+    #[test]
+    fn fast_path_rebase_note_remap_copies_multiple_commits_in_one_pass() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        repo.write_file("ai.txt", "base\n", true)
+            .expect("write ai base");
+        repo.commit_with_message("base").expect("commit base");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature")
+            .expect("create feature branch");
+
+        let mut original_commits = Vec::new();
+        for idx in 1..=2 {
+            repo.write_file("ai.txt", &format!("base\nfeature {}\n", idx), true)
+                .expect("write feature ai");
+            repo.commit_with_message(&format!("feature ai commit {}", idx))
+                .expect("commit feature ai");
+            let original_commit = repo.get_head_commit_sha().expect("feature sha");
+            write_minimal_authorship_note(&repo, &original_commit, "ai.txt", "mock_ai");
+            original_commits.push(original_commit);
+        }
+
+        repo.switch_branch(&default_branch)
+            .expect("switch default branch");
+        repo.write_file("unrelated.txt", "main\n", true)
+            .expect("write unrelated");
+        repo.commit_with_message("main unrelated")
+            .expect("commit unrelated");
+
+        let mut new_commits = Vec::new();
+        for original_commit in &original_commits {
+            repo.git_command(&["cherry-pick", original_commit])
+                .expect("cherry-pick feature commit");
+            new_commits.push(repo.get_head_commit_sha().expect("new sha"));
+        }
+
+        let commits_to_process_lookup: HashSet<&str> =
+            new_commits.iter().map(String::as_str).collect();
+        let did_remap = try_fast_path_rebase_note_remap(
+            repo.gitai_repo(),
+            &original_commits,
+            &new_commits,
+            &commits_to_process_lookup,
+            &["ai.txt".to_string()],
+        )
+        .expect("fast-path remap result");
+
+        assert!(did_remap, "expected fast-path remap to trigger");
+
+        for new_commit in new_commits {
+            let remapped_note_raw =
+                show_authorship_note(repo.gitai_repo(), &new_commit).expect("new note content");
+            let remapped =
+                AuthorshipLog::deserialize_from_string(&remapped_note_raw).expect("parse new note");
+            assert_eq!(remapped.metadata.base_commit_sha, new_commit);
+            assert_eq!(remapped.attestations.len(), 1);
+            assert_eq!(remapped.attestations[0].file_path, "ai.txt");
+        }
+    }
+
+    #[test]
+    fn fast_path_rebase_note_remap_declines_when_tracked_blobs_differ() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        repo.write_file("ai.txt", "base\n", true)
+            .expect("write ai base");
+        repo.commit_with_message("base").expect("commit base");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature")
+            .expect("create feature branch");
+        repo.write_file("ai.txt", "base\nfeature\n", true)
+            .expect("write feature ai");
+        repo.commit_with_message("feature ai commit")
+            .expect("commit feature ai");
+        let original_commit = repo.get_head_commit_sha().expect("feature sha");
+        write_minimal_authorship_note(&repo, &original_commit, "ai.txt", "mock_ai");
+
+        repo.switch_branch(&default_branch)
+            .expect("switch default branch");
+        repo.write_file("ai.txt", "base\nmain-only\n", true)
+            .expect("write divergent ai");
+        repo.commit_with_message("main modifies ai")
+            .expect("commit divergent ai");
+        let new_commit = repo.get_head_commit_sha().expect("new sha");
+
+        let commits_to_process_lookup: HashSet<&str> = [new_commit.as_str()].into_iter().collect();
+        let did_remap = try_fast_path_rebase_note_remap(
+            repo.gitai_repo(),
+            std::slice::from_ref(&original_commit),
+            std::slice::from_ref(&new_commit),
+            &commits_to_process_lookup,
+            &["ai.txt".to_string()],
+        )
+        .expect("fast-path remap result");
+
+        assert!(!did_remap, "expected fast-path remap to decline");
+    }
+
+    #[test]
+    fn transform_attributions_to_final_state_preserves_unchanged_files() {
+        let repo = TmpRepo::new().expect("tmp repo");
+        repo.write_file("a.txt", "aaa\n", true).expect("write a");
+        repo.write_file("b.txt", "bbb\n", true).expect("write b");
+        repo.commit_with_message("base").expect("commit base");
+        let base_sha = repo.get_head_commit_sha().expect("base sha");
+
+        let mut attrs = HashMap::new();
+        attrs.insert(
+            "a.txt".to_string(),
+            (
+                vec![Attribution::new(0, 4, "ai-a".to_string(), 1)],
+                vec![LineAttribution {
+                    start_line: 1,
+                    end_line: 1,
+                    author_id: "ai-a".to_string(),
+                    overrode: None,
+                }],
+            ),
+        );
+        attrs.insert(
+            "b.txt".to_string(),
+            (
+                vec![Attribution::new(0, 4, "ai-b".to_string(), 1)],
+                vec![LineAttribution {
+                    start_line: 1,
+                    end_line: 1,
+                    author_id: "ai-b".to_string(),
+                    overrode: None,
+                }],
+            ),
+        );
+
+        let mut file_contents = HashMap::new();
+        file_contents.insert("a.txt".to_string(), "aaa\n".to_string());
+        file_contents.insert("b.txt".to_string(), "bbb\n".to_string());
+
+        let source_va =
+            VirtualAttributions::new(repo.gitai_repo().clone(), base_sha, attrs, file_contents, 1);
+
+        let mut final_state = HashMap::new();
+        final_state.insert("a.txt".to_string(), "aaa!\n".to_string());
+
+        let transformed = transform_attributions_to_final_state(&source_va, final_state, None)
+            .expect("transform");
+
+        assert_eq!(
+            transformed
+                .get_file_content("b.txt")
+                .map(std::string::String::as_str),
+            Some("bbb\n")
+        );
+        assert!(
+            transformed.get_line_attributions("b.txt").is_some(),
+            "unchanged file should retain attributions"
+        );
+    }
+
+    #[test]
+    fn rebase_complete_migrates_initial_to_new_head() {
+        let repo = TmpRepo::new().expect("create tmp repo");
+
+        repo.write_file("base.txt", "base\n", true)
+            .expect("write base");
+        repo.commit_with_message("base commit")
+            .expect("commit base");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature")
+            .expect("create feature branch");
+        repo.write_file("feature.txt", "feature code\n", true)
+            .expect("write feature");
+        repo.commit_with_message("feature commit")
+            .expect("commit feature");
+        let original_head = repo.get_head_commit_sha().expect("feature head sha");
+
+        let mut initial_files = HashMap::new();
+        initial_files.insert(
+            "uncommitted.txt".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 5,
+                author_id: "ai-author-1".to_string(),
+                overrode: None,
+            }],
+        );
+        let mut prompts = HashMap::new();
+        prompts.insert(
+            "ai-author-1".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "test-tool".to_string(),
+                    id: "session-1".to_string(),
+                    model: "test-model".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 5,
+                total_deletions: 0,
+                accepted_lines: 5,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: Some(HashMap::from([
+                    ("employee_id".to_string(), "E100".to_string()),
+                    ("team".to_string(), "test".to_string()),
+                ])),
+            },
+        );
+
+        let old_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&original_head)
+            .unwrap();
+        old_wl
+            .write_initial_attributions(initial_files.clone(), prompts.clone())
+            .expect("write INITIAL");
+
+        let old_initial = old_wl.read_initial_attributions();
+        assert_eq!(
+            old_initial.files.len(),
+            1,
+            "INITIAL should exist on old HEAD before rebase"
+        );
+
+        repo.switch_branch(&default_branch)
+            .expect("switch default branch");
+        repo.write_file("upstream.txt", "upstream\n", true)
+            .expect("write upstream");
+        repo.commit_with_message("upstream commit")
+            .expect("commit upstream");
+        let new_head = repo
+            .get_head_commit_sha()
+            .expect("upstream sha as simulated new_head");
+
+        let rebase_event = RewriteLogEvent::RebaseComplete {
+            rebase_complete: RebaseCompleteEvent::new(
+                original_head.clone(),
+                new_head.clone(),
+                false,
+                vec![original_head.clone()],
+                vec![new_head.clone()],
+            ),
+        };
+
+        super::rewrite_authorship_if_needed(
+            repo.gitai_repo(),
+            &rebase_event,
+            "Test User".to_string(),
+            &vec![rebase_event.clone()],
+            true,
+        )
+        .expect("rewrite_authorship_if_needed should succeed");
+
+        let new_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&new_head)
+            .unwrap();
+        let migrated = new_wl.read_initial_attributions();
+
+        assert_eq!(
+            migrated.files.len(),
+            1,
+            "INITIAL should have been migrated to new HEAD"
+        );
+        assert!(
+            migrated.files.contains_key("uncommitted.txt"),
+            "migrated INITIAL should contain the uncommitted file"
+        );
+        let attrs = &migrated.files["uncommitted.txt"];
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0].start_line, 1);
+        assert_eq!(attrs[0].end_line, 5);
+        assert_eq!(attrs[0].author_id, "ai-author-1");
+
+        assert!(
+            migrated.prompts.contains_key("ai-author-1"),
+            "migrated INITIAL should preserve prompt records"
+        );
+    }
+
+    #[test]
+    fn rebase_complete_no_initial_is_noop() {
+        let repo = TmpRepo::new().expect("create tmp repo");
+        repo.write_file("base.txt", "base\n", true)
+            .expect("write base");
+        repo.commit_with_message("base commit")
+            .expect("commit base");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature").expect("create feature");
+        repo.write_file("feature.txt", "code\n", true)
+            .expect("write feature");
+        repo.commit_with_message("feature commit")
+            .expect("commit feature");
+        let original_head = repo.get_head_commit_sha().expect("feature sha");
+
+        repo.switch_branch(&default_branch)
+            .expect("switch default branch");
+        repo.write_file("upstream.txt", "upstream\n", true)
+            .expect("write upstream");
+        repo.commit_with_message("upstream commit")
+            .expect("commit upstream");
+        let new_head = repo.get_head_commit_sha().expect("upstream sha");
+
+        let rebase_event = RewriteLogEvent::RebaseComplete {
+            rebase_complete: RebaseCompleteEvent::new(
+                original_head.clone(),
+                new_head.clone(),
+                false,
+                vec![original_head.clone()],
+                vec![new_head.clone()],
+            ),
+        };
+
+        super::rewrite_authorship_if_needed(
+            repo.gitai_repo(),
+            &rebase_event,
+            "Test User".to_string(),
+            &vec![rebase_event.clone()],
+            true,
+        )
+        .expect("rewrite_authorship_if_needed should succeed with no INITIAL");
+
+        let new_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&new_head)
+            .unwrap();
+        let migrated = new_wl.read_initial_attributions();
+        assert!(
+            migrated.files.is_empty(),
+            "no INITIAL should exist on new HEAD when none existed on old HEAD"
+        );
+    }
+
+    #[test]
+    fn rebase_complete_migrates_multi_file_initial() {
+        let repo = TmpRepo::new().expect("create tmp repo");
+        repo.write_file("base.txt", "base\n", true)
+            .expect("write base");
+        repo.commit_with_message("base commit")
+            .expect("commit base");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature").expect("create feature");
+        repo.write_file("feature.txt", "feature\n", true)
+            .expect("write feature");
+        repo.commit_with_message("feature commit")
+            .expect("commit feature");
+        let original_head = repo.get_head_commit_sha().expect("feature sha");
+
+        let mut initial_files = HashMap::new();
+        initial_files.insert(
+            "file_a.py".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 10,
+                author_id: "ai-cursor".to_string(),
+                overrode: None,
+            }],
+        );
+        initial_files.insert(
+            "file_b.py".to_string(),
+            vec![
+                LineAttribution {
+                    start_line: 1,
+                    end_line: 3,
+                    author_id: "ai-cursor".to_string(),
+                    overrode: None,
+                },
+                LineAttribution {
+                    start_line: 7,
+                    end_line: 12,
+                    author_id: "ai-copilot".to_string(),
+                    overrode: None,
+                },
+            ],
+        );
+
+        let mut prompts = HashMap::new();
+        prompts.insert(
+            "ai-cursor".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "cursor".to_string(),
+                    id: "sess-1".to_string(),
+                    model: "gpt-4".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 13,
+                total_deletions: 0,
+                accepted_lines: 13,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: Some(HashMap::from([
+                    ("employee_id".to_string(), "E200".to_string()),
+                    ("team".to_string(), "platform".to_string()),
+                ])),
+            },
+        );
+        prompts.insert(
+            "ai-copilot".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "copilot".to_string(),
+                    id: "sess-2".to_string(),
+                    model: "gpt-4o".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 6,
+                total_deletions: 0,
+                accepted_lines: 6,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: Some(HashMap::from([
+                    ("employee_id".to_string(), "E200".to_string()),
+                    ("team".to_string(), "platform".to_string()),
+                ])),
+            },
+        );
+
+        let old_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&original_head)
+            .unwrap();
+        old_wl
+            .write_initial_attributions(initial_files, prompts)
+            .expect("write multi-file INITIAL");
+
+        repo.switch_branch(&default_branch)
+            .expect("switch default branch");
+        repo.write_file("upstream.txt", "upstream\n", true)
+            .expect("write upstream");
+        repo.commit_with_message("upstream")
+            .expect("commit upstream");
+        let new_head = repo.get_head_commit_sha().expect("new sha");
+
+        let rebase_event = RewriteLogEvent::RebaseComplete {
+            rebase_complete: RebaseCompleteEvent::new(
+                original_head.clone(),
+                new_head.clone(),
+                false,
+                vec![original_head.clone()],
+                vec![new_head.clone()],
+            ),
+        };
+
+        super::rewrite_authorship_if_needed(
+            repo.gitai_repo(),
+            &rebase_event,
+            "Test User".to_string(),
+            &vec![rebase_event.clone()],
+            true,
+        )
+        .expect("rewrite should succeed");
+
+        let migrated = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&new_head)
+            .unwrap()
+            .read_initial_attributions();
+
+        assert_eq!(migrated.files.len(), 2, "both files should be migrated");
+        assert!(migrated.files.contains_key("file_a.py"));
+        assert!(migrated.files.contains_key("file_b.py"));
+
+        let b_attrs = &migrated.files["file_b.py"];
+        assert_eq!(
+            b_attrs.len(),
+            2,
+            "file_b.py should have both attribution ranges"
+        );
+
+        assert_eq!(
+            migrated.prompts.len(),
+            2,
+            "both prompt records should be migrated"
+        );
+        assert!(migrated.prompts.contains_key("ai-cursor"));
+        assert!(migrated.prompts.contains_key("ai-copilot"));
+    }
+
+    #[test]
+    fn rebase_complete_merges_initial_when_both_working_logs_exist() {
+        let repo = TmpRepo::new().expect("create tmp repo");
+        repo.write_file("base.txt", "base\n", true)
+            .expect("write base");
+        repo.commit_with_message("base commit")
+            .expect("commit base");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature").expect("create feature");
+        repo.write_file("feature.txt", "feature\n", true)
+            .expect("write feature");
+        repo.commit_with_message("feature commit")
+            .expect("commit feature");
+        let original_head = repo.get_head_commit_sha().expect("feature sha");
+
+        let mut old_initial_files = HashMap::new();
+        old_initial_files.insert(
+            "old_file.txt".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 3,
+                author_id: "ai-old".to_string(),
+                overrode: None,
+            }],
+        );
+        let mut old_prompts = HashMap::new();
+        old_prompts.insert(
+            "ai-old".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "test-tool".to_string(),
+                    id: "old-session".to_string(),
+                    model: "test-model".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 3,
+                total_deletions: 0,
+                accepted_lines: 3,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: Some(HashMap::from([
+                    ("employee_id".to_string(), "E300".to_string()),
+                    ("team".to_string(), "infra".to_string()),
+                ])),
+            },
+        );
+
+        let old_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&original_head)
+            .unwrap();
+        old_wl
+            .write_initial_attributions(old_initial_files, old_prompts)
+            .expect("write old INITIAL");
+
+        repo.switch_branch(&default_branch)
+            .expect("switch default branch");
+        repo.write_file("upstream.txt", "upstream\n", true)
+            .expect("write upstream");
+        repo.commit_with_message("upstream commit")
+            .expect("commit upstream");
+        let new_head = repo.get_head_commit_sha().expect("upstream sha");
+
+        let new_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&new_head)
+            .unwrap();
+        let checkpoint = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            "diff".to_string(),
+            "new-author".to_string(),
+            vec![],
+        );
+        new_wl
+            .append_checkpoint(&checkpoint)
+            .expect("write checkpoint on new HEAD");
+
+        let rebase_event = RewriteLogEvent::RebaseComplete {
+            rebase_complete: RebaseCompleteEvent::new(
+                original_head.clone(),
+                new_head.clone(),
+                false,
+                vec![original_head.clone()],
+                vec![new_head.clone()],
+            ),
+        };
+
+        super::rewrite_authorship_if_needed(
+            repo.gitai_repo(),
+            &rebase_event,
+            "Test User".to_string(),
+            &vec![rebase_event.clone()],
+            true,
+        )
+        .expect("rewrite should succeed when both working logs exist");
+
+        let merged_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&new_head)
+            .unwrap();
+        let migrated = merged_wl.read_initial_attributions();
+
+        assert_eq!(
+            migrated.files.len(),
+            1,
+            "INITIAL from old HEAD should be merged into new HEAD"
+        );
+        assert!(migrated.files.contains_key("old_file.txt"));
+        assert!(migrated.prompts.contains_key("ai-old"));
+
+        let checkpoints = merged_wl
+            .read_all_checkpoints()
+            .expect("read checkpoints on new HEAD");
+        assert_eq!(
+            checkpoints.len(),
+            1,
+            "checkpoint on new HEAD should be preserved"
+        );
+        assert_eq!(checkpoints[0].author, "new-author");
+
+        assert!(
+            !repo.gitai_repo().storage.has_working_log(&original_head),
+            "old working log should be cleaned up"
+        );
+    }
+
+    #[test]
+    fn regression_initial_preserved_through_checkpoint_commit_rebase() {
+        let repo = TmpRepo::new().expect("create tmp repo");
+
+        repo.write_file("app.py", "def main():\n    print('hello')\n", true)
+            .expect("write base app.py");
+        repo.commit_with_message("initial commit")
+            .expect("initial commit");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature").expect("create feature");
+        repo.write_file(
+            "app.py",
+            "import logging\ndef main():\n    logging.info('Starting')\n    return 42\n",
+            true,
+        )
+        .expect("write AI app.py");
+        repo.write_file(
+            "utils.py",
+            "def helper():\n    return 'one'\ndef helper_two():\n    return 'two'\n",
+            true,
+        )
+        .expect("write AI utils.py");
+
+        repo.trigger_checkpoint_with_ai("cursor", None, None)
+            .expect("AI checkpoint for both files");
+
+        repo.commit_with_message("AI feature work")
+            .expect("feature commit");
+        let original_head = repo.get_head_commit_sha().expect("feature sha");
+
+        let mut initial_files = HashMap::new();
+        initial_files.insert(
+            "utils.py".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 4,
+                author_id: "cursor".to_string(),
+                overrode: None,
+            }],
+        );
+        let mut prompts = HashMap::new();
+        prompts.insert(
+            "cursor".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "cursor".to_string(),
+                    id: "session-1".to_string(),
+                    model: "test-model".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 4,
+                total_deletions: 0,
+                accepted_lines: 4,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: Some(HashMap::from([
+                    ("employee_id".to_string(), "E400".to_string()),
+                    ("team".to_string(), "backend".to_string()),
+                ])),
+            },
+        );
+        let old_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&original_head)
+            .unwrap();
+        old_wl
+            .write_initial_attributions(initial_files, prompts)
+            .expect("write INITIAL for uncommitted utils.py");
+
+        let pre_rebase_initial = old_wl.read_initial_attributions();
+        assert_eq!(
+            pre_rebase_initial.files.len(),
+            1,
+            "INITIAL should exist before rebase"
+        );
+
+        repo.switch_branch(&default_branch)
+            .expect("switch to default");
+        repo.write_file("README.md", "# Test Project\n", true)
+            .expect("write upstream README");
+        repo.commit_with_message("upstream: add README")
+            .expect("upstream commit");
+        let new_head = repo.get_head_commit_sha().expect("upstream sha");
+
+        let rebase_event = RewriteLogEvent::RebaseComplete {
+            rebase_complete: RebaseCompleteEvent::new(
+                original_head.clone(),
+                new_head.clone(),
+                false,
+                vec![original_head.clone()],
+                vec![new_head.clone()],
+            ),
+        };
+
+        super::rewrite_authorship_if_needed(
+            repo.gitai_repo(),
+            &rebase_event,
+            "Test User".to_string(),
+            &vec![rebase_event.clone()],
+            true,
+        )
+        .expect("rewrite should succeed");
+
+        let new_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&new_head)
+            .unwrap();
+        let migrated = new_wl.read_initial_attributions();
+
+        assert_eq!(
+            migrated.files.len(),
+            1,
+            "INITIAL should be migrated to new HEAD after rebase"
+        );
+        assert!(
+            migrated.files.contains_key("utils.py"),
+            "utils.py should be in migrated INITIAL"
+        );
+        let utils_attrs = &migrated.files["utils.py"];
+        assert_eq!(utils_attrs.len(), 1);
+        assert_eq!(utils_attrs[0].start_line, 1);
+        assert_eq!(utils_attrs[0].end_line, 4);
+        assert_eq!(utils_attrs[0].author_id, "cursor");
+
+        assert!(
+            migrated.prompts.contains_key("cursor"),
+            "cursor prompt record should be migrated"
+        );
+        assert!(
+            !repo.gitai_repo().storage.has_working_log(&original_head),
+            "old working log should not exist after rename"
+        );
+    }
+
+    #[test]
+    fn regression_initial_survives_amend_then_rebase() {
+        let repo = TmpRepo::new().expect("create tmp repo");
+
+        repo.write_file("app.py", "def main():\n    pass\n", true)
+            .expect("write base");
+        repo.commit_with_message("base commit")
+            .expect("commit base");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature").expect("create feature");
+        repo.write_file(
+            "app.py",
+            "import logging\ndef main():\n    logging.info('v1')\n    return 1\n",
+            true,
+        )
+        .expect("write feature v1");
+        repo.commit_with_message("feature v1")
+            .expect("commit feature v1");
+        let v1_head = repo.get_head_commit_sha().expect("v1 sha");
+
+        let mut initial_files = HashMap::new();
+        initial_files.insert(
+            "utils.py".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 8,
+                author_id: "ai-cursor".to_string(),
+                overrode: None,
+            }],
+        );
+        let mut prompts = HashMap::new();
+        prompts.insert(
+            "ai-cursor".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "cursor".to_string(),
+                    id: "sess-amend".to_string(),
+                    model: "gpt-4".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 8,
+                total_deletions: 0,
+                accepted_lines: 8,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: Some(HashMap::from([
+                    ("employee_id".to_string(), "E400".to_string()),
+                    ("team".to_string(), "backend".to_string()),
+                ])),
+            },
+        );
+        let v1_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&v1_head)
+            .unwrap();
+        v1_wl
+            .write_initial_attributions(initial_files.clone(), prompts.clone())
+            .expect("write INITIAL on v1");
+
+        repo.write_file(
+            "app.py",
+            "import logging\ndef main():\n    logging.info('v2')\n    return 2\n",
+            true,
+        )
+        .expect("write feature v2");
+        let amend_sha = repo.amend_commit("feature v2").expect("amend commit");
+        assert_ne!(v1_head, amend_sha, "amend should produce new SHA");
+
+        let amend_event = RewriteLogEvent::RebaseComplete {
+            rebase_complete: RebaseCompleteEvent::new(
+                v1_head.clone(),
+                amend_sha.clone(),
+                false,
+                vec![v1_head.clone()],
+                vec![amend_sha.clone()],
+            ),
+        };
+        super::rewrite_authorship_if_needed(
+            repo.gitai_repo(),
+            &amend_event,
+            "Test User".to_string(),
+            &vec![amend_event.clone()],
+            true,
+        )
+        .expect("amend rewrite should succeed");
+
+        let amend_initial = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&amend_sha)
+            .unwrap()
+            .read_initial_attributions();
+        assert_eq!(amend_initial.files.len(), 1, "INITIAL should survive amend");
+        assert!(amend_initial.files.contains_key("utils.py"));
+
+        repo.switch_branch(&default_branch)
+            .expect("switch to default");
+        repo.write_file("upstream.txt", "upstream change\n", true)
+            .expect("write upstream");
+        repo.commit_with_message("upstream commit")
+            .expect("commit upstream");
+        let rebase_new_head = repo.get_head_commit_sha().expect("rebase new head");
+
+        let rebase_event = RewriteLogEvent::RebaseComplete {
+            rebase_complete: RebaseCompleteEvent::new(
+                amend_sha.clone(),
+                rebase_new_head.clone(),
+                false,
+                vec![amend_sha.clone()],
+                vec![rebase_new_head.clone()],
+            ),
+        };
+        super::rewrite_authorship_if_needed(
+            repo.gitai_repo(),
+            &rebase_event,
+            "Test User".to_string(),
+            &vec![rebase_event.clone()],
+            true,
+        )
+        .expect("rebase rewrite should succeed");
+
+        let final_initial = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&rebase_new_head)
+            .unwrap()
+            .read_initial_attributions();
+        assert_eq!(
+            final_initial.files.len(),
+            1,
+            "INITIAL should survive amend + rebase"
+        );
+        assert!(final_initial.files.contains_key("utils.py"));
+        let attrs = &final_initial.files["utils.py"];
+        assert_eq!(attrs[0].start_line, 1);
+        assert_eq!(attrs[0].end_line, 8);
+        assert_eq!(attrs[0].author_id, "ai-cursor");
+        assert!(final_initial.prompts.contains_key("ai-cursor"));
+    }
+
+    #[test]
+    fn regression_multi_tool_initial_with_disjoint_files_survives_rebase() {
+        let repo = TmpRepo::new().expect("create tmp repo");
+
+        repo.write_file("base.txt", "base\n", true)
+            .expect("write base");
+        repo.commit_with_message("base commit")
+            .expect("commit base");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        repo.create_branch("feature").expect("create feature");
+        repo.write_file("committed.py", "print('committed')\n", true)
+            .expect("write committed");
+        repo.commit_with_message("feature commit")
+            .expect("commit feature");
+        let original_head = repo.get_head_commit_sha().expect("feature sha");
+
+        let mut initial_files = HashMap::new();
+        initial_files.insert(
+            "cursor_file.py".to_string(),
+            vec![LineAttribution {
+                start_line: 1,
+                end_line: 10,
+                author_id: "ai-cursor".to_string(),
+                overrode: None,
+            }],
+        );
+        initial_files.insert(
+            "copilot_file.py".to_string(),
+            vec![
+                LineAttribution {
+                    start_line: 1,
+                    end_line: 5,
+                    author_id: "ai-copilot".to_string(),
+                    overrode: None,
+                },
+                LineAttribution {
+                    start_line: 10,
+                    end_line: 15,
+                    author_id: "ai-copilot".to_string(),
+                    overrode: None,
+                },
+            ],
+        );
+        initial_files.insert(
+            "shared_file.py".to_string(),
+            vec![
+                LineAttribution {
+                    start_line: 1,
+                    end_line: 3,
+                    author_id: "ai-cursor".to_string(),
+                    overrode: None,
+                },
+                LineAttribution {
+                    start_line: 4,
+                    end_line: 8,
+                    author_id: "ai-copilot".to_string(),
+                    overrode: None,
+                },
+            ],
+        );
+
+        let mut prompts = HashMap::new();
+        prompts.insert(
+            "ai-cursor".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "cursor".to_string(),
+                    id: "sess-cursor".to_string(),
+                    model: "gpt-4".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 13,
+                total_deletions: 0,
+                accepted_lines: 13,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: Some(HashMap::from([
+                    ("employee_id".to_string(), "E500".to_string()),
+                    ("team".to_string(), "security".to_string()),
+                ])),
+            },
+        );
+        prompts.insert(
+            "ai-copilot".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "copilot".to_string(),
+                    id: "sess-copilot".to_string(),
+                    model: "gpt-4o".to_string(),
+                },
+                human_author: None,
+                messages: vec![],
+                total_additions: 16,
+                total_deletions: 0,
+                accepted_lines: 16,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: Some(HashMap::from([
+                    ("employee_id".to_string(), "E500".to_string()),
+                    ("team".to_string(), "security".to_string()),
+                ])),
+            },
+        );
+
+        let old_wl = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&original_head)
+            .unwrap();
+        old_wl
+            .write_initial_attributions(initial_files, prompts)
+            .expect("write multi-tool INITIAL");
+
+        repo.switch_branch(&default_branch)
+            .expect("switch to default");
+        repo.write_file("upstream.txt", "upstream\n", true)
+            .expect("write upstream");
+        repo.commit_with_message("upstream commit")
+            .expect("commit upstream");
+        let new_head = repo.get_head_commit_sha().expect("new sha");
+
+        let rebase_event = RewriteLogEvent::RebaseComplete {
+            rebase_complete: RebaseCompleteEvent::new(
+                original_head.clone(),
+                new_head.clone(),
+                false,
+                vec![original_head.clone()],
+                vec![new_head.clone()],
+            ),
+        };
+
+        super::rewrite_authorship_if_needed(
+            repo.gitai_repo(),
+            &rebase_event,
+            "Test User".to_string(),
+            &vec![rebase_event.clone()],
+            true,
+        )
+        .expect("rewrite should succeed");
+
+        let migrated = repo
+            .gitai_repo()
+            .storage
+            .working_log_for_base_commit(&new_head)
+            .unwrap()
+            .read_initial_attributions();
+
+        assert_eq!(
+            migrated.files.len(),
+            3,
+            "all three files should be migrated"
+        );
+        assert!(migrated.files.contains_key("cursor_file.py"));
+        assert!(migrated.files.contains_key("copilot_file.py"));
+        assert!(migrated.files.contains_key("shared_file.py"));
+
+        let copilot_attrs = &migrated.files["copilot_file.py"];
+        assert_eq!(
+            copilot_attrs.len(),
+            2,
+            "copilot_file.py should have both attribution ranges"
+        );
+        assert_eq!(copilot_attrs[0].start_line, 1);
+        assert_eq!(copilot_attrs[0].end_line, 5);
+        assert_eq!(copilot_attrs[1].start_line, 10);
+        assert_eq!(copilot_attrs[1].end_line, 15);
+
+        let shared_attrs = &migrated.files["shared_file.py"];
+        assert_eq!(
+            shared_attrs.len(),
+            2,
+            "shared_file.py should have attributions from both tools"
+        );
+
+        assert_eq!(
+            migrated.prompts.len(),
+            2,
+            "both prompt records should be migrated"
+        );
+        assert!(migrated.prompts.contains_key("ai-cursor"));
+        assert!(migrated.prompts.contains_key("ai-copilot"));
+
+        let cursor_prompt = &migrated.prompts["ai-cursor"];
+        assert_eq!(cursor_prompt.agent_id.tool, "cursor");
+        assert_eq!(cursor_prompt.total_additions, 13);
+
+        let copilot_prompt = &migrated.prompts["ai-copilot"];
+        assert_eq!(copilot_prompt.agent_id.tool, "copilot");
+        assert_eq!(copilot_prompt.total_additions, 16);
+    }
+
+    /// Micro-benchmark comparing diff-based transfer vs char-level transform (old blame-based slow path).
+    /// The char-level approach uses AttributionTracker::update_attributions + attributions_to_line_attributions.
+    /// The diff-based approach uses diff_based_line_attribution_transfer (line-level diff only).
+    ///
+    /// Run with: cargo test --lib diff_based_transfer_benchmark -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn diff_based_transfer_benchmark() {
+        use crate::authorship::attribution_tracker::AttributionTracker;
+        use std::time::Instant;
+
+        let num_files = 20;
+        let lines_per_file = 200;
+        let num_commits = 100;
+
+        println!("\n=== Diff-Based vs Char-Level Transform Benchmark ===");
+        println!(
+            "Files: {}, Lines/file: {}, Commits: {}",
+            num_files, lines_per_file, num_commits
+        );
+
+        // Build initial file contents and both types of attributions
+        let mut file_contents: Vec<String> = Vec::new();
+        let mut line_attrs_per_file: Vec<Vec<LineAttribution>> = Vec::new();
+        let mut char_attrs_per_file: Vec<Vec<Attribution>> = Vec::new();
+
+        for file_idx in 0..num_files {
+            let mut lines = Vec::new();
+            let mut line_attrs = Vec::new();
+            for line_idx in 0..lines_per_file {
+                let content = format!("// AI code module {} line {}", file_idx, line_idx);
+                let author = format!("ai-{}", line_idx % 3);
+                lines.push(content);
+                line_attrs.push(LineAttribution {
+                    start_line: (line_idx + 1) as u32,
+                    end_line: (line_idx + 1) as u32,
+                    author_id: author,
+                    overrode: None,
+                });
+            }
+            let content = lines.join("\n") + "\n";
+
+            // Build char-level attributions matching the line attributions
+            let mut char_attrs = Vec::new();
+            let mut char_pos = 0usize;
+            for (line_idx, line) in content.lines().enumerate() {
+                let line_end = char_pos + line.len() + 1; // +1 for newline
+                char_attrs.push(Attribution::new(
+                    char_pos,
+                    line_end,
+                    format!("ai-{}", line_idx % 3),
+                    1,
+                ));
+                char_pos = line_end;
+            }
+
+            file_contents.push(content);
+            line_attrs_per_file.push(line_attrs);
+            char_attrs_per_file.push(char_attrs);
+        }
+
+        // Generate modified content per commit: insert 2 lines at top + modify 10% of lines
+        let mut all_new_contents: Vec<Vec<String>> = Vec::new();
+        let mut prev_contents = file_contents.clone();
+
+        for commit_idx in 0..num_commits {
+            let mut new_contents = Vec::new();
+            for (file_idx, old_content) in prev_contents.iter().enumerate() {
+                let old_lines: Vec<&str> = old_content.lines().collect();
+                let mut new_lines: Vec<String> = Vec::new();
+                if commit_idx == 0 {
+                    // First commit: insert header lines (simulating main branch changes)
+                    new_lines.push(format!("// Main header for module {}", file_idx));
+                    new_lines.push("// Marker".to_string());
+                }
+                for (line_idx, line) in old_lines.iter().enumerate() {
+                    if commit_idx == 0 && line_idx % 10 == 5 {
+                        new_lines.push(format!("{} MODIFIED", line));
+                    } else {
+                        new_lines.push(line.to_string());
+                    }
+                }
+                new_contents.push(new_lines.join("\n") + "\n");
+            }
+            all_new_contents.push(new_contents.clone());
+            prev_contents = new_contents;
+        }
+
+        // ===== Benchmark 1: Diff-based transfer (new approach) =====
+        let start = Instant::now();
+        let mut current_line_attrs = line_attrs_per_file.clone();
+        let mut current_contents = file_contents.clone();
+        for commit_contents in &all_new_contents {
+            for file_idx in 0..num_files {
+                let new_content = &commit_contents[file_idx];
+                let old_content = &current_contents[file_idx];
+                let old_attrs = &current_line_attrs[file_idx];
+                let new_attrs = super::diff_based_line_attribution_transfer(
+                    old_content,
+                    new_content,
+                    old_attrs,
+                );
+                current_line_attrs[file_idx] = new_attrs;
+                current_contents[file_idx] = new_content.clone();
+            }
+        }
+        let diff_based_duration = start.elapsed();
+        let diff_total_attrs: usize = current_line_attrs.iter().map(|a| a.len()).sum();
+
+        // ===== Benchmark 2: Char-level transform (old slow path) =====
+        let tracker = AttributionTracker::new();
+        let start = Instant::now();
+        let mut current_char_attrs = char_attrs_per_file.clone();
+        let mut current_contents2 = file_contents.clone();
+        for commit_contents in &all_new_contents {
+            for file_idx in 0..num_files {
+                let new_content = &commit_contents[file_idx];
+                let old_content = &current_contents2[file_idx];
+                let old_attrs = &current_char_attrs[file_idx];
+                let new_attrs = tracker
+                    .update_attributions(old_content, new_content, old_attrs, "__DUMMY__", 1)
+                    .unwrap();
+                let line_attrs =
+                    crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                        &new_attrs,
+                        new_content,
+                    );
+                current_char_attrs[file_idx] = new_attrs;
+                current_contents2[file_idx] = new_content.clone();
+                let _ = line_attrs; // used in real code for serialization
+            }
+        }
+        let char_level_duration = start.elapsed();
+        let char_total_attrs: usize = current_char_attrs.iter().map(|a| a.len()).sum();
+
+        // ===== Benchmark 3: Full old slow path (char-level + VA wrapper + metrics + serialization) =====
+        // This measures what the old slow path actually did per commit:
+        // 1. Clone attributions into VA wrapper
+        // 2. transform_changed_files_to_final_state (char-level diff)
+        // 3. subtract/add prompt line metrics
+        // 4. upsert_file_attestation per file
+        // 5. Full serialization per commit
+        let start = Instant::now();
+        let mut full_slow_char_attrs = char_attrs_per_file.clone();
+        let mut full_slow_contents = file_contents.clone();
+        let mut full_slow_line_attrs = line_attrs_per_file.clone();
+        for commit_contents in &all_new_contents {
+            // Clone attributions (VA wrapper construction overhead)
+            let _cloned_attrs: Vec<Vec<Attribution>> = full_slow_char_attrs.clone();
+            let _cloned_contents: Vec<String> = full_slow_contents.clone();
+
+            for file_idx in 0..num_files {
+                let new_content = &commit_contents[file_idx];
+                let old_content = &full_slow_contents[file_idx];
+                let old_attrs = &full_slow_char_attrs[file_idx];
+
+                // Step 1: char-level transform
+                let new_attrs = tracker
+                    .update_attributions(old_content, new_content, old_attrs, "__DUMMY__", 1)
+                    .unwrap();
+                // Step 2: convert to line attrs
+                let line_attrs =
+                    crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                        &new_attrs,
+                        new_content,
+                    );
+                // Step 3: serialize file attestation (old path did this per file per commit)
+                let _serialized = super::build_file_attestation_from_line_attributions(
+                    &format!("file_{}.rs", file_idx),
+                    &line_attrs,
+                );
+
+                full_slow_char_attrs[file_idx] = new_attrs;
+                full_slow_contents[file_idx] = new_content.clone();
+                full_slow_line_attrs[file_idx] = line_attrs;
+            }
+        }
+        let full_slow_duration = start.elapsed();
+
+        // ===== Benchmark 4: Full new path (diff-based + fast serialization) =====
+        let start = Instant::now();
+        let mut full_fast_line_attrs = line_attrs_per_file.clone();
+        let mut full_fast_contents = file_contents.clone();
+        for commit_contents in &all_new_contents {
+            for file_idx in 0..num_files {
+                let new_content = &commit_contents[file_idx];
+                let old_content = &full_fast_contents[file_idx];
+                let old_attrs = &full_fast_line_attrs[file_idx];
+
+                // Step 1: diff-based transfer
+                let new_attrs = super::diff_based_line_attribution_transfer(
+                    old_content,
+                    new_content,
+                    old_attrs,
+                );
+                // Step 2: serialize attestation from line attributions
+                let _serialized = super::build_file_attestation_from_line_attributions(
+                    &format!("file_{}.rs", file_idx),
+                    &new_attrs,
+                );
+
+                full_fast_line_attrs[file_idx] = new_attrs;
+                full_fast_contents[file_idx] = new_content.clone();
+            }
+        }
+        let full_fast_duration = start.elapsed();
+
+        let transform_speedup =
+            char_level_duration.as_secs_f64() / diff_based_duration.as_secs_f64();
+        let pipeline_speedup = full_slow_duration.as_secs_f64() / full_fast_duration.as_secs_f64();
+
+        println!("\n--- Transform-Only Results ---");
+        println!(
+            "Diff-based transfer (new):    {:>8.1}ms  ({} line attrs)",
+            diff_based_duration.as_secs_f64() * 1000.0,
+            diff_total_attrs
+        );
+        println!(
+            "Char-level transform (old):   {:>8.1}ms  ({} char attrs)",
+            char_level_duration.as_secs_f64() * 1000.0,
+            char_total_attrs
+        );
+        println!("Transform speedup:            {:>8.1}x", transform_speedup);
+
+        println!("\n--- Full Pipeline Results (transform + serialization + overhead) ---");
+        println!(
+            "New pipeline (diff + serial):  {:>8.1}ms",
+            full_fast_duration.as_secs_f64() * 1000.0
+        );
+        println!(
+            "Old pipeline (char + VA + serial): {:>5.1}ms",
+            full_slow_duration.as_secs_f64() * 1000.0
+        );
+        println!("Full pipeline speedup:         {:>8.1}x", pipeline_speedup);
+        println!("===================================================\n");
+
+        // The diff-based approach should be significantly faster than char-level transform.
+        // In release mode with 200-line files we consistently see 3-4x improvement.
+        assert!(
+            pipeline_speedup >= 2.0,
+            "Expected at least 2x pipeline speedup, got {:.1}x",
+            pipeline_speedup
+        );
+    }
+
+    /// Scaling benchmark: measures how diff-based vs char-level transform performance
+    /// changes as file size increases from 50 to 5000 lines.
+    ///
+    /// Run with: cargo test --lib --release diff_based_transfer_scaling -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn diff_based_transfer_scaling() {
+        use crate::authorship::attribution_tracker::AttributionTracker;
+        use std::time::Instant;
+
+        let num_files = 5;
+        let num_commits = 10;
+        let file_sizes = [50, 100, 200, 500, 1000, 2000, 5000];
+
+        println!("\n=== Scaling Benchmark: Diff-Based vs Char-Level ===");
+        println!(
+            "{:>8} {:>12} {:>12} {:>8}",
+            "Lines", "Diff(ms)", "CharLvl(ms)", "Speedup"
+        );
+        println!("{}", "-".repeat(48));
+
+        for &lines_per_file in &file_sizes {
+            // Build initial content and attributions
+            let mut file_contents = Vec::new();
+            let mut line_attrs_per_file = Vec::new();
+            let mut char_attrs_per_file = Vec::new();
+
+            for file_idx in 0..num_files {
+                let mut lines = Vec::new();
+                let mut line_attrs = Vec::new();
+                for line_idx in 0..lines_per_file {
+                    lines.push(format!("// AI code module {} line {}", file_idx, line_idx));
+                    line_attrs.push(LineAttribution {
+                        start_line: (line_idx + 1) as u32,
+                        end_line: (line_idx + 1) as u32,
+                        author_id: format!("ai-{}", line_idx % 3),
+                        overrode: None,
+                    });
+                }
+                let content = lines.join("\n") + "\n";
+                let mut char_attrs = Vec::new();
+                let mut pos = 0usize;
+                for (li, line) in content.lines().enumerate() {
+                    let end = pos + line.len() + 1;
+                    char_attrs.push(Attribution::new(pos, end, format!("ai-{}", li % 3), 1));
+                    pos = end;
+                }
+                file_contents.push(content);
+                line_attrs_per_file.push(line_attrs);
+                char_attrs_per_file.push(char_attrs);
+            }
+
+            // Generate modified content: insert 5 lines + modify 10%
+            let mut all_new = Vec::new();
+            let mut prev = file_contents.clone();
+            for ci in 0..num_commits {
+                let mut new_batch = Vec::new();
+                for (fi, _) in prev.iter().enumerate() {
+                    let old_lines: Vec<&str> = prev[fi].lines().collect();
+                    let mut new_lines = Vec::new();
+                    if ci == 0 {
+                        for h in 0..5 {
+                            new_lines.push(format!("// Header {} mod {}", h, fi));
+                        }
+                    }
+                    for (li, line) in old_lines.iter().enumerate() {
+                        if ci == 0 && li % 10 == 5 {
+                            new_lines.push(format!("{} MOD", line));
+                        } else {
+                            new_lines.push(line.to_string());
+                        }
+                    }
+                    new_batch.push(new_lines.join("\n") + "\n");
+                }
+                all_new.push(new_batch.clone());
+                prev = new_batch;
+            }
+
+            // Benchmark diff-based
+            let start = Instant::now();
+            let mut cur_la = line_attrs_per_file.clone();
+            let mut cur_c = file_contents.clone();
+            for commit_contents in &all_new {
+                for fi in 0..num_files {
+                    let na = super::diff_based_line_attribution_transfer(
+                        &cur_c[fi],
+                        &commit_contents[fi],
+                        &cur_la[fi],
+                    );
+                    cur_la[fi] = na;
+                    cur_c[fi] = commit_contents[fi].clone();
+                }
+            }
+            let diff_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+            // Benchmark char-level
+            let tracker = AttributionTracker::new();
+            let start = Instant::now();
+            let mut cur_ca = char_attrs_per_file.clone();
+            let mut cur_c2 = file_contents.clone();
+            for commit_contents in &all_new {
+                for fi in 0..num_files {
+                    let na = tracker
+                        .update_attributions(
+                            &cur_c2[fi],
+                            &commit_contents[fi],
+                            &cur_ca[fi],
+                            "__DUMMY__",
+                            1,
+                        )
+                        .unwrap();
+                    let _la =
+                        crate::authorship::attribution_tracker::attributions_to_line_attributions(
+                            &na,
+                            &commit_contents[fi],
+                        );
+                    cur_ca[fi] = na;
+                    cur_c2[fi] = commit_contents[fi].clone();
+                }
+            }
+            let char_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+            let speedup = char_ms / diff_ms;
+            println!(
+                "{:>8} {:>12.1} {:>12.1} {:>8.1}x",
+                lines_per_file, diff_ms, char_ms, speedup
+            );
+        }
+        println!("===================================================\n");
+    }
+
+    #[test]
+    fn diff_based_transfer_equal_content() {
+        let old = "line1\nline2\nline3\n";
+        let new = "line1\nline2\nline3\n";
+        let attrs = vec![
+            LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id: "ai-b".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 3,
+                end_line: 3,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+        ];
+        let result = super::diff_based_line_attribution_transfer(old, new, &attrs);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].author_id, "ai-a");
+        assert_eq!(result[1].author_id, "ai-b");
+        assert_eq!(result[2].author_id, "ai-a");
+    }
+
+    #[test]
+    fn diff_based_transfer_insertion_shifts_lines() {
+        let old = "line1\nline2\nline3\n";
+        let new = "line1\nnew_line\nline2\nline3\n";
+        let attrs = vec![
+            LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id: "ai-b".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 3,
+                end_line: 3,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+        ];
+        let result = super::diff_based_line_attribution_transfer(old, new, &attrs);
+        // line1 kept (line 1), new_line inserted (line 2, no attr), line2 kept (line 3), line3 kept (line 4)
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].start_line, 1);
+        assert_eq!(result[0].author_id, "ai-a");
+        assert_eq!(result[1].start_line, 3); // shifted from line 2 to line 3
+        assert_eq!(result[1].author_id, "ai-b");
+        assert_eq!(result[2].start_line, 4); // shifted from line 3 to line 4
+        assert_eq!(result[2].author_id, "ai-a");
+    }
+
+    #[test]
+    fn diff_based_transfer_deletion_removes_line() {
+        let old = "line1\nline2\nline3\n";
+        let new = "line1\nline3\n";
+        let attrs = vec![
+            LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id: "ai-b".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 3,
+                end_line: 3,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+        ];
+        let result = super::diff_based_line_attribution_transfer(old, new, &attrs);
+        // line1 kept (line 1), line2 deleted, line3 kept (line 2)
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].start_line, 1);
+        assert_eq!(result[0].author_id, "ai-a");
+        assert_eq!(result[1].start_line, 2);
+        assert_eq!(result[1].author_id, "ai-a");
+    }
+
+    #[test]
+    fn diff_based_transfer_replacement_drops_attribution() {
+        let old = "line1\nline2\nline3\n";
+        let new = "line1\nmodified\nline3\n";
+        let attrs = vec![
+            LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id: "ai-b".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 3,
+                end_line: 3,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+        ];
+        let result = super::diff_based_line_attribution_transfer(old, new, &attrs);
+        // line1 kept (line 1), line2 replaced by "modified" (line 2, no attr), line3 kept (line 3)
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].start_line, 1);
+        assert_eq!(result[0].author_id, "ai-a");
+        assert_eq!(result[1].start_line, 3);
+        assert_eq!(result[1].author_id, "ai-a");
+    }
+
+    #[test]
+    fn diff_based_transfer_handles_duplicate_lines_correctly() {
+        // This tests the case that the old content-matching approach got wrong:
+        // identical lines from different authors should be tracked by position, not content
+        let old = "let x = 42;\nlet y = 0;\nlet x = 42;\n";
+        let new = "let x = 42;\nlet z = 1;\nlet y = 0;\nlet x = 42;\n";
+        let attrs = vec![
+            LineAttribution {
+                start_line: 1,
+                end_line: 1,
+                author_id: "ai-a".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 2,
+                end_line: 2,
+                author_id: "ai-b".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 3,
+                end_line: 3,
+                author_id: "ai-c".to_string(),
+                overrode: None,
+            },
+        ];
+        let result = super::diff_based_line_attribution_transfer(old, new, &attrs);
+        // line "let x = 42;" (1) kept as line 1 (ai-a)
+        // "let z = 1;" inserted (line 2, no attr)
+        // "let y = 0;" kept (line 3, ai-b)
+        // "let x = 42;" (3) kept as line 4 (ai-c) — NOT ai-a!
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].start_line, 1);
+        assert_eq!(result[0].author_id, "ai-a");
+        assert_eq!(result[1].start_line, 3);
+        assert_eq!(result[1].author_id, "ai-b");
+        assert_eq!(result[2].start_line, 4);
+        assert_eq!(result[2].author_id, "ai-c");
+    }
+
+    /// Regression test for the flatten_prompts_for_metadata bug.
+    ///
+    /// When multiple commits in a rebase all belong to the same AI session they share one
+    /// prompt_id.  The internal representation is:
+    ///
+    ///   prompts[prompt_id] = { sha_A: PromptRecord{total_additions:5},
+    ///                          sha_B: PromptRecord{total_additions:10} }
+    ///
+    /// The old code called `commits.values().next()` which always picked the
+    /// lexicographically-first SHA's record regardless of which commit was being processed.
+    /// The fix passes `original_commit` down so each rebased commit gets its own record.
+    ///
+    /// Setup
+    /// -----
+    ///   base  : feature.txt = line1..line10 (10 lines)
+    ///   A     : feature.txt replaces lines 3-7 with ai-line3..ai-line7  (5 AI lines)
+    ///   B     : adds other.txt with ai-line1..ai-line10               (10 AI lines)
+    ///   main+ : prepends "header\n" to feature.txt (forces slow path for A)
+    ///
+    /// Expected after rewriting A'=cherry-pick(A) and B'=cherry-pick(B):
+    ///   A' note: total_additions=5  AND feature.txt lines 4-8 (shifted +1 by header)
+    ///   B' note: total_additions=10 AND other.txt lines 1-10 (unchanged)
+    #[test]
+    fn flatten_prompts_picks_per_commit_record_for_same_session_multi_commit() {
+        use crate::authorship::authorship_log_serialization::generate_short_hash;
+
+        let repo = TmpRepo::new().expect("create tmp repo");
+
+        // --- Base commit ---
+        let base_content =
+            "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n";
+        repo.write_file("feature.txt", base_content, true)
+            .expect("write base feature.txt");
+        repo.commit_with_message("base").expect("commit base");
+        let default_branch = repo.current_branch().expect("default branch");
+
+        // --- Feature branch: commit A (5 AI lines in feature.txt) ---
+        repo.create_branch("feature")
+            .expect("create feature branch");
+        let content_a = "line1\nline2\nai-line3\nai-line4\nai-line5\nai-line6\nai-line7\nline8\nline9\nline10\n";
+        repo.write_file("feature.txt", content_a, true)
+            .expect("write feature.txt for commit A");
+        repo.commit_with_message("commit-A").expect("commit A");
+        let sha_a = repo.get_head_commit_sha().expect("sha A");
+
+        // --- Feature branch: commit B (10 AI lines in other.txt) ---
+        let other_content = "ai-line1\nai-line2\nai-line3\nai-line4\nai-line5\nai-line6\nai-line7\nai-line8\nai-line9\nai-line10\n";
+        repo.write_file("other.txt", other_content, true)
+            .expect("write other.txt for commit B");
+        repo.commit_with_message("commit-B").expect("commit B");
+        let sha_b = repo.get_head_commit_sha().expect("sha B");
+
+        // --- Write notes for A and B (SAME AI session → same prompt_id) ---
+        let agent_id = AgentId {
+            tool: "claude".to_string(),
+            id: "session-flatten-test-abc".to_string(),
+            model: "claude-sonnet-4".to_string(),
+        };
+        let prompt_hash = generate_short_hash(&agent_id.id, &agent_id.tool);
+
+        // Note for commit A: 5 AI lines (feature.txt lines 3-7)
+        {
+            let mut log = AuthorshipLog::new();
+            log.metadata.base_commit_sha = sha_a.clone();
+            log.metadata.prompts.insert(
+                prompt_hash.clone(),
+                PromptRecord {
+                    agent_id: agent_id.clone(),
+                    human_author: None,
+                    messages: vec![],
+                    total_additions: 5,
+                    total_deletions: 0,
+                    accepted_lines: 5,
+                    overriden_lines: 0,
+                    messages_url: None,
+                    custom_attributes: None,
+                },
+            );
+            let mut file = FileAttestation::new("feature.txt".to_string());
+            file.add_entry(AttestationEntry::new(
+                prompt_hash.clone(),
+                vec![LineRange::Range(3, 7)],
+            ));
+            log.attestations.push(file);
+            let note = log.serialize_to_string().expect("serialize note A");
+            notes_add(repo.gitai_repo(), &sha_a, &note).expect("write note A");
+        }
+
+        // Note for commit B: 10 AI lines (other.txt lines 1-10)
+        {
+            let mut log = AuthorshipLog::new();
+            log.metadata.base_commit_sha = sha_b.clone();
+            log.metadata.prompts.insert(
+                prompt_hash.clone(),
+                PromptRecord {
+                    agent_id: agent_id.clone(),
+                    human_author: None,
+                    messages: vec![],
+                    total_additions: 10,
+                    total_deletions: 0,
+                    accepted_lines: 10,
+                    overriden_lines: 0,
+                    messages_url: None,
+                    custom_attributes: None,
+                },
+            );
+            let mut file = FileAttestation::new("other.txt".to_string());
+            file.add_entry(AttestationEntry::new(
+                prompt_hash.clone(),
+                vec![LineRange::Range(1, 10)],
+            ));
+            log.attestations.push(file);
+            let note = log.serialize_to_string().expect("serialize note B");
+            notes_add(repo.gitai_repo(), &sha_b, &note).expect("write note B");
+        }
+
+        // --- Main branch: prepend "header\n" to feature.txt (forces slow path) ---
+        repo.switch_branch(&default_branch)
+            .expect("switch to default branch");
+        let main_content = format!("header\n{}", base_content);
+        repo.write_file("feature.txt", &main_content, true)
+            .expect("write main feature.txt");
+        repo.commit_with_message("main-advance")
+            .expect("commit main advance");
+
+        // --- Cherry-pick A and B onto main ---
+        repo.cherry_pick(&[&sha_a]).expect("cherry-pick A");
+        let new_a = repo.get_head_commit_sha().expect("new A sha");
+
+        repo.cherry_pick(&[&sha_b]).expect("cherry-pick B");
+        let new_b = repo.get_head_commit_sha().expect("new B sha");
+
+        // --- Invoke rewrite_authorship_after_rebase_v2 ---
+        // original_commits ordered oldest-first; original_head is the feature branch tip (sha_b)
+        super::rewrite_authorship_after_rebase_v2(
+            repo.gitai_repo(),
+            &sha_b,
+            &[sha_a.clone(), sha_b.clone()],
+            &[new_a.clone(), new_b.clone()],
+            "human-tester",
+        )
+        .expect("rewrite authorship after rebase");
+
+        // --- Verify new_A note ---
+        // total_additions must come from commit A's PromptRecord (= 5), NOT from B's (= 10).
+        // The bug picked whichever SHA was lexicographically first, so one of the two commits
+        // would always get the wrong value.  The fix picks by original commit SHA.
+        {
+            let note_raw =
+                show_authorship_note(repo.gitai_repo(), &new_a).expect("read new_A note");
+            let log = AuthorshipLog::deserialize_from_string(&note_raw).expect("parse new_A note");
+
+            let record = log
+                .metadata
+                .prompts
+                .get(&prompt_hash)
+                .expect("prompt_hash must be in new_A note metadata");
+            assert_eq!(
+                record.total_additions, 5,
+                "new_A: total_additions should be 5 (from commit A's PromptRecord), got {}; \
+                 before the fix the lexicographically-first SHA's record was always used",
+                record.total_additions
+            );
+
+            let file_att = log
+                .attestations
+                .iter()
+                .find(|f| f.file_path == "feature.txt")
+                .expect("new_A note must have feature.txt attestation");
+            assert_eq!(
+                file_att.entries.len(),
+                1,
+                "feature.txt should have exactly one attestation entry"
+            );
+            assert_eq!(
+                file_att.entries[0].hash, prompt_hash,
+                "attestation entry must reference the AI prompt hash"
+            );
+            // header prepended by main shifted AI lines from 3-7 to 4-8
+            assert_eq!(
+                file_att.entries[0].line_ranges,
+                vec![LineRange::Range(4, 8)],
+                "feature.txt AI lines must shift by 1 to 4-8 after main prepended 'header\\n'; \
+                 got {:?}",
+                file_att.entries[0].line_ranges
+            );
+        }
+
+        // --- Verify new_B note ---
+        // total_additions must come from commit B's PromptRecord (= 10), NOT from A's (= 5).
+        {
+            let note_raw =
+                show_authorship_note(repo.gitai_repo(), &new_b).expect("read new_B note");
+            let log = AuthorshipLog::deserialize_from_string(&note_raw).expect("parse new_B note");
+
+            let record = log
+                .metadata
+                .prompts
+                .get(&prompt_hash)
+                .expect("prompt_hash must be in new_B note metadata");
+            assert_eq!(
+                record.total_additions, 10,
+                "new_B: total_additions should be 10 (from commit B's PromptRecord), got {}; \
+                 before the fix the lexicographically-first SHA's record was always used",
+                record.total_additions
+            );
+
+            let file_att = log
+                .attestations
+                .iter()
+                .find(|f| f.file_path == "other.txt")
+                .expect("new_B note must have other.txt attestation");
+            assert_eq!(
+                file_att.entries.len(),
+                1,
+                "other.txt should have exactly one attestation entry"
+            );
+            assert_eq!(
+                file_att.entries[0].hash, prompt_hash,
+                "attestation entry must reference the AI prompt hash"
+            );
+            // other.txt was not affected by main's change; lines stay at 1-10
+            assert_eq!(
+                file_att.entries[0].line_ranges,
+                vec![LineRange::Range(1, 10)],
+                "other.txt AI lines must remain at 1-10 (unchanged by rebase); got {:?}",
+                file_att.entries[0].line_ranges
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Contributor helper unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_resolve_email_full_format() {
+        let name_to_email = HashMap::new();
+        let result = resolve_contributor_email(
+            &Some("Alice <alice@tazapay.com>".to_string()),
+            "fallback@example.com",
+            &name_to_email,
+        );
+        assert_eq!(result, "alice@tazapay.com");
+    }
+
+    #[test]
+    fn test_resolve_email_bare_name_found() {
+        let mut name_to_email = HashMap::new();
+        name_to_email.insert("alice".to_string(), "alice@tazapay.com".to_string());
+        let result = resolve_contributor_email(
+            &Some("Alice".to_string()),
+            "fallback@example.com",
+            &name_to_email,
+        );
+        assert_eq!(result, "alice@tazapay.com");
+    }
+
+    #[test]
+    fn test_resolve_email_bare_name_not_found() {
+        let name_to_email = HashMap::new();
+        let result = resolve_contributor_email(
+            &Some("Alice".to_string()),
+            "fallback@example.com",
+            &name_to_email,
+        );
+        assert_eq!(result, "fallback@example.com");
+    }
+
+    #[test]
+    fn test_resolve_email_null() {
+        let name_to_email = HashMap::new();
+        let result = resolve_contributor_email(&None, "fallback@example.com", &name_to_email);
+        assert_eq!(result, "fallback@example.com");
+    }
+
+    #[test]
+    fn test_parse_name_from_full_format() {
+        let result = parse_name_from_human_author(&Some("Alice <alice@tazapay.com>".to_string()));
+        assert_eq!(result, "Alice");
+    }
+
+    #[test]
+    fn test_parse_name_bare() {
+        let result = parse_name_from_human_author(&Some("Alice".to_string()));
+        assert_eq!(result, "Alice");
+    }
+
+    #[test]
+    fn test_parse_name_null() {
+        let result = parse_name_from_human_author(&None);
+        assert_eq!(result, "unknown");
+    }
+
+    #[test]
+    fn test_extract_github_username_noreply() {
+        let result = extract_github_username("12345+alicetaza@users.noreply.github.com");
+        assert_eq!(result, Some("alicetaza".to_string()));
+    }
+
+    #[test]
+    fn test_extract_github_username_no_numeric_prefix() {
+        let result = extract_github_username("alicetaza@users.noreply.github.com");
+        assert_eq!(result, Some("alicetaza".to_string()));
+    }
+
+    #[test]
+    fn test_extract_github_username_non_noreply() {
+        let result = extract_github_username("alice@example.com");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_normalize_email_found() {
+        let mut normalizer = HashMap::new();
+        normalizer.insert(
+            "12345+alice@users.noreply.github.com".to_string(),
+            "alice@tazapay.com".to_string(),
+        );
+        let result = normalize_email("12345+alice@users.noreply.github.com", &normalizer);
+        assert_eq!(result, "alice@tazapay.com");
+    }
+
+    #[test]
+    fn test_normalize_email_not_found() {
+        let normalizer = HashMap::new();
+        let result = normalize_email("alice@tazapay.com", &normalizer);
+        assert_eq!(result, "alice@tazapay.com");
+    }
+
+    #[test]
+    fn test_contributor_stats_merge() {
+        use crate::authorship::authorship_log::{ContributorStats, ToolModelContributorStats};
+        use std::collections::BTreeMap;
+
+        let mut a = ContributorStats {
+            name: "Alice".to_string(),
+            human_additions: 10,
+            manual_additions: 8,
+            ai_additions: 5,
+            ai_accepted: 3,
+            mixed_additions: 2,
+            ai_acceptance_rate: 0.0,
+            tool_model_breakdown: BTreeMap::new(),
+        };
+        a.tool_model_breakdown.insert(
+            "claude::opus".to_string(),
+            ToolModelContributorStats {
+                ai_additions: 5,
+                ai_accepted: 3,
+                mixed_additions: 2,
+                ai_acceptance_rate: 0.0,
+            },
+        );
+
+        let mut b = ContributorStats {
+            name: "".to_string(), // empty name, should not overwrite
+            human_additions: 5,
+            manual_additions: 3,
+            ai_additions: 4,
+            ai_accepted: 3,
+            mixed_additions: 1,
+            ai_acceptance_rate: 0.0,
+            tool_model_breakdown: BTreeMap::new(),
+        };
+        b.tool_model_breakdown.insert(
+            "claude::opus".to_string(),
+            ToolModelContributorStats {
+                ai_additions: 4,
+                ai_accepted: 3,
+                mixed_additions: 1,
+                ai_acceptance_rate: 0.0,
+            },
+        );
+
+        a.merge_from(&b);
+        a.recalculate_acceptance_rates();
+
+        assert_eq!(a.name, "Alice"); // not overwritten by empty
+        assert_eq!(a.human_additions, 15);
+        assert_eq!(a.manual_additions, 11);
+        assert_eq!(a.ai_additions, 9);
+        assert_eq!(a.ai_accepted, 6);
+        assert_eq!(a.mixed_additions, 3);
+        // 6/9 * 100 = 66.67
+        assert!((a.ai_acceptance_rate - 66.67).abs() < 0.01);
+
+        let tm = a.tool_model_breakdown.get("claude::opus").unwrap();
+        assert_eq!(tm.ai_additions, 9);
+        assert_eq!(tm.ai_accepted, 6);
+        assert_eq!(tm.mixed_additions, 3);
+        assert!((tm.ai_acceptance_rate - 66.67).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_acceptance_rate_zero_ai() {
+        use crate::authorship::authorship_log::ContributorStats;
+
+        let mut stats = ContributorStats {
+            manual_additions: 10,
+            human_additions: 10,
+            ..Default::default()
+        };
+        stats.recalculate_acceptance_rates();
+        assert_eq!(stats.ai_acceptance_rate, 0.0);
+    }
+
+    #[test]
+    fn test_acceptance_rate_rounding() {
+        use crate::authorship::authorship_log::ContributorStats;
+
+        let mut stats = ContributorStats {
+            ai_accepted: 2,
+            ai_additions: 3,
+            ..Default::default()
+        };
+        stats.recalculate_acceptance_rates();
+        // 2/3 * 100 = 66.666... → rounded to 66.67
+        assert_eq!(stats.ai_acceptance_rate, 66.67);
+    }
 }

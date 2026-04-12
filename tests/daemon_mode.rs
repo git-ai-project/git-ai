@@ -1,3 +1,4 @@
+#![cfg(feature = "daemon-tests")]
 #[macro_use]
 #[path = "integration/repos/mod.rs"]
 mod repos;
