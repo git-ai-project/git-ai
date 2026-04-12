@@ -275,11 +275,14 @@ pub fn get_gitlab_ci_context() -> Result<Option<CiContext>, GitAiError> {
     }))
 }
 
-/// Print the GitLab CI YAML snippet to stdout for users to copy into their .gitlab-ci.yml
+/// Print the GitLab CI YAML snippet to stdout for users to copy into their .gitlab-ci.yml,
+/// pinned to the current git-ai version for supply chain security.
 pub fn print_gitlab_ci_yaml() {
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let yaml = GITLAB_CI_TEMPLATE_YAML.replace("__GIT_AI_VERSION__", &version);
     println!("Add the following to your .gitlab-ci.yml:");
     println!();
-    println!("{}", GITLAB_CI_TEMPLATE_YAML);
+    println!("{}", yaml);
 }
 
 #[cfg(test)]
@@ -348,6 +351,57 @@ mod tests {
         assert!(
             !GITLAB_CI_TEMPLATE_YAML.is_empty(),
             "GitLab CI template YAML should not be empty"
+        );
+    }
+
+    #[test]
+    fn test_gitlab_ci_template_contains_version_placeholder() {
+        assert!(
+            GITLAB_CI_TEMPLATE_YAML.contains("__GIT_AI_VERSION__"),
+            "GitLab CI template should contain __GIT_AI_VERSION__ placeholder"
+        );
+    }
+
+    #[test]
+    fn test_gitlab_ci_template_no_curl_pipe_bash() {
+        assert!(
+            !GITLAB_CI_TEMPLATE_YAML.contains("| bash"),
+            "GitLab CI template should not pipe curl directly to bash"
+        );
+        assert!(
+            !GITLAB_CI_TEMPLATE_YAML.contains("| sh"),
+            "GitLab CI template should not pipe curl directly to sh"
+        );
+    }
+
+    #[test]
+    fn test_gitlab_ci_template_uses_release_url() {
+        assert!(
+            GITLAB_CI_TEMPLATE_YAML.contains("github.com/git-ai-project/git-ai/releases/download"),
+            "GitLab CI template should download install script from GitHub releases"
+        );
+    }
+
+    #[test]
+    fn test_gitlab_ci_template_has_version_verification() {
+        assert!(
+            GITLAB_CI_TEMPLATE_YAML.contains("version mismatch"),
+            "GitLab CI template should verify installed version"
+        );
+    }
+
+    #[test]
+    fn test_gitlab_ci_template_version_replacement() {
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let rendered = GITLAB_CI_TEMPLATE_YAML.replace("__GIT_AI_VERSION__", &version);
+
+        assert!(
+            !rendered.contains("__GIT_AI_VERSION__"),
+            "Rendered template should not contain placeholder"
+        );
+        assert!(
+            rendered.contains(&version),
+            "Rendered template should contain the pinned version"
         );
     }
 }
