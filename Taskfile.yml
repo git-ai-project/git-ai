@@ -71,6 +71,11 @@ tasks:
     cmds:
       - cargo bench
 
+  bench:readonly-flood:
+    desc: Run readonly-flood microbenchmarks (daemon fast-path for Zed IDE fix)
+    cmds:
+      - cargo bench --bench readonly_flood --features bench
+
   doc:
     desc: Build documentation with warnings as errors
     cmds:

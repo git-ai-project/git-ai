@@ -17,9 +17,13 @@ pub fn tracks_primary_command_for_test_sync(
     match primary_command {
         "branch" => !invoked_args.iter().any(|arg| arg == "--show-current"),
         "checkout" | "cherry-pick" | "clone" | "commit" | "fetch" | "init" | "merge" | "pull"
-        | "push" | "rebase" | "reset" | "revert" | "switch" | "tag" | "update-ref" | "worktree" => {
-            true
-        }
+        | "push" | "rebase" | "reset" | "revert" | "switch" | "tag" | "update-ref" => true,
+        // `git worktree list` is classified as readonly by the daemon's fast-path
+        // and is discarded before reaching the completion log — exclude it from
+        // tracking to avoid test sync timeouts (mirrors the stash list exclusion).
+        "worktree" => !invoked_args
+            .first()
+            .is_some_and(|subcommand| matches!(subcommand.as_str(), "list")),
         "remote" => invoked_args.first().is_some_and(|subcommand| {
             matches!(
                 subcommand.as_str(),
