@@ -7,6 +7,7 @@
 //! `cargo test benchmark_stats_hunk_density_hotspot -- --ignored --nocapture`
 
 use git_ai::authorship::diff_ai_accepted::diff_ai_accepted_stats;
+use git_ai::authorship::post_commit::estimate_stats_cost_for_head;
 use git_ai::authorship::stats::{get_git_diff_stats, stats_for_commit_stats};
 use git_ai::git::find_repository_in_path;
 use std::fs;
@@ -427,5 +428,112 @@ fn benchmark_stats_thousands_changed_files_fast_path() {
         avg_ms,
         max_avg_ms,
         file_count
+    );
+}
+
+/// Build a repo that matches the user-reported hang pattern:
+/// many files deleted, each with many lines, very few (or no) additions.
+/// Mirrors the ~124 files / ~91K deletions / ~22 additions from:
+/// 537f4caca27837aa7aa729dbdbcf954fdab856ff (~/projects/monorepo)
+fn setup_repo_with_mass_deletion(file_count: usize, lines_per_file: usize) -> TempDir {
+    let tmp = TempDir::new().expect("failed to create tempdir");
+    let repo = tmp.path();
+
+    run_git(repo, &["init", "-q"]);
+    run_git(repo, &["config", "user.name", "Perf User"]);
+    run_git(repo, &["config", "user.email", "perf@example.com"]);
+
+    // Create many files with many lines each
+    for i in 1..=file_count {
+        let content = (1..=lines_per_file)
+            .map(|l| format!("file{:03} line {:04}\n", i, l))
+            .collect::<String>();
+        fs::write(repo.join(format!("f{:03}.txt", i)), content).expect("failed to write file");
+    }
+    run_git(repo, &["add", "-A"]);
+    run_git(repo, &["commit", "-q", "-m", "initial"]);
+
+    // Delete all files — this is the commit that triggers the hang
+    for i in 1..=file_count {
+        fs::remove_file(repo.join(format!("f{:03}.txt", i))).expect("failed to delete file");
+    }
+    run_git(repo, &["add", "-A"]);
+    run_git(repo, &["commit", "-q", "-m", "mass-deletion"]);
+
+    tmp
+}
+
+/// Regression test: the stats-cost estimator must flag a mass-deletion commit
+/// (many files deleted, no additions) as expensive so the post-commit hook
+/// skips the full stats pass.
+///
+/// Previously `estimate_stats_cost_for_head` only counted *added* lines, so a
+/// commit deleting 100 files × 750 lines (= 75 000 deletions, 0 additions) was
+/// classified as cheap.  The hook then ran `get_diff_with_line_numbers` which
+/// had to parse and allocate storage for all 75 000 deleted-content lines,
+/// causing a multi-second hang that users perceived as git-ai freezing.
+#[test]
+fn estimate_stats_cost_skips_mass_deletion_commit() {
+    // 100 files × 750 lines ≈ 75 000 deleted lines, zero additions.
+    // Matches the scale of the real-world hang (537f4cac in ~/projects/monorepo).
+    let tmp = setup_repo_with_mass_deletion(100, 750);
+    let repo = find_repository_in_path(tmp.path().to_str().expect("non-utf8 path"))
+        .expect("failed to open repository");
+
+    let head_sha = repo
+        .head()
+        .expect("failed to get HEAD")
+        .target()
+        .expect("failed to resolve HEAD target");
+
+    let estimate = estimate_stats_cost_for_head(&repo, &head_sha, &[])
+        .expect("estimate_stats_cost_for_head should succeed");
+
+    assert!(
+        estimate.should_skip(),
+        "expected estimate_stats_cost_for_head to flag a 75K-deletion commit as \
+         expensive (should_skip=true), but got should_skip=false. \
+         The estimator only counted added lines and missed the large deletion cost."
+    );
+}
+
+/// Performance guard: post-commit stats for a mass-deletion commit must
+/// complete within 2 seconds now that the fast path is taken.
+#[test]
+#[ignore] // Run manually: cargo test benchmark_stats_mass_deletion_fast_path -- --ignored --nocapture
+fn benchmark_stats_mass_deletion_fast_path() {
+    const FILE_COUNT: usize = 100;
+    const LINES_PER_FILE: usize = 750;
+    const MAX_MS: f64 = 2_000.0;
+
+    let tmp = setup_repo_with_mass_deletion(FILE_COUNT, LINES_PER_FILE);
+    let repo = find_repository_in_path(tmp.path().to_str().expect("non-utf8 path"))
+        .expect("failed to open repository");
+
+    let head_sha = repo
+        .head()
+        .expect("failed to get HEAD")
+        .target()
+        .expect("failed to resolve HEAD target");
+
+    let ignore_patterns: Vec<String> = vec![];
+
+    let start = Instant::now();
+    let _stats = stats_for_commit_stats(&repo, &head_sha, &ignore_patterns)
+        .expect("stats_for_commit_stats should succeed");
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    println!(
+        "\n=== Stats Benchmark: Mass File Deletion ({} files × {} lines) ===",
+        FILE_COUNT, LINES_PER_FILE
+    );
+    println!("elapsed: {:.2}ms", elapsed_ms);
+    println!("budget:  {:.2}ms", MAX_MS);
+
+    assert!(
+        elapsed_ms <= MAX_MS,
+        "stats_for_commit_stats took {:.2}ms for mass-deletion commit, expected <= {:.2}ms",
+        elapsed_ms,
+        MAX_MS
     );
 }
