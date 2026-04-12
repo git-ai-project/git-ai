@@ -208,6 +208,9 @@ pub fn handle_git_ai(args: &[String]) {
         "dash" | "dashboard" => {
             commands::personal_dashboard::handle_personal_dashboard(&args[1..]);
         }
+        "logs" => {
+            commands::logs::handle_logs(&args[1..]);
+        }
         "show-prompt" => {
             commands::show_prompt::handle_show_prompt(&args[1..]);
         }
@@ -306,6 +309,8 @@ fn print_help() {
     eprintln!("    set <key> <value>     Set a config value (arrays: single value = [value])");
     eprintln!("    --add <key> <value>   Add to array or upsert into object");
     eprintln!("    unset <key>           Remove config value (reverts to default)");
+    eprintln!("  logs <commitsha>   Collect agent transcripts and context into a zip");
+    eprintln!("    -o <outputfolder>         Output directory (default: current directory)");
     eprintln!("  debug              Print support/debug diagnostics");
     eprintln!("  bg                 Run and control git-ai background service");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");
