@@ -38,11 +38,9 @@ export class AITabEditManager {
     // TODO Anything we should track here?
     console.log('[git-ai] before ai tab completion accepted', args);
     this.beforeCompletionFileStates = {};
-    for (const doc of vscode.workspace.textDocuments) {
-      if (doc.uri.scheme !== "file") {
-        continue;
-      }
-      this.beforeCompletionFileStates[doc.uri.fsPath] = doc.getText();
+    const activeEditor = vscode.window.activeTextEditor;
+    if (activeEditor && activeEditor.document.uri.scheme === "file") {
+      this.beforeCompletionFileStates[activeEditor.document.uri.fsPath] = activeEditor.document.getText();
     }
   }
 
@@ -117,12 +115,16 @@ export class AITabEditManager {
         // Call the "original" command implementation (the previously registered handler).
         const result = await vscode.commands.executeCommand(this.getTabAcceptedCommand(), ...args);
 
-        this.afterHook(result);
+        await this.afterHook(result);
         return result;
       } finally {
         // Always restore our override so future executions flow through us again.
         try {
           this.restoring = true;
+          // Dispose old registration before creating a new one to avoid leaking disposables
+          if (this.registration) {
+            try { this.registration.dispose(); } catch { /* ignore */ }
+          }
           this.registration = this.registerOverride();
         } finally {
           this.restoring = false;
@@ -130,8 +132,6 @@ export class AITabEditManager {
       }
     });
 
-    // Keep it in extension subscriptions so VS Code cleans up on deactivate.
-    this.context.subscriptions.push(disp);
     return disp;
   }
 

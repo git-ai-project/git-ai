@@ -193,11 +193,16 @@ export class BlameService {
    */
   public invalidateCache(uri: vscode.Uri): void {
     const filePath = uri.fsPath;
-    // Remove all cache entries for this file (they start with the file path)
+    // Collect keys first, then delete in a second pass to avoid
+    // mutating the Map during iteration.
+    const keysToDelete: string[] = [];
     for (const key of this.contentCache.keys()) {
       if (key.startsWith(filePath + ':')) {
-        this.contentCache.delete(key);
+        keysToDelete.push(key);
       }
+    }
+    for (const key of keysToDelete) {
+      this.contentCache.delete(key);
     }
   }
   

@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
-import { exec, spawn } from "child_process";
+import { execFile, spawn } from "child_process";
 import { isVersionSatisfied } from "./utils/semver";
 import { getGitAiBinary } from "./utils/binary-path";
 import { MIN_GIT_AI_VERSION, GIT_AI_INSTALL_DOCS_URL } from "./consts";
@@ -55,6 +55,10 @@ export class AIEditManager {
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);
     }
+    for (const { timer } of this.pendingSaves.values()) {
+      clearTimeout(timer);
+    }
+    this.pendingSaves.clear();
     for (const timer of this.stableContentTimers.values()) {
       clearTimeout(timer);
     }
@@ -494,7 +498,7 @@ export class AIEditManager {
     }
     // TODO Consider only re-checking every X attempts
     return new Promise((resolve) => {
-      exec("git-ai --version", (error, stdout, stderr) => {
+      execFile(getGitAiBinary(), ["--version"], (error, stdout, stderr) => {
         if (error) {
           if (!this.hasShownGitAiErrorMessage) {
             // Show startup notification
