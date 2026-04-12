@@ -811,22 +811,66 @@ impl VirtualAttributions {
         let checkpoint_va =
             Self::from_just_working_log(repo.clone(), base_commit.clone(), human_author)?;
 
-        // If checkpoint_va is empty, just return blame_va
-        if checkpoint_va.attributions.is_empty() {
-            return Ok(blame_va);
-        }
+        // Step 3: Merge blame and checkpoint attributions.
+        //
+        // IMPORTANT: The `final_state` that drives coordinate-space transformation must
+        // reflect the *current working directory*, not the base-commit content stored in
+        // `blame_va`.  Without this, when an AI line is deleted before an amend the blame
+        // VA still has that line in the original-commit coordinate space; comparing those
+        // line numbers directly against the amended-commit diff produces a spurious
+        // attestation for a line that no longer exists.
+        //
+        // Priority for `final_state` per file:
+        //   1. checkpoint_va.file_contents  (working-log entries already read the workdir)
+        //   2. current working directory    (for files with no AI checkpoints)
+        //   3. blame_va.file_contents       (fallback – preserves previous behaviour for
+        //                                    files that were deleted from the worktree)
 
-        // Step 3: Merge blame and checkpoint attributions
-        // Checkpoint attributions should override blame attributions for overlapping lines
-        // Use the union of both VAs' file contents so files tracked only via blame/notes
-        // (committed AI work) are not dropped when INITIAL covers a disjoint set of files.
+        // Save session prompt IDs before the merge consumes checkpoint_va.  These are
+        // prompts from the *current* amend/commit session and must be kept in
+        // metadata.prompts even if no lines landed (non-landing prompts).
+        let checkpoint_prompt_ids: std::collections::HashSet<String> =
+            checkpoint_va.prompts.keys().cloned().collect();
+
         let mut final_state = checkpoint_va.file_contents.clone();
+        if let Ok(workdir) = repo.workdir() {
+            for pathspec in pathspecs {
+                if !final_state.contains_key(pathspec.as_str()) {
+                    let file_path = workdir.join(pathspec.as_str());
+                    if let Ok(content) = std::fs::read_to_string(&file_path) {
+                        final_state.insert(pathspec.clone(), content);
+                    }
+                }
+            }
+        }
         for (file, content) in &blame_va.file_contents {
             final_state
                 .entry(file.clone())
                 .or_insert_with(|| content.clone());
         }
-        let merged_va = merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
+        let mut merged_va =
+            merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
+
+        // Prune blame-history prompts whose lines were deleted (e.g. because the user
+        // deleted an AI-authored line during an amend).  We keep:
+        //   • any prompt that came from the current session (checkpoint_prompt_ids), and
+        //   • any prompt that still has at least one live attribution in the merged VA.
+        // This avoids leaking PromptRecords from earlier commits into the amended note
+        // while preserving intentional non-landing prompts from the current session.
+        let referenced_in_merged: std::collections::HashSet<String> = merged_va
+            .attributions
+            .values()
+            .flat_map(|(_, line_attrs)| line_attrs.iter())
+            .map(|la| la.author_id.clone())
+            .collect();
+        merged_va.prompts.retain(|id, _| {
+            checkpoint_prompt_ids.contains(id) || referenced_in_merged.contains(id)
+        });
+        // Human records don't have a "non-landing" concept, so prune any whose lines
+        // were deleted (e.g. a known-human line from an earlier commit removed in amend).
+        merged_va
+            .humans
+            .retain(|id, _| referenced_in_merged.contains(id));
 
         Ok(merged_va)
     }
@@ -858,17 +902,44 @@ impl VirtualAttributions {
             final_state_snapshot,
         )?;
 
-        if checkpoint_va.attributions.is_empty() {
-            return Ok(blame_va);
-        }
+        // Save session prompt IDs before the merge consumes checkpoint_va.
+        let checkpoint_prompt_ids: std::collections::HashSet<String> =
+            checkpoint_va.prompts.keys().cloned().collect();
 
+        // Priority for `final_state` per file:
+        //   1. checkpoint_va.file_contents  (working-log snapshot entries)
+        //   2. final_state_snapshot         (post-command snapshot – the amended content)
+        //   3. blame_va.file_contents       (fallback for files removed from worktree)
         let mut final_state = checkpoint_va.file_contents.clone();
+        for (file, content) in final_state_snapshot {
+            final_state
+                .entry(file.clone())
+                .or_insert_with(|| content.clone());
+        }
         for (file, content) in &blame_va.file_contents {
             final_state
                 .entry(file.clone())
                 .or_insert_with(|| content.clone());
         }
-        merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)
+        let mut merged_va =
+            merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
+
+        // Prune blame-history prompts whose lines were deleted.  Same logic as
+        // `from_working_log_for_commit`.
+        let referenced_in_merged: std::collections::HashSet<String> = merged_va
+            .attributions
+            .values()
+            .flat_map(|(_, line_attrs)| line_attrs.iter())
+            .map(|la| la.author_id.clone())
+            .collect();
+        merged_va.prompts.retain(|id, _| {
+            checkpoint_prompt_ids.contains(id) || referenced_in_merged.contains(id)
+        });
+        merged_va
+            .humans
+            .retain(|id, _| referenced_in_merged.contains(id));
+
+        Ok(merged_va)
     }
 
     /// Create VirtualAttributions from raw components (used for transformations)
