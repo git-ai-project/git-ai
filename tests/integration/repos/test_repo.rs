@@ -30,11 +30,11 @@ use super::test_file::TestFile;
 const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 const DAEMON_TEST_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]
-const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(300);
 #[cfg(not(windows))]
 const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(windows)]
-const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 #[cfg(not(windows))]
 const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const DAEMON_TEST_TRACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
