@@ -2,6 +2,7 @@
 name = "git-ai"
 version = "1.3.0"
 edition = "2024"
+default-run = "git-ai"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
