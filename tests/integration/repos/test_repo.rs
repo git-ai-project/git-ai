@@ -1503,6 +1503,7 @@ impl TestRepo {
         let start = Instant::now();
         let mut last_progress = start;
         let mut last_observed_count = baseline_count;
+        let mut last_total_count = 0u64;
         loop {
             let entries = self.daemon_completion_entries_for_family(family_key);
             let tracked_entries = entries
@@ -1527,9 +1528,11 @@ impl TestRepo {
             if observed_count >= expected_count {
                 return observed_count;
             }
-            if observed_count > last_observed_count {
+            let total_count = entries.len() as u64;
+            if observed_count > last_observed_count || total_count > last_total_count {
                 last_progress = Instant::now();
                 last_observed_count = observed_count;
+                last_total_count = total_count;
             }
             if start.elapsed() >= DAEMON_TEST_SYNC_TOTAL_TIMEOUT
                 || last_progress.elapsed() >= DAEMON_TEST_SYNC_IDLE_TIMEOUT
@@ -1552,6 +1555,11 @@ impl TestRepo {
         let mut last_progress = start;
         let mut last_observed_count = 0usize;
         let mut last_completed_count = 0usize;
+        // Track total entries (including untracked) so the idle timer resets on any
+        // daemon activity — not just when a specifically-tracked entry appears.
+        // This prevents spurious idle timeouts when an untracked operation (e.g. git-add)
+        // is blocking the sequencer ahead of the tracked entry we're waiting for.
+        let mut last_total_count = 0usize;
         loop {
             let entries = self.daemon_completion_entries_for_family(family_key);
             let tracked_entries = entries
@@ -1581,11 +1589,15 @@ impl TestRepo {
             if completed.len() == expected.len() {
                 return tracked_entries.len() as u64;
             }
-            if tracked_entries.len() > last_observed_count || completed.len() > last_completed_count
+            let total_count = entries.len();
+            if tracked_entries.len() > last_observed_count
+                || completed.len() > last_completed_count
+                || total_count > last_total_count
             {
                 last_progress = Instant::now();
                 last_observed_count = tracked_entries.len();
                 last_completed_count = completed.len();
+                last_total_count = total_count;
             }
             if start.elapsed() >= DAEMON_TEST_SYNC_TOTAL_TIMEOUT
                 || last_progress.elapsed() >= DAEMON_TEST_SYNC_IDLE_TIMEOUT
@@ -1682,6 +1694,11 @@ impl TestRepo {
         let start = Instant::now();
         let mut last_progress = start;
         let mut last_observed_count = baseline_count;
+        // Track total entries so the idle timer resets on any daemon activity, not
+        // only when a checkpoint entry appears. An untracked operation (e.g. git-add)
+        // blocking the sequencer ahead of the checkpoint would otherwise cause a
+        // premature idle timeout.
+        let mut last_total_count = 0u64;
         loop {
             let entries = self.daemon_completion_entries_for_family(&family_key);
             if let Some(error_entry) = entries
@@ -1705,9 +1722,11 @@ impl TestRepo {
             if observed_count >= expected_count {
                 return observed_count;
             }
-            if observed_count > last_observed_count {
+            let total_count = entries.len() as u64;
+            if observed_count > last_observed_count || total_count > last_total_count {
                 last_progress = Instant::now();
                 last_observed_count = observed_count;
+                last_total_count = total_count;
             }
             if start.elapsed() >= DAEMON_TEST_SYNC_TOTAL_TIMEOUT
                 || last_progress.elapsed() >= DAEMON_TEST_SYNC_IDLE_TIMEOUT
