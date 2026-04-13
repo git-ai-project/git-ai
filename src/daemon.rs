@@ -5610,8 +5610,19 @@ impl ActorDaemonCoordinator {
                             // repo context, just as the Applied path does (line ~7098).
                             // Without this, sequenced commands (those that go through
                             // the family sequencer) never receive wrapper state overlay.
+                            //
+                            // Use a short timeout here: the outer wrapper command's
+                            // post-state typically arrives within milliseconds of the
+                            // trace2 exit event, so 200ms is ample. Inner git processes
+                            // (git fetch, git rebase, etc.) inherit GIT_AI_WRAPPER_INVOCATION_ID
+                            // but the wrapper never sends them post-state, so they must time
+                            // out quickly rather than blocking the ingest task for 20 seconds each.
                             if applied.command.wrapper_invocation_id.is_some() {
-                                self.apply_wrapper_state_overlay(&mut applied.command).await;
+                                self.apply_wrapper_state_overlay_with_timeout(
+                                    &mut applied.command,
+                                    Duration::from_millis(200),
+                                )
+                                .await;
                             }
                             let side_effect = self
                                 .maybe_apply_side_effects_for_applied_command(
@@ -7288,11 +7299,22 @@ impl ActorDaemonCoordinator {
         &self,
         command: &mut crate::daemon::domain::NormalizedCommand,
     ) {
+        self.apply_wrapper_state_overlay_with_timeout(
+            command,
+            self.wrapper_state_wait_timeout(),
+        )
+        .await;
+    }
+
+    async fn apply_wrapper_state_overlay_with_timeout(
+        &self,
+        command: &mut crate::daemon::domain::NormalizedCommand,
+        timeout: Duration,
+    ) {
         let Some(invocation_id) = command.wrapper_invocation_id.as_ref() else {
             return;
         };
         let invocation_id = invocation_id.clone();
-        let timeout = self.wrapper_state_wait_timeout();
         let deadline = tokio::time::Instant::now() + timeout;
 
         loop {
