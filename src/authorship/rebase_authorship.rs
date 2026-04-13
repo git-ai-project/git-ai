@@ -3104,26 +3104,34 @@ pub fn reconstruct_working_log_after_reset(
         old_head_va.prompts().len()
     ));
 
-    // Step 4: Build VirtualAttributions from target_commit
-    let repo_clone = repo.clone();
-    let target_clone = target_commit_sha.to_string();
-    let pathspecs_clone = pathspecs.clone();
-
-    let target_va = smol::block_on(async {
-        crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
-            repo_clone,
-            target_clone,
-            &pathspecs_clone,
-            Some(target_commit_sha.to_string()),
+    // Step 4: Build VirtualAttributions from target_commit.
+    //
+    // The previous implementation called `new_for_base_commit` with both `base_commit` and
+    // `blame_start_commit` set to `target_commit_sha`. This produces a git blame range of
+    // `target..target` (oldest == newest), which is always empty — every line is attributed to a
+    // "boundary" commit (before the range) and mapped to human. Running git blame for every
+    // changed file was therefore O(files × file_size) wasted work that scaled directly with
+    // commit size, causing noticeable slowness on large commits in async_mode = false.
+    //
+    // We create an empty VA directly instead. `merge_attributions_favoring_first` (Step 5) uses
+    // `old_head_va` as the primary source and `target_va` to fill gaps; with `target_va` empty,
+    // `old_head_va` is the sole attribution source, which matches the previous net behaviour.
+    let target_va = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        crate::authorship::virtual_attribution::VirtualAttributions::new(
+            repo.clone(),
+            target_commit_sha.to_string(),
+            HashMap::new(),
+            HashMap::new(),
+            ts,
         )
-        .await
-    })?;
+    };
 
-    debug_log(&format!(
-        "Built target VA with {} files, {} prompts",
-        target_va.files().len(),
-        target_va.prompts().len()
-    ));
+    debug_log("Skipped target VA blame (range would be target..target = empty); using empty VA");
 
     // Step 5: Merge VAs favoring old_head to preserve uncommitted AI changes
     // old_head (with working log) wins overlaps, target fills gaps

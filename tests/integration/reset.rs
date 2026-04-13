@@ -1,4 +1,4 @@
-use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_file::{AuthorType, ExpectedLineExt};
 use crate::repos::test_repo::TestRepo;
 use std::fs;
 
@@ -602,6 +602,66 @@ fn test_reset_with_directory_pathspec() {
     ]);
 }
 
+/// Test that resetting a large commit (500+ lines across many files) preserves AI
+/// authorship correctly.  This is the scenario from issue #1025: the previous
+/// implementation ran `git blame target..target` for every changed file in the
+/// post-reset hook, which (a) is O(files × file_size) wasted work and (b) always
+/// produced zero AI attributions because the range is empty.  The fix creates an
+/// empty target VA directly, halving the blame work with no correctness change.
+#[test]
+fn test_reset_large_commit_preserves_attribution() {
+    let repo = TestRepo::new();
+
+    // Create a base commit
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base line"]);
+    let base_commit = repo.stage_all_and_commit("Base").unwrap();
+
+    // Create a large AI commit: 10 files, each with multiple AI lines (≥50 lines total)
+    let file_count = 10;
+    let ai_lines_per_file = 6;
+    let mut file_handles = Vec::new();
+    for i in 0..file_count {
+        let name = format!("module_{i}.rs");
+        let mut f = repo.filename(&name);
+        // One human line per file so the file has a non-AI context
+        f.set_contents(crate::lines![format!("// module {i}")]);
+        // Insert several AI lines
+        for j in 0..ai_lines_per_file {
+            f.insert_at(
+                (j + 1) as usize,
+                crate::lines![format!("    // AI line {j} in module {i}").ai()],
+            );
+        }
+        file_handles.push((name, f));
+    }
+    repo.stage_all_and_commit("Large AI commit (500+ lines)").unwrap();
+
+    // Reset the large AI commit
+    repo.git(&["reset", "--mixed", &base_commit.commit_sha])
+        .expect("reset --mixed should succeed");
+
+    // Re-commit and verify all AI attributions were preserved across all files
+    let new_commit = repo
+        .stage_all_and_commit("Re-commit after reset")
+        .unwrap();
+
+    assert!(
+        !new_commit.authorship_log.attestations.is_empty(),
+        "AI authorship should be preserved after resetting a large commit"
+    );
+
+    // Spot-check: each module file should still have AI-attributed lines
+    for (name, _) in &file_handles {
+        let f = repo.filename(name);
+        let ai_lines = f.lines_by_author(AuthorType::Ai);
+        assert!(
+            !ai_lines.is_empty(),
+            "file {name} should have AI-attributed lines after reset + re-commit"
+        );
+    }
+}
+
 crate::reuse_tests_in_worktree!(
     test_reset_hard_deletes_working_log,
     test_reset_soft_reconstructs_working_log,
@@ -618,4 +678,5 @@ crate::reuse_tests_in_worktree!(
     test_reset_mixed_pathspec_preserves_ai_authorship,
     test_reset_mixed_pathspec_multiple_commits,
     test_reset_with_directory_pathspec,
+    test_reset_large_commit_preserves_attribution,
 );
