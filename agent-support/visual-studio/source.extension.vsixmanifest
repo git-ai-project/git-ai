@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
+  <Metadata>
+    <Identity Id="io.gitai.visualstudio" Version="1.0.0" Language="en-US" Publisher="git-ai" />
+    <DisplayName>git-ai</DisplayName>
+    <Description>Known-human authorship tracking for git-ai</Description>
+  </Metadata>
+  <Installation>
+    <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[16.0,18.0)" />
+    <InstallationTarget Id="Microsoft.VisualStudio.Professional" Version="[16.0,18.0)" />
+    <InstallationTarget Id="Microsoft.VisualStudio.Enterprise" Version="[16.0,18.0)" />
+  </Installation>
+  <Assets>
+    <Asset Type="Microsoft.VisualStudio.VsPackage" d:Source="Project" d:ProjectName="%CurrentProject%" Path="|%CurrentProject%;PkgdefProjectOutputGroup|"/>
+  </Assets>
+</PackageManifest>
