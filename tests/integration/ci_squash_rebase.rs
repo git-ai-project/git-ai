@@ -1526,6 +1526,270 @@ fn test_ci_rebase_merge_populates_contributors() {
     );
 }
 
+/// Regression test: a squash merge onto a branch with prior history must NOT be
+/// misdetected as a rebase merge. The old heuristic counted linear commits walked
+/// back from merge_commit_sha — if the target branch had N prior commits matching
+/// the PR's N, it would wrongly classify as rebase. The fix verifies that the
+/// walked-back commits touch the same files as the originals.
+#[test]
+fn test_ci_squash_merge_not_misdetected_as_rebase_on_branch_with_history() {
+    use git_ai::ci::ci_context::{CiContext, CiEvent, CiRunOptions};
+
+    let repo = direct_test_repo();
+
+    // Create initial commit on main
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Create target branch (gitai-feature) with prior commits to create history
+    repo.git(&["checkout", "-b", "gitai-feature"]).unwrap();
+
+    let mut prior1 = repo.filename("prior1.txt");
+    prior1.set_contents(crate::lines!["prior commit 1"]);
+    repo.stage_all_and_commit("Prior commit 1 on feature")
+        .unwrap();
+
+    let mut prior2 = repo.filename("prior2.txt");
+    prior2.set_contents(crate::lines!["prior commit 2"]);
+    repo.stage_all_and_commit("Prior commit 2 on feature")
+        .unwrap();
+
+    let mut prior3 = repo.filename("prior3.txt");
+    prior3.set_contents(crate::lines!["prior commit 3"]);
+    repo.stage_all_and_commit("Prior commit 3 on feature")
+        .unwrap();
+
+    // Create task branch from feature with 4 AI commits (matching the prior count + 1)
+    repo.git(&["checkout", "-b", "task-branch"]).unwrap();
+
+    let mut file_a = repo.filename("file_a.ts");
+    file_a.set_contents(crate::lines!["human line 1", "human line 2"]);
+    repo.stage_all_and_commit("Human commit").unwrap();
+
+    let mut file_b = repo.filename("file_b.ts");
+    file_b.set_contents(crate::lines!["ai line 1".ai()]);
+    repo.stage_all_and_commit("AI commit 1").unwrap();
+
+    let mut file_c = repo.filename("file_c.ts");
+    file_c.set_contents(crate::lines!["ai line 2".ai()]);
+    repo.stage_all_and_commit("AI commit 2").unwrap();
+
+    let mut file_d = repo.filename("file_d.ts");
+    file_d.set_contents(crate::lines!["ai line 3".ai()]);
+    let task_tip = repo.stage_all_and_commit("AI commit 3").unwrap();
+    let task_tip_sha = task_tip.commit_sha;
+
+    // Simulate squash merge onto gitai-feature (use git_og to avoid writing a note —
+    // the CI context should be the one writing the note, not the test harness)
+    repo.git(&["checkout", "gitai-feature"]).unwrap();
+    file_a.set_contents(crate::lines!["human line 1", "human line 2"]);
+    file_b.set_contents(crate::lines!["ai line 1"]);
+    file_c.set_contents(crate::lines!["ai line 2"]);
+    file_d.set_contents(crate::lines!["ai line 3"]);
+    repo.git_og(&["add", "-A"]).unwrap();
+    repo.git_og(&["commit", "-m", "Squash merge task branch"])
+        .unwrap();
+    let squash_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Set up bare origin for CiContext
+    let origin_dir = tempfile::tempdir().unwrap();
+    let origin_path = origin_dir.path().join("origin.git");
+    repo.git_og(&[
+        "clone",
+        "--bare",
+        repo.path().to_str().unwrap(),
+        origin_path.to_str().unwrap(),
+    ])
+    .unwrap();
+    repo.git_og(&["remote", "add", "origin", origin_path.to_str().unwrap()])
+        .unwrap();
+
+    // Run CiContext — this should detect squash (not rebase)
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    let base_sha = repo
+        .git(&["merge-base", &task_tip_sha, "gitai-feature~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let event = CiEvent::Merge {
+        merge_commit_sha: squash_sha.clone(),
+        head_ref: "task-branch".to_string(),
+        head_sha: task_tip_sha.clone(),
+        base_ref: "gitai-feature".to_string(),
+        base_sha,
+    };
+
+    let ctx = CiContext::with_repository(git_ai_repo.clone(), event);
+    ctx.run_with_options(CiRunOptions {
+        skip_fetch_notes: true,
+        skip_fetch_base: true,
+    })
+    .expect("CiContext run should succeed");
+
+    // KEY ASSERTION: the squash commit should have aggregated contributors
+    let squash_log = get_reference_as_authorship_log_v3(&git_ai_repo, &squash_sha)
+        .expect("Squash commit should have authorship log");
+
+    // Should have multiple prompts (aggregated from all source commits)
+    assert!(
+        squash_log.metadata.prompts.len() >= 2,
+        "Squash merge should aggregate prompts from multiple source commits. Got {} prompts: {:?}",
+        squash_log.metadata.prompts.len(),
+        squash_log.metadata.prompts.keys().collect::<Vec<_>>()
+    );
+
+    // Contributors should be populated with aggregated stats
+    assert!(
+        squash_log.metadata.contributors.is_some(),
+        "Squash merge should have aggregated contributors"
+    );
+    let contributors = squash_log.metadata.contributors.unwrap();
+    assert!(!contributors.is_empty(), "Contributors should not be empty");
+
+    // Should have AI contributions from multiple prompts
+    let total_ai: u32 = contributors.values().map(|c| c.ai_accepted).sum();
+    assert!(
+        total_ai >= 2,
+        "Aggregated contributors should have ai_accepted >= 2 (from multiple AI commits). Got: {}",
+        total_ai
+    );
+}
+
+/// Test that a real rebase merge onto a branch with prior history is still correctly
+/// detected as rebase (not squash). The patch-id verification should confirm the
+/// walked-back commits match the originals.
+#[test]
+fn test_ci_rebase_merge_correctly_detected_on_branch_with_history() {
+    use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+    use git_ai::ci::ci_context::{CiContext, CiEvent, CiRunOptions};
+
+    let repo = direct_test_repo();
+
+    // Create initial commit on main
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Create target branch with prior commits (history)
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    let mut prior1 = repo.filename("prior1.txt");
+    prior1.set_contents(crate::lines!["prior 1"]);
+    repo.stage_all_and_commit("Prior 1").unwrap();
+
+    let mut prior2 = repo.filename("prior2.txt");
+    prior2.set_contents(crate::lines!["prior 2"]);
+    repo.stage_all_and_commit("Prior 2").unwrap();
+
+    // Create task branch from feature with 2 AI commits
+    repo.git(&["checkout", "-b", "task"]).unwrap();
+
+    let mut file_a = repo.filename("file_a.txt");
+    file_a.set_contents(crate::lines!["ai in file_a".ai()]);
+    let task_sha1 = repo.stage_all_and_commit("Add file_a").unwrap().commit_sha;
+
+    let mut file_b = repo.filename("file_b.txt");
+    file_b.set_contents(crate::lines!["ai in file_b".ai()]);
+    let task_sha2 = repo.stage_all_and_commit("Add file_b").unwrap().commit_sha;
+
+    // Simulate rebase merge onto feature: cherry-pick each task commit
+    repo.git(&["checkout", "feature"]).unwrap();
+
+    repo.git_og(&["cherry-pick", &task_sha1]).unwrap();
+    let new_sha1 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    repo.git_og(&["cherry-pick", &task_sha2]).unwrap();
+    let new_sha2 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Set up bare origin
+    let origin_dir = tempfile::tempdir().unwrap();
+    let origin_path = origin_dir.path().join("origin.git");
+    repo.git_og(&[
+        "clone",
+        "--bare",
+        repo.path().to_str().unwrap(),
+        origin_path.to_str().unwrap(),
+    ])
+    .unwrap();
+    repo.git_og(&["remote", "add", "origin", origin_path.to_str().unwrap()])
+        .unwrap();
+
+    // Run CiContext — should detect rebase (not squash) despite prior history
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    let base_sha = repo
+        .git(&["merge-base", &task_sha2, "feature~2"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let event = CiEvent::Merge {
+        merge_commit_sha: new_sha2.clone(),
+        head_ref: "task".to_string(),
+        head_sha: task_sha2.clone(),
+        base_ref: "feature".to_string(),
+        base_sha,
+    };
+
+    let ctx = CiContext::with_repository(git_ai_repo, event);
+    ctx.run_with_options(CiRunOptions {
+        skip_fetch_notes: true,
+        skip_fetch_base: true,
+    })
+    .expect("CiContext run should succeed");
+
+    // Verify each rebased commit got its own note (rebase path, not squash)
+    let note1 = repo
+        .read_authorship_note(&new_sha1)
+        .expect("rebased commit 1 should have authorship note");
+    let log1 = AuthorshipLog::deserialize_from_string(&note1).unwrap();
+
+    let note2 = repo
+        .read_authorship_note(&new_sha2)
+        .expect("rebased commit 2 should have authorship note");
+    let log2 = AuthorshipLog::deserialize_from_string(&note2).unwrap();
+
+    // Each commit should have its own file's attestation (not aggregated)
+    let files1: Vec<String> = log1
+        .attestations
+        .iter()
+        .map(|a| a.file_path.clone())
+        .collect();
+    let files2: Vec<String> = log2
+        .attestations
+        .iter()
+        .map(|a| a.file_path.clone())
+        .collect();
+
+    assert!(
+        files1.iter().any(|f| f.contains("file_a")),
+        "Rebased commit 1 should have file_a. Got: {:?}",
+        files1
+    );
+    assert!(
+        files2.iter().any(|f| f.contains("file_b")),
+        "Rebased commit 2 should have file_b. Got: {:?}",
+        files2
+    );
+
+    // Both should have contributors (per-commit)
+    assert!(
+        log1.metadata.contributors.is_some(),
+        "Rebased commit 1 should have contributors"
+    );
+    assert!(
+        log2.metadata.contributors.is_some(),
+        "Rebased commit 2 should have contributors"
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_basic,
     test_ci_squash_merge_multiple_files,
@@ -1543,4 +1807,6 @@ crate::reuse_tests_in_worktree!(
     test_ci_rebase_merge_multiple_commits_standard_human,
     test_ci_squash_merge_populates_contributors,
     test_ci_rebase_merge_populates_contributors,
+    test_ci_squash_merge_not_misdetected_as_rebase_on_branch_with_history,
+    test_ci_rebase_merge_correctly_detected_on_branch_with_history,
 );

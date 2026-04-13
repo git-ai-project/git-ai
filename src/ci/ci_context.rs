@@ -6,7 +6,7 @@ use crate::error::GitAiError;
 use crate::git::notes_api::{
     read_authorship_v3 as get_reference_as_authorship_log_v3, read_note as show_authorship_note,
 };
-use crate::git::repository::{CommitRange, Repository};
+use crate::git::repository::{CommitRange, Repository, exec_git, exec_git_stdin};
 use crate::git::sync_authorship::fetch_authorship_notes;
 use std::fs;
 use std::path::PathBuf;
@@ -191,7 +191,12 @@ impl CiContext {
                     let new_commits =
                         self.get_rebased_commits(merge_commit_sha, original_commits.len());
 
-                    if new_commits.len() == original_commits.len() {
+                    // Count match alone is not enough: a squash merge onto a branch with
+                    // prior history also yields N linear commits. Verify the walked-back
+                    // commits actually touch the same files as the originals.
+                    if new_commits.len() == original_commits.len()
+                        && self.verify_rebase_commit_match(&original_commits, &new_commits)
+                    {
                         println!(
                             "Detected rebase merge: {} original -> {} new commits",
                             original_commits.len(),
@@ -302,6 +307,57 @@ impl CiContext {
         commits.reverse();
         commits
     }
+
+    /// Verify that candidate rebased commits actually correspond to the original PR commits
+    /// by comparing patch-ids. A true rebase produces new commits with the same diff content
+    /// (same patch-id) as the originals. A squash merge on a branch with prior history will
+    /// have unrelated commits with different patch-ids, even if they coincidentally touch the
+    /// same files.
+    fn verify_rebase_commit_match(
+        &self,
+        original_commits: &[String],
+        new_commits: &[String],
+    ) -> bool {
+        if original_commits.len() != new_commits.len() {
+            return false;
+        }
+        for (orig, new) in original_commits.iter().zip(new_commits.iter()) {
+            let orig_patch_id = get_commit_patch_id(&self.repo, orig);
+            let new_patch_id = get_commit_patch_id(&self.repo, new);
+            match (orig_patch_id, new_patch_id) {
+                (Some(a), Some(b)) if a == b => continue,
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+/// Get the patch-id for a single commit. Patch-id is a content-based hash of the diff
+/// that ignores line numbers and whitespace, so the same change rebased onto a different
+/// base produces the same patch-id.
+fn get_commit_patch_id(repo: &Repository, commit_sha: &str) -> Option<String> {
+    // Step 1: get the patch via `git diff-tree -p <sha>`
+    let mut diff_args = repo.global_args_for_exec();
+    diff_args.extend_from_slice(&[
+        "diff-tree".to_string(),
+        "-p".to_string(),
+        commit_sha.to_string(),
+    ]);
+    let diff_output = exec_git(&diff_args).ok()?;
+    if diff_output.stdout.is_empty() {
+        return None;
+    }
+
+    // Step 2: pipe the patch into `git patch-id`
+    let mut patch_id_args = repo.global_args_for_exec();
+    patch_id_args.push("patch-id".to_string());
+    let patch_output = exec_git_stdin(&patch_id_args, &diff_output.stdout).ok()?;
+
+    // Output format: "<patch-id> <commit-sha>"
+    String::from_utf8(patch_output.stdout)
+        .ok()
+        .and_then(|s| s.split_whitespace().next().map(String::from))
 }
 
 #[cfg(test)]
