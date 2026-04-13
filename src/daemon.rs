@@ -8125,46 +8125,61 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn checkpoint_requests_use_long_timeout_in_ci_or_test_env() {
-        let _unset_ci = EnvVarGuard::unset("CI");
-        let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
-        let _test_db = EnvVarGuard::set("GIT_AI_TEST_DB_PATH", "/tmp/git-ai-test.db");
-
         assert_eq!(
-            control_request_response_timeout(&queued_checkpoint_request()),
+            checkpoint_control_response_timeout(&queued_checkpoint_request(), true),
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         );
         assert_eq!(
-            control_request_response_timeout(&waited_checkpoint_request()),
+            checkpoint_control_response_timeout(&waited_checkpoint_request(), true),
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         );
     }
 
     #[test]
-    #[serial]
     fn queued_checkpoint_requests_use_short_timeout_in_product_env() {
-        let _unset_ci = EnvVarGuard::unset("CI");
-        let _unset_test = EnvVarGuard::unset("GIT_AI_TEST_DB_PATH");
-        let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
-
         assert_eq!(
-            control_request_response_timeout(&queued_checkpoint_request()),
+            checkpoint_control_response_timeout(&queued_checkpoint_request(), false),
             DAEMON_CONTROL_RESPONSE_TIMEOUT
         );
     }
 
     #[test]
-    #[serial]
     fn waited_checkpoint_requests_use_long_timeout_in_product_env() {
+        assert_eq!(
+            checkpoint_control_response_timeout(&waited_checkpoint_request(), false),
+            DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn checkpoint_control_timeout_uses_ci_env_var() {
+        let _unset_test = EnvVarGuard::unset("GIT_AI_TEST_DB_PATH");
+        let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
+        let _set_ci = EnvVarGuard::set("CI", "true");
+
+        assert!(checkpoint_control_timeout_uses_ci_or_test_budget());
+    }
+
+    #[test]
+    #[serial]
+    fn checkpoint_control_timeout_uses_test_db_env_var() {
+        let _unset_ci = EnvVarGuard::unset("CI");
+        let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
+        let _set_test = EnvVarGuard::set("GIT_AI_TEST_DB_PATH", "/tmp/git-ai-test.db");
+
+        assert!(checkpoint_control_timeout_uses_ci_or_test_budget());
+    }
+
+    #[test]
+    #[serial]
+    fn checkpoint_control_timeout_false_when_no_ci_or_test_vars() {
         let _unset_ci = EnvVarGuard::unset("CI");
         let _unset_test = EnvVarGuard::unset("GIT_AI_TEST_DB_PATH");
         let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
 
-        assert_eq!(
-            control_request_response_timeout(&waited_checkpoint_request()),
-            DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
-        );
+        assert!(!checkpoint_control_timeout_uses_ci_or_test_budget());
     }
 
     #[test]
