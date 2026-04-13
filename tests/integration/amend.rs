@@ -748,8 +748,7 @@ fn test_amend_delete_known_human_line_preserves_human_record_in_note() {
         !original_log.metadata.humans.is_empty(),
         "precondition: original commit should have HumanRecord entries"
     );
-    let original_human_ids: Vec<String> =
-        original_log.metadata.humans.keys().cloned().collect();
+    let original_human_ids: Vec<String> = original_log.metadata.humans.keys().cloned().collect();
 
     // Amend: overwrite the file with plain human content only, deleting the KnownHuman line.
     let file_path = repo.path().join("test.txt");

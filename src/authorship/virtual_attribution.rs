@@ -872,9 +872,9 @@ impl VirtualAttributions {
         merged_va.prompts.retain(|id, _| {
             checkpoint_prompt_ids.contains(id) || referenced_in_merged.contains(id)
         });
-        merged_va.humans.retain(|id, _| {
-            checkpoint_human_ids.contains(id) || referenced_in_merged.contains(id)
-        });
+        merged_va
+            .humans
+            .retain(|id, _| checkpoint_human_ids.contains(id) || referenced_in_merged.contains(id));
 
         Ok(merged_va)
     }
@@ -942,9 +942,9 @@ impl VirtualAttributions {
         merged_va.prompts.retain(|id, _| {
             checkpoint_prompt_ids.contains(id) || referenced_in_merged.contains(id)
         });
-        merged_va.humans.retain(|id, _| {
-            checkpoint_human_ids.contains(id) || referenced_in_merged.contains(id)
-        });
+        merged_va
+            .humans
+            .retain(|id, _| checkpoint_human_ids.contains(id) || referenced_in_merged.contains(id));
 
         Ok(merged_va)
     }
