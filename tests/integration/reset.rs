@@ -635,16 +635,15 @@ fn test_reset_large_commit_preserves_attribution() {
         }
         file_handles.push((name, f));
     }
-    repo.stage_all_and_commit("Large AI commit (500+ lines)").unwrap();
+    repo.stage_all_and_commit("Large AI commit (500+ lines)")
+        .unwrap();
 
     // Reset the large AI commit
     repo.git(&["reset", "--mixed", &base_commit.commit_sha])
         .expect("reset --mixed should succeed");
 
     // Re-commit and verify all AI attributions were preserved across all files
-    let new_commit = repo
-        .stage_all_and_commit("Re-commit after reset")
-        .unwrap();
+    let new_commit = repo.stage_all_and_commit("Re-commit after reset").unwrap();
 
     assert!(
         !new_commit.authorship_log.attestations.is_empty(),
