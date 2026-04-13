@@ -1737,7 +1737,7 @@ impl TestRepo {
     /// `wait=false`, so the drain is async in exactly the same way.
     fn checkpoint_completion_baseline_for_cmd(&self, args: &[&str]) -> u64 {
         if git_ai_primary_command(args) == Some("checkpoint") {
-            self.daemon_total_completion_count()
+            self.daemon_checkpoint_completion_count()
         } else {
             0
         }
@@ -1769,7 +1769,7 @@ impl TestRepo {
         if !output.contains("queued") {
             return;
         }
-        self.wait_for_daemon_total_completion_count(baseline, baseline.saturating_add(1));
+        self.wait_for_daemon_checkpoint_completion_count(baseline, baseline.saturating_add(1));
     }
 
     fn daemon_family_key_for_repo_path(&self, repo_path: &Path) -> String {
