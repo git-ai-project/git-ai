@@ -7116,16 +7116,16 @@ impl ActorDaemonCoordinator {
                 // idle timeout, causing "session never observed" failures.  The
                 // exec_lock serialises this inline drain with any concurrent
                 // drain worker run (one will drain, the other sees an empty
-                // sequencer and is a no-op).  The drain worker remains in place
-                // as a backup for checkpoints and any notifications it receives
-                // while this ingest worker is processing other events.
+                // sequencer and is a no-op).
                 //
                 // Use try_lock() instead of lock().await: the ingest worker is a
                 // single sequential task and blocking it on exec_lock would prevent
                 // processing events from ALL families (not just the contended one).
-                // When exec_lock is held (e.g., during checkpoint drain), fall back
-                // to the per-family drain worker which runs on a separate task and
-                // can wait for exec_lock without blocking the ingest worker.
+                // When exec_lock is held (e.g., during checkpoint drain), spawn a
+                // one-shot task that waits for exec_lock without blocking the ingest
+                // worker.  This is more reliable than notify_one() on the drain
+                // worker, which can miss a notification if a concurrent drain is
+                // already in progress.
                 let exec_lock = self.side_effect_exec_lock(&family)?;
                 if let Ok(_guard) = exec_lock.try_lock() {
                     if let Err(e) = self
@@ -7138,11 +7138,32 @@ impl ActorDaemonCoordinator {
                         ));
                     }
                 } else {
-                    // exec_lock contended: wake the drain worker so it runs the
-                    // drain once exec_lock is available.
-                    if let Ok(notify) = self.get_or_create_drain_notifier(&family) {
-                        notify.notify_one();
-                    }
+                    // exec_lock contended: spawn a one-shot task that waits for
+                    // exec_lock and then drains.  This is more reliable than
+                    // notify_one() on the per-family drain worker, which can
+                    // miss a notification if it is already in the middle of a
+                    // drain pass (and the new entry arrived after the drain
+                    // started but before notified().await is reached).  Each
+                    // missed inline drain gets its own dedicated task that is
+                    // guaranteed to run once exec_lock is released.
+                    let coordinator = self.clone();
+                    let family_clone = family.clone();
+                    tokio::spawn(async move {
+                        let lock = match coordinator.side_effect_exec_lock(&family_clone) {
+                            Ok(l) => l,
+                            Err(_) => return,
+                        };
+                        let _guard = lock.lock().await;
+                        if let Err(e) = coordinator
+                            .drain_ready_family_sequencer_entries_locked(&family_clone)
+                            .await
+                        {
+                            debug_log(&format!(
+                                "daemon fallback drain error for family {}: {}",
+                                family_clone, e
+                            ));
+                        }
+                    });
                 }
             }
             TracePayloadApplyOutcome::Applied(mut applied) => {
