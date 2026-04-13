@@ -2324,6 +2324,13 @@ impl TestRepo {
             .current_dir(&absolute_working_dir);
         self.configure_git_ai_env(&mut command);
 
+        // Do NOT delegate checkpoints to the daemon drain here.  The caller's
+        // CWD may differ from self's repo root (cross-repo / subrepo tests),
+        // so the completion log family key is unpredictable and any async wait
+        // would target the wrong family.  Running synchronously means the
+        // working log is guaranteed to be written before we return.
+        command.env_remove("GIT_AI_DAEMON_CHECKPOINT_DELEGATE");
+
         if let Some(patch) = &self.config_patch
             && let Ok(patch_json) = serde_json::to_string(patch)
         {
