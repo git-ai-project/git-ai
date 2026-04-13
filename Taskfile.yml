@@ -4,7 +4,10 @@ tasks:
     desc: Setup git-ai debug build for local dev
     deps: [build-debug]
     cmds:
-      - ./scripts/dev.sh
+      - cmd: powershell -NonInteractive -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1
+        platforms: [windows]
+      - cmd: ./scripts/dev.sh
+        platforms: [linux, darwin]
   build:
     desc: Build the project in release mode
     cmds:
