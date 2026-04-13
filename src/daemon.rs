@@ -5740,7 +5740,28 @@ impl ActorDaemonCoordinator {
                                 .apply_checkpoint(Path::new(request.repo_working_dir()))
                                 .await;
                             match ack {
-                                Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
+                                Ok(ack) => {
+                                    let seq = ack.seq;
+                                    let request = *request;
+                                    // Run the blocking side effect on a dedicated blocking
+                                    // thread so the Tokio async thread pool stays free to
+                                    // process ingest events (including exit events for other
+                                    // git commands queued in the family sequencer).  Without
+                                    // this, a long-running git-notes subprocess inside
+                                    // apply_checkpoint_side_effect could starve the ingest
+                                    // worker on a loaded CI runner.
+                                    tokio::task::spawn_blocking(move || {
+                                        apply_checkpoint_side_effect(request)
+                                    })
+                                    .await
+                                    .unwrap_or_else(|join_err| {
+                                        Err(GitAiError::Generic(format!(
+                                            "checkpoint side effect blocking thread panicked: {}",
+                                            join_err
+                                        )))
+                                    })
+                                    .map(|_| seq)
+                                }
                                 Err(error) => Err(error),
                             }
                         };
@@ -7299,11 +7320,8 @@ impl ActorDaemonCoordinator {
         &self,
         command: &mut crate::daemon::domain::NormalizedCommand,
     ) {
-        self.apply_wrapper_state_overlay_with_timeout(
-            command,
-            self.wrapper_state_wait_timeout(),
-        )
-        .await;
+        self.apply_wrapper_state_overlay_with_timeout(command, self.wrapper_state_wait_timeout())
+            .await;
     }
 
     async fn apply_wrapper_state_overlay_with_timeout(
