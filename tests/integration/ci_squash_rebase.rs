@@ -1790,6 +1790,209 @@ fn test_ci_rebase_merge_correctly_detected_on_branch_with_history() {
     );
 }
 
+/// Test that contributors.ai_accepted matches the top-level ai_accepted after a CI squash merge.
+/// This pins the fix for the mismatch caused by build_contributors reading pre-merge
+/// prompt.accepted_lines from source notes instead of the final merged VA result.
+#[test]
+fn test_ci_squash_merge_contributors_ai_accepted_matches_top_level() {
+    use git_ai::authorship::stats::stats_for_commit_stats;
+
+    let repo = direct_test_repo();
+    let mut file = repo.filename("service.ts");
+
+    // Create initial commit on main
+    file.set_contents(crate::lines!["export class Service {", "}"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Create feature branch with two AI prompts
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit 1: AI adds 2 lines
+    file.insert_at(1, crate::lines!["  connect() {}".ai(), "  disconnect() {}".ai()]);
+    repo.stage_all_and_commit("AI adds connect/disconnect").unwrap();
+
+    // Commit 2: AI adds 1 more line (different prompt session)
+    file.insert_at(3, crate::lines!["  ping() {}".ai()]);
+    let feature_commit = repo.stage_all_and_commit("AI adds ping").unwrap();
+    let feature_sha = feature_commit.commit_sha;
+
+    // Simulate CI squash merge onto main
+    repo.git(&["checkout", "main"]).unwrap();
+    file.set_contents(crate::lines![
+        "export class Service {",
+        "  connect() {}",
+        "  disconnect() {}",
+        "  ping() {}",
+        "}"
+    ]);
+    let merge_commit = repo.stage_all_and_commit("Squash feature").unwrap();
+    let merge_sha = merge_commit.commit_sha;
+
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "feature",
+        "main",
+        &feature_sha,
+        &merge_sha,
+        false,
+    )
+    .unwrap();
+
+    // Compute top-level stats (blame-based, the authoritative source)
+    let top_level = stats_for_commit_stats(&git_ai_repo, &merge_sha, &[])
+        .expect("stats_for_commit_stats should succeed");
+
+    // Read contributors from the note
+    let squash_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha)
+        .expect("Squash commit should have authorship log");
+    let contributors = squash_log
+        .metadata
+        .contributors
+        .expect("contributors should be populated");
+
+    // KEY ASSERTION: contributors ai_accepted must match the top-level value exactly
+    let contributors_total_ai_accepted: u32 = contributors.values().map(|c| c.ai_accepted).sum();
+    assert_eq!(
+        contributors_total_ai_accepted,
+        top_level.ai_accepted,
+        "contributors.ai_accepted ({}) must match top-level ai_accepted ({})",
+        contributors_total_ai_accepted,
+        top_level.ai_accepted,
+    );
+
+    let contributors_total_ai_additions: u32 = contributors.values().map(|c| c.ai_additions).sum();
+    assert_eq!(
+        contributors_total_ai_additions,
+        top_level.ai_additions,
+        "contributors.ai_additions ({}) must match top-level ai_additions ({})",
+        contributors_total_ai_additions,
+        top_level.ai_additions,
+    );
+}
+
+/// Test that a second-level CI squash (feature → main) correctly merges the existing contributors
+/// sections from each source commit (built at task → feature time) via Priority 1, rather than
+/// re-deriving from the merged log. This pins the fix that prevents Priority 0 from incorrectly
+/// bypassing Priority 1 when source commits already have a contributors section.
+#[test]
+fn test_ci_squash_merge_second_level_merges_existing_contributors() {
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+
+    let repo = direct_test_repo();
+
+    // --- First level: task → feature squash ---
+
+    // Initial commit on feature branch (acts as base)
+    let mut file = repo.filename("app.ts");
+    file.set_contents(crate::lines!["export const app = {};"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "feature"]).unwrap();
+
+    // Task branch with AI commits
+    repo.git(&["checkout", "-b", "task"]).unwrap();
+    file.insert_at(1, crate::lines!["export function init() {}".ai()]);
+    repo.stage_all_and_commit("AI adds init").unwrap();
+    file.insert_at(2, crate::lines!["export function run() {}".ai()]);
+    let task_tip = repo.stage_all_and_commit("AI adds run").unwrap();
+    let task_sha = task_tip.commit_sha;
+
+    // Squash task → feature
+    repo.git(&["checkout", "feature"]).unwrap();
+    file.set_contents(crate::lines![
+        "export const app = {};",
+        "export function init() {}",
+        "export function run() {}",
+    ]);
+    let feature_merge = repo.stage_all_and_commit("Squash task").unwrap();
+    let feature_merge_sha = feature_merge.commit_sha;
+
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "task",
+        "feature",
+        &task_sha,
+        &feature_merge_sha,
+        false,
+    )
+    .unwrap();
+
+    // Verify the first-level squash commit has contributors
+    let first_level_log = get_reference_as_authorship_log_v3(&git_ai_repo, &feature_merge_sha)
+        .expect("First-level squash should have authorship log");
+    assert!(
+        first_level_log.metadata.contributors.is_some(),
+        "First-level squash should have contributors"
+    );
+    let first_level_contributors = first_level_log.metadata.contributors.clone().unwrap();
+    let first_level_ai_accepted: u32 = first_level_contributors
+        .values()
+        .map(|c| c.ai_accepted)
+        .sum();
+    assert!(
+        first_level_ai_accepted > 0,
+        "First-level squash contributors should have ai_accepted > 0"
+    );
+
+    // --- Second level: feature → main squash ---
+
+    repo.git(&["checkout", "-b", "main"]).unwrap();
+    // Detach to create main at initial state, then reset feature merge onto it
+    // Simpler: create main from the initial state
+    let initial_sha = repo
+        .git(&["rev-list", "--max-parents=0", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git(&["checkout", "-b", "main2", &initial_sha]).unwrap();
+
+    file.set_contents(crate::lines![
+        "export const app = {};",
+        "export function init() {}",
+        "export function run() {}",
+    ]);
+    let main_merge = repo.stage_all_and_commit("Squash feature onto main").unwrap();
+    let main_merge_sha = main_merge.commit_sha;
+
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "feature",
+        "main2",
+        &feature_merge_sha,
+        &main_merge_sha,
+        false,
+    )
+    .unwrap();
+
+    let second_level_log = get_reference_as_authorship_log_v3(&git_ai_repo, &main_merge_sha)
+        .expect("Second-level squash should have authorship log");
+
+    // KEY ASSERTION: second-level contributors must have at least as much ai_accepted as first-level
+    // (Priority 1 path: merges existing contributors from the feature merge commit)
+    let second_level_contributors = second_level_log
+        .metadata
+        .contributors
+        .expect("Second-level squash should have contributors");
+    let second_level_ai_accepted: u32 = second_level_contributors
+        .values()
+        .map(|c| c.ai_accepted)
+        .sum();
+    assert_eq!(
+        second_level_ai_accepted,
+        first_level_ai_accepted,
+        "Second-level squash contributors.ai_accepted ({}) should equal first-level ({}): Priority 1 merge should propagate contributors unchanged",
+        second_level_ai_accepted,
+        first_level_ai_accepted,
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_basic,
     test_ci_squash_merge_multiple_files,
@@ -1809,4 +2012,6 @@ crate::reuse_tests_in_worktree!(
     test_ci_rebase_merge_populates_contributors,
     test_ci_squash_merge_not_misdetected_as_rebase_on_branch_with_history,
     test_ci_rebase_merge_correctly_detected_on_branch_with_history,
+    test_ci_squash_merge_contributors_ai_accepted_matches_top_level,
+    test_ci_squash_merge_second_level_merges_existing_contributors,
 );

@@ -727,7 +727,10 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     }
 
     // Step 6b: Build per-developer contributors section
-    let contributors = build_contributors(repo, &source_commits);
+    // Pass the merged authorship_log so build_contributors uses accepted_lines
+    // from the final merged state (matching top-level stats) rather than re-reading
+    // source commit notes which reflect pre-merge accepted counts.
+    let contributors = build_contributors(repo, &source_commits, Some(&authorship_log));
     if !contributors.is_empty() {
         authorship_log.metadata.contributors = Some(contributors);
     }
@@ -1779,7 +1782,7 @@ pub fn rewrite_authorship_after_rebase_v2(
                 let active_ids: HashSet<String> = active_prompt_key.keys().cloned().collect();
                 // Build per-commit contributors from the original commit's note + diff
                 if let Some(orig_sha) = current_original_commit {
-                    let contributors = build_contributors(repo, &[orig_sha.to_string()]);
+                    let contributors = build_contributors(repo, &[orig_sha.to_string()], None);
                     if !contributors.is_empty() {
                         current_authorship_log.metadata.contributors = Some(contributors);
                     } else {
@@ -3713,7 +3716,7 @@ pub fn try_fast_path_rebase_note_remap_cached(
         let mut remapped = remap_note_content_for_target_commit(raw_note, new_commit);
 
         // Inject per-commit contributors into the fast-path remapped note
-        let contributors = build_contributors(repo, std::slice::from_ref(original_commit));
+        let contributors = build_contributors(repo, std::slice::from_ref(original_commit), None);
         if !contributors.is_empty()
             && let Ok(mut log) =
                 crate::authorship::authorship_log_serialization::AuthorshipLog::deserialize_from_string(&remapped)
@@ -4831,17 +4834,130 @@ pub fn transform_attributions_to_final_state(
 
 use crate::authorship::authorship_log::ContributorStats;
 
+/// Build per-developer contributors from an already-merged authorship log.
+/// Used in the CI squash merge path (first level only) where the merged log's
+/// prompt.accepted_lines are set from the final VA result and match the top-level stats exactly.
+fn build_contributors_from_merged_log(
+    repo: &Repository,
+    source_commits: &[String],
+    merged_log: &AuthorshipLog,
+    noreply_normalizer: &HashMap<String, String>,
+    name_to_email: &HashMap<String, String>,
+) -> BTreeMap<String, ContributorStats> {
+    let mut contributors: HashMap<String, ContributorStats> = HashMap::new();
+
+    // Fall back to source-commit-based logic if the merged log has no prompts.
+    if merged_log.metadata.prompts.is_empty() {
+        return BTreeMap::new();
+    }
+
+    // Get the commit author for fallback email resolution.
+    // Use the last source commit as the representative author.
+    let representative_sha = source_commits.last().map(String::as_str).unwrap_or("");
+    let commit_author_email = get_commit_author_email(repo, representative_sha);
+    let commit_author_name = get_commit_author_name(repo, representative_sha);
+    let normalized_commit_email = normalize_email(&commit_author_email, noreply_normalizer);
+
+    // Sum git diff added lines across all source commits for manual line calculation.
+    let git_diff_added_lines: u32 = source_commits
+        .iter()
+        .map(|sha| get_commit_diff_added_lines(repo, sha))
+        .sum();
+
+    let mut total_ai_accepted: u32 = 0;
+    let mut total_mixed: u32 = 0;
+
+    for prompt in merged_log.metadata.prompts.values() {
+        let dev_email =
+            resolve_contributor_email(&prompt.human_author, &commit_author_email, name_to_email);
+        let dev_email = normalize_email(&dev_email, noreply_normalizer);
+        let dev_name = parse_name_from_human_author(&prompt.human_author);
+        let tool_model = format!("{}::{}", prompt.agent_id.tool, prompt.agent_id.model);
+
+        let c = contributors.entry(dev_email).or_default();
+        if !dev_name.is_empty() && dev_name != "unknown" {
+            c.name = dev_name;
+        }
+
+        // prompt.accepted_lines here reflects the final merged VA state — consistent
+        // with top-level stats. prompt.overriden_lines was propagated from source notes.
+        c.ai_accepted += prompt.accepted_lines;
+        c.mixed_additions += prompt.overriden_lines;
+        c.ai_additions += prompt.accepted_lines + prompt.overriden_lines;
+        c.human_additions += prompt.overriden_lines; // mixed counts as human (upstream compat)
+
+        let tm = c.tool_model_breakdown.entry(tool_model).or_default();
+        tm.ai_accepted += prompt.accepted_lines;
+        tm.mixed_additions += prompt.overriden_lines;
+        tm.ai_additions += prompt.accepted_lines + prompt.overriden_lines;
+
+        total_ai_accepted += prompt.accepted_lines;
+        total_mixed += prompt.overriden_lines;
+    }
+
+    // Manual lines = raw git total - ai_accepted - mixed
+    let manual_for_commit = git_diff_added_lines
+        .saturating_sub(total_ai_accepted)
+        .saturating_sub(total_mixed);
+
+    if manual_for_commit > 0 {
+        let c = contributors.entry(normalized_commit_email).or_default();
+        if c.name.is_empty() {
+            c.name = commit_author_name;
+        }
+        c.manual_additions += manual_for_commit;
+        c.human_additions += manual_for_commit;
+    }
+
+    // Recalculate acceptance rates
+    for stats in contributors.values_mut() {
+        stats.recalculate_acceptance_rates();
+    }
+
+    contributors.into_iter().collect()
+}
+
 /// Build per-developer contributor stats from source commits being squash-merged.
 ///
-/// Three priority levels per commit:
-/// 1. If the commit already has a `contributors` section (from a previous squash), merge those.
-/// 2. If the commit has notes with prompts, derive AI vs human stats from prompt records + git diff.
-/// 3. If the commit has no notes, all added lines are attributed as manual to the commit author.
+/// Priority levels:
+/// 0. If a merged_log is provided and no source commit has an existing contributors section,
+///    derive stats directly from the merged log (first-level CI squash — matches top-level stats).
+/// 1. If a source commit already has a `contributors` section (second-level squash), merge those.
+/// 2. If a source commit has notes with prompts, derive AI vs human stats from prompt records + git diff.
+/// 3. If a source commit has no notes, all added lines are attributed as manual to the commit author.
 fn build_contributors(
     repo: &Repository,
     source_commits: &[String],
+    merged_log: Option<&AuthorshipLog>,
 ) -> BTreeMap<String, ContributorStats> {
     let (noreply_normalizer, name_to_email) = build_email_normalizer(repo, source_commits);
+
+    // Priority 0: when a merged authorship log is provided (CI squash merge) AND no source commit
+    // already has a contributors section, derive contributors directly from it. Its
+    // prompt.accepted_lines reflects the final merged state (set by VA at merge time), matching
+    // what the top-level stats compute. Reading source commit notes instead would give pre-merge
+    // accepted counts that can differ after conflict resolution.
+    //
+    // We skip Priority 0 if any source commit has an existing contributors section — that means
+    // this is a second-level squash (feature → main) where contributors were already built at
+    // task → feature time and should be merged via Priority 1 instead.
+    let any_source_has_contributors = source_commits.iter().any(|sha| {
+        get_reference_as_authorship_log_v3(repo, sha)
+            .ok()
+            .and_then(|log| log.metadata.contributors)
+            .map_or(false, |c| !c.is_empty())
+    });
+    if let Some(merged_log) = merged_log
+        && !any_source_has_contributors
+    {
+        return build_contributors_from_merged_log(
+            repo,
+            source_commits,
+            merged_log,
+            &noreply_normalizer,
+            &name_to_email,
+        );
+    }
     let mut contributors: HashMap<String, ContributorStats> = HashMap::new();
 
     for sha in source_commits {
