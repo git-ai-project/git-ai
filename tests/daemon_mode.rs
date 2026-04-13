@@ -691,41 +691,6 @@ impl WorkdirRaceHarness {
         }
     }
 
-    /// Return the current total number of completion-log entries for this
-    /// harness's git family.  Used to capture a baseline before queuing
-    /// checkpoints so that `wait_for_completion_count` can detect when
-    /// those checkpoints have been fully processed by the drain worker.
-    fn completion_count(&self) -> u64 {
-        let log_path = DaemonConfig::from_home(&self.daemon_home)
-            .test_completion_log_path_for_family(&self.daemon_family_key);
-        let Ok(content) = fs::read_to_string(&log_path) else {
-            return 0;
-        };
-        content
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .count() as u64
-    }
-
-    /// Block until the completion log for this family reaches `expected`
-    /// total entries (or until a 60-second timeout).
-    fn wait_for_completion_count(&self, baseline: u64, expected: u64) {
-        let start = std::time::Instant::now();
-        loop {
-            let count = self.completion_count();
-            if count >= expected {
-                return;
-            }
-            if start.elapsed() >= Duration::from_secs(60) {
-                panic!(
-                    "timeout waiting for {} completions in family {} (observed {}, baseline {})",
-                    expected, self.daemon_family_key, count, baseline
-                );
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-    }
-
     /// Return the current number of checkpoint-specific completion-log entries
     /// for this harness's git family.
     fn checkpoint_completion_count(&self) -> u64 {
@@ -820,6 +785,7 @@ impl WorkdirRaceHarness {
         self.run_traced_git(workdir, &["add", file_rel]);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_worktree_ai_stream(
         &self,
         workdir: PathBuf,
