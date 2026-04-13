@@ -7119,16 +7119,30 @@ impl ActorDaemonCoordinator {
                 // sequencer and is a no-op).  The drain worker remains in place
                 // as a backup for checkpoints and any notifications it receives
                 // while this ingest worker is processing other events.
+                //
+                // Use try_lock() instead of lock().await: the ingest worker is a
+                // single sequential task and blocking it on exec_lock would prevent
+                // processing events from ALL families (not just the contended one).
+                // When exec_lock is held (e.g., during checkpoint drain), fall back
+                // to the per-family drain worker which runs on a separate task and
+                // can wait for exec_lock without blocking the ingest worker.
                 let exec_lock = self.side_effect_exec_lock(&family)?;
-                let _guard = exec_lock.lock().await;
-                if let Err(e) = self
-                    .drain_ready_family_sequencer_entries_locked(&family)
-                    .await
-                {
-                    debug_log(&format!(
-                        "daemon inline drain error for family {}: {}",
-                        family, e
-                    ));
+                if let Ok(_guard) = exec_lock.try_lock() {
+                    if let Err(e) = self
+                        .drain_ready_family_sequencer_entries_locked(&family)
+                        .await
+                    {
+                        debug_log(&format!(
+                            "daemon inline drain error for family {}: {}",
+                            family, e
+                        ));
+                    }
+                } else {
+                    // exec_lock contended: wake the drain worker so it runs the
+                    // drain once exec_lock is available.
+                    if let Ok(notify) = self.get_or_create_drain_notifier(&family) {
+                        notify.notify_one();
+                    }
                 }
             }
             TracePayloadApplyOutcome::Applied(mut applied) => {
