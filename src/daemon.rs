@@ -7176,14 +7176,15 @@ impl ActorDaemonCoordinator {
                         .maybe_apply_side_effects_for_applied_command(Some(&family), &applied)
                         .await;
                     let _ = self.end_family_effect(&family);
-                    if let Err(error) = result {
-                        let _ = self.record_side_effect_error(&family, applied.seq, &error);
+                    if let Err(error) = &result {
+                        let _ = self.record_side_effect_error(&family, applied.seq, error);
                         debug_log(&format!(
                             "daemon async side-effect error for family {} seq {}: {}",
                             family, applied.seq, error
                         ));
-                    } else if let Err(error) =
-                        self.append_command_completion_log(&family, &applied, &Ok(()), applied.seq)
+                    }
+                    if let Err(error) =
+                        self.append_command_completion_log(&family, &applied, &result, applied.seq)
                     {
                         let _ = self.record_side_effect_error(&family, applied.seq, &error);
                         debug_log(&format!(
