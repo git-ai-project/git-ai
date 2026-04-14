@@ -193,7 +193,12 @@ fn handle_run(args: &[String]) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     // Daemon is fully dead (lock released, sockets removed, threads joined).
-    // Now safe to self-update — install.sh can start a fresh daemon.
+    // Now safe to self-update — the daemon can decide whether a fresh instance
+    // should be started based on the shutdown reason and install outcome.
+    #[cfg(not(windows))]
+    let update_installed = crate::daemon::daemon_run_pending_self_update();
+
+    #[cfg(windows)]
     crate::daemon::daemon_run_pending_self_update();
 
     match exit_action {
@@ -204,7 +209,9 @@ fn handle_run(args: &[String]) -> Result<(), String> {
         crate::daemon::DaemonExitAction::RestartAfterUpdate => {
             #[cfg(not(windows))]
             {
-                ensure_daemon_running(Duration::from_secs(5)).map(|_| ())?;
+                if update_installed {
+                    ensure_daemon_running(Duration::from_secs(5)).map(|_| ())?;
+                }
             }
         }
     }

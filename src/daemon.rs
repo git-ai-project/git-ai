@@ -8280,7 +8280,7 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
 /// On Unix the installer atomically replaces the binary via `mv`; on Windows
 /// the installer is spawned as a detached process that polls until the exe is
 /// unlocked.
-pub(crate) fn daemon_run_pending_self_update() {
+pub(crate) fn daemon_run_pending_self_update() -> bool {
     use crate::commands::upgrade::{
         DaemonUpdateCheckResult, check_and_install_update_if_available,
     };
@@ -8288,12 +8288,15 @@ pub(crate) fn daemon_run_pending_self_update() {
     match check_and_install_update_if_available() {
         Ok(DaemonUpdateCheckResult::UpdateReady) => {
             tracing::info!("self-update: installation completed successfully");
+            true
         }
         Ok(DaemonUpdateCheckResult::NoUpdate) => {
             tracing::info!("self-update: no update to install");
+            false
         }
         Err(err) => {
             tracing::warn!(%err, "self-update: installation failed");
+            false
         }
     }
 }
