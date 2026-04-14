@@ -2,7 +2,6 @@ use crate::ci::ci_context::{CiContext, CiEvent, CiRunOptions, CiRunResult};
 use crate::ci::github::{get_github_ci_context, install_github_ci_workflow};
 use crate::ci::gitlab::{get_gitlab_ci_context, print_gitlab_ci_yaml};
 use crate::git::repository::find_repository_in_path;
-use crate::utils::debug_log;
 
 /// Print a human-readable message for a CiRunResult
 fn print_ci_result(result: &CiRunResult, prefix: &str) {
@@ -61,10 +60,10 @@ fn handle_ci_github(args: &[String]) {
             let ci_context = get_github_ci_context();
             match ci_context {
                 Ok(Some(ci_context)) => {
-                    debug_log(&format!("GitHub CI context: {:?}", ci_context));
+                    tracing::debug!("GitHub CI context: {:?}", ci_context);
                     match ci_context.run() {
                         Ok(result) => {
-                            debug_log(&format!("GitHub CI result: {:?}", result));
+                            tracing::debug!("GitHub CI result: {:?}", result);
                             print_ci_result(&result, "GitHub CI");
                         }
                         Err(e) => {
@@ -77,9 +76,9 @@ fn handle_ci_github(args: &[String]) {
                             eprintln!("Error tearing down GitHub CI context: {}", e);
                             std::process::exit(1);
                         }
-                        debug_log("GitHub CI context teared down");
+                        tracing::debug!("GitHub CI context teared down");
                     } else {
-                        debug_log("Skipping teardown (--no-cleanup)");
+                        tracing::debug!("Skipping teardown (--no-cleanup)");
                     }
                     std::process::exit(0);
                 }
@@ -121,10 +120,10 @@ fn handle_ci_gitlab(args: &[String]) {
             let ci_context = get_gitlab_ci_context();
             match ci_context {
                 Ok(Some(ci_context)) => {
-                    debug_log(&format!("GitLab CI context: {:?}", ci_context));
+                    tracing::debug!("GitLab CI context: {:?}", ci_context);
                     match ci_context.run() {
                         Ok(result) => {
-                            debug_log(&format!("GitLab CI result: {:?}", result));
+                            tracing::debug!("GitLab CI result: {:?}", result);
                             print_ci_result(&result, "GitLab CI");
                         }
                         Err(e) => {
@@ -137,9 +136,9 @@ fn handle_ci_gitlab(args: &[String]) {
                             eprintln!("Error tearing down GitLab CI context: {}", e);
                             std::process::exit(1);
                         }
-                        debug_log("GitLab CI context teared down");
+                        tracing::debug!("GitLab CI context teared down");
                     } else {
-                        debug_log("Skipping teardown (--no-cleanup)");
+                        tracing::debug!("Skipping teardown (--no-cleanup)");
                     }
                     std::process::exit(0);
                 }
@@ -260,13 +259,13 @@ fn handle_ci_local(args: &[String]) {
                 temp_dir: std::path::PathBuf::from("."),
             };
 
-            debug_log(&format!("Local CI context: {:?}", ctx));
+            tracing::debug!("Local CI context: {:?}", ctx);
             match ctx.run_with_options(CiRunOptions {
                 skip_fetch_notes,
                 skip_fetch_base,
             }) {
                 Ok(result) => {
-                    debug_log(&format!("Local CI result: {:?}", result));
+                    tracing::debug!("Local CI result: {:?}", result);
                     print_ci_result(&result, "Local CI (merge)");
                 }
                 Err(e) => {

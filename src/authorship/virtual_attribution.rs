@@ -2199,18 +2199,16 @@ pub fn restore_stashed_va(
     new_head: &str,
     stashed_va: VirtualAttributions,
 ) {
-    use crate::utils::debug_log;
-
-    debug_log(&format!(
+    tracing::debug!(
         "Restoring stashed VA: {} -> {}",
         old_head, new_head
-    ));
+    );
 
     // Get the files that were in the stashed VA
     let stashed_files: Vec<String> = stashed_va.files();
 
     if stashed_files.is_empty() {
-        debug_log("Stashed VA has no files, nothing to restore");
+        tracing::debug!("Stashed VA has no files, nothing to restore");
         return;
     }
 
@@ -2227,10 +2225,10 @@ pub fn restore_stashed_va(
                 // file may contain conflict markers. We keep "ours" (stashed VA) lines
                 // so the attribution merge operates on clean content.
                 let clean_content = if content_has_conflict_markers(&content) {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Conflict markers detected in {}, stripping for VA merge",
                         file_path
-                    ));
+                    );
                     strip_conflict_markers_keep_ours(&content)
                 } else {
                     content
@@ -2241,7 +2239,7 @@ pub fn restore_stashed_va(
     }
 
     if working_files.is_empty() {
-        debug_log("No working files to restore attributions for");
+        tracing::debug!("No working files to restore attributions for");
         return;
     }
 
@@ -2253,7 +2251,7 @@ pub fn restore_stashed_va(
     ) {
         Ok(va) => va,
         Err(e) => {
-            debug_log(&format!("Failed to build new VA: {}, using empty", e));
+            tracing::debug!("Failed to build new VA: {}, using empty", e);
             VirtualAttributions::new(
                 repository.clone(),
                 new_head.to_string(),
@@ -2268,7 +2266,7 @@ pub fn restore_stashed_va(
     let merged_va = match merge_attributions_favoring_first(stashed_va, new_va, working_files) {
         Ok(va) => va,
         Err(e) => {
-            debug_log(&format!("Failed to merge VirtualAttributions: {}", e));
+            tracing::debug!("Failed to merge VirtualAttributions: {}", e);
             return;
         }
     };
@@ -2293,10 +2291,10 @@ pub fn restore_stashed_va(
         let working_log = match repository.storage.working_log_for_base_commit(new_head) {
             Ok(wl) => wl,
             Err(e) => {
-                debug_log(&format!(
+                tracing::debug!(
                     "Failed to get working log for {}: {}",
                     new_head, e
-                ));
+                );
                 return;
             }
         };
@@ -2310,14 +2308,14 @@ pub fn restore_stashed_va(
             initial_attributions.humans,
             initial_file_contents,
         ) {
-            debug_log(&format!("Failed to write INITIAL attributions: {}", e));
+            tracing::debug!("Failed to write INITIAL attributions: {}", e);
             return;
         }
 
-        debug_log(&format!(
-            "✓ Restored AI attributions to INITIAL for new HEAD {}",
+        tracing::debug!(
+            "Restored AI attributions to INITIAL for new HEAD {}",
             &new_head[..8.min(new_head.len())]
-        ));
+        );
     }
 }
 

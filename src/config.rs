@@ -752,7 +752,7 @@ fn build_custom_attributes(file_cfg: &Option<FileConfig>) -> HashMap<String, Str
                 }
             }
         } else {
-            crate::utils::debug_log("GIT_AI_CUSTOM_ATTRIBUTES is not valid JSON, ignoring");
+            tracing::debug!("GIT_AI_CUSTOM_ATTRIBUTES is not valid JSON, ignoring");
         }
     }
 

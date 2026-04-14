@@ -3,7 +3,6 @@ use crate::commands::git_handlers::CommandHooksContext;
 use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
-use crate::utils::debug_log;
 
 pub fn commit_pre_command_hook(
     parsed_args: &ParsedGitInvocation,
@@ -51,7 +50,7 @@ pub fn commit_post_command_hook(
     if let Some(pre_commit_hook_result) = command_hooks_context.pre_commit_hook_result
         && !pre_commit_hook_result
     {
-        debug_log("Skipping git-ai post-commit hook because pre-commit hook failed");
+        tracing::debug!("Skipping git-ai post-commit hook because pre-commit hook failed");
         return;
     }
 

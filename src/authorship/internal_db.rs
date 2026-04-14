@@ -2,7 +2,6 @@ use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::transcript::AiTranscript;
 use crate::authorship::working_log::Checkpoint;
 use crate::error::GitAiError;
-use crate::utils::debug_log;
 use dirs;
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
@@ -316,7 +315,7 @@ impl InternalDatabase {
     pub fn warmup() {
         std::thread::spawn(|| {
             if let Err(e) = Self::global() {
-                debug_log(&format!("DB warmup failed: {}", e));
+                tracing::debug!("DB warmup failed: {}", e);
             }
         });
     }
@@ -427,11 +426,11 @@ impl InternalDatabase {
 
         // Step 3: Apply all missing migrations sequentially
         for target_version in current_version..SCHEMA_VERSION {
-            debug_log(&format!(
+            tracing::debug!(
                 "[Migration] Upgrading database from version {} to {}",
                 target_version,
                 target_version + 1
-            ));
+            );
 
             // Apply the migration (FATAL on error)
             self.apply_migration(target_version)?;
@@ -448,10 +447,10 @@ impl InternalDatabase {
                 params![(target_version + 1).to_string()],
             )?;
 
-            debug_log(&format!(
+            tracing::debug!(
                 "[Migration] Successfully upgraded to version {}",
                 target_version + 1
-            ));
+            );
         }
 
         // Step 5: Verify final version matches expected

@@ -10,7 +10,6 @@ use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
-use crate::utils::debug_log;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 use unicode_normalization::UnicodeNormalization;
@@ -1250,10 +1249,10 @@ impl Repository {
                 supress_output,
             )
         {
-            debug_log(&format!(
+            tracing::debug!(
                 "rewrite_authorship_if_needed failed for {:?}: {}",
                 rewrite_log_event, error
-            ));
+            );
             crate::observability::log_error(
                 &error,
                 Some(serde_json::json!({

@@ -85,10 +85,10 @@ pub(crate) fn prepare_agent_bash_pre_hook(
             ) {
                 Ok(result) => result.captured_checkpoint.map(|info| info.capture_id),
                 Err(error) => {
-                    crate::utils::debug_log(&format!(
+                    tracing::debug!(
                         "Bash pre-hook snapshot failed for {} session {}: {}",
                         agent_id.tool, session_id, error
-                    ));
+                    );
                     None
                 }
             }
@@ -321,7 +321,7 @@ impl AgentCheckpointPreset for ClaudePreset {
                 }
                 Ok(BashCheckpointAction::TakePreSnapshot) => None, // shouldn't happen on post
                 Err(e) => {
-                    crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
+                    tracing::debug!("Bash tool post-hook error: {}", e);
                     None
                 }
             }
@@ -1035,7 +1035,7 @@ impl AgentCheckpointPreset for GeminiPreset {
                 }
                 Ok(BashCheckpointAction::TakePreSnapshot) => None,
                 Err(e) => {
-                    crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
+                    tracing::debug!("Bash tool post-hook error: {}", e);
                     None
                 }
             }
@@ -1205,7 +1205,7 @@ impl AgentCheckpointPreset for ContinueCliPreset {
                 }
                 Ok(BashCheckpointAction::TakePreSnapshot) => None,
                 Err(e) => {
-                    crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
+                    tracing::debug!("Bash tool post-hook error: {}", e);
                     None
                 }
             }
@@ -1453,9 +1453,7 @@ impl AgentCheckpointPreset for CodexPreset {
                 .captured_checkpoint_id();
 
                 if pre_hook_captured_id.is_some() {
-                    crate::utils::debug_log(
-                        "Codex PreToolUse captured a bash pre-snapshot but will skip emitting a checkpoint",
-                    );
+                    tracing::debug!("Codex PreToolUse captured a bash pre-snapshot but will skip emitting a checkpoint",);
                 }
 
                 return Err(GitAiError::PresetError(
@@ -1484,7 +1482,7 @@ impl AgentCheckpointPreset for CodexPreset {
                     Ok(BashCheckpointAction::Fallback) => None,
                     Ok(BashCheckpointAction::TakePreSnapshot) => None,
                     Err(e) => {
-                        crate::utils::debug_log(&format!("Codex bash post-hook error: {}", e));
+                        tracing::debug!("Codex bash post-hook error: {}", e);
                         None
                     }
                 };
@@ -3356,7 +3354,7 @@ impl AgentCheckpointPreset for DroidPreset {
                 }
                 Ok(BashCheckpointAction::TakePreSnapshot) => None,
                 Err(e) => {
-                    crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
+                    tracing::debug!("Bash tool post-hook error: {}", e);
                     None
                 }
             }

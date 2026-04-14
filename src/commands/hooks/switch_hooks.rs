@@ -3,7 +3,6 @@ use crate::commands::git_handlers::CommandHooksContext;
 use crate::commands::hooks::commit_hooks::get_commit_default_author;
 use crate::git::cli_parser::ParsedGitInvocation;
 use crate::git::repository::Repository;
-use crate::utils::debug_log;
 
 pub fn pre_switch_hook(
     parsed_args: &ParsedGitInvocation,
@@ -25,12 +24,12 @@ fn capture_va_for_merge(
     repository: &Repository,
     command_hooks_context: &mut CommandHooksContext,
 ) {
-    debug_log("Detected switch --merge with uncommitted changes, capturing VirtualAttributions");
+    tracing::debug!("Detected switch --merge with uncommitted changes, capturing VirtualAttributions");
 
     let head_sha = match repository.head().ok().and_then(|h| h.target().ok()) {
         Some(sha) => sha,
         None => {
-            debug_log("Failed to get HEAD for VA capture");
+            tracing::debug!("Failed to get HEAD for VA capture");
             return;
         }
     };
@@ -43,17 +42,17 @@ fn capture_va_for_merge(
     ) {
         Ok(va) => {
             if !va.attributions.is_empty() {
-                debug_log(&format!(
+                tracing::debug!(
                     "Captured VA with {} files for switch --merge preservation",
                     va.attributions.len()
-                ));
+                );
                 command_hooks_context.stashed_va = Some(va);
             } else {
-                debug_log("No attributions in working log to preserve");
+                tracing::debug!("No attributions in working log to preserve");
             }
         }
         Err(e) => {
-            debug_log(&format!("Failed to build VirtualAttributions: {}", e));
+            tracing::debug!("Failed to build VirtualAttributions: {}", e);
         }
     }
 }
@@ -70,7 +69,7 @@ pub fn post_switch_hook(
     // markers, but we must still restore the stashed VA so attribution is not lost.
     // All other failed switches are skipped as before.
     if !exit_status.success() && !is_merge {
-        debug_log("Switch failed, skipping working log handling");
+        tracing::debug!("Switch failed, skipping working log handling");
         return;
     }
 
@@ -86,16 +85,16 @@ pub fn post_switch_hook(
 
     // HEAD unchanged is always a no-op: no branch switch occurred.
     if old_head == new_head {
-        debug_log("HEAD unchanged after switch, no working log handling needed");
+        tracing::debug!("HEAD unchanged after switch, no working log handling needed");
         return;
     }
 
     // Force switch - delete working log (changes discarded)
     if is_force_switch(parsed_args) {
-        debug_log(&format!(
+        tracing::debug!(
             "Force switch detected, deleting working log for {}",
             &old_head
-        ));
+        );
         let _ = repository
             .storage
             .delete_working_log_for_base_commit(&old_head);
@@ -126,22 +125,22 @@ pub fn post_switch_hook(
         });
 
         if let Some(stashed_va) = stashed_va {
-            debug_log("Restoring VA after switch --merge");
+            tracing::debug!("Restoring VA after switch --merge");
             let _ = repository
                 .storage
                 .delete_working_log_for_base_commit(&old_head);
             restore_stashed_va(repository, &old_head, &new_head, stashed_va);
             return;
         }
-        debug_log("switch --merge: no VA to restore, falling through to working log migration");
+        tracing::debug!("switch --merge: no VA to restore, falling through to working log migration");
         // Fall through to rename
     }
 
     // Normal branch switch - migrate working log
-    debug_log(&format!(
+    tracing::debug!(
         "Switch changed HEAD: {} -> {}",
         &old_head, &new_head
-    ));
+    );
     let _ = repository.storage.rename_working_log(&old_head, &new_head);
 }
 

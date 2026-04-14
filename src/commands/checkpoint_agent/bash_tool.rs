@@ -14,7 +14,7 @@ use crate::daemon::control_api::ControlRequest;
 use crate::daemon::{DaemonConfig, send_control_request_with_timeout};
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
-use crate::utils::{checkpoint_delegation_enabled, debug_log, normalize_to_posix};
+use crate::utils::{checkpoint_delegation_enabled, normalize_to_posix};
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
@@ -379,10 +379,10 @@ pub fn checkpoint_context_from_active_bash(
             latest_context: Some(active_context),
             ..
         } => {
-            debug_log(&format!(
+            tracing::debug!(
                 "active bash context: found {} session {} tool_use_id {}",
                 active_context.agent_id.tool, active_context.session_id, active_context.tool_use_id
-            ));
+            );
             Some((
                 CheckpointKind::AiAgent,
                 Some(active_context.into_agent_run_result(repo_working_dir.to_string())),
@@ -392,7 +392,7 @@ pub fn checkpoint_context_from_active_bash(
             has_inflight_snapshot: true,
             latest_context: None,
         } => {
-            debug_log("active bash context: falling back to unscoped AI checkpoint");
+            tracing::debug!("active bash context: falling back to unscoped AI checkpoint");
             Some((CheckpointKind::AiAgent, None))
         }
         ActiveBashSnapshotScan {
@@ -582,10 +582,10 @@ pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
         .collect();
     for pattern in &shared_patterns {
         if let Err(e) = builder.add_line(None, pattern) {
-            debug_log(&format!(
+            tracing::debug!(
                 "Warning: failed to add ignore pattern '{}': {}",
                 pattern, e
-            ));
+            );
         }
     }
 
@@ -693,7 +693,7 @@ pub fn snapshot(
                 elapsed_ms,
                 entries.len()
             );
-            debug_log(&msg);
+            tracing::debug!("{}", msg);
             crate::observability::log_message(
                 &msg,
                 "warning",
@@ -709,7 +709,7 @@ pub fn snapshot(
         let entry = match result {
             Ok(e) => e,
             Err(e) => {
-                debug_log(&format!("Walker error: {}", e));
+                tracing::debug!("Walker error: {}", e);
                 continue;
             }
         };
@@ -744,10 +744,10 @@ pub fn snapshot(
                 if !is_wm_covered(mtime_ns, effective_worktree_wm, &per_file_wm, &posix_key) {
                     entries.insert(normalized, stat);
                     if entries.len() > MAX_TRACKED_FILES {
-                        debug_log(&format!(
+                        tracing::debug!(
                             "Snapshot: exceeded MAX_TRACKED_FILES ({}), skipping stat-diff",
                             MAX_TRACKED_FILES
-                        ));
+                        );
                         return Err(GitAiError::Generic(format!(
                             "repo has more than {} recently-modified files; skipping stat-diff",
                             MAX_TRACKED_FILES
@@ -756,16 +756,16 @@ pub fn snapshot(
                 }
             }
             Err(e) => {
-                debug_log(&format!("Failed to stat {}: {}", abs_path.display(), e));
+                tracing::debug!("Failed to stat {}: {}", abs_path.display(), e);
             }
         }
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "Snapshot: {} files scanned in {}ms",
         entries.len(),
         start.elapsed().as_millis()
-    ));
+    );
 
     Ok(StatSnapshot {
         entries,
@@ -840,11 +840,11 @@ pub fn save_snapshot(snapshot: &StatSnapshot) -> Result<(), GitAiError> {
 
     fs::write(&path, data).map_err(GitAiError::IoError)?;
 
-    debug_log(&format!(
+    tracing::debug!(
         "Saved pre-snapshot: {} ({} entries)",
         path.display(),
         snapshot.entries.len()
-    ));
+    );
 
     Ok(())
 }
@@ -872,11 +872,11 @@ pub fn load_and_consume_snapshot(
     // Consume: remove the file after a successful read.
     let _ = fs::remove_file(&path);
 
-    debug_log(&format!(
+    tracing::debug!(
         "Loaded pre-snapshot: {} ({} entries)",
         path.display(),
         snapshot.entries.len()
-    ));
+    );
 
     Ok(Some(snapshot))
 }
@@ -895,7 +895,7 @@ pub fn cleanup_stale_snapshots(repo_root: &Path) -> Result<(), GitAiError> {
                 && let Ok(age) = now.duration_since(modified)
                 && age.as_secs() > SNAPSHOT_STALE_SECS
             {
-                debug_log(&format!("Cleaning stale snapshot: {}", path.display()));
+                tracing::debug!("Cleaning stale snapshot: {}", path.display());
                 let _ = fs::remove_file(&path);
             }
         }
@@ -993,22 +993,22 @@ fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<St
         let mut file = match fs::File::open(&abs_path) {
             Ok(f) => f,
             Err(e) => {
-                debug_log(&format!(
+                tracing::debug!(
                     "Skipping unreadable file for capture: {}: {}",
                     rel_path.display(),
                     e
-                ));
+                );
                 continue;
             }
         };
         if let Ok(meta) = file.metadata()
             && meta.len() > MAX_CAPTURE_FILE_SIZE
         {
-            debug_log(&format!(
+            tracing::debug!(
                 "Skipping large file for capture: {} ({} bytes)",
                 rel_path.display(),
                 meta.len()
-            ));
+            );
             continue;
         }
         let mut content = String::new();
@@ -1018,11 +1018,11 @@ fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<St
                 contents.insert(key, content);
             }
             Err(e) => {
-                debug_log(&format!(
+                tracing::debug!(
                     "Skipping non-UTF8/unreadable file for capture: {}: {}",
                     rel_path.display(),
                     e
-                ));
+                );
             }
         }
     }
@@ -1065,10 +1065,10 @@ fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
     .ok()?;
 
     if !response.ok {
-        debug_log(&format!(
+        tracing::debug!(
             "Daemon watermark query returned error: {}",
             response.error.as_deref().unwrap_or("unknown")
-        ));
+        );
         return None;
     }
 
@@ -1142,7 +1142,7 @@ fn attempt_pre_hook_capture(
     repo_root: &Path,
 ) -> Option<CapturedCheckpointInfo> {
     if !checkpoint_delegation_enabled() {
-        debug_log("Pre-hook capture: async checkpoint delegation not enabled, skipping capture");
+        tracing::debug!("Pre-hook capture: async checkpoint delegation not enabled, skipping capture");
         return None;
     }
 
@@ -1153,15 +1153,15 @@ fn attempt_pre_hook_capture(
     let stale_files = find_stale_files(snap);
 
     if stale_files.is_empty() {
-        debug_log("Pre-hook capture: no stale files found, skipping");
+        tracing::debug!("Pre-hook capture: no stale files found, skipping");
         return None;
     }
     if stale_files.len() > MAX_STALE_FILES_FOR_CAPTURE {
-        debug_log(&format!(
+        tracing::debug!(
             "Pre-hook capture: {} stale files exceeds limit of {}, skipping",
             stale_files.len(),
             MAX_STALE_FILES_FOR_CAPTURE,
-        ));
+        );
         return None;
     }
 
@@ -1170,7 +1170,7 @@ fn attempt_pre_hook_capture(
     let repo = match find_repository_in_path(&repo_working_dir) {
         Ok(r) => r,
         Err(e) => {
-            debug_log(&format!("Pre-hook capture: failed to open repo: {}", e));
+            tracing::debug!("Pre-hook capture: failed to open repo: {}", e);
             return None;
         }
     };
@@ -1205,24 +1205,24 @@ fn attempt_pre_hook_capture(
         None,  // base_commit_override
     ) {
         Ok(Some(capture)) => {
-            debug_log(&format!(
+            tracing::debug!(
                 "Pre-hook captured checkpoint prepared: {} ({} files)",
                 capture.capture_id, capture.file_count,
-            ));
+            );
             Some(CapturedCheckpointInfo {
                 capture_id: capture.capture_id,
                 repo_working_dir: capture.repo_working_dir,
             })
         }
         Ok(None) => {
-            debug_log("Pre-hook capture: prepare_captured_checkpoint returned None");
+            tracing::debug!("Pre-hook capture: prepare_captured_checkpoint returned None");
             None
         }
         Err(e) => {
-            debug_log(&format!(
+            tracing::debug!(
                 "Pre-hook capture: prepare_captured_checkpoint failed: {}",
                 e
-            ));
+            );
             None
         }
     }
@@ -1243,7 +1243,7 @@ fn attempt_post_hook_capture(
     // Only attempt capture when delegation is enabled — captured checkpoint
     // files are consumed by the daemon; without it they would accumulate.
     if !checkpoint_delegation_enabled() {
-        debug_log("Post-hook capture: async checkpoint delegation not enabled, skipping capture");
+        tracing::debug!("Post-hook capture: async checkpoint delegation not enabled, skipping capture");
         return None;
     }
 
@@ -1257,7 +1257,7 @@ fn attempt_post_hook_capture(
         .partition(|p| repo_root.join(p.as_str()).exists());
 
     if existing_paths.is_empty() {
-        debug_log("Post-hook capture: no existing changed files to capture, skipping");
+        tracing::debug!("Post-hook capture: no existing changed files to capture, skipping");
         return None;
     }
 
@@ -1270,7 +1270,7 @@ fn attempt_post_hook_capture(
     let repo = match find_repository_in_path(&repo_working_dir) {
         Ok(r) => r,
         Err(e) => {
-            debug_log(&format!("Post-hook capture: failed to open repo: {}", e));
+            tracing::debug!("Post-hook capture: failed to open repo: {}", e);
             return None;
         }
     };
@@ -1301,24 +1301,24 @@ fn attempt_post_hook_capture(
         None,  // base_commit_override
     ) {
         Ok(Some(capture)) => {
-            debug_log(&format!(
+            tracing::debug!(
                 "Post-hook captured checkpoint prepared: {} ({} files)",
                 capture.capture_id, capture.file_count,
-            ));
+            );
             Some(CapturedCheckpointInfo {
                 capture_id: capture.capture_id,
                 repo_working_dir: capture.repo_working_dir,
             })
         }
         Ok(None) => {
-            debug_log("Post-hook capture: prepare_captured_checkpoint returned None");
+            tracing::debug!("Post-hook capture: prepare_captured_checkpoint returned None");
             None
         }
         Err(e) => {
-            debug_log(&format!(
+            tracing::debug!(
                 "Post-hook capture: prepare_captured_checkpoint failed: {}",
                 e
-            ));
+            );
             None
         }
     }
@@ -1399,11 +1399,11 @@ fn resolve_bash_tool_use_id(
             if let Some(path) = bash_sidecar_path(repo_root, session_id)
                 && let Err(e) = fs::write(&path, &id)
             {
-                debug_log(&format!(
+                tracing::debug!(
                     "bash sidecar write failed ({}): {}",
                     path.display(),
                     e
-                ));
+                );
             }
             id
         }
@@ -1421,7 +1421,7 @@ fn resolve_bash_tool_use_id(
             }
             // No sidecar found — caller passed "bash" for both hooks without a
             // matching pre-hook; fall back to the literal key (best effort).
-            debug_log("bash sidecar not found for post-hook; using 'bash' as fallback key");
+            tracing::debug!("bash sidecar not found for post-hook; using 'bash' as fallback key");
             FALLBACK.to_string()
         }
     }
@@ -1454,7 +1454,7 @@ fn handle_bash_pre_tool_use_internal(
                 "bash_tool: {} exceeded {}ms hook limit ({}ms elapsed); abandoning",
                 $label, hook_timeout.as_millis(), elapsed_ms
             );
-            debug_log(&msg);
+            tracing::debug!("{}", msg);
             crate::observability::log_message(
                 &msg,
                 "warning",
@@ -1488,12 +1488,12 @@ fn handle_bash_pre_tool_use_internal(
         Ok(mut snap) => {
             snap.inflight_agent_context = inflight_agent_context;
             save_snapshot(&snap)?;
-            debug_log(&format!(
+            tracing::debug!(
                 "Pre-snapshot stored for invocation {} ({} entries, effective_wm={:?})",
                 invocation_key,
                 snap.entries.len(),
                 snap.effective_worktree_wm,
-            ));
+            );
 
             if hook_start.elapsed() >= hook_timeout {
                 hook_timeout_fallback!("pre-hook after snapshot");
@@ -1509,10 +1509,10 @@ fn handle_bash_pre_tool_use_internal(
             })
         }
         Err(e) => {
-            debug_log(&format!(
+            tracing::debug!(
                 "Pre-snapshot failed: {}; will use fallback on post",
                 e
-            ));
+            );
             // Don't fail the tool call; post-hook will use fallback path
             Ok(BashToolResult {
                 action: BashCheckpointAction::TakePreSnapshot,
@@ -1568,7 +1568,7 @@ pub fn handle_bash_tool(
                 "bash_tool: {} exceeded {}ms hook limit ({}ms elapsed); abandoning",
                 $label, hook_timeout.as_millis(), elapsed_ms
             );
-            debug_log(&msg);
+            tracing::debug!("{}", msg);
             crate::observability::log_message(
                 &msg,
                 "warning",
@@ -1624,23 +1624,23 @@ pub fn handle_bash_tool(
                             let diff_result = diff(&pre, &post);
 
                             if diff_result.is_empty() {
-                                debug_log(&format!(
+                                tracing::debug!(
                                     "Bash tool {}: no changes detected",
                                     invocation_key
-                                ));
+                                );
                                 Ok(BashToolResult {
                                     action: BashCheckpointAction::NoChanges,
                                     captured_checkpoint: None,
                                 })
                             } else {
                                 let paths = diff_result.all_changed_paths();
-                                debug_log(&format!(
+                                tracing::debug!(
                                     "Bash tool {}: {} files changed ({} created, {} modified)",
                                     invocation_key,
                                     paths.len(),
                                     diff_result.created.len(),
                                     diff_result.modified.len(),
-                                ));
+                                );
 
                                 if hook_start.elapsed() >= hook_timeout {
                                     hook_timeout_fallback!("post-hook after snapshot");
@@ -1657,7 +1657,7 @@ pub fn handle_bash_tool(
                             }
                         }
                         Err(e) => {
-                            debug_log(&format!("Post-snapshot failed: {}; returning fallback", e));
+                            tracing::debug!("Post-snapshot failed: {}; returning fallback", e);
                             Ok(BashToolResult {
                                 action: BashCheckpointAction::Fallback,
                                 captured_checkpoint: None,
@@ -1669,10 +1669,10 @@ pub fn handle_bash_tool(
                     // Pre-snapshot lost (process restart, etc.) — return fallback.
                     // We do not call git status here: it is extremely slow on large
                     // monorepos and cannot be relied on at this point in the flow.
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Pre-snapshot not found for {}; returning fallback (no git status)",
                         invocation_key
-                    ));
+                    );
                     Ok(BashToolResult {
                         action: BashCheckpointAction::Fallback,
                         captured_checkpoint: None,

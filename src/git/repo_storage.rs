@@ -4,7 +4,7 @@ use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::working_log::{CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind};
 use crate::error::GitAiError;
 use crate::git::rewrite_log::{RewriteLogEvent, append_event_to_file};
-use crate::utils::{debug_log, normalize_to_posix};
+use crate::utils::normalize_to_posix;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -126,10 +126,10 @@ impl RepoStorage {
             // Best-effort; don't fail the commit if we can't write the marker
             let _ = fs::write(&marker, now.to_string());
 
-            debug_log(&format!(
+            tracing::debug!(
                 "Moved checkpoint directory from {} to old-{}",
                 sha, sha
-            ));
+            );
 
             // In production builds, prune old working logs that have expired.
             // Debug builds never prune so developers can inspect old state.
@@ -178,7 +178,7 @@ impl RepoStorage {
             };
 
             if now_secs.saturating_sub(archived_at) >= Self::OLD_WORKING_LOG_RETENTION_SECS {
-                debug_log(&format!("Pruning expired old working log: {}", name_str));
+                tracing::debug!("Pruning expired old working log: {}", name_str);
                 let _ = fs::remove_dir_all(&dir_path);
             }
         }
@@ -192,10 +192,10 @@ impl RepoStorage {
         let new_dir = self.working_logs.join(new_sha);
         if old_dir.exists() && !new_dir.exists() {
             fs::rename(&old_dir, &new_dir)?;
-            debug_log(&format!(
+            tracing::debug!(
                 "Renamed working log from {} to {}",
                 old_sha, new_sha
-            ));
+            );
         }
         Ok(())
     }
@@ -478,10 +478,10 @@ impl PersistedWorkingLog {
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
             if checkpoint.api_version != CHECKPOINT_API_VERSION {
-                debug_log(&format!(
+                tracing::debug!(
                     "unsupported checkpoint api version: {} (silently skipping checkpoint)",
                     checkpoint.api_version
-                ));
+                );
                 continue;
             }
 
@@ -762,18 +762,18 @@ impl PersistedWorkingLog {
             Ok(content) => match serde_json::from_str(&content) {
                 Ok(initial_data) => initial_data,
                 Err(e) => {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Failed to parse INITIAL file: {}. Returning empty.",
                         e
-                    ));
+                    );
                     InitialAttributions::default()
                 }
             },
             Err(e) => {
-                debug_log(&format!(
+                tracing::debug!(
                     "Failed to read INITIAL file: {}. Returning empty.",
                     e
-                ));
+                );
                 InitialAttributions::default()
             }
         }

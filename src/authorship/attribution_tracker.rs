@@ -7,7 +7,6 @@ use crate::authorship::imara_diff_utils::{ByteDiff, ByteDiffOp, DiffOp, capture_
 use crate::authorship::move_detection::{DeletedLine, InsertedLine, detect_moves};
 use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
-use crate::utils::debug_log;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -309,10 +308,10 @@ impl AttributionTracker {
         let line_metadata_start = Instant::now();
         let old_lines = collect_line_metadata(old_content);
         let new_lines = collect_line_metadata(new_content);
-        debug_log(&format!(
+        tracing::debug!(
             "[BENCHMARK] collect_line_metadata (old/new) took {:?}",
             line_metadata_start.elapsed()
-        ));
+        );
 
         let capture_start = Instant::now();
         let old_line_slices: Vec<&str> = old_lines
@@ -326,11 +325,11 @@ impl AttributionTracker {
 
         let line_ops = capture_diff_slices(&old_line_slices, &new_line_slices);
         let line_ops_len = line_ops.len();
-        debug_log(&format!(
+        tracing::debug!(
             "[BENCHMARK] capture_diff_slices produced {} ops in {:?}",
             line_ops_len,
             capture_start.elapsed()
-        ));
+        );
 
         let mut computation = DiffComputation::default();
         let mut pending_changed: Vec<DiffOp> = Vec::new();
@@ -370,12 +369,12 @@ impl AttributionTracker {
         }
 
         computation.substantive_new_ranges = merge_ranges(computation.substantive_new_ranges);
-        debug_log(&format!(
+        tracing::debug!(
             "[BENCHMARK] compute_diffs processed {} ops in {:?} (total {:?})",
             line_ops_len,
             process_start.elapsed(),
             compute_start.elapsed()
-        ));
+        );
 
         Ok(computation)
     }

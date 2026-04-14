@@ -12,7 +12,6 @@ use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
 use crate::git::repository::Repository;
 use crate::observability::log_error;
-use crate::utils::debug_log;
 use std::collections::{HashMap, HashSet};
 
 /// Find a prompt in the repository history
@@ -182,7 +181,7 @@ pub fn update_prompt_from_tool(
         "pi" => update_pi_prompt(agent_metadata, current_model),
         "windsurf" => update_windsurf_prompt(agent_metadata, current_model),
         _ => {
-            debug_log(&format!("Unknown tool: {}", tool));
+            tracing::debug!("Unknown tool: {}", tool);
             PromptUpdateResult::Unchanged
         }
     }
@@ -201,10 +200,10 @@ fn update_codex_prompt(
                     model.unwrap_or_else(|| current_model.to_string()),
                 ),
                 Err(e) => {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Failed to parse Codex rollout JSONL transcript from {}: {}",
                         transcript_path, e
-                    ));
+                    );
                     log_error(
                         &e,
                         Some(serde_json::json!({
@@ -236,10 +235,10 @@ fn update_cursor_prompt(
                     PromptUpdateResult::Updated(transcript, current_model.to_string())
                 }
                 Err(e) => {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Failed to parse Cursor JSONL transcript from {}: {}",
                         transcript_path, e
-                    ));
+                    );
                     log_error(
                         &e,
                         Some(serde_json::json!({
@@ -277,10 +276,10 @@ fn update_claude_prompt(
                     )
                 }
                 Err(e) => {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Failed to parse Claude JSONL transcript from {}: {}",
                         transcript_path, e
-                    ));
+                    );
                     log_error(
                         &e,
                         Some(serde_json::json!({
@@ -320,10 +319,10 @@ fn update_gemini_prompt(
                     )
                 }
                 Err(e) => {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Failed to parse Gemini JSON transcript from {}: {}",
                         transcript_path, e
-                    ));
+                    );
                     log_error(
                         &e,
                         Some(serde_json::json!({
@@ -365,10 +364,10 @@ fn update_github_copilot_prompt(
                     )
                 }
                 Err(e) => {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Failed to parse GitHub Copilot chat session JSON from {}: {}",
                         chat_session_path, e
-                    ));
+                    );
                     log_error(
                         &e,
                         Some(serde_json::json!({
@@ -406,10 +405,10 @@ fn update_continue_cli_prompt(
                     PromptUpdateResult::Updated(transcript, current_model.to_string())
                 }
                 Err(e) => {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Failed to parse Continue CLI JSON transcript from {}: {}",
                         transcript_path, e
-                    ));
+                    );
                     log_error(
                         &e,
                         Some(serde_json::json!({
@@ -442,10 +441,10 @@ fn update_droid_prompt(
                 match DroidPreset::transcript_and_model_from_droid_jsonl(transcript_path) {
                     Ok((transcript, _model)) => transcript,
                     Err(e) => {
-                        debug_log(&format!(
+                        tracing::debug!(
                             "Failed to parse Droid JSONL transcript from {}: {}",
                             transcript_path, e
-                        ));
+                        );
                         log_error(
                             &e,
                             Some(serde_json::json!({
@@ -463,10 +462,10 @@ fn update_droid_prompt(
                     Ok(Some(m)) => m,
                     Ok(None) => current_model.to_string(),
                     Err(e) => {
-                        debug_log(&format!(
+                        tracing::debug!(
                             "Failed to parse Droid settings.json from {}: {}",
                             settings_path, e
-                        ));
+                        );
                         current_model.to_string()
                     }
                 }
@@ -533,10 +532,10 @@ fn update_amp_prompt(
             model.unwrap_or_else(|| current_model.to_string()),
         ),
         Err(e) => {
-            debug_log(&format!(
+            tracing::debug!(
                 "Failed to fetch Amp transcript for thread {}: {}",
                 thread_id, e
-            ));
+            );
             log_error(
                 &e,
                 Some(serde_json::json!({
@@ -576,10 +575,10 @@ fn update_opencode_prompt(
             model.unwrap_or_else(|| current_model.to_string()),
         ),
         Err(e) => {
-            debug_log(&format!(
+            tracing::debug!(
                 "Failed to fetch OpenCode transcript for session {}: {}",
                 session_id, e
-            ));
+            );
             log_error(
                 &e,
                 Some(serde_json::json!({
@@ -639,10 +638,10 @@ fn update_windsurf_prompt(
                     model.unwrap_or_else(|| current_model.to_string()),
                 ),
                 Err(e) => {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Failed to parse Windsurf JSONL transcript from {}: {}",
                         transcript_path, e
-                    ));
+                    );
                     log_error(
                         &e,
                         Some(serde_json::json!({

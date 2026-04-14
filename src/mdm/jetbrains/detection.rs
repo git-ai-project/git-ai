@@ -1,7 +1,5 @@
 use super::ide_types::{DetectedIde, JETBRAINS_IDES, JetBrainsIde};
 use crate::mdm::utils::home_dir;
-#[cfg(target_os = "macos")]
-use crate::utils::debug_log;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
@@ -124,10 +122,10 @@ fn detect_macos_ide(ide: &'static JetBrainsIde, app_path: &Path) -> Option<Detec
         .join(ide.binary_name_macos);
 
     if !binary_path.exists() {
-        debug_log(&format!(
+        tracing::debug!(
             "JetBrains: Binary not found at {:?} for {}",
             binary_path, ide.name
-        ));
+        );
         return None;
     }
 

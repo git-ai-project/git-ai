@@ -6,7 +6,7 @@ use crate::daemon::{
 use crate::utils::LockFile;
 #[cfg(windows)]
 use crate::utils::{
-    CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, debug_log,
+    CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
 };
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 #[cfg(windows)]
@@ -306,10 +306,10 @@ fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
         match child.spawn() {
             Ok(_) => Ok(()),
             Err(preferred_err) => {
-                debug_log(&format!(
+                tracing::debug!(
                     "detached daemon spawn with CREATE_BREAKAWAY_FROM_JOB failed, retrying without it: {}",
                     preferred_err
-                ));
+                );
                 child.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
                 child.spawn().map(|_| ()).map_err(|fallback_err| {
                     format!(
@@ -373,10 +373,10 @@ fn spawn_daemon_run_with_piped_stderr(
         match child.spawn() {
             Ok(c) => Ok(c),
             Err(preferred_err) => {
-                debug_log(&format!(
+                tracing::debug!(
                     "detached daemon spawn with CREATE_BREAKAWAY_FROM_JOB failed, retrying without it: {}",
                     preferred_err
-                ));
+                );
                 child.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
                 child.spawn().map_err(|fallback_err| {
                     format!(

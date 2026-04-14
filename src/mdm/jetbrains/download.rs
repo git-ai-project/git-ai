@@ -1,5 +1,4 @@
 use crate::error::GitAiError;
-use crate::utils::debug_log;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
@@ -16,7 +15,7 @@ pub fn download_plugin_from_marketplace(
         plugin_id, product_code, build_number
     );
 
-    debug_log(&format!("JetBrains: Downloading plugin from {}", url));
+    tracing::debug!("JetBrains: Downloading plugin from {}", url);
 
     let agent = crate::http::build_agent(Some(120));
     let request = agent.get(&url);
@@ -123,10 +122,10 @@ pub fn install_plugin_to_directory(zip_data: &[u8], plugin_dir: &Path) -> Result
         }
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "JetBrains: Plugin extracted to {}",
         plugin_dir.display()
-    ));
+    );
 
     Ok(())
 }
@@ -137,10 +136,10 @@ pub fn install_plugin_to_directory(zip_data: &[u8], plugin_dir: &Path) -> Result
 pub fn install_plugin_via_cli(binary_path: &Path, plugin_id: &str) -> Result<bool, GitAiError> {
     use std::process::Command;
 
-    debug_log(&format!(
+    tracing::debug!(
         "JetBrains: Trying CLI installation with {:?}",
         binary_path
-    ));
+    );
 
     #[cfg(windows)]
     let result = Command::new(binary_path)
@@ -155,16 +154,16 @@ pub fn install_plugin_via_cli(binary_path: &Path, plugin_id: &str) -> Result<boo
     match result {
         Ok(output) => {
             if output.status.success() {
-                debug_log("JetBrains: CLI installation succeeded");
+                tracing::debug!("JetBrains: CLI installation succeeded");
                 Ok(true)
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                debug_log(&format!("JetBrains: CLI installation failed: {}", stderr));
+                tracing::debug!("JetBrains: CLI installation failed: {}", stderr);
                 Ok(false)
             }
         }
         Err(e) => {
-            debug_log(&format!("JetBrains: Failed to run CLI: {}", e));
+            tracing::debug!("JetBrains: Failed to run CLI: {}", e);
             Ok(false)
         }
     }

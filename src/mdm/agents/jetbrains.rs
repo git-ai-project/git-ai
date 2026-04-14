@@ -7,8 +7,6 @@ use crate::mdm::jetbrains::{
     find_jetbrains_installations, install_plugin_to_directory, install_plugin_via_cli,
     is_plugin_installed,
 };
-use crate::utils::debug_log;
-
 pub struct JetBrainsInstaller;
 
 impl JetBrainsInstaller {
@@ -64,16 +62,16 @@ impl JetBrainsInstaller {
                 };
             }
             Ok(false) => {
-                debug_log(&format!(
+                tracing::debug!(
                     "JetBrains: CLI install failed for {}, trying direct download",
                     ide_name
-                ));
+                );
             }
             Err(e) => {
-                debug_log(&format!(
+                tracing::debug!(
                     "JetBrains: CLI install error for {}: {}",
                     ide_name, e
-                ));
+                );
             }
         }
 
@@ -97,18 +95,18 @@ impl JetBrainsInstaller {
                             };
                         }
                         Err(e) => {
-                            debug_log(&format!(
+                            tracing::debug!(
                                 "JetBrains: Failed to extract plugin for {}: {}",
                                 ide_name, e
-                            ));
+                            );
                         }
                     }
                 }
                 Err(e) => {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "JetBrains: Failed to download plugin for {}: {}",
                         ide_name, e
-                    ));
+                    );
                 }
             }
         }
@@ -167,11 +165,11 @@ impl HookInstaller for JetBrainsInstaller {
         let has_compatible = installations.iter().any(|i| i.is_compatible());
 
         if !has_compatible {
-            debug_log(&format!(
+            tracing::debug!(
                 "JetBrains: Found {} IDEs but none meet minimum version requirement (build {})",
                 installations.len(),
                 MIN_INTELLIJ_BUILD
-            ));
+            );
         }
 
         // JetBrains doesn't have config file hooks - only the plugin via install_extras

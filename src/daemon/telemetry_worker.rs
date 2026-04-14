@@ -9,7 +9,6 @@ use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
 use crate::metrics::db::MetricsDatabase;
 use crate::metrics::{MetricEvent, MetricsBatch};
 use crate::observability::MAX_METRICS_PER_ENVELOPE;
-use crate::utils::debug_log;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -252,7 +251,7 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>) {
         })
         .await
         .unwrap_or_else(|e| {
-            debug_log(&format!("telemetry flush task panicked: {}", e));
+            tracing::error!(%e, "telemetry flush task panicked");
         });
     }
 }
@@ -523,7 +522,7 @@ fn flush_cas(records: Vec<CasSyncPayload>) {
 
     let using_default_api = api_base_url == crate::config::DEFAULT_API_BASE_URL;
     if using_default_api && !client.is_logged_in() && !client.has_api_key() {
-        debug_log("daemon telemetry: skipping CAS flush, not logged in");
+        tracing::debug!("telemetry: skipping CAS flush, not logged in");
         return;
     }
 
@@ -533,7 +532,7 @@ fn flush_cas(records: Vec<CasSyncPayload>) {
         let content: Value = match serde_json::from_str(&record.data) {
             Ok(v) => v,
             Err(e) => {
-                debug_log(&format!("daemon telemetry: CAS parse error: {}", e));
+                tracing::warn!(%e, "telemetry: CAS parse error");
                 continue;
             }
         };
@@ -568,13 +567,10 @@ fn flush_cas(records: Vec<CasSyncPayload>) {
                 {
                     let _ = db_lock.delete_cas_by_hashes(&hashes);
                 }
-                debug_log(&format!(
-                    "daemon telemetry: uploaded {} CAS objects",
-                    chunk.len()
-                ));
+                tracing::debug!(count = chunk.len(), "telemetry: uploaded CAS objects");
             }
             Err(e) => {
-                debug_log(&format!("daemon telemetry: CAS upload error: {}", e));
+                tracing::warn!(%e, "telemetry: CAS upload error");
             }
         }
     }

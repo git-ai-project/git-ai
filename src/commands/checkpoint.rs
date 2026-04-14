@@ -18,7 +18,7 @@ use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
 use crate::git::repository::Repository;
 use crate::git::status::{EntryKind, StatusCode};
-use crate::utils::{debug_log, normalize_to_posix};
+use crate::utils::normalize_to_posix;
 use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -263,13 +263,13 @@ fn cleanup_failed_captured_checkpoint_prepare(
     if let Err(cleanup_error) = fs::remove_dir_all(capture_dir)
         && cleanup_error.kind() != std::io::ErrorKind::NotFound
     {
-        debug_log(&format!(
+        tracing::debug!(
             "failed cleaning up incomplete captured checkpoint {} at {} after error {}: {}",
             capture_id,
             capture_dir.display(),
             error,
             cleanup_error
-        ));
+        );
     }
 }
 
@@ -374,7 +374,7 @@ pub(crate) fn run_with_base_commit_override_with_policy(
     base_override_resolution_policy: BaseOverrideResolutionPolicy,
 ) -> Result<(usize, usize, usize), GitAiError> {
     let checkpoint_start = Instant::now();
-    debug_log("[BENCHMARK] Starting checkpoint run");
+    tracing::debug!("[BENCHMARK] Starting checkpoint run");
     let resolved = resolve_live_checkpoint_execution(
         repo,
         kind,
@@ -384,10 +384,10 @@ pub(crate) fn run_with_base_commit_override_with_policy(
         base_override_resolution_policy,
     )?;
     let Some(resolved) = resolved else {
-        debug_log(&format!(
+        tracing::debug!(
             "[BENCHMARK] Total checkpoint run took {:?}",
             checkpoint_start.elapsed()
-        ));
+        );
         return Ok((0, 0, 0));
     };
 
@@ -630,10 +630,10 @@ fn resolve_live_checkpoint_execution(
     let storage_start = Instant::now();
     let repo_storage = repo.storage.clone();
     let mut working_log = repo_storage.working_log_for_base_commit(&base_commit)?;
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] Storage initialization took {:?}",
         storage_start.elapsed()
-    ));
+    );
 
     if is_pre_commit && base_commit_override.is_none() {
         let has_no_ai_edits = working_log
@@ -648,7 +648,7 @@ fn resolve_live_checkpoint_execution(
             && !Config::get().get_feature_flags().inter_commit_move
             && !has_explicit_ai_agent_context
         {
-            debug_log("No AI edits in pre-commit checkpoint, skipping");
+            tracing::debug!("No AI edits in pre-commit checkpoint, skipping");
             return Ok(None);
         }
     }
@@ -665,10 +665,10 @@ fn resolve_live_checkpoint_execution(
     let has_explicit_target_paths = explicit_capture_target_paths(kind, agent_run_result).is_some();
     let pathspec_start = Instant::now();
     let filtered_pathspec = filtered_pathspecs_for_agent_run_result(repo, kind, agent_run_result);
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] Pathspec filtering took {:?}",
         pathspec_start.elapsed()
-    ));
+    );
 
     // Base-override replays already provide the exact file list and content snapshot that
     // should be checkpointed. Re-running git status here turns daemon commit replay into a
@@ -687,10 +687,10 @@ fn resolve_live_checkpoint_execution(
                     &ignore_matcher,
                 ) {
                     Ok(Some(resolved)) => {
-                        debug_log(&format!(
+                        tracing::debug!(
                             "[BENCHMARK] Reusing {} explicit dirty file(s) for base override checkpoint",
                             resolved.files.len()
-                        ));
+                        );
                         return Ok(Some(resolved));
                     }
                     Ok(None) => {
@@ -747,11 +747,11 @@ fn resolve_live_checkpoint_execution(
         is_pre_commit && filtered_pathspec.is_some(),
         &ignore_matcher,
     )?;
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] get_all_tracked_files found {} files, took {:?}",
         files.len(),
         files_start.elapsed()
-    ));
+    );
 
     let dirty_files = files
         .iter()
@@ -792,11 +792,11 @@ fn execute_resolved_checkpoint(
 
     let read_checkpoints_start = Instant::now();
     let mut checkpoints = working_log.read_all_checkpoints()?;
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] Reading {} checkpoints took {:?}",
         checkpoints.len(),
         read_checkpoints_start.elapsed()
-    ));
+    );
 
     // Reject KnownHuman checkpoints that arrive within KNOWN_HUMAN_MIN_SECS_AFTER_AI
     // seconds of an AI checkpoint on any of the same files. These are likely spurious
@@ -815,21 +815,21 @@ fn execute_resolved_checkpoint(
                 && cp.entries.iter().any(|e| resolved.files.contains(&e.file))
         });
         if too_soon {
-            debug_log(&format!(
+            tracing::debug!(
                 "[KnownHuman] Rejected: fired within {}s of an AI checkpoint on the same file",
                 KNOWN_HUMAN_MIN_SECS_AFTER_AI
-            ));
+            );
             return Ok((0, 0, 0));
         }
     }
 
     let save_states_start = Instant::now();
     let file_content_hashes = save_current_file_states(&working_log, &resolved.files)?;
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] save_current_file_states for {} files took {:?}",
         resolved.files.len(),
         save_states_start.elapsed()
-    ));
+    );
 
     let hash_compute_start = Instant::now();
     let mut ordered_hashes: Vec<_> = file_content_hashes.iter().collect();
@@ -841,10 +841,10 @@ fn execute_resolved_checkpoint(
         combined_hasher.update(hash.as_bytes());
     }
     let combined_hash = format!("{:x}", combined_hasher.finalize());
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] Hash computation took {:?}",
         hash_compute_start.elapsed()
-    ));
+    );
 
     let entries_start = Instant::now();
     let (entries, file_stats) = smol::block_on(get_checkpoint_entries(
@@ -860,11 +860,11 @@ fn execute_resolved_checkpoint(
         is_pre_commit,
         Some(resolved.base_commit.as_str()),
     ))?;
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] get_checkpoint_entries generated {} entries, took {:?}",
         entries.len(),
         entries_start.elapsed()
-    ));
+    );
 
     if !entries.is_empty() {
         let checkpoint_create_start = Instant::now();
@@ -902,10 +902,10 @@ fn execute_resolved_checkpoint(
                 });
             }
         }
-        debug_log(&format!(
+        tracing::debug!(
             "[BENCHMARK] Checkpoint creation took {:?}",
             checkpoint_create_start.elapsed()
-        ));
+        );
 
         if kind.is_ai()
             && checkpoint.agent_id.is_some()
@@ -916,10 +916,10 @@ fn execute_resolved_checkpoint(
                 None,
             )
         {
-            debug_log(&format!(
+            tracing::debug!(
                 "[Warning] Failed to upsert prompt to database: {}",
                 e
-            ));
+            );
             crate::observability::log_error(
                 &e,
                 Some(serde_json::json!({
@@ -931,10 +931,10 @@ fn execute_resolved_checkpoint(
 
         let append_start = Instant::now();
         working_log.append_checkpoint(&checkpoint)?;
-        debug_log(&format!(
+        tracing::debug!(
             "[BENCHMARK] Appending checkpoint to working log took {:?}",
             append_start.elapsed()
-        ));
+        );
         checkpoints.push(checkpoint.clone());
 
         let attrs =
@@ -1002,10 +1002,10 @@ fn execute_resolved_checkpoint(
         }
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] Total checkpoint run took {:?}",
         checkpoint_start.elapsed()
-    ));
+    );
     Ok((entries.len(), resolved.files.len(), checkpoints.len()))
 }
 
@@ -1197,7 +1197,7 @@ pub fn execute_captured_checkpoint(
     capture_id: &str,
 ) -> Result<(usize, usize, usize), GitAiError> {
     let checkpoint_start = Instant::now();
-    debug_log("[BENCHMARK] Starting captured checkpoint replay");
+    tracing::debug!("[BENCHMARK] Starting captured checkpoint replay");
 
     let manifest = load_captured_checkpoint_manifest(capture_id)?;
     validate_captured_checkpoint_manifest_repo(repo, &manifest)?;
@@ -1265,10 +1265,10 @@ fn get_status_of_files(
 
     let status_start = Instant::now();
     let statuses = repo.status(edited_filepaths_option, skip_untracked)?;
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK]   git status call took {:?}",
         status_start.elapsed()
-    ));
+    );
 
     for entry in statuses {
         // Skip ignored files
@@ -1355,10 +1355,10 @@ fn get_all_tracked_files(
         let normalized_path = normalize_to_posix(file);
         // Filter out paths outside the repository to prevent git command failures
         if !is_path_in_repo(&normalized_path) {
-            debug_log(&format!(
+            tracing::debug!(
                 "Skipping INITIAL file outside repository: {}",
                 normalized_path
-            ));
+            );
             continue;
         }
         if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
@@ -1368,10 +1368,10 @@ fn get_all_tracked_files(
             files.insert(normalized_path);
         }
     }
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK]   Reading INITIAL attributions in get_all_tracked_files took {:?}",
         initial_read_start.elapsed()
-    ));
+    );
 
     let checkpoints_read_start = Instant::now();
     if let Ok(working_log_data) = working_log.read_all_checkpoints() {
@@ -1381,10 +1381,10 @@ fn get_all_tracked_files(
                 let normalized_path = normalize_to_posix(&entry.file);
                 // Filter out paths outside the repository to prevent git command failures
                 if !is_path_in_repo(&normalized_path) {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Skipping checkpoint file outside repository: {}",
                         normalized_path
-                    ));
+                    );
                     continue;
                 }
                 if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
@@ -1399,10 +1399,10 @@ fn get_all_tracked_files(
             }
         }
     }
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK]   Reading checkpoints in get_all_tracked_files took {:?}",
         checkpoints_read_start.elapsed()
-    ));
+    );
 
     let has_ai_checkpoints = if let Ok(working_log_data) = working_log.read_all_checkpoints() {
         working_log_data.iter().any(|checkpoint| {
@@ -1418,10 +1418,10 @@ fn get_all_tracked_files(
     } else {
         get_status_of_files(repo, working_log, files, false, ignore_matcher)?
     };
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK]   get_status_of_files in get_all_tracked_files took {:?}",
         status_files_start.elapsed()
-    ));
+    );
 
     // Ensure to always include all dirty files
     if let Some(ref dirty_files) = working_log.dirty_files {
@@ -1430,10 +1430,10 @@ fn get_all_tracked_files(
             let normalized_path = normalize_to_posix(file_path);
             // Filter out paths outside the repository to prevent git command failures
             if !is_path_in_repo(&normalized_path) {
-                debug_log(&format!(
+                tracing::debug!(
                     "Skipping dirty file outside repository: {}",
                     normalized_path
-                ));
+                );
                 continue;
             }
             if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
@@ -1752,11 +1752,11 @@ fn get_checkpoint_entry_for_file(
             Some((line_authors, prompt_records))
         };
 
-        debug_log(&format!(
+        tracing::debug!(
             "[BENCHMARK] Blame for {} took {:?}",
             file_path,
             blame_start.elapsed()
-        ));
+        );
 
         // Add blame results for lines NOT covered by INITIAL
         if let Some((blames, _)) = ai_blame {
@@ -1870,11 +1870,11 @@ fn get_checkpoint_entry_for_file(
         content: &current_content,
         ts,
     })?;
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] Processing file {} took {:?}",
         file_path,
         file_start.elapsed()
-    ));
+    );
     Ok(Some((entry, stats)))
 }
 
@@ -1907,18 +1907,18 @@ async fn get_checkpoint_entries(
         })
         .collect();
     let initial_attributions = initial_data.files;
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] Reading initial attributions took {:?}",
         initial_read_start.elapsed()
-    ));
+    );
 
     let precompute_start = Instant::now();
     let (previous_file_state_by_file, ai_touched_files) =
         build_previous_file_state_maps(previous_checkpoints, &initial_attributions);
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] Precomputing previous state maps took {:?}",
         precompute_start.elapsed()
-    ));
+    );
 
     // Determine author_id based on checkpoint kind and agent_id
     let author_id = match kind {
@@ -2019,20 +2019,20 @@ async fn get_checkpoint_entries(
 
         tasks.push(task);
     }
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] Spawning {} tasks took {:?}",
         tasks.len(),
         spawn_start.elapsed()
-    ));
+    );
 
     // Await all tasks concurrently
     let await_start = Instant::now();
     let results = futures::future::join_all(tasks).await;
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] Awaiting {} tasks took {:?}",
         results.len(),
         await_start.elapsed()
-    ));
+    );
 
     // Process results
     let process_start = Instant::now();
@@ -2049,15 +2049,15 @@ async fn get_checkpoint_entries(
             Err(e) => return Err(e),
         }
     }
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK] Processing {} results took {:?}",
         results_count,
         process_start.elapsed()
-    ));
-    debug_log(&format!(
+    );
+    tracing::debug!(
         "[BENCHMARK] get_checkpoint_entries function total took {:?}",
         entries_fn_start.elapsed()
-    ));
+    );
 
     Ok((entries, file_stats))
 }
@@ -2096,11 +2096,11 @@ fn make_entry_for_file(
         &CheckpointKind::Human.to_str(),
         ts - 1,
     );
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK]   attribute_unattributed_ranges for {} took {:?}",
         file_path,
         fill_start.elapsed()
-    ));
+    );
 
     let update_start = Instant::now();
     let new_attributions = tracker.update_attributions_for_checkpoint(
@@ -2111,11 +2111,11 @@ fn make_entry_for_file(
         ts,
         is_ai_checkpoint,
     )?;
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK]   update_attributions for {} took {:?}",
         file_path,
         update_start.elapsed()
-    ));
+    );
 
     // TODO Consider discarding any "uncontentious" attributions for the human author. Any human attributions that do not share a line with any other author's attributions can be discarded.
     // let filtered_attributions = crate::authorship::attribution_tracker::discard_uncontentious_attributions_for_author(&new_attributions, &CheckpointKind::Human.to_str());
@@ -2127,20 +2127,20 @@ fn make_entry_for_file(
             content,
             is_ai_checkpoint,
         );
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK]   attributions_to_line_attributions for {} took {:?}",
         file_path,
         line_attr_start.elapsed()
-    ));
+    );
 
     // Compute line stats while we already have both contents in memory
     let stats_start = Instant::now();
     let line_stats = compute_file_line_stats(previous_content, content);
-    debug_log(&format!(
+    tracing::debug!(
         "[BENCHMARK]   compute_file_line_stats for {} took {:?}",
         file_path,
         stats_start.elapsed()
-    ));
+    );
 
     let entry = WorkingLogEntry::new(
         file_path.to_string(),

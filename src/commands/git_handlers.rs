@@ -24,7 +24,6 @@ use std::collections::HashSet;
 use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
 #[cfg(windows)]
 use crate::utils::CREATE_NO_WINDOW;
-use crate::utils::debug_log;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 #[cfg(unix)]
@@ -159,7 +158,7 @@ pub fn handle_git(args: &[String]) {
         if let crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Failed(e) =
             crate::daemon::telemetry_handle::init_daemon_telemetry_handle()
         {
-            debug_log(&format!("wrapper: daemon telemetry init failed: {}", e));
+            tracing::debug!("wrapper: daemon telemetry init failed: {}", e);
         }
 
         let repository = find_repository(&parsed.global_args).ok();
@@ -205,9 +204,7 @@ pub fn handle_git(args: &[String]) {
     let skip_hooks = !config.is_allowed_repository(&repository_option);
 
     if skip_hooks {
-        debug_log(
-            "Skipping git-ai hooks because repository is excluded or not in allow_repositories list",
-        );
+        tracing::debug!("Skipping git-ai hooks because repository is excluded or not in allow_repositories list",);
     }
 
     // Handle clone separately since repo doesn't exist before the command.
@@ -488,7 +485,7 @@ fn run_pre_command_hooks(
             "args": parsed_args.to_invocation_vec(),
         });
 
-        debug_log(&error_message);
+        tracing::debug!("{}", error_message);
         observability::log_error(&HookPanicError(error_message.clone()), Some(context));
     }
 }
@@ -593,7 +590,7 @@ fn run_post_command_hooks(
             "args": parsed_args.to_invocation_vec(),
         });
 
-        debug_log(&error_message);
+        tracing::debug!("{}", error_message);
         observability::log_error(&HookPanicError(error_message.clone()), Some(context));
     }
 }
@@ -779,10 +776,10 @@ fn send_wrapper_pre_state_to_daemon(
         &wt_str,
         head_state_to_repo_context(pre),
     ) {
-        debug_log(&format!(
+        tracing::debug!(
             "wrapper: failed to send pre-state for {}: {}",
             invocation_id, e
-        ));
+        );
     }
 }
 
@@ -801,10 +798,10 @@ fn send_wrapper_post_state_to_daemon(
         &wt_str,
         head_state_to_repo_context(post),
     ) {
-        debug_log(&format!(
+        tracing::debug!(
             "wrapper: failed to send post-state for {}: {}",
             invocation_id, e
-        ));
+        );
     }
 }
 

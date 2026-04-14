@@ -5,7 +5,6 @@ use crate::git::refs::{
 use crate::{
     error::GitAiError,
     git::{cli_parser::ParsedGitInvocation, repository::exec_git},
-    utils::debug_log,
 };
 
 use super::repository::Repository;
@@ -105,26 +104,26 @@ pub fn fetch_missing_notes_for_commits(repository: &Repository, source_commits: 
         return;
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "Source commits missing notes: {:?}, trying to fetch from remotes",
         missing
-    ));
+    );
 
     if let Ok(remotes) = repository.remotes_with_urls() {
         for (remote_name, _) in remotes {
-            debug_log(&format!(
+            tracing::debug!(
                 "Attempting safe notes fetch from remote {}",
                 remote_name
-            ));
+            );
             match fetch_authorship_notes(repository, &remote_name) {
-                Ok(_) => debug_log(&format!(
-                    "✓ Fetched and merged notes from remote {}",
+                Ok(_) => tracing::debug!(
+                    "Fetched and merged notes from remote {}",
                     remote_name
-                )),
-                Err(e) => debug_log(&format!(
+                ),
+                Err(e) => tracing::debug!(
                     "Notes fetch from remote {} failed (best-effort): {}",
                     remote_name, e
-                )),
+                ),
             }
         }
     }
@@ -141,10 +140,10 @@ pub fn fetch_authorship_notes(
     // Generate tracking ref for this remote
     let tracking_ref = tracking_ref_for_remote(remote_name);
 
-    debug_log(&format!(
+    tracing::debug!(
         "fetching authorship notes for remote '{}' to tracking ref '{}'",
         remote_name, tracking_ref
-    ));
+    );
 
     // Fetch notes to tracking ref with explicit refspec.
     // If the remote does not have refs/notes/ai yet, treat that as NotFound.
@@ -158,28 +157,28 @@ pub fn fetch_authorship_notes(
         &fetch_refspec,
     );
 
-    debug_log(&format!("fetch command: {:?}", fetch_authorship));
+    tracing::debug!("fetch command: {:?}", fetch_authorship);
 
     match exec_git(&fetch_authorship) {
         Ok(output) => {
-            debug_log(&format!(
+            tracing::debug!(
                 "fetch stdout: '{}'",
                 String::from_utf8_lossy(&output.stdout)
-            ));
-            debug_log(&format!(
+            );
+            tracing::debug!(
                 "fetch stderr: '{}'",
                 String::from_utf8_lossy(&output.stderr)
-            ));
+            );
         }
         Err(e) => {
             if is_missing_remote_notes_ref_error(&e) {
-                debug_log(&format!(
+                tracing::debug!(
                     "no authorship notes found on remote '{}', nothing to sync",
                     remote_name
-                ));
+                );
                 return Ok(NotesExistence::NotFound);
             }
-            debug_log(&format!("authorship fetch failed: {}", e));
+            tracing::debug!("authorship fetch failed: {}", e);
             return Err(e);
         }
     }
@@ -190,33 +189,33 @@ pub fn fetch_authorship_notes(
     if crate::git::refs::ref_exists(repository, &tracking_ref) {
         if crate::git::refs::ref_exists(repository, local_notes_ref) {
             // Both exist - merge them
-            debug_log(&format!(
+            tracing::debug!(
                 "merging authorship notes from {} into {}",
                 tracking_ref, local_notes_ref
-            ));
+            );
             if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
-                debug_log(&format!("notes merge failed: {}", e));
+                tracing::debug!("notes merge failed: {}", e);
                 // Fallback: manually merge notes when git notes merge crashes
                 if let Err(e2) = fallback_merge_notes_ours(repository, &tracking_ref) {
-                    debug_log(&format!("fallback merge also failed: {}", e2));
+                    tracing::debug!("fallback merge also failed: {}", e2);
                 }
             }
         } else {
             // Only tracking ref exists - copy it to local
-            debug_log(&format!(
+            tracing::debug!(
                 "initializing {} from tracking ref {}",
                 local_notes_ref, tracking_ref
-            ));
+            );
             if let Err(e) = copy_ref(repository, &tracking_ref, local_notes_ref) {
-                debug_log(&format!("notes copy failed: {}", e));
+                tracing::debug!("notes copy failed: {}", e);
                 // Don't fail on copy errors, just log and continue
             }
         }
     } else {
-        debug_log(&format!(
+        tracing::debug!(
             "tracking ref {} was not created after fetch",
             tracking_ref
-        ));
+        );
     }
 
     Ok(NotesExistence::Found)
@@ -245,11 +244,11 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
 
     for attempt in 0..PUSH_NOTES_MAX_ATTEMPTS {
         if attempt > 0 {
-            debug_log(&format!(
+            tracing::debug!(
                 "retrying notes push (attempt {}/{})",
                 attempt + 1,
                 PUSH_NOTES_MAX_ATTEMPTS
-            ));
+            );
         }
 
         fetch_and_merge_tracking_notes(repository, remote_name);
@@ -257,15 +256,15 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
         // Push notes without force (requires fast-forward)
         let push_args = build_authorship_push_args(repository.global_args_for_exec(), remote_name);
 
-        debug_log(&format!(
+        tracing::debug!(
             "pushing authorship refs (no force): {:?}",
             &push_args
-        ));
+        );
 
         match exec_git(&push_args) {
             Ok(_) => return Ok(()),
             Err(e) => {
-                debug_log(&format!("authorship push failed: {}", e));
+                tracing::debug!("authorship push failed: {}", e);
                 if is_non_fast_forward_error(&e) && attempt + 1 < PUSH_NOTES_MAX_ATTEMPTS {
                     // Another pusher updated remote notes between our merge and push.
                     // Retry the full fetch-merge-push cycle.
@@ -292,7 +291,7 @@ fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) {
         &fetch_refspec,
     );
 
-    debug_log(&format!("pre-push authorship fetch: {:?}", &fetch_args));
+    tracing::debug!("pre-push authorship fetch: {:?}", &fetch_args);
 
     // Fetch is best-effort; if it fails (e.g., no remote notes yet), continue
     if exec_git(&fetch_args).is_err() {
@@ -307,28 +306,28 @@ fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) {
 
     if !ref_exists(repository, local_notes_ref) {
         // Only tracking ref exists - copy it to local
-        debug_log(&format!(
+        tracing::debug!(
             "pre-push: initializing {} from {}",
             local_notes_ref, tracking_ref
-        ));
+        );
         if let Err(e) = copy_ref(repository, &tracking_ref, local_notes_ref) {
-            debug_log(&format!("pre-push notes copy failed: {}", e));
+            tracing::debug!("pre-push notes copy failed: {}", e);
         }
         return;
     }
 
     // Both exist - merge them
-    debug_log(&format!(
+    tracing::debug!(
         "pre-push: merging {} into {}",
         tracking_ref, local_notes_ref
-    ));
+    );
     if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
-        debug_log(&format!("pre-push notes merge failed: {}", e));
+        tracing::debug!("pre-push notes merge failed: {}", e);
         // Fallback: manually merge notes when git notes merge crashes
         // (e.g., due to corrupted/mixed-fanout notes trees, or git bugs
         // with fanout-level mismatches on older git versions like macOS)
         if let Err(e2) = fallback_merge_notes_ours(repository, &tracking_ref) {
-            debug_log(&format!("pre-push fallback merge also failed: {}", e2));
+            tracing::debug!("pre-push fallback merge also failed: {}", e2);
         }
     }
 }

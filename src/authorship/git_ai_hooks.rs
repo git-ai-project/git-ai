@@ -5,7 +5,6 @@ use crate::config::Config;
 use crate::git::repository::Repository;
 #[cfg(windows)]
 use crate::utils::CREATE_NO_WINDOW;
-use crate::utils::debug_log;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -59,10 +58,10 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)]) {
     let payload_json = match serde_json::to_string(&payload) {
         Ok(json) => json,
         Err(e) => {
-            debug_log(&format!(
+            tracing::debug!(
                 "[git_ai_hooks] Failed to serialize post_notes_updated payload: {}",
                 e
-            ));
+            );
             return;
         }
     };
@@ -72,10 +71,10 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)]) {
         let mut child = match spawn_shell_command(&hook_command) {
             Ok(child) => child,
             Err(e) => {
-                debug_log(&format!(
+                tracing::debug!(
                     "[git_ai_hooks] Failed to spawn post_notes_updated hook '{}': {}",
                     hook_command, e
-                ));
+                );
                 continue;
             }
         };
@@ -86,17 +85,17 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)]) {
             std::thread::spawn(move || {
                 use std::io::Write;
                 if let Err(e) = stdin.write_all(payload_for_stdin.as_bytes()) {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "[git_ai_hooks] Failed to write post_notes_updated stdin for '{}': {}",
                         command_for_log, e
-                    ));
+                    );
                 }
             });
         } else {
-            debug_log(&format!(
+            tracing::debug!(
                 "[git_ai_hooks] Hook '{}' was spawned without a stdin pipe",
                 hook_command
-            ));
+            );
         }
 
         running_children.push((hook_command, child));
@@ -123,18 +122,18 @@ fn wait_for_hooks_or_detach(mut children: Vec<(String, Child)>) {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     if !status.success() {
-                        debug_log(&format!(
+                        tracing::debug!(
                             "[git_ai_hooks] Hook '{}' exited with status {}",
                             command, status
-                        ));
+                        );
                     }
                 }
                 Ok(None) => still_running.push((command, child)),
                 Err(e) => {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "[git_ai_hooks] Failed to poll hook '{}': {}",
                         command, e
-                    ));
+                    );
                 }
             }
         }
@@ -145,27 +144,27 @@ fn wait_for_hooks_or_detach(mut children: Vec<(String, Child)>) {
 
         if Instant::now() >= deadline {
             let detached_count = still_running.len();
-            debug_log(&format!(
+            tracing::debug!(
                 "[git_ai_hooks] Detaching {} unfinished hook command(s) after {}ms",
                 detached_count,
                 HOOK_WAIT_TIMEOUT.as_millis()
-            ));
+            );
             std::thread::spawn(move || {
                 for (command, mut child) in still_running {
                     match child.wait() {
                         Ok(status) => {
                             if !status.success() {
-                                debug_log(&format!(
+                                tracing::debug!(
                                     "[git_ai_hooks] Detached hook '{}' exited with status {}",
                                     command, status
-                                ));
+                                );
                             }
                         }
                         Err(e) => {
-                            debug_log(&format!(
+                            tracing::debug!(
                                 "[git_ai_hooks] Failed waiting detached hook '{}': {}",
                                 command, e
-                            ));
+                            );
                         }
                     }
                 }

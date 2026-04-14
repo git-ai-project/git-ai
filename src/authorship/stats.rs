@@ -4,7 +4,6 @@ use crate::authorship::transcript::Message;
 use crate::error::GitAiError;
 use crate::git::refs::get_authorship;
 use crate::git::repository::Repository;
-use crate::utils::debug_log;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
@@ -77,10 +76,10 @@ pub fn stats_command(
         (target, name)
     };
 
-    debug_log(&format!(
+    tracing::debug!(
         "Stats command found commit: {} refname: {}",
         target, refname
-    ));
+    );
 
     let stats = stats_for_commit_stats(repo, &target, ignore_patterns)?;
 

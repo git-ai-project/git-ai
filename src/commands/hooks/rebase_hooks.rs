@@ -4,34 +4,33 @@ use crate::commands::hooks::commit_hooks::get_commit_default_author;
 use crate::git::cli_parser::{ParsedGitInvocation, RebaseArgsSummary, is_dry_run};
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
-use crate::utils::debug_log;
 
 pub fn pre_rebase_hook(
     parsed_args: &ParsedGitInvocation,
     repository: &mut Repository,
     command_hooks_context: &mut CommandHooksContext,
 ) {
-    debug_log("=== REBASE PRE-COMMAND HOOK ===");
+    tracing::debug!("=== REBASE PRE-COMMAND HOOK ===");
 
     // Check if we're continuing an existing rebase or starting a new one
     let rebase_dir = repository.path().join("rebase-merge");
     let rebase_apply_dir = repository.path().join("rebase-apply");
     let rebase_in_progress = rebase_dir.exists() || rebase_apply_dir.exists();
 
-    debug_log(&format!(
+    tracing::debug!(
         "Rebase directories check: rebase-merge={}, rebase-apply={}",
         rebase_dir.exists(),
         rebase_apply_dir.exists()
-    ));
+    );
 
     // Check if there's an active Start event in the log that matches
     let has_active_start = has_active_rebase_start_event(repository);
     let is_continuing = rebase_in_progress && has_active_start;
 
-    debug_log(&format!(
+    tracing::debug!(
         "Rebase state: in_progress={}, has_active_start={}, is_continuing={}",
         rebase_in_progress, has_active_start, is_continuing
-    ));
+    );
 
     if !is_continuing {
         // Starting a new rebase - capture original HEAD and log Start event
@@ -40,10 +39,10 @@ pub fn pre_rebase_hook(
                 let original_head = resolve_rebase_original_head(parsed_args, repository)
                     .unwrap_or_else(|| target.clone());
                 let onto_head = resolve_rebase_onto_head(parsed_args, repository);
-                debug_log(&format!(
+                tracing::debug!(
                     "Starting new rebase from HEAD: {} (resolved original_head: {}, onto: {:?})",
                     target, original_head, onto_head
-                ));
+                );
                 command_hooks_context.rebase_original_head = Some(original_head.clone());
                 command_hooks_context.rebase_onto = onto_head.clone();
 
@@ -51,7 +50,7 @@ pub fn pre_rebase_hook(
                 let is_interactive = parsed_args.has_command_flag("-i")
                     || parsed_args.has_command_flag("--interactive");
 
-                debug_log(&format!("Interactive rebase: {}", is_interactive));
+                tracing::debug!("Interactive rebase: {}", is_interactive);
 
                 // Log the rebase start event
                 let start_event = RewriteLogEvent::rebase_start(
@@ -64,15 +63,15 @@ pub fn pre_rebase_hook(
 
                 // Write to rewrite log
                 match repository.storage.append_rewrite_event(start_event) {
-                    Ok(_) => debug_log("✓ Logged RebaseStart event"),
-                    Err(e) => debug_log(&format!("✗ Failed to log RebaseStart event: {}", e)),
+                    Ok(_) => tracing::debug!("✓ Logged RebaseStart event"),
+                    Err(e) => tracing::debug!("✗ Failed to log RebaseStart event: {}", e),
                 }
             }
         } else {
-            debug_log("Could not read HEAD for new rebase");
+            tracing::debug!("Could not read HEAD for new rebase");
         }
     } else {
-        debug_log("Continuing existing rebase (will read original head from log in post-hook)");
+        tracing::debug!("Continuing existing rebase (will read original head from log in post-hook)");
     }
 }
 
@@ -82,28 +81,28 @@ pub fn handle_rebase_post_command(
     exit_status: std::process::ExitStatus,
     repository: &mut Repository,
 ) {
-    debug_log("=== REBASE POST-COMMAND HOOK ===");
-    debug_log(&format!("Exit status: {}", exit_status));
+    tracing::debug!("=== REBASE POST-COMMAND HOOK ===");
+    tracing::debug!("Exit status: {}", exit_status);
 
     // Check if rebase is still in progress
     let rebase_dir = repository.path().join("rebase-merge");
     let rebase_apply_dir = repository.path().join("rebase-apply");
     let is_in_progress = rebase_dir.exists() || rebase_apply_dir.exists();
 
-    debug_log(&format!(
+    tracing::debug!(
         "Rebase directories check: rebase-merge={}, rebase-apply={}",
         rebase_dir.exists(),
         rebase_apply_dir.exists()
-    ));
+    );
 
     if is_in_progress {
         // Rebase still in progress (conflict or not finished)
-        debug_log("⏸ Rebase still in progress, waiting for completion (conflict or multi-step)");
+        tracing::debug!("⏸ Rebase still in progress, waiting for completion (conflict or multi-step)");
         return;
     }
 
     if is_dry_run(&parsed_args.command_args) {
-        debug_log("Skipping rebase post-hook for dry-run");
+        tracing::debug!("Skipping rebase post-hook for dry-run");
         return;
     }
 
@@ -119,13 +118,13 @@ pub fn handle_rebase_post_command(
         .as_ref()
         .and_then(|event| event.onto_head.clone());
 
-    debug_log(&format!(
+    tracing::debug!(
         "Original head: context={:?}, log={:?}; onto: context={:?}, log={:?}",
         original_head_from_context,
         original_head_from_log,
         onto_head_from_context,
         onto_head_from_log
-    ));
+    );
 
     let original_head = original_head_from_context.or(original_head_from_log);
     let onto_head = onto_head_from_context.or(onto_head_from_log);
@@ -133,27 +132,27 @@ pub fn handle_rebase_post_command(
     if !exit_status.success() {
         // Rebase was aborted or failed - log Abort event
         if let Some(orig_head) = original_head {
-            debug_log(&format!("✗ Rebase aborted/failed from {}", orig_head));
+            tracing::debug!("✗ Rebase aborted/failed from {}", orig_head);
             let abort_event = RewriteLogEvent::rebase_abort(
                 crate::git::rewrite_log::RebaseAbortEvent::new(orig_head),
             );
             match repository.storage.append_rewrite_event(abort_event) {
-                Ok(_) => debug_log("✓ Logged RebaseAbort event"),
-                Err(e) => debug_log(&format!("✗ Failed to log RebaseAbort event: {}", e)),
+                Ok(_) => tracing::debug!("✓ Logged RebaseAbort event"),
+                Err(e) => tracing::debug!("✗ Failed to log RebaseAbort event: {}", e),
             }
         } else {
-            debug_log("✗ Rebase failed but couldn't determine original head");
+            tracing::debug!("✗ Rebase failed but couldn't determine original head");
         }
         return;
     }
 
     // Rebase completed successfully!
-    debug_log("✓ Rebase completed successfully");
+    tracing::debug!("✓ Rebase completed successfully");
     if let Some(original_head) = original_head {
-        debug_log(&format!(
+        tracing::debug!(
             "Processing completed rebase from {}",
             original_head
-        ));
+        );
         process_completed_rebase(
             repository,
             &original_head,
@@ -161,7 +160,7 @@ pub fn handle_rebase_post_command(
             parsed_args,
         );
     } else {
-        debug_log("⚠ Rebase completed but couldn't determine original head");
+        tracing::debug!("⚠ Rebase completed but couldn't determine original head");
     }
 }
 
@@ -215,79 +214,79 @@ fn process_completed_rebase(
     onto_head: Option<&str>,
     parsed_args: &ParsedGitInvocation,
 ) {
-    debug_log(&format!(
+    tracing::debug!(
         "--- Processing completed rebase from {} ---",
         original_head
-    ));
+    );
 
     // Get the new HEAD
     let new_head = match repository.head() {
         Ok(head) => match head.target() {
             Ok(target) => {
-                debug_log(&format!("New HEAD: {}", target));
+                tracing::debug!("New HEAD: {}", target);
                 target
             }
             Err(e) => {
-                debug_log(&format!("✗ Failed to get HEAD target: {}", e));
+                tracing::debug!("✗ Failed to get HEAD target: {}", e);
                 return;
             }
         },
         Err(e) => {
-            debug_log(&format!("✗ Failed to get HEAD: {}", e));
+            tracing::debug!("✗ Failed to get HEAD: {}", e);
             return;
         }
     };
 
     // If HEAD didn't change, nothing to do
     if original_head == new_head {
-        debug_log("Rebase resulted in no changes (fast-forward or empty)");
+        tracing::debug!("Rebase resulted in no changes (fast-forward or empty)");
         return;
     }
 
     // Build commit mappings
-    debug_log(&format!(
+    tracing::debug!(
         "Building commit mappings: {} -> {}",
         original_head, new_head
-    ));
+    );
     let (original_commits, new_commits) =
         match build_rebase_commit_mappings(repository, original_head, &new_head, onto_head) {
             Ok(mappings) => {
-                debug_log(&format!(
+                tracing::debug!(
                     "✓ Built mappings: {} original commits -> {} new commits",
                     mappings.0.len(),
                     mappings.1.len()
-                ));
+                );
                 mappings
             }
             Err(e) => {
-                debug_log(&format!("✗ Failed to build rebase mappings: {}", e));
+                tracing::debug!("✗ Failed to build rebase mappings: {}", e);
                 return;
             }
         };
 
     if original_commits.is_empty() {
-        debug_log("No commits to rewrite authorship for");
+        tracing::debug!("No commits to rewrite authorship for");
         return;
     }
     if new_commits.is_empty() {
-        debug_log("No new rebased commits detected (all commits were skipped/already upstream)");
+        tracing::debug!("No new rebased commits detected (all commits were skipped/already upstream)");
         return;
     }
 
-    debug_log(&format!("Original commits: {:?}", original_commits));
-    debug_log(&format!("New commits: {:?}", new_commits));
+    tracing::debug!("Original commits: {:?}", original_commits);
+    tracing::debug!("New commits: {:?}", new_commits);
 
     // Determine rebase type
     let is_interactive =
         parsed_args.has_command_flag("-i") || parsed_args.has_command_flag("--interactive");
-    debug_log(&format!(
+    tracing::debug!(
         "Rebase type: {}",
         if is_interactive {
             "interactive"
         } else {
             "normal"
         }
-    ));
+    );
 
     let rebase_event =
         RewriteLogEvent::rebase_complete(crate::git::rewrite_log::RebaseCompleteEvent::new(
@@ -298,7 +297,7 @@ fn process_completed_rebase(
             new_commits.clone(),
         ));
 
-    debug_log("Creating RebaseComplete event and rewriting authorship...");
+    tracing::debug!("Creating RebaseComplete event and rewriting authorship...");
     let commit_author = get_commit_default_author(repository, &parsed_args.command_args);
 
     repository.handle_rewrite_log_event(
@@ -308,7 +307,7 @@ fn process_completed_rebase(
         true,  // save to log
     );
 
-    debug_log("✓ Rebase authorship rewrite complete");
+    tracing::debug!("✓ Rebase authorship rewrite complete");
 }
 
 fn original_equivalent_for_rewritten_commit(
@@ -383,10 +382,10 @@ pub(crate) fn build_rebase_commit_mappings(
     // If there were no original commits, there is nothing to rewrite.
     // Avoid walking potentially large parts of new history.
     if original_commits.is_empty() {
-        debug_log(&format!(
+        tracing::debug!(
             "Commit mapping: 0 original -> 0 new (merge_base: {}, original_base: {})",
             merge_base, original_base
-        ));
+        );
         return Ok((original_commits, Vec::new()));
     }
 
@@ -402,14 +401,14 @@ pub(crate) fn build_rebase_commit_mappings(
     // Reverse so they're in chronological order (oldest first)
     new_commits.reverse();
 
-    debug_log(&format!(
+    tracing::debug!(
         "Commit mapping: {} original -> {} new (merge_base: {}, original_base: {}, new_base: {})",
         original_commits.len(),
         new_commits.len(),
         merge_base,
         original_base,
         new_commits_base
-    ));
+    );
 
     // Always pass all commits through - let the authorship rewriting logic
     // handle many-to-one, one-to-one, and other mapping scenarios properly

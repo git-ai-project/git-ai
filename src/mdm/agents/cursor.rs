@@ -8,7 +8,6 @@ use crate::mdm::utils::{
     settings_paths_for_products, should_process_settings_target, version_meets_requirement,
     write_atomic,
 };
-use crate::utils::debug_log;
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
@@ -356,10 +355,10 @@ impl HookInstaller for CursorInstaller {
                                 });
                             }
                             Err(e) => {
-                                debug_log(&format!(
+                                tracing::debug!(
                                     "Cursor: Error automatically installing extension: {}",
                                     e
-                                ));
+                                );
                                 results.push(InstallResult {
                                     changed: false,
                                     diff: None,
