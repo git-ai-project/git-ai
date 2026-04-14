@@ -576,20 +576,20 @@ impl VirtualAttributions {
                     continue;
                 }
 
-                // Prefer the checkpoint's blob content over the snapshot for
-                // file_contents.  The snapshot may only contain committed files
-                // (e.g. from committed_file_snapshot_between_commits in daemon
-                // mode), missing unstaged changes.  The blob_sha from the
-                // checkpoint is the ground truth for what the working directory
-                // looked like at checkpoint time.  Fall back to the snapshot
-                // only when the blob is unavailable.
+                // Use snapshot content if available, but fall back to the
+                // checkpoint's blob when:
+                //   (a) the file isn't in the snapshot at all, OR
+                //   (b) the blob has strictly more content than the snapshot
+                //       (i.e. the snapshot only contains committed files and
+                //       misses unstaged appended lines).
+                let snapshot_content = final_state_snapshot.get(&entry.file).cloned();
                 let blob_content = working_log.get_file_version(&entry.blob_sha).ok();
-                let file_content = blob_content.unwrap_or_else(|| {
-                    final_state_snapshot
-                        .get(&entry.file)
-                        .cloned()
-                        .unwrap_or_default()
-                });
+                let file_content = match (&snapshot_content, &blob_content) {
+                    (Some(snap), Some(blob)) if blob.len() > snap.len() => blob.clone(),
+                    (Some(snap), _) => snap.clone(),
+                    (None, Some(blob)) => blob.clone(),
+                    (None, None) => String::new(),
+                };
                 file_contents.insert(entry.file.clone(), file_content.clone());
 
                 let line_attrs = if entry.line_attributions.is_empty() {
