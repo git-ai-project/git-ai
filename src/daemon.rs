@@ -4007,6 +4007,12 @@ impl ActorDaemonCoordinator {
         self.shutdown_condvar.notify_all();
     }
 
+    fn request_stop(&self) {
+        self.shutdown_action
+            .store(DaemonExitAction::Stop.as_u8(), Ordering::SeqCst);
+        self.request_shutdown();
+    }
+
     fn request_restart(&self) {
         self.shutdown_action
             .store(DaemonExitAction::Restart.as_u8(), Ordering::SeqCst);
@@ -7829,7 +7835,7 @@ fn handle_control_connection_actor_reader<R: Read + Write>(
         reader.get_mut().write_all(b"\n")?;
         reader.get_mut().flush()?;
         if shutdown_after_response {
-            coordinator.request_shutdown();
+            coordinator.request_stop();
         }
     }
     Ok(())
