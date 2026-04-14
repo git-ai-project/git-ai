@@ -72,6 +72,7 @@ pub mod family_actor;
 pub mod git_backend;
 pub mod global_actor;
 pub mod reducer;
+pub mod sentry_layer;
 pub mod telemetry_handle;
 pub mod telemetry_worker;
 pub mod test_sync;
