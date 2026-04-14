@@ -1691,6 +1691,19 @@ impl TestRepo {
         expected_count: u64,
     ) -> u64 {
         let family_key = self.daemon_family_key();
+        self.wait_for_daemon_checkpoint_completion_count_in_family(
+            &family_key,
+            baseline_count,
+            expected_count,
+        )
+    }
+
+    fn wait_for_daemon_checkpoint_completion_count_in_family(
+        &self,
+        family_key: &str,
+        baseline_count: u64,
+        expected_count: u64,
+    ) -> u64 {
         let start = Instant::now();
         let mut last_progress = start;
         let mut last_observed_count = baseline_count;
@@ -1700,7 +1713,7 @@ impl TestRepo {
         // premature idle timeout.
         let mut last_total_count = 0u64;
         loop {
-            let entries = self.daemon_completion_entries_for_family(&family_key);
+            let entries = self.daemon_completion_entries_for_family(family_key);
             if let Some(error_entry) = entries
                 .iter()
                 .skip(baseline_count as usize)
@@ -1736,7 +1749,7 @@ impl TestRepo {
             thread::sleep(Duration::from_millis(10));
         }
 
-        let final_entries = self.daemon_completion_entries_for_family(&family_key);
+        let final_entries = self.daemon_completion_entries_for_family(family_key);
         let observed_count = final_entries
             .iter()
             .filter(|entry| entry.primary_command.as_deref() == Some("checkpoint"))
@@ -1789,6 +1802,52 @@ impl TestRepo {
             return;
         }
         self.wait_for_daemon_checkpoint_completion_count(baseline, baseline.saturating_add(1));
+    }
+
+    /// Like `checkpoint_completion_baseline_for_cmd`, but derives the family key
+    /// from an arbitrary repo path instead of `self.path`.  Used by
+    /// `git_ai_from_working_dir` where the checkpoint target repo differs from
+    /// the test repo.
+    fn checkpoint_completion_baseline_for_path(
+        &self,
+        args: &[&str],
+        repo_path: &Path,
+    ) -> u64 {
+        if git_ai_primary_command(args) != Some("checkpoint") {
+            return 0;
+        }
+        let Some(family_key) = self.maybe_daemon_family_key_for_repo_path(repo_path) else {
+            return 0;
+        };
+        self.daemon_completion_entries_for_family(&family_key)
+            .iter()
+            .filter(|entry| entry.primary_command.as_deref() == Some("checkpoint"))
+            .count() as u64
+    }
+
+    /// Like `sync_queued_checkpoint_if_needed`, but waits on the completion log
+    /// for the repo at `repo_path` rather than `self.path`.
+    fn sync_queued_checkpoint_for_path(
+        &self,
+        args: &[&str],
+        output: &str,
+        baseline: u64,
+        repo_path: &Path,
+    ) {
+        if git_ai_primary_command(args) != Some("checkpoint") {
+            return;
+        }
+        if !output.contains("queued") {
+            return;
+        }
+        let Some(family_key) = self.maybe_daemon_family_key_for_repo_path(repo_path) else {
+            return;
+        };
+        self.wait_for_daemon_checkpoint_completion_count_in_family(
+            &family_key,
+            baseline,
+            baseline.saturating_add(1),
+        );
     }
 
     fn daemon_family_key_for_repo_path(&self, repo_path: &Path) -> String {
@@ -2445,6 +2504,13 @@ impl TestRepo {
                 e
             )
         })?;
+
+        // Capture checkpoint baseline BEFORE running the command.  The working
+        // dir may belong to a different repo than self (cross-repo tests), so
+        // we derive the family key from the actual working directory.
+        let checkpoint_baseline =
+            self.checkpoint_completion_baseline_for_path(args, &absolute_working_dir);
+
         command
             .args(&normalized_args)
             .current_dir(&absolute_working_dir);
@@ -2474,6 +2540,12 @@ impl TestRepo {
             } else {
                 format!("{}{}", stdout, stderr)
             };
+            self.sync_queued_checkpoint_for_path(
+                args,
+                &combined,
+                checkpoint_baseline,
+                &absolute_working_dir,
+            );
             Ok(combined)
         } else {
             let combined = if stdout.is_empty() {

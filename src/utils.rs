@@ -105,7 +105,6 @@ pub fn normalize_to_posix(path: &str) -> String {
 /// `GIT_AI_DAEMON_CHECKPOINT_DELEGATE` environment variable.  Used by both
 /// the main hook handler and the bash tool to skip capture work when the
 /// daemon will not be available to consume captured checkpoint files.
-///
 pub fn checkpoint_delegation_enabled() -> bool {
     if crate::config::Config::get().feature_flags().async_mode {
         return true;
