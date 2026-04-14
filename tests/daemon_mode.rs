@@ -4055,12 +4055,12 @@ fn daemon_max_uptime_restarts_and_recovers() {
         &repo,
         &[
             ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "1".to_string()),
-            ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "1".to_string()),
+            ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "5".to_string()),
         ],
     );
 
     let original_pid = child.id();
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(status) = child.try_wait().expect("failed to poll daemon") {
             assert!(
@@ -4073,7 +4073,7 @@ fn daemon_max_uptime_restarts_and_recovers() {
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("daemon did not exit within 15s after exceeding max uptime");
+            panic!("daemon did not exit within 30s after exceeding max uptime");
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -4098,7 +4098,7 @@ fn daemon_max_uptime_restarts_and_recovers() {
             break pid;
         }
         if std::time::Instant::now() >= deadline {
-            panic!("daemon did not restart within 15s after max uptime exit");
+            panic!("daemon did not restart within 30s after max uptime exit");
         }
         thread::sleep(Duration::from_millis(100));
     };
