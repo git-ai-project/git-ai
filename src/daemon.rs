@@ -6238,14 +6238,13 @@ impl ActorDaemonCoordinator {
                             .pending_rebase_original_head_for_worktree(worktree)
                             .ok()
                             .flatten();
-                        let fallback_old = pending_old
-                            .as_deref()
-                            .filter(|s| !s.is_empty())
-                            .or(if !old_head.is_empty() {
+                        let fallback_old = pending_old.as_deref().filter(|s| !s.is_empty()).or(
+                            if !old_head.is_empty() {
                                 Some(old_head.as_str())
                             } else {
                                 None
-                            });
+                            },
+                        );
                         let fallback_new = if !new_head.is_empty() {
                             Some(new_head.as_str())
                         } else {
