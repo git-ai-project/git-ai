@@ -749,29 +749,45 @@ pub fn rewrite_authorship_after_squash_or_rebase(
         if let Some((additions, deletions, overriden)) = summed_totals.get(prompt_id) {
             record.total_additions = *additions;
             record.total_deletions = *deletions;
+            // Fix up overriden_lines and accepted_lines.
+            // Save original VA overriden before applying max — needed to
+            // distinguish VA-inflated overrides from source-reported ones.
+            let original_va_overriden = record.overriden_lines;
+            let source_overriden = *overriden;
+
             // Use the max of VA-calculated and source notes value.
             // VA-based detection may find some overrides; source notes carry
             // overrides that blame can't detect. Take whichever is larger.
-            record.overriden_lines = record.overriden_lines.max(*overriden);
+            record.overriden_lines = record.overriden_lines.max(source_overriden);
 
-            // Fix up accepted_lines: the upstream VA merge can undercount
-            // accepted lines when target-branch KnownHuman (h_) attributions
-            // overlap with source-branch AI attributions for modified lines.
-            // The h_ wins by timestamp, causing the AI line to be counted as
-            // "overridden by human" instead of "accepted". Detect this case:
-            // if the VA found more overrides than source notes report AND the
-            // VA found zero accepted lines, the extra overrides are h_ false
-            // positives. Recover accepted_lines from the source notes values.
-            let source_overriden = *overriden;
-            let va_overriden = record.overriden_lines;
-            if record.accepted_lines == 0
-                && va_overriden > source_overriden
-                && *additions > 0
-            {
-                // The VA detected false overrides from h_ conflicts.
-                // Use source notes overriden as authoritative, derive accepted.
-                record.overriden_lines = source_overriden;
-                record.accepted_lines = additions.saturating_sub(source_overriden);
+            // Fix up accepted_lines when the VA undercounts them.
+            // Two cases where this happens:
+            //
+            // Case 1: h_ false positives inflate VA overrides beyond source.
+            // The upstream VA merge gives target-branch KnownHuman (h_)
+            // attributions priority over source AI attributions by timestamp.
+            // This causes accepted AI lines to appear as "overridden by human".
+            // Detect: VA found MORE overrides than source notes report.
+            //
+            // Case 2: h_ false positives masked by real overrides.
+            // When the same prompt spans multiple source commits (e.g., one
+            // with accepted=1 and another with overridden=1), VA may report
+            // overridden=1 (h_ false positive for the accepted line) while
+            // source also sums to overridden=1 (the real override). The
+            // numerical equality masks the h_ false positive.
+            // Detect: accepted + overridden < total_additions.
+            if record.accepted_lines == 0 && *additions > 0 {
+                if original_va_overriden > source_overriden {
+                    // Case 1: VA inflated overrides from h_ conflicts.
+                    // Use source notes overriden as authoritative.
+                    record.overriden_lines = source_overriden;
+                }
+                // Derive accepted from invariant: accepted = additions - overridden.
+                // Handles both cases — after Case 1 resets overriden, or when
+                // Case 2 leaves overriden correct but accepted undercounted.
+                if *additions > record.overriden_lines {
+                    record.accepted_lines = additions.saturating_sub(record.overriden_lines);
+                }
             }
         }
     }
@@ -785,6 +801,14 @@ pub fn rewrite_authorship_after_squash_or_rebase(
                 record.total_additions = *additions;
                 record.total_deletions = *deletions;
                 record.overriden_lines = *overriden;
+                // Derive accepted_lines from invariant: the first-seen record's
+                // accepted_lines may not reflect the sum across all source commits
+                // when the same prompt appears in multiple commits.
+                if *additions > *overriden {
+                    record.accepted_lines = additions.saturating_sub(*overriden);
+                } else {
+                    record.accepted_lines = 0;
+                }
             }
             authorship_log.metadata.prompts.insert(prompt_id, record);
         }

@@ -3094,6 +3094,212 @@ fn test_ci_squash_two_tasks_merge_then_feature_to_main() {
     );
 }
 
+/// Case 5: Same prompt ID across multiple source commits — one accepted, one overridden.
+/// Reproduces the bug where h_ false positives and real overrides numerically mask
+/// each other (both = 1), causing the h_ fix to not trigger and accepted_lines = 0.
+#[test]
+fn test_ci_squash_same_prompt_across_commits_accepted_and_overridden() {
+    use git_ai::authorship::authorship_log::PromptRecord;
+    use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+    use git_ai::authorship::working_log::AgentId;
+    use git_ai::git::refs::notes_add;
+
+    let repo = direct_test_repo();
+    let mut file = repo.filename("service.ts");
+
+    // Initial state on main
+    file.set_contents(crate::lines!["// module", "const x = 1;", "const y = 2;"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Task branch with 4 commits
+    repo.git(&["checkout", "-b", "task"]).unwrap();
+
+    // Commit 1: human manual add
+    file.insert_at(2, crate::lines!["const manual = true;"]);
+    repo.stage_all_and_commit("Human adds manual line").unwrap();
+
+    // Commit 2: AI adds 1 line (accepted)
+    file.insert_at(3, crate::lines!["const aiKept = 1;".ai()]);
+    let commit2 = repo.stage_all_and_commit("AI adds accepted line").unwrap();
+    let commit2_sha = commit2.commit_sha.clone();
+
+    // Commit 3: Human writes a line that was originally AI-suggested then overridden.
+    // The line is plain text (human-written), but the note will record it as
+    // an AI prompt with accepted=0, overridden=1 (simulating AI suggestion → human override).
+    file.insert_at(4, crate::lines!["const aiOverridden = 2;"]);
+    let commit3 = repo
+        .stage_all_and_commit("AI adds overridden line")
+        .unwrap();
+    let commit3_sha = commit3.commit_sha.clone();
+
+    // Commit 4: different AI adds a line
+    file.insert_at(5, crate::lines!["const diffAi = 1;".ai()]);
+    let commit4 = repo.stage_all_and_commit("Different AI adds line").unwrap();
+    let commit4_sha = commit4.commit_sha.clone();
+
+    let task_sha = repo
+        .git(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    // Get prompt IDs from commits 2, 3, 4
+    let prompt_a_id = get_reference_as_authorship_log_v3(&git_ai_repo, &commit2_sha)
+        .expect("Commit 2 should have log")
+        .metadata
+        .prompts
+        .keys()
+        .next()
+        .expect("Commit 2 should have prompt")
+        .clone();
+
+    let prompt_b_id = get_reference_as_authorship_log_v3(&git_ai_repo, &commit4_sha)
+        .expect("Commit 4 should have log")
+        .metadata
+        .prompts
+        .keys()
+        .next()
+        .expect("Commit 4 should have prompt")
+        .clone();
+
+    // KEY: Rewrite commit 3's note to ADD a prompt with the SAME hash as commit 2,
+    // simulating the real-world scenario where the same AI session spans multiple commits.
+    // Commit 3 is a human-written line (no .ai()), so its note has no prompts.
+    // We add one with accepted_lines=0, overriden_lines=1 to represent: AI suggested
+    // something, human overwrote it (the committed line is the human's version).
+    let commit3_note = repo
+        .read_authorship_note(&commit3_sha)
+        .expect("Commit 3 should have note");
+    let mut commit3_log =
+        AuthorshipLog::deserialize_from_string(&commit3_note).expect("parse commit 3 note");
+
+    // Get the agent_id from commit 2's prompt to reuse the same session
+    let commit2_record = get_reference_as_authorship_log_v3(&git_ai_repo, &commit2_sha)
+        .expect("Commit 2 log")
+        .metadata
+        .prompts
+        .get(&prompt_a_id)
+        .expect("Commit 2 prompt")
+        .clone();
+
+    commit3_log.metadata.prompts.insert(
+        prompt_a_id.clone(),
+        PromptRecord {
+            agent_id: AgentId {
+                tool: commit2_record.agent_id.tool.clone(),
+                id: commit2_record.agent_id.id.clone(),
+                model: commit2_record.agent_id.model.clone(),
+            },
+            human_author: Some("Test User <test@example.com>".to_string()),
+            messages: vec![],
+            total_additions: 1,
+            total_deletions: 0,
+            accepted_lines: 0,
+            overriden_lines: 1,
+            messages_url: None,
+            custom_attributes: None,
+        },
+    );
+    let rewritten_note = commit3_log
+        .serialize_to_string()
+        .expect("serialize rewritten note");
+    notes_add(&git_ai_repo, &commit3_sha, &rewritten_note)
+        .expect("rewrite commit 3 note with shared prompt hash");
+
+    // Squash merge onto main
+    repo.git(&["checkout", "main"]).unwrap();
+    file.set_contents(crate::lines![
+        "// module",
+        "const x = 1;",
+        "const manual = true;",
+        "const aiKept = 1;",
+        "const aiOverridden = 2;",
+        "const diffAi = 1;",
+        "const y = 2;"
+    ]);
+    let merge_commit = repo.stage_all_and_commit("Squash task").unwrap();
+    let merge_sha = merge_commit.commit_sha;
+
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "task",
+        "main",
+        &task_sha,
+        &merge_sha,
+        false,
+    )
+    .unwrap();
+
+    let log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha)
+        .expect("Squash should have log");
+
+    // --- Prompt assertions ---
+    let pa = log
+        .metadata
+        .prompts
+        .get(&prompt_a_id)
+        .unwrap_or_else(|| panic!("Prompt A ({}) missing", prompt_a_id));
+    assert_eq!(pa.total_additions, 2, "Prompt A total_additions");
+    assert_eq!(
+        pa.accepted_lines, 1,
+        "Prompt A accepted_lines: aiKept survived, aiOverridden was overridden. Got accepted={}, overriden={}",
+        pa.accepted_lines, pa.overriden_lines
+    );
+    assert_eq!(
+        pa.overriden_lines, 1,
+        "Prompt A overriden_lines: one line was human-overridden. Got overriden={}",
+        pa.overriden_lines
+    );
+
+    let pb = log
+        .metadata
+        .prompts
+        .get(&prompt_b_id)
+        .unwrap_or_else(|| panic!("Prompt B ({}) missing", prompt_b_id));
+    assert_eq!(pb.total_additions, 1, "Prompt B total_additions");
+    assert_eq!(
+        pb.accepted_lines, 1,
+        "Prompt B accepted_lines: diffAi survived. Got accepted={}, overriden={}",
+        pb.accepted_lines, pb.overriden_lines
+    );
+
+    // --- Contributor assertions ---
+    let c = log
+        .metadata
+        .contributors
+        .expect("Should have contributors");
+    let ai_accepted: u32 = c.values().map(|s| s.ai_accepted).sum();
+    let ai_additions: u32 = c.values().map(|s| s.ai_additions).sum();
+    let mixed: u32 = c.values().map(|s| s.mixed_additions).sum();
+    let manual: u32 = c.values().map(|s| s.manual_additions).sum();
+
+    assert_eq!(
+        ai_accepted, 2,
+        "ai_accepted should be 2 (aiKept + diffAi). contributors={:?}",
+        c
+    );
+    assert_eq!(
+        mixed, 1,
+        "mixed_additions should be 1 (aiOverridden). contributors={:?}",
+        c
+    );
+    assert_eq!(
+        ai_additions, 3,
+        "ai_additions should be 3 (2 claude + 1 copilot). contributors={:?}",
+        c
+    );
+    assert!(
+        manual >= 1,
+        "manual_additions should be >= 1. contributors={:?}",
+        c
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_basic,
     test_ci_squash_merge_multiple_files,
@@ -3124,4 +3330,5 @@ crate::reuse_tests_in_worktree!(
     test_ci_squash_four_commits_all_change_types,
     test_ci_squash_single_commit_all_change_types,
     test_ci_squash_two_tasks_merge_then_feature_to_main,
+    test_ci_squash_same_prompt_across_commits_accepted_and_overridden,
 );
