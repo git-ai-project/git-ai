@@ -7149,51 +7149,22 @@ impl ActorDaemonCoordinator {
         match self.apply_trace_payload_to_state(payload).await? {
             TracePayloadApplyOutcome::None => {}
             TracePayloadApplyOutcome::QueuedFamily(family) => {
-                // Run an inline drain pass immediately rather than waiting for
-                // the per-family drain worker task to be scheduled by Tokio.
-                // Under CI load the scheduling latency can exceed the test-sync
-                // idle timeout, causing "session never observed" failures.  The
-                // exec_lock serialises this inline drain with any concurrent
-                // drain worker run (one will drain, the other sees an empty
-                // sequencer and is a no-op).
+                // The per-family drain worker (started by
+                // get_or_create_drain_notifier) is already notified via
+                // notify_one() in replace_pending_root_entry.  It will
+                // acquire exec_lock and drain all ready sequencer entries.
                 //
-                // Use try_lock() instead of lock().await: the ingest worker is a
-                // single sequential task and blocking it on exec_lock would prevent
-                // processing events from ALL families (not just the contended one).
-                // When exec_lock is held (e.g., during checkpoint drain), spawn a
-                // one-shot task that waits for exec_lock without blocking the ingest
-                // worker.
-                let exec_lock = self.side_effect_exec_lock(&family)?;
-                if let Ok(_guard) = exec_lock.try_lock() {
-                    if let Err(e) = self
-                        .drain_ready_family_sequencer_entries_locked(&family)
-                        .await
-                    {
-                        debug_log(&format!(
-                            "daemon inline drain error for family {}: {}",
-                            family, e
-                        ));
-                    }
-                } else {
-                    let coordinator = self.clone();
-                    let family_clone = family.clone();
-                    tokio::spawn(async move {
-                        let lock = match coordinator.side_effect_exec_lock(&family_clone) {
-                            Ok(l) => l,
-                            Err(_) => return,
-                        };
-                        let _guard = lock.lock().await;
-                        if let Err(e) = coordinator
-                            .drain_ready_family_sequencer_entries_locked(&family_clone)
-                            .await
-                        {
-                            debug_log(&format!(
-                                "daemon fallback drain error for family {}: {}",
-                                family_clone, e
-                            ));
-                        }
-                    });
-                }
+                // We do NOT run an inline drain here because doing so blocks
+                // the single-threaded ingest worker for the entire duration
+                // of side-effect processing (blame, notes).  When one
+                // family's drain takes 30+ seconds, ALL other families'
+                // trace events are delayed, causing idle-timeout failures
+                // in unrelated tests.
+                //
+                // The drain worker runs on its own Tokio task and processes
+                // entries promptly after notification without blocking the
+                // ingest worker.
+                let _ = self.get_or_create_drain_notifier(&family)?;
             }
             TracePayloadApplyOutcome::Applied(mut applied) => {
                 if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
