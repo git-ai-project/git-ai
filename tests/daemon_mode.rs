@@ -4811,7 +4811,7 @@ fn daemon_wrapper_daemon_interactive_rebase_preserves_ai_notes() {
     repo.git(&["checkout", "feature"]).unwrap();
     repo.git_with_env(
         &["rebase", "-i", &default_branch],
-        &[("GIT_SEQUENCE_EDITOR", "true")],
+        &[("GIT_SEQUENCE_EDITOR", "true"), ("GIT_EDITOR", "true")],
         None,
     )
     .unwrap();
