@@ -1747,6 +1747,233 @@ fn test_ai_generated_file_then_human_full_rewrite() {
     ]);
 }
 
+/// Test: AI creates two separate files, user commits only one — the second file's
+/// attribution must carry over via INITIAL and appear in the next commit.
+///
+/// Reproduces the bug where `calcb1.py` lost its AI attribution when only
+/// `calca1.py` was committed first, specifically when using the snapshot code path
+/// (daemon mode / materialize from persisted state).
+///
+/// The root cause: `collect_unstaged_hunks_from_snapshot` doesn't handle files that
+/// are in pathspecs but absent from BOTH the commit tree AND the final_state_snapshot.
+/// When the snapshot only contains committed files (as in `committed_file_snapshot_between_commits`),
+/// untracked AI files silently disappear because their committed_content and final_content
+/// are both empty, causing the diff to be skipped entirely.
+#[test]
+fn test_two_ai_files_partial_commit_carries_over_attribution() {
+    let repo = TestRepo::new();
+
+    // Create an initial commit so we have a base
+    let readme_path = repo.path().join("README.md");
+    fs::write(&readme_path, "# Project\n").unwrap();
+    repo.git(&["add", "."]).unwrap();
+    repo.commit("Initial commit").unwrap();
+
+    // AI creates two separate files in the same session
+    let calca_path = repo.path().join("calca1.py");
+    let calcb_path = repo.path().join("calcb1.py");
+
+    let calca_content = "\
+def get_int(prompt):
+    while True:
+        try:
+            return int(input(prompt))
+        except ValueError:
+            print(\"Please enter a valid integer.\")
+
+def add(a, b):
+    return a + b
+
+if __name__ == \"__main__\":
+    print(\"Calculator A\")
+    x = get_int(\"Enter first integer: \")
+    y = get_int(\"Enter second integer: \")
+    result = add(x, y)
+    print(f\"Result: {result}\")
+";
+
+    let calcb_content = "\
+import sys
+
+print(\"Calculator B - Addition\")
+print(\"Enter two integers separated by a space:\")
+
+line = input(\"> \").strip().split()
+if len(line) != 2:
+    print(\"Error: expected exactly two values.\")
+    sys.exit(1)
+
+try:
+    a, b = int(line[0]), int(line[1])
+except ValueError:
+    print(\"Error: both values must be integers.\")
+    sys.exit(1)
+
+print(f\"Result: {a + b}\")
+";
+
+    // AI writes both files and checkpoints them
+    fs::write(&calca_path, calca_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "calca1.py"])
+        .unwrap();
+
+    fs::write(&calcb_path, calcb_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "calcb1.py"])
+        .unwrap();
+
+    // User stages ONLY calca1.py and commits
+    repo.git(&["add", "calca1.py"]).unwrap();
+    let first_commit = repo.commit("Add calca1.py").unwrap();
+
+    // First commit should have AI attribution for calca1.py
+    assert!(
+        !first_commit.authorship_log.attestations.is_empty(),
+        "first commit should include AI attribution for calca1.py"
+    );
+    assert!(
+        first_commit
+            .authorship_log
+            .attestations
+            .iter()
+            .any(|a| a.file_path == "calca1.py"),
+        "first commit attestations should reference calca1.py"
+    );
+
+    // Verify that INITIAL was written for calcb1.py
+    let repo_obj =
+        git_ai::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
+            .unwrap();
+    let wl = repo_obj
+        .storage
+        .working_log_for_base_commit(&first_commit.commit_sha)
+        .unwrap();
+    let initial = wl.read_initial_attributions();
+    assert!(
+        initial.files.contains_key("calcb1.py"),
+        "INITIAL should contain calcb1.py attribution after first commit. INITIAL files: {:?}",
+        initial.files.keys().collect::<Vec<_>>()
+    );
+
+    // Now stage and commit calcb1.py
+    repo.git(&["add", "calcb1.py"]).unwrap();
+    let second_commit = repo.commit("Add calcb1.py").unwrap();
+
+    // Second commit MUST have AI attribution for calcb1.py — this is the bug
+    assert!(
+        !second_commit.authorship_log.attestations.is_empty(),
+        "second commit should include AI attribution for calcb1.py (carried over via INITIAL)"
+    );
+    assert!(
+        second_commit
+            .authorship_log
+            .attestations
+            .iter()
+            .any(|a| a.file_path == "calcb1.py"),
+        "second commit attestations should reference calcb1.py"
+    );
+}
+
+/// Test: Same as above but exercises the snapshot code path directly.
+///
+/// When `post_commit_with_final_state` is called with a snapshot that only contains
+/// committed files (as happens with `committed_file_snapshot_between_commits` in daemon
+/// mode), the INITIAL carry-over for uncommitted AI files must still work.
+#[test]
+fn test_two_ai_files_snapshot_path_carries_over_attribution() {
+    use std::collections::HashMap;
+
+    let repo = TestRepo::new();
+
+    // Create an initial commit so we have a base
+    let readme_path = repo.path().join("README.md");
+    fs::write(&readme_path, "# Project\n").unwrap();
+    repo.git(&["add", "."]).unwrap();
+    repo.commit("Initial commit").unwrap();
+
+    // AI creates two separate files and checkpoints them
+    let calca_path = repo.path().join("calca1.py");
+    let calcb_path = repo.path().join("calcb1.py");
+
+    let calca_content = "def add(a, b):\n    return a + b\n";
+    let calcb_content = "def sub(a, b):\n    return a - b\n";
+
+    fs::write(&calca_path, calca_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "calca1.py"])
+        .unwrap();
+
+    fs::write(&calcb_path, calcb_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "calcb1.py"])
+        .unwrap();
+
+    // Stage and commit ONLY calca1.py via raw git (bypassing wrapper hooks)
+    repo.git_og(&["add", "calca1.py"]).unwrap();
+    repo.git_og(&["commit", "-m", "Add calca1.py"]).unwrap();
+
+    // Get commit info
+    let repo_obj =
+        git_ai::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
+            .unwrap();
+    let head_sha = repo_obj
+        .head()
+        .unwrap()
+        .target()
+        .unwrap();
+    let parent_sha = repo_obj
+        .find_commit(head_sha.clone())
+        .unwrap()
+        .parent(0)
+        .unwrap()
+        .id();
+
+    // Build a snapshot containing ONLY committed files (simulates committed_file_snapshot_between_commits)
+    let mut committed_only_snapshot: HashMap<String, String> = HashMap::new();
+    committed_only_snapshot.insert("calca1.py".to_string(), calca_content.to_string());
+    // NOTE: calcb1.py is intentionally NOT in the snapshot — this is the bug trigger
+
+    // Run post_commit with the committed-only snapshot
+    let (_commit_sha, authorship_log) =
+        git_ai::authorship::post_commit::post_commit_with_final_state(
+            &repo_obj,
+            Some(parent_sha.clone()),
+            head_sha.clone(),
+            "Test User".to_string(),
+            true,
+            Some(&committed_only_snapshot),
+        )
+        .unwrap();
+
+    // First commit should have AI attribution for calca1.py
+    assert!(
+        authorship_log
+            .attestations
+            .iter()
+            .any(|a| a.file_path == "calca1.py"),
+        "first commit attestations should reference calca1.py, got: {:?}",
+        authorship_log
+            .attestations
+            .iter()
+            .map(|a| &a.file_path)
+            .collect::<Vec<_>>()
+    );
+
+    // INITIAL should have been written for calcb1.py
+    let new_wl = repo_obj
+        .storage
+        .working_log_for_base_commit(&head_sha)
+        .unwrap();
+    let initial = new_wl.read_initial_attributions();
+    assert!(
+        initial.files.contains_key("calcb1.py"),
+        "INITIAL should contain calcb1.py attribution after snapshot-path commit. \
+         INITIAL files: {:?}",
+        initial.files.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !initial.prompts.is_empty(),
+        "INITIAL should contain prompts for the carried-over attribution"
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_simple_additions_empty_repo,
     test_simple_additions_with_base_commit,
