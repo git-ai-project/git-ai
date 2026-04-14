@@ -4622,3 +4622,234 @@ fn daemon_recovers_from_panic_in_side_effect_pipeline() {
     // Clean shutdown.
     daemon.shutdown();
 }
+
+/// Issue #1079: Rebase in WrapperDaemon mode (async_mode=true, git_hooks_enabled=false)
+/// should preserve AI authorship notes on rebased commits.
+#[test]
+#[serial]
+fn daemon_wrapper_daemon_rebase_preserves_ai_notes() {
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+
+    // Create base commit on default branch
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(lines!["base content"]);
+    repo.stage_all_and_commit("Base commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with AI-attributed commit
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut ai_file = repo.filename("ai_feature.txt");
+    ai_file.set_contents(lines!["// AI generated code".ai(), "function compute() {".ai(), "  return 42;".ai(), "}".ai()]);
+    repo.stage_all_and_commit("AI feature commit").unwrap();
+
+    // Advance default branch to force a non-trivial rebase
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file = repo.filename("main_advance.txt");
+    main_file.set_contents(lines!["main content"]);
+    repo.stage_all_and_commit("Main advance").unwrap();
+
+    // Rebase feature onto default branch
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Verify AI authorship notes are preserved after rebase
+    ai_file.assert_lines_and_blame(lines![
+        "// AI generated code".ai(),
+        "function compute() {".ai(),
+        "  return 42;".ai(),
+        "}".ai()
+    ]);
+}
+
+/// Issue #1079: Multiple AI commits on feature branch, rebase in WrapperDaemon mode.
+#[test]
+#[serial]
+fn daemon_wrapper_daemon_rebase_preserves_notes_across_multiple_commits() {
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(lines!["base"]);
+    repo.stage_all_and_commit("Base").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // First AI commit
+    let mut file1 = repo.filename("feature1.txt");
+    file1.set_contents(lines!["// AI feature 1".ai(), "let x = 1;".ai()]);
+    repo.stage_all_and_commit("AI commit 1").unwrap();
+
+    // Second AI commit
+    let mut file2 = repo.filename("feature2.txt");
+    file2.set_contents(lines!["// AI feature 2".ai(), "let y = 2;".ai()]);
+    repo.stage_all_and_commit("AI commit 2").unwrap();
+
+    // Human commit
+    let mut file3 = repo.filename("human.txt");
+    file3.set_contents(lines!["human work"]);
+    repo.stage_all_and_commit("Human commit").unwrap();
+
+    // Advance default branch
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file = repo.filename("main2.txt");
+    main_file.set_contents(lines!["main advance"]);
+    repo.stage_all_and_commit("Main advance").unwrap();
+
+    // Rebase
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // All AI notes should be preserved
+    file1.assert_lines_and_blame(lines!["// AI feature 1".ai(), "let x = 1;".ai()]);
+    file2.assert_lines_and_blame(lines!["// AI feature 2".ai(), "let y = 2;".ai()]);
+    file3.assert_lines_and_blame(lines!["human work".human()]);
+}
+
+/// Issue #1079: Rebase in pure Daemon mode (no wrapper, trace2 socket only).
+#[test]
+#[serial]
+fn daemon_pure_trace_rebase_preserves_ai_notes() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+
+    // Create base commit on default branch
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(lines!["base"]);
+    repo.stage_all_and_commit("Base").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Create feature branch with AI commit
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut ai_file = repo.filename("ai.txt");
+    ai_file.set_contents(lines!["// AI line 1".ai(), "// AI line 2".ai()]);
+    repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Advance default branch
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file = repo.filename("main.txt");
+    main_file.set_contents(lines!["main advance"]);
+    repo.stage_all_and_commit("Main advance").unwrap();
+
+    // Rebase feature onto default branch
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Verify notes survived the daemon-mode rebase
+    ai_file.assert_lines_and_blame(lines!["// AI line 1".ai(), "// AI line 2".ai()]);
+}
+
+/// Issue #1079: Mixed AI and human lines in a single file, rebase in WrapperDaemon mode.
+#[test]
+#[serial]
+fn daemon_wrapper_daemon_rebase_preserves_mixed_attribution_in_single_file() {
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(lines!["base"]);
+    repo.stage_all_and_commit("Base").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut mixed_file = repo.filename("mixed.txt");
+    mixed_file.set_contents(lines![
+        "// Human header".human(),
+        "function ai_compute() {".ai(),
+        "  return 42;".ai(),
+        "}".ai(),
+        "// Human footer".human()
+    ]);
+    repo.stage_all_and_commit("Mixed commit").unwrap();
+
+    // Advance default branch
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file = repo.filename("main.txt");
+    main_file.set_contents(lines!["main"]);
+    repo.stage_all_and_commit("Main advance").unwrap();
+
+    // Rebase
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Verify mixed attribution preserved
+    mixed_file.assert_lines_and_blame(lines![
+        "// Human header".human(),
+        "function ai_compute() {".ai(),
+        "  return 42;".ai(),
+        "}".ai(),
+        "// Human footer".human()
+    ]);
+}
+
+/// Issue #1079: Interactive rebase in WrapperDaemon mode should preserve AI notes.
+#[test]
+#[serial]
+fn daemon_wrapper_daemon_interactive_rebase_preserves_ai_notes() {
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(lines!["base"]);
+    repo.stage_all_and_commit("Base").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut ai_file = repo.filename("ai.txt");
+    ai_file.set_contents(lines!["// AI code".ai(), "let x = 1;".ai()]);
+    repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Advance default branch
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file = repo.filename("main.txt");
+    main_file.set_contents(lines!["main"]);
+    repo.stage_all_and_commit("Main advance").unwrap();
+
+    // Interactive rebase (no-op sequence editor keeps all picks)
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git_with_env(
+        &["rebase", "-i", &default_branch],
+        &[("GIT_SEQUENCE_EDITOR", "true")],
+        None,
+    )
+    .unwrap();
+
+    ai_file.assert_lines_and_blame(lines!["// AI code".ai(), "let x = 1;".ai()]);
+}
+
+/// Issue #1079: Rebase with conflict and --continue preserves AI notes.
+#[test]
+#[serial]
+fn daemon_wrapper_daemon_rebase_continue_preserves_ai_notes() {
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+
+    let mut shared_file = repo.filename("shared.txt");
+    shared_file.set_contents(lines!["original content"]);
+    repo.stage_all_and_commit("Base").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Feature branch: modify shared file with AI content + add new file
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    shared_file.set_contents(lines!["feature content".ai()]);
+    let mut ai_file = repo.filename("feature_only.txt");
+    ai_file.set_contents(lines!["// AI feature".ai(), "fn feature() {}".ai()]);
+    repo.stage_all_and_commit("Feature commit").unwrap();
+
+    // Main branch: modify same shared file to cause conflict
+    repo.git(&["checkout", &default_branch]).unwrap();
+    shared_file.set_contents(lines!["main content"]);
+    repo.stage_all_and_commit("Main conflicting commit").unwrap();
+
+    // Start rebase — this will fail due to conflict
+    repo.git(&["checkout", "feature"]).unwrap();
+    let rebase_result = repo.git(&["rebase", &default_branch]);
+    assert!(
+        rebase_result.is_err(),
+        "rebase should fail due to conflict"
+    );
+
+    // Resolve conflict by accepting feature's version
+    shared_file.set_contents(lines!["resolved content".ai()]);
+    repo.git(&["add", "shared.txt"]).unwrap();
+    repo.git(&["rebase", "--continue"]).unwrap();
+
+    // Verify AI notes are preserved after conflict resolution
+    ai_file.assert_lines_and_blame(lines!["// AI feature".ai(), "fn feature() {}".ai()]);
+}
