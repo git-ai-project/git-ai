@@ -673,13 +673,14 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     authorship_log.metadata.base_commit_sha = merge_commit_sha.to_string();
 
     // Preserve accumulated totals from source commits (squash/rebase should not drop session totals).
-    let mut summed_totals: HashMap<String, (u32, u32)> = HashMap::new();
+    // Use max (not sum) because totals are cumulative — later commits already include earlier values.
+    let mut max_totals: HashMap<String, (u32, u32)> = HashMap::new();
     for commit_sha in &source_commits {
         if let Ok(log) = get_reference_as_authorship_log_v3(repo, commit_sha) {
             for (prompt_id, record) in log.metadata.prompts {
-                let entry = summed_totals.entry(prompt_id).or_insert((0, 0));
-                entry.0 = entry.0.saturating_add(record.total_additions);
-                entry.1 = entry.1.saturating_add(record.total_deletions);
+                let entry = max_totals.entry(prompt_id).or_insert((0, 0));
+                entry.0 = entry.0.max(record.total_additions);
+                entry.1 = entry.1.max(record.total_deletions);
             }
             for (hash, record) in log.metadata.humans {
                 authorship_log.metadata.humans.entry(hash).or_insert(record);
@@ -688,7 +689,7 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     }
 
     for (prompt_id, record) in authorship_log.metadata.prompts.iter_mut() {
-        if let Some((additions, deletions)) = summed_totals.get(prompt_id) {
+        if let Some((additions, deletions)) = max_totals.get(prompt_id) {
             record.total_additions = *additions;
             record.total_deletions = *deletions;
         }
@@ -3368,6 +3369,7 @@ fn build_metadata_only_authorship_log_from_source_notes(
     use crate::authorship::authorship_log::HumanRecord;
 
     let mut merged_prompts = BTreeMap::new();
+    // Use max (not sum) because totals are cumulative — later commits already include earlier values.
     let mut prompt_totals: HashMap<String, (u32, u32)> = HashMap::new();
     let mut merged_humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
     let mut saw_any_note = false;
@@ -3380,8 +3382,8 @@ fn build_metadata_only_authorship_log_from_source_notes(
 
         for (prompt_id, prompt_record) in log.metadata.prompts {
             let entry = prompt_totals.entry(prompt_id.clone()).or_insert((0, 0));
-            entry.0 = entry.0.saturating_add(prompt_record.total_additions);
-            entry.1 = entry.1.saturating_add(prompt_record.total_deletions);
+            entry.0 = entry.0.max(prompt_record.total_additions);
+            entry.1 = entry.1.max(prompt_record.total_deletions);
             merged_prompts.insert(prompt_id, prompt_record);
         }
         for (hash, record) in log.metadata.humans {
