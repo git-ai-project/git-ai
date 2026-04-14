@@ -1807,10 +1807,10 @@ fn preceding_merge_squash_for_pending_commit(
 ) -> Result<Option<MergeSquashEvent>, GitAiError> {
     let events = repo.storage.read_rewrite_events()?;
     for event in events {
-        if let RewriteLogEvent::MergeSquash { merge_squash } = event {
-            if merge_squash.base_head == base_commit {
-                return Ok(Some(merge_squash));
-            }
+        if let RewriteLogEvent::MergeSquash { merge_squash } = event
+            && merge_squash.base_head == base_commit
+        {
+            return Ok(Some(merge_squash));
         }
     }
     Ok(None)
@@ -7206,8 +7206,19 @@ impl ActorDaemonCoordinator {
                                 let _guard = lock.lock().await;
                                 coordinator.begin_family_effect(&family_clone)?;
                                 if applied.command.wrapper_invocation_id.is_some() {
+                                    // Use a short timeout: Applied-path commands are
+                                    // non-sequencer (add, diff, status, etc.).  Inner
+                                    // git processes inherit GIT_AI_WRAPPER_INVOCATION_ID
+                                    // but the wrapper never sends them post-state, so
+                                    // they must time out quickly rather than holding
+                                    // exec_lock for the full 20s default, which would
+                                    // block the drain worker from processing sequenced
+                                    // commands (commit, rebase, etc.) for this family.
                                     coordinator
-                                        .apply_wrapper_state_overlay(&mut applied.command)
+                                        .apply_wrapper_state_overlay_with_timeout(
+                                            &mut applied.command,
+                                            Duration::from_millis(200),
+                                        )
                                         .await;
                                 }
                                 let result = coordinator
@@ -7269,21 +7280,18 @@ impl ActorDaemonCoordinator {
                                     status: "error".to_string(),
                                     error: Some(error.to_string()),
                                 };
-                                let _ = coordinator.maybe_append_test_completion_log(
-                                    &family_clone,
-                                    &log_entry,
-                                );
+                                let _ = coordinator
+                                    .maybe_append_test_completion_log(&family_clone, &log_entry);
                             }
                             Err(panic_payload) => {
-                                let panic_msg = if let Some(s) =
-                                    panic_payload.downcast_ref::<String>()
-                                {
-                                    s.clone()
-                                } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
-                                    s.to_string()
-                                } else {
-                                    "unknown panic".to_string()
-                                };
+                                let panic_msg =
+                                    if let Some(s) = panic_payload.downcast_ref::<String>() {
+                                        s.clone()
+                                    } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                                        s.to_string()
+                                    } else {
+                                        "unknown panic".to_string()
+                                    };
                                 let error = GitAiError::Generic(format!(
                                     "daemon applied-path panic: {}",
                                     panic_msg
@@ -7308,10 +7316,8 @@ impl ActorDaemonCoordinator {
                                     status: "error".to_string(),
                                     error: Some(panic_msg),
                                 };
-                                let _ = coordinator.maybe_append_test_completion_log(
-                                    &family_clone,
-                                    &log_entry,
-                                );
+                                let _ = coordinator
+                                    .maybe_append_test_completion_log(&family_clone, &log_entry);
                             }
                         }
                     });
@@ -7475,14 +7481,6 @@ impl ActorDaemonCoordinator {
         self.wrapper_state_notify.notify_waiters();
     }
 
-    async fn apply_wrapper_state_overlay(
-        &self,
-        command: &mut crate::daemon::domain::NormalizedCommand,
-    ) {
-        self.apply_wrapper_state_overlay_with_timeout(command, self.wrapper_state_wait_timeout())
-            .await;
-    }
-
     async fn apply_wrapper_state_overlay_with_timeout(
         &self,
         command: &mut crate::daemon::domain::NormalizedCommand,
@@ -7542,16 +7540,6 @@ impl ActorDaemonCoordinator {
 
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let _ = tokio::time::timeout(remaining, notified).await;
-        }
-    }
-
-    fn wrapper_state_wait_timeout(&self) -> Duration {
-        let is_test = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
-            || std::env::var_os("GITAI_TEST_DB_PATH").is_some();
-        if is_test {
-            Duration::from_secs(20)
-        } else {
-            Duration::from_millis(750)
         }
     }
 }
