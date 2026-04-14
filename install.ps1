@@ -104,9 +104,9 @@ function Stop-GitAiManagedProcesses {
     $pids = @($processes | Sort-Object ProcessId -Unique | Select-Object -ExpandProperty ProcessId)
     Write-Warning ("Stopping lingering git-ai processes: {0}" -f ($pids -join ', '))
 
-    foreach ($pid in $pids) {
+    foreach ($managedPid in $pids) {
         try {
-            Stop-Process -Id $pid -Force -ErrorAction Stop
+            Stop-Process -Id $managedPid -Force -ErrorAction Stop
         } catch { }
     }
 
@@ -519,6 +519,13 @@ try {
     Write-Success 'Successfully set up IDE/agent hooks'
 } catch {
     Write-Warning "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."
+}
+
+# Best-effort restart so detached self-updates can bring the background service back.
+try {
+    & $finalExe bg start *> $null
+} catch {
+    Write-Warning "Warning: Failed to restart git-ai background service automatically."
 }
 
 # Update PATH so our shim takes precedence over any Git entries
