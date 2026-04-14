@@ -12,4 +12,5 @@ pub mod mdm;
 pub mod metrics;
 pub mod observability;
 pub mod repo_url;
+pub mod ssh_config;
 pub mod utils;

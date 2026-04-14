@@ -217,6 +217,7 @@ fn build_repo_hook_context(repo: &Repository) -> RepoHookContext {
                     .map(|(_, url)| url)
             })
         })
+        .map(|url| crate::repo_url::normalize_repo_url(&url).unwrap_or(url))
         .unwrap_or_default();
 
     let repo_name = repo_url
