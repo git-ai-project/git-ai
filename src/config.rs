@@ -83,6 +83,10 @@ pub struct Config {
     quiet: bool,
     custom_attributes: HashMap<String, String>,
     git_ai_hooks: HashMap<String, Vec<String>>,
+    /// Maximum checkpoint JSONL file size in bytes before skipping parse (default: 64 MB)
+    max_checkpoint_jsonl_bytes: u64,
+    /// Maximum transcript file size in bytes before skipping parse (default: 32 MB)
+    max_transcript_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
@@ -154,6 +158,10 @@ pub struct FileConfig {
     pub custom_attributes: Option<HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_ai_hooks: Option<HashMap<String, Vec<String>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_checkpoint_jsonl_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_transcript_bytes: Option<u64>,
 }
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
@@ -416,6 +424,16 @@ impl Config {
         &self.git_ai_hooks
     }
 
+    /// Maximum checkpoint JSONL file size (bytes) before skipping parse to prevent OOM.
+    pub fn max_checkpoint_jsonl_bytes(&self) -> u64 {
+        self.max_checkpoint_jsonl_bytes
+    }
+
+    /// Maximum transcript file size (bytes) before skipping parse to prevent OOM.
+    pub fn max_transcript_bytes(&self) -> u64 {
+        self.max_transcript_bytes
+    }
+
     /// Returns configured shell commands for a specific hook.
     pub fn git_ai_hook_commands(&self, hook_name: &str) -> Option<&Vec<String>> {
         self.git_ai_hooks.get(hook_name)
@@ -653,6 +671,23 @@ fn build_config() -> Config {
     // Build custom attributes: file config as base, env var overrides
     let custom_attributes = build_custom_attributes(&file_cfg);
 
+    // Memory safety caps: configurable limits for checkpoint and transcript file sizes.
+    // Env vars take precedence over file config; defaults: 64 MB checkpoints, 32 MB transcripts.
+    const DEFAULT_MAX_CHECKPOINT_JSONL_BYTES: u64 = 64 * 1024 * 1024;
+    const DEFAULT_MAX_TRANSCRIPT_BYTES: u64 = 32 * 1024 * 1024;
+
+    let max_checkpoint_jsonl_bytes = env::var("GIT_AI_MAX_CHECKPOINT_JSONL_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.max_checkpoint_jsonl_bytes))
+        .unwrap_or(DEFAULT_MAX_CHECKPOINT_JSONL_BYTES);
+
+    let max_transcript_bytes = env::var("GIT_AI_MAX_TRANSCRIPT_BYTES")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .or_else(|| file_cfg.as_ref().and_then(|c| c.max_transcript_bytes))
+        .unwrap_or(DEFAULT_MAX_TRANSCRIPT_BYTES);
+
     let git_ai_hooks = file_cfg
         .as_ref()
         .and_then(|c| c.git_ai_hooks.clone())
@@ -698,6 +733,8 @@ fn build_config() -> Config {
             quiet,
             custom_attributes: custom_attributes.clone(),
             git_ai_hooks: git_ai_hooks.clone(),
+            max_checkpoint_jsonl_bytes,
+            max_transcript_bytes,
         };
         apply_test_config_patch(&mut config);
         config
@@ -723,6 +760,8 @@ fn build_config() -> Config {
         quiet,
         custom_attributes,
         git_ai_hooks,
+        max_checkpoint_jsonl_bytes,
+        max_transcript_bytes,
     }
 }
 
@@ -1125,6 +1164,8 @@ mod tests {
             quiet: false,
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
+            max_checkpoint_jsonl_bytes: 64 * 1024 * 1024,
+            max_transcript_bytes: 32 * 1024 * 1024,
         }
     }
 
@@ -1234,6 +1275,8 @@ mod tests {
             quiet: false,
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
+            max_checkpoint_jsonl_bytes: 64 * 1024 * 1024,
+            max_transcript_bytes: 32 * 1024 * 1024,
         }
     }
 
@@ -1352,6 +1395,8 @@ mod tests {
             quiet: false,
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
+            max_checkpoint_jsonl_bytes: 64 * 1024 * 1024,
+            max_transcript_bytes: 32 * 1024 * 1024,
         }
     }
 

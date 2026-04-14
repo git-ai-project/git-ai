@@ -6,10 +6,11 @@ use crate::{
     commands::checkpoint_agent::bash_tool::{
         self, Agent, BashCheckpointAction, HookEvent, ToolClass,
     },
+    config::Config,
     error::GitAiError,
     git::repository::find_repository_for_file,
     observability::log_error,
-    utils::normalize_to_posix,
+    utils::{debug_log, normalize_to_posix},
 };
 use chrono::{TimeZone, Utc};
 use dirs;
@@ -17,7 +18,33 @@ use glob::glob;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
+use std::io::BufRead;
 use std::path::{Component, Path, PathBuf};
+
+/// Check whether a transcript file exceeds the configured size cap.
+/// Returns `Err` if the file is too large, so callers propagate the error
+/// and preserve any previously-stored transcript instead of overwriting it
+/// with an empty one.
+fn check_transcript_size_cap(path: &str) -> Result<(), GitAiError> {
+    let max_bytes = Config::get().max_transcript_bytes();
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            if meta.len() > max_bytes {
+                let msg = format!(
+                    "Transcript file {} is {} bytes, exceeding cap of {} bytes — skipping parse to preserve existing data",
+                    path,
+                    meta.len(),
+                    max_bytes
+                );
+                debug_log(&msg);
+                Err(GitAiError::Generic(msg))
+            } else {
+                Ok(())
+            }
+        }
+        Err(_) => Ok(()), // If we can't read metadata, let the parser handle the error
+    }
+}
 
 pub struct AgentCheckpointFlags {
     pub hook_input: Option<String>,
@@ -381,16 +408,19 @@ impl ClaudePreset {
     pub fn transcript_and_model_from_claude_code_jsonl(
         transcript_path: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {
-        let jsonl_content =
-            std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
+        // No size cap: this parser streams line-by-line via BufReader
+        let file = std::fs::File::open(transcript_path).map_err(GitAiError::IoError)?;
+        let reader = std::io::BufReader::new(file);
         let mut transcript = AiTranscript::new();
         let mut model = None;
         let mut plan_states = std::collections::HashMap::new();
 
-        for line in jsonl_content.lines() {
-            if !line.trim().is_empty() {
+        for line_result in reader.lines() {
+            let line = line_result.map_err(GitAiError::IoError)?;
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
                 // Parse the raw JSONL entry
-                let raw_entry: serde_json::Value = serde_json::from_str(line)?;
+                let raw_entry: serde_json::Value = serde_json::from_str(trimmed)?;
                 let timestamp = raw_entry["timestamp"].as_str().map(|s| s.to_string());
 
                 // Extract model from assistant messages if we haven't found it yet
@@ -590,9 +620,11 @@ impl GeminiPreset {
     pub fn transcript_and_model_from_gemini_json(
         transcript_path: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {
-        let json_content = std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
+        check_transcript_size_cap(transcript_path)?;
+        let file = std::fs::File::open(transcript_path).map_err(GitAiError::IoError)?;
+        let reader = std::io::BufReader::new(file);
         let conversation: serde_json::Value =
-            serde_json::from_str(&json_content).map_err(GitAiError::JsonError)?;
+            serde_json::from_reader(reader).map_err(GitAiError::JsonError)?;
 
         let messages = conversation
             .get("messages")
@@ -797,17 +829,20 @@ impl WindsurfPreset {
     pub fn transcript_and_model_from_windsurf_jsonl(
         transcript_path: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {
-        let content = std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
+        // No size cap: this parser streams line-by-line via BufReader
+        let file = std::fs::File::open(transcript_path).map_err(GitAiError::IoError)?;
+        let reader = std::io::BufReader::new(file);
 
         let mut transcript = AiTranscript::new();
 
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() {
+        for line_result in reader.lines() {
+            let line = line_result.map_err(GitAiError::IoError)?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
 
-            let entry: serde_json::Value = match serde_json::from_str(line) {
+            let entry: serde_json::Value = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
                 Err(_) => continue, // skip malformed lines
             };
@@ -1238,9 +1273,11 @@ impl ContinueCliPreset {
     pub fn transcript_from_continue_json(
         transcript_path: &str,
     ) -> Result<AiTranscript, GitAiError> {
-        let json_content = std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
+        check_transcript_size_cap(transcript_path)?;
+        let file = std::fs::File::open(transcript_path).map_err(GitAiError::IoError)?;
+        let reader = std::io::BufReader::new(file);
         let conversation: serde_json::Value =
-            serde_json::from_str(&json_content).map_err(GitAiError::JsonError)?;
+            serde_json::from_reader(reader).map_err(GitAiError::JsonError)?;
 
         let history = conversation
             .get("history")
@@ -1602,138 +1639,151 @@ impl CodexPreset {
     pub fn transcript_and_model_from_codex_rollout_jsonl(
         transcript_path: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {
-        let jsonl_content =
-            std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
-
-        let mut parsed_lines: Vec<serde_json::Value> = Vec::new();
-        for line in jsonl_content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let value: serde_json::Value = serde_json::from_str(trimmed)?;
-            parsed_lines.push(value);
-        }
-
+        // No size cap: this parser streams line-by-line via BufReader
         let mut transcript = AiTranscript::new();
         let mut model = None;
 
-        for entry in &parsed_lines {
-            let timestamp = entry
-                .get("timestamp")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+        // Pass 1: Stream through file looking for turn_context and response_item entries.
+        {
+            let file = std::fs::File::open(transcript_path).map_err(GitAiError::IoError)?;
+            let reader = std::io::BufReader::new(file);
 
-            let item_type = entry
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let payload = entry.get("payload").unwrap_or(entry);
-
-            match item_type {
-                "turn_context" => {
-                    if let Some(model_name) = payload.get("model").and_then(|v| v.as_str())
-                        && !model_name.trim().is_empty()
-                    {
-                        // Keep the latest model for sessions that switched models mid-thread.
-                        model = Some(model_name.to_string());
-                    }
+            for line_result in reader.lines() {
+                let line = line_result.map_err(GitAiError::IoError)?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
                 }
-                "response_item" => {
-                    let response_type = payload
-                        .get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    match response_type {
-                        "message" => {
-                            let role = payload
-                                .get("role")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or_default();
+                let entry: serde_json::Value = serde_json::from_str(trimmed)?;
 
-                            let mut text_parts: Vec<String> = Vec::new();
-                            if let Some(content_arr) =
-                                payload.get("content").and_then(|v| v.as_array())
-                            {
-                                for item in content_arr {
-                                    let content_type = item
-                                        .get("type")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or_default();
-                                    if (role == "assistant" || role == "user")
-                                        && (content_type == "output_text"
-                                            || content_type == "input_text")
-                                        && let Some(text) =
-                                            item.get("text").and_then(|v| v.as_str())
-                                    {
-                                        let trimmed = text.trim();
-                                        if !trimmed.is_empty() {
-                                            text_parts.push(trimmed.to_string());
+                let timestamp = entry
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                let item_type = entry
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let payload = entry.get("payload").unwrap_or(&entry);
+
+                match item_type {
+                    "turn_context" => {
+                        if let Some(model_name) = payload.get("model").and_then(|v| v.as_str())
+                            && !model_name.trim().is_empty()
+                        {
+                            model = Some(model_name.to_string());
+                        }
+                    }
+                    "response_item" => {
+                        let response_type = payload
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        match response_type {
+                            "message" => {
+                                let role = payload
+                                    .get("role")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default();
+
+                                let mut text_parts: Vec<String> = Vec::new();
+                                if let Some(content_arr) =
+                                    payload.get("content").and_then(|v| v.as_array())
+                                {
+                                    for item in content_arr {
+                                        let content_type = item
+                                            .get("type")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or_default();
+                                        if (role == "assistant" || role == "user")
+                                            && (content_type == "output_text"
+                                                || content_type == "input_text")
+                                            && let Some(text) =
+                                                item.get("text").and_then(|v| v.as_str())
+                                        {
+                                            let text_trimmed = text.trim();
+                                            if !text_trimmed.is_empty() {
+                                                text_parts.push(text_trimmed.to_string());
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            if !text_parts.is_empty() {
-                                let joined = text_parts.join("\n");
-                                if role == "user" {
-                                    transcript.add_message(Message::User {
-                                        text: joined,
-                                        timestamp: timestamp.clone(),
-                                    });
-                                } else if role == "assistant" {
-                                    transcript.add_message(Message::Assistant {
-                                        text: joined,
-                                        timestamp: timestamp.clone(),
-                                    });
+                                if !text_parts.is_empty() {
+                                    let joined = text_parts.join("\n");
+                                    if role == "user" {
+                                        transcript.add_message(Message::User {
+                                            text: joined,
+                                            timestamp: timestamp.clone(),
+                                        });
+                                    } else if role == "assistant" {
+                                        transcript.add_message(Message::Assistant {
+                                            text: joined,
+                                            timestamp: timestamp.clone(),
+                                        });
+                                    }
                                 }
                             }
-                        }
-                        "function_call" | "custom_tool_call" | "local_shell_call"
-                        | "web_search_call" => {
-                            let name = payload
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or(response_type)
-                                .to_string();
+                            "function_call" | "custom_tool_call" | "local_shell_call"
+                            | "web_search_call" => {
+                                let name = payload
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(response_type)
+                                    .to_string();
 
-                            let input = if response_type == "function_call" {
-                                if let Some(arguments) =
-                                    payload.get("arguments").and_then(|v| v.as_str())
-                                {
-                                    serde_json::from_str::<serde_json::Value>(arguments)
-                                        .unwrap_or_else(|_| {
-                                            serde_json::Value::String(arguments.to_string())
+                                let input = if response_type == "function_call" {
+                                    if let Some(arguments) =
+                                        payload.get("arguments").and_then(|v| v.as_str())
+                                    {
+                                        serde_json::from_str::<serde_json::Value>(arguments)
+                                            .unwrap_or_else(|_| {
+                                                serde_json::Value::String(arguments.to_string())
+                                            })
+                                    } else {
+                                        payload.get("arguments").cloned().unwrap_or_else(|| {
+                                            serde_json::Value::Object(serde_json::Map::new())
                                         })
+                                    }
+                                } else if let Some(input) =
+                                    payload.get("input").and_then(|v| v.as_str())
+                                {
+                                    serde_json::Value::String(input.to_string())
                                 } else {
-                                    payload.get("arguments").cloned().unwrap_or_else(|| {
-                                        serde_json::Value::Object(serde_json::Map::new())
-                                    })
-                                }
-                            } else if let Some(input) =
-                                payload.get("input").and_then(|v| v.as_str())
-                            {
-                                serde_json::Value::String(input.to_string())
-                            } else {
-                                payload.clone()
-                            };
+                                    payload.clone()
+                                };
 
-                            transcript.add_message(Message::ToolUse {
-                                name,
-                                input,
-                                timestamp: timestamp.clone(),
-                            });
+                                transcript.add_message(Message::ToolUse {
+                                    name,
+                                    input,
+                                    timestamp: timestamp.clone(),
+                                });
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
 
         if transcript.messages().is_empty() {
-            // Backward-compatible fallback for sessions that only recorded legacy event messages.
-            for entry in &parsed_lines {
+            // Backward-compatible fallback: re-stream file looking for legacy event_msg entries.
+            let file = std::fs::File::open(transcript_path).map_err(GitAiError::IoError)?;
+            let reader = std::io::BufReader::new(file);
+
+            for line_result in reader.lines() {
+                let line = line_result.map_err(GitAiError::IoError)?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let entry: serde_json::Value = match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
                 let timestamp = entry
                     .get("timestamp")
                     .and_then(|v| v.as_str())
@@ -1742,7 +1792,7 @@ impl CodexPreset {
                     continue;
                 }
 
-                let payload = entry.get("payload").unwrap_or(entry);
+                let payload = entry.get("payload").unwrap_or(&entry);
                 let event_type = payload
                     .get("type")
                     .and_then(|v| v.as_str())
@@ -1750,10 +1800,10 @@ impl CodexPreset {
 
                 if event_type == "user_message" {
                     if let Some(text) = payload.get("message").and_then(|v| v.as_str()) {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
+                        let text_trimmed = text.trim();
+                        if !text_trimmed.is_empty() {
                             transcript.add_message(Message::User {
-                                text: trimmed.to_string(),
+                                text: text_trimmed.to_string(),
                                 timestamp: timestamp.clone(),
                             });
                         }
@@ -1761,10 +1811,10 @@ impl CodexPreset {
                 } else if event_type == "agent_message"
                     && let Some(text) = payload.get("message").and_then(|v| v.as_str())
                 {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
+                    let text_trimmed = text.trim();
+                    if !text_trimmed.is_empty() {
                         transcript.add_message(Message::Assistant {
-                            text: trimmed.to_string(),
+                            text: text_trimmed.to_string(),
                             timestamp: timestamp.clone(),
                         });
                     }
@@ -3393,17 +3443,19 @@ impl DroidPreset {
     pub fn transcript_and_model_from_droid_jsonl(
         transcript_path: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {
-        let jsonl_content =
-            std::fs::read_to_string(transcript_path).map_err(GitAiError::IoError)?;
+        // No size cap: this parser streams line-by-line via BufReader
+        let file = std::fs::File::open(transcript_path).map_err(GitAiError::IoError)?;
+        let reader = std::io::BufReader::new(file);
         let mut transcript = AiTranscript::new();
         let mut plan_states = std::collections::HashMap::new();
 
-        for line in jsonl_content.lines() {
+        for line_result in reader.lines() {
+            let line = line_result.map_err(GitAiError::IoError)?;
             if line.trim().is_empty() {
                 continue;
             }
 
-            let raw_entry: serde_json::Value = serde_json::from_str(line)?;
+            let raw_entry: serde_json::Value = serde_json::from_str(line.trim())?;
 
             // Only process "message" entries; skip session_start, todo_state, etc.
             if raw_entry["type"].as_str() != Some("message") {
@@ -3545,6 +3597,8 @@ impl GithubCopilotPreset {
         if is_codespaces || is_remote_containers {
             return Ok((AiTranscript::new(), None, Some(Vec::new())));
         }
+
+        check_transcript_size_cap(session_json_path)?;
 
         // Read the session JSON file.
         // Supports both plain .json (pretty-printed or single-line) and .jsonl files

@@ -2,6 +2,7 @@ use crate::authorship::attribution_tracker::LineAttribution;
 use crate::authorship::authorship_log::{HumanRecord, PromptRecord};
 use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::working_log::{CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind};
+use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::rewrite_log::{RewriteLogEvent, append_event_to_file};
 use crate::utils::{debug_log, normalize_to_posix};
@@ -394,7 +395,7 @@ impl PersistedWorkingLog {
 
     /* append checkpoint */
     pub fn append_checkpoint(&self, checkpoint: &Checkpoint) -> Result<(), GitAiError> {
-        // Read existing checkpoints
+        // Read existing checkpoints (now uses streaming BufReader, not read_to_string)
         let mut checkpoints = self.read_all_checkpoints().unwrap_or_default();
 
         // Create a copy, potentially without transcript to reduce storage size.
@@ -465,16 +466,34 @@ impl PersistedWorkingLog {
             return Ok(Vec::new());
         }
 
-        let content = fs::read_to_string(&checkpoints_file)?;
+        // Log a warning for oversized checkpoint files, but still parse them.
+        // With streaming BufReader we no longer load the entire file into a String,
+        // so OOM risk is reduced.  Returning an empty Vec here would cause callers
+        // (post_commit, status, pre-commit) to silently drop existing AI authorship.
+        if let Ok(meta) = fs::metadata(&checkpoints_file) {
+            let max_bytes = Config::get().max_checkpoint_jsonl_bytes();
+            if meta.len() > max_bytes {
+                debug_log(&format!(
+                    "checkpoints.jsonl is {} bytes, exceeding advisory cap of {} bytes — parsing with streaming reader",
+                    meta.len(),
+                    max_bytes
+                ));
+            }
+        }
+
+        let file = std::fs::File::open(&checkpoints_file)?;
+        let reader = std::io::BufReader::new(file);
         let mut checkpoints = Vec::new();
 
-        // Parse JSONL file - each line is a separate JSON object
-        for line in content.lines() {
+        // Parse JSONL file line-by-line without loading entire file into memory
+        use std::io::BufRead;
+        for line_result in reader.lines() {
+            let line = line_result?;
             if line.trim().is_empty() {
                 continue;
             }
 
-            let checkpoint: Checkpoint = serde_json::from_str(line)
+            let checkpoint: Checkpoint = serde_json::from_str(line.trim())
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
             if checkpoint.api_version != CHECKPOINT_API_VERSION {
@@ -488,7 +507,7 @@ impl PersistedWorkingLog {
             checkpoints.push(checkpoint);
         }
 
-        // Migrate 7-char prompt hashes to 16-char hashes
+        // Migrate 7-char prompt hashes to 16-char hashes in-place
         // Step 1: Build mapping from old 7-char hash to new 16-char hash
         let mut old_to_new_hash: HashMap<String, String> = HashMap::new();
 
@@ -500,11 +519,9 @@ impl PersistedWorkingLog {
             }
         }
 
-        // Step 2: Replace 7-char author_ids in all checkpoints' attributions and line_attributions
-        let mut migrated_checkpoints = Vec::new();
-        for mut checkpoint in checkpoints {
+        // Step 2: Replace 7-char author_ids in-place (no second Vec allocation)
+        for checkpoint in &mut checkpoints {
             for entry in &mut checkpoint.entries {
-                // Replace author_ids in attributions
                 for attr in &mut entry.attributions {
                     if attr.author_id.len() == 7
                         && let Some(new_hash) = old_to_new_hash.get(&attr.author_id)
@@ -513,14 +530,12 @@ impl PersistedWorkingLog {
                     }
                 }
 
-                // Replace author_ids in line_attributions
                 for line_attr in &mut entry.line_attributions {
                     if line_attr.author_id.len() == 7
                         && let Some(new_hash) = old_to_new_hash.get(&line_attr.author_id)
                     {
                         line_attr.author_id = new_hash.clone();
                     }
-                    // Also migrate the overrode field if it contains a 7-char hash
                     if let Some(ref overrode_id) = line_attr.overrode
                         && overrode_id.len() == 7
                         && let Some(new_hash) = old_to_new_hash.get(overrode_id)
@@ -529,10 +544,9 @@ impl PersistedWorkingLog {
                     }
                 }
             }
-            migrated_checkpoints.push(checkpoint);
         }
 
-        Ok(migrated_checkpoints)
+        Ok(checkpoints)
     }
 
     /// Remove char-level attributions from all but the most recent checkpoint per file.

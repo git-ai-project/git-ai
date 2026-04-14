@@ -737,15 +737,23 @@ fn resolve_live_checkpoint_execution(
         };
     }
 
+    let read_checkpoints_start = Instant::now();
+    let previous_checkpoints = working_log.read_all_checkpoints()?;
+    debug_log(&format!(
+        "[BENCHMARK] Reading {} checkpoints for file discovery took {:?}",
+        previous_checkpoints.len(),
+        read_checkpoints_start.elapsed()
+    ));
+
     let files_start = Instant::now();
     let files = get_all_tracked_files(
         repo,
-        &base_commit,
         &working_log,
         filtered_pathspec.as_ref(),
         is_pre_commit,
         is_pre_commit && filtered_pathspec.is_some(),
         &ignore_matcher,
+        &previous_checkpoints,
     )?;
     debug_log(&format!(
         "[BENCHMARK] get_all_tracked_files found {} files, took {:?}",
@@ -1314,12 +1322,12 @@ fn get_status_of_files(
 ///
 fn get_all_tracked_files(
     repo: &Repository,
-    _base_commit: &str,
     working_log: &PersistedWorkingLog,
     edited_filepaths: Option<&Vec<String>>,
     is_pre_commit: bool,
     preserve_explicit_pre_commit_paths: bool,
     ignore_matcher: &IgnoreMatcher,
+    previous_checkpoints: &[Checkpoint],
 ) -> Result<Vec<String>, GitAiError> {
     let explicit_pre_commit_paths: HashSet<String> = edited_filepaths
         .map(|paths| {
@@ -1374,43 +1382,37 @@ fn get_all_tracked_files(
     ));
 
     let checkpoints_read_start = Instant::now();
-    if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        for checkpoint in &working_log_data {
-            for entry in &checkpoint.entries {
-                // Normalize path separators to forward slashes
-                let normalized_path = normalize_to_posix(&entry.file);
-                // Filter out paths outside the repository to prevent git command failures
-                if !is_path_in_repo(&normalized_path) {
-                    debug_log(&format!(
-                        "Skipping checkpoint file outside repository: {}",
-                        normalized_path
-                    ));
-                    continue;
-                }
-                if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
-                    continue;
-                }
-                if !files.contains(&normalized_path) {
-                    // Check if it's a text file before adding
-                    if is_text_file(working_log, &normalized_path) {
-                        files.insert(normalized_path);
-                    }
+    for checkpoint in previous_checkpoints {
+        for entry in &checkpoint.entries {
+            // Normalize path separators to forward slashes
+            let normalized_path = normalize_to_posix(&entry.file);
+            // Filter out paths outside the repository to prevent git command failures
+            if !is_path_in_repo(&normalized_path) {
+                debug_log(&format!(
+                    "Skipping checkpoint file outside repository: {}",
+                    normalized_path
+                ));
+                continue;
+            }
+            if should_ignore_file_with_matcher(&normalized_path, ignore_matcher) {
+                continue;
+            }
+            if !files.contains(&normalized_path) {
+                // Check if it's a text file before adding
+                if is_text_file(working_log, &normalized_path) {
+                    files.insert(normalized_path);
                 }
             }
         }
     }
     debug_log(&format!(
-        "[BENCHMARK]   Reading checkpoints in get_all_tracked_files took {:?}",
+        "[BENCHMARK]   Scanning checkpoints in get_all_tracked_files took {:?}",
         checkpoints_read_start.elapsed()
     ));
 
-    let has_ai_checkpoints = if let Ok(working_log_data) = working_log.read_all_checkpoints() {
-        working_log_data.iter().any(|checkpoint| {
-            checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab
-        })
-    } else {
-        false
-    };
+    let has_ai_checkpoints = previous_checkpoints.iter().any(|checkpoint| {
+        checkpoint.kind == CheckpointKind::AiAgent || checkpoint.kind == CheckpointKind::AiTab
+    });
 
     let status_files_start = Instant::now();
     let mut results_for_tracked_files = if is_pre_commit && !has_ai_checkpoints {
