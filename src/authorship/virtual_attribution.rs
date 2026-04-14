@@ -2168,8 +2168,8 @@ pub fn merge_attributions_favoring_first(
         &HashMap::new(),
     );
 
-    // Overwrite total_additions/total_deletions with the summed values from both sources,
-    // since merge should reflect the combined totals from primary + secondary.
+    // Overwrite total_additions/total_deletions with the max values from both sources,
+    // since totals are cumulative and merge should reflect the highest seen across sources.
     for (prompt_id, commits) in merged.prompts.iter_mut() {
         if let Some(&(additions, deletions)) = saved_totals.get(prompt_id) {
             for prompt_record in commits.values_mut() {
