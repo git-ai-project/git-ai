@@ -3489,6 +3489,112 @@ export default function ExtraLanguageCard({
     }
 }
 
+/// Regression test: AI inserts comments and a blank line into an existing AI-written file.
+/// The blank line is byte-identical to existing blank lines, so imara-diff matches it as
+/// Equal. Git diff treats it as inserted. Without gap-filling, it shows as [no-data].
+/// Reproduces exact scenario from user bug report with calcb.py.
+#[test]
+fn test_diff_ai_inserted_blank_line_with_comments_attributed_to_ai() {
+    let repo = TestRepo::new();
+
+    // Step 1: AI writes the initial file (first Claude session)
+    let file_path = "calcb.py";
+    let initial_content = "\
+import sys
+
+
+def add(a: int, b: int) -> int:
+    return a + b
+
+
+def main():
+    if len(sys.argv) != 3:
+        print(\"Usage: python calcb.py <int1> <int2>\")
+        sys.exit(1)
+    a = int(sys.argv[1])
+    b = int(sys.argv[2])
+    result = add(a, b)
+    print(f\"{a} + {b} = {result}\")
+
+
+if __name__ == \"__main__\":
+    main()
+";
+
+    let full_path = repo.path().join(file_path);
+    fs::write(&full_path, initial_content).expect("write initial content");
+    repo.git_ai(&["checkpoint", "mock_ai", file_path])
+        .expect("checkpoint initial write");
+    repo.git(&["add", file_path]).expect("git add");
+    repo.commit("initial").expect("initial commit");
+
+    // Step 2: AI adds comments and a blank line (second Claude session edit)
+    let edited_content = "\
+import sys
+
+# Simple integer addition calculator
+# Accepts two integers as command-line arguments
+
+
+def add(a: int, b: int) -> int:
+    \"\"\"Return the sum of two integers.\"\"\"
+    return a + b
+
+
+def main():
+    # Validate that exactly two arguments are provided
+    if len(sys.argv) != 3:
+        print(\"Usage: python calcb.py <int1> <int2>\")
+        sys.exit(1)
+    a = int(sys.argv[1])
+    b = int(sys.argv[2])
+    result = add(a, b)
+    # Display the result in a readable format
+    print(f\"{a} + {b} = {result}\")
+
+
+if __name__ == \"__main__\":
+    main()
+";
+
+    fs::write(&full_path, edited_content).expect("write edited content");
+    repo.git_ai(&["checkpoint", "mock_ai", file_path])
+        .expect("checkpoint edit");
+    repo.git(&["add", file_path]).expect("git add");
+    let commit = repo.commit("add comments").expect("commit");
+
+    // Step 3: verify no [no-data] lines in the diff
+    let diff_output = repo
+        .git_ai(&["diff", &commit.commit_sha])
+        .expect("git ai diff should succeed");
+
+    let diff_lines = parse_diff_output(&diff_output);
+    let added_lines: Vec<&DiffLine> = diff_lines.iter().filter(|l| l.prefix == "+").collect();
+
+    assert!(
+        !added_lines.is_empty(),
+        "Expected added lines in diff output.\nFull diff:\n{}",
+        diff_output
+    );
+
+    let no_data_lines: Vec<&&DiffLine> = added_lines
+        .iter()
+        .filter(|l| l.attribution.as_deref() == Some("no-data"))
+        .collect();
+
+    assert!(
+        no_data_lines.is_empty(),
+        "Found {} added lines with [no-data] that should be attributed to AI:\n{}\nFull diff:\n{}",
+        no_data_lines.len(),
+        no_data_lines
+            .iter()
+            .map(|l| format!("  +{} [no-data]", l.content))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        diff_output
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_diff_single_commit,
     test_diff_commit_range,
@@ -3533,4 +3639,5 @@ crate::reuse_tests_in_worktree!(
     test_diff_json_output_includes_human_id_in_hunks,
     test_diff_json_humans_map_complete_across_multiple_commits,
     test_diff_ai_reindented_lines_attributed_to_ai,
+    test_diff_ai_inserted_blank_line_with_comments_attributed_to_ai,
 );
