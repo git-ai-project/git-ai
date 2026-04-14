@@ -2418,9 +2418,27 @@ fn test_ci_squash_merge_with_merge_commit_in_source() {
 
     // Bob should have AI stats (from bob.ts AI line)
     let total_ai: u32 = contributors.values().map(|c| c.ai_accepted).sum();
-    assert!(
-        total_ai >= 1,
-        "Bob should have ai_accepted >= 1. Got: {:?}",
+    assert_eq!(
+        total_ai, 1,
+        "ai_accepted should be 1 (bobAI). Got: {:?}",
+        contributors
+    );
+
+    // manual_additions must NOT include Alice's lines from the merge commit.
+    // Bob's commit has 3 additions: "// bob code" (manual), "bobAI" (AI), "bobManual" (manual).
+    // Only the 2 non-AI lines should be manual. The merge commit brought in Alice's
+    // 2 lines, but those must be excluded (merge commit diff inflation fix).
+    let total_manual: u32 = contributors.values().map(|c| c.manual_additions).sum();
+    assert_eq!(
+        total_manual, 2,
+        "manual_additions should be 2 (Bob's non-AI lines only, not Alice's merged lines). Got: {:?}",
+        contributors
+    );
+
+    let total_human: u32 = contributors.values().map(|c| c.human_additions).sum();
+    assert_eq!(
+        total_human, 2,
+        "human_additions should be 2 (manual only, no mixed). Got: {:?}",
         contributors
     );
 }

@@ -718,7 +718,7 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     // human-edited AI lines to the human, not the AI. We propagate the source values.
     // Also collect full prompt records so we can add any that VA failed to load
     // (discover_and_load_foreign_prompts silently swallows errors).
-    let mut summed_totals: HashMap<String, (u32, u32, u32)> = HashMap::new();
+    let mut summed_totals: HashMap<String, (u32, u32, u32, u32)> = HashMap::new();
     let mut source_prompt_records: HashMap<
         String,
         crate::authorship::authorship_log::PromptRecord,
@@ -726,10 +726,13 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     for commit_sha in &source_commits {
         if let Ok(log) = get_reference_as_authorship_log_v3(repo, commit_sha) {
             for (prompt_id, record) in log.metadata.prompts {
-                let entry = summed_totals.entry(prompt_id.clone()).or_insert((0, 0, 0));
+                let entry = summed_totals
+                    .entry(prompt_id.clone())
+                    .or_insert((0, 0, 0, 0));
                 entry.0 = entry.0.saturating_add(record.total_additions);
                 entry.1 = entry.1.saturating_add(record.total_deletions);
                 entry.2 = entry.2.saturating_add(record.overriden_lines);
+                entry.3 = entry.3.saturating_add(record.accepted_lines);
                 // Keep first-seen full record for prompts VA may have missed
                 source_prompt_records.entry(prompt_id).or_insert(record);
             }
@@ -743,7 +746,9 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     }
 
     for (prompt_id, record) in authorship_log.metadata.prompts.iter_mut() {
-        if let Some((additions, deletions, overriden)) = summed_totals.get(prompt_id) {
+        if let Some((additions, deletions, overriden, source_accepted)) =
+            summed_totals.get(prompt_id)
+        {
             record.total_additions = *additions;
             record.total_deletions = *deletions;
             // Fix up overriden_lines and accepted_lines.
@@ -757,31 +762,30 @@ pub fn rewrite_authorship_after_squash_or_rebase(
             // overrides that blame can't detect. Take whichever is larger.
             record.overriden_lines = record.overriden_lines.max(source_overriden);
 
-            // Fix up accepted_lines when the VA undercounts them.
-            // Two cases where this happens:
-            //
-            // Case 1: h_ false positives inflate VA overrides beyond source.
-            // The upstream VA merge gives target-branch KnownHuman (h_)
-            // attributions priority over source AI attributions by timestamp.
-            // This causes accepted AI lines to appear as "overridden by human".
-            // Detect: VA found MORE overrides than source notes report.
-            //
-            // Case 2: h_ false positives masked by real overrides.
-            // When the same prompt spans multiple source commits (e.g., one
-            // with accepted=1 and another with overridden=1), VA may report
-            // overridden=1 (h_ false positive for the accepted line) while
-            // source also sums to overridden=1 (the real override). The
-            // numerical equality masks the h_ false positive.
-            // Detect: accepted + overridden < total_additions.
-            if record.accepted_lines == 0 && *additions > 0 {
+            // Fix up accepted_lines. Both VA and source can be wrong:
+            // - VA can overcount (manual line blamed to AI during merge)
+            // - VA can undercount to 0 (h_ false positives steal AI attributions)
+            // - Source sum can overcount (same prompt accepted in commit A,
+            //   overridden in later commit B — sum still has A's accepted count)
+            if *source_accepted > 0 && record.accepted_lines > 0 {
+                // Both non-zero: take the minimum to handle either direction
+                // of error. VA overcounts → source caps it; source overcounts
+                // (intra-prompt override across commits) → VA caps it.
+                record.accepted_lines = record.accepted_lines.min(*source_accepted);
+            } else if *source_accepted > 0 {
+                // VA undercounted to 0 (h_ false positive). Source is authoritative.
+                // Also fix overriden_lines: VA's inflated overrides from h_
+                // conflicts need resetting to source authority.
                 if original_va_overriden > source_overriden {
-                    // Case 1: VA inflated overrides from h_ conflicts.
-                    // Use source notes overriden as authoritative.
                     record.overriden_lines = source_overriden;
                 }
-                // Derive accepted from invariant: accepted = additions - overridden.
-                // Handles both cases — after Case 1 resets overriden, or when
-                // Case 2 leaves overriden correct but accepted undercounted.
+                record.accepted_lines = *source_accepted;
+            } else if record.accepted_lines == 0 && *additions > 0 {
+                // Both 0 — derive from invariant (e.g. same-prompt-across-commits
+                // where individual accepted_lines are 0 but lines exist).
+                if original_va_overriden > source_overriden {
+                    record.overriden_lines = source_overriden;
+                }
                 if *additions > record.overriden_lines {
                     record.accepted_lines = additions.saturating_sub(record.overriden_lines);
                 }
@@ -794,14 +798,18 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     // leaving attestations that reference prompt IDs not in the metadata.
     for (prompt_id, mut record) in source_prompt_records {
         if !authorship_log.metadata.prompts.contains_key(&prompt_id) {
-            if let Some((additions, deletions, overriden)) = summed_totals.get(&prompt_id) {
+            if let Some((additions, deletions, overriden, source_accepted)) =
+                summed_totals.get(&prompt_id)
+            {
                 record.total_additions = *additions;
                 record.total_deletions = *deletions;
                 record.overriden_lines = *overriden;
-                // Derive accepted_lines from invariant: the first-seen record's
-                // accepted_lines may not reflect the sum across all source commits
-                // when the same prompt appears in multiple commits.
-                if *additions > *overriden {
+                // Use source accepted_lines when available; fall back to
+                // deriving from invariant when the first-seen record's value
+                // may not reflect the sum across all source commits.
+                if *source_accepted > 0 {
+                    record.accepted_lines = *source_accepted;
+                } else if *additions > *overriden {
                     record.accepted_lines = additions.saturating_sub(*overriden);
                 } else {
                     record.accepted_lines = 0;
@@ -4957,8 +4965,11 @@ fn build_contributors_from_merged_log(
     let normalized_commit_email = normalize_email(&commit_author_email, noreply_normalizer);
 
     // Sum git diff added lines across all source commits for manual line calculation.
+    // Skip merge commits — their diff against first parent includes the entire
+    // merged branch, which would massively inflate manual_additions.
     let git_diff_added_lines: u32 = source_commits
         .iter()
+        .filter(|sha| !is_merge_commit(repo, sha))
         .map(|sha| get_commit_diff_added_lines(repo, sha))
         .sum();
 
@@ -5087,7 +5098,13 @@ fn build_contributors(
                 let commit_author_name = get_commit_author_name(repo, sha);
                 let normalized_commit_email =
                     normalize_email(&commit_author_email, &noreply_normalizer);
-                let git_diff_added_lines = get_commit_diff_added_lines(repo, sha);
+                // For merge commits, git diff against first parent inflates added lines
+                // with the entire merged branch. Use 0 to avoid inflating manual_additions.
+                let git_diff_added_lines = if is_merge_commit(repo, sha) {
+                    0
+                } else {
+                    get_commit_diff_added_lines(repo, sha)
+                };
 
                 let mut total_ai_accepted: u32 = 0;
                 let mut total_mixed: u32 = 0;
@@ -5137,7 +5154,12 @@ fn build_contributors(
             }
         }
 
-        // Priority 3: no notes — all lines are manual
+        // Priority 3: no notes — all lines are manual.
+        // Skip merge commits: their diff against first parent shows the entire
+        // merged branch content, not new manual work by this developer.
+        if is_merge_commit(repo, sha) {
+            continue;
+        }
         let commit_author_email = get_commit_author_email(repo, sha);
         let commit_author_name = get_commit_author_name(repo, sha);
         let normalized_commit_email = normalize_email(&commit_author_email, &noreply_normalizer);
@@ -5232,6 +5254,20 @@ fn get_commit_diff_added_lines(repo: &Repository, commit_sha: &str) -> u32 {
         }
     }
     total
+}
+
+/// Check whether a commit is a merge commit (has 2+ parents).
+/// Merge commits' diffs against first parent include the entire merged branch,
+/// which inflates manual_additions if counted in contributor stats.
+fn is_merge_commit(repo: &Repository, commit_sha: &str) -> bool {
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "rev-parse".to_string(),
+        "--verify".to_string(),
+        "--quiet".to_string(),
+        format!("{}^2", commit_sha),
+    ]);
+    exec_git(&args).is_ok()
 }
 
 /// Resolve contributor email from a prompt's `human_author` field.
