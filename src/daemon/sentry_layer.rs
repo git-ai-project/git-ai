@@ -62,10 +62,8 @@ impl Visit for MessageVisitor {
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
-        self.fields.insert(
-            field.name().to_string(),
-            serde_json::Value::Bool(value),
-        );
+        self.fields
+            .insert(field.name().to_string(), serde_json::Value::Bool(value));
     }
 }
 

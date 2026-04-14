@@ -180,7 +180,8 @@ fn create_authorship_log_for_range(
 
     tracing::debug!(
         "Calculating authorship log for range: {} -> {}",
-        start_sha, end_sha
+        start_sha,
+        end_sha
     );
 
     // Step 1: Get list of changed files between the two commits

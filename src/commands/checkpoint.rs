@@ -916,10 +916,7 @@ fn execute_resolved_checkpoint(
                 None,
             )
         {
-            tracing::debug!(
-                "[Warning] Failed to upsert prompt to database: {}",
-                e
-            );
+            tracing::debug!("[Warning] Failed to upsert prompt to database: {}", e);
             crate::observability::log_error(
                 &e,
                 Some(serde_json::json!({

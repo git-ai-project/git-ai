@@ -33,10 +33,7 @@ pub fn fetch_pull_pre_command_hook(
 
     // Spawn background thread to fetch authorship notes in parallel with main fetch
     Some(std::thread::spawn(move || {
-        tracing::debug!(
-            "started fetching authorship notes from remote: {}",
-            remote
-        );
+        tracing::debug!("started fetching authorship notes from remote: {}", remote);
         // Recreate repository in the background thread
         if let Ok(repo) = find_repository(&global_args) {
             if let Err(e) = fetch_authorship_notes(&repo, &remote) {
@@ -69,7 +66,9 @@ pub fn pull_pre_command_hook(
 
     tracing::debug!(
         "pull pre-hook: rebase={}, autostash={}, has_changes={}",
-        config.is_rebase, config.is_autostash, has_changes
+        config.is_rebase,
+        config.is_autostash,
+        has_changes
     );
 
     // Write RebaseStart so that `git rebase --continue` (after conflict)
@@ -84,16 +83,15 @@ pub fn pull_pre_command_hook(
             crate::git::rewrite_log::RebaseStartEvent::new_with_onto(head_sha, false, None),
         );
         if let Err(e) = repository.storage.append_rewrite_event(start_event) {
-            tracing::debug!(
-                "pull pre-hook: failed to write RebaseStart: {}",
-                e
-            );
+            tracing::debug!("pull pre-hook: failed to write RebaseStart: {}", e);
         }
     }
 
     // Only capture VA if we're in rebase+autostash mode AND have uncommitted changes
     if config.is_rebase && config.is_autostash && has_changes {
-        tracing::debug!("Detected pull --rebase --autostash with uncommitted changes, capturing VirtualAttributions",);
+        tracing::debug!(
+            "Detected pull --rebase --autostash with uncommitted changes, capturing VirtualAttributions",
+        );
 
         // Get current HEAD
         let head_sha = match repository.head().ok().and_then(|h| h.target().ok()) {
@@ -242,10 +240,7 @@ pub fn pull_post_command_hook(
 
     // Check for fast-forward pull and rename working log if applicable
     if was_fast_forward_pull(repository, &new_head) {
-        tracing::debug!(
-            "Fast-forward detected: {} -> {}",
-            old_head, new_head
-        );
+        tracing::debug!("Fast-forward detected: {} -> {}", old_head, new_head);
         let _ = repository.storage.rename_working_log(&old_head, &new_head);
         return;
     }
@@ -285,7 +280,8 @@ fn was_fast_forward_pull(repository: &Repository, expected_new_head: &str) -> bo
             if sha != expected_new_head {
                 tracing::debug!(
                     "Reflog SHA {} doesn't match expected HEAD {}",
-                    sha, expected_new_head
+                    sha,
+                    expected_new_head
                 );
                 return false;
             }
@@ -379,7 +375,8 @@ fn has_uncommitted_changes(repository: &Repository) -> bool {
 fn process_completed_pull_rebase(repository: &mut Repository, original_head: &str, new_head: &str) {
     tracing::debug!(
         "Processing pull --rebase authorship: {} -> {}",
-        original_head, new_head
+        original_head,
+        new_head
     );
 
     let onto_head = resolve_pull_rebase_onto_head(repository);

@@ -24,7 +24,9 @@ fn capture_va_for_merge(
     repository: &Repository,
     command_hooks_context: &mut CommandHooksContext,
 ) {
-    tracing::debug!("Detected switch --merge with uncommitted changes, capturing VirtualAttributions");
+    tracing::debug!(
+        "Detected switch --merge with uncommitted changes, capturing VirtualAttributions"
+    );
 
     let head_sha = match repository.head().ok().and_then(|h| h.target().ok()) {
         Some(sha) => sha,
@@ -132,15 +134,14 @@ pub fn post_switch_hook(
             restore_stashed_va(repository, &old_head, &new_head, stashed_va);
             return;
         }
-        tracing::debug!("switch --merge: no VA to restore, falling through to working log migration");
+        tracing::debug!(
+            "switch --merge: no VA to restore, falling through to working log migration"
+        );
         // Fall through to rename
     }
 
     // Normal branch switch - migrate working log
-    tracing::debug!(
-        "Switch changed HEAD: {} -> {}",
-        &old_head, &new_head
-    );
+    tracing::debug!("Switch changed HEAD: {} -> {}", &old_head, &new_head);
     let _ = repository.storage.rename_working_log(&old_head, &new_head);
 }
 

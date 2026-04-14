@@ -210,10 +210,7 @@ pub fn post_commit_with_final_state(
                 if let Err(e) =
                     enqueue_prompt_messages_to_cas(repo, &mut authorship_log.metadata.prompts)
                 {
-                    tracing::debug!(
-                        "[Warning] Failed to enqueue prompt messages to CAS: {}",
-                        e
-                    );
+                    tracing::debug!("[Warning] Failed to enqueue prompt messages to CAS: {}", e);
                     // Enqueue failed - still strip messages (never keep in notes for "default")
                     strip_prompt_messages(&mut authorship_log.metadata.prompts);
                 }
@@ -270,10 +267,7 @@ pub fn post_commit_with_final_state(
     } else {
         match skip_reason.as_ref() {
             Some(StatsSkipReason::MergeCommit) => {
-                tracing::debug!(
-                    "Skipping post-commit stats for merge commit {}",
-                    commit_sha
-                );
+                tracing::debug!("Skipping post-commit stats for merge commit {}", commit_sha);
             }
             Some(StatsSkipReason::Expensive(estimate)) => {
                 tracing::debug!(

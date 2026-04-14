@@ -145,7 +145,8 @@ pub fn rewrite_authorship_if_needed(
 
             tracing::debug!(
                 "Ammended commit {} now has authorship log {}",
-                &commit_amend.original_commit, &commit_amend.amended_commit_sha
+                &commit_amend.original_commit,
+                &commit_amend.amended_commit_sha
             );
         }
         RewriteLogEvent::MergeSquash { merge_squash } => {
@@ -184,7 +185,8 @@ pub fn rewrite_authorship_if_needed(
 
             tracing::debug!(
                 "✓ Prepared authorship attributions for merge --squash of {} into {}",
-                merge_squash.source_branch, merge_squash.base_branch
+                merge_squash.source_branch,
+                merge_squash.base_branch
             );
         }
         RewriteLogEvent::RebaseComplete { rebase_complete } => {
@@ -267,7 +269,8 @@ fn migrate_working_log_after_rebase(
             new_wl.write_initial(initial)?;
             tracing::debug!(
                 "Migrated INITIAL attributions from {} to {}",
-                original_head, new_head
+                original_head,
+                new_head
             );
         } else {
             tracing::debug!(
@@ -577,7 +580,8 @@ pub fn rewrite_authorship_after_squash_or_rebase(
 
     tracing::debug!(
         "Rewriting authorship for squash/rebase merge: {} -> {}",
-        source_head_sha, merge_commit_sha
+        source_head_sha,
+        merge_commit_sha
     );
 
     // Step 2: Find merge base between source and target to optimize blame
@@ -1101,10 +1105,7 @@ pub fn rewrite_authorship_after_rebase_v2(
             let has_log = !force_process_existing_notes
                 && note_cache.new_commits_with_notes.contains(commit.as_str());
             if has_log {
-                tracing::debug!(
-                    "Skipping commit {} (already has authorship log)",
-                    commit
-                );
+                tracing::debug!("Skipping commit {} (already has authorship log)", commit);
             }
             !has_log
         })
@@ -1815,7 +1816,8 @@ pub fn rewrite_authorship_after_rebase_v2(
     for (commit_sha, file_count) in pending_note_debug {
         tracing::debug!(
             "Saved authorship log for commit {} ({} files)",
-            commit_sha, file_count
+            commit_sha,
+            file_count
         );
     }
 
@@ -2995,7 +2997,8 @@ pub fn reconstruct_working_log_after_reset(
 
     tracing::debug!(
         "Reconstructing working log after reset from {} to {}",
-        old_head_sha, target_commit_sha
+        old_head_sha,
+        target_commit_sha
     );
 
     // Step 1: Get all files changed between target and old_head
@@ -3058,10 +3061,7 @@ pub fn reconstruct_working_log_after_reset(
             };
             final_state.insert(file_path.clone(), content);
         }
-        tracing::debug!(
-            "Read {} files from working directory",
-            final_state.len()
-        );
+        tracing::debug!("Read {} files from working directory", final_state.len());
         final_state
     };
 
@@ -3145,10 +3145,7 @@ pub fn reconstruct_working_log_after_reset(
         final_state.clone(),
     )?;
 
-    tracing::debug!(
-        "Merged VAs, result has {} files",
-        merged_va.files().len()
-    );
+    tracing::debug!("Merged VAs, result has {} files", merged_va.files().len());
 
     // Step 6: Convert to INITIAL (everything is uncommitted after reset) without consulting the
     // live worktree again.

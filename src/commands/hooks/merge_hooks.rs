@@ -36,10 +36,7 @@ pub fn post_merge_hook(
         let staged_file_blobs = match repository.get_all_staged_file_blob_oids() {
             Ok(staged_file_blobs) => staged_file_blobs,
             Err(error) => {
-                tracing::debug!(
-                    "Failed to snapshot merge --squash staged blobs: {}",
-                    error
-                );
+                tracing::debug!("Failed to snapshot merge --squash staged blobs: {}", error);
                 return;
             }
         };

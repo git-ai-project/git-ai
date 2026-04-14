@@ -2199,10 +2199,7 @@ pub fn restore_stashed_va(
     new_head: &str,
     stashed_va: VirtualAttributions,
 ) {
-    tracing::debug!(
-        "Restoring stashed VA: {} -> {}",
-        old_head, new_head
-    );
+    tracing::debug!("Restoring stashed VA: {} -> {}", old_head, new_head);
 
     // Get the files that were in the stashed VA
     let stashed_files: Vec<String> = stashed_va.files();
@@ -2291,10 +2288,7 @@ pub fn restore_stashed_va(
         let working_log = match repository.storage.working_log_for_base_commit(new_head) {
             Ok(wl) => wl,
             Err(e) => {
-                tracing::debug!(
-                    "Failed to get working log for {}: {}",
-                    new_head, e
-                );
+                tracing::debug!("Failed to get working log for {}: {}", new_head, e);
                 return;
             }
         };

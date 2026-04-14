@@ -78,7 +78,8 @@ pub fn stats_command(
 
     tracing::debug!(
         "Stats command found commit: {} refname: {}",
-        target, refname
+        target,
+        refname
     );
 
     let stats = stats_for_commit_stats(repo, &target, ignore_patterns)?;

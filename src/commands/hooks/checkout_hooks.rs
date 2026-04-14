@@ -45,7 +45,9 @@ fn capture_va_for_merge(
     repository: &Repository,
     command_hooks_context: &mut CommandHooksContext,
 ) {
-    tracing::debug!("Detected checkout --merge with uncommitted changes, capturing VirtualAttributions");
+    tracing::debug!(
+        "Detected checkout --merge with uncommitted changes, capturing VirtualAttributions"
+    );
 
     let head_sha = match repository.head().ok().and_then(|h| h.target().ok()) {
         Some(sha) => sha,
@@ -178,15 +180,14 @@ pub fn post_checkout_hook(
             restore_stashed_va(repository, &old_head, &new_head, stashed_va);
             return;
         }
-        tracing::debug!("checkout --merge: no VA to restore, falling through to working log migration");
+        tracing::debug!(
+            "checkout --merge: no VA to restore, falling through to working log migration"
+        );
         // Fall through to Case 5 so the working log is renamed to the new HEAD.
     }
 
     // Case 5: Normal branch checkout - migrate working log
-    tracing::debug!(
-        "Checkout changed HEAD: {} -> {}",
-        &old_head, &new_head
-    );
+    tracing::debug!("Checkout changed HEAD: {} -> {}", &old_head, &new_head);
     let _ = repository.storage.rename_working_log(&old_head, &new_head);
 }
 

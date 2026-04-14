@@ -29,7 +29,9 @@ pub fn pre_rebase_hook(
 
     tracing::debug!(
         "Rebase state: in_progress={}, has_active_start={}, is_continuing={}",
-        rebase_in_progress, has_active_start, is_continuing
+        rebase_in_progress,
+        has_active_start,
+        is_continuing
     );
 
     if !is_continuing {
@@ -41,7 +43,9 @@ pub fn pre_rebase_hook(
                 let onto_head = resolve_rebase_onto_head(parsed_args, repository);
                 tracing::debug!(
                     "Starting new rebase from HEAD: {} (resolved original_head: {}, onto: {:?})",
-                    target, original_head, onto_head
+                    target,
+                    original_head,
+                    onto_head
                 );
                 command_hooks_context.rebase_original_head = Some(original_head.clone());
                 command_hooks_context.rebase_onto = onto_head.clone();
@@ -71,7 +75,9 @@ pub fn pre_rebase_hook(
             tracing::debug!("Could not read HEAD for new rebase");
         }
     } else {
-        tracing::debug!("Continuing existing rebase (will read original head from log in post-hook)");
+        tracing::debug!(
+            "Continuing existing rebase (will read original head from log in post-hook)"
+        );
     }
 }
 
@@ -97,7 +103,9 @@ pub fn handle_rebase_post_command(
 
     if is_in_progress {
         // Rebase still in progress (conflict or not finished)
-        tracing::debug!("⏸ Rebase still in progress, waiting for completion (conflict or multi-step)");
+        tracing::debug!(
+            "⏸ Rebase still in progress, waiting for completion (conflict or multi-step)"
+        );
         return;
     }
 
@@ -149,10 +157,7 @@ pub fn handle_rebase_post_command(
     // Rebase completed successfully!
     tracing::debug!("✓ Rebase completed successfully");
     if let Some(original_head) = original_head {
-        tracing::debug!(
-            "Processing completed rebase from {}",
-            original_head
-        );
+        tracing::debug!("Processing completed rebase from {}", original_head);
         process_completed_rebase(
             repository,
             &original_head,
@@ -214,10 +219,7 @@ fn process_completed_rebase(
     onto_head: Option<&str>,
     parsed_args: &ParsedGitInvocation,
 ) {
-    tracing::debug!(
-        "--- Processing completed rebase from {} ---",
-        original_head
-    );
+    tracing::debug!("--- Processing completed rebase from {} ---", original_head);
 
     // Get the new HEAD
     let new_head = match repository.head() {
@@ -246,7 +248,8 @@ fn process_completed_rebase(
     // Build commit mappings
     tracing::debug!(
         "Building commit mappings: {} -> {}",
-        original_head, new_head
+        original_head,
+        new_head
     );
     let (original_commits, new_commits) =
         match build_rebase_commit_mappings(repository, original_head, &new_head, onto_head) {
@@ -269,7 +272,9 @@ fn process_completed_rebase(
         return;
     }
     if new_commits.is_empty() {
-        tracing::debug!("No new rebased commits detected (all commits were skipped/already upstream)");
+        tracing::debug!(
+            "No new rebased commits detected (all commits were skipped/already upstream)"
+        );
         return;
     }
 
@@ -384,7 +389,8 @@ pub(crate) fn build_rebase_commit_mappings(
     if original_commits.is_empty() {
         tracing::debug!(
             "Commit mapping: 0 original -> 0 new (merge_base: {}, original_base: {})",
-            merge_base, original_base
+            merge_base,
+            original_base
         );
         return Ok((original_commits, Vec::new()));
     }

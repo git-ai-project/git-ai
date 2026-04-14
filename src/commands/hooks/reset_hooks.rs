@@ -51,10 +51,7 @@ pub fn post_reset_hook(
         Vec::new()
     });
 
-    tracing::debug!(
-        "Reset: tree-ish='{}', pathspecs={:?}",
-        tree_ish, pathspecs
-    );
+    tracing::debug!("Reset: tree-ish='{}', pathspecs={:?}", tree_ish, pathspecs);
 
     // Get old HEAD (before reset) from pre-command hook
     let old_head_sha = match &repository.pre_command_base_commit {
@@ -165,10 +162,7 @@ fn handle_reset_hard(repository: &Repository, old_head_sha: &str, _target_commit
         .storage
         .delete_working_log_for_base_commit(old_head_sha);
 
-    tracing::debug!(
-        "Reset --hard: deleted working log for {}",
-        old_head_sha
-    );
+    tracing::debug!("Reset --hard: deleted working log for {}", old_head_sha);
 }
 
 /// Handle --soft, --mixed, --merge: preserve working directory and reconstruct working log
@@ -183,7 +177,8 @@ fn handle_reset_preserve_working_dir(
     if new_head_sha != target_commit_sha {
         tracing::debug!(
             "Warning: new HEAD ({}) != target commit ({})",
-            new_head_sha, target_commit_sha
+            new_head_sha,
+            target_commit_sha
         );
     }
 
@@ -235,10 +230,7 @@ fn handle_reset_preserve_working_dir(
             );
         }
         Err(e) => {
-            tracing::debug!(
-                "Failed to reconstruct working log after reset: {}",
-                e
-            );
+            tracing::debug!("Failed to reconstruct working log after reset: {}", e);
         }
     }
 }
@@ -255,14 +247,17 @@ fn handle_reset_pathspec_preserve_working_dir(
 ) {
     tracing::debug!(
         "Handling pathspec reset: old_head={}, target={}, pathspecs={:?}",
-        old_head_sha, target_commit_sha, pathspecs
+        old_head_sha,
+        target_commit_sha,
+        pathspecs
     );
 
     // For pathspec resets, HEAD doesn't move
     if old_head_sha != new_head_sha {
         tracing::debug!(
             "Warning: pathspec reset but HEAD moved from {} to {}",
-            old_head_sha, new_head_sha
+            old_head_sha,
+            new_head_sha
         );
     }
 
@@ -281,10 +276,7 @@ fn handle_reset_pathspec_preserve_working_dir(
     let working_log = match repository.storage.working_log_for_base_commit(old_head_sha) {
         Ok(wl) => wl,
         Err(e) => {
-            tracing::debug!(
-                "Failed to get working log for {}: {}",
-                old_head_sha, e
-            );
+            tracing::debug!("Failed to get working log for {}: {}", old_head_sha, e);
             return;
         }
     };
@@ -337,10 +329,7 @@ fn handle_reset_pathspec_preserve_working_dir(
     {
         Ok(wl) => wl,
         Err(e) => {
-            tracing::debug!(
-                "Failed to get working log for {}: {}",
-                target_commit_sha, e
-            );
+            tracing::debug!("Failed to get working log for {}: {}", target_commit_sha, e);
             return;
         }
     };
@@ -358,10 +347,7 @@ fn handle_reset_pathspec_preserve_working_dir(
     let head_working_log = match repository.storage.working_log_for_base_commit(new_head_sha) {
         Ok(wl) => wl,
         Err(e) => {
-            tracing::debug!(
-                "Failed to get working log for {}: {}",
-                new_head_sha, e
-            );
+            tracing::debug!("Failed to get working log for {}: {}", new_head_sha, e);
             return;
         }
     };
@@ -379,7 +365,8 @@ fn handle_reset_pathspec_preserve_working_dir(
 
     tracing::debug!(
         "✓ Updated working log for pathspec reset: {} pathspec checkpoints, {} non-pathspec checkpoints preserved",
-        pathspec_count, non_pathspec_count
+        pathspec_count,
+        non_pathspec_count
     );
 }
 

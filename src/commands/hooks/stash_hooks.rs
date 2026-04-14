@@ -96,10 +96,7 @@ pub fn post_stash_hook(
         let head_sha = match repository.head().and_then(|head| head.target()) {
             Ok(head_sha) => head_sha.to_string(),
             Err(e) => {
-                tracing::debug!(
-                    "Failed to resolve HEAD after stash {}: {}",
-                    subcommand, e
-                );
+                tracing::debug!("Failed to resolve HEAD after stash {}: {}", subcommand, e);
                 return;
             }
         };
@@ -126,17 +123,11 @@ pub fn post_stash_hook(
             }
         };
 
-        tracing::debug!(
-            "Restoring attributions from stash SHA: {}",
-            stash_sha
-        );
+        tracing::debug!("Restoring attributions from stash SHA: {}", stash_sha);
         let head_sha = match repository.head().and_then(|head| head.target()) {
             Ok(head_sha) => head_sha.to_string(),
             Err(e) => {
-                tracing::debug!(
-                    "Failed to resolve HEAD after stash {}: {}",
-                    subcommand, e
-                );
+                tracing::debug!("Failed to resolve HEAD after stash {}: {}", subcommand, e);
                 return;
             }
         };
@@ -243,10 +234,7 @@ pub(crate) fn restore_stash_attributions(
     head_sha: &str,
     stash_sha: &str,
 ) -> Result<(), GitAiError> {
-    tracing::debug!(
-        "Restoring stash attributions from SHA: {}",
-        stash_sha
-    );
+    tracing::debug!("Restoring stash attributions from SHA: {}", stash_sha);
 
     // Try to read authorship log from git note (refs/notes/ai-stash)
     let note_content = match read_stash_note(repo, stash_sha) {

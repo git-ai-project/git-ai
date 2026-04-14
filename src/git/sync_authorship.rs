@@ -111,18 +111,13 @@ pub fn fetch_missing_notes_for_commits(repository: &Repository, source_commits: 
 
     if let Ok(remotes) = repository.remotes_with_urls() {
         for (remote_name, _) in remotes {
-            tracing::debug!(
-                "Attempting safe notes fetch from remote {}",
-                remote_name
-            );
+            tracing::debug!("Attempting safe notes fetch from remote {}", remote_name);
             match fetch_authorship_notes(repository, &remote_name) {
-                Ok(_) => tracing::debug!(
-                    "Fetched and merged notes from remote {}",
-                    remote_name
-                ),
+                Ok(_) => tracing::debug!("Fetched and merged notes from remote {}", remote_name),
                 Err(e) => tracing::debug!(
                     "Notes fetch from remote {} failed (best-effort): {}",
-                    remote_name, e
+                    remote_name,
+                    e
                 ),
             }
         }
@@ -142,7 +137,8 @@ pub fn fetch_authorship_notes(
 
     tracing::debug!(
         "fetching authorship notes for remote '{}' to tracking ref '{}'",
-        remote_name, tracking_ref
+        remote_name,
+        tracking_ref
     );
 
     // Fetch notes to tracking ref with explicit refspec.
@@ -191,7 +187,8 @@ pub fn fetch_authorship_notes(
             // Both exist - merge them
             tracing::debug!(
                 "merging authorship notes from {} into {}",
-                tracking_ref, local_notes_ref
+                tracking_ref,
+                local_notes_ref
             );
             if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
                 tracing::debug!("notes merge failed: {}", e);
@@ -204,7 +201,8 @@ pub fn fetch_authorship_notes(
             // Only tracking ref exists - copy it to local
             tracing::debug!(
                 "initializing {} from tracking ref {}",
-                local_notes_ref, tracking_ref
+                local_notes_ref,
+                tracking_ref
             );
             if let Err(e) = copy_ref(repository, &tracking_ref, local_notes_ref) {
                 tracing::debug!("notes copy failed: {}", e);
@@ -212,10 +210,7 @@ pub fn fetch_authorship_notes(
             }
         }
     } else {
-        tracing::debug!(
-            "tracking ref {} was not created after fetch",
-            tracking_ref
-        );
+        tracing::debug!("tracking ref {} was not created after fetch", tracking_ref);
     }
 
     Ok(NotesExistence::Found)
@@ -256,10 +251,7 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
         // Push notes without force (requires fast-forward)
         let push_args = build_authorship_push_args(repository.global_args_for_exec(), remote_name);
 
-        tracing::debug!(
-            "pushing authorship refs (no force): {:?}",
-            &push_args
-        );
+        tracing::debug!("pushing authorship refs (no force): {:?}", &push_args);
 
         match exec_git(&push_args) {
             Ok(_) => return Ok(()),
@@ -308,7 +300,8 @@ fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) {
         // Only tracking ref exists - copy it to local
         tracing::debug!(
             "pre-push: initializing {} from {}",
-            local_notes_ref, tracking_ref
+            local_notes_ref,
+            tracking_ref
         );
         if let Err(e) = copy_ref(repository, &tracking_ref, local_notes_ref) {
             tracing::debug!("pre-push notes copy failed: {}", e);
@@ -319,7 +312,8 @@ fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) {
     // Both exist - merge them
     tracing::debug!(
         "pre-push: merging {} into {}",
-        tracking_ref, local_notes_ref
+        tracking_ref,
+        local_notes_ref
     );
     if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
         tracing::debug!("pre-push notes merge failed: {}", e);

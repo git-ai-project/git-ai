@@ -1251,7 +1251,8 @@ impl Repository {
         {
             tracing::debug!(
                 "rewrite_authorship_if_needed failed for {:?}: {}",
-                rewrite_log_event, error
+                rewrite_log_event,
+                error
             );
             crate::observability::log_error(
                 &error,

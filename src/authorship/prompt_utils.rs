@@ -202,7 +202,8 @@ fn update_codex_prompt(
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse Codex rollout JSONL transcript from {}: {}",
-                        transcript_path, e
+                        transcript_path,
+                        e
                     );
                     log_error(
                         &e,
@@ -237,7 +238,8 @@ fn update_cursor_prompt(
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse Cursor JSONL transcript from {}: {}",
-                        transcript_path, e
+                        transcript_path,
+                        e
                     );
                     log_error(
                         &e,
@@ -278,7 +280,8 @@ fn update_claude_prompt(
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse Claude JSONL transcript from {}: {}",
-                        transcript_path, e
+                        transcript_path,
+                        e
                     );
                     log_error(
                         &e,
@@ -321,7 +324,8 @@ fn update_gemini_prompt(
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse Gemini JSON transcript from {}: {}",
-                        transcript_path, e
+                        transcript_path,
+                        e
                     );
                     log_error(
                         &e,
@@ -366,7 +370,8 @@ fn update_github_copilot_prompt(
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse GitHub Copilot chat session JSON from {}: {}",
-                        chat_session_path, e
+                        chat_session_path,
+                        e
                     );
                     log_error(
                         &e,
@@ -407,7 +412,8 @@ fn update_continue_cli_prompt(
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse Continue CLI JSON transcript from {}: {}",
-                        transcript_path, e
+                        transcript_path,
+                        e
                     );
                     log_error(
                         &e,
@@ -443,7 +449,8 @@ fn update_droid_prompt(
                     Err(e) => {
                         tracing::debug!(
                             "Failed to parse Droid JSONL transcript from {}: {}",
-                            transcript_path, e
+                            transcript_path,
+                            e
                         );
                         log_error(
                             &e,
@@ -464,7 +471,8 @@ fn update_droid_prompt(
                     Err(e) => {
                         tracing::debug!(
                             "Failed to parse Droid settings.json from {}: {}",
-                            settings_path, e
+                            settings_path,
+                            e
                         );
                         current_model.to_string()
                     }
@@ -534,7 +542,8 @@ fn update_amp_prompt(
         Err(e) => {
             tracing::debug!(
                 "Failed to fetch Amp transcript for thread {}: {}",
-                thread_id, e
+                thread_id,
+                e
             );
             log_error(
                 &e,
@@ -577,7 +586,8 @@ fn update_opencode_prompt(
         Err(e) => {
             tracing::debug!(
                 "Failed to fetch OpenCode transcript for session {}: {}",
-                session_id, e
+                session_id,
+                e
             );
             log_error(
                 &e,
@@ -640,7 +650,8 @@ fn update_windsurf_prompt(
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse Windsurf JSONL transcript from {}: {}",
-                        transcript_path, e
+                        transcript_path,
+                        e
                     );
                     log_error(
                         &e,

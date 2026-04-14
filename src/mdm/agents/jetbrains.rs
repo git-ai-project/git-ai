@@ -68,10 +68,7 @@ impl JetBrainsInstaller {
                 );
             }
             Err(e) => {
-                tracing::debug!(
-                    "JetBrains: CLI install error for {}: {}",
-                    ide_name, e
-                );
+                tracing::debug!("JetBrains: CLI install error for {}: {}", ide_name, e);
             }
         }
 
@@ -97,7 +94,8 @@ impl JetBrainsInstaller {
                         Err(e) => {
                             tracing::debug!(
                                 "JetBrains: Failed to extract plugin for {}: {}",
-                                ide_name, e
+                                ide_name,
+                                e
                             );
                         }
                     }
@@ -105,7 +103,8 @@ impl JetBrainsInstaller {
                 Err(e) => {
                     tracing::debug!(
                         "JetBrains: Failed to download plugin for {}: {}",
-                        ide_name, e
+                        ide_name,
+                        e
                     );
                 }
             }

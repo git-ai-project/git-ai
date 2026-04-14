@@ -13,7 +13,9 @@ pub fn post_clone_hook(parsed_args: &ParsedGitInvocation, exit_status: std::proc
     let target_dir = match extract_clone_target_directory(&parsed_args.command_args) {
         Some(dir) => dir,
         None => {
-            tracing::debug!("failed to extract target directory from clone command; skipping authorship fetch",);
+            tracing::debug!(
+                "failed to extract target directory from clone command; skipping authorship fetch",
+            );
             return;
         }
     };
@@ -29,7 +31,8 @@ pub fn post_clone_hook(parsed_args: &ParsedGitInvocation, exit_status: std::proc
         Err(e) => {
             tracing::debug!(
                 "failed to open cloned repository at {}: {}; skipping authorship fetch",
-                target_dir, e
+                target_dir,
+                e
             );
             return;
         }
@@ -38,7 +41,9 @@ pub fn post_clone_hook(parsed_args: &ParsedGitInvocation, exit_status: std::proc
     // Check if the newly cloned repository is allowed by allow_repositories config
     let config = config::Config::get();
     if !config.is_allowed_repository(&Some(repository.clone())) {
-        tracing::debug!("Skipping authorship fetch for cloned repository: not in allow_repositories list",);
+        tracing::debug!(
+            "Skipping authorship fetch for cloned repository: not in allow_repositories list",
+        );
         return;
     }
 

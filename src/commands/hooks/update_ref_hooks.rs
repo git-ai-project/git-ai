@@ -80,7 +80,9 @@ pub fn post_update_ref_hook(
     if is_ancestor(repository, &new_target, &old_target) {
         tracing::debug!(
             "Skipping wrapper update-ref rewind handling for {}: {} -> {}",
-            ref_name, old_target, new_target
+            ref_name,
+            old_target,
+            new_target
         );
         return;
     }

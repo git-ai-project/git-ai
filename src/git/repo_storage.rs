@@ -126,10 +126,7 @@ impl RepoStorage {
             // Best-effort; don't fail the commit if we can't write the marker
             let _ = fs::write(&marker, now.to_string());
 
-            tracing::debug!(
-                "Moved checkpoint directory from {} to old-{}",
-                sha, sha
-            );
+            tracing::debug!("Moved checkpoint directory from {} to old-{}", sha, sha);
 
             // In production builds, prune old working logs that have expired.
             // Debug builds never prune so developers can inspect old state.
@@ -192,10 +189,7 @@ impl RepoStorage {
         let new_dir = self.working_logs.join(new_sha);
         if old_dir.exists() && !new_dir.exists() {
             fs::rename(&old_dir, &new_dir)?;
-            tracing::debug!(
-                "Renamed working log from {} to {}",
-                old_sha, new_sha
-            );
+            tracing::debug!("Renamed working log from {} to {}", old_sha, new_sha);
         }
         Ok(())
     }
@@ -762,18 +756,12 @@ impl PersistedWorkingLog {
             Ok(content) => match serde_json::from_str(&content) {
                 Ok(initial_data) => initial_data,
                 Err(e) => {
-                    tracing::debug!(
-                        "Failed to parse INITIAL file: {}. Returning empty.",
-                        e
-                    );
+                    tracing::debug!("Failed to parse INITIAL file: {}. Returning empty.", e);
                     InitialAttributions::default()
                 }
             },
             Err(e) => {
-                tracing::debug!(
-                    "Failed to read INITIAL file: {}. Returning empty.",
-                    e
-                );
+                tracing::debug!("Failed to read INITIAL file: {}. Returning empty.", e);
                 InitialAttributions::default()
             }
         }

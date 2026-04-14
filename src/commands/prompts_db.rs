@@ -1009,7 +1009,9 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
         } else {
             tracing::debug!(
                 "prompts: hostname mismatch id={} url={} expected_prefix={}",
-                dp.id, dp.messages_url, instance_prefix
+                dp.id,
+                dp.messages_url,
+                instance_prefix
             );
             foreign_indices.push(i);
         }
@@ -1053,7 +1055,8 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                 let dp = &deferred[idx];
                 tracing::debug!(
                     "prompts: unresolved (foreign url + no local body) id={} url={}",
-                    dp.id, dp.messages_url
+                    dp.id,
+                    dp.messages_url
                 );
             }
         }
@@ -1109,7 +1112,9 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                             let dp = &deferred[idx];
                             tracing::debug!(
                                 "prompts: auth error (not logged in) id={} hash={} url={}",
-                                dp.id, hash, dp.messages_url
+                                dp.id,
+                                hash,
+                                dp.messages_url
                             );
                             cas_initial_failures.insert(idx, "not logged in");
                         }
@@ -1162,7 +1167,9 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                                                     let dp = &deferred[idx];
                                                     tracing::debug!(
                                                         "prompts: CAS decode error id={} hash={} url={}",
-                                                        dp.id, result.hash, dp.messages_url
+                                                        dp.id,
+                                                        result.hash,
+                                                        dp.messages_url
                                                     );
                                                 }
                                             }
@@ -1174,7 +1181,10 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                                                 let dp = &deferred[idx];
                                                 tracing::debug!(
                                                     "prompts: CAS not-found id={} hash={} url={} reason=\"{}\"",
-                                                    dp.id, result.hash, dp.messages_url, reason
+                                                    dp.id,
+                                                    result.hash,
+                                                    dp.messages_url,
+                                                    reason
                                                 );
                                             }
                                         }
@@ -1194,7 +1204,10 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                                     let dp = &deferred[idx];
                                     tracing::debug!(
                                         "prompts: CAS network error id={} hash={} url={} reason=\"{}\"",
-                                        dp.id, hash, dp.messages_url, err
+                                        dp.id,
+                                        hash,
+                                        dp.messages_url,
+                                        err
                                     );
                                 }
                             }
@@ -1287,7 +1300,9 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
             let dp = &deferred[idx];
             tracing::debug!(
                 "prompts: unresolved id={} url={} reason=\"{}\"",
-                dp.id, dp.messages_url, reason
+                dp.id,
+                dp.messages_url,
+                reason
             );
         }
     }

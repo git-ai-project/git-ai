@@ -29,7 +29,9 @@ pub fn pre_cherry_pick_hook(
 
     tracing::debug!(
         "Cherry-pick state: in_progress={}, has_active_start={}, is_continuing={}",
-        cherry_pick_in_progress, has_active_start, is_continuing
+        cherry_pick_in_progress,
+        has_active_start,
+        is_continuing
     );
 
     if !is_continuing {
@@ -51,7 +53,9 @@ pub fn pre_cherry_pick_hook(
                 // Fix #952: If source_commits is empty (e.g. bad args), skip writing
                 // the Start event to prevent state corruption for subsequent operations.
                 if source_commits.is_empty() {
-                    tracing::debug!("No valid source commits parsed, skipping CherryPickStart event (prevents state corruption from bad args)",);
+                    tracing::debug!(
+                        "No valid source commits parsed, skipping CherryPickStart event (prevents state corruption from bad args)",
+                    );
                     return;
                 }
 
@@ -73,7 +77,9 @@ pub fn pre_cherry_pick_hook(
             tracing::debug!("Could not read HEAD for new cherry-pick");
         }
     } else {
-        tracing::debug!("Continuing existing cherry-pick (will read original head from log in post-hook)",);
+        tracing::debug!(
+            "Continuing existing cherry-pick (will read original head from log in post-hook)",
+        );
         // Fix #951: If --skip is being used, update source_commits to remove
         // the skipped commit so subsequent cherry-picks get correct attribution.
         if parsed_args.command_args.iter().any(|a| a == "--skip") {
@@ -104,7 +110,9 @@ pub fn post_cherry_pick_hook(
 
     if is_in_progress {
         // Cherry-pick still in progress (conflict or not finished)
-        tracing::debug!("⏸ Cherry-pick still in progress, waiting for completion (conflict or multi-step)",);
+        tracing::debug!(
+            "⏸ Cherry-pick still in progress, waiting for completion (conflict or multi-step)",
+        );
         return;
     }
 
@@ -139,10 +147,7 @@ pub fn post_cherry_pick_hook(
     // Cherry-pick completed successfully!
     tracing::debug!("✓ Cherry-pick completed successfully");
     if let Some(original_head) = original_head {
-        tracing::debug!(
-            "Processing completed cherry-pick from {}",
-            original_head
-        );
+        tracing::debug!("Processing completed cherry-pick from {}", original_head);
         process_completed_cherry_pick(repository, &original_head, parsed_args);
     } else {
         tracing::debug!("⚠ Cherry-pick completed but couldn't determine original head");
@@ -444,7 +449,8 @@ fn process_completed_cherry_pick(
     // Build commit mappings
     tracing::debug!(
         "Building commit mappings: {} -> {}",
-        original_head, new_head
+        original_head,
+        new_head
     );
     let new_commits = match build_cherry_pick_commit_mappings(repository, original_head, &new_head)
     {
@@ -504,10 +510,7 @@ fn build_cherry_pick_commit_mappings(
     let mut new_commits = new_commits;
     new_commits.reverse();
 
-    tracing::debug!(
-        "Cherry-pick created {} new commits",
-        new_commits.len()
-    );
+    tracing::debug!("Cherry-pick created {} new commits", new_commits.len());
 
     Ok(new_commits)
 }

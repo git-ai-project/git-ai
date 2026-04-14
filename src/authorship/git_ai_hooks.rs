@@ -73,7 +73,8 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)]) {
             Err(e) => {
                 tracing::debug!(
                     "[git_ai_hooks] Failed to spawn post_notes_updated hook '{}': {}",
-                    hook_command, e
+                    hook_command,
+                    e
                 );
                 continue;
             }
@@ -87,7 +88,8 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)]) {
                 if let Err(e) = stdin.write_all(payload_for_stdin.as_bytes()) {
                     tracing::debug!(
                         "[git_ai_hooks] Failed to write post_notes_updated stdin for '{}': {}",
-                        command_for_log, e
+                        command_for_log,
+                        e
                     );
                 }
             });
@@ -124,16 +126,14 @@ fn wait_for_hooks_or_detach(mut children: Vec<(String, Child)>) {
                     if !status.success() {
                         tracing::debug!(
                             "[git_ai_hooks] Hook '{}' exited with status {}",
-                            command, status
+                            command,
+                            status
                         );
                     }
                 }
                 Ok(None) => still_running.push((command, child)),
                 Err(e) => {
-                    tracing::debug!(
-                        "[git_ai_hooks] Failed to poll hook '{}': {}",
-                        command, e
-                    );
+                    tracing::debug!("[git_ai_hooks] Failed to poll hook '{}': {}", command, e);
                 }
             }
         }
@@ -156,14 +156,16 @@ fn wait_for_hooks_or_detach(mut children: Vec<(String, Child)>) {
                             if !status.success() {
                                 tracing::debug!(
                                     "[git_ai_hooks] Detached hook '{}' exited with status {}",
-                                    command, status
+                                    command,
+                                    status
                                 );
                             }
                         }
                         Err(e) => {
                             tracing::debug!(
                                 "[git_ai_hooks] Failed waiting detached hook '{}': {}",
-                                command, e
+                                command,
+                                e
                             );
                         }
                     }

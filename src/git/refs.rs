@@ -567,10 +567,7 @@ pub fn merge_notes_from_ref(repo: &Repository, source_ref: &str) -> Result<(), G
     args.push("--quiet".to_string());
     args.push(source_ref.to_string());
 
-    tracing::debug!(
-        "Merging notes from {} into refs/notes/ai",
-        source_ref
-    );
+    tracing::debug!("Merging notes from {} into refs/notes/ai", source_ref);
     exec_git(&args)?;
     Ok(())
 }

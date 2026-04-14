@@ -17,10 +17,7 @@ pub fn push_pre_command_hook(
     let remote = resolve_push_remote(parsed_args, repository);
 
     if let Some(remote) = remote {
-        tracing::debug!(
-            "started pushing authorship notes to remote: {}",
-            remote
-        );
+        tracing::debug!("started pushing authorship notes to remote: {}", remote);
         // Clone what we need for the background thread
         let global_args = repository.global_args_for_exec();
 
@@ -54,10 +51,7 @@ pub fn run_pre_push_hook_managed(parsed_args: &ParsedGitInvocation, repository: 
         return;
     };
 
-    tracing::debug!(
-        "started pushing authorship notes to remote: {}",
-        remote
-    );
+    tracing::debug!("started pushing authorship notes to remote: {}", remote);
 
     if let Err(e) = push_authorship_notes(repository, &remote) {
         tracing::debug!("authorship push failed: {}", e);

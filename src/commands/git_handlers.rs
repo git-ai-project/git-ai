@@ -204,7 +204,9 @@ pub fn handle_git(args: &[String]) {
     let skip_hooks = !config.is_allowed_repository(&repository_option);
 
     if skip_hooks {
-        tracing::debug!("Skipping git-ai hooks because repository is excluded or not in allow_repositories list",);
+        tracing::debug!(
+            "Skipping git-ai hooks because repository is excluded or not in allow_repositories list",
+        );
     }
 
     // Handle clone separately since repo doesn't exist before the command.
@@ -778,7 +780,8 @@ fn send_wrapper_pre_state_to_daemon(
     ) {
         tracing::debug!(
             "wrapper: failed to send pre-state for {}: {}",
-            invocation_id, e
+            invocation_id,
+            e
         );
     }
 }
@@ -800,7 +803,8 @@ fn send_wrapper_post_state_to_daemon(
     ) {
         tracing::debug!(
             "wrapper: failed to send post-state for {}: {}",
-            invocation_id, e
+            invocation_id,
+            e
         );
     }
 }

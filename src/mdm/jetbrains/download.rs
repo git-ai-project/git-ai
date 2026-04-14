@@ -122,10 +122,7 @@ pub fn install_plugin_to_directory(zip_data: &[u8], plugin_dir: &Path) -> Result
         }
     }
 
-    tracing::debug!(
-        "JetBrains: Plugin extracted to {}",
-        plugin_dir.display()
-    );
+    tracing::debug!("JetBrains: Plugin extracted to {}", plugin_dir.display());
 
     Ok(())
 }
@@ -136,10 +133,7 @@ pub fn install_plugin_to_directory(zip_data: &[u8], plugin_dir: &Path) -> Result
 pub fn install_plugin_via_cli(binary_path: &Path, plugin_id: &str) -> Result<bool, GitAiError> {
     use std::process::Command;
 
-    tracing::debug!(
-        "JetBrains: Trying CLI installation with {:?}",
-        binary_path
-    );
+    tracing::debug!("JetBrains: Trying CLI installation with {:?}", binary_path);
 
     #[cfg(windows)]
     let result = Command::new(binary_path)

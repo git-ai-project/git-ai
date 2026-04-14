@@ -6651,10 +6651,14 @@ impl ActorDaemonCoordinator {
             "commit" | "rebase" | "merge" | "cherry-pick" | "am" | "stash" | "reset" | "push"
         );
         if is_write_op && cmd.exit_code == 0 {
-            let repo_path = cmd.worktree.as_ref()
+            let repo_path = cmd
+                .worktree
+                .as_ref()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let post_head = cmd.post_repo.as_ref()
+            let post_head = cmd
+                .post_repo
+                .as_ref()
                 .and_then(|r| r.head.clone())
                 .unwrap_or_default();
             tracing::info!(

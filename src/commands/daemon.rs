@@ -5,9 +5,7 @@ use crate::daemon::{
 };
 use crate::utils::LockFile;
 #[cfg(windows)]
-use crate::utils::{
-    CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
-};
+use crate::utils::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;

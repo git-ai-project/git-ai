@@ -381,7 +381,9 @@ pub fn checkpoint_context_from_active_bash(
         } => {
             tracing::debug!(
                 "active bash context: found {} session {} tool_use_id {}",
-                active_context.agent_id.tool, active_context.session_id, active_context.tool_use_id
+                active_context.agent_id.tool,
+                active_context.session_id,
+                active_context.tool_use_id
             );
             Some((
                 CheckpointKind::AiAgent,
@@ -582,10 +584,7 @@ pub fn build_gitignore(repo_root: &Path) -> Result<Gitignore, GitAiError> {
         .collect();
     for pattern in &shared_patterns {
         if let Err(e) = builder.add_line(None, pattern) {
-            tracing::debug!(
-                "Warning: failed to add ignore pattern '{}': {}",
-                pattern, e
-            );
+            tracing::debug!("Warning: failed to add ignore pattern '{}': {}", pattern, e);
         }
     }
 
@@ -1142,7 +1141,9 @@ fn attempt_pre_hook_capture(
     repo_root: &Path,
 ) -> Option<CapturedCheckpointInfo> {
     if !checkpoint_delegation_enabled() {
-        tracing::debug!("Pre-hook capture: async checkpoint delegation not enabled, skipping capture");
+        tracing::debug!(
+            "Pre-hook capture: async checkpoint delegation not enabled, skipping capture"
+        );
         return None;
     }
 
@@ -1207,7 +1208,8 @@ fn attempt_pre_hook_capture(
         Ok(Some(capture)) => {
             tracing::debug!(
                 "Pre-hook captured checkpoint prepared: {} ({} files)",
-                capture.capture_id, capture.file_count,
+                capture.capture_id,
+                capture.file_count,
             );
             Some(CapturedCheckpointInfo {
                 capture_id: capture.capture_id,
@@ -1243,7 +1245,9 @@ fn attempt_post_hook_capture(
     // Only attempt capture when delegation is enabled — captured checkpoint
     // files are consumed by the daemon; without it they would accumulate.
     if !checkpoint_delegation_enabled() {
-        tracing::debug!("Post-hook capture: async checkpoint delegation not enabled, skipping capture");
+        tracing::debug!(
+            "Post-hook capture: async checkpoint delegation not enabled, skipping capture"
+        );
         return None;
     }
 
@@ -1303,7 +1307,8 @@ fn attempt_post_hook_capture(
         Ok(Some(capture)) => {
             tracing::debug!(
                 "Post-hook captured checkpoint prepared: {} ({} files)",
-                capture.capture_id, capture.file_count,
+                capture.capture_id,
+                capture.file_count,
             );
             Some(CapturedCheckpointInfo {
                 capture_id: capture.capture_id,
@@ -1399,11 +1404,7 @@ fn resolve_bash_tool_use_id(
             if let Some(path) = bash_sidecar_path(repo_root, session_id)
                 && let Err(e) = fs::write(&path, &id)
             {
-                tracing::debug!(
-                    "bash sidecar write failed ({}): {}",
-                    path.display(),
-                    e
-                );
+                tracing::debug!("bash sidecar write failed ({}): {}", path.display(), e);
             }
             id
         }
@@ -1509,10 +1510,7 @@ fn handle_bash_pre_tool_use_internal(
             })
         }
         Err(e) => {
-            tracing::debug!(
-                "Pre-snapshot failed: {}; will use fallback on post",
-                e
-            );
+            tracing::debug!("Pre-snapshot failed: {}; will use fallback on post", e);
             // Don't fail the tool call; post-hook will use fallback path
             Ok(BashToolResult {
                 action: BashCheckpointAction::TakePreSnapshot,

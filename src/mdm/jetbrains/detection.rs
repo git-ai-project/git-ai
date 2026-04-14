@@ -124,7 +124,8 @@ fn detect_macos_ide(ide: &'static JetBrainsIde, app_path: &Path) -> Option<Detec
     if !binary_path.exists() {
         tracing::debug!(
             "JetBrains: Binary not found at {:?} for {}",
-            binary_path, ide.name
+            binary_path,
+            ide.name
         );
         return None;
     }

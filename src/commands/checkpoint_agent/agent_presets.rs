@@ -87,7 +87,9 @@ pub(crate) fn prepare_agent_bash_pre_hook(
                 Err(error) => {
                     tracing::debug!(
                         "Bash pre-hook snapshot failed for {} session {}: {}",
-                        agent_id.tool, session_id, error
+                        agent_id.tool,
+                        session_id,
+                        error
                     );
                     None
                 }
@@ -1453,7 +1455,9 @@ impl AgentCheckpointPreset for CodexPreset {
                 .captured_checkpoint_id();
 
                 if pre_hook_captured_id.is_some() {
-                    tracing::debug!("Codex PreToolUse captured a bash pre-snapshot but will skip emitting a checkpoint",);
+                    tracing::debug!(
+                        "Codex PreToolUse captured a bash pre-snapshot but will skip emitting a checkpoint",
+                    );
                 }
 
                 return Err(GitAiError::PresetError(
