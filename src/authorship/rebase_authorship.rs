@@ -4556,15 +4556,16 @@ fn transform_attributions_to_final_state(
         }
     }
 
-    // Calculate and update prompt metrics based on transformed attributions
+    // Calculate and update prompt metrics based on transformed attributions.
+    // Empty session maps preserve existing total_additions/total_deletions values.
     crate::authorship::virtual_attribution::VirtualAttributions::calculate_and_update_prompt_metrics(
         &mut prompts,
         &attributions,
-        &HashMap::new(), // Empty - will result in total_additions = 0
-        &HashMap::new(), // Empty - will result in total_deletions = 0
+        &HashMap::new(),
+        &HashMap::new(),
     );
 
-    // Restore the saved total_additions and total_deletions
+    // Overwrite with the saved pre-rebase totals (rebase should preserve original totals).
     for (prompt_id, commits) in prompts.iter_mut() {
         if let Some(&(additions, deletions)) = saved_totals.get(prompt_id) {
             for prompt_record in commits.values_mut() {
