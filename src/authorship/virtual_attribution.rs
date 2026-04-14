@@ -2674,7 +2674,8 @@ mod tests {
         session_deletions.insert("session_b".to_string(), 5u32);
 
         // Empty attributions (we're only testing the total_additions/total_deletions logic)
-        let attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> = HashMap::new();
+        let attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
+            HashMap::new();
 
         VirtualAttributions::calculate_and_update_prompt_metrics(
             &mut prompts,
@@ -2734,7 +2735,8 @@ mod tests {
         commits.insert("abc123".to_string(), prompt_record);
         prompts.insert("session_x".to_string(), commits);
 
-        let attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> = HashMap::new();
+        let attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
+            HashMap::new();
 
         // Empty session maps (as used in merge/rebase paths)
         VirtualAttributions::calculate_and_update_prompt_metrics(
