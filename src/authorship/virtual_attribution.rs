@@ -1187,6 +1187,7 @@ fn collect_unstaged_hunks_from_snapshot(
     commit_sha: &str,
     pathspecs: Option<&HashSet<String>>,
     final_state_snapshot: &HashMap<String, String>,
+    va_file_contents: &HashMap<String, String>,
 ) -> Result<
     (
         HashMap<String, Vec<LineRange>>,
@@ -1204,8 +1205,15 @@ fn collect_unstaged_hunks_from_snapshot(
 
     for file_path in file_paths {
         let committed_content = get_file_content_at_commit(repo, commit_sha, &file_path)?;
+        // When looking up the final (working-directory) state for a file, try the
+        // captured snapshot first.  If the file is absent from the snapshot (e.g.
+        // an untracked AI file that was never committed), fall back to the content
+        // the VirtualAttributions already resolved from the working-log blob store.
+        // Only when neither source has content do we treat the file as identical to
+        // the committed tree (which may be empty for new files).
         let final_content = final_state_snapshot
             .get(&file_path)
+            .or_else(|| va_file_contents.get(&file_path))
             .cloned()
             .unwrap_or_else(|| committed_content.clone());
 
@@ -1330,7 +1338,13 @@ impl VirtualAttributions {
         let committed_hunks = collect_committed_hunks(repo, parent_sha, commit_sha, pathspecs)?;
         let (mut unstaged_hunks, pure_insertion_hunks) =
             if let Some(snapshot) = final_state_snapshot {
-                collect_unstaged_hunks_from_snapshot(repo, commit_sha, pathspecs, snapshot)?
+                collect_unstaged_hunks_from_snapshot(
+                    repo,
+                    commit_sha,
+                    pathspecs,
+                    snapshot,
+                    &self.file_contents,
+                )?
             } else {
                 collect_unstaged_hunks(repo, commit_sha, pathspecs)?
             };
