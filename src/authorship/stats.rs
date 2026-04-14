@@ -225,7 +225,8 @@ pub fn write_stats_to_terminal(stats: &CommitStats, is_interactive: bool) -> Str
         // not via format-width padding on the label — so that invisible escape bytes do
         // not misalign the output.
         let untracked_label = if is_interactive {
-            "\x1b]8;;https://usegitai.com/docs\x1b\\untracked\x1b]8;;\x1b\\".to_string()
+            "\x1b]8;;https://usegitai.com/docs\x1b\\\x1b[4muntracked\x1b[24m\x1b]8;;\x1b\\"
+                .to_string()
         } else {
             "untracked".to_string()
         };
