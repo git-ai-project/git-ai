@@ -6241,12 +6241,10 @@ impl ActorDaemonCoordinator {
                         let fallback_old = pending_old
                             .as_deref()
                             .filter(|s| !s.is_empty())
-                            .or_else(|| {
-                                if !old_head.is_empty() {
-                                    Some(old_head.as_str())
-                                } else {
-                                    None
-                                }
+                            .or(if !old_head.is_empty() {
+                                Some(old_head.as_str())
+                            } else {
+                                None
                             });
                         let fallback_new = if !new_head.is_empty() {
                             Some(new_head.as_str())
