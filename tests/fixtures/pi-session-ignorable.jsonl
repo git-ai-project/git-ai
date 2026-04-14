@@ -1,0 +1,7 @@
+{"type":"session","version":3,"id":"pi-session-789","timestamp":"2026-03-31T10:20:00.000Z","cwd":"/tmp/project"}
+{"type":"model_change","id":"model111","parentId":null,"timestamp":"2026-03-31T10:20:00.500Z","provider":"openai","modelId":"gpt-5"}
+{"type":"custom","id":"custom111","parentId":"model111","timestamp":"2026-03-31T10:20:00.750Z","customType":"git-ai","data":{"note":"ignore me"}}
+{"type":"message","id":"dddd4444","parentId":"custom111","timestamp":"2026-03-31T10:20:01.000Z","message":{"role":"user","content":"Summarize the config changes.","timestamp":1774952401000}}
+{"type":"branchSummary","id":"branch111","parentId":"dddd4444","timestamp":"2026-03-31T10:20:01.500Z","summary":"Ignore this branch summary."}
+{"type":"compactionSummary","id":"compact111","parentId":"branch111","timestamp":"2026-03-31T10:20:01.750Z","summary":"Ignore this compaction summary."}
+{"type":"message","id":"eeee5555","parentId":"dddd4444","timestamp":"2026-03-31T10:20:02.000Z","message":{"role":"assistant","provider":"openai","model":"gpt-5","content":[{"type":"text","text":"The config changes are now summarized."}],"timestamp":1774952402000}}
