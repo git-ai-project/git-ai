@@ -49,14 +49,14 @@ fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  142)             let fro
 <td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/pi.svg" alt="Pi" height="40" /></td>
 <td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/windsurf.png" alt="Windsurf" height="40" /></td>
 <td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/droid.png" alt="Droid" height="40" /></td>
-<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/amp.png" alt="Amp" height="40" style="margin-top:6px" /></td>
-<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/gemini.png" alt="Gemini" height="40" style="margin-top:5px" /></td>
+<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/amp.png" alt="Amp" height="40" /></td>
+<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/gemini.png" alt="Gemini" height="40" /></td>
 </tr>
 <tr>
-<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/continue.png" alt="Continue" height="40" style="margin-top:4px" /></td>
+<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/continue.png" alt="Continue" height="40" /></td>
 <td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/junie_white.png" alt="Junie" height="40" /></td>
 <td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/rovodev.png" alt="Rovo Dev" height="40" /></td>
-<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/firebender.png" alt="Firebender" height="40" style="margin-top:3px" /></td>
+<td bgcolor="#ffffff" align="center"><img src="assets/docs/agents/firebender.png" alt="Firebender" height="40" /></td>
 <td align="center"><a href="https://usegitai.com/docs/cli/add-your-agent">+ Add an Agent</a></td>
 </tr>
 </table>
