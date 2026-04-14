@@ -15,19 +15,11 @@ pub fn notes_add(
     commit_sha: &str,
     note_content: &str,
 ) -> Result<(), GitAiError> {
-    let mut args = repo.global_args_for_exec();
-    args.push("notes".to_string());
-    args.push("--ref=ai".to_string());
-    args.push("add".to_string());
-    args.push("-f".to_string()); // Always force overwrite
-    args.push("-F".to_string());
-    args.push("-".to_string()); // Read note content from stdin
-    args.push(commit_sha.to_string());
-
-    // Use stdin to provide the note content to avoid command line length limits
-    exec_git_stdin(&args, note_content.as_bytes())?;
-    crate::authorship::git_ai_hooks::post_notes_updated_single(repo, commit_sha, note_content);
-    Ok(())
+    // Route through notes_add_batch to ensure consistent fanout tree format.
+    // Using git's native `notes add` can produce flat entries for small trees,
+    // leading to mixed-fanout trees that trigger assertion failures in
+    // `git notes merge` (notes-merge.c diff_tree_remote).
+    notes_add_batch(repo, &[(commit_sha.to_string(), note_content.to_string())])
 }
 
 fn notes_path_for_object(oid: &str) -> String {
@@ -557,23 +549,15 @@ pub fn ref_exists(repo: &Repository, ref_name: &str) -> bool {
 }
 
 /// Merge notes from a source ref into refs/notes/ai
-/// Uses the 'ours' strategy to combine notes without data loss
+/// Uses a fast-import based "ours" strategy to combine notes without data loss.
+/// This avoids `git notes merge` which can crash with an assertion failure
+/// (notes-merge.c diff_tree_remote) on mixed-fanout notes trees.
 pub fn merge_notes_from_ref(repo: &Repository, source_ref: &str) -> Result<(), GitAiError> {
-    let mut args = repo.global_args_for_exec();
-    args.push("notes".to_string());
-    args.push(format!("--ref={}", AI_AUTHORSHIP_REFNAME));
-    args.push("merge".to_string());
-    args.push("-s".to_string());
-    args.push("ours".to_string());
-    args.push("--quiet".to_string());
-    args.push(source_ref.to_string());
-
     debug_log(&format!(
         "Merging notes from {} into refs/notes/ai",
         source_ref
     ));
-    exec_git(&args)?;
-    Ok(())
+    fallback_merge_notes_ours(repo, source_ref)
 }
 
 /// Fallback merge when `git notes merge -s ours` fails (e.g., due to git assertion

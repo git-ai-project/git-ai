@@ -1,5 +1,5 @@
 use crate::git::refs::{
-    AI_AUTHORSHIP_PUSH_REFSPEC, copy_ref, fallback_merge_notes_ours, merge_notes_from_ref,
+    AI_AUTHORSHIP_PUSH_REFSPEC, copy_ref, merge_notes_from_ref,
     ref_exists, tracking_ref_for_remote,
 };
 use crate::{
@@ -196,10 +196,6 @@ pub fn fetch_authorship_notes(
             ));
             if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
                 debug_log(&format!("notes merge failed: {}", e));
-                // Fallback: manually merge notes when git notes merge crashes
-                if let Err(e2) = fallback_merge_notes_ours(repository, &tracking_ref) {
-                    debug_log(&format!("fallback merge also failed: {}", e2));
-                }
             }
         } else {
             // Only tracking ref exists - copy it to local
@@ -324,12 +320,6 @@ fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) {
     ));
     if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
         debug_log(&format!("pre-push notes merge failed: {}", e));
-        // Fallback: manually merge notes when git notes merge crashes
-        // (e.g., due to corrupted/mixed-fanout notes trees, or git bugs
-        // with fanout-level mismatches on older git versions like macOS)
-        if let Err(e2) = fallback_merge_notes_ours(repository, &tracking_ref) {
-            debug_log(&format!("pre-push fallback merge also failed: {}", e2));
-        }
     }
 }
 
