@@ -183,6 +183,53 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
         return Ok(());
     }
 
+    let mut deduped_entries: Vec<(String, String)> = Vec::new();
+    let mut seen = HashSet::new();
+    for (commit_sha, note_content) in entries.iter().rev() {
+        if seen.insert(commit_sha.as_str()) {
+            deduped_entries.push((commit_sha.clone(), note_content.clone()));
+        }
+    }
+    deduped_entries.reverse();
+
+    // Retry on refs/notes/ai ref conflicts: when a concurrent writer updates
+    // the ref between our rev-parse and fast-import, git fast-import rejects
+    // the update with "new tip does not contain old tip".  Re-reading the tip
+    // and retrying resolves this.
+    for attempt in 0..3 {
+        match notes_add_batch_once(repo, &deduped_entries) {
+            Ok(()) => {
+                crate::authorship::git_ai_hooks::post_notes_updated(repo, &deduped_entries);
+                return Ok(());
+            }
+            Err(ref e) if attempt < 2 && is_notes_ref_conflict(e) => {
+                crate::utils::debug_log(&format!(
+                    "notes_add_batch ref conflict (attempt {}), retrying",
+                    attempt + 1,
+                ));
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
+/// Returns true when a GitAiError's stderr contains the fast-import
+/// "new tip does not contain old tip" ref-conflict message.
+fn is_notes_ref_conflict(err: &GitAiError) -> bool {
+    match err {
+        GitAiError::GitCliError { stderr, .. } => {
+            stderr.contains("does not contain")
+        }
+        _ => false,
+    }
+}
+
+fn notes_add_batch_once(
+    repo: &Repository,
+    deduped_entries: &[(String, String)],
+) -> Result<(), GitAiError> {
     let mut args = repo.global_args_for_exec();
     args.push("rev-parse".to_string());
     args.push("--verify".to_string());
@@ -195,15 +242,6 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
         | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
         Err(e) => return Err(e),
     };
-
-    let mut deduped_entries: Vec<(String, String)> = Vec::new();
-    let mut seen = HashSet::new();
-    for (commit_sha, note_content) in entries.iter().rev() {
-        if seen.insert(commit_sha.as_str()) {
-            deduped_entries.push((commit_sha.clone(), note_content.clone()));
-        }
-    }
-    deduped_entries.reverse();
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -242,7 +280,6 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
     fast_import_args.push("fast-import".to_string());
     fast_import_args.push("--quiet".to_string());
     exec_git_stdin(&fast_import_args, &script)?;
-    crate::authorship::git_ai_hooks::post_notes_updated(repo, &deduped_entries);
 
     Ok(())
 }
@@ -259,19 +296,6 @@ pub fn notes_add_blob_batch(
         return Ok(());
     }
 
-    let mut args = repo.global_args_for_exec();
-    args.push("rev-parse".to_string());
-    args.push("--verify".to_string());
-    args.push("refs/notes/ai".to_string());
-    let existing_notes_tip = match exec_git(&args) {
-        Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
-        Err(GitAiError::GitCliError {
-            code: Some(128), ..
-        })
-        | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
-        Err(e) => return Err(e),
-    };
-
     let mut deduped_entries: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
     for (commit_sha, blob_oid) in entries.iter().rev() {
@@ -281,34 +305,20 @@ pub fn notes_add_blob_batch(
     }
     deduped_entries.reverse();
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
-        .as_secs();
-
-    let mut script = Vec::<u8>::new();
-    script.extend_from_slice(b"commit refs/notes/ai\n");
-    script.extend_from_slice(format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes());
-    script.extend_from_slice(b"data 0\n");
-    if let Some(existing_tip) = existing_notes_tip {
-        script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
-    }
-
-    for (commit_sha, blob_oid) in &deduped_entries {
-        let fanout_path = notes_path_for_object(commit_sha);
-        let flat_path = commit_sha.clone();
-        if flat_path != fanout_path {
-            script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+    // Retry on ref conflicts (same as notes_add_batch).
+    for attempt in 0..3 {
+        match notes_add_blob_batch_once(repo, &deduped_entries) {
+            Ok(()) => break,
+            Err(ref e) if attempt < 2 && is_notes_ref_conflict(e) => {
+                crate::utils::debug_log(&format!(
+                    "notes_add_blob_batch ref conflict (attempt {}), retrying",
+                    attempt + 1,
+                ));
+                continue;
+            }
+            Err(e) => return Err(e),
         }
-        script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
-        script.extend_from_slice(format!("M 100644 {} {}\n", blob_oid, fanout_path).as_bytes());
     }
-    script.extend_from_slice(b"\n");
-
-    let mut fast_import_args = repo.global_args_for_exec();
-    fast_import_args.push("fast-import".to_string());
-    fast_import_args.push("--quiet".to_string());
-    exec_git_stdin(&fast_import_args, &script)?;
 
     let has_post_notes_updated_hooks = crate::config::Config::get()
         .git_ai_hook_commands("post_notes_updated")
@@ -344,6 +354,55 @@ pub fn notes_add_blob_batch(
             )),
         }
     }
+
+    Ok(())
+}
+
+fn notes_add_blob_batch_once(
+    repo: &Repository,
+    deduped_entries: &[(String, String)],
+) -> Result<(), GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.push("rev-parse".to_string());
+    args.push("--verify".to_string());
+    args.push("refs/notes/ai".to_string());
+    let existing_notes_tip = match exec_git(&args) {
+        Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
+        Err(GitAiError::GitCliError {
+            code: Some(128), ..
+        })
+        | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
+        Err(e) => return Err(e),
+    };
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
+        .as_secs();
+
+    let mut script = Vec::<u8>::new();
+    script.extend_from_slice(b"commit refs/notes/ai\n");
+    script.extend_from_slice(format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes());
+    script.extend_from_slice(b"data 0\n");
+    if let Some(existing_tip) = existing_notes_tip {
+        script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
+    }
+
+    for (commit_sha, blob_oid) in deduped_entries {
+        let fanout_path = notes_path_for_object(commit_sha);
+        let flat_path = commit_sha.clone();
+        if flat_path != fanout_path {
+            script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+        }
+        script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
+        script.extend_from_slice(format!("M 100644 {} {}\n", blob_oid, fanout_path).as_bytes());
+    }
+    script.extend_from_slice(b"\n");
+
+    let mut fast_import_args = repo.global_args_for_exec();
+    fast_import_args.push("fast-import".to_string());
+    fast_import_args.push("--quiet".to_string());
+    exec_git_stdin(&fast_import_args, &script)?;
 
     Ok(())
 }
