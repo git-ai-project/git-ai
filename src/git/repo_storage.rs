@@ -429,6 +429,11 @@ impl PersistedWorkingLog {
             }
             // opencode can always refetch from its session storage
             "opencode" => false,
+            // pi needs session_path metadata for prompt refresh
+            "pi" => metadata
+                .as_ref()
+                .and_then(|m| m.get("session_path"))
+                .is_none(),
             // github-copilot needs chat_session_path
             "github-copilot" => metadata
                 .as_ref()
@@ -778,6 +783,8 @@ impl PersistedWorkingLog {
 #[cfg(test)]
 mod tests {
 
+    use crate::authorship::transcript::AiTranscript;
+    use crate::authorship::working_log::AgentId;
     use crate::git::test_utils::TmpRepo;
 
     use super::*;
@@ -1202,6 +1209,72 @@ mod tests {
         assert!(
             !working_log.initial_file.exists(),
             "INITIAL should be removed when empty"
+        );
+    }
+
+    #[test]
+    fn test_pi_transcript_refetch_requires_session_path_metadata() {
+        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
+        let repo_storage =
+            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
+                .unwrap();
+        let working_log = repo_storage
+            .working_log_for_base_commit("test-commit-sha")
+            .unwrap();
+
+        let mut checkpoint_with_session_path = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            "diff".to_string(),
+            "author".to_string(),
+            vec![],
+        );
+        checkpoint_with_session_path.agent_id = Some(AgentId {
+            tool: "pi".to_string(),
+            id: "session-1".to_string(),
+            model: "anthropic/claude-sonnet-4-5".to_string(),
+        });
+        checkpoint_with_session_path.transcript = Some(AiTranscript::new());
+        checkpoint_with_session_path.agent_metadata = Some(HashMap::from([(
+            "session_path".to_string(),
+            "/tmp/pi-session.jsonl".to_string(),
+        )]));
+
+        working_log
+            .append_checkpoint(&checkpoint_with_session_path)
+            .expect("append checkpoint with session_path");
+
+        let checkpoints = working_log
+            .read_all_checkpoints()
+            .expect("read checkpoints with session_path");
+        assert!(
+            checkpoints[0].transcript.is_none(),
+            "Pi checkpoints with session_path should drop inline transcript"
+        );
+
+        let mut checkpoint_without_session_path = Checkpoint::new(
+            CheckpointKind::AiAgent,
+            "diff-2".to_string(),
+            "author".to_string(),
+            vec![],
+        );
+        checkpoint_without_session_path.agent_id = Some(AgentId {
+            tool: "pi".to_string(),
+            id: "session-2".to_string(),
+            model: "anthropic/claude-sonnet-4-5".to_string(),
+        });
+        checkpoint_without_session_path.transcript = Some(AiTranscript::new());
+        checkpoint_without_session_path.agent_metadata = Some(HashMap::new());
+
+        working_log
+            .append_checkpoint(&checkpoint_without_session_path)
+            .expect("append checkpoint without session_path");
+
+        let checkpoints = working_log
+            .read_all_checkpoints()
+            .expect("read checkpoints without session_path");
+        assert!(
+            checkpoints[1].transcript.is_some(),
+            "Pi checkpoints without session_path should keep inline transcript"
         );
     }
 
