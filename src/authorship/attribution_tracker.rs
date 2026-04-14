@@ -2654,4 +2654,88 @@ mod tests {
         assert_eq!(ai_block.start_line, 2);
         assert_eq!(ai_block.end_line, 17);
     }
+
+    // ====================================================================
+    // CRLF / LF normalization tests
+    // ====================================================================
+
+    #[test]
+    fn crlf_to_lf_same_content_preserves_attributions() {
+        // When content only changes line endings (CRLF→LF), attributions should
+        // be preserved for the original author, NOT re-attributed.
+        let tracker = AttributionTracker::new();
+        let old = "hello\r\nworld\r\n";
+        let new = "hello\nworld\n";
+        let old_attrs = vec![Attribution::new(0, old.len(), "Alice".into(), TEST_TS)];
+
+        let updated = tracker
+            .update_attributions_for_checkpoint(old, new, &old_attrs, "Bob", TEST_TS + 1, false)
+            .unwrap();
+
+        // All non-whitespace content should still be owned by Alice
+        assert_non_ws_owned_by(
+            &updated,
+            new,
+            "Alice",
+            "CRLF→LF with same content should not re-attribute to Bob",
+        );
+    }
+
+    #[test]
+    fn lf_to_crlf_same_content_preserves_attributions() {
+        let tracker = AttributionTracker::new();
+        let old = "hello\nworld\n";
+        let new = "hello\r\nworld\r\n";
+        let old_attrs = vec![Attribution::new(0, old.len(), "Alice".into(), TEST_TS)];
+
+        let updated = tracker
+            .update_attributions_for_checkpoint(old, new, &old_attrs, "Bob", TEST_TS + 1, false)
+            .unwrap();
+
+        assert_non_ws_owned_by(
+            &updated,
+            new,
+            "Alice",
+            "LF→CRLF with same content should not re-attribute to Bob",
+        );
+    }
+
+    #[test]
+    fn crlf_to_lf_with_real_edit_attributes_correctly() {
+        // Old has CRLF, new has LF with one line changed. Only the changed line
+        // should be attributed to the new author.
+        let tracker = AttributionTracker::new();
+        let old = "line1\r\nline2\r\nline3\r\n";
+        let new = "line1\nmodified\nline3\n";
+        let old_attrs = vec![Attribution::new(0, old.len(), "Alice".into(), TEST_TS)];
+
+        let updated = tracker
+            .update_attributions_for_checkpoint(old, new, &old_attrs, "Bob", TEST_TS + 1, false)
+            .unwrap();
+
+        // "line1" and "line3" should remain Alice's
+        // "modified" should be Bob's
+        let line1_start = 0;
+        let line1_end = "line1".len();
+        assert_range_owned_by(&updated, line1_start, line1_end, "Alice");
+
+        let modified_start = "line1\n".len();
+        let modified_end = "line1\nmodified".len();
+        assert_range_owned_by(&updated, modified_start, modified_end, "Bob");
+
+        let line3_start = "line1\nmodified\n".len();
+        let line3_end = "line1\nmodified\nline3".len();
+        assert_range_owned_by(&updated, line3_start, line3_end, "Alice");
+    }
+
+    #[test]
+    fn collect_line_metadata_strips_cr_from_text() {
+        // Verify that collect_line_metadata strips \r from the text field
+        // (this already works, but verifies the building block)
+        let content = "hello\r\nworld\r\n";
+        let metadata = collect_line_metadata(content);
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(metadata[0].text, "hello");
+        assert_eq!(metadata[1].text, "world");
+    }
 }

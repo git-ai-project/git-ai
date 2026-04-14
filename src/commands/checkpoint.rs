@@ -6,7 +6,9 @@ use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::ignore::{
     IgnoreMatcher, build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
-use crate::authorship::imara_diff_utils::{LineChangeTag, compute_line_changes};
+use crate::authorship::imara_diff_utils::{
+    LineChangeTag, compute_line_changes, normalize_line_endings,
+};
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
@@ -1575,6 +1577,14 @@ fn get_previous_content_from_head(
     }
 }
 
+/// Compare file contents ignoring CRLF/LF differences.
+fn content_eq_normalized(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    normalize_line_endings(a) == normalize_line_endings(b)
+}
+
 fn is_ai_author_id(author_id: &str) -> bool {
     author_id != "human" && !author_id.starts_with("h_")
 }
@@ -1671,7 +1681,7 @@ fn get_checkpoint_entry_for_file(
             get_previous_content_from_head(&repo, &file_path, head_tree_id.as_ref())
         };
 
-        if current_content == previous_content {
+        if content_eq_normalized(&current_content, &previous_content) {
             return Ok(None);
         }
 
@@ -1700,7 +1710,9 @@ fn get_checkpoint_entry_for_file(
 
         // Skip if no changes, UNLESS we have INITIAL attributions for this file
         // (in which case we need to create an entry to record those attributions)
-        if current_content == previous_content && initial_attrs_for_file.is_empty() {
+        if content_eq_normalized(&current_content, &previous_content)
+            && initial_attrs_for_file.is_empty()
+        {
             return Ok(None);
         }
 
@@ -1817,8 +1829,35 @@ fn get_checkpoint_entry_for_file(
 
     // Skip if no changes (but we already checked this earlier, accounting for INITIAL attributions)
     // For files from previous checkpoints, check if content has changed
-    if is_from_checkpoint && current_content == previous_content {
-        return Ok(None);
+    if is_from_checkpoint && content_eq_normalized(&current_content, &previous_content) {
+        if current_content == previous_content {
+            // Byte-identical — truly no change.
+            return Ok(None);
+        }
+        // Content differs only in line endings (CRLF ↔ LF). Update the stored blob
+        // to the current content so future diffs compare LF-vs-LF. Without this,
+        // the stale CRLF blob causes capture_diff_slices to see every line as changed,
+        // and AI checkpoints (force_split=true) would re-attribute all lines to AI.
+        // Remap attributions through line-number space to adjust byte offsets.
+        let line_attributions =
+            crate::authorship::attribution_tracker::attributions_to_line_attributions_for_checkpoint(
+                &prev_attributions,
+                &previous_content,
+                kind.is_ai(),
+            );
+        let remapped_attributions =
+            crate::authorship::attribution_tracker::line_attributions_to_attributions(
+                &line_attributions,
+                &current_content,
+                ts,
+            );
+        let entry = WorkingLogEntry::new(
+            file_path,
+            file_content_hash,
+            remapped_attributions,
+            line_attributions,
+        );
+        return Ok(Some((entry, FileLineStats::default())));
     }
 
     let (entry, stats) = make_entry_for_file(FileEntryInput {
@@ -3232,6 +3271,285 @@ mod tests {
         assert_eq!(
             latest_stats.deletions_sloc, 0,
             "Whitespace deletions ignored"
+        );
+    }
+
+    // ====================================================================
+    // CRLF / LF normalization tests for compute_file_line_stats
+    // ====================================================================
+
+    #[test]
+    fn test_compute_file_line_stats_crlf_to_lf_no_changes() {
+        // Same content, only line endings differ (CRLF → LF).
+        // Stats should show 0 additions and 0 deletions.
+        let old = "line1\r\nline2\r\nline3\r\n";
+        let new = "line1\nline2\nline3\n";
+
+        let stats = compute_file_line_stats(old, new);
+
+        assert_eq!(
+            stats.additions, 0,
+            "CRLF→LF with identical content should show 0 additions"
+        );
+        assert_eq!(
+            stats.deletions, 0,
+            "CRLF→LF with identical content should show 0 deletions"
+        );
+    }
+
+    #[test]
+    fn test_compute_file_line_stats_lf_to_crlf_no_changes() {
+        let old = "line1\nline2\nline3\n";
+        let new = "line1\r\nline2\r\nline3\r\n";
+
+        let stats = compute_file_line_stats(old, new);
+
+        assert_eq!(
+            stats.additions, 0,
+            "LF→CRLF with identical content should show 0 additions"
+        );
+        assert_eq!(
+            stats.deletions, 0,
+            "LF→CRLF with identical content should show 0 deletions"
+        );
+    }
+
+    #[test]
+    fn test_compute_file_line_stats_crlf_to_lf_with_additions() {
+        // Reproduces the user-reported bug: file with CRLF, AI adds lines with LF.
+        // Old: 3 CRLF lines. New: same 3 lines (LF) + 2 new lines.
+        // Should show exactly 2 additions and 0 deletions.
+        let old = "line1\r\nline2\r\nline3\r\n";
+        let new = "line1\nline2\nline3\nnew_a\nnew_b\n";
+
+        let stats = compute_file_line_stats(old, new);
+
+        assert_eq!(
+            stats.additions, 2,
+            "Should have exactly 2 additions (the new lines)"
+        );
+        assert_eq!(
+            stats.deletions, 0,
+            "Should have 0 deletions (no lines removed)"
+        );
+    }
+
+    #[test]
+    fn test_compute_file_line_stats_crlf_large_file_user_reported_bug() {
+        // Exact scenario from user report:
+        // 100-line CRLF file, AI adds 5 lines (with LF).
+        // Should show +5 -0, NOT +105 -100.
+        let mut old = String::new();
+        for i in 1..=100 {
+            old.push_str(&format!("line number {}\r\n", i));
+        }
+
+        let mut new = String::new();
+        for i in 1..=100 {
+            new.push_str(&format!("line number {}\n", i));
+        }
+        for i in 1..=5 {
+            new.push_str(&format!("new ai line {}\n", i));
+        }
+
+        let stats = compute_file_line_stats(&old, &new);
+
+        assert_eq!(
+            stats.additions, 5,
+            "Should have exactly 5 additions (AI-added lines), not {}",
+            stats.additions
+        );
+        assert_eq!(
+            stats.deletions, 0,
+            "Should have 0 deletions, not {}",
+            stats.deletions
+        );
+    }
+
+    // ====================================================================
+    // End-to-end CRLF test: blob has CRLF, working tree has LF
+    // Simulates the real-world scenario where git stores CRLF (or autocrlf
+    // converts on checkout) and an AI tool writes LF.
+    // ====================================================================
+
+    #[test]
+    fn test_checkpoint_crlf_blob_vs_lf_working_tree_stats_not_inflated() {
+        // Step 1: Create a repo and commit a file with CRLF line endings.
+        // On Linux without autocrlf, the blob stores CRLF verbatim.
+        let repo = TmpRepo::new().unwrap();
+        let crlf_content = "line1\r\nline2\r\nline3\r\nline4\r\nline5\r\n";
+        repo.write_file("test.txt", crlf_content, true).unwrap();
+        repo.commit_with_message("initial commit with CRLF")
+            .unwrap();
+
+        // Step 2: Overwrite the file with LF endings + one new line,
+        // simulating an AI tool that writes LF on a Windows repo.
+        let lf_content_with_addition = "line1\nline2\nline3\nline4\nline5\nnew_ai_line\n";
+        std::fs::write(repo.path().join("test.txt"), lf_content_with_addition).unwrap();
+
+        // Step 3: Run a checkpoint
+        repo.trigger_checkpoint_with_author("test-author").unwrap();
+
+        // Step 4: Read back checkpoint stats
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
+                .expect("Repository should exist");
+        let base_commit = gitai_repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+        let working_log = gitai_repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
+        let checkpoints = working_log.read_all_checkpoints().unwrap();
+        let latest = checkpoints
+            .last()
+            .expect("Should have at least one checkpoint");
+
+        // The key assertion: stats should reflect only the actual addition,
+        // NOT inflate every line because of CRLF→LF conversion.
+        assert_eq!(
+            latest.line_stats.additions, 1,
+            "Should have 1 addition (the new AI line), not {} (which would mean CRLF→LF inflated the count)",
+            latest.line_stats.additions
+        );
+        assert_eq!(
+            latest.line_stats.deletions, 0,
+            "Should have 0 deletions, not {} (which would mean CRLF→LF caused all old lines to appear deleted)",
+            latest.line_stats.deletions
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_crlf_blob_vs_lf_working_tree_no_changes_skipped() {
+        // When the only difference is CRLF→LF (no actual content change),
+        // the checkpoint should skip the file entirely — content_eq_normalized
+        // detects they're equal and returns None.
+        let repo = TmpRepo::new().unwrap();
+        let crlf_content = "line1\r\nline2\r\nline3\r\n";
+        repo.write_file("test.txt", crlf_content, true).unwrap();
+        repo.commit_with_message("initial commit with CRLF")
+            .unwrap();
+
+        // Overwrite with LF-only — same text content, different line endings
+        let lf_content = "line1\nline2\nline3\n";
+        std::fs::write(repo.path().join("test.txt"), lf_content).unwrap();
+
+        repo.trigger_checkpoint_with_author("test-author").unwrap();
+
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
+                .expect("Repository should exist");
+        let base_commit = gitai_repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+        let working_log = gitai_repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
+        let checkpoints = working_log.read_all_checkpoints().unwrap();
+
+        // The checkpoint may be empty (no entries) or absent entirely,
+        // because content_eq_normalized correctly detected no real change.
+        if let Some(latest) = checkpoints.last() {
+            let test_entry = latest.entries.iter().find(|e| e.file == "test.txt");
+            assert!(
+                test_entry.is_none(),
+                "test.txt should be skipped when only line endings differ"
+            );
+        }
+        // If no checkpoints at all, that's also correct — nothing changed.
+    }
+
+    #[test]
+    fn test_checkpoint_stale_crlf_blob_causes_ai_reattribution() {
+        // Regression test for Devin review finding: when a CRLF-only change is
+        // skipped (preserving a stale CRLF blob), the NEXT AI checkpoint compares
+        // the stale CRLF blob against the LF working tree. Because
+        // capture_diff_slices sees "line\r\n" ≠ "line\n", ALL lines appear changed.
+        // With force_split=true in AI checkpoints, every "changed" line gets
+        // re-attributed to AI — even human-written lines.
+        //
+        // The fix: when content differs only in line endings, update the blob
+        // to LF (preserving attributions) so future diffs are LF-vs-LF.
+        let repo = TmpRepo::new().unwrap();
+        let crlf_initial = "human_line1\r\nhuman_line2\r\nhuman_line3\r\n";
+        repo.write_file("test.txt", crlf_initial, true).unwrap();
+        repo.commit_with_message("initial commit with CRLF")
+            .unwrap();
+
+        // Step 1: Human checkpoint on CRLF file → creates entry with CRLF blob
+        // (need to add a line so the checkpoint creates an entry)
+        let crlf_with_edit = "human_line1\r\nhuman_line2\r\nhuman_line3\r\nhuman_line4\r\n";
+        std::fs::write(repo.path().join("test.txt"), crlf_with_edit).unwrap();
+        repo.trigger_checkpoint_with_author("human-author").unwrap();
+
+        // Step 2: Convert file to LF (same content, only line endings change)
+        let lf_with_edit = "human_line1\nhuman_line2\nhuman_line3\nhuman_line4\n";
+        std::fs::write(repo.path().join("test.txt"), lf_with_edit).unwrap();
+        repo.trigger_checkpoint_with_author("human-author").unwrap();
+
+        // Step 3: AI adds one line (LF) → AI checkpoint
+        let lf_with_ai = "human_line1\nhuman_line2\nhuman_line3\nhuman_line4\nai_new_line\n";
+        std::fs::write(repo.path().join("test.txt"), lf_with_ai).unwrap();
+        repo.trigger_checkpoint_with_ai("Claude", None, None)
+            .unwrap();
+
+        // Read the AI checkpoint
+        let gitai_repo =
+            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
+                .expect("Repository should exist");
+        let base_commit = gitai_repo
+            .head()
+            .ok()
+            .and_then(|head| head.target().ok())
+            .unwrap_or_else(|| "initial".to_string());
+        let working_log = gitai_repo
+            .storage
+            .working_log_for_base_commit(&base_commit)
+            .unwrap();
+        let checkpoints = working_log.read_all_checkpoints().unwrap();
+
+        // Find the AI checkpoint entry for test.txt
+        let ai_checkpoint = checkpoints
+            .iter()
+            .rev()
+            .find(|cp| cp.kind.is_ai() && cp.entries.iter().any(|e| e.file == "test.txt"))
+            .expect("Should have an AI checkpoint with test.txt");
+        let test_entry = ai_checkpoint
+            .entries
+            .iter()
+            .find(|e| e.file == "test.txt")
+            .unwrap();
+
+        // The key assertion: the AI checkpoint should NOT attribute all lines to AI.
+        // Only the actually-added line should be AI-attributed.
+        let ai_line_attrs: Vec<_> = test_entry
+            .line_attributions
+            .iter()
+            .filter(|la| is_ai_author_id(&la.author_id))
+            .collect();
+
+        // Count total lines covered by AI attributions
+        let ai_line_count: u32 = ai_line_attrs
+            .iter()
+            .map(|la| la.end_line - la.start_line + 1)
+            .sum();
+
+        // AI should only attribute 1 line (the new ai_new_line), not all 5 lines.
+        // If the stale CRLF blob caused full re-attribution, ai_line_count would be 5.
+        assert!(
+            ai_line_count <= 2,
+            "AI should attribute at most 1-2 lines (the actual addition), \
+             but attributed {} lines — stale CRLF blob caused full re-attribution. \
+             AI attributions: {:?}, all attributions: {:?}",
+            ai_line_count,
+            ai_line_attrs,
+            test_entry.line_attributions
         );
     }
 }

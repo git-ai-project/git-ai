@@ -969,29 +969,57 @@ fn is_executable(path: &Path) -> bool {
     true
 }
 
+/// Check whether two paths refer to the same underlying file.
+/// On Unix this compares (dev, ino); on other platforms it falls back to
+/// comparing canonicalized paths.
+fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(ma), Ok(mb)) = (fs::metadata(a), fs::metadata(b)) {
+            return ma.dev() == mb.dev() && ma.ino() == mb.ino();
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if let (Ok(ca), Ok(cb)) = (a.canonicalize(), b.canonicalize()) {
+            return ca == cb;
+        }
+    }
+    false
+}
+
 /// Detect if a path is actually the git-ai binary (or a symlink to it).
 /// This prevents `git_cmd()` from returning the git-ai shim, which would
 /// cause infinite recursion: handle_git() → proxy_to_git() → shim → handle_git() → ...
 fn path_is_git_ai_binary(path: &Path) -> bool {
-    // Check if a sibling "git-ai" exists in the same directory — this is the
-    // telltale sign that `path` is the git shim installed next to git-ai.
+    // Check canonical path — if the path resolves to a binary whose name
+    // is git-ai (or a variant), it is the git-ai binary regardless of what
+    // the original path looks like (catches symlinks like `git → git-ai`).
+    if let Ok(canonical) = path.canonicalize()
+        && let Some(name) = canonical.file_name().and_then(|n| n.to_str())
+    {
+        let stem = name.strip_suffix(".exe").unwrap_or(name);
+        if stem == "git-ai" || stem.starts_with("git-ai-") || stem.starts_with("git_ai") {
+            return true;
+        }
+    }
+
+    // Check if a sibling "git-ai" exists in the same directory AND both
+    // refer to the same underlying file (hard-link, bind-mount, or copy
+    // installed as a shim).  This catches hard-linked shims that the
+    // canonical-name check above misses, without false-positiving on
+    // environments where a real git binary legitimately coexists with a
+    // git-ai symlink (e.g. Docker images that compile git from source into
+    // /usr/local/bin and also symlink git-ai there).
     if let Some(parent) = path.parent() {
         let git_ai_name = if cfg!(windows) {
             "git-ai.exe"
         } else {
             "git-ai"
         };
-        if parent.join(git_ai_name).exists() {
-            return true;
-        }
-    }
-
-    // Also check canonical path — the symlink target may be git-ai itself.
-    if let Ok(canonical) = path.canonicalize()
-        && let Some(name) = canonical.file_name().and_then(|n| n.to_str())
-    {
-        let stem = name.strip_suffix(".exe").unwrap_or(name);
-        if stem == "git-ai" || stem.starts_with("git-ai-") || stem.starts_with("git_ai") {
+        let sibling = parent.join(git_ai_name);
+        if sibling.exists() && same_file(path, &sibling) {
             return true;
         }
     }
@@ -1627,5 +1655,46 @@ mod tests {
 
         let parsed = parse_file_config_bytes(data).expect("regular config should parse");
         assert_eq!(parsed.git_path.as_deref(), Some("/usr/bin/git"));
+    }
+
+    #[test]
+    fn test_path_is_git_ai_binary_symlink_to_git_ai() {
+        // A symlink `git → git-ai` should be detected as git-ai.
+        let dir = tempfile::tempdir().unwrap();
+        let git_ai = dir.path().join("git-ai");
+        fs::write(&git_ai, "fake-binary").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&git_ai, dir.path().join("git")).unwrap();
+        #[cfg(unix)]
+        assert!(path_is_git_ai_binary(&dir.path().join("git")));
+    }
+
+    #[test]
+    fn test_path_is_git_ai_binary_real_git_with_sibling_symlink() {
+        // A real `git` binary should NOT be flagged just because a `git-ai`
+        // symlink exists in the same directory (Docker/server environment).
+        let dir = tempfile::tempdir().unwrap();
+        let real_git = dir.path().join("git");
+        fs::write(&real_git, "real-git-binary").unwrap();
+        // git-ai is a different file (or symlink to a different file)
+        let git_ai_target = dir.path().join("git-ai-actual");
+        fs::write(&git_ai_target, "git-ai-binary").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&git_ai_target, dir.path().join("git-ai")).unwrap();
+        #[cfg(unix)]
+        assert!(!path_is_git_ai_binary(&real_git));
+    }
+
+    #[test]
+    fn test_path_is_git_ai_binary_hardlink() {
+        // A hard-linked shim (same inode) should be detected as git-ai.
+        let dir = tempfile::tempdir().unwrap();
+        let git_ai = dir.path().join("git-ai");
+        fs::write(&git_ai, "fake-binary").unwrap();
+        let git = dir.path().join("git");
+        #[cfg(unix)]
+        fs::hard_link(&git_ai, &git).unwrap();
+        #[cfg(unix)]
+        assert!(path_is_git_ai_binary(&git));
     }
 }

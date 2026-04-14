@@ -13,6 +13,7 @@ use crate::commands::checkpoint_agent::agent_presets::{
 use crate::commands::checkpoint_agent::agent_v1_preset::AgentV1Preset;
 use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
 use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
+use crate::commands::checkpoint_agent::pi_preset::PiPreset;
 use crate::config;
 use crate::daemon::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, LiveCheckpointRunRequest,
@@ -260,7 +261,7 @@ fn print_help() {
     eprintln!("Commands:");
     eprintln!("  checkpoint         Checkpoint working changes and attribute author");
     eprintln!(
-        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, windsurf, opencode, ai_tab, firebender, mock_ai, mock_known_human, known_human"
+        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, windsurf, opencode, pi, ai_tab, firebender, mock_ai, mock_known_human, known_human"
     );
     eprintln!(
         "    --hook-input <json|stdin>   JSON payload required by presets, or 'stdin' to read from stdin"
@@ -610,6 +611,22 @@ fn handle_checkpoint(args: &[String]) {
                     }
                     Err(e) => {
                         eprintln!("OpenCode preset error: {}", e);
+                        std::process::exit(0);
+                    }
+                }
+            }
+            "pi" => {
+                match PiPreset.run(AgentCheckpointFlags {
+                    hook_input: hook_input.clone(),
+                }) {
+                    Ok(agent_run) => {
+                        if agent_run.repo_working_dir.is_some() {
+                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
+                        }
+                        agent_run_result = Some(agent_run);
+                    }
+                    Err(e) => {
+                        eprintln!("Pi preset error: {}", e);
                         std::process::exit(0);
                     }
                 }

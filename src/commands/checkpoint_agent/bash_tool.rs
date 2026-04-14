@@ -462,6 +462,11 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "Bash" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::Pi => match tool_name {
+            "edit" | "write" | "replace" | "rename" => ToolClass::FileEdit,
+            "bash" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
     }
 }
 
@@ -476,6 +481,7 @@ pub enum Agent {
     OpenCode,
     Firebender,
     Codex,
+    Pi,
 }
 
 // ---------------------------------------------------------------------------

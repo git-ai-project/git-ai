@@ -69,6 +69,7 @@ mod multi_repo_workspace;
 mod non_utf8_files;
 mod opencode;
 mod performance;
+mod pi;
 mod prompt_across_commit;
 mod prompt_hash_migration;
 mod prompt_picker_test;
