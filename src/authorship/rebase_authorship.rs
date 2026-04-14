@@ -3138,8 +3138,6 @@ pub fn reconstruct_working_log_after_reset(
         )
     };
 
-    debug_log("Skipped target VA blame (range would be target..target = empty); using empty VA");
-
     // Step 5: Merge VAs favoring old_head to preserve uncommitted AI changes
     // old_head (with working log) wins overlaps, target fills gaps
     let merged_va = crate::authorship::virtual_attribution::merge_attributions_favoring_first(
