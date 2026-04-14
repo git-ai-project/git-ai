@@ -81,6 +81,8 @@ pub struct Config {
     #[serde(serialize_with = "serialize_masked_api_key")]
     api_key: Option<String>,
     quiet: bool,
+    ssl_cert_file: Option<String>,
+    ssl_no_verify: bool,
     custom_attributes: HashMap<String, String>,
     git_ai_hooks: HashMap<String, Vec<String>>,
 }
@@ -150,6 +152,10 @@ pub struct FileConfig {
     pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quiet: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_cert_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssl_no_verify: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -406,6 +412,20 @@ impl Config {
         self.quiet
     }
 
+    /// Returns the path to a custom SSL certificate file, if configured.
+    /// When set, these certificates are loaded in addition to the system's
+    /// native certificate store.
+    pub fn ssl_cert_file(&self) -> Option<&str> {
+        self.ssl_cert_file.as_deref()
+    }
+
+    /// Returns true if TLS certificate verification should be skipped.
+    /// This is dangerous and should only be used for self-hosted instances
+    /// with self-signed certificates where adding the CA cert is not possible.
+    pub fn ssl_no_verify(&self) -> bool {
+        self.ssl_no_verify
+    }
+
     /// Returns the custom attributes map (from config file + env var override).
     pub fn custom_attributes(&self) -> &HashMap<String, String> {
         &self.custom_attributes
@@ -650,6 +670,26 @@ fn build_config() -> Config {
     // Get quiet setting (defaults to false)
     let quiet = file_cfg.as_ref().and_then(|c| c.quiet).unwrap_or(false);
 
+    // Get SSL/TLS settings (env vars take precedence over config file)
+    let ssl_cert_file = env::var("GIT_AI_SSL_CERT_FILE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.ssl_cert_file.clone())
+                .filter(|s| !s.is_empty())
+        });
+    let ssl_no_verify = env::var("GIT_AI_SSL_NO_VERIFY")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or_else(|| {
+            file_cfg
+                .as_ref()
+                .and_then(|c| c.ssl_no_verify)
+                .unwrap_or(false)
+        });
+
     // Build custom attributes: file config as base, env var overrides
     let custom_attributes = build_custom_attributes(&file_cfg);
 
@@ -696,6 +736,8 @@ fn build_config() -> Config {
             default_prompt_storage,
             api_key,
             quiet,
+            ssl_cert_file,
+            ssl_no_verify,
             custom_attributes: custom_attributes.clone(),
             git_ai_hooks: git_ai_hooks.clone(),
         };
@@ -721,6 +763,8 @@ fn build_config() -> Config {
         default_prompt_storage,
         api_key,
         quiet,
+        ssl_cert_file,
+        ssl_no_verify,
         custom_attributes,
         git_ai_hooks,
     }
@@ -1123,6 +1167,8 @@ mod tests {
             default_prompt_storage: None,
             api_key: None,
             quiet: false,
+            ssl_cert_file: None,
+            ssl_no_verify: false,
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
         }
@@ -1232,6 +1278,8 @@ mod tests {
             default_prompt_storage: None,
             api_key: None,
             quiet: false,
+            ssl_cert_file: None,
+            ssl_no_verify: false,
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
         }
@@ -1350,6 +1398,8 @@ mod tests {
             default_prompt_storage: default_prompt_storage.map(|s| s.to_string()),
             api_key: None,
             quiet: false,
+            ssl_cert_file: None,
+            ssl_no_verify: false,
             custom_attributes: HashMap::new(),
             git_ai_hooks: HashMap::new(),
         }

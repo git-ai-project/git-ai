@@ -8,6 +8,7 @@ pub mod daemon;
 pub mod error;
 pub mod feature_flags;
 pub mod git;
+pub mod http;
 pub mod mdm;
 pub mod metrics;
 pub mod observability;
