@@ -225,7 +225,7 @@ pub fn write_stats_to_terminal(stats: &CommitStats, is_interactive: bool) -> Str
         // not via format-width padding on the label — so that invisible escape bytes do
         // not misalign the output.
         let untracked_label = if is_interactive {
-            "\x1b]8;;https://usegitai.com/docs/untracked\x1b\\\x1b[4muntracked\x1b[24m\x1b]8;;\x1b\\"
+            "\x1b]8;;https://usegitai.com/docs/cli/untracked\x1b\\\x1b[4muntracked\x1b[24m\x1b]8;;\x1b\\"
                 .to_string()
         } else {
             "untracked".to_string()
@@ -924,7 +924,7 @@ mod tests {
         // Not a snapshot test — asserts presence of the escape sequence directly.
         let hyperlink_output = write_stats_to_terminal(&untracked_stats, true);
         assert!(
-            hyperlink_output.contains("\x1b]8;;https://usegitai.com/docs/untracked\x1b\\"),
+            hyperlink_output.contains("\x1b]8;;https://usegitai.com/docs/cli/untracked\x1b\\"),
             "Expected OSC 8 hyperlink in interactive output, got: {:?}",
             hyperlink_output
         );
