@@ -1914,8 +1914,12 @@ impl VirtualAttributions {
         // Update all prompt records with calculated metrics
         for (session_id, commits) in prompts.iter_mut() {
             for prompt_record in commits.values_mut() {
-                prompt_record.total_additions = *session_additions.get(session_id).unwrap_or(&0);
-                prompt_record.total_deletions = *session_deletions.get(session_id).unwrap_or(&0);
+                if let Some(&additions) = session_additions.get(session_id) {
+                    prompt_record.total_additions = additions;
+                }
+                if let Some(&deletions) = session_deletions.get(session_id) {
+                    prompt_record.total_deletions = deletions;
+                }
                 prompt_record.accepted_lines =
                     *session_accepted_lines.get(session_id).unwrap_or(&0);
                 prompt_record.overriden_lines =
@@ -2072,15 +2076,17 @@ pub fn merge_attributions_favoring_first(
         }
     }
 
-    // Calculate and update prompt metrics (will set accepted_lines and overridden_lines)
+    // Calculate and update prompt metrics (will set accepted_lines and overridden_lines).
+    // Empty session maps preserve existing total_additions/total_deletions values.
     VirtualAttributions::calculate_and_update_prompt_metrics(
         &mut merged.prompts,
         &merged.attributions,
-        &HashMap::new(), // Empty - will result in total_additions = 0
-        &HashMap::new(), // Empty - will result in total_deletions = 0
+        &HashMap::new(),
+        &HashMap::new(),
     );
 
-    // Restore the saved total_additions and total_deletions
+    // Overwrite total_additions/total_deletions with the summed values from both sources,
+    // since merge should reflect the combined totals from primary + secondary.
     for (prompt_id, commits) in merged.prompts.iter_mut() {
         if let Some(&(additions, deletions)) = saved_totals.get(prompt_id) {
             for prompt_record in commits.values_mut() {
@@ -2605,5 +2611,149 @@ mod tests {
         }
 
         assert!(!virtual_attributions.files().is_empty());
+    }
+
+    /// Regression test for https://github.com/git-ai-project/git-ai/issues/1080
+    ///
+    /// When a prompt is inherited from INITIAL (e.g., from a previous agent session)
+    /// and has no new checkpoints in the current working log, its `total_additions`
+    /// must be preserved. Previously, `calculate_and_update_prompt_metrics` would
+    /// unconditionally overwrite with `unwrap_or(0)`, zeroing out inherited values.
+    #[test]
+    fn test_inherited_prompt_preserves_total_additions_when_no_checkpoint_data() {
+        use crate::authorship::authorship_log::PromptRecord;
+        use crate::authorship::working_log::AgentId;
+
+        // Set up two prompts: one with checkpoint data, one inherited (no checkpoint data)
+        let mut prompts = BTreeMap::new();
+
+        // Prompt A: inherited from INITIAL, already has total_additions = 42
+        let prompt_a_record = PromptRecord {
+            agent_id: AgentId {
+                tool: "cursor".to_string(),
+                id: "session_a".to_string(),
+                model: "gpt-4".to_string(),
+            },
+            human_author: Some("dev@example.com".to_string()),
+            messages: vec![],
+            total_additions: 42,
+            total_deletions: 10,
+            accepted_lines: 0,
+            overriden_lines: 0,
+            messages_url: None,
+            custom_attributes: None,
+        };
+        let mut prompt_a_commits = BTreeMap::new();
+        prompt_a_commits.insert(String::new(), prompt_a_record);
+        prompts.insert("session_a".to_string(), prompt_a_commits);
+
+        // Prompt B: has checkpoint data in this session
+        let prompt_b_record = PromptRecord {
+            agent_id: AgentId {
+                tool: "codex".to_string(),
+                id: "session_b".to_string(),
+                model: "gpt-4".to_string(),
+            },
+            human_author: Some("dev@example.com".to_string()),
+            messages: vec![],
+            total_additions: 0,
+            total_deletions: 0,
+            accepted_lines: 0,
+            overriden_lines: 0,
+            messages_url: None,
+            custom_attributes: None,
+        };
+        let mut prompt_b_commits = BTreeMap::new();
+        prompt_b_commits.insert(String::new(), prompt_b_record);
+        prompts.insert("session_b".to_string(), prompt_b_commits);
+
+        // Only session_b has checkpoint data; session_a has none (inherited from INITIAL)
+        let mut session_additions = HashMap::new();
+        session_additions.insert("session_b".to_string(), 25u32);
+        let mut session_deletions = HashMap::new();
+        session_deletions.insert("session_b".to_string(), 5u32);
+
+        // Empty attributions (we're only testing the total_additions/total_deletions logic)
+        let attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
+            HashMap::new();
+
+        VirtualAttributions::calculate_and_update_prompt_metrics(
+            &mut prompts,
+            &attributions,
+            &session_additions,
+            &session_deletions,
+        );
+
+        // Session A (inherited, no checkpoint data): total_additions must be PRESERVED
+        let prompt_a = prompts["session_a"].values().next().unwrap();
+        assert_eq!(
+            prompt_a.total_additions, 42,
+            "inherited prompt total_additions should be preserved, not reset to 0"
+        );
+        assert_eq!(
+            prompt_a.total_deletions, 10,
+            "inherited prompt total_deletions should be preserved, not reset to 0"
+        );
+
+        // Session B (has checkpoint data): total_additions must be UPDATED from checkpoints
+        let prompt_b = prompts["session_b"].values().next().unwrap();
+        assert_eq!(
+            prompt_b.total_additions, 25,
+            "prompt with checkpoint data should have total_additions updated"
+        );
+        assert_eq!(
+            prompt_b.total_deletions, 5,
+            "prompt with checkpoint data should have total_deletions updated"
+        );
+    }
+
+    /// Test that passing empty session maps preserves all existing values.
+    /// This is the pattern used by merge_attributions_favoring_first and rebase_authorship.
+    #[test]
+    fn test_empty_session_maps_preserve_existing_totals() {
+        use crate::authorship::authorship_log::PromptRecord;
+        use crate::authorship::working_log::AgentId;
+
+        let mut prompts = BTreeMap::new();
+
+        let prompt_record = PromptRecord {
+            agent_id: AgentId {
+                tool: "cursor".to_string(),
+                id: "session_x".to_string(),
+                model: "gpt-4".to_string(),
+            },
+            human_author: None,
+            messages: vec![],
+            total_additions: 100,
+            total_deletions: 30,
+            accepted_lines: 0,
+            overriden_lines: 0,
+            messages_url: None,
+            custom_attributes: None,
+        };
+        let mut commits = BTreeMap::new();
+        commits.insert("abc123".to_string(), prompt_record);
+        prompts.insert("session_x".to_string(), commits);
+
+        let attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
+            HashMap::new();
+
+        // Empty session maps (as used in merge/rebase paths)
+        VirtualAttributions::calculate_and_update_prompt_metrics(
+            &mut prompts,
+            &attributions,
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        let prompt = prompts["session_x"].values().next().unwrap();
+        assert_eq!(
+            prompt.total_additions, 100,
+            "empty session_additions map should not zero out existing total_additions"
+        );
+        assert_eq!(
+            prompt.total_deletions, 30,
+            "empty session_deletions map should not zero out existing total_deletions"
+        );
     }
 }
