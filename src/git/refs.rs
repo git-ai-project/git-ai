@@ -219,7 +219,9 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
 /// "new tip does not contain old tip" ref-conflict message.
 fn is_notes_ref_conflict(err: &GitAiError) -> bool {
     match err {
-        GitAiError::GitCliError { stderr, .. } => stderr.contains("does not contain"),
+        GitAiError::GitCliError { stderr, .. } => {
+            stderr.contains("does not contain") || stderr.contains("cannot lock ref")
+        }
         _ => false,
     }
 }
