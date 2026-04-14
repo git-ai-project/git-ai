@@ -4044,6 +4044,87 @@ fn spawn_daemon_with_env(repo: &TestRepo, extra_env: &[(&str, String)]) -> Child
     panic!("daemon did not become ready");
 }
 
+/// When the daemon exceeds its configured max uptime, it should restart and
+/// make a fresh control socket available.
+#[test]
+#[serial]
+fn daemon_max_uptime_restarts_and_recovers() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    let mut child = spawn_daemon_with_env(
+        &repo,
+        &[
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "1".to_string()),
+            ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "1".to_string()),
+        ],
+    );
+
+    let original_pid = child.id();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = child.try_wait().expect("failed to poll daemon") {
+            assert!(
+                status.success(),
+                "daemon should exit cleanly before restart, got: {}",
+                status
+            );
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("daemon did not exit within 15s after exceeding max uptime");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let control_socket_path = daemon_control_socket_path(&repo);
+    let trace_socket_path = daemon_trace_socket_path(&repo);
+    let repo_workdir = repo_workdir_string(&repo);
+    let restarted_pid = loop {
+        if send_control_request(
+            &control_socket_path,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir.clone(),
+            },
+        )
+        .is_ok()
+            && local_socket_connects_with_timeout(&trace_socket_path, DAEMON_TEST_PROBE_TIMEOUT)
+                .is_ok()
+        {
+            let daemon_config = DaemonConfig::from_home(&repo.daemon_home_path());
+            let pid = read_daemon_pid(&daemon_config)
+                .expect("restarted daemon should publish pid metadata");
+            break pid;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("daemon did not restart within 15s after max uptime exit");
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+
+    assert_ne!(
+        restarted_pid, original_pid,
+        "daemon restart should produce a new process id"
+    );
+
+    let _ = send_control_request(&control_socket_path, &ControlRequest::Shutdown);
+    for _ in 0..200 {
+        if send_control_request(
+            &control_socket_path,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir.clone(),
+            },
+        )
+        .is_err()
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("restarted daemon did not shut down cleanly");
+}
+
 /// Config patch JSON that enables version checks and auto-updates (they
 /// default to disabled in non-OSS debug builds).
 fn update_enabled_config_patch() -> String {
