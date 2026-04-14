@@ -576,14 +576,20 @@ impl VirtualAttributions {
                     continue;
                 }
 
-                let file_content = final_state_snapshot
-                    .get(&entry.file)
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        working_log
-                            .get_file_version(&entry.blob_sha)
-                            .unwrap_or_default()
-                    });
+                // Prefer the checkpoint's blob content over the snapshot for
+                // file_contents.  The snapshot may only contain committed files
+                // (e.g. from committed_file_snapshot_between_commits in daemon
+                // mode), missing unstaged changes.  The blob_sha from the
+                // checkpoint is the ground truth for what the working directory
+                // looked like at checkpoint time.  Fall back to the snapshot
+                // only when the blob is unavailable.
+                let blob_content = working_log.get_file_version(&entry.blob_sha).ok();
+                let file_content = blob_content.unwrap_or_else(|| {
+                    final_state_snapshot
+                        .get(&entry.file)
+                        .cloned()
+                        .unwrap_or_default()
+                });
                 file_contents.insert(entry.file.clone(), file_content.clone());
 
                 let line_attrs = if entry.line_attributions.is_empty() {
@@ -1205,15 +1211,16 @@ fn collect_unstaged_hunks_from_snapshot(
 
     for file_path in file_paths {
         let committed_content = get_file_content_at_commit(repo, commit_sha, &file_path)?;
-        // When looking up the final (working-directory) state for a file, try the
-        // captured snapshot first.  If the file is absent from the snapshot (e.g.
-        // an untracked AI file that was never committed), fall back to the content
-        // the VirtualAttributions already resolved from the working-log blob store.
-        // Only when neither source has content do we treat the file as identical to
-        // the committed tree (which may be empty for new files).
-        let final_content = final_state_snapshot
+        // When looking up the final (working-directory) state for a file, prefer
+        // the content from VirtualAttributions (va_file_contents) which represents
+        // the true working-directory state resolved from checkpoint blob storage.
+        // This is critical for partially-staged files: the snapshot only contains
+        // the committed version, but va_file_contents has the full working copy
+        // including unstaged changes.  Fall back to the snapshot for files not
+        // tracked by VirtualAttributions, then to the committed tree content.
+        let final_content = va_file_contents
             .get(&file_path)
-            .or_else(|| va_file_contents.get(&file_path))
+            .or_else(|| final_state_snapshot.get(&file_path))
             .cloned()
             .unwrap_or_else(|| committed_content.clone());
 

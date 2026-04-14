@@ -1968,6 +1968,351 @@ fn test_two_ai_files_snapshot_path_carries_over_attribution() {
     );
 }
 
+/// Regression test: AI writes a file, user stages it, AI adds more lines to the same file,
+/// user commits (only the staged portion goes in). Then the user stages + commits the remaining
+/// AI lines. The second commit must:
+/// - Have file attestation lines for the file (e.g. `calca4.py <prompt_id> 20-24`)
+/// - Show correct `accepted_lines` count (only the newly committed lines, not the full file)
+///
+/// Bug: The second commit shows the prompt metadata but with NO file attestation lines
+/// and an inflated `accepted_lines` count equal to the lines from the first checkpoint
+/// rather than just the unstaged remainder.
+#[test]
+fn test_partial_stage_then_ai_append_carries_over_to_second_commit() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("calca4.py");
+
+    // AI writes the initial 19-line file
+    let initial_content = "\
+def get_int(prompt):
+    while True:
+        try:
+            return int(input(prompt))
+        except ValueError:
+            print(\"Please enter a valid integer.\")
+
+def add(a, b):
+    return a + b
+
+def main():
+    print(\"Calculator A\")
+    x = get_int(\"Enter first integer: \")
+    y = get_int(\"Enter second integer: \")
+    result = add(x, y)
+    print(f\"Result: {result}\")
+
+if __name__ == \"__main__\":
+    main()
+";
+    fs::write(&file_path, initial_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "calca4.py"])
+        .unwrap();
+
+    // User stages the file
+    repo.git(&["add", "calca4.py"]).unwrap();
+
+    // AI adds 5 more lines at the end (these are NOT staged)
+    let appended_content = "\
+def get_int(prompt):
+    while True:
+        try:
+            return int(input(prompt))
+        except ValueError:
+            print(\"Please enter a valid integer.\")
+
+def add(a, b):
+    return a + b
+
+def main():
+    print(\"Calculator A\")
+    x = get_int(\"Enter first integer: \")
+    y = get_int(\"Enter second integer: \")
+    result = add(x, y)
+    print(f\"Result: {result}\")
+
+if __name__ == \"__main__\":
+    main()
+    again = input(\"Run again? (y/n): \").strip().lower()
+    while again == \"y\":
+        main()
+        again = input(\"Run again? (y/n): \").strip().lower()
+    print(\"Goodbye!\")
+";
+    fs::write(&file_path, appended_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "calca4.py"])
+        .unwrap();
+
+    // First commit: only the staged 19 lines go in
+    let first_commit = repo.commit("Add calca4.py").unwrap();
+    assert!(
+        !first_commit.authorship_log.attestations.is_empty(),
+        "first commit should include AI attribution for calca4.py"
+    );
+    assert!(
+        first_commit
+            .authorship_log
+            .attestations
+            .iter()
+            .any(|a| a.file_path == "calca4.py"),
+        "first commit attestations should reference calca4.py"
+    );
+
+    // Now stage and commit the remaining 5 lines
+    repo.git(&["add", "calca4.py"]).unwrap();
+    let second_commit = repo.commit("Add run-again loop to calca4.py").unwrap();
+
+    // Second commit MUST have file attestation lines for calca4.py
+    assert!(
+        !second_commit.authorship_log.attestations.is_empty(),
+        "second commit should include AI attribution for the appended lines in calca4.py"
+    );
+    assert!(
+        second_commit
+            .authorship_log
+            .attestations
+            .iter()
+            .any(|a| a.file_path == "calca4.py"),
+        "second commit attestations should reference calca4.py, got: {:?}",
+        second_commit
+            .authorship_log
+            .attestations
+            .iter()
+            .map(|a| &a.file_path)
+            .collect::<Vec<_>>()
+    );
+
+    // Verify the accepted_lines count is correct (should be ~5, not 17+)
+    // The second commit only adds 5 new lines, so accepted_lines should reflect that
+    let total_accepted: u32 = second_commit
+        .authorship_log
+        .metadata
+        .prompts
+        .values()
+        .map(|p| p.accepted_lines)
+        .sum();
+    assert!(
+        total_accepted <= 10,
+        "second commit accepted_lines should reflect only the 5 appended lines, not the full file. Got: {}",
+        total_accepted
+    );
+
+    // Final state: all lines should be AI-attributed
+    let mut file = repo.filename("calca4.py");
+    file.assert_lines_and_blame(lines![
+        "def get_int(prompt):".ai(),
+        "    while True:".ai(),
+        "        try:".ai(),
+        "            return int(input(prompt))".ai(),
+        "        except ValueError:".ai(),
+        "            print(\"Please enter a valid integer.\")".ai(),
+        "".ai(),
+        "def add(a, b):".ai(),
+        "    return a + b".ai(),
+        "".ai(),
+        "def main():".ai(),
+        "    print(\"Calculator A\")".ai(),
+        "    x = get_int(\"Enter first integer: \")".ai(),
+        "    y = get_int(\"Enter second integer: \")".ai(),
+        "    result = add(x, y)".ai(),
+        "    print(f\"Result: {result}\")".ai(),
+        "".ai(),
+        "if __name__ == \"__main__\":".ai(),
+        "    main()".ai(),
+        "    again = input(\"Run again? (y/n): \").strip().lower()".ai(),
+        "    while again == \"y\":".ai(),
+        "        main()".ai(),
+        "        again = input(\"Run again? (y/n): \").strip().lower()".ai(),
+        "    print(\"Goodbye!\")".ai(),
+    ]);
+}
+
+/// Same scenario as test_partial_stage_then_ai_append_carries_over_to_second_commit
+/// but exercises the snapshot code path directly (daemon mode equivalent).
+///
+/// When `post_commit_with_final_state` is called with a committed-only snapshot,
+/// the INITIAL carry-over for partially-staged AI changes to the same file must work.
+#[test]
+fn test_partial_stage_snapshot_path_carries_over_attribution() {
+    use std::collections::HashMap;
+
+    let repo = TestRepo::new();
+
+    // Create an initial commit so we have a base
+    let readme_path = repo.path().join("README.md");
+    fs::write(&readme_path, "# Project\n").unwrap();
+    repo.git(&["add", "."]).unwrap();
+    repo.commit("Initial commit").unwrap();
+
+    let file_path = repo.path().join("calca4.py");
+
+    // AI writes the initial file (19 lines)
+    let initial_content = "\
+def get_int(prompt):
+    while True:
+        try:
+            return int(input(prompt))
+        except ValueError:
+            print(\"Please enter a valid integer.\")
+
+def add(a, b):
+    return a + b
+
+def main():
+    print(\"Calculator A\")
+    x = get_int(\"Enter first integer: \")
+    y = get_int(\"Enter second integer: \")
+    result = add(x, y)
+    print(f\"Result: {result}\")
+
+if __name__ == \"__main__\":
+    main()
+";
+    fs::write(&file_path, initial_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "calca4.py"])
+        .unwrap();
+
+    // User stages the file
+    repo.git(&["add", "calca4.py"]).unwrap();
+
+    // AI adds 5 more lines at the end (these are NOT staged)
+    let appended_content = "\
+def get_int(prompt):
+    while True:
+        try:
+            return int(input(prompt))
+        except ValueError:
+            print(\"Please enter a valid integer.\")
+
+def add(a, b):
+    return a + b
+
+def main():
+    print(\"Calculator A\")
+    x = get_int(\"Enter first integer: \")
+    y = get_int(\"Enter second integer: \")
+    result = add(x, y)
+    print(f\"Result: {result}\")
+
+if __name__ == \"__main__\":
+    main()
+    again = input(\"Run again? (y/n): \").strip().lower()
+    while again == \"y\":
+        main()
+        again = input(\"Run again? (y/n): \").strip().lower()
+    print(\"Goodbye!\")
+";
+    fs::write(&file_path, appended_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "calca4.py"])
+        .unwrap();
+
+    // Commit via raw git (bypassing wrapper hooks to simulate daemon path)
+    repo.git_og(&["commit", "-m", "Add calca4.py"]).unwrap();
+
+    // Get commit info
+    let repo_obj =
+        git_ai::git::repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let head_sha = repo_obj.head().unwrap().target().unwrap();
+    let parent_sha = repo_obj
+        .find_commit(head_sha.clone())
+        .unwrap()
+        .parent(0)
+        .unwrap()
+        .id();
+
+    // Build a snapshot containing ONLY the committed version (19 lines, no appended lines)
+    let mut committed_only_snapshot: HashMap<String, String> = HashMap::new();
+    committed_only_snapshot.insert("calca4.py".to_string(), initial_content.to_string());
+
+    // Run post_commit with the committed-only snapshot (simulates daemon mode)
+    let (_commit_sha, first_authorship) =
+        git_ai::authorship::post_commit::post_commit_with_final_state(
+            &repo_obj,
+            Some(parent_sha.clone()),
+            head_sha.clone(),
+            "Test User".to_string(),
+            true,
+            Some(&committed_only_snapshot),
+        )
+        .unwrap();
+
+    // First commit should have AI attribution for calca4.py (the 19 staged lines)
+    assert!(
+        first_authorship
+            .attestations
+            .iter()
+            .any(|a| a.file_path == "calca4.py"),
+        "first commit attestations should reference calca4.py"
+    );
+
+    // INITIAL should carry over the unstaged 5 lines for calca4.py
+    let new_wl = repo_obj
+        .storage
+        .working_log_for_base_commit(&head_sha)
+        .unwrap();
+    let initial = new_wl.read_initial_attributions();
+    assert!(
+        initial.files.contains_key("calca4.py"),
+        "INITIAL should contain calca4.py attribution for unstaged appended lines. \
+         INITIAL files: {:?}",
+        initial.files.keys().collect::<Vec<_>>()
+    );
+
+    // Now stage and commit the remaining 5 lines
+    repo.git_og(&["add", "calca4.py"]).unwrap();
+    repo.git_og(&["commit", "-m", "Add run-again loop"])
+        .unwrap();
+
+    // Get new commit info
+    let head_sha2 = repo_obj.head().unwrap().target().unwrap();
+
+    // Build snapshot with the full file (24 lines)
+    let mut full_snapshot: HashMap<String, String> = HashMap::new();
+    full_snapshot.insert("calca4.py".to_string(), appended_content.to_string());
+
+    // Run post_commit for the second commit
+    let (_commit_sha2, second_authorship) =
+        git_ai::authorship::post_commit::post_commit_with_final_state(
+            &repo_obj,
+            Some(head_sha.clone()),
+            head_sha2.clone(),
+            "Test User".to_string(),
+            true,
+            Some(&full_snapshot),
+        )
+        .unwrap();
+
+    // Second commit MUST have file attestation lines for calca4.py
+    assert!(
+        !second_authorship.attestations.is_empty(),
+        "second commit should include AI attribution for calca4.py appended lines"
+    );
+    assert!(
+        second_authorship
+            .attestations
+            .iter()
+            .any(|a| a.file_path == "calca4.py"),
+        "second commit attestations should reference calca4.py, got: {:?}",
+        second_authorship
+            .attestations
+            .iter()
+            .map(|a| &a.file_path)
+            .collect::<Vec<_>>()
+    );
+
+    // Verify the accepted_lines count is correct (should be ~5, not 19)
+    let total_accepted: u32 = second_authorship
+        .metadata
+        .prompts
+        .values()
+        .map(|p| p.accepted_lines)
+        .sum();
+    assert!(
+        total_accepted <= 10,
+        "second commit accepted_lines should reflect only the 5 appended lines, not the full file. Got: {}",
+        total_accepted
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_simple_additions_empty_repo,
     test_simple_additions_with_base_commit,
