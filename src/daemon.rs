@@ -58,7 +58,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
@@ -3884,6 +3884,7 @@ pub struct ActorDaemonCoordinator {
     wrapper_states: Mutex<HashMap<String, WrapperStateEntry>>,
     wrapper_state_notify: Notify,
     shutting_down: AtomicBool,
+    shutdown_action: AtomicU8,
     shutdown_notify: Notify,
     shutdown_condvar: std::sync::Condvar,
     shutdown_condvar_mutex: Mutex<()>,
@@ -3893,6 +3894,31 @@ struct WrapperStateEntry {
     pre_repo: Option<RepoContext>,
     post_repo: Option<RepoContext>,
     received_at_ns: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DaemonExitAction {
+    Stop,
+    Restart,
+    RestartAfterUpdate,
+}
+
+impl DaemonExitAction {
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::Stop => 0,
+            Self::Restart => 1,
+            Self::RestartAfterUpdate => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Restart,
+            2 => Self::RestartAfterUpdate,
+            _ => Self::Stop,
+        }
+    }
 }
 
 enum TracePayloadApplyOutcome {
@@ -3949,6 +3975,7 @@ impl ActorDaemonCoordinator {
             wrapper_states: Mutex::new(HashMap::new()),
             wrapper_state_notify: Notify::new(),
             shutting_down: AtomicBool::new(false),
+            shutdown_action: AtomicU8::new(DaemonExitAction::Stop.as_u8()),
             shutdown_notify: Notify::new(),
             shutdown_condvar: std::sync::Condvar::new(),
             shutdown_condvar_mutex: Mutex::new(()),
@@ -3978,6 +4005,24 @@ impl ActorDaemonCoordinator {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         self.shutdown_condvar.notify_all();
+    }
+
+    fn request_restart(&self) {
+        self.shutdown_action
+            .store(DaemonExitAction::Restart.as_u8(), Ordering::SeqCst);
+        self.request_shutdown();
+    }
+
+    fn request_restart_after_update(&self) {
+        self.shutdown_action.store(
+            DaemonExitAction::RestartAfterUpdate.as_u8(),
+            Ordering::SeqCst,
+        );
+        self.request_shutdown();
+    }
+
+    fn shutdown_action(&self) -> DaemonExitAction {
+        DaemonExitAction::from_u8(self.shutdown_action.load(Ordering::SeqCst))
     }
 
     async fn wait_for_shutdown(&self) {
@@ -8210,7 +8255,7 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
         match check_for_update_available() {
             Ok(DaemonUpdateCheckResult::UpdateReady) => {
                 tracing::info!("update check: newer version available, requesting shutdown");
-                coordinator.request_shutdown();
+                coordinator.request_restart_after_update();
                 return;
             }
             Ok(DaemonUpdateCheckResult::NoUpdate) => {
@@ -8224,7 +8269,7 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
         let uptime_ns = now_unix_nanos().saturating_sub(started_at_ns);
         if uptime_ns >= daemon_max_uptime_ns() {
             tracing::info!("uptime exceeded max, requesting restart");
-            coordinator.request_shutdown();
+            coordinator.request_restart();
             return;
         }
     }
@@ -8253,7 +8298,7 @@ pub(crate) fn daemon_run_pending_self_update() {
     }
 }
 
-pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
+pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction, GitAiError> {
     sanitize_git_env_for_daemon();
     disable_trace2_for_daemon_process();
     config.ensure_parent_dirs()?;
@@ -8438,9 +8483,10 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     remove_socket_if_exists(&config.control_socket_path)?;
     remove_pid_metadata(&config)?;
 
-    tracing::info!("daemon shutdown complete");
+    let action = coordinator.shutdown_action();
+    tracing::info!(?action, "daemon shutdown complete");
 
-    Ok(())
+    Ok(action)
 }
 
 fn checkpoint_control_timeout_uses_ci_or_test_budget() -> bool {

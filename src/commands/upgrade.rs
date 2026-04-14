@@ -661,7 +661,7 @@ pub fn run_with_args(args: &[String]) {
 }
 
 fn run_impl(force: bool, background: bool) {
-    let config = config::Config::get();
+    let config = config::Config::fresh();
     let channel = config.update_channel();
     let skip_install = background && config.auto_updates_disabled();
     let _ = run_impl_with_url(force, config.api_base_url(), channel, skip_install);

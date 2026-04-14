@@ -188,13 +188,26 @@ fn handle_run(args: &[String]) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    runtime
+    let exit_action = runtime
         .block_on(async move { crate::daemon::run_daemon(config).await })
         .map_err(|e| e.to_string())?;
 
     // Daemon is fully dead (lock released, sockets removed, threads joined).
     // Now safe to self-update — install.sh can start a fresh daemon.
     crate::daemon::daemon_run_pending_self_update();
+
+    match exit_action {
+        crate::daemon::DaemonExitAction::Stop => {}
+        crate::daemon::DaemonExitAction::Restart => {
+            ensure_daemon_running(Duration::from_secs(5)).map(|_| ())?;
+        }
+        crate::daemon::DaemonExitAction::RestartAfterUpdate => {
+            #[cfg(not(windows))]
+            {
+                ensure_daemon_running(Duration::from_secs(5)).map(|_| ())?;
+            }
+        }
+    }
 
     Ok(())
 }
