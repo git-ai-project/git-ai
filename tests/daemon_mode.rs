@@ -4851,7 +4851,8 @@ fn daemon_wrapper_daemon_rebase_continue_preserves_ai_notes() {
     // Resolve conflict by accepting feature's version
     shared_file.set_contents(lines!["resolved content".ai()]);
     repo.git(&["add", "shared.txt"]).unwrap();
-    repo.git(&["rebase", "--continue"]).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
 
     // Verify AI notes are preserved after conflict resolution
     ai_file.assert_lines_and_blame(lines!["// AI feature".ai(), "fn feature() {}".ai()]);
