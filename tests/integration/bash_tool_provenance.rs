@@ -9,8 +9,8 @@
 
 use crate::repos::test_repo::TestRepo;
 use git_ai::commands::checkpoint_agent::bash_tool::{
-    BashCheckpointAction, BashToolResult, HookEvent, diff, git_status_fallback, handle_bash_tool,
-    snapshot,
+    BashCheckpointAction, BashToolResult, HookEvent, checkpoint_context_from_active_bash, diff,
+    git_status_fallback, handle_bash_tool, handle_bash_pre_tool_use_with_context, snapshot,
 };
 use std::fs;
 use std::process::Command;
@@ -1399,4 +1399,506 @@ fn test_bash_provenance_mv_directory_rename() {
         "lib/lib.rs should appear in checkpoint (created); got {:?}",
         paths
     );
+}
+
+// ===========================================================================
+// Category 14: Pre-commit hook formatter attribution
+//
+// Verifies that when a git commit runs inside an AI agent's bash tool call,
+// and git's pre-commit hook runs a formatter (or any tool that modifies files),
+// those changes are properly detected by the stat-diff mechanism and attributed
+// to the AI agent.
+// ===========================================================================
+
+/// Install a git pre-commit hook script in the test repo.
+/// The hook must be executable and located at `.git/hooks/pre-commit`.
+#[cfg(unix)]
+fn install_pre_commit_hook(repo: &TestRepo, script: &str) {
+    let git_dir = repo.path().join(".git");
+    // For linked worktrees, .git is a file pointing to the real git dir
+    let hooks_dir = if git_dir.is_file() {
+        let content = fs::read_to_string(&git_dir).expect("read .git file");
+        let real_git_dir = content
+            .trim()
+            .strip_prefix("gitdir: ")
+            .expect("parse gitdir");
+        std::path::PathBuf::from(real_git_dir).join("hooks")
+    } else {
+        git_dir.join("hooks")
+    };
+    fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+    let hook_path = hooks_dir.join("pre-commit");
+    fs::write(&hook_path, script).expect("write pre-commit hook");
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&hook_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&hook_path, perms).expect("chmod hook");
+}
+
+/// Run a raw git command in the repo (without bypassing hooks).
+/// Unlike `run_bash`, this returns the full output including exit status
+/// without asserting success, so we can check for hook failures.
+fn run_git_with_hooks(repo: &TestRepo, args: &[&str]) -> std::process::Output {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("git {:?} failed to start: {}", args, e))
+}
+
+#[cfg(unix)]
+#[test]
+fn test_bash_provenance_precommit_hook_formatter_modifies_staged_file() {
+    // Scenario: AI agent creates a file, commits it, and the pre-commit hook
+    // reformats the file (modifies it without re-staging). The stat-diff should
+    // detect the formatter's modification.
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+    add_and_commit(&repo, "init.txt", "seed", "initial commit");
+
+    // Install a pre-commit hook that appends a formatter comment to .py files.
+    // It modifies the working tree file but does NOT re-stage, so the commit
+    // contains the original content and the working tree has the formatted version.
+    install_pre_commit_hook(
+        &repo,
+        r#"#!/bin/sh
+for f in $(git diff --cached --name-only --diff-filter=ACM -- '*.py'); do
+    echo '# auto-formatted' >> "$f"
+done
+exit 0
+"#,
+    );
+
+    // Pre-snapshot: AI agent's bash tool starts
+    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "fmt-sess", "fmt-t1")
+        .expect("PreToolUse should succeed");
+    assert!(matches!(
+        pre_action.action,
+        BashCheckpointAction::TakePreSnapshot
+    ));
+
+    // AI agent creates and stages a Python file
+    write_file(&repo, "main.py", "print('hello')\n");
+    run_git_with_hooks(&repo, &["add", "main.py"]);
+
+    // AI agent commits — the pre-commit hook will modify main.py
+    let commit_output = run_git_with_hooks(&repo, &["commit", "-m", "add main.py"]);
+    assert!(
+        commit_output.status.success(),
+        "git commit should succeed: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    // Verify the formatter actually ran
+    let content = fs::read_to_string(repo.path().join("main.py")).unwrap();
+    assert!(
+        content.contains("# auto-formatted"),
+        "pre-commit hook should have appended formatter comment; got: {:?}",
+        content
+    );
+
+    // Post-snapshot: stat-diff should detect the formatter's modification
+    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "fmt-sess", "fmt-t1")
+        .expect("PostToolUse should succeed");
+    assert_checkpoint_contains(&post_action, "main.py");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_bash_provenance_precommit_hook_formatter_restages_file() {
+    // Scenario: pre-commit hook formats AND re-stages the file (common pattern
+    // with tools like prettier --write + git add). The commit contains the
+    // formatted content. The stat-diff should still detect the file change.
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+    add_and_commit(&repo, "init.txt", "seed", "initial commit");
+
+    install_pre_commit_hook(
+        &repo,
+        r#"#!/bin/sh
+for f in $(git diff --cached --name-only --diff-filter=ACM -- '*.py'); do
+    # Simulate a formatter that normalizes whitespace
+    sed -i 's/[[:space:]]*$//' "$f"
+    echo '# formatted-and-staged' >> "$f"
+    git add "$f"
+done
+exit 0
+"#,
+    );
+
+    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "fmtstage-sess", "fmtstage-t1")
+        .expect("PreToolUse should succeed");
+    assert!(matches!(
+        pre_action.action,
+        BashCheckpointAction::TakePreSnapshot
+    ));
+
+    write_file(&repo, "app.py", "x = 1   \ny = 2   \n");
+    run_git_with_hooks(&repo, &["add", "app.py"]);
+
+    let commit_output = run_git_with_hooks(&repo, &["commit", "-m", "add app.py"]);
+    assert!(
+        commit_output.status.success(),
+        "git commit should succeed: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    let content = fs::read_to_string(repo.path().join("app.py")).unwrap();
+    assert!(
+        content.contains("# formatted-and-staged"),
+        "formatter should have modified the file; got: {:?}",
+        content
+    );
+
+    let post_action = handle_bash_tool(
+        HookEvent::PostToolUse,
+        &root,
+        "fmtstage-sess",
+        "fmtstage-t1",
+    )
+    .expect("PostToolUse should succeed");
+    assert_checkpoint_contains(&post_action, "app.py");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_bash_provenance_precommit_hook_creates_new_file() {
+    // Scenario: pre-commit hook creates a new file (e.g., a lint report or
+    // generated manifest). The stat-diff should detect the new file.
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+    add_and_commit(&repo, "init.txt", "seed", "initial commit");
+
+    install_pre_commit_hook(
+        &repo,
+        r#"#!/bin/sh
+# Generate a timestamp file on every commit
+echo "last-commit: $(date -u +%Y-%m-%dT%H:%M:%S)" > .commit-metadata
+exit 0
+"#,
+    );
+
+    let pre_action =
+        handle_bash_tool(HookEvent::PreToolUse, &root, "hooknew-sess", "hooknew-t1")
+            .expect("PreToolUse should succeed");
+    assert!(matches!(
+        pre_action.action,
+        BashCheckpointAction::TakePreSnapshot
+    ));
+
+    write_file(&repo, "feature.py", "def feature(): pass\n");
+    run_git_with_hooks(&repo, &["add", "feature.py"]);
+
+    let commit_output = run_git_with_hooks(&repo, &["commit", "-m", "add feature"]);
+    assert!(
+        commit_output.status.success(),
+        "git commit should succeed: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    // Verify the hook created the metadata file
+    assert!(
+        repo.path().join(".commit-metadata").exists(),
+        "pre-commit hook should have created .commit-metadata"
+    );
+
+    let post_action = handle_bash_tool(
+        HookEvent::PostToolUse,
+        &root,
+        "hooknew-sess",
+        "hooknew-t1",
+    )
+    .expect("PostToolUse should succeed");
+
+    // Both the agent's file and the hook-created file should be detected
+    assert_checkpoint_contains(&post_action, "feature.py");
+    assert_checkpoint_contains(&post_action, ".commit-metadata");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_bash_provenance_precommit_hook_modifies_untouched_file() {
+    // Scenario: pre-commit hook modifies a file that the AI agent did NOT touch.
+    // For example, a hook that updates a version timestamp in a config file
+    // whenever any commit is made. The stat-diff should detect this change.
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+    add_and_commit(&repo, "init.txt", "seed", "initial commit");
+    add_and_commit(
+        &repo,
+        "build-stamp.txt",
+        "build: 0\n",
+        "add build stamp",
+    );
+
+    install_pre_commit_hook(
+        &repo,
+        r#"#!/bin/sh
+# Increment build number on every commit (modifies a file the agent didn't touch)
+current=$(grep -o '[0-9]*' build-stamp.txt)
+next=$((current + 1))
+echo "build: $next" > build-stamp.txt
+exit 0
+"#,
+    );
+
+    let pre_action = handle_bash_tool(
+        HookEvent::PreToolUse,
+        &root,
+        "hookother-sess",
+        "hookother-t1",
+    )
+    .expect("PreToolUse should succeed");
+    assert!(matches!(
+        pre_action.action,
+        BashCheckpointAction::TakePreSnapshot
+    ));
+
+    // AI agent creates a completely different file
+    thread::sleep(Duration::from_millis(50));
+    write_file(&repo, "new-feature.rs", "fn new_feature() {}\n");
+    run_git_with_hooks(&repo, &["add", "new-feature.rs"]);
+
+    let commit_output = run_git_with_hooks(&repo, &["commit", "-m", "add new feature"]);
+    assert!(
+        commit_output.status.success(),
+        "git commit should succeed: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    // Verify the hook modified build-stamp.txt
+    let content = fs::read_to_string(repo.path().join("build-stamp.txt")).unwrap();
+    assert!(
+        content.contains("build: 1"),
+        "hook should have incremented build number; got: {:?}",
+        content
+    );
+
+    let post_action = handle_bash_tool(
+        HookEvent::PostToolUse,
+        &root,
+        "hookother-sess",
+        "hookother-t1",
+    )
+    .expect("PostToolUse should succeed");
+
+    // Both files should be detected: the agent's new file and the hook-modified file
+    assert_checkpoint_contains(&post_action, "new-feature.rs");
+    assert_checkpoint_contains(&post_action, "build-stamp.txt");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_bash_provenance_precommit_hook_with_agent_context_attribution() {
+    // Scenario: Same as the formatter test, but uses handle_bash_pre_tool_use_with_context
+    // to set up proper AI agent context. Verifies that checkpoint_context_from_active_bash
+    // returns AiAgent while the pre-snapshot is active (which is the case during
+    // the pre-commit hook execution).
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+    add_and_commit(&repo, "init.txt", "seed", "initial commit");
+
+    install_pre_commit_hook(
+        &repo,
+        r#"#!/bin/sh
+for f in $(git diff --cached --name-only --diff-filter=ACM -- '*.py'); do
+    echo '# agent-formatted' >> "$f"
+done
+exit 0
+"#,
+    );
+
+    // Set up pre-snapshot WITH agent context (simulating a real AI agent session)
+    let agent_id = git_ai::authorship::working_log::AgentId {
+        tool: "claude".to_string(),
+        id: "test-session-1".to_string(),
+        model: "opus-4".to_string(),
+    };
+    let pre_action = handle_bash_pre_tool_use_with_context(
+        &root,
+        "agent-sess",
+        "agent-t1",
+        &agent_id,
+        None,
+    )
+    .expect("PreToolUse with context should succeed");
+    assert!(matches!(
+        pre_action.action,
+        BashCheckpointAction::TakePreSnapshot
+    ));
+
+    // Verify that checkpoint_context_from_active_bash finds the active context
+    // (this is what the pre-commit hook would see during commit execution)
+    let repo_working_dir = root.to_string_lossy().to_string();
+    let context = checkpoint_context_from_active_bash(&root, &repo_working_dir);
+    assert!(
+        context.is_some(),
+        "checkpoint_context_from_active_bash should find active bash snapshot"
+    );
+    let (kind, agent_run) = context.unwrap();
+    assert_eq!(
+        kind,
+        git_ai::authorship::working_log::CheckpointKind::AiAgent,
+        "checkpoint kind should be AiAgent"
+    );
+    let agent_run = agent_run.expect("should have agent run result with context");
+    assert_eq!(agent_run.agent_id.tool, "claude");
+    assert_eq!(agent_run.agent_id.id, "test-session-1");
+    assert_eq!(agent_run.agent_id.model, "opus-4");
+
+    // Now run the actual commit with hooks
+    write_file(&repo, "module.py", "import os\n");
+    run_git_with_hooks(&repo, &["add", "module.py"]);
+
+    let commit_output = run_git_with_hooks(&repo, &["commit", "-m", "add module"]);
+    assert!(
+        commit_output.status.success(),
+        "git commit should succeed: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    // Verify formatter ran
+    let content = fs::read_to_string(repo.path().join("module.py")).unwrap();
+    assert!(
+        content.contains("# agent-formatted"),
+        "formatter should have modified module.py; got: {:?}",
+        content
+    );
+
+    // Post-snapshot should detect the change
+    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "agent-sess", "agent-t1")
+        .expect("PostToolUse should succeed");
+    assert_checkpoint_contains(&post_action, "module.py");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_bash_provenance_precommit_hook_modifies_multiple_files() {
+    // Scenario: pre-commit hook runs a formatter on multiple staged files.
+    // All modified files should be detected by the stat-diff.
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+    add_and_commit(&repo, "init.txt", "seed", "initial commit");
+
+    install_pre_commit_hook(
+        &repo,
+        r#"#!/bin/sh
+for f in $(git diff --cached --name-only --diff-filter=ACM -- '*.py'); do
+    echo '# lint-pass' >> "$f"
+done
+exit 0
+"#,
+    );
+
+    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "multi-fmt-sess", "multi-fmt-t1")
+        .expect("PreToolUse should succeed");
+    assert!(matches!(
+        pre_action.action,
+        BashCheckpointAction::TakePreSnapshot
+    ));
+
+    // AI agent creates multiple Python files
+    write_file(&repo, "src/api.py", "def api(): pass\n");
+    write_file(&repo, "src/models.py", "class Model: pass\n");
+    write_file(&repo, "src/utils.py", "def util(): pass\n");
+    write_file(&repo, "readme.md", "# Project\n"); // Not .py — won't be formatted
+
+    run_git_with_hooks(&repo, &["add", "."]);
+
+    let commit_output = run_git_with_hooks(&repo, &["commit", "-m", "add src"]);
+    assert!(
+        commit_output.status.success(),
+        "git commit should succeed: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    // Verify all .py files were formatted
+    for py_file in &["src/api.py", "src/models.py", "src/utils.py"] {
+        let content = fs::read_to_string(repo.path().join(py_file)).unwrap();
+        assert!(
+            content.contains("# lint-pass"),
+            "{} should have been formatted; got: {:?}",
+            py_file,
+            content
+        );
+    }
+    // readme.md should NOT have been formatted
+    let readme = fs::read_to_string(repo.path().join("readme.md")).unwrap();
+    assert!(
+        !readme.contains("# lint-pass"),
+        "readme.md should not have been formatted"
+    );
+
+    let post_action = handle_bash_tool(
+        HookEvent::PostToolUse,
+        &root,
+        "multi-fmt-sess",
+        "multi-fmt-t1",
+    )
+    .expect("PostToolUse should succeed");
+
+    // All created/modified files should be detected
+    assert_checkpoint_contains(&post_action, "api.py");
+    assert_checkpoint_contains(&post_action, "models.py");
+    assert_checkpoint_contains(&post_action, "utils.py");
+    assert_checkpoint_contains(&post_action, "readme.md");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_bash_provenance_precommit_hook_fails_and_modifies_files() {
+    // Scenario: pre-commit hook modifies files but then exits with non-zero
+    // (e.g., a linter that fixes formatting but reports errors). The commit
+    // fails, but the stat-diff should still detect the modified files because
+    // the working tree was changed.
+    let repo = TestRepo::new();
+    let root = repo_root(&repo);
+    add_and_commit(&repo, "init.txt", "seed", "initial commit");
+
+    install_pre_commit_hook(
+        &repo,
+        r#"#!/bin/sh
+# Fix formatting but report failure (like a strict linter)
+for f in $(git diff --cached --name-only --diff-filter=ACM -- '*.py'); do
+    echo '# auto-fixed' >> "$f"
+done
+exit 1
+"#,
+    );
+
+    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "hookfail-sess", "hookfail-t1")
+        .expect("PreToolUse should succeed");
+    assert!(matches!(
+        pre_action.action,
+        BashCheckpointAction::TakePreSnapshot
+    ));
+
+    write_file(&repo, "broken.py", "x=1\n");
+    run_git_with_hooks(&repo, &["add", "broken.py"]);
+
+    // The commit will FAIL because the hook exits 1
+    let commit_output = run_git_with_hooks(&repo, &["commit", "-m", "try commit"]);
+    assert!(
+        !commit_output.status.success(),
+        "git commit should fail due to hook exit 1"
+    );
+
+    // But the hook still modified the file
+    let content = fs::read_to_string(repo.path().join("broken.py")).unwrap();
+    assert!(
+        content.contains("# auto-fixed"),
+        "hook should have modified the file even though it failed; got: {:?}",
+        content
+    );
+
+    // The stat-diff should detect the modification
+    let post_action = handle_bash_tool(
+        HookEvent::PostToolUse,
+        &root,
+        "hookfail-sess",
+        "hookfail-t1",
+    )
+    .expect("PostToolUse should succeed");
+    assert_checkpoint_contains(&post_action, "broken.py");
 }
