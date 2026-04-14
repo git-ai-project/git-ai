@@ -7217,31 +7217,80 @@ impl ActorDaemonCoordinator {
                     // exec_lock) can run concurrently on different Tokio tasks,
                     // causing `refs/notes/ai` ref conflicts when both try to write
                     // git notes for the same repo at the same time.
+                    //
+                    // Use try_lock() like the QueuedFamily path: the ingest worker
+                    // is a single sequential task and blocking it on exec_lock would
+                    // prevent processing events from ALL families, potentially
+                    // causing idle-timeout failures in unrelated tests.  When the
+                    // lock is contended, spawn a one-shot task instead.
                     let exec_lock = self.side_effect_exec_lock(&family)?;
-                    let _guard = exec_lock.lock().await;
-                    self.begin_family_effect(&family)?;
-                    if applied.command.wrapper_invocation_id.is_some() {
-                        self.apply_wrapper_state_overlay(&mut applied.command).await;
-                    }
-                    let result = self
-                        .maybe_apply_side_effects_for_applied_command(Some(&family), &applied)
-                        .await;
-                    let _ = self.end_family_effect(&family);
-                    if let Err(error) = &result {
-                        let _ = self.record_side_effect_error(&family, applied.seq, error);
-                        debug_log(&format!(
-                            "daemon async side-effect error for family {} seq {}: {}",
-                            family, applied.seq, error
-                        ));
-                    }
-                    if let Err(error) =
-                        self.append_command_completion_log(&family, &applied, &result, applied.seq)
-                    {
-                        let _ = self.record_side_effect_error(&family, applied.seq, &error);
-                        debug_log(&format!(
-                            "daemon async completion log write failed for family {} seq {}: {}",
-                            family, applied.seq, error
-                        ));
+                    if let Ok(_guard) = exec_lock.try_lock() {
+                        self.begin_family_effect(&family)?;
+                        if applied.command.wrapper_invocation_id.is_some() {
+                            self.apply_wrapper_state_overlay(&mut applied.command).await;
+                        }
+                        let result = self
+                            .maybe_apply_side_effects_for_applied_command(Some(&family), &applied)
+                            .await;
+                        let _ = self.end_family_effect(&family);
+                        if let Err(error) = &result {
+                            let _ = self.record_side_effect_error(&family, applied.seq, error);
+                            debug_log(&format!(
+                                "daemon async side-effect error for family {} seq {}: {}",
+                                family, applied.seq, error
+                            ));
+                        }
+                        if let Err(error) =
+                            self.append_command_completion_log(&family, &applied, &result, applied.seq)
+                        {
+                            let _ = self.record_side_effect_error(&family, applied.seq, &error);
+                            debug_log(&format!(
+                                "daemon async completion log write failed for family {} seq {}: {}",
+                                family, applied.seq, error
+                            ));
+                        }
+                    } else {
+                        // exec_lock contended: spawn a one-shot task that waits for
+                        // exec_lock without blocking the ingest worker.
+                        let coordinator = self.clone();
+                        let family_clone = family.clone();
+                        tokio::spawn(async move {
+                            let lock = match coordinator.side_effect_exec_lock(&family_clone) {
+                                Ok(l) => l,
+                                Err(_) => return,
+                            };
+                            let _guard = lock.lock().await;
+                            if let Err(e) = coordinator.begin_family_effect(&family_clone) {
+                                debug_log(&format!(
+                                    "daemon applied-path spawn begin_family_effect error for family {}: {}",
+                                    family_clone, e
+                                ));
+                                return;
+                            }
+                            if applied.command.wrapper_invocation_id.is_some() {
+                                coordinator.apply_wrapper_state_overlay(&mut applied.command).await;
+                            }
+                            let result = coordinator
+                                .maybe_apply_side_effects_for_applied_command(Some(&family_clone), &applied)
+                                .await;
+                            let _ = coordinator.end_family_effect(&family_clone);
+                            if let Err(error) = &result {
+                                let _ = coordinator.record_side_effect_error(&family_clone, applied.seq, error);
+                                debug_log(&format!(
+                                    "daemon async side-effect error for family {} seq {}: {}",
+                                    family_clone, applied.seq, error
+                                ));
+                            }
+                            if let Err(error) =
+                                coordinator.append_command_completion_log(&family_clone, &applied, &result, applied.seq)
+                            {
+                                let _ = coordinator.record_side_effect_error(&family_clone, applied.seq, &error);
+                                debug_log(&format!(
+                                    "daemon async completion log write failed for family {} seq {}: {}",
+                                    family_clone, applied.seq, error
+                                ));
+                            }
+                        });
                     }
                 }
             }
