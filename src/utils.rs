@@ -106,14 +106,7 @@ pub fn normalize_to_posix(path: &str) -> String {
 /// the main hook handler and the bash tool to skip capture work when the
 /// daemon will not be available to consume captured checkpoint files.
 ///
-/// Setting `GIT_AI_CHECKPOINT_FORCE_SYNC=1` overrides everything (including
-/// `async_mode`) and forces synchronous execution.  This is used by test
-/// helpers that run cross-repo checkpoints where the daemon completion-log
-/// family key is unpredictable.
 pub fn checkpoint_delegation_enabled() -> bool {
-    if std::env::var("GIT_AI_CHECKPOINT_FORCE_SYNC").is_ok() {
-        return false;
-    }
     if crate::config::Config::get().feature_flags().async_mode {
         return true;
     }
