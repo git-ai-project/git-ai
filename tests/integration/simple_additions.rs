@@ -1841,8 +1841,7 @@ print(f\"Result: {a + b}\")
 
     // Verify that INITIAL was written for calcb1.py
     let repo_obj =
-        git_ai::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
-            .unwrap();
+        git_ai::git::repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let wl = repo_obj
         .storage
         .working_log_for_base_commit(&first_commit.commit_sha)
@@ -1911,13 +1910,8 @@ fn test_two_ai_files_snapshot_path_carries_over_attribution() {
 
     // Get commit info
     let repo_obj =
-        git_ai::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
-            .unwrap();
-    let head_sha = repo_obj
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
+        git_ai::git::repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let head_sha = repo_obj.head().unwrap().target().unwrap();
     let parent_sha = repo_obj
         .find_commit(head_sha.clone())
         .unwrap()
