@@ -1442,6 +1442,7 @@ fn install_pre_commit_hook(repo: &TestRepo, script: &str) {
 /// Run a raw git command in the repo (without bypassing hooks).
 /// Unlike `run_bash`, this returns the full output including exit status
 /// without asserting success, so we can check for hook failures.
+#[cfg(unix)]
 fn run_git_with_hooks(repo: &TestRepo, args: &[&str]) -> std::process::Output {
     Command::new("git")
         .arg("-C")
@@ -1523,7 +1524,7 @@ fn test_bash_provenance_precommit_hook_formatter_restages_file() {
         r#"#!/bin/sh
 for f in $(git diff --cached --name-only --diff-filter=ACM -- '*.py'); do
     # Simulate a formatter that normalizes whitespace
-    sed -i 's/[[:space:]]*$//' "$f"
+    sed -i.bak 's/[[:space:]]*$//' "$f" && rm -f "$f.bak"
     echo '# formatted-and-staged' >> "$f"
     git add "$f"
 done
