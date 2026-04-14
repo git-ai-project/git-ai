@@ -5603,6 +5603,22 @@ impl ActorDaemonCoordinator {
                     // Wrap the entire command + side-effect pipeline in catch_unwind
                     // so that a panic (e.g. from UTF-8 boundary issues in diff parsing)
                     // does not kill the daemon process.
+                    //
+                    // Save the test-sync metadata before moving `command` into the
+                    // future so we can write a completion log entry even when
+                    // route_command() fails or the future panics.
+                    let fallback_test_sync_session =
+                        crate::daemon::test_sync::test_sync_session_from_invocation(
+                            &parsed_invocation_for_normalized_command(&command),
+                        );
+                    let fallback_sync_tracked =
+                        crate::daemon::test_sync::tracks_primary_command_for_test_sync(
+                            command.primary_command.as_deref(),
+                            &command.invoked_args,
+                        );
+                    let fallback_primary_command = command.primary_command.clone();
+                    let fallback_exit_code = command.exit_code;
+
                     let side_effect_result = {
                         let future = async {
                             let mut applied = self.coordinator.route_command(*command).await?;
@@ -5663,6 +5679,20 @@ impl ActorDaemonCoordinator {
                                 "daemon command apply failed for family {} order {}: {}",
                                 family, order, error
                             ));
+                            // Write a completion log entry so the test sync
+                            // infrastructure sees the session instead of timing out.
+                            let log_entry = TestCompletionLogEntry {
+                                seq: 0,
+                                family_key: family.to_string(),
+                                kind: "command".to_string(),
+                                primary_command: fallback_primary_command.clone(),
+                                test_sync_session: fallback_test_sync_session.clone(),
+                                exit_code: Some(fallback_exit_code),
+                                sync_tracked: fallback_sync_tracked,
+                                status: "error".to_string(),
+                                error: Some(error.to_string()),
+                            };
+                            let _ = self.maybe_append_test_completion_log(family, &log_entry);
                         }
                         Err(panic_payload) => {
                             let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>()
@@ -5693,6 +5723,20 @@ impl ActorDaemonCoordinator {
                                     "order": order,
                                 })),
                             );
+                            // Write a completion log entry so the test sync
+                            // infrastructure sees the session instead of timing out.
+                            let log_entry = TestCompletionLogEntry {
+                                seq: 0,
+                                family_key: family.to_string(),
+                                kind: "command".to_string(),
+                                primary_command: fallback_primary_command,
+                                test_sync_session: fallback_test_sync_session,
+                                exit_code: Some(fallback_exit_code),
+                                sync_tracked: fallback_sync_tracked,
+                                status: "error".to_string(),
+                                error: Some(error.to_string()),
+                            };
+                            let _ = self.maybe_append_test_completion_log(family, &log_entry);
                         }
                     }
                 }
