@@ -753,6 +753,26 @@ pub fn rewrite_authorship_after_squash_or_rebase(
             // VA-based detection may find some overrides; source notes carry
             // overrides that blame can't detect. Take whichever is larger.
             record.overriden_lines = record.overriden_lines.max(*overriden);
+
+            // Fix up accepted_lines: the upstream VA merge can undercount
+            // accepted lines when target-branch KnownHuman (h_) attributions
+            // overlap with source-branch AI attributions for modified lines.
+            // The h_ wins by timestamp, causing the AI line to be counted as
+            // "overridden by human" instead of "accepted". Detect this case:
+            // if the VA found more overrides than source notes report AND the
+            // VA found zero accepted lines, the extra overrides are h_ false
+            // positives. Recover accepted_lines from the source notes values.
+            let source_overriden = *overriden;
+            let va_overriden = record.overriden_lines;
+            if record.accepted_lines == 0
+                && va_overriden > source_overriden
+                && *additions > 0
+            {
+                // The VA detected false overrides from h_ conflicts.
+                // Use source notes overriden as authoritative, derive accepted.
+                record.overriden_lines = source_overriden;
+                record.accepted_lines = additions.saturating_sub(source_overriden);
+            }
         }
     }
 

@@ -2563,6 +2563,537 @@ fn test_ci_squash_merge_base_branch_ai_not_in_squash_contributors() {
     );
 }
 
+/// Case 1: Four individual commits with all 4 change types, squash merged.
+/// Standard pattern:
+///   commit 1: human manual add
+///   commit 2: AI adds 2 lines (prompt A) — one kept, one to be overridden
+///   commit 3: human overrides one of AI's lines from commit 2
+///   commit 4: different AI adds a line (prompt B)
+/// Verifies prompts (accepted_lines, total_additions) and contributors.
+#[test]
+fn test_ci_squash_four_commits_all_change_types() {
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+
+    let repo = direct_test_repo();
+    let mut file = repo.filename("service.ts");
+
+    // Initial state on main
+    file.set_contents(crate::lines!["// module", "const x = 1;", "const y = 2;"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Feature branch with 4 commits
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit 1: human manual add
+    file.insert_at(2, crate::lines!["const manual = true;"]);
+    repo.stage_all_and_commit("Human adds manual line").unwrap();
+
+    // Commit 2: AI (prompt A) adds 2 lines — one kept, one to be overridden
+    file.insert_at(
+        3,
+        crate::lines!["const aiKept = 1;".ai(), "const aiTemp = 1;".ai()],
+    );
+    let commit2 = repo.stage_all_and_commit("AI adds two lines").unwrap();
+    let commit2_sha = commit2.commit_sha.clone();
+
+    // Commit 3: human overrides the AI "aiTemp" line
+    file.replace_at(4, "const aiOverridden = 2;");
+    repo.stage_all_and_commit("Human overrides AI line").unwrap();
+
+    // Commit 4: different AI (prompt B) adds a line
+    file.insert_at(5, crate::lines!["const diffAi = 1;".ai()]);
+    let commit4 = repo.stage_all_and_commit("Different AI adds line").unwrap();
+    let commit4_sha = commit4.commit_sha.clone();
+
+    let feature_sha = repo
+        .git(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Capture prompt IDs from source commits
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    let prompt_a_id = get_reference_as_authorship_log_v3(&git_ai_repo, &commit2_sha)
+        .expect("Commit 2 should have log")
+        .metadata
+        .prompts
+        .keys()
+        .next()
+        .expect("Commit 2 should have prompt")
+        .clone();
+
+    let prompt_b_id = get_reference_as_authorship_log_v3(&git_ai_repo, &commit4_sha)
+        .expect("Commit 4 should have log")
+        .metadata
+        .prompts
+        .keys()
+        .next()
+        .expect("Commit 4 should have prompt")
+        .clone();
+
+    assert_ne!(prompt_a_id, prompt_b_id, "Prompts A and B should differ");
+
+    // Squash merge onto main
+    repo.git(&["checkout", "main"]).unwrap();
+    file.set_contents(crate::lines![
+        "// module",
+        "const x = 1;",
+        "const manual = true;",
+        "const aiKept = 1;",
+        "const aiOverridden = 2;",
+        "const diffAi = 1;",
+        "const y = 2;"
+    ]);
+    let merge_commit = repo.stage_all_and_commit("Squash feature").unwrap();
+    let merge_sha = merge_commit.commit_sha;
+
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "feature",
+        "main",
+        &feature_sha,
+        &merge_sha,
+        false,
+    )
+    .unwrap();
+
+    let log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha)
+        .expect("Squash should have log");
+
+    // --- Prompt assertions ---
+    let pa = log
+        .metadata
+        .prompts
+        .get(&prompt_a_id)
+        .unwrap_or_else(|| panic!("Prompt A ({}) missing", prompt_a_id));
+    assert_eq!(pa.total_additions, 2, "Prompt A total_additions");
+    assert_eq!(
+        pa.accepted_lines, 1,
+        "Prompt A accepted_lines: aiKept survived. Got accepted={}, overriden={}",
+        pa.accepted_lines, pa.overriden_lines
+    );
+
+    let pb = log
+        .metadata
+        .prompts
+        .get(&prompt_b_id)
+        .unwrap_or_else(|| panic!("Prompt B ({}) missing", prompt_b_id));
+    assert_eq!(pb.total_additions, 1, "Prompt B total_additions");
+    assert_eq!(
+        pb.accepted_lines, 1,
+        "Prompt B accepted_lines: diffAi survived. Got accepted={}, overriden={}",
+        pb.accepted_lines, pb.overriden_lines
+    );
+
+    // --- Contributor assertions ---
+    let c = log
+        .metadata
+        .contributors
+        .expect("Should have contributors");
+    let ai_accepted: u32 = c.values().map(|s| s.ai_accepted).sum();
+    let manual: u32 = c.values().map(|s| s.manual_additions).sum();
+
+    assert_eq!(
+        ai_accepted, 2,
+        "ai_accepted should be 2 (aiKept + diffAi). contributors={:?}",
+        c
+    );
+    assert!(
+        manual >= 1,
+        "manual_additions should be >= 1. contributors={:?}",
+        c
+    );
+}
+
+/// Case 2: All 4 change types in a single commit, squash merged.
+/// In a single commit all AI lines share one prompt. The "override" is simulated
+/// by set_contents's two-step write (AI stubs → human overwrites).
+#[test]
+fn test_ci_squash_single_commit_all_change_types() {
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+
+    let repo = direct_test_repo();
+    let mut file = repo.filename("config.ts");
+
+    // Initial state on main
+    file.set_contents(crate::lines![
+        "// config",
+        "const a = 1;",
+        "const b = 2;",
+        "const c = 3;"
+    ]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    // Feature branch — single commit with all 4 change types
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // set_contents creates a single commit. AI lines share one prompt.
+    // The "human override" line is plain text — set_contents's two-step write
+    // (AI stubs first, then human fills them) means this line was briefly AI
+    // then overwritten by the human content.
+    file.set_contents(crate::lines![
+        "// config",
+        "const a = 1;",
+        "const manual = true;",     // change 1: human manual
+        "const aiKept = 1;".ai(),   // change 2: AI add (accepted)
+        "const humanOverride = 1;", // change 3: was AI, human overrode
+        "const diffAi = 1;".ai(),   // change 4: different AI add (same prompt)
+        "const b = 2;",
+        "const c = 3;"
+    ]);
+    let feature_commit = repo.stage_all_and_commit("All changes in one commit").unwrap();
+    let feature_sha = feature_commit.commit_sha.clone();
+
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    let feature_log = get_reference_as_authorship_log_v3(&git_ai_repo, &feature_sha)
+        .expect("Feature commit should have log");
+    let prompt_id = feature_log
+        .metadata
+        .prompts
+        .keys()
+        .next()
+        .expect("Should have a prompt")
+        .clone();
+
+    // Squash merge onto main
+    repo.git(&["checkout", "main"]).unwrap();
+    file.set_contents(crate::lines![
+        "// config",
+        "const a = 1;",
+        "const manual = true;",
+        "const aiKept = 1;",
+        "const humanOverride = 1;",
+        "const diffAi = 1;",
+        "const b = 2;",
+        "const c = 3;"
+    ]);
+    let merge_commit = repo.stage_all_and_commit("Squash feature").unwrap();
+    let merge_sha = merge_commit.commit_sha;
+
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "feature",
+        "main",
+        &feature_sha,
+        &merge_sha,
+        false,
+    )
+    .unwrap();
+
+    let log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha)
+        .expect("Squash should have log");
+
+    // --- Prompt assertions ---
+    let p = log
+        .metadata
+        .prompts
+        .get(&prompt_id)
+        .unwrap_or_else(|| panic!("Prompt ({}) missing", prompt_id));
+    assert!(
+        p.accepted_lines >= 2,
+        "Single-commit prompt should have >= 2 accepted lines (aiKept + diffAi). Got accepted={}, total_add={}",
+        p.accepted_lines, p.total_additions
+    );
+
+    // --- Contributor assertions ---
+    let c = log
+        .metadata
+        .contributors
+        .expect("Should have contributors");
+    let ai_accepted: u32 = c.values().map(|s| s.ai_accepted).sum();
+    let manual: u32 = c.values().map(|s| s.manual_additions).sum();
+
+    assert!(
+        ai_accepted >= 2,
+        "ai_accepted should be >= 2 (aiKept + diffAi). contributors={:?}",
+        c
+    );
+    assert!(
+        manual >= 1,
+        "manual_additions should be >= 1 (manual line). contributors={:?}",
+        c
+    );
+}
+
+/// Cases 3 & 4: Two task branches → feature → main.
+///
+/// task-1 (file_a): all 4 change types in one commit → squash into feat
+/// task-2 (file_b): all 4 change types in one commit, merge feat (with task-1),
+///                  then squash into feat
+///
+/// Case 3: verify each task squash has correct prompts and contributors
+/// Case 4: squash feat → main; verify aggregated contributors from both tasks
+#[test]
+fn test_ci_squash_two_tasks_merge_then_feature_to_main() {
+    use git_ai::authorship::rebase_authorship::rewrite_authorship_after_squash_or_rebase;
+
+    let repo = direct_test_repo();
+
+    // --- Initial state on feat ---
+    let mut file_a = repo.filename("task1.ts");
+    let mut file_b = repo.filename("task2.ts");
+    file_a.set_contents(crate::lines!["// task1", "const a = 1;", "const b = 2;"]);
+    file_b.set_contents(crate::lines!["// task2", "const c = 1;", "const d = 2;"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    repo.git(&["branch", "-M", "feat"]).unwrap();
+
+    // --- TASK-1: branch from feat, all 4 types on file_a ---
+    repo.git(&["checkout", "-b", "task-1"]).unwrap();
+    file_a.set_contents(crate::lines![
+        "// task1",
+        "const a = 1;",
+        "const t1Manual = true;",     // change 1: manual
+        "const t1AiKept = 1;".ai(),   // change 2: AI kept
+        "const t1Override = 1;",       // change 3: was AI, human overrode
+        "const t1DiffAi = 1;".ai(),   // change 4: different AI (same prompt)
+        "const b = 2;"
+    ]);
+    let task1_tip = repo.stage_all_and_commit("Task-1 changes").unwrap();
+    let task1_sha = task1_tip.commit_sha.clone();
+
+    let git_ai_repo = GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("Failed to find repository");
+
+    // Capture task-1 prompt
+    let t1_log = get_reference_as_authorship_log_v3(&git_ai_repo, &task1_sha)
+        .expect("Task-1 should have log");
+    let prompt_t1 = t1_log.metadata.prompts.keys().next().cloned();
+
+    // Squash task-1 → feat
+    repo.git(&["checkout", "feat"]).unwrap();
+    file_a.set_contents(crate::lines![
+        "// task1",
+        "const a = 1;",
+        "const t1Manual = true;",
+        "const t1AiKept = 1;",
+        "const t1Override = 1;",
+        "const t1DiffAi = 1;",
+        "const b = 2;"
+    ]);
+    let squash1 = repo.stage_all_and_commit("Squash task-1").unwrap();
+    let squash1_sha = squash1.commit_sha.clone();
+
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "task-1",
+        "feat",
+        &task1_sha,
+        &squash1_sha,
+        false,
+    )
+    .unwrap();
+
+    // --- Case 3a: verify task-1 squash ---
+    let log1 = get_reference_as_authorship_log_v3(&git_ai_repo, &squash1_sha)
+        .expect("Squash-1 should have log");
+
+    if let Some(ref pid) = prompt_t1 {
+        let p = log1
+            .metadata
+            .prompts
+            .get(pid)
+            .unwrap_or_else(|| panic!("Task-1 prompt ({}) missing from squash-1", pid));
+        assert!(
+            p.accepted_lines >= 2,
+            "Task-1 prompt accepted_lines should be >= 2. Got accepted={}, total_add={}",
+            p.accepted_lines, p.total_additions
+        );
+    }
+    let c1 = log1
+        .metadata
+        .contributors
+        .as_ref()
+        .expect("Squash-1 should have contributors");
+    let c1_ai: u32 = c1.values().map(|s| s.ai_accepted).sum();
+    let c1_manual: u32 = c1.values().map(|s| s.manual_additions).sum();
+    assert!(
+        c1_ai >= 2,
+        "Task-1 ai_accepted should be >= 2. Got {:?}",
+        c1
+    );
+    assert!(
+        c1_manual >= 1,
+        "Task-1 manual_additions should be >= 1. Got {:?}",
+        c1
+    );
+
+    // --- TASK-2: branch from feat BEFORE task-1 merge, work on file_b ---
+    // We need task-2 to branch from feat's state before task-1 was squashed.
+    // Since feat already has the squash, we branch from its parent.
+    let feat_parent = repo
+        .git(&["rev-parse", "feat~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git(&["checkout", "-b", "task-2", &feat_parent])
+        .unwrap();
+
+    file_b.set_contents(crate::lines![
+        "// task2",
+        "const c = 1;",
+        "const t2Manual = true;",     // change 1: manual
+        "const t2AiKept = 1;".ai(),   // change 2: AI kept
+        "const t2Override = 1;",       // change 3: was AI, human overrode
+        "const t2DiffAi = 1;".ai(),   // change 4: different AI (same prompt)
+        "const d = 2;"
+    ]);
+    let task2_commit = repo.stage_all_and_commit("Task-2 changes").unwrap();
+
+    // Capture task-2 prompt
+    let t2_log =
+        get_reference_as_authorship_log_v3(&git_ai_repo, &task2_commit.commit_sha)
+            .expect("Task-2 should have log");
+    let prompt_t2 = t2_log.metadata.prompts.keys().next().cloned();
+
+    // Merge feat into task-2 (pulls in task-1 squash)
+    repo.git(&["merge", "feat", "-m", "Merge feat into task-2"])
+        .unwrap();
+    let merge_head = repo
+        .git(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Squash task-2 → feat
+    repo.git(&["checkout", "feat"]).unwrap();
+    file_b.set_contents(crate::lines![
+        "// task2",
+        "const c = 1;",
+        "const t2Manual = true;",
+        "const t2AiKept = 1;",
+        "const t2Override = 1;",
+        "const t2DiffAi = 1;",
+        "const d = 2;"
+    ]);
+    let squash2 = repo.stage_all_and_commit("Squash task-2").unwrap();
+    let squash2_sha = squash2.commit_sha.clone();
+
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "task-2",
+        "feat",
+        &merge_head,
+        &squash2_sha,
+        false,
+    )
+    .unwrap();
+
+    // --- Case 3b: verify task-2 squash ---
+    let log2 = get_reference_as_authorship_log_v3(&git_ai_repo, &squash2_sha)
+        .expect("Squash-2 should have log");
+
+    if let Some(ref pid) = prompt_t2 {
+        let p = log2
+            .metadata
+            .prompts
+            .get(pid)
+            .unwrap_or_else(|| panic!("Task-2 prompt ({}) missing from squash-2", pid));
+        assert!(
+            p.accepted_lines >= 2,
+            "Task-2 prompt accepted_lines should be >= 2. Got accepted={}, total_add={}",
+            p.accepted_lines, p.total_additions
+        );
+    }
+    let c2 = log2
+        .metadata
+        .contributors
+        .as_ref()
+        .expect("Squash-2 should have contributors");
+    let c2_ai: u32 = c2.values().map(|s| s.ai_accepted).sum();
+    let c2_manual: u32 = c2.values().map(|s| s.manual_additions).sum();
+    assert!(
+        c2_ai >= 2,
+        "Task-2 ai_accepted should be >= 2. Got {:?}",
+        c2
+    );
+    assert!(
+        c2_manual >= 1,
+        "Task-2 manual_additions should be >= 1. Got {:?}",
+        c2
+    );
+
+    // Verify no prompt leakage from task-1 into task-2's squash
+    if let (Some(t1_pid), Some(t2_pid)) = (&prompt_t1, &prompt_t2) {
+        assert_ne!(t1_pid, t2_pid, "Task prompts should differ");
+        assert!(
+            !log2.metadata.prompts.contains_key(t1_pid.as_str()),
+            "Task-1 prompt {} should NOT leak into task-2 squash. Prompts: {:?}",
+            t1_pid,
+            log2.metadata.prompts.keys().collect::<Vec<_>>()
+        );
+    }
+
+    // --- Case 4: squash feat → main ---
+    let initial_sha = repo
+        .git(&["rev-list", "--max-parents=0", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git(&["checkout", "-b", "main", &initial_sha]).unwrap();
+
+    // Set combined final state for both files
+    file_a.set_contents(crate::lines![
+        "// task1",
+        "const a = 1;",
+        "const t1Manual = true;",
+        "const t1AiKept = 1;",
+        "const t1Override = 1;",
+        "const t1DiffAi = 1;",
+        "const b = 2;"
+    ]);
+    file_b.set_contents(crate::lines![
+        "// task2",
+        "const c = 1;",
+        "const t2Manual = true;",
+        "const t2AiKept = 1;",
+        "const t2Override = 1;",
+        "const t2DiffAi = 1;",
+        "const d = 2;"
+    ]);
+    let main_merge = repo
+        .stage_all_and_commit("Squash feat onto main")
+        .unwrap();
+    let main_sha = main_merge.commit_sha;
+
+    let feat_tip = squash2_sha; // feat HEAD = latest squash
+    rewrite_authorship_after_squash_or_rebase(
+        &git_ai_repo,
+        "feat",
+        "main",
+        &feat_tip,
+        &main_sha,
+        false,
+    )
+    .unwrap();
+
+    let main_log = get_reference_as_authorship_log_v3(&git_ai_repo, &main_sha)
+        .expect("Main squash should have log");
+    let mc = main_log
+        .metadata
+        .contributors
+        .as_ref()
+        .expect("Main should have contributors");
+    let main_ai: u32 = mc.values().map(|s| s.ai_accepted).sum();
+    let main_manual: u32 = mc.values().map(|s| s.manual_additions).sum();
+
+    assert!(
+        main_ai >= 4,
+        "Main ai_accepted should be >= 4 (2 from task-1 + 2 from task-2). Got {}. contributors={:?}",
+        main_ai, mc
+    );
+    assert!(
+        main_manual >= 2,
+        "Main manual_additions should be >= 2 (1 from each task). Got {}. contributors={:?}",
+        main_manual, mc
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_basic,
     test_ci_squash_merge_multiple_files,
@@ -2590,4 +3121,7 @@ crate::reuse_tests_in_worktree!(
     test_ci_squash_merge_with_merge_commit_in_source,
     test_ci_squash_merge_prompt_from_source_when_va_has_attestation,
     test_ci_squash_merge_base_branch_ai_not_in_squash_contributors,
+    test_ci_squash_four_commits_all_change_types,
+    test_ci_squash_single_commit_all_change_types,
+    test_ci_squash_two_tasks_merge_then_feature_to_main,
 );
