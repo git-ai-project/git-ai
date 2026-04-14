@@ -8726,6 +8726,29 @@ mod tests {
     }
 
     #[test]
+    fn explicit_stop_overrides_prior_restart_intent() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let coordinator = ActorDaemonCoordinator::new();
+
+            coordinator.request_restart_after_update();
+            assert_eq!(
+                coordinator.shutdown_action(),
+                DaemonExitAction::RestartAfterUpdate
+            );
+
+            coordinator.request_stop();
+
+            assert!(coordinator.is_shutting_down());
+            assert_eq!(coordinator.shutdown_action(), DaemonExitAction::Stop);
+        });
+    }
+
+    #[test]
     fn recent_working_log_snapshot_preserves_humans_on_restore() {
         use crate::authorship::attribution_tracker::LineAttribution;
         use crate::authorship::authorship_log::HumanRecord;
