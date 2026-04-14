@@ -7212,6 +7212,13 @@ impl ActorDaemonCoordinator {
             }
             TracePayloadApplyOutcome::Applied(mut applied) => {
                 if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
+                    // Acquire the per-family exec lock before processing side effects.
+                    // Without this, the Applied path and the drain-path (which holds
+                    // exec_lock) can run concurrently on different Tokio tasks,
+                    // causing `refs/notes/ai` ref conflicts when both try to write
+                    // git notes for the same repo at the same time.
+                    let exec_lock = self.side_effect_exec_lock(&family)?;
+                    let _guard = exec_lock.lock().await;
                     self.begin_family_effect(&family)?;
                     if applied.command.wrapper_invocation_id.is_some() {
                         self.apply_wrapper_state_overlay(&mut applied.command).await;
