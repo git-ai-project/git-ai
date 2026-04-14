@@ -5,7 +5,7 @@ use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::virtual_attribution::VirtualAttributions;
 
 #[test]
-fn test_merge_prompts_picking_newest_sums_totals_on_collision() {
+fn test_merge_prompts_picking_newest_uses_max_totals_on_collision() {
     let repo = TestRepo::new();
     let mut file = repo.filename("file.txt");
 
@@ -63,13 +63,15 @@ fn test_merge_prompts_picking_newest_sums_totals_on_collision() {
         .next()
         .expect("merged prompt record should exist");
 
+    // total_additions/total_deletions are cumulative, so merge should use max, not sum.
+    // This prevents inflation when the same prompt appears in both checkpoint and blame VAs.
     assert_eq!(
         merged_record.total_additions,
-        record1.total_additions + record2.total_additions
+        record1.total_additions.max(record2.total_additions)
     );
     assert_eq!(
         merged_record.total_deletions,
-        record1.total_deletions + record2.total_deletions
+        record1.total_deletions.max(record2.total_deletions)
     );
     assert_eq!(merged_record.overriden_lines, record2.overriden_lines);
 
@@ -77,4 +79,4 @@ fn test_merge_prompts_picking_newest_sums_totals_on_collision() {
     assert_eq!(merged_record.agent_id, record2.agent_id);
 }
 
-crate::reuse_tests_in_worktree!(test_merge_prompts_picking_newest_sums_totals_on_collision,);
+crate::reuse_tests_in_worktree!(test_merge_prompts_picking_newest_uses_max_totals_on_collision,);

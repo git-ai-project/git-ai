@@ -338,6 +338,18 @@ impl VirtualAttributions {
                 .insert(String::new(), prompt_record.clone());
         }
 
+        // Save inherited cumulative totals from INITIAL prompts before checkpoint
+        // processing may overwrite them. Used later to make session deltas cumulative.
+        let inherited_totals: HashMap<String, (u32, u32)> = prompts
+            .iter()
+            .filter_map(|(id, commits)| {
+                commits
+                    .values()
+                    .next()
+                    .map(|r| (id.clone(), (r.total_additions, r.total_deletions)))
+            })
+            .collect();
+
         // Load known human records from INITIAL attributions
         for (hash, human_record) in &initial_attributions.humans {
             humans
@@ -466,6 +478,10 @@ impl VirtualAttributions {
             &session_deletions,
         );
 
+        // Make total_additions cumulative by adding inherited base from INITIAL.
+        // This ensures merge operations using max() produce correct results.
+        Self::add_inherited_totals(&mut prompts, &inherited_totals, &session_additions);
+
         Ok(VirtualAttributions {
             repo,
             base_commit,
@@ -505,6 +521,18 @@ impl VirtualAttributions {
                 .or_insert_with(BTreeMap::new)
                 .insert(String::new(), prompt_record.clone());
         }
+
+        // Save inherited cumulative totals from INITIAL prompts before checkpoint
+        // processing may overwrite them. Used later to make session deltas cumulative.
+        let inherited_totals: HashMap<String, (u32, u32)> = prompts
+            .iter()
+            .filter_map(|(id, commits)| {
+                commits
+                    .values()
+                    .next()
+                    .map(|r| (id.clone(), (r.total_additions, r.total_deletions)))
+            })
+            .collect();
 
         // Load known human records from INITIAL attributions
         for (hash, human_record) in &initial_attributions.humans {
@@ -615,6 +643,9 @@ impl VirtualAttributions {
             &session_deletions,
         );
 
+        // Make total_additions cumulative by adding inherited base from INITIAL.
+        Self::add_inherited_totals(&mut prompts, &inherited_totals, &session_additions);
+
         Ok(VirtualAttributions {
             repo,
             base_commit,
@@ -655,6 +686,18 @@ impl VirtualAttributions {
                 .or_insert_with(BTreeMap::new)
                 .insert(String::new(), prompt_record.clone());
         }
+
+        // Save inherited cumulative totals from INITIAL prompts before checkpoint
+        // processing may overwrite them. Used later to make session deltas cumulative.
+        let inherited_totals: HashMap<String, (u32, u32)> = prompts
+            .iter()
+            .filter_map(|(id, commits)| {
+                commits
+                    .values()
+                    .next()
+                    .map(|r| (id.clone(), (r.total_additions, r.total_deletions)))
+            })
+            .collect();
 
         // Load known human records from INITIAL attributions
         for (hash, human_record) in &initial_attributions.humans {
@@ -771,6 +814,9 @@ impl VirtualAttributions {
             &session_additions,
             &session_deletions,
         );
+
+        // Make total_additions cumulative by adding inherited base from INITIAL.
+        Self::add_inherited_totals(&mut prompts, &inherited_totals, &session_additions);
 
         Ok(VirtualAttributions {
             repo,
@@ -1818,15 +1864,18 @@ impl VirtualAttributions {
             // Sort records oldest to newest using the Ord implementation
             all_records.sort();
 
-            // Take the last (newest) record and accumulate totals across all records
+            // Take the last (newest) record and use the max totals across all records.
+            // total_additions/total_deletions are cumulative, so the highest value
+            // represents the most up-to-date count. Using max instead of sum prevents
+            // inflation when the same prompt appears in both checkpoint and blame VAs.
             if let Some(newest_record) = all_records.last() {
                 let mut merged_record = newest_record.clone();
                 let mut total_additions = 0u32;
                 let mut total_deletions = 0u32;
 
                 for record in &all_records {
-                    total_additions = total_additions.saturating_add(record.total_additions);
-                    total_deletions = total_deletions.saturating_add(record.total_deletions);
+                    total_additions = total_additions.max(record.total_additions);
+                    total_deletions = total_deletions.max(record.total_deletions);
                 }
 
                 merged_record.total_additions = total_additions;
@@ -1924,6 +1973,37 @@ impl VirtualAttributions {
                     *session_accepted_lines.get(session_id).unwrap_or(&0);
                 prompt_record.overriden_lines =
                     *session_overridden_lines.get(session_id).unwrap_or(&0);
+            }
+        }
+    }
+
+    /// Add inherited INITIAL totals to prompts that had new checkpoint data,
+    /// making their `total_additions`/`total_deletions` cumulative rather than
+    /// session-delta-only. Prompts without new checkpoint data already carry
+    /// the inherited cumulative value (preserved by the conditional update in
+    /// `calculate_and_update_prompt_metrics`).
+    ///
+    /// This must be called after `calculate_and_update_prompt_metrics` and before
+    /// any merge operation, so that all prompts carry cumulative values and the
+    /// merge can use `max` instead of `sum`.
+    pub fn add_inherited_totals(
+        prompts: &mut BTreeMap<String, BTreeMap<String, PromptRecord>>,
+        inherited_totals: &HashMap<String, (u32, u32)>,
+        session_additions: &HashMap<String, u32>,
+    ) {
+        for (session_id, commits) in prompts.iter_mut() {
+            // Only add inherited base for sessions that had new checkpoint data.
+            // Sessions without new checkpoints already carry the correct cumulative
+            // value from INITIAL (preserved by calculate_and_update_prompt_metrics).
+            if session_additions.contains_key(session_id) {
+                if let Some(&(inherited_adds, inherited_dels)) = inherited_totals.get(session_id) {
+                    for prompt_record in commits.values_mut() {
+                        prompt_record.total_additions =
+                            prompt_record.total_additions.saturating_add(inherited_adds);
+                        prompt_record.total_deletions =
+                            prompt_record.total_deletions.saturating_add(inherited_dels);
+                    }
+                }
             }
         }
     }
@@ -2064,14 +2144,17 @@ pub fn merge_attributions_favoring_first(
             .insert(file_path, final_content.clone());
     }
 
-    // Save total_additions and total_deletions by summing across sources so squash/rebase preserves totals.
+    // Save total_additions and total_deletions using max across sources.
+    // These values are cumulative, so the highest value is the most up-to-date.
+    // Using max instead of sum prevents inflation when the same prompt appears
+    // in both sources (e.g., checkpoint VA and blame VA during amend).
     let mut saved_totals: HashMap<String, (u32, u32)> = HashMap::new();
     for source in [&primary.prompts, &secondary.prompts] {
         for (prompt_id, commits) in source {
             for prompt_record in commits.values() {
                 let entry = saved_totals.entry(prompt_id.clone()).or_insert((0, 0));
-                entry.0 = entry.0.saturating_add(prompt_record.total_additions);
-                entry.1 = entry.1.saturating_add(prompt_record.total_deletions);
+                entry.0 = entry.0.max(prompt_record.total_additions);
+                entry.1 = entry.1.max(prompt_record.total_deletions);
             }
         }
     }
@@ -2754,6 +2837,217 @@ mod tests {
         assert_eq!(
             prompt.total_deletions, 30,
             "empty session_deletions map should not zero out existing total_deletions"
+        );
+    }
+
+    /// Regression test for https://github.com/git-ai-project/git-ai/issues/1098
+    ///
+    /// When the same prompt_id appears in both sources with cumulative total_additions,
+    /// merge_prompts_picking_newest should take the max, not sum, to avoid inflating
+    /// the total on each successive amend.
+    #[test]
+    fn test_merge_prompts_does_not_inflate_totals_for_same_prompt() {
+        use crate::authorship::authorship_log::PromptRecord;
+        use crate::authorship::working_log::AgentId;
+
+        let mut source1 = BTreeMap::new();
+        let mut source2 = BTreeMap::new();
+
+        // Source 1 (checkpoint VA): prompt with cumulative total_additions = 13
+        let record1 = PromptRecord {
+            agent_id: AgentId {
+                tool: "cursor".to_string(),
+                id: "s1".to_string(),
+                model: "gpt-4".to_string(),
+            },
+            human_author: None,
+            messages: vec![],
+            total_additions: 13,
+            total_deletions: 5,
+            accepted_lines: 0,
+            overriden_lines: 0,
+            messages_url: None,
+            custom_attributes: None,
+        };
+        source1
+            .entry("prompt_a".to_string())
+            .or_insert_with(BTreeMap::new)
+            .insert(String::new(), record1);
+
+        // Source 2 (blame VA): same prompt with same cumulative total_additions = 13
+        let record2 = PromptRecord {
+            agent_id: AgentId {
+                tool: "cursor".to_string(),
+                id: "s1".to_string(),
+                model: "gpt-4".to_string(),
+            },
+            human_author: None,
+            messages: vec![],
+            total_additions: 13,
+            total_deletions: 5,
+            accepted_lines: 0,
+            overriden_lines: 0,
+            messages_url: None,
+            custom_attributes: None,
+        };
+        source2
+            .entry("prompt_a".to_string())
+            .or_insert_with(BTreeMap::new)
+            .insert("abc123".to_string(), record2);
+
+        let merged = VirtualAttributions::merge_prompts_picking_newest(&[&source1, &source2]);
+
+        let prompt = merged["prompt_a"].values().next().unwrap();
+        assert_eq!(
+            prompt.total_additions, 13,
+            "merge should not double cumulative total_additions (got {}, expected 13)",
+            prompt.total_additions
+        );
+        assert_eq!(
+            prompt.total_deletions, 5,
+            "merge should not double cumulative total_deletions"
+        );
+    }
+
+    /// When primary (checkpoint_va) has a higher cumulative value from new checkpoints,
+    /// merge should use the higher value.
+    #[test]
+    fn test_merge_prompts_picks_higher_cumulative_total() {
+        use crate::authorship::authorship_log::PromptRecord;
+        use crate::authorship::working_log::AgentId;
+
+        let mut source1 = BTreeMap::new();
+        let mut source2 = BTreeMap::new();
+
+        // Source 1: updated cumulative after new checkpoints (13 inherited + 5 new = 18)
+        let record1 = PromptRecord {
+            agent_id: AgentId {
+                tool: "cursor".to_string(),
+                id: "s1".to_string(),
+                model: "gpt-4".to_string(),
+            },
+            human_author: None,
+            messages: vec![],
+            total_additions: 18,
+            total_deletions: 7,
+            accepted_lines: 0,
+            overriden_lines: 0,
+            messages_url: None,
+            custom_attributes: None,
+        };
+        source1
+            .entry("prompt_a".to_string())
+            .or_insert_with(BTreeMap::new)
+            .insert(String::new(), record1);
+
+        // Source 2: old cumulative from committed note
+        let record2 = PromptRecord {
+            agent_id: AgentId {
+                tool: "cursor".to_string(),
+                id: "s1".to_string(),
+                model: "gpt-4".to_string(),
+            },
+            human_author: None,
+            messages: vec![],
+            total_additions: 13,
+            total_deletions: 5,
+            accepted_lines: 0,
+            overriden_lines: 0,
+            messages_url: None,
+            custom_attributes: None,
+        };
+        source2
+            .entry("prompt_a".to_string())
+            .or_insert_with(BTreeMap::new)
+            .insert("abc123".to_string(), record2);
+
+        let merged = VirtualAttributions::merge_prompts_picking_newest(&[&source1, &source2]);
+
+        let prompt = merged["prompt_a"].values().next().unwrap();
+        assert_eq!(
+            prompt.total_additions, 18,
+            "merge should use the higher cumulative value"
+        );
+        assert_eq!(
+            prompt.total_deletions, 7,
+            "merge should use the higher cumulative value for deletions"
+        );
+    }
+
+    /// Verify that calculate_and_update_prompt_metrics produces cumulative totals
+    /// when session deltas are added on top of inherited INITIAL values.
+    #[test]
+    fn test_session_delta_plus_inherited_base_is_cumulative() {
+        use crate::authorship::authorship_log::PromptRecord;
+        use crate::authorship::working_log::AgentId;
+
+        // Simulate the from_just_working_log flow:
+        // 1. INITIAL prompt has inherited total_additions = 10
+        // 2. New checkpoint adds session_additions = 3
+        // 3. After calculate_and_update_prompt_metrics, total should be 3 (session delta)
+        // 4. After adding inherited base, total should be 13 (cumulative)
+
+        let mut prompts = BTreeMap::new();
+        let prompt_record = PromptRecord {
+            agent_id: AgentId {
+                tool: "cursor".to_string(),
+                id: "s1".to_string(),
+                model: "gpt-4".to_string(),
+            },
+            human_author: None,
+            messages: vec![],
+            total_additions: 0, // Checkpoint replaced the INITIAL entry
+            total_deletions: 0,
+            accepted_lines: 0,
+            overriden_lines: 0,
+            messages_url: None,
+            custom_attributes: None,
+        };
+        prompts
+            .entry("session_a".to_string())
+            .or_insert_with(BTreeMap::new)
+            .insert(String::new(), prompt_record);
+
+        let mut session_additions = HashMap::new();
+        session_additions.insert("session_a".to_string(), 3u32);
+        let mut session_deletions = HashMap::new();
+        session_deletions.insert("session_a".to_string(), 1u32);
+
+        let attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
+            HashMap::new();
+
+        // Simulate inherited totals saved before checkpoint processing
+        let inherited_totals: HashMap<String, (u32, u32)> =
+            [("session_a".to_string(), (10u32, 2u32))]
+                .into_iter()
+                .collect();
+
+        VirtualAttributions::calculate_and_update_prompt_metrics(
+            &mut prompts,
+            &attributions,
+            &session_additions,
+            &session_deletions,
+        );
+
+        // After metrics: total_additions = 3 (session delta only)
+        let prompt = prompts["session_a"].values().next().unwrap();
+        assert_eq!(prompt.total_additions, 3);
+
+        // Add inherited base to make cumulative
+        VirtualAttributions::add_inherited_totals(
+            &mut prompts,
+            &inherited_totals,
+            &session_additions,
+        );
+
+        let prompt = prompts["session_a"].values().next().unwrap();
+        assert_eq!(
+            prompt.total_additions, 13,
+            "session delta (3) + inherited base (10) = cumulative (13)"
+        );
+        assert_eq!(
+            prompt.total_deletions, 3,
+            "session delta (1) + inherited base (2) = cumulative (3)"
         );
     }
 }
