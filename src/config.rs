@@ -985,7 +985,11 @@ fn path_is_git_ai_binary(path: &Path) -> bool {
         } else {
             "git-ai"
         };
-        if parent.join(git_ai_name).exists() && path != Path::new("/usr/local/bin/git") {
+        let local_bin = home_dir().join(".local/bin/git");
+        if parent.join(git_ai_name).exists()
+            && path != Path::new("/usr/local/bin/git")
+            && path != local_bin
+        {
             return true;
         }
     }
