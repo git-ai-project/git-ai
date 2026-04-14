@@ -1,0 +1,5 @@
+---
+source: src/authorship/stats.rs
+expression: all_untracked_output
+---
+"you  ········································ ai\n     0%           untracked 100%            0%\n"

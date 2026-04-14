@@ -94,7 +94,7 @@ pub fn stats_command(
     Ok(())
 }
 
-pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
+pub fn write_stats_to_terminal(stats: &CommitStats, is_interactive: bool) -> String {
     let mut output = String::new();
 
     // Set maximum bar width to 40 characters
@@ -112,7 +112,7 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
 
         output.push_str(&progress_bar);
         output.push('\n');
-        if print {
+        if is_interactive {
             println!("{}", progress_bar);
         }
 
@@ -120,86 +120,64 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
         let no_additions_msg = format!("     \x1b[90m{:^40}\x1b[0m", "(no additions)");
         output.push_str(&no_additions_msg);
         output.push('\n');
-        if print {
+        if is_interactive {
             println!("{}", no_additions_msg);
         }
         // No percentage line or AI stats for deletion-only commits
         return output;
     }
 
-    // Calculate total additions for the progress bar
-    // Total = (known human + unknown) + mixed (AI-edited-by-human) + pure AI
-    // unknown_additions are unattested lines — treated as human for display until
-    // full KnownHuman attestation pipeline is in place.
-    let display_human = stats.human_additions + stats.unknown_additions;
-    let total_additions = display_human + stats.ai_additions;
+    // Calculate total additions: known human + unknown (untracked) + AI
+    let total_additions = stats.human_additions + stats.unknown_additions + stats.ai_additions;
 
     // Calculate AI acceptance percentage (capped at 100%)
-    // It can go higher because AI can write on top of AI code. This feels reasonable for now
     let _ai_acceptance_percentage = if stats.ai_additions > 0 {
         ((stats.ai_accepted as f64 / stats.ai_additions as f64) * 100.0).min(100.0)
     } else {
         0.0
     };
 
-    // Create progress bar with three categories
-    // Pure human = (human_additions + unknown_additions) - mixed_additions (overridden lines)
-    let pure_human = display_human.saturating_sub(stats.mixed_additions);
-
-    let pure_human_bars = if total_additions > 0 {
-        ((pure_human as f64 / total_additions as f64) * bar_width as f64) as usize
+    // Determine whether to show the untracked segment (raw float check, before rounding)
+    let untracked_pct_raw = if total_additions > 0 {
+        stats.unknown_additions as f64 / total_additions as f64 * 100.0
     } else {
-        0
+        0.0
     };
+    let show_untracked = untracked_pct_raw > 1.0;
 
-    #[allow(unused_variables)]
-    let mixed_bars = if total_additions > 0 {
-        ((stats.mixed_additions as f64 / total_additions as f64) * bar_width as f64) as usize
-    } else {
-        0
-    };
-
-    #[allow(unused_variables)]
-    let ai_bars = if total_additions > 0 {
-        ((stats.ai_additions as f64 / total_additions as f64) * bar_width as f64) as usize
+    // Calculate human bar segment
+    let human_bars = if total_additions > 0 {
+        ((stats.human_additions as f64 / total_additions as f64) * bar_width as f64) as usize
     } else {
         0
     };
 
     // Ensure human contributions get at least 2 visible blocks if they have more than 1 line
-    let min_human_bars = if display_human > 1 { 2 } else { 0 };
-    let final_pure_human_bars = if display_human > 1 {
-        pure_human_bars.max(min_human_bars)
+    let min_human_bars = if stats.human_additions > 1 { 2 } else { 0 };
+    let final_human_bars = human_bars.max(min_human_bars);
+
+    // Distribute remaining width between untracked and AI proportionally.
+    // When untracked is below the 1% threshold, all remaining width goes to AI.
+    let remaining_width = bar_width.saturating_sub(final_human_bars);
+    let (final_untracked_bars, final_ai_bars) = if show_untracked {
+        let total_other = stats.unknown_additions + stats.ai_additions;
+        let untracked_bars = if total_other > 0 {
+            ((stats.unknown_additions as f64 / total_other as f64) * remaining_width as f64)
+                as usize
+        } else {
+            0
+        };
+        (untracked_bars, remaining_width.saturating_sub(untracked_bars))
     } else {
-        pure_human_bars
+        (0, remaining_width)
     };
 
-    // Adjust other bars if we had to give more space to human
-    let remaining_width = bar_width.saturating_sub(final_pure_human_bars);
-    let total_other_additions = stats.mixed_additions + stats.ai_additions;
-
-    let final_mixed_bars = if total_other_additions > 0 {
-        ((stats.mixed_additions as f64 / total_other_additions as f64) * remaining_width as f64)
-            as usize
-    } else {
-        0
-    };
-
-    let final_ai_bars = remaining_width.saturating_sub(final_mixed_bars);
-
-    // Build the progress bar with three categories
+    // Build the progress bar
     let mut progress_bar = String::new();
     progress_bar.push_str("you  ");
-
-    // Pure human bars (darkest)
-    progress_bar.push_str(&"█".repeat(final_pure_human_bars));
-
-    // Mixed bars (medium) - AI-generated but human-edited
-    progress_bar.push_str(&"▒".repeat(final_mixed_bars));
-
-    // AI bars (lightest) - pure AI, untouched
-    progress_bar.push_str(&"░".repeat(final_ai_bars));
-
+    progress_bar.push_str(&"█".repeat(final_human_bars));    // known human (attested)
+    progress_bar.push_str(&"·".repeat(final_untracked_bars)); // untracked (no attestation)
+    progress_bar.push_str(&"░".repeat(final_ai_bars));        // AI
     progress_bar.push_str(" ai");
 
     // Format time waiting for AI
@@ -217,13 +195,8 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
     };
 
     // Calculate percentages for display
-    let pure_human_percentage = if total_additions > 0 {
-        ((pure_human as f64 / total_additions as f64) * 100.0).round() as u32
-    } else {
-        0
-    };
-    let mixed_percentage = if total_additions > 0 {
-        ((stats.mixed_additions as f64 / total_additions as f64) * 100.0).round() as u32
+    let human_percentage = if total_additions > 0 {
+        ((stats.human_additions as f64 / total_additions as f64) * 100.0).round() as u32
     } else {
         0
     };
@@ -236,39 +209,47 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
     // Print the stats
     output.push_str(&progress_bar);
     output.push('\n');
-    if print {
+    if is_interactive {
         println!("{}", progress_bar);
     }
-    // Print percentage line with proper spacing (40 columns total)
-    // "you  " (5) + 40 chars + " ai" (3) = 48 total
-    // Human% left-aligned at left edge of bar, AI% right-aligned at right edge of bar
-    if mixed_percentage > 0 {
-        // Show all three: human, mixed, ai
-        // Human% at left edge, mixed% in middle, AI% at right edge
+
+    // Percentage line: three anchors (human / untracked / AI) when untracked is visible,
+    // two anchors (human / AI) otherwise.
+    if show_untracked {
+        let untracked_percentage = untracked_pct_raw.round() as u32;
+        // When interactive, wrap "untracked" in an OSC 8 hyperlink so it is clickable in
+        // supporting terminals (iTerm2, Warp, etc.). Spaces are constructed manually —
+        // not via format-width padding on the label — so that invisible escape bytes do
+        // not misalign the output.
+        let untracked_label = if is_interactive {
+            "\x1b]8;;https://usegitai.com/docs\x1b\\untracked\x1b]8;;\x1b\\".to_string()
+        } else {
+            "untracked".to_string()
+        };
         let percentage_line = format!(
-            "     {:<3}{:>12}mixed {:>3}%{:>12}{:>3}%",
-            format!("{}%", pure_human_percentage),
+            "     {:<3}{:>10}{} {:>3}%{:>10}{:>3}%",
+            format!("{}%", human_percentage),
             "",
-            mixed_percentage,
+            untracked_label,
+            untracked_percentage,
             "",
             ai_percentage
         );
         output.push_str(&percentage_line);
         output.push('\n');
-        if print {
+        if is_interactive {
             println!("{}", percentage_line);
         }
     } else {
-        // No mixed, just show human and ai at bar edges
         let percentage_line = format!(
             "     {:<3}{:>33}{:>3}%",
-            format!("{}%", pure_human_percentage),
+            format!("{}%", human_percentage),
             "",
             ai_percentage
         );
         output.push_str(&percentage_line);
         output.push('\n');
-        if print {
+        if is_interactive {
             println!("{}", percentage_line);
         }
     }
@@ -293,7 +274,7 @@ pub fn write_stats_to_terminal(stats: &CommitStats, print: bool) -> String {
         );
         output.push_str(&ai_acceptance_str);
         output.push('\n');
-        if print {
+        if is_interactive {
             println!("{}", ai_acceptance_str);
         }
     }
@@ -790,7 +771,7 @@ mod tests {
             tool_model_breakdown: BTreeMap::new(),
         };
 
-        let mixed_output = write_stats_to_terminal(&stats, true);
+        let mixed_output = write_stats_to_terminal(&stats, false);
         assert_debug_snapshot!(mixed_output);
 
         // Test with AI-only stats
@@ -808,7 +789,7 @@ mod tests {
             tool_model_breakdown: BTreeMap::new(),
         };
 
-        let ai_only_output = write_stats_to_terminal(&ai_stats, true);
+        let ai_only_output = write_stats_to_terminal(&ai_stats, false);
         assert_debug_snapshot!(ai_only_output);
 
         // Test with human-only stats
@@ -826,7 +807,7 @@ mod tests {
             tool_model_breakdown: BTreeMap::new(),
         };
 
-        let human_only_output = write_stats_to_terminal(&human_stats, true);
+        let human_only_output = write_stats_to_terminal(&human_stats, false);
         assert_debug_snapshot!(human_only_output);
 
         // Test with minimal human contribution (should get at least 2 blocks)
@@ -844,7 +825,7 @@ mod tests {
             tool_model_breakdown: BTreeMap::new(),
         };
 
-        let minimal_human_output = write_stats_to_terminal(&minimal_human_stats, true);
+        let minimal_human_output = write_stats_to_terminal(&minimal_human_stats, false);
         assert_debug_snapshot!(minimal_human_output);
 
         // Test with deletion-only commit (no additions)
@@ -862,8 +843,91 @@ mod tests {
             tool_model_breakdown: BTreeMap::new(),
         };
 
-        let deletion_only_output = write_stats_to_terminal(&deletion_only_stats, true);
+        let deletion_only_output = write_stats_to_terminal(&deletion_only_stats, false);
         assert_debug_snapshot!(deletion_only_output);
+
+        // --- New test cases for untracked segment ---
+
+        // 18% human / 22% untracked / 60% AI — matches the design example
+        let untracked_stats = CommitStats {
+            human_additions: 180,
+            unknown_additions: 220,
+            mixed_additions: 0,
+            ai_additions: 600,
+            ai_accepted: 462,
+            time_waiting_for_ai: 60,
+            git_diff_deleted_lines: 0,
+            git_diff_added_lines: 1000,
+            total_ai_additions: 600,
+            total_ai_deletions: 0,
+            tool_model_breakdown: BTreeMap::new(),
+        };
+        let with_untracked_output = write_stats_to_terminal(&untracked_stats, false);
+        assert_debug_snapshot!(with_untracked_output);
+
+        // untracked exactly at the 1% threshold — should NOT show untracked segment
+        let threshold_stats = CommitStats {
+            human_additions: 49,
+            unknown_additions: 1,
+            mixed_additions: 0,
+            ai_additions: 50,
+            ai_accepted: 50,
+            time_waiting_for_ai: 0,
+            git_diff_deleted_lines: 0,
+            git_diff_added_lines: 100,
+            total_ai_additions: 50,
+            total_ai_deletions: 0,
+            tool_model_breakdown: BTreeMap::new(),
+        };
+        let untracked_at_threshold_output = write_stats_to_terminal(&threshold_stats, false);
+        assert_debug_snapshot!(untracked_at_threshold_output);
+
+        // untracked just above 1% threshold (~2%) — should show untracked segment
+        let above_threshold_stats = CommitStats {
+            human_additions: 97,
+            unknown_additions: 2,
+            mixed_additions: 0,
+            ai_additions: 0,
+            ai_accepted: 0,
+            time_waiting_for_ai: 0,
+            git_diff_deleted_lines: 0,
+            git_diff_added_lines: 99,
+            total_ai_additions: 0,
+            total_ai_deletions: 0,
+            tool_model_breakdown: BTreeMap::new(),
+        };
+        let untracked_just_above_output = write_stats_to_terminal(&above_threshold_stats, false);
+        assert_debug_snapshot!(untracked_just_above_output);
+
+        // 100% untracked — entire bar is · chars
+        let all_untracked_stats = CommitStats {
+            human_additions: 0,
+            unknown_additions: 100,
+            mixed_additions: 0,
+            ai_additions: 0,
+            ai_accepted: 0,
+            time_waiting_for_ai: 0,
+            git_diff_deleted_lines: 0,
+            git_diff_added_lines: 100,
+            total_ai_additions: 0,
+            total_ai_deletions: 0,
+            tool_model_breakdown: BTreeMap::new(),
+        };
+        let all_untracked_output = write_stats_to_terminal(&all_untracked_stats, false);
+        assert_debug_snapshot!(all_untracked_output);
+
+        // OSC 8 hyperlink emitted when is_interactive = true
+        // Not a snapshot test — asserts presence of the escape sequence directly.
+        let hyperlink_output = write_stats_to_terminal(&untracked_stats, true);
+        assert!(
+            hyperlink_output.contains("\x1b]8;;https://usegitai.com/docs\x1b\\"),
+            "Expected OSC 8 hyperlink in interactive output, got: {:?}",
+            hyperlink_output
+        );
+        assert!(
+            hyperlink_output.contains("untracked"),
+            "Expected 'untracked' label in interactive output"
+        );
     }
 
     #[test]

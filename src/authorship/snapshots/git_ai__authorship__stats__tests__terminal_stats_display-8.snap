@@ -1,0 +1,5 @@
+---
+source: src/authorship/stats.rs
+expression: untracked_just_above_output
+---
+"you  ███████████████████████████████████████· ai\n     98%          untracked   2%            0%\n"

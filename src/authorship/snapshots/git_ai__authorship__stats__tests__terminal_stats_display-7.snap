@@ -1,0 +1,5 @@
+---
+source: src/authorship/stats.rs
+expression: untracked_at_threshold_output
+---
+"you  ███████████████████░░░░░░░░░░░░░░░░░░░░░ ai\n     49%                                  50%\n     \u{1b}[90m100% AI code accepted\u{1b}[0m\n"
