@@ -55,7 +55,7 @@ keyring = ["dep:keyring"]
 git-ai = { path = ".", features = ["test-support"] }
 tempfile = "3.27"
 insta = "1.47"
-rand = "0.8"
+rand = "0.10"
 regex = "1.12"
 filetime = "0.2"
 serial_test = "3.4"

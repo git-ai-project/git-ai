@@ -1,6 +1,5 @@
 use git_ai::feature_flags::FeatureFlags;
-use rand::seq::SliceRandom;
-use rand::thread_rng;
+use rand::seq::IndexedRandom;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -32,7 +31,7 @@ fn setup() {
 mod tests {
     use super::*;
     use git_ai::observability::wrapper_performance_targets::PERFORMANCE_FLOOR_MS;
-    use rand::seq::SliceRandom;
+    use rand::seq::IndexedRandom;
     use rstest::rstest;
 
     #[rstest]
@@ -375,9 +374,9 @@ mod tests {
                 .expect("Checkpoint mock_ai should succeed");
 
             // Step 3: Select 100 random files from the 1000 and edit them (simulating human edits)
-            let mut rng = thread_rng();
+            let mut rng = rand::rng();
             let files_to_re_edit: Vec<String> = all_files
-                .choose_multiple(&mut rng, 100.min(all_files.len()))
+                .sample(&mut rng, 100.min(all_files.len()))
                 .cloned()
                 .collect();
 
@@ -577,7 +576,7 @@ pub fn find_random_files_with_options(
         return Err("No files found in repository".to_string());
     }
 
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
 
     // Find large files using file size as a proxy (> 100KB considered large)
     // This is much faster than reading files to count lines
@@ -609,7 +608,7 @@ pub fn find_random_files_with_options(
         .collect();
 
     let random_files: Vec<String> = candidates
-        .choose_multiple(&mut rng, options.random_file_count.min(candidates.len()))
+        .sample(&mut rng, options.random_file_count.min(candidates.len()))
         .map(|s| (*s).clone())
         .collect();
 

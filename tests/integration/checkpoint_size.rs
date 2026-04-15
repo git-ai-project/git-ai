@@ -1,12 +1,12 @@
 use crate::repos::test_repo::TestRepo;
-use rand::{Rng, distributions::Alphanumeric};
+use rand::{RngExt, distr::Alphanumeric};
 use std::{fs, time::Instant};
 
 #[test]
 fn test_checkpoint_size_logging_large_ai_rewrites() {
     eprintln!("test_checkpoint_size_logging_large_ai_rewrites started...");
     let repo = TestRepo::new();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     // (target_lines, iterations)
     let configs: &[(usize, usize)] = &[

@@ -8,7 +8,7 @@ use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::{AgentId, CheckpointKind};
 use git_ai::git::repository as GitAiRepository;
 use insta::assert_debug_snapshot;
-use rand::Rng;
+use rand::RngExt;
 use regex::Regex;
 use serde_json::json;
 use std::collections::HashMap;
@@ -155,8 +155,8 @@ fn assert_file_lines(
 }
 
 fn unique_worktree_path() -> PathBuf {
-    let mut rng = rand::thread_rng();
-    let n: u64 = rng.gen_range(0..10_000_000_000);
+    let mut rng = rand::rng();
+    let n: u64 = rng.random_range(0..10_000_000_000);
     std::env::temp_dir().join(format!("git-ai-worktree-{}", n))
 }
 
