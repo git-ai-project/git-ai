@@ -4600,63 +4600,159 @@ impl ActorDaemonCoordinator {
             let mut pending_by_seq: BTreeMap<u64, Value> = BTreeMap::new();
             let mut gc_counter: u64 = 0;
             const GC_INTERVAL: u64 = 500;
+            // Gap detection: if the ingest worker has buffered events beyond
+            // next_seq but next_seq itself never arrives (because the
+            // connection handler thread panicked after assigning the sequence
+            // number but before enqueueing the payload), we must skip the
+            // missing sequence(s) to avoid stalling the entire pipeline.
+            let mut gap_stall_since: Option<tokio::time::Instant> = None;
+            const GAP_SKIP_TIMEOUT: Duration = Duration::from_secs(5);
 
-            while let Some(payload) = rx.recv().await {
-                let Some(seq) = payload.get(TRACE_INGEST_SEQ_FIELD).and_then(Value::as_u64) else {
-                    let error = GitAiError::Generic(
-                        "trace ingest payload missing ingress sequence".to_string(),
-                    );
-                    observability::log_error(
-                        &error,
-                        Some(serde_json::json!({
-                            "component": "daemon",
-                            "phase": "trace_ingest_worker",
-                            "reason": "missing_ingest_seq",
-                            "payload": payload,
-                        })),
-                    );
-                    coordinator.request_shutdown();
-                    break;
+            let mut channel_open = true;
+            loop {
+                // Use a timeout-based receive when we have buffered events
+                // waiting behind a gap.  This ensures gap detection fires
+                // even when no new payloads arrive.
+                let payload = if gap_stall_since.is_some() {
+                    match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+                        Ok(Some(payload)) => Some(payload),
+                        Ok(None) => {
+                            channel_open = false;
+                            None
+                        }
+                        Err(_) => None, // timeout — check gap below
+                    }
+                } else {
+                    match rx.recv().await {
+                        Some(payload) => Some(payload),
+                        None => {
+                            channel_open = false;
+                            None
+                        }
+                    }
                 };
 
-                if pending_by_seq.len() >= TRACE_INGEST_QUEUE_CAPACITY {
-                    let error = GitAiError::Generic(format!(
-                        "trace ingest reorder buffer overflow at {} entries; next_seq={}",
-                        pending_by_seq.len(),
-                        next_seq
-                    ));
-                    debug_log(&format!("{}", error));
-                    observability::log_error(
-                        &error,
-                        Some(serde_json::json!({
-                            "component": "daemon",
-                            "phase": "trace_ingest_worker",
-                            "reason": "reorder_buffer_overflow",
-                            "buffered_count": pending_by_seq.len(),
-                            "next_seq": next_seq,
-                            "received_seq": seq,
-                        })),
-                    );
-                    coordinator.request_shutdown();
+                if let Some(payload) = payload {
+                    let Some(seq) = payload.get(TRACE_INGEST_SEQ_FIELD).and_then(Value::as_u64) else {
+                        let error = GitAiError::Generic(
+                            "trace ingest payload missing ingress sequence".to_string(),
+                        );
+                        observability::log_error(
+                            &error,
+                            Some(serde_json::json!({
+                                "component": "daemon",
+                                "phase": "trace_ingest_worker",
+                                "reason": "missing_ingest_seq",
+                                "payload": payload,
+                            })),
+                        );
+                        coordinator.request_shutdown();
+                        break;
+                    };
+
+                    if pending_by_seq.len() >= TRACE_INGEST_QUEUE_CAPACITY {
+                        let error = GitAiError::Generic(format!(
+                            "trace ingest reorder buffer overflow at {} entries; next_seq={}",
+                            pending_by_seq.len(),
+                            next_seq
+                        ));
+                        debug_log(&format!("{}", error));
+                        observability::log_error(
+                            &error,
+                            Some(serde_json::json!({
+                                "component": "daemon",
+                                "phase": "trace_ingest_worker",
+                                "reason": "reorder_buffer_overflow",
+                                "buffered_count": pending_by_seq.len(),
+                                "next_seq": next_seq,
+                                "received_seq": seq,
+                            })),
+                        );
+                        coordinator.request_shutdown();
+                        break;
+                    }
+
+                    if pending_by_seq.insert(seq, payload).is_some() {
+                        let error = GitAiError::Generic(format!(
+                            "duplicate trace ingest sequence received: {}",
+                            seq
+                        ));
+                        observability::log_error(
+                            &error,
+                            Some(serde_json::json!({
+                                "component": "daemon",
+                                "phase": "trace_ingest_worker",
+                                "reason": "duplicate_ingest_seq",
+                                "sequence": seq,
+                            })),
+                        );
+                        coordinator.request_shutdown();
+                        break;
+                    }
+                } else if !channel_open && gap_stall_since.is_none() {
+                    // Channel closed and no gap — exit the worker loop.
                     break;
+                } else if !channel_open && gap_stall_since.is_some() {
+                    // Channel closed but we have a gap — skip immediately
+                    // rather than waiting for the full timeout.
+                    if !pending_by_seq.is_empty() {
+                        let earliest = *pending_by_seq.keys().next().unwrap();
+                        if earliest > next_seq {
+                            let skipped = earliest - next_seq;
+                            debug_log(&format!(
+                                "trace ingest skipping {} missing sequence(s) on channel close ({} -> {})",
+                                skipped, next_seq, earliest
+                            ));
+                            next_seq = earliest;
+                        }
+                    }
+                    gap_stall_since = None;
+                    if pending_by_seq.is_empty() {
+                        break;
+                    }
                 }
 
-                if pending_by_seq.insert(seq, payload).is_some() {
-                    let error = GitAiError::Generic(format!(
-                        "duplicate trace ingest sequence received: {}",
-                        seq
-                    ));
-                    observability::log_error(
-                        &error,
-                        Some(serde_json::json!({
-                            "component": "daemon",
-                            "phase": "trace_ingest_worker",
-                            "reason": "duplicate_ingest_seq",
-                            "sequence": seq,
-                        })),
-                    );
-                    coordinator.request_shutdown();
-                    break;
+                // Gap detection: if next_seq is missing but later sequences
+                // exist in the buffer, a connection handler may have panicked
+                // after assigning the sequence number.  After GAP_SKIP_TIMEOUT
+                // of no progress, skip ahead to the earliest buffered sequence.
+                if !pending_by_seq.contains_key(&next_seq) && !pending_by_seq.is_empty() {
+                    match gap_stall_since {
+                        None => {
+                            gap_stall_since = Some(tokio::time::Instant::now());
+                        }
+                        Some(since) if since.elapsed() >= GAP_SKIP_TIMEOUT => {
+                            // Skip to the smallest buffered sequence.
+                            let earliest = *pending_by_seq.keys().next().unwrap();
+                            let skipped = earliest - next_seq;
+                            debug_log(&format!(
+                                "trace ingest skipping {} missing sequence(s) ({} -> {})",
+                                skipped, next_seq, earliest
+                            ));
+                            observability::log_error(
+                                &GitAiError::Generic(format!(
+                                    "trace ingest gap: skipped {} lost sequence(s) ({} -> {})",
+                                    skipped, next_seq, earliest
+                                )),
+                                Some(serde_json::json!({
+                                    "component": "daemon",
+                                    "phase": "trace_ingest_worker",
+                                    "reason": "sequence_gap_skip",
+                                    "from_seq": next_seq,
+                                    "to_seq": earliest,
+                                    "skipped_count": skipped,
+                                })),
+                            );
+                            next_seq = earliest;
+                            gap_stall_since = None;
+                        }
+                        Some(_) => {
+                            // Still within timeout — keep waiting for the
+                            // missing sequence to arrive.
+                        }
+                    }
+                } else if pending_by_seq.contains_key(&next_seq) {
+                    gap_stall_since = None;
                 }
 
                 while let Some(mut ordered_payload) = pending_by_seq.remove(&next_seq) {
@@ -4793,7 +4889,7 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    fn enqueue_trace_payload(&self, payload: Value) -> Result<(), GitAiError> {
+    fn enqueue_trace_payload(&self, mut payload: Value) -> Result<(), GitAiError> {
         let tx = self
             .trace_ingest_tx
             .lock()
@@ -4801,6 +4897,17 @@ impl ActorDaemonCoordinator {
             .as_ref()
             .cloned()
             .ok_or_else(|| GitAiError::Generic("trace ingest worker not started".to_string()))?;
+        // Assign the sequence number here (not in prepare_trace_payload_for_ingest)
+        // so that a panic during augmentation does not consume a sequence number
+        // and permanently stall the ingest worker's reorder buffer.
+        if let Some(object) = payload.as_object_mut()
+            && object.get(TRACE_INGEST_SEQ_FIELD).is_none()
+        {
+            object.insert(
+                TRACE_INGEST_SEQ_FIELD.to_string(),
+                json!(self.next_trace_ingest_seq()),
+            );
+        }
         let payload_root = Self::trace_payload_root_sid(&payload);
         self.record_trace_payload_enqueued(&payload)?;
         self.queued_trace_payloads.fetch_add(1, Ordering::SeqCst);
@@ -4845,14 +4952,9 @@ impl ActorDaemonCoordinator {
     }
 
     fn prepare_trace_payload_for_ingest(&self, payload: &mut Value) {
-        if let Some(object) = payload.as_object_mut()
-            && object.get(TRACE_INGEST_SEQ_FIELD).is_none()
-        {
-            object.insert(
-                TRACE_INGEST_SEQ_FIELD.to_string(),
-                json!(self.next_trace_ingest_seq()),
-            );
-        }
+        // NOTE: sequence number assignment is deferred to enqueue_trace_payload
+        // so that a panic during augmentation does not consume a sequence number
+        // and permanently stall the reorder buffer.
         self.augment_trace_payload_with_reflog_metadata(payload);
     }
 
