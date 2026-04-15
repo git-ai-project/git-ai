@@ -7168,7 +7168,34 @@ impl ActorDaemonCoordinator {
             }
             TracePayloadApplyOutcome::Applied(mut applied) => {
                 if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
-                    let exec_lock = self.side_effect_exec_lock(&family)?;
+                    let exec_lock = match self.side_effect_exec_lock(&family) {
+                        Ok(lock) => lock,
+                        Err(error) => {
+                            // Lock map poisoned — write fallback completion log
+                            // so the test sync poller is not left waiting forever.
+                            let _ = self.record_side_effect_error(&family, applied.seq, &error);
+                            let log_entry = TestCompletionLogEntry {
+                                seq: 0,
+                                family_key: family.clone(),
+                                kind: "command".to_string(),
+                                primary_command: applied.command.primary_command.clone(),
+                                test_sync_session:
+                                    crate::daemon::test_sync::test_sync_session_from_invocation(
+                                        &parsed_invocation_for_normalized_command(&applied.command),
+                                    ),
+                                exit_code: Some(applied.command.exit_code),
+                                sync_tracked:
+                                    crate::daemon::test_sync::tracks_primary_command_for_test_sync(
+                                        applied.command.primary_command.as_deref(),
+                                        &applied.command.invoked_args,
+                                    ),
+                                status: "error".to_string(),
+                                error: Some(error.to_string()),
+                            };
+                            let _ = self.maybe_append_test_completion_log(&family, &log_entry);
+                            return Err(error);
+                        }
+                    };
                     // Use try_lock for the common fast path: when exec_lock is
                     // available, process inline to avoid scheduling latency and
                     // ensure the completion log entry is written before the
@@ -7182,28 +7209,97 @@ impl ActorDaemonCoordinator {
                     // worker.  This is rare in practice because Applied commands
                     // complete quickly.
                     if let Ok(guard) = exec_lock.try_lock() {
-                        self.begin_family_effect(&family)?;
-                        if applied.command.wrapper_invocation_id.is_some() {
-                            self.apply_wrapper_state_overlay_with_timeout(
-                                &mut applied.command,
-                                Duration::from_millis(200),
-                            )
-                            .await;
-                        }
-                        let result = self
-                            .maybe_apply_side_effects_for_applied_command(Some(&family), &applied)
-                            .await;
-                        let _ = self.end_family_effect(&family);
-                        if let Err(error) = &result {
-                            let _ = self.record_side_effect_error(&family, applied.seq, error);
-                        }
-                        if let Err(error) = self.append_command_completion_log(
-                            &family,
-                            &applied,
-                            &result,
-                            applied.seq,
-                        ) {
-                            let _ = self.record_side_effect_error(&family, applied.seq, &error);
+                        // Save fallback metadata BEFORE processing so we can
+                        // write a completion log entry even if processing panics.
+                        let fb_session =
+                            crate::daemon::test_sync::test_sync_session_from_invocation(
+                                &parsed_invocation_for_normalized_command(&applied.command),
+                            );
+                        let fb_tracked =
+                            crate::daemon::test_sync::tracks_primary_command_for_test_sync(
+                                applied.command.primary_command.as_deref(),
+                                &applied.command.invoked_args,
+                            );
+                        let fb_primary = applied.command.primary_command.clone();
+                        let fb_exit = applied.command.exit_code;
+                        let seq = applied.seq;
+
+                        let side_effect_result = {
+                            let future = async {
+                                self.begin_family_effect(&family)?;
+                                if applied.command.wrapper_invocation_id.is_some() {
+                                    self.apply_wrapper_state_overlay_with_timeout(
+                                        &mut applied.command,
+                                        Duration::from_millis(200),
+                                    )
+                                    .await;
+                                }
+                                let result = self
+                                    .maybe_apply_side_effects_for_applied_command(
+                                        Some(&family),
+                                        &applied,
+                                    )
+                                    .await;
+                                let _ = self.end_family_effect(&family);
+                                Ok::<_, GitAiError>((applied, result))
+                            };
+                            let caught = std::panic::AssertUnwindSafe(future);
+                            futures::FutureExt::catch_unwind(caught).await
+                        };
+
+                        match side_effect_result {
+                            Ok(Ok((applied, result))) => {
+                                if let Err(error) = &result {
+                                    let _ = self.record_side_effect_error(&family, seq, error);
+                                }
+                                if let Err(error) = self
+                                    .append_command_completion_log(&family, &applied, &result, seq)
+                                {
+                                    let _ = self.record_side_effect_error(&family, seq, &error);
+                                }
+                            }
+                            Ok(Err(error)) => {
+                                let _ = self.record_side_effect_error(&family, seq, &error);
+                                let log_entry = TestCompletionLogEntry {
+                                    seq: 0,
+                                    family_key: family.clone(),
+                                    kind: "command".to_string(),
+                                    primary_command: fb_primary,
+                                    test_sync_session: fb_session,
+                                    exit_code: Some(fb_exit),
+                                    sync_tracked: fb_tracked,
+                                    status: "error".to_string(),
+                                    error: Some(error.to_string()),
+                                };
+                                let _ = self.maybe_append_test_completion_log(&family, &log_entry);
+                            }
+                            Err(panic_payload) => {
+                                let panic_msg =
+                                    if let Some(s) = panic_payload.downcast_ref::<String>() {
+                                        s.clone()
+                                    } else if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                                        s.to_string()
+                                    } else {
+                                        "unknown panic".to_string()
+                                    };
+                                let error = GitAiError::Generic(format!(
+                                    "daemon applied-path inline panic: {}",
+                                    panic_msg
+                                ));
+                                let _ = self.record_side_effect_error(&family, seq, &error);
+                                let log_entry = TestCompletionLogEntry {
+                                    seq: 0,
+                                    family_key: family.clone(),
+                                    kind: "command".to_string(),
+                                    primary_command: fb_primary,
+                                    test_sync_session: fb_session,
+                                    exit_code: Some(fb_exit),
+                                    sync_tracked: fb_tracked,
+                                    status: "error".to_string(),
+                                    error: Some(panic_msg),
+                                };
+                                let _ = self.maybe_append_test_completion_log(&family, &log_entry);
+                            }
                         }
                         drop(guard);
                     } else {
