@@ -18,6 +18,7 @@ fn test_windsurf_preset_human_checkpoint() {
     let hook_input = json!({
         "trajectory_id": "traj-abc-123",
         "agent_action_name": "pre_write_code",
+        "model_name": "GPT 4.1",
         "tool_info": {
             "file_path": "/home/user/project/main.rs"
         }
@@ -42,6 +43,7 @@ fn test_windsurf_preset_human_checkpoint() {
     assert!(result.agent_metadata.is_none());
     assert_eq!(result.agent_id.tool, "windsurf");
     assert_eq!(result.agent_id.id, "traj-abc-123");
+    assert_eq!(result.agent_id.model, "GPT 4.1");
 }
 
 #[test]
@@ -73,6 +75,52 @@ fn test_windsurf_preset_ai_checkpoint_post_write_code() {
     assert!(result.transcript.is_some());
     assert!(result.agent_metadata.is_some());
     assert_eq!(result.agent_id.tool, "windsurf");
+    // No model_name in hook input → falls back to "unknown"
+    assert_eq!(result.agent_id.model, "unknown");
+}
+
+#[test]
+fn test_windsurf_preset_extracts_model_name_from_hook() {
+    let hook_input = json!({
+        "trajectory_id": "traj-abc-123",
+        "agent_action_name": "post_write_code",
+        "model_name": "Claude Sonnet 4",
+        "tool_info": {
+            "file_path": "/home/user/project/main.rs"
+        }
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let result = WindsurfPreset
+        .run(flags)
+        .expect("Failed to run WindsurfPreset");
+
+    assert_eq!(result.agent_id.model, "Claude Sonnet 4");
+}
+
+#[test]
+fn test_windsurf_preset_ignores_unknown_model_name() {
+    let hook_input = json!({
+        "trajectory_id": "traj-abc-123",
+        "agent_action_name": "post_write_code",
+        "model_name": "Unknown",
+        "tool_info": {
+            "file_path": "/home/user/project/main.rs"
+        }
+    });
+
+    let flags = AgentCheckpointFlags {
+        hook_input: Some(hook_input.to_string()),
+    };
+
+    let result = WindsurfPreset
+        .run(flags)
+        .expect("Failed to run WindsurfPreset");
+
+    // "Unknown" from Windsurf should be treated as absent, falling back to "unknown"
     assert_eq!(result.agent_id.model, "unknown");
 }
 
