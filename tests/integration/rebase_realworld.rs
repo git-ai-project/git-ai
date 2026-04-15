@@ -8853,14 +8853,14 @@ fn test_human_conflict_rust_server_c4_human_resolved_c5_accumulates() {
 
     // C4': human-resolved conflict on server.rs.  The human changed `std::net::TcpListener`
     // to `TcpListener` in the resolution — the line content differs from the original AI
-    // line so the content-diff transfer produces no AI attribution.  No note is expected.
-    // (If a note does exist it must not claim server.rs as AI.)
-    assert_note_no_forbidden_files_if_present(
-        &repo,
-        &chain[3],
-        "c4_no_server_rs",
-        &["src/server.rs"],
+    // line so the content-diff transfer produces no AI attribution.  However, the original
+    // commit had an AI note, so it is remapped to preserve provenance.
+    let c4_note = repo.read_authorship_note(&chain[3]);
+    assert!(
+        c4_note.is_some(),
+        "c4: original AI note should be remapped to preserve provenance after conflict resolution"
     );
+    assert_note_files_exact(&repo, &chain[3], "c4_files", &["src/server.rs"]);
 
     // C5': tls.rs only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
@@ -9440,7 +9440,12 @@ fn test_human_conflict_resolves_all_ai_lines_replaced() {
     // Base had result=0, feature had result=2, main had result=1.
     // Human writes result=42 with an extra human comment — none of these lines
     // match original AI content, so diff_based_line_attribution_transfer produces
-    // only Replace ops → commit_has_attestations = false → no note should be written.
+    // only Replace ops → commit_has_attestations = false.
+    //
+    // However, the original commit DID have an AI authorship note.  Rather than
+    // silently dropping provenance, the slow-path fallback remaps the original note
+    // to the rebased commit.  The attestation line numbers may be stale but the AI
+    // authorship record is preserved.
     fs::write(
         repo.path().join("compute.py"),
         "# human resolved\nresult = 42\n",
@@ -9453,22 +9458,15 @@ fn test_human_conflict_resolves_all_ai_lines_replaced() {
     let chain = get_commit_chain(&repo, 3);
     // chain[0]=C1', chain[1]=C2', chain[2]=C3'
 
-    // C1': human fully replaced all AI lines → NO note expected
+    // C1': human fully replaced all AI lines, but original note is preserved as
+    // provenance (remapped from the pre-rebase commit).
     let c1_note = repo.read_authorship_note(&chain[0]);
     assert!(
-        c1_note.is_none(),
-        "C1 had all AI lines replaced by human: expected no note, got: {:?}",
-        c1_note
+        c1_note.is_some(),
+        "C1 original had AI note: should be preserved as provenance even after conflict resolution",
     );
-
-    // Blame at C1': both lines are human
-    assert_blame_at_commit(
-        &repo,
-        &chain[0],
-        "compute.py",
-        "c1_blame",
-        &[("# human resolved", false), ("result = 42", false)],
-    );
+    // The remapped note still references compute.py (from the original note).
+    assert_note_files_exact(&repo, &chain[0], "c1_files", &["compute.py"]);
 
     // C2': module_b.py — AI, untouched by conflict — note must exist with correct attribution
     assert_note_base_commit_matches(&repo, &chain[1], "c2");
@@ -9501,6 +9499,79 @@ fn test_human_conflict_resolves_all_ai_lines_replaced() {
             ("def name(self): return 'module_c'", true),
         ],
     );
+}
+
+/// Regression test for #1079: when the ONLY AI-tracked file is the conflict file,
+/// and the human resolves with completely different content, the original authorship
+/// note must still be remapped to the rebased commit.  Before this fix the slow path
+/// produced no note (content-diff found no matching AI lines) and the metadata-only
+/// remap skipped notes with real attestations, silently losing provenance.
+#[test]
+fn test_human_conflict_ai_file_is_conflict_file_note_preserved() {
+    let repo = TestRepo::new();
+
+    // Initial: ai_file.py with one human line
+    write_raw_commit(&repo, "ai_file.py", "original line\n", "Initial commit");
+    let main_branch = repo.current_branch();
+
+    // Main: change ai_file.py → will conflict with feature
+    write_raw_commit(
+        &repo,
+        "ai_file.py",
+        "upstream changed line\n",
+        "main: modify ai_file",
+    );
+
+    // Feature branch from initial commit
+    let base_sha = repo
+        .git(&["rev-parse", "HEAD~1"])
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git(&["checkout", "-b", "feature", &base_sha]).unwrap();
+
+    // C1: AI modifies ai_file.py — this is the ONLY commit on feature, and the
+    // ONLY file that has AI attribution.  It will conflict with main.
+    let mut ai_file = repo.filename("ai_file.py");
+    ai_file.set_contents(crate::lines!["ai modified line".ai()]);
+    repo.stage_all_and_commit("feat: AI edits ai_file.py")
+        .unwrap();
+
+    // Verify note exists before rebase
+    let pre_rebase_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let pre_note = repo.read_authorship_note(&pre_rebase_sha);
+    assert!(
+        pre_note.is_some(),
+        "AI commit should have a note before rebase"
+    );
+
+    // Rebase onto main — conflict on ai_file.py
+    repo.git(&["checkout", "feature"]).unwrap();
+    let rebase_result = repo.git(&["rebase", &main_branch]);
+    assert!(
+        rebase_result.is_err(),
+        "rebase should conflict on ai_file.py"
+    );
+
+    // Human resolves with completely different content (no AI lines survive).
+    fs::write(repo.path().join("ai_file.py"), "human resolved content\n").unwrap();
+    repo.git(&["add", "ai_file.py"]).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .expect("rebase --continue should succeed");
+
+    let chain = get_commit_chain(&repo, 1);
+
+    // The rebased commit must still have a note — the original authorship note is
+    // remapped to preserve AI provenance even though the content-diff couldn't
+    // carry the attribution (human resolved with different content).
+    let post_note = repo.read_authorship_note(&chain[0]);
+    assert!(
+        post_note.is_some(),
+        "AI authorship note must survive conflict rebase (issue #1079): \
+         original note should be remapped to preserve provenance"
+    );
+    // The remapped note references ai_file.py from the original note.
+    assert_note_files_exact(&repo, &chain[0], "c1_files", &["ai_file.py"]);
 }
 
 // ============================================================================
@@ -13501,6 +13572,7 @@ crate::reuse_tests_in_worktree!(
     test_human_conflict_typescript_component_ai_created_c2_conflict,
     test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact,
     test_human_conflict_resolves_all_ai_lines_replaced,
+    test_human_conflict_ai_file_is_conflict_file_note_preserved,
     // Category 4: AI conflict resolution
     test_conflict_ai_resolves_timeout_constant,
     test_conflict_ai_resolves_timeout_constant_standard_human,

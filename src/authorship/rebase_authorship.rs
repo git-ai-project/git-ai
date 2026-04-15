@@ -1774,45 +1774,39 @@ pub fn rewrite_authorship_after_rebase_v2(
         }
     }
 
-    // Fix #1079: After the slow-path loop, remap metadata-only notes for commits that
-    // were not covered by the diff-based attribution transfer.  When a rebase contains a
-    // mix of AI-attested and human-only commits and the fast path fails (tracked file
-    // blobs differ between original and rebased), the slow path only writes notes for
-    // commits whose diff-tree intersects the AI-tracked pathspecs.  Metadata-only commits
-    // that touch different files are silently dropped.  Remap their original notes here.
+    // Fix #1079: After the slow-path loop, remap original notes for commits that
+    // were not covered by the diff-based attribution transfer.  This handles two cases:
     //
-    // Important: only remap notes whose original was metadata-only (no file attestations
-    // before the `---` divider).  If the original had real attestations and the slow path
-    // didn't produce a note, the slow path intentionally decided not to write one (e.g.
-    // because a human conflict resolution replaced all AI content).
+    // 1. Metadata-only notes (no file attestations before `---`): commits that touch
+    //    different files than the AI-tracked pathspecs.
+    //
+    // 2. Notes with real attestations where the slow path couldn't produce output:
+    //    this happens during conflict rebases when the AI-tracked file is the one
+    //    with the conflict.  The content-diff can't carry attribution for manually
+    //    resolved content, and build_note_from_conflict_wl returns None when no
+    //    checkpoint was written during resolution.  Rather than silently dropping
+    //    the note, remap the original — it may not perfectly reflect the resolved
+    //    content but preserves the AI authorship provenance.
     let processed_new_commits: HashSet<&str> = pending_note_entries
         .iter()
         .map(|(sha, _)| sha.as_str())
         .collect();
-    let unprocessed_metadata_only_pairs: Vec<(String, String)> = commit_pairs_to_process
+    let unprocessed_pairs_with_notes: Vec<(String, String)> = commit_pairs_to_process
         .iter()
         .filter(|(orig, new)| {
             if processed_new_commits.contains(new.as_str()) {
                 return false;
             }
-            // Only remap if the original note is metadata-only (no attestation file paths).
-            if let Some(content) = note_cache.original_note_contents.get(orig) {
-                if content.starts_with("---\n") || content.starts_with("---\r") {
-                    true
-                } else {
-                    content
-                        .find("\n---\n")
-                        .map(|pos| content[..pos].trim().is_empty())
-                        .unwrap_or(false)
-                }
-            } else {
-                false
-            }
+            // Remap any commit whose original had a note (metadata-only or with
+            // real attestations).  The slow path already had its chance to produce
+            // a more accurate note; reaching here means it couldn't, so preserving
+            // the original is the best we can do.
+            note_cache.original_note_contents.contains_key(orig)
         })
         .cloned()
         .collect();
-    if !unprocessed_metadata_only_pairs.is_empty() {
-        let original_note_contents: HashMap<String, String> = unprocessed_metadata_only_pairs
+    if !unprocessed_pairs_with_notes.is_empty() {
+        let original_note_contents: HashMap<String, String> = unprocessed_pairs_with_notes
             .iter()
             .filter_map(|(orig, _)| {
                 note_cache
@@ -1823,13 +1817,13 @@ pub fn rewrite_authorship_after_rebase_v2(
             .collect();
         let remapped_count = remap_notes_for_commit_pairs(
             repo,
-            &unprocessed_metadata_only_pairs,
+            &unprocessed_pairs_with_notes,
             &original_note_contents,
         )?;
         if remapped_count > 0 {
             tracing::debug!(
                 remapped_count,
-                "remapped metadata-only notes for commits not covered by slow-path attribution transfer"
+                "remapped original notes for commits not covered by slow-path attribution transfer"
             );
         }
     }
