@@ -851,8 +851,14 @@ impl VirtualAttributions {
         // Save session prompt IDs before the merge consumes checkpoint_va.  These are
         // prompts from the *current* amend/commit session and must be kept in
         // metadata.prompts even if no lines landed (non-landing prompts).
-        let checkpoint_prompt_ids: std::collections::HashSet<String> =
-            checkpoint_va.prompts.keys().cloned().collect();
+        // Exclude INITIAL-only prompts — they are stale carry-overs from prior commits,
+        // not from the current session.
+        let checkpoint_prompt_ids: std::collections::HashSet<String> = checkpoint_va
+            .prompts
+            .keys()
+            .filter(|id| !checkpoint_va.initial_only_prompt_ids.contains(*id))
+            .cloned()
+            .collect();
 
         let mut final_state = checkpoint_va.file_contents.clone();
         if let Ok(workdir) = repo.workdir() {
@@ -872,6 +878,16 @@ impl VirtualAttributions {
         }
         let mut merged_va =
             merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
+
+        // Mark all non-session prompts (INITIAL-only + blame-sourced) so the
+        // downstream filter in `to_authorship_log_and_initial_working_log` can
+        // remove them when they have no committed lines in the attestations.
+        merged_va.initial_only_prompt_ids = merged_va
+            .prompts
+            .keys()
+            .filter(|id| !checkpoint_prompt_ids.contains(*id))
+            .cloned()
+            .collect();
 
         // Prune blame-history prompts whose lines were deleted (e.g. because the user
         // deleted an AI-authored line during an amend).  We keep:
@@ -925,8 +941,13 @@ impl VirtualAttributions {
         )?;
 
         // Save session prompt IDs before the merge consumes checkpoint_va.
-        let checkpoint_prompt_ids: std::collections::HashSet<String> =
-            checkpoint_va.prompts.keys().cloned().collect();
+        // Exclude INITIAL-only prompts (same logic as `from_working_log_for_commit`).
+        let checkpoint_prompt_ids: std::collections::HashSet<String> = checkpoint_va
+            .prompts
+            .keys()
+            .filter(|id| !checkpoint_va.initial_only_prompt_ids.contains(*id))
+            .cloned()
+            .collect();
 
         // Priority for `final_state` per file:
         //   1. checkpoint_va.file_contents  (working-log snapshot entries)
@@ -945,6 +966,14 @@ impl VirtualAttributions {
         }
         let mut merged_va =
             merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
+
+        // Mark all non-session prompts (same logic as `from_working_log_for_commit`).
+        merged_va.initial_only_prompt_ids = merged_va
+            .prompts
+            .keys()
+            .filter(|id| !checkpoint_prompt_ids.contains(*id))
+            .cloned()
+            .collect();
 
         // Prune blame-history prompts whose lines were deleted.  Same logic as
         // `from_working_log_for_commit`.
