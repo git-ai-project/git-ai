@@ -115,14 +115,23 @@ pub fn handle_git(args: &[String]) {
     if config::Config::get().feature_flags().async_mode {
         let parsed = parse_git_cli_args(args);
 
-        // Read-only commands don't need wrapper state (the daemon fast-paths
+        // Read-only invocations don't need wrapper state (the daemon fast-paths
         // their trace events and never processes them through the normalizer).
         // Skip the invocation_id so we can also suppress trace2 for them,
         // avoiding unnecessary daemon work and wrapper_states memory leaks.
-        let is_read_only = parsed
-            .command
-            .as_deref()
-            .is_some_and(crate::git::command_classification::is_definitely_read_only_command);
+        //
+        // Use is_definitely_read_only_invocation (not is_definitely_read_only_command)
+        // so that subcommand-gated read-only calls like `git stash list` and
+        // `git worktree list` are also suppressed — these account for thousands
+        // of Zed IDE invocations per session.
+        let is_read_only = {
+            let subcommand = parsed.command_args.first().map(String::as_str);
+            parsed.command.as_deref().is_some_and(|cmd| {
+                crate::git::command_classification::is_definitely_read_only_invocation(
+                    cmd, subcommand,
+                )
+            })
+        };
 
         if is_read_only {
             let exit_status = proxy_to_git(args, false, None, None);
@@ -805,17 +814,21 @@ fn proxy_to_git(
     child_hooks_path_override: Option<&str>,
     wrapper_invocation_id: Option<&str>,
 ) -> std::process::ExitStatus {
-    // Suppress trace2 for read-only commands to avoid hitting the daemon with
-    // events that can never produce meaningful state changes. In async mode,
-    // read-only commands are handled before this point (no invocation_id set),
-    // so wrapper_invocation_id is only Some for mutating commands that need
-    // trace2 events for the daemon to match wrapper state entries.
+    // Suppress trace2 for read-only invocations to avoid hitting the daemon
+    // with events that can never produce meaningful state changes.  In async
+    // mode, read-only invocations are handled before this point (no
+    // invocation_id set), so wrapper_invocation_id is only Some for mutating
+    // commands that need trace2 events for the daemon to match wrapper state.
+    //
+    // Use is_definitely_read_only_invocation so that subcommand-gated
+    // read-only calls like `git stash list` and `git worktree list` are also
+    // suppressed (matches the updated wrapper check in handle_git above).
     let suppress_trace2 = wrapper_invocation_id.is_none() && {
         let parsed = parse_git_cli_args(args);
-        parsed
-            .command
-            .as_deref()
-            .is_some_and(crate::git::command_classification::is_definitely_read_only_command)
+        let subcommand = parsed.command_args.first().map(String::as_str);
+        parsed.command.as_deref().is_some_and(|cmd| {
+            crate::git::command_classification::is_definitely_read_only_invocation(cmd, subcommand)
+        })
     };
 
     // Use spawn for interactive commands
