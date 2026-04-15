@@ -92,6 +92,7 @@ mod simple_additions;
 mod simple_benchmark;
 mod squash_merge;
 mod stash_attribution;
+mod stale_prompt_carry;
 mod stats;
 mod status_ignore;
 mod subdirs;
