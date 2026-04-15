@@ -1,14 +1,16 @@
 use std::io::Read;
+use std::sync::Arc;
 use std::time::Duration;
 
-/// Build a ureq Agent that uses the system's native certificate store.
+/// Build a ureq Agent that uses the platform's native TLS library.
 ///
-/// ureq with the `native-certs` feature automatically loads certificates
-/// from the OS trust store (Keychain on macOS, cert bundles on Linux,
-/// Windows Certificate Store on Windows), matching the behavior of curl
-/// and web browsers.
+/// Uses OpenSSL on Linux, Secure Transport on macOS, and SChannel on
+/// Windows — the same TLS implementations that curl uses. This ensures
+/// certificates trusted by the OS (including custom CA certs added to
+/// the system trust store) are handled identically to curl and browsers.
 pub fn build_agent(timeout_secs: Option<u64>) -> ureq::Agent {
-    let mut builder = ureq::AgentBuilder::new();
+    let tls = native_tls::TlsConnector::new().expect("failed to create TLS connector");
+    let mut builder = ureq::AgentBuilder::new().tls_connector(Arc::new(tls));
 
     if let Some(secs) = timeout_secs {
         builder = builder.timeout(Duration::from_secs(secs));
