@@ -4714,7 +4714,37 @@ impl ActorDaemonCoordinator {
                             }
                         }
                     };
-                    let _ = ingest_result;
+                    // When ingest fails (normalizer error or panic), the
+                    // PendingRoot entry for this root may still be in the
+                    // family sequencer.  Cancel it so subsequent commands
+                    // for that family are not blocked forever by a stale
+                    // PendingRoot at the head of the BTreeMap.
+                    if ingest_result.is_err() {
+                        if let Some(root_sid) = ordered_payload_root.as_deref() {
+                            let cancel_coord = coordinator.clone();
+                            let cancel_root = root_sid.to_string();
+                            // Spawn the async cancel on a separate task to
+                            // avoid blocking the ingest worker.
+                            tokio::spawn(async move {
+                                if let Ok(Some(family)) = cancel_coord
+                                    .replace_pending_root_entry(
+                                        &cancel_root,
+                                        FamilySequencerEntry::Canceled,
+                                    )
+                                    .await
+                                {
+                                    debug_log(&format!(
+                                        "canceled stale pending root sid={} family={} after ingest error",
+                                        cancel_root, family
+                                    ));
+                                    let _ = cancel_coord
+                                        .get_or_create_drain_notifier(&family)
+                                        .map(|n| n.notify_one());
+                                }
+                                let _ = cancel_coord.clear_trace_root_tracking(&cancel_root);
+                            });
+                        }
+                    }
                     let _ = coordinator.queued_trace_payloads.fetch_update(
                         Ordering::SeqCst,
                         Ordering::SeqCst,
