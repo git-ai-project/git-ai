@@ -8526,56 +8526,6 @@ pub fn send_control_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
-    use std::ffi::OsString;
-
-    struct EnvVarGuard {
-        key: &'static str,
-        original: Option<OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var_os(key);
-            // SAFETY: these tests are serialized via #[serial], so mutating the
-            // process environment is isolated for the duration of each test.
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, original }
-        }
-
-        fn unset(key: &'static str) -> Self {
-            let original = std::env::var_os(key);
-            // SAFETY: these tests are serialized via #[serial], so mutating the
-            // process environment is isolated for the duration of each test.
-            unsafe {
-                std::env::remove_var(key);
-            }
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.original {
-                Some(value) => {
-                    // SAFETY: these tests are serialized via #[serial], so restoring
-                    // process environment state is isolated for the duration of each test.
-                    unsafe {
-                        std::env::set_var(self.key, value);
-                    }
-                }
-                None => {
-                    // SAFETY: these tests are serialized via #[serial], so restoring
-                    // process environment state is isolated for the duration of each test.
-                    unsafe {
-                        std::env::remove_var(self.key);
-                    }
-                }
-            }
-        }
-    }
 
     fn queued_checkpoint_request() -> ControlRequest {
         ControlRequest::CheckpointRun {
@@ -8606,44 +8556,31 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn checkpoint_requests_use_long_timeout_in_ci_or_test_env() {
-        let _unset_ci = EnvVarGuard::unset("CI");
-        let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
-        let _test_db = EnvVarGuard::set("GIT_AI_TEST_DB_PATH", "/tmp/git-ai-test.db");
-
+        // Test with use_ci_or_test_budget=true directly to avoid env var races
+        // when other tests run concurrently and mutate process-wide env vars.
         assert_eq!(
-            control_request_response_timeout(&queued_checkpoint_request()),
+            checkpoint_control_response_timeout(&queued_checkpoint_request(), true),
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         );
         assert_eq!(
-            control_request_response_timeout(&waited_checkpoint_request()),
+            checkpoint_control_response_timeout(&waited_checkpoint_request(), true),
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         );
     }
 
     #[test]
-    #[serial]
     fn queued_checkpoint_requests_use_short_timeout_in_product_env() {
-        let _unset_ci = EnvVarGuard::unset("CI");
-        let _unset_test = EnvVarGuard::unset("GIT_AI_TEST_DB_PATH");
-        let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
-
         assert_eq!(
-            control_request_response_timeout(&queued_checkpoint_request()),
+            checkpoint_control_response_timeout(&queued_checkpoint_request(), false),
             DAEMON_CONTROL_RESPONSE_TIMEOUT
         );
     }
 
     #[test]
-    #[serial]
     fn waited_checkpoint_requests_use_long_timeout_in_product_env() {
-        let _unset_ci = EnvVarGuard::unset("CI");
-        let _unset_test = EnvVarGuard::unset("GIT_AI_TEST_DB_PATH");
-        let _unset_legacy_test = EnvVarGuard::unset("GITAI_TEST_DB_PATH");
-
         assert_eq!(
-            control_request_response_timeout(&waited_checkpoint_request()),
+            checkpoint_control_response_timeout(&waited_checkpoint_request(), false),
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         );
     }
