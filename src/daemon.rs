@@ -7625,12 +7625,6 @@ fn trace_listener_loop_actor(
 ) -> Result<(), GitAiError> {
     #[cfg(not(windows))]
     {
-        // Hard ceiling on concurrent connection threads.  At ~40 trace events/sec
-        // from Zed each connection lasts <10ms, so this is effectively unlimited
-        // for normal workloads; it protects against pathological floods (>1K/sec).
-        const MAX_CONCURRENT_TRACE_CONNECTIONS: usize = 512;
-        let active_connections = Arc::new(AtomicUsize::new(0));
-
         remove_socket_if_exists(&trace_socket_path)?;
         let listener = ListenerOptions::new()
             .name(local_socket_name(&trace_socket_path)?)
@@ -7644,38 +7638,16 @@ fn trace_listener_loop_actor(
             let Ok(stream) = stream else {
                 continue;
             };
-            // Back-pressure: drop the connection rather than spawning unbounded
-            // threads.  The git process will reconnect on the next invocation.
-            let current = active_connections.load(Ordering::Relaxed);
-            if current >= MAX_CONCURRENT_TRACE_CONNECTIONS {
-                tracing::debug!(
-                    current,
-                    limit = MAX_CONCURRENT_TRACE_CONNECTIONS,
-                    "trace listener: dropping connection"
-                );
-                continue;
-            }
-            active_connections.fetch_add(1, Ordering::Relaxed);
-            let active = active_connections.clone();
+
             let coord = coordinator.clone();
             if std::thread::Builder::new()
                 .spawn(move || {
-                    // RAII guard: decrements the active-connection counter when
-                    // this scope exits, including on panic-driven unwinding.
-                    struct ActiveGuard(Arc<AtomicUsize>);
-                    impl Drop for ActiveGuard {
-                        fn drop(&mut self) {
-                            self.0.fetch_sub(1, Ordering::Relaxed);
-                        }
-                    }
-                    let _guard = ActiveGuard(active);
                     if let Err(e) = handle_trace_connection_actor(stream, coord) {
                         tracing::debug!(%e, "trace connection error");
                     }
                 })
                 .is_err()
             {
-                active_connections.fetch_sub(1, Ordering::Relaxed);
                 tracing::error!("trace listener: failed to spawn handler thread");
                 break;
             }
