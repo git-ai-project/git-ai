@@ -1454,6 +1454,60 @@ impl VirtualAttributions {
                 }
             }
 
+            // Fill gaps in committed hunks caused by imara_diff Equal matching.
+            //
+            // When AI rewrites a region, imara_diff can match byte-for-byte
+            // identical lines (e.g. empty lines between code blocks) as "Equal",
+            // preserving the old human attribution. Those lines get stripped from
+            // the checkpoint's line_attributions and never make it here. This
+            // leaves gaps in committed_hunks that show as [no-data] in `git ai diff`.
+            //
+            // Fix: for each gap line in a committed hunk, check the nearest
+            // attributed line before and after it. If both neighbors have the
+            // same AI author (not human/h_), fill the gap with that author.
+            if let Some(hunks) = file_committed_hunks {
+                // Build a sorted map of committed line → author_id for neighbor lookups
+                let mut line_to_author: Vec<(u32, &str)> = Vec::new();
+                for (author_id, lines) in &committed_lines_map {
+                    for &line in lines {
+                        line_to_author.push((line, author_id.as_str()));
+                    }
+                }
+                line_to_author.sort_by_key(|(line, _)| *line);
+
+                let mut gap_fills: Vec<(String, u32)> = Vec::new();
+
+                for hunk in hunks {
+                    for line in hunk.expand() {
+                        // Skip lines that already have attribution
+                        if line_to_author
+                            .binary_search_by_key(&line, |(l, _)| *l)
+                            .is_ok()
+                        {
+                            continue;
+                        }
+
+                        // Find nearest attributed neighbor before this line
+                        let prev = line_to_author.iter().rev().find(|(l, _)| *l < line);
+
+                        // Find nearest attributed neighbor after this line
+                        let next = line_to_author.iter().find(|(l, _)| *l > line);
+
+                        // Fill only if both neighbors exist and are the same AI author
+                        if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next)
+                            && prev_author == next_author
+                            && !prev_author.starts_with("h_")
+                        {
+                            gap_fills.push((prev_author.to_string(), line));
+                        }
+                    }
+                }
+
+                for (author_id, line) in gap_fills {
+                    committed_lines_map.entry(author_id).or_default().push(line);
+                }
+            }
+
             // Add committed attributions to authorship log
             if !committed_lines_map.is_empty() {
                 // Create attestation entries from committed lines
@@ -1670,6 +1724,44 @@ impl VirtualAttributions {
                             .or_default()
                             .push(line_num);
                     }
+                }
+            }
+
+            // Fill attribution gaps for lines in committed hunks that weren't
+            // directly attributed (e.g. empty lines between AI-authored blocks).
+            // Only fill if both nearest neighbors share the same AI author.
+            {
+                let mut line_to_author: Vec<(u32, &str)> = Vec::new();
+                for (author_id, lines) in &committed_lines_map {
+                    for &line in lines {
+                        line_to_author.push((line, author_id.as_str()));
+                    }
+                }
+                line_to_author.sort_by_key(|(line, _)| *line);
+
+                let mut gap_fills: Vec<(String, u32)> = Vec::new();
+
+                for hunk in file_committed_hunks {
+                    for line in hunk.expand() {
+                        if line_to_author
+                            .binary_search_by_key(&line, |(l, _)| *l)
+                            .is_ok()
+                        {
+                            continue;
+                        }
+                        let prev = line_to_author.iter().rev().find(|(l, _)| *l < line);
+                        let next = line_to_author.iter().find(|(l, _)| *l > line);
+                        if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next)
+                            && prev_author == next_author
+                            && !prev_author.starts_with("h_")
+                        {
+                            gap_fills.push((prev_author.to_string(), line));
+                        }
+                    }
+                }
+
+                for (author_id, line) in gap_fills {
+                    committed_lines_map.entry(author_id).or_default().push(line);
                 }
             }
 
