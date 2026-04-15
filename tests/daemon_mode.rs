@@ -2040,6 +2040,494 @@ omega body
     ]);
 }
 
+/// Reproduces the partial-stage attribution bug that occurs when all
+/// checkpoints share the same agent ID (as in a real Claude Code session).
+///
+/// Flow:
+/// 1. AI creates file_a (12 lines) and file_b (4 lines) — same session/agent
+/// 2. User stages only file_a
+/// 3. AI appends 7 more lines to file_a (now 19 lines) — same session/agent
+/// 4. First commit: only the staged 12-line file_a goes in
+/// 5. User stages edited file_a (19 lines)
+/// 6. Second commit — BUG: attribution for appended lines lost
+/// 7. User stages file_b and commits
+///
+/// With `mock_ai` each checkpoint gets a unique agent ID, masking this bug.
+/// The `agent-v1` preset with a fixed `conversation_id` reproduces the real
+/// Claude Code behaviour where all checkpoints share one prompt hash.
+#[test]
+#[serial]
+fn daemon_partial_stage_shared_agent_id_carries_over_attribution() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let _daemon = DaemonGuard::start(&repo);
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
+
+    // Shared agent identity — mirrors a single Claude Code conversation
+    let conversation_id = "shared-session-uuid-1234";
+    let agent_tool = "claude";
+    let agent_model = "claude-sonnet-4-20250514";
+
+    // Helper: emit an agent-v1 AI checkpoint via the daemon
+    let checkpoint_agent_v1 = |repo: &TestRepo,
+                                file_rel: &str,
+                                expected: &mut u64| {
+        let mut transcript = AiTranscript::new();
+        transcript.add_message(git_ai::authorship::transcript::Message::user(
+            "write code".to_string(),
+            None,
+        ));
+        let hook_input = serde_json::json!({
+            "type": "ai_agent",
+            "repo_working_dir": repo.path().to_str().unwrap(),
+            "edited_filepaths": vec![file_rel],
+            "transcript": transcript,
+            "agent_name": agent_tool,
+            "model": agent_model,
+            "conversation_id": conversation_id,
+        });
+        let hook_input_str =
+            serde_json::to_string(&hook_input).expect("hook input should serialize");
+
+        *expected += 1;
+        repo.git_ai_with_env(
+            &[
+                "checkpoint",
+                "agent-v1",
+                "--hook-input",
+                &hook_input_str,
+            ],
+            &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
+        )
+        .unwrap_or_else(|e| panic!("agent-v1 checkpoint for {} failed: {}", file_rel, e));
+    };
+
+    let file_a_rel = "calca_daemon.py";
+    let file_b_rel = "calcb_daemon.py";
+    let file_a_path = repo.path().join(file_a_rel);
+    let file_b_path = repo.path().join(file_b_rel);
+
+    // Step 1a: AI writes file_a (3 lines — keep it small for clear blame)
+    fs::write(&file_a_path, "line1\nline2\nline3\n").expect("write file_a initial");
+    checkpoint_agent_v1(&repo, file_a_rel, &mut expected_top_level_completions);
+
+    // Step 1b: AI writes file_b (2 lines)
+    fs::write(&file_b_path, "bline1\nbline2\n").expect("write file_b");
+    checkpoint_agent_v1(&repo, file_b_rel, &mut expected_top_level_completions);
+
+    // Step 2: User stages ONLY file_a (the 3-line version)
+    traced_git_with_env(
+        &repo,
+        &["add", file_a_rel],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging file_a should succeed");
+
+    // Step 3: AI appends 2 more lines to file_a (now 5 lines, same agent)
+    fs::write(&file_a_path, "line1\nline2\nline3\nline4\nline5\n")
+        .expect("write file_a appended");
+    checkpoint_agent_v1(&repo, file_a_rel, &mut expected_top_level_completions);
+
+    // Step 4: First commit — only the staged 3-line file_a goes in
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "first: partial file_a"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("first commit should succeed");
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+
+    // Verify first commit attributed file_a's 3 committed lines
+    let mut file_a = repo.filename(file_a_rel);
+    file_a.assert_committed_lines(lines![
+        "line1".ai(),
+        "line2".ai(),
+        "line3".ai(),
+    ]);
+
+    // Step 5: User stages the edited file_a (5 lines)
+    traced_git_with_env(
+        &repo,
+        &["add", file_a_rel],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging updated file_a should succeed");
+
+    // Step 6: Second commit — the appended lines of file_a
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "second: rest of file_a"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("second commit should succeed");
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+
+    // THIS IS THE BUG: all 5 lines of file_a must be AI-attributed after second commit
+    let mut file_a_after = repo.filename(file_a_rel);
+    file_a_after.assert_lines_and_blame(lines![
+        "line1".ai(),
+        "line2".ai(),
+        "line3".ai(),
+        "line4".ai(),
+        "line5".ai(),
+    ]);
+
+    // Step 7: User stages and commits file_b
+    traced_git_with_env(
+        &repo,
+        &["add", file_b_rel],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging file_b should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "third: file_b"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("third commit should succeed");
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+
+    // file_b lines should be AI-attributed
+    let mut file_b = repo.filename(file_b_rel);
+    file_b.assert_lines_and_blame(lines![
+        "bline1".ai(),
+        "bline2".ai(),
+    ]);
+}
+
+/// Same scenario as daemon_partial_stage_shared_agent_id_carries_over_attribution
+/// but without waiting between commits — simulates the rapid `! g cm` flow
+/// where commit 2 fires before commit 1's carryover is fully processed.
+#[test]
+#[serial]
+fn daemon_partial_stage_shared_agent_no_wait_between_commits() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let _daemon = DaemonGuard::start(&repo);
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
+
+    let conversation_id = "shared-session-no-wait";
+    let agent_tool = "claude";
+    let agent_model = "claude-sonnet-4-20250514";
+
+    let checkpoint_agent_v1 = |repo: &TestRepo,
+                                file_rel: &str,
+                                expected: &mut u64| {
+        let mut transcript = AiTranscript::new();
+        transcript.add_message(git_ai::authorship::transcript::Message::user(
+            "write code".to_string(),
+            None,
+        ));
+        let hook_input = serde_json::json!({
+            "type": "ai_agent",
+            "repo_working_dir": repo.path().to_str().unwrap(),
+            "edited_filepaths": vec![file_rel],
+            "transcript": transcript,
+            "agent_name": agent_tool,
+            "model": agent_model,
+            "conversation_id": conversation_id,
+        });
+        let hook_input_str =
+            serde_json::to_string(&hook_input).expect("hook input should serialize");
+
+        *expected += 1;
+        repo.git_ai_with_env(
+            &[
+                "checkpoint",
+                "agent-v1",
+                "--hook-input",
+                &hook_input_str,
+            ],
+            &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
+        )
+        .unwrap_or_else(|e| panic!("agent-v1 checkpoint for {} failed: {}", file_rel, e));
+    };
+
+    let file_a_rel = "calca_nowait.py";
+    let file_b_rel = "calcb_nowait.py";
+    let file_a_path = repo.path().join(file_a_rel);
+    let file_b_path = repo.path().join(file_b_rel);
+
+    // AI writes file_a (3 lines)
+    fs::write(&file_a_path, "line1\nline2\nline3\n").expect("write file_a initial");
+    checkpoint_agent_v1(&repo, file_a_rel, &mut expected_top_level_completions);
+
+    // AI writes file_b (2 lines)
+    fs::write(&file_b_path, "bline1\nbline2\n").expect("write file_b");
+    checkpoint_agent_v1(&repo, file_b_rel, &mut expected_top_level_completions);
+
+    // User stages ONLY file_a
+    traced_git_with_env(
+        &repo,
+        &["add", file_a_rel],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging file_a should succeed");
+
+    // AI appends 2 more lines to file_a (same agent)
+    fs::write(&file_a_path, "line1\nline2\nline3\nline4\nline5\n")
+        .expect("write file_a appended");
+    checkpoint_agent_v1(&repo, file_a_rel, &mut expected_top_level_completions);
+
+    // First commit — only the staged 3-line file_a
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "first: partial file_a"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("first commit should succeed");
+
+    // DO NOT wait for first commit to complete — immediately stage and commit again
+    // This simulates: ! g a calca.py && ! g cm 'second'
+
+    // Stage the edited file_a (5 lines)
+    traced_git_with_env(
+        &repo,
+        &["add", file_a_rel],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging updated file_a should succeed");
+
+    // Second commit — the appended lines
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "second: rest of file_a"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("second commit should succeed");
+
+    // Stage and commit file_b
+    traced_git_with_env(
+        &repo,
+        &["add", file_b_rel],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging file_b should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "third: file_b"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("third commit should succeed");
+
+    // NOW wait for all processing to complete
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+
+    // All 5 lines of file_a must be AI-attributed
+    let mut file_a = repo.filename(file_a_rel);
+    file_a.assert_lines_and_blame(lines![
+        "line1".ai(),
+        "line2".ai(),
+        "line3".ai(),
+        "line4".ai(),
+        "line5".ai(),
+    ]);
+
+    // file_b must be AI-attributed
+    let mut file_b = repo.filename(file_b_rel);
+    file_b.assert_lines_and_blame(lines![
+        "bline1".ai(),
+        "bline2".ai(),
+    ]);
+}
+
+/// Variant: checkpoints written synchronously (not delegated), commits via
+/// trace2 daemon — simulates real Claude Code `!` command flow.
+///
+/// In real Claude Code:
+/// - AI hooks call `git ai checkpoint claude` synchronously → write to working log
+/// - `!` commands bypass hooks entirely → git commit goes through trace2 only
+/// - No bash tool snapshot active → daemon creates Human checkpoint for the commit
+#[test]
+#[serial]
+fn daemon_partial_stage_sync_checkpoint_trace_commit() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let _daemon = DaemonGuard::start(&repo);
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let env = git_trace_env(&trace_socket);
+    let env_refs = [(env[0].0, env[0].1.as_str()), (env[1].0, env[1].1.as_str())];
+    let completion_baseline = repo.daemon_total_completion_count();
+    let mut expected_top_level_completions = 0u64;
+
+    let conversation_id = "shared-session-sync-ckpt";
+    let agent_tool = "claude";
+    let agent_model = "claude-sonnet-4-20250514";
+
+    // Helper: emit agent-v1 checkpoint SYNCHRONOUSLY (not delegated to daemon)
+    let checkpoint_sync = |repo: &TestRepo, file_rel: &str| {
+        let mut transcript = AiTranscript::new();
+        transcript.add_message(git_ai::authorship::transcript::Message::user(
+            "write code".to_string(),
+            None,
+        ));
+        let hook_input = serde_json::json!({
+            "type": "ai_agent",
+            "repo_working_dir": repo.path().to_str().unwrap(),
+            "edited_filepaths": vec![file_rel],
+            "transcript": transcript,
+            "agent_name": agent_tool,
+            "model": agent_model,
+            "conversation_id": conversation_id,
+        });
+        let hook_input_str =
+            serde_json::to_string(&hook_input).expect("hook input should serialize");
+
+        // No GIT_AI_DAEMON_CHECKPOINT_DELEGATE — writes directly to working log
+        repo.git_ai(&[
+            "checkpoint",
+            "agent-v1",
+            "--hook-input",
+            &hook_input_str,
+        ])
+        .unwrap_or_else(|e| panic!("sync checkpoint for {} failed: {}", file_rel, e));
+    };
+
+    let file_a_rel = "calca_sync.py";
+    let file_b_rel = "calcb_sync.py";
+    let file_a_path = repo.path().join(file_a_rel);
+    let file_b_path = repo.path().join(file_b_rel);
+
+    // AI writes file_a (3 lines) — sync checkpoint
+    fs::write(&file_a_path, "line1\nline2\nline3\n").expect("write file_a initial");
+    checkpoint_sync(&repo, file_a_rel);
+
+    // AI writes file_b (2 lines) — sync checkpoint
+    fs::write(&file_b_path, "bline1\nbline2\n").expect("write file_b");
+    checkpoint_sync(&repo, file_b_rel);
+
+    // User stages ONLY file_a via traced git (daemon sees trace events)
+    traced_git_with_env(
+        &repo,
+        &["add", file_a_rel],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging file_a should succeed");
+
+    // AI appends 2 more lines to file_a (same agent, sync checkpoint)
+    fs::write(&file_a_path, "line1\nline2\nline3\nline4\nline5\n")
+        .expect("write file_a appended");
+    checkpoint_sync(&repo, file_a_rel);
+
+    // First commit via traced git (daemon processes via trace2)
+    // No bash tool in flight → daemon creates Human checkpoint
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "first: partial file_a"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("first commit should succeed");
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+
+    // Verify first commit
+    let mut file_a = repo.filename(file_a_rel);
+    file_a.assert_committed_lines(lines![
+        "line1".ai(),
+        "line2".ai(),
+        "line3".ai(),
+    ]);
+
+    // Stage the edited file_a (5 lines)
+    traced_git_with_env(
+        &repo,
+        &["add", file_a_rel],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging updated file_a should succeed");
+
+    // Second commit via traced git
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "second: rest of file_a"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("second commit should succeed");
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+
+    // All 5 lines of file_a must be AI-attributed
+    let mut file_a_after = repo.filename(file_a_rel);
+    file_a_after.assert_lines_and_blame(lines![
+        "line1".ai(),
+        "line2".ai(),
+        "line3".ai(),
+        "line4".ai(),
+        "line5".ai(),
+    ]);
+
+    // Stage and commit file_b
+    traced_git_with_env(
+        &repo,
+        &["add", file_b_rel],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("staging file_b should succeed");
+    traced_git_with_env(
+        &repo,
+        &["commit", "-m", "third: file_b"],
+        &env_refs,
+        &mut expected_top_level_completions,
+    )
+    .expect("third commit should succeed");
+    wait_for_expected_top_level_completions(
+        &repo,
+        completion_baseline,
+        expected_top_level_completions,
+    );
+
+    // file_b must be AI-attributed
+    let mut file_b = repo.filename(file_b_rel);
+    file_b.assert_lines_and_blame(lines![
+        "bline1".ai(),
+        "bline2".ai(),
+    ]);
+}
+
 #[test]
 #[serial]
 fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
