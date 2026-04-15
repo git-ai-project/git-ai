@@ -4345,7 +4345,9 @@ impl ActorDaemonCoordinator {
             let removed = self
                 .ingr_root_open_connections
                 .remove_if_mut(root_sid, |_, v| {
-                    *v = v.saturating_sub(1);
+                    if *v > 0 {
+                        *v -= 1;
+                    }
                     *v == 0
                 });
             if removed.is_some() || !self.ingr_root_open_connections.contains_key(root_sid) {
@@ -5053,29 +5055,33 @@ impl ActorDaemonCoordinator {
             .or_else(|| trace_argv_primary_command(&effective_argv));
         if let Some(primary) = effective_primary.clone() {
             let should_capture = trace_command_may_mutate_refs(Some(primary.as_str()));
-            match self.ingr_root_mutating.get(&root).map(|v| *v) {
-                Some(false) if should_capture => {
-                    self.ingr_root_mutating.insert(root.clone(), true);
+            {
+                let mut entry = self
+                    .ingr_root_mutating
+                    .entry(root.clone())
+                    .or_insert(should_capture);
+                if !*entry && should_capture {
+                    *entry = true;
                 }
-                None => {
-                    self.ingr_root_mutating.insert(root.clone(), should_capture);
-                }
-                _ => {}
             }
             let target_repo_only =
                 trace_command_uses_target_repo_context_only(Some(primary.as_str()));
-            match self.ingr_root_target_repo_only.get(&root).map(|v| *v) {
-                Some(false) if target_repo_only => {
-                    self.ingr_root_target_repo_only.insert(root.clone(), true);
-                    self.ingr_root_reflog_refs.remove(&root);
-                    self.ingr_root_head_reflog_start_offsets.remove(&root);
-                    self.ingr_root_family_reflog_start_offsets.remove(&root);
+            let upgraded_to_target_repo_only = {
+                let mut entry = self
+                    .ingr_root_target_repo_only
+                    .entry(root.clone())
+                    .or_insert(target_repo_only);
+                if !*entry && target_repo_only {
+                    *entry = true;
+                    true
+                } else {
+                    false
                 }
-                None => {
-                    self.ingr_root_target_repo_only
-                        .insert(root.clone(), target_repo_only);
-                }
-                _ => {}
+            };
+            if upgraded_to_target_repo_only {
+                self.ingr_root_reflog_refs.remove(&root);
+                self.ingr_root_head_reflog_start_offsets.remove(&root);
+                self.ingr_root_family_reflog_start_offsets.remove(&root);
             }
         }
 
