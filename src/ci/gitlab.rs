@@ -73,14 +73,12 @@ pub fn get_gitlab_ci_context() -> Result<Option<CiContext>, GitAiError> {
 
     println!("[GitLab CI] Querying API: {}", endpoint);
 
-    let response = minreq::get(&endpoint)
-        .with_header(auth_header_name, &auth_token)
-        .with_header(
-            "User-Agent",
-            format!("git-ai/{}", env!("CARGO_PKG_VERSION")),
-        )
-        .with_timeout(30)
-        .send()
+    let agent = crate::http::build_agent(Some(30));
+    let request = agent.get(&endpoint).set(auth_header_name, &auth_token).set(
+        "User-Agent",
+        &format!("git-ai/{}", env!("CARGO_PKG_VERSION")),
+    );
+    let response = crate::http::send(request)
         .map_err(|e| GitAiError::Generic(format!("GitLab API request failed: {}", e)))?;
 
     if response.status_code != 200 {

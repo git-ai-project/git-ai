@@ -358,10 +358,10 @@ fn fetch_and_verify_checksums(
 ) -> Result<HashMap<String, String>, String> {
     let endpoint = format!("/worker/releases/{}/download/SHA256SUMS", channel);
 
-    let response = ApiContext::http_get(&format!("{}{}", api_base_url, endpoint))
-        .with_timeout(30)
-        .send()
-        .map_err(|e| format!("Failed to fetch SHA256SUMS: {}", e))?;
+    let (_agent, request) =
+        ApiContext::http_get(&format!("{}{}", api_base_url, endpoint), Some(30));
+    let response =
+        crate::http::send(request).map_err(|e| format!("Failed to fetch SHA256SUMS: {}", e))?;
 
     if response.status_code != 200 {
         return Err(format!(
@@ -398,9 +398,9 @@ fn fetch_and_verify_install_script(
 
     let endpoint = format!("/worker/releases/{}/download/{}", channel, script_name);
 
-    let response = ApiContext::http_get(&format!("{}{}", api_base_url, endpoint))
-        .with_timeout(30)
-        .send()
+    let (_agent, request) =
+        ApiContext::http_get(&format!("{}{}", api_base_url, endpoint), Some(30));
+    let response = crate::http::send(request)
         .map_err(|e| format!("Failed to fetch {}: {}", script_name, e))?;
 
     if response.status_code != 200 {
