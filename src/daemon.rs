@@ -5635,12 +5635,38 @@ impl ActorDaemonCoordinator {
                                 )
                                 .await;
                             }
-                            let side_effect = self
-                                .maybe_apply_side_effects_for_applied_command(
-                                    Some(family),
-                                    &applied,
-                                )
-                                .await;
+                            // Run the blocking side-effect pipeline on a dedicated
+                            // blocking thread so the Tokio async thread pool stays
+                            // free to process ingest events and family actor messages
+                            // from other families.  maybe_apply_side_effects_for_applied_command
+                            // is async in signature but performs only synchronous I/O
+                            // (file reads, git subprocess spawning, blame computation).
+                            // Without spawn_blocking, 4 concurrent drain workers each
+                            // block a Tokio thread, starving the ingest worker.
+                            let coord = self.self_weak.get().and_then(|w| w.upgrade()).ok_or_else(
+                                || {
+                                    GitAiError::Generic(
+                                        "side effect coordinator arc not available".to_string(),
+                                    )
+                                },
+                            )?;
+                            let fam = family.to_string();
+                            let (applied, side_effect) = tokio::task::spawn_blocking(move || {
+                                let side_effect = tokio::runtime::Handle::current().block_on(
+                                    coord.maybe_apply_side_effects_for_applied_command(
+                                        Some(&fam),
+                                        &applied,
+                                    ),
+                                );
+                                (applied, side_effect)
+                            })
+                            .await
+                            .map_err(|join_err| {
+                                GitAiError::Generic(format!(
+                                    "command side effect blocking thread panicked: {}",
+                                    join_err
+                                ))
+                            })?;
                             Ok::<_, GitAiError>((applied, side_effect))
                         };
                         let caught = std::panic::AssertUnwindSafe(future);
@@ -7233,12 +7259,26 @@ impl ActorDaemonCoordinator {
                                         )
                                         .await;
                                 }
-                                let result = coordinator
-                                    .maybe_apply_side_effects_for_applied_command(
-                                        Some(&family_clone),
-                                        &applied,
-                                    )
-                                    .await;
+                                // Run blocking side effects on a dedicated thread
+                                // (see drain worker for rationale).
+                                let coord2 = coordinator.clone();
+                                let fam2 = family_clone.clone();
+                                let (applied, result) = tokio::task::spawn_blocking(move || {
+                                    let result = tokio::runtime::Handle::current().block_on(
+                                        coord2.maybe_apply_side_effects_for_applied_command(
+                                            Some(&fam2),
+                                            &applied,
+                                        ),
+                                    );
+                                    (applied, result)
+                                })
+                                .await
+                                .map_err(|join_err| {
+                                    GitAiError::Generic(format!(
+                                        "applied-path side effect blocking thread panicked: {}",
+                                        join_err
+                                    ))
+                                })?;
                                 let _ = coordinator.end_family_effect(&family_clone);
                                 Ok::<_, GitAiError>((applied, result))
                             };
