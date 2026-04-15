@@ -6,7 +6,7 @@ use crate::mdm::utils::{
     generate_diff, home_dir, install_vsc_editor_extension, is_git_ai_checkpoint_command,
     is_github_codespaces, is_vsc_editor_extension_installed, resolve_editor_cli, write_atomic,
 };
-use crate::utils::debug_log;
+
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
@@ -354,10 +354,10 @@ impl HookInstaller for WindsurfInstaller {
                                 });
                             }
                             Err(e) => {
-                                debug_log(&format!(
+                                tracing::debug!(
                                     "Windsurf: Error automatically installing extension: {}",
                                     e
-                                ));
+                                );
                                 results.push(InstallResult {
                                     changed: false,
                                     diff: None,

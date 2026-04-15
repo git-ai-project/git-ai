@@ -182,7 +182,7 @@ impl AgentCheckpointPreset for PiPreset {
                         | BashCheckpointAction::TakePreSnapshot => None,
                     },
                     Err(e) => {
-                        crate::utils::debug_log(&format!("Pi bash post-hook error: {}", e));
+                        tracing::debug!("Pi bash post-hook error: {}", e);
                         None
                     }
                 };

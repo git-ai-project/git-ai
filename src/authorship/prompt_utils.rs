@@ -616,10 +616,11 @@ fn update_pi_prompt(
                 model.unwrap_or_else(|| current_model.to_string()),
             ),
             Err(e) => {
-                debug_log(&format!(
+                tracing::debug!(
                     "Failed to parse Pi session JSONL from {}: {}",
-                    session_path, e
-                ));
+                    session_path,
+                    e
+                );
                 log_error(
                     &e,
                     Some(serde_json::json!({
