@@ -4821,22 +4821,80 @@ impl ActorDaemonCoordinator {
                     // replace_pending_root_entry is async in signature but
                     // only uses std::sync::Mutex, so the .await resolves
                     // immediately.
-                    if ingest_result.is_err() {
+                    if let Err(ref ingest_error) = ingest_result {
                         if let Some(root_sid) = ordered_payload_root.as_deref() {
-                            if let Ok(Some(family)) = coordinator
+                            // Extract fallback completion log data from ingress
+                            // state BEFORE clearing root tracking, so we can write
+                            // a completion log entry that the test sync
+                            // infrastructure will observe.
+                            let fallback_data = coordinator
+                                .trace_ingress_state
+                                .lock()
+                                .ok()
+                                .and_then(|ingress| {
+                                    let argv = ingress.root_argv.get(root_sid)?.clone();
+                                    let family = ingress.root_families.get(root_sid).cloned();
+                                    Some((argv, family))
+                                });
+
+                            let cancel_family = coordinator
                                 .replace_pending_root_entry(
                                     root_sid,
                                     FamilySequencerEntry::Canceled,
                                 )
                                 .await
-                            {
+                                .ok()
+                                .flatten();
+
+                            // Determine the family from the cancel result or from
+                            // ingress state as a fallback.
+                            let family = cancel_family.or_else(|| {
+                                fallback_data
+                                    .as_ref()
+                                    .and_then(|(_, fam)| fam.clone())
+                            });
+
+                            if let Some(family) = &family {
                                 debug_log(&format!(
                                     "canceled stale pending root sid={} family={} after ingest error",
                                     root_sid, family
                                 ));
                                 let _ = coordinator
-                                    .get_or_create_drain_notifier(&family)
+                                    .get_or_create_drain_notifier(family)
                                     .map(|n| n.notify_one());
+
+                                // Write a fallback completion log so the test sync
+                                // infrastructure observes this session instead of
+                                // timing out.
+                                if let Some((argv, _)) = &fallback_data {
+                                    let parsed = parse_git_cli_args(
+                                        trace_invocation_args(argv),
+                                    );
+                                    let fb_session =
+                                        crate::daemon::test_sync::test_sync_session_from_invocation(
+                                            &parsed,
+                                        );
+                                    if fb_session.is_some() {
+                                        let fb_tracked =
+                                            crate::daemon::test_sync::tracks_parsed_git_invocation_for_test_sync(
+                                                &parsed,
+                                            );
+                                        let fb_primary = parsed.command.clone();
+                                        let log_entry = TestCompletionLogEntry {
+                                            seq: 0,
+                                            family_key: family.clone(),
+                                            kind: "command".to_string(),
+                                            primary_command: fb_primary,
+                                            test_sync_session: fb_session,
+                                            exit_code: None,
+                                            sync_tracked: fb_tracked,
+                                            status: "error".to_string(),
+                                            error: Some(ingest_error.to_string()),
+                                        };
+                                        let _ = coordinator
+                                            .maybe_append_test_completion_log(family, &log_entry);
+                                    }
+                                }
                             }
                             let _ = coordinator.clear_trace_root_tracking(root_sid);
                         }

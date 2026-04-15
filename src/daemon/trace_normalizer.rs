@@ -11,6 +11,7 @@ use crate::git::repo_state::{
     read_ref_oid_for_common_dir, worktree_root_for_path,
 };
 use crate::observability;
+use crate::utils::debug_log;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -238,7 +239,22 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 &pending.raw_argv,
                 Some(worktree),
                 Some(family),
-            )?
+            )
+            .unwrap_or_else(|error| {
+                debug_log(&format!(
+                    "resolve_primary_hint failed in refresh_pending_mutation_capture for sid={}: {}",
+                    root_sid, error
+                ));
+                let pending = self.state.pending.get(root_sid);
+                pending.and_then(|p| {
+                    select_primary_command(
+                        p.root_cmd_name.as_deref(),
+                        &p.observed_child_commands,
+                        &p.raw_argv,
+                    )
+                    .or_else(|| argv_primary_command(&p.raw_argv))
+                })
+            })
         };
         if !command_may_mutate_refs(primary_hint.as_deref()) {
             return Ok(());
@@ -430,13 +446,15 @@ impl<B: GitBackend> TraceNormalizer<B> {
             self.state.sid_to_family.get(root_sid).cloned()
         };
 
-        let primary_hint = self.resolve_primary_hint(
-            None,
-            &[],
-            &raw_argv,
-            worktree.as_deref(),
-            family_key.as_ref(),
-        )?;
+        let primary_hint = self
+            .resolve_primary_hint(None, &[], &raw_argv, worktree.as_deref(), family_key.as_ref())
+            .unwrap_or_else(|error| {
+                debug_log(&format!(
+                    "resolve_primary_hint failed in handle_start for sid={}: {}; falling back to argv",
+                    root_sid, error
+                ));
+                argv_primary_command(&raw_argv)
+            });
         let should_capture_mutation_state =
             command_may_mutate_refs(primary_hint.as_deref()) && family_key.is_some();
         let (_invoked_command, invoked_args) =
@@ -853,13 +871,26 @@ impl<B: GitBackend> TraceNormalizer<B> {
             });
         }
 
-        let mut primary_command = self.resolve_primary_hint(
-            pending.root_cmd_name.as_deref(),
-            &pending.observed_child_commands,
-            &pending.raw_argv,
-            pending.worktree.as_deref(),
-            pending.family_key.as_ref(),
-        )?;
+        let mut primary_command = self
+            .resolve_primary_hint(
+                pending.root_cmd_name.as_deref(),
+                &pending.observed_child_commands,
+                &pending.raw_argv,
+                pending.worktree.as_deref(),
+                pending.family_key.as_ref(),
+            )
+            .unwrap_or_else(|error| {
+                debug_log(&format!(
+                    "resolve_primary_hint failed for sid={}: {}; falling back to argv",
+                    root_sid, error
+                ));
+                select_primary_command(
+                    pending.root_cmd_name.as_deref(),
+                    &pending.observed_child_commands,
+                    &pending.raw_argv,
+                )
+                .or_else(|| argv_primary_command(&pending.raw_argv))
+            });
         let (invoked_command, invoked_args) =
             canonical_invocation(&pending.raw_argv, primary_command.as_deref());
         if primary_command.is_none() {
@@ -877,24 +908,41 @@ impl<B: GitBackend> TraceNormalizer<B> {
             } else if let Some(end) = pending.reflog_end_cut.as_ref() {
                 let start_cut = pending.reflog_start_cut.as_ref();
                 if let Some(start_cut) = start_cut {
-                    ref_changes = self.backend.reflog_delta(family, start_cut, end)?;
-                    confidence = Confidence::High;
+                    match self.backend.reflog_delta(family, start_cut, end) {
+                        Ok(changes) => {
+                            ref_changes = changes;
+                            confidence = Confidence::High;
+                        }
+                        Err(error) => {
+                            debug_log(&format!(
+                                "reflog_delta failed for sid={} family={}: {}; continuing with captured ref changes",
+                                pending.root_sid, family, error
+                            ));
+                        }
+                    }
                 } else if matches!(primary_command.as_deref(), Some("clone" | "init")) {
                     confidence = Confidence::High;
                 } else {
-                    return Err(GitAiError::Generic(format!(
-                        "missing reflog start cut for mutating command sid={} primary={:?} family={}",
+                    // Missing reflog start cut is non-fatal: the command can still
+                    // be produced with Low confidence and whatever ref changes were
+                    // captured inline during augmentation.
+                    debug_log(&format!(
+                        "missing reflog start cut for mutating command sid={} primary={:?} family={}; proceeding with low confidence",
                         pending.root_sid, primary_command, family
-                    )));
+                    ));
                 }
             } else if matches!(primary_command.as_deref(), Some("clone" | "init")) {
                 // Clone/init can resolve into a family only after the repository exists at exit.
                 // In that flow there is no stable pre-command reflog cut to diff against.
             } else {
-                return Err(GitAiError::Generic(format!(
-                    "missing reflog end cut for mutating command sid={} primary={:?} family={}",
+                // Missing reflog end cut is non-fatal: the command can still be
+                // produced with whatever ref changes were captured inline during
+                // augmentation.  This can happen when the connection handler's
+                // augmentation encounters an I/O error reading the reflog.
+                debug_log(&format!(
+                    "missing reflog end cut for mutating command sid={} primary={:?} family={}; proceeding with low confidence",
                     pending.root_sid, primary_command, family
-                )));
+                ));
             }
         }
 
@@ -905,15 +953,24 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 pending.worktree_head_end_offset,
             )
         {
-            let head_changes = worktree_head_reflog_delta(worktree, start, end)?;
-            for change in head_changes {
-                let duplicate = ref_changes.iter().any(|existing| {
-                    existing.reference == change.reference
-                        && existing.old == change.old
-                        && existing.new == change.new
-                });
-                if !duplicate {
-                    ref_changes.push(change);
+            match worktree_head_reflog_delta(worktree, start, end) {
+                Ok(head_changes) => {
+                    for change in head_changes {
+                        let duplicate = ref_changes.iter().any(|existing| {
+                            existing.reference == change.reference
+                                && existing.old == change.old
+                                && existing.new == change.new
+                        });
+                        if !duplicate {
+                            ref_changes.push(change);
+                        }
+                    }
+                }
+                Err(error) => {
+                    debug_log(&format!(
+                        "worktree_head_reflog_delta failed for sid={} worktree={}: {}; skipping HEAD changes",
+                        root_sid, worktree.display(), error
+                    ));
                 }
             }
         }
