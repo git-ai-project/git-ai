@@ -1797,11 +1797,14 @@ pub fn rewrite_authorship_after_rebase_v2(
             }
             // Only remap if the original note is metadata-only (no attestation file paths).
             if let Some(content) = note_cache.original_note_contents.get(orig) {
-                let attestation_section = content
-                    .find("\n---\n")
-                    .map(|pos| &content[..pos])
-                    .unwrap_or(content);
-                attestation_section.trim().is_empty()
+                if content.starts_with("---\n") || content.starts_with("---\r") {
+                    true
+                } else {
+                    content
+                        .find("\n---\n")
+                        .map(|pos| content[..pos].trim().is_empty())
+                        .unwrap_or(false)
+                }
             } else {
                 false
             }
