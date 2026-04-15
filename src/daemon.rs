@@ -5562,45 +5562,8 @@ impl ActorDaemonCoordinator {
         for (order, ready_entry) in ready {
             match ready_entry {
                 FamilySequencerEntry::ReadyCommand(mut command) => {
-                    // Deferred carryover snapshot capture: the ingest worker runs
-                    // `capture_carryover_snapshot_for_command` eagerly, but with
-                    // async drain it may execute BEFORE a prior command's drain has
-                    // updated the working log (e.g. an `amend` that moves the
-                    // working-log entry from the original SHA to the amended SHA).
-                    // At this point every prior command in this family has already
-                    // been drained, so the working log is fully up-to-date.  If the
-                    // eager capture found nothing, retry here.
-                    if command.carryover_snapshot_id.is_none()
-                        && let Some(worktree) = command.worktree.as_deref()
-                    {
-                        match self.capture_carryover_snapshot_for_command(CarryoverCaptureInput {
-                            root_sid: &command.root_sid,
-                            worktree,
-                            primary_command: command.primary_command.as_deref(),
-                            argv: &command.raw_argv,
-                            exit_code: command.exit_code,
-                            finished_at_ns: command.finished_at_ns,
-                            post_repo: command.post_repo.as_ref(),
-                            ref_changes: &command.ref_changes,
-                        }) {
-                            Ok(Some(snapshot_id)) => {
-                                command.carryover_snapshot_id = Some(snapshot_id);
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                debug_log(&format!(
-                                    "deferred carryover snapshot capture failed for sid={}: {}",
-                                    command.root_sid, e
-                                ));
-                            }
-                        }
-                    }
-                    // Wrap the entire command + side-effect pipeline in catch_unwind
-                    // so that a panic (e.g. from UTF-8 boundary issues in diff parsing)
-                    // does not kill the daemon process.
-                    //
-                    // Save the test-sync metadata before moving `command` into the
-                    // future so we can write a completion log entry even when
+                    // Save the test-sync metadata before any move of `command`
+                    // so we can write a completion log entry even when
                     // route_command() fails or the future panics.
                     let fallback_test_sync_session =
                         crate::daemon::test_sync::test_sync_session_from_invocation(
@@ -5613,6 +5576,86 @@ impl ActorDaemonCoordinator {
                         );
                     let fallback_primary_command = command.primary_command.clone();
                     let fallback_exit_code = command.exit_code;
+
+                    // Deferred carryover snapshot capture: the ingest worker runs
+                    // `capture_carryover_snapshot_for_command` eagerly, but with
+                    // async drain it may execute BEFORE a prior command's drain has
+                    // updated the working log (e.g. an `amend` that moves the
+                    // working-log entry from the original SHA to the amended SHA).
+                    // At this point every prior command in this family has already
+                    // been drained, so the working log is fully up-to-date.  If the
+                    // eager capture found nothing, retry here.
+                    //
+                    // Run on a blocking thread because capture_carryover_snapshot
+                    // performs filesystem I/O (working-log reads, repository discovery)
+                    // that would block the Tokio async thread pool.
+                    if command.carryover_snapshot_id.is_none() && command.worktree.is_some() {
+                        let capture_coord = self.self_weak.get().and_then(|w| w.upgrade());
+                        if let Some(capture_coord) = capture_coord {
+                            let mut capture_cmd = command;
+                            match tokio::task::spawn_blocking(move || {
+                                let worktree = capture_cmd.worktree.as_deref().unwrap();
+                                let result = capture_coord.capture_carryover_snapshot_for_command(
+                                    CarryoverCaptureInput {
+                                        root_sid: &capture_cmd.root_sid,
+                                        worktree,
+                                        primary_command: capture_cmd.primary_command.as_deref(),
+                                        argv: &capture_cmd.raw_argv,
+                                        exit_code: capture_cmd.exit_code,
+                                        finished_at_ns: capture_cmd.finished_at_ns,
+                                        post_repo: capture_cmd.post_repo.as_ref(),
+                                        ref_changes: &capture_cmd.ref_changes,
+                                    },
+                                );
+                                match result {
+                                    Ok(Some(snapshot_id)) => {
+                                        capture_cmd.carryover_snapshot_id = Some(snapshot_id);
+                                    }
+                                    Ok(None) => {}
+                                    Err(e) => {
+                                        debug_log(&format!(
+                                            "deferred carryover snapshot capture failed \
+                                             for sid={}: {}",
+                                            capture_cmd.root_sid, e
+                                        ));
+                                    }
+                                }
+                                capture_cmd
+                            })
+                            .await
+                            {
+                                Ok(updated_cmd) => {
+                                    command = updated_cmd;
+                                }
+                                Err(join_err) => {
+                                    debug_log(&format!(
+                                        "carryover snapshot capture thread panicked: {}",
+                                        join_err
+                                    ));
+                                    // command was moved into the panicked thread and lost.
+                                    // Write a fallback completion log so test sync sees
+                                    // this session, then continue to the next entry.
+                                    let log_entry = TestCompletionLogEntry {
+                                        seq: 0,
+                                        family_key: family.to_string(),
+                                        kind: "command".to_string(),
+                                        primary_command: fallback_primary_command.clone(),
+                                        test_sync_session: fallback_test_sync_session.clone(),
+                                        exit_code: Some(fallback_exit_code),
+                                        sync_tracked: fallback_sync_tracked,
+                                        status: "error".to_string(),
+                                        error: Some(format!(
+                                            "carryover snapshot capture panicked: {}",
+                                            join_err
+                                        )),
+                                    };
+                                    let _ =
+                                        self.maybe_append_test_completion_log(family, &log_entry);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
 
                     let side_effect_result = {
                         let future = async {
