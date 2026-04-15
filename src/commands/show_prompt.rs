@@ -3,7 +3,6 @@ use crate::api::types::CasMessagesObject;
 use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::prompt_utils::find_prompt;
 use crate::git::find_repository;
-use crate::utils::debug_log;
 
 /// Handle the `show-prompt` command
 ///
@@ -48,17 +47,17 @@ pub fn handle_show_prompt(args: &[String]) {
                         && let Ok(cas_obj) = serde_json::from_str::<CasMessagesObject>(&cached_json)
                     {
                         prompt_record.messages = cas_obj.messages;
-                        debug_log("show-prompt: resolved from cas_cache");
+                        tracing::debug!("show-prompt: resolved from cas_cache");
                     }
 
                     // 2. If cache miss, fetch from CAS API (network)
                     if prompt_record.messages.is_empty() {
                         let context = ApiContext::new(None);
                         if context.auth_token.is_some() {
-                            debug_log(&format!(
+                            tracing::debug!(
                                 "show-prompt: trying CAS API for hash {}",
                                 &hash[..8.min(hash.len())]
-                            ));
+                            );
                             let client = ApiClient::new(context);
                             match client.read_ca_prompt_store(&[hash]) {
                                 Ok(response) => {
@@ -74,10 +73,10 @@ pub fn handle_show_prompt(args: &[String]) {
                                                 )
                                             {
                                                 prompt_record.messages = cas_obj.messages;
-                                                debug_log(&format!(
+                                                tracing::debug!(
                                                     "show-prompt: resolved {} messages from CAS API",
                                                     prompt_record.messages.len()
-                                                ));
+                                                );
                                                 // Cache for next time
                                                 if let Ok(db_mutex) = InternalDatabase::global()
                                                     && let Ok(mut db_guard) = db_mutex.lock()
@@ -89,11 +88,11 @@ pub fn handle_show_prompt(args: &[String]) {
                                     }
                                 }
                                 Err(e) => {
-                                    debug_log(&format!("show-prompt: CAS API error: {}", e));
+                                    tracing::debug!("show-prompt: CAS API error: {}", e);
                                 }
                             }
                         } else {
-                            debug_log("show-prompt: no auth token, skipping CAS API");
+                            tracing::debug!("show-prompt: no auth token, skipping CAS API");
                         }
                     }
                 }
@@ -106,10 +105,10 @@ pub fn handle_show_prompt(args: &[String]) {
                     && !db_record.messages.messages.is_empty()
                 {
                     prompt_record.messages = db_record.messages.messages;
-                    debug_log(&format!(
+                    tracing::debug!(
                         "show-prompt: resolved {} messages from local SQLite",
                         prompt_record.messages.len()
-                    ));
+                    );
                 }
             }
 

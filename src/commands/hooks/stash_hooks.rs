@@ -5,7 +5,6 @@ use crate::commands::hooks::commit_hooks::get_commit_default_author;
 use crate::error::GitAiError;
 use crate::git::cli_parser::ParsedGitInvocation;
 use crate::git::repository::{Repository, exec_git, exec_git_stdin};
-use crate::utils::debug_log;
 
 pub fn pre_stash_hook(
     parsed_args: &ParsedGitInvocation,
@@ -34,7 +33,7 @@ pub fn pre_stash_hook(
 
         if let Ok(stash_sha) = resolve_stash_to_sha(repository, &stash_ref) {
             command_hooks_context.stash_sha = Some(stash_sha);
-            debug_log(&format!("Pre-stash: captured stash SHA for {}", subcommand));
+            tracing::debug!("Pre-stash: captured stash SHA for {}", subcommand);
         }
     } else {
         let _ = match crate::commands::checkpoint::run(
@@ -47,7 +46,7 @@ pub fn pre_stash_hook(
         ) {
             Ok(result) => result,
             Err(e) => {
-                debug_log(&format!("Failed to run checkpoint: {}", e));
+                tracing::debug!("Failed to run checkpoint: {}", e);
                 return;
             }
         };
@@ -75,20 +74,20 @@ pub fn post_stash_hook(
         let is_restore_subcommand =
             subcommand == "pop" || subcommand == "apply" || subcommand == "branch";
         if is_restore_subcommand && has_stash_conflict(repository) {
-            debug_log(&format!(
+            tracing::debug!(
                 "Stash {} had conflicts, but will still restore attributions",
                 subcommand
-            ));
+            );
         } else {
-            debug_log(&format!(
+            tracing::debug!(
                 "Stash {} failed (non-conflict), skipping post-stash hook",
                 subcommand
-            ));
+            );
             return;
         }
     }
 
-    debug_log(&format!("Post-stash: processing stash {}", subcommand));
+    tracing::debug!("Post-stash: processing stash {}", subcommand);
 
     // Handle different subcommands
     if subcommand == "push" || subcommand == "save" {
@@ -97,24 +96,21 @@ pub fn post_stash_hook(
         let head_sha = match repository.head().and_then(|head| head.target()) {
             Ok(head_sha) => head_sha.to_string(),
             Err(e) => {
-                debug_log(&format!(
-                    "Failed to resolve HEAD after stash {}: {}",
-                    subcommand, e
-                ));
+                tracing::debug!("Failed to resolve HEAD after stash {}: {}", subcommand, e);
                 return;
             }
         };
         let stash_sha = match resolve_stash_to_sha(repository, "stash@{0}") {
             Ok(stash_sha) => stash_sha,
             Err(e) => {
-                debug_log(&format!("Failed to resolve created stash SHA: {}", e));
+                tracing::debug!("Failed to resolve created stash SHA: {}", e);
                 return;
             }
         };
 
         // Stash was created - save authorship log as git note
         if let Err(e) = save_stash_authorship_log(repository, &head_sha, &stash_sha, &pathspecs) {
-            debug_log(&format!("Failed to save stash authorship log: {}", e));
+            tracing::debug!("Failed to save stash authorship log: {}", e);
         }
     } else if subcommand == "pop" || subcommand == "apply" || subcommand == "branch" {
         // Stash was applied - restore attributions from git note
@@ -122,28 +118,22 @@ pub fn post_stash_hook(
         let stash_sha = match &command_hooks_context.stash_sha {
             Some(sha) => sha.clone(),
             None => {
-                debug_log("No stash SHA captured in pre-hook, cannot restore attributions");
+                tracing::debug!("No stash SHA captured in pre-hook, cannot restore attributions");
                 return;
             }
         };
 
-        debug_log(&format!(
-            "Restoring attributions from stash SHA: {}",
-            stash_sha
-        ));
+        tracing::debug!("Restoring attributions from stash SHA: {}", stash_sha);
         let head_sha = match repository.head().and_then(|head| head.target()) {
             Ok(head_sha) => head_sha.to_string(),
             Err(e) => {
-                debug_log(&format!(
-                    "Failed to resolve HEAD after stash {}: {}",
-                    subcommand, e
-                ));
+                tracing::debug!("Failed to resolve HEAD after stash {}: {}", subcommand, e);
                 return;
             }
         };
 
         if let Err(e) = restore_stash_attributions(repository, &head_sha, &stash_sha) {
-            debug_log(&format!("Failed to restore stash attributions: {}", e));
+            tracing::debug!("Failed to restore stash attributions: {}", e);
         }
     }
 }
@@ -175,7 +165,7 @@ pub(crate) fn save_stash_authorship_log(
     stash_sha: &str,
     pathspecs: &[String],
 ) -> Result<(), GitAiError> {
-    debug_log(&format!("Stash created with SHA: {}", stash_sha));
+    tracing::debug!("Stash created with SHA: {}", stash_sha);
 
     // Build VirtualAttributions from the working log before it was cleared
     let working_log_va =
@@ -200,16 +190,16 @@ pub(crate) fn save_stash_authorship_log(
 
     // If there are no attributions, just clean up working log for filtered files
     if filtered_files.is_empty() {
-        debug_log("No attributions to save for stash");
+        tracing::debug!("No attributions to save for stash");
         delete_working_log_for_files(repo, head_sha, &filtered_files)?;
         return Ok(());
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "Saving attributions for {} files (pathspecs: {:?})",
         filtered_files.len(),
         pathspecs
-    ));
+    );
 
     // Convert to authorship log, filtering to only include matched files
     let mut authorship_log = working_log_va.to_authorship_log()?;
@@ -223,17 +213,17 @@ pub(crate) fn save_stash_authorship_log(
         .map_err(|e| GitAiError::Generic(format!("Failed to serialize authorship log: {}", e)))?;
     save_stash_note(repo, stash_sha, &json)?;
 
-    debug_log(&format!(
+    tracing::debug!(
         "Saved authorship log to refs/notes/ai-stash for stash {}",
         stash_sha
-    ));
+    );
 
     // Delete the working log entries for files that were stashed
     delete_working_log_for_files(repo, head_sha, &filtered_files)?;
-    debug_log(&format!(
+    tracing::debug!(
         "Deleted working log entries for {} files",
         filtered_files.len()
-    ));
+    );
 
     Ok(())
 }
@@ -244,16 +234,13 @@ pub(crate) fn restore_stash_attributions(
     head_sha: &str,
     stash_sha: &str,
 ) -> Result<(), GitAiError> {
-    debug_log(&format!(
-        "Restoring stash attributions from SHA: {}",
-        stash_sha
-    ));
+    tracing::debug!("Restoring stash attributions from SHA: {}", stash_sha);
 
     // Try to read authorship log from git note (refs/notes/ai-stash)
     let note_content = match read_stash_note(repo, stash_sha) {
         Ok(content) => content,
         Err(_) => {
-            debug_log("No authorship log found in refs/notes/ai-stash for this stash");
+            tracing::debug!("No authorship log found in refs/notes/ai-stash for this stash");
             return Ok(());
         }
     };
@@ -262,16 +249,16 @@ pub(crate) fn restore_stash_attributions(
     let authorship_log = match crate::authorship::authorship_log_serialization::AuthorshipLog::deserialize_from_string(&note_content) {
         Ok(log) => log,
         Err(e) => {
-            debug_log(&format!("Failed to parse stash authorship log: {}", e));
+            tracing::debug!("Failed to parse stash authorship log: {}", e);
             return Ok(());
         }
     };
 
-    debug_log(&format!(
+    tracing::debug!(
         "Loaded authorship log from stash: {} files, {} prompts",
         authorship_log.attestations.len(),
         authorship_log.metadata.prompts.len()
-    ));
+    );
 
     // Convert authorship log to INITIAL attributions
     let mut initial_files = std::collections::HashMap::new();
@@ -319,10 +306,10 @@ pub(crate) fn restore_stash_attributions(
             initial_file_contents,
         )?;
 
-        debug_log(&format!(
+        tracing::debug!(
             "✓ Wrote INITIAL attributions to working log for {}",
             head_sha
-        ));
+        );
     }
 
     Ok(())
@@ -464,7 +451,7 @@ pub(crate) fn extract_stash_pathspecs(parsed_args: &ParsedGitInvocation) -> Vec<
         pathspecs.push(arg.clone());
     }
 
-    debug_log(&format!("Extracted pathspecs: {:?}", pathspecs));
+    tracing::debug!("Extracted pathspecs: {:?}", pathspecs);
     pathspecs
 }
 

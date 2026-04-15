@@ -21,8 +21,7 @@ use crate::git::rewrite_log::{
     RebaseCompleteEvent, ResetEvent, ResetKind, RewriteLogEvent, StashEvent, StashOperation,
 };
 use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
-use crate::observability;
-use crate::utils::{LockFile, debug_log};
+use crate::utils::LockFile;
 use crate::{
     authorship::post_commit::post_commit_with_final_state,
     authorship::rebase_authorship::{
@@ -72,6 +71,7 @@ pub mod family_actor;
 pub mod git_backend;
 pub mod global_actor;
 pub mod reducer;
+pub mod sentry_layer;
 pub mod telemetry_handle;
 pub mod telemetry_worker;
 pub mod test_sync;
@@ -1479,19 +1479,20 @@ fn apply_pull_notes_sync_side_effect(
     let remote = match fetch_remote_from_args(&repo, &parsed) {
         Ok(remote) => remote,
         Err(error) => {
-            debug_log(&format!(
-                "daemon notes sync: failed to determine remote for {}: {}",
-                parsed.command.as_deref().unwrap_or("pull"),
-                error
-            ));
+            tracing::debug!(
+                %error,
+                command = parsed.command.as_deref().unwrap_or("pull"),
+                "notes sync: failed to determine remote"
+            );
             return Ok(());
         }
     };
     if let Err(error) = fetch_authorship_notes(&repo, &remote) {
-        debug_log(&format!(
-            "daemon notes sync: failed to fetch authorship notes from {}: {}",
-            remote, error
-        ));
+        tracing::debug!(
+            %error,
+            %remote,
+            "notes sync: failed to fetch authorship notes"
+        );
     }
     Ok(())
 }
@@ -1499,10 +1500,10 @@ fn apply_pull_notes_sync_side_effect(
 fn apply_clone_notes_sync_side_effect(worktree: &str) -> Result<(), GitAiError> {
     let repo = find_repository_in_path(worktree)?;
     if let Err(error) = fetch_authorship_notes(&repo, "origin") {
-        debug_log(&format!(
-            "daemon notes sync: failed to fetch clone authorship notes from origin: {}",
-            error
-        ));
+        tracing::debug!(
+            %error,
+            "notes sync: failed to fetch clone authorship notes from origin"
+        );
     }
     Ok(())
 }
@@ -1616,10 +1617,10 @@ fn apply_checkout_switch_working_log_side_effect(
             // handled the migration).  Fall through to the rename path so the
             // working log is migrated rather than lost.  Attribution may be
             // slightly misaligned but is preserved.
-            debug_log(&format!(
-                "{} --merge missing carryover snapshot, falling back to rename",
-                cmd.primary_command.as_deref().unwrap_or("checkout")
-            ));
+            tracing::warn!(
+                command = cmd.primary_command.as_deref().unwrap_or("checkout"),
+                "--merge missing carryover snapshot, falling back to rename"
+            );
         } else {
             if let Some(snapshot) = carryover_snapshot {
                 // Fix #957: When --merge produced conflict markers (exit_code != 0),
@@ -1783,10 +1784,10 @@ fn filter_commit_replay_files(
             selected_dirty_files.insert(file_path.clone(), target_content);
             selected_files.push(file_path);
         } else {
-            debug_log(&format!(
-                "Skipping synthetic pre-commit replay for {} because working log already matches committed content",
-                file_path
-            ));
+            tracing::debug!(
+                %file_path,
+                "skipping synthetic pre-commit replay because working log already matches committed content"
+            );
         }
     }
 
@@ -2230,10 +2231,12 @@ fn recover_reset_working_log_for_commit_replay(
     if let Err(error) =
         attempt_materialize_commit_chain_authorship(repo, Some(base_commit), &old_head, author)
     {
-        debug_log(&format!(
-            "Failed to backfill reset prerequisite notes between {} and {}: {}",
-            base_commit, old_head, error
-        ));
+        tracing::debug!(
+            %error,
+            %base_commit,
+            %old_head,
+            "failed to backfill reset prerequisite notes"
+        );
     }
     reconstruct_working_log_after_reset(
         repo,
@@ -2272,21 +2275,22 @@ fn seed_merge_squash_working_log_for_commit_replay(
         &merge_squash.source_head,
         author,
     ) {
-        debug_log(&format!(
-            "Failed to backfill squash prerequisite notes for {}: {}",
-            merge_squash.source_head, error
-        ));
+        tracing::debug!(
+            %error,
+            source_head = %merge_squash.source_head,
+            "failed to backfill squash prerequisite notes"
+        );
     }
 
-    debug_log(&format!(
-        "Seeding merge --squash working log before daemon commit replay for base {}",
-        base_commit
-    ));
+    tracing::debug!(
+        %base_commit,
+        "seeding merge --squash working log before commit replay"
+    );
     let Some(final_state) = exact_final_state else {
-        debug_log(&format!(
-            "Skipping merge --squash commit replay seed for {} because no committed final state was available",
-            base_commit
-        ));
+        tracing::debug!(
+            %base_commit,
+            "skipping merge --squash commit replay seed because no committed final state was available"
+        );
         return Ok(());
     };
     prepare_working_log_after_squash_from_final_state(
@@ -2339,10 +2343,12 @@ fn recover_recent_replay_prerequisites_for_commit_replay(
                     &old_head,
                     author,
                 ) {
-                    debug_log(&format!(
-                        "Failed to backfill recent reset prerequisite notes between {} and {}: {}",
-                        base_commit, old_head, error
-                    ));
+                    tracing::debug!(
+                        %error,
+                        %base_commit,
+                        %old_head,
+                        "failed to backfill recent reset prerequisite notes"
+                    );
                 }
                 reconstruct_working_log_after_reset(
                     repo,
@@ -2444,10 +2450,11 @@ fn ensure_rewrite_prerequisites(
         )
         .map(|_| ());
         if let Err(error) = materialize_result {
-            debug_log(&format!(
-                "Failed to backfill base commit note for {}: {}",
-                base_commit, error
-            ));
+            tracing::debug!(
+                %error,
+                %base_commit,
+                "failed to backfill base commit note"
+            );
         }
     }
 
@@ -2816,7 +2823,7 @@ fn apply_stash_rewrite_side_effect(
                 ));
             };
             let Some(stash_sha) = stash_event.stash_sha.as_deref() else {
-                debug_log("Skipping stash create replay without created stash oid");
+                tracing::debug!("skipping stash create replay without created stash oid");
                 return Ok(());
             };
             stash_hooks::save_stash_authorship_log(
@@ -2893,17 +2900,17 @@ fn maybe_rebase_mappings_from_repository(
             repository, old_head, new_head, onto_head,
         )?;
     if original_commits.is_empty() {
-        debug_log(&format!(
-            "{} produced no rebase source commits; skipping rewrite synthesis",
-            context
-        ));
+        tracing::debug!(
+            %context,
+            "produced no rebase source commits; skipping rewrite synthesis"
+        );
         return Ok(None);
     }
     if new_commits.is_empty() {
-        debug_log(&format!(
-            "{} produced no rebased commits; skipping rewrite synthesis",
-            context
-        ));
+        tracing::debug!(
+            %context,
+            "produced no rebased commits; skipping rewrite synthesis"
+        );
         return Ok(None);
     }
     Ok(Some((original_commits, new_commits)))
@@ -3287,10 +3294,12 @@ fn apply_reset_working_log_side_effect(
             &reset.old_head_sha,
             human_author,
         ) {
-            debug_log(&format!(
-                "Failed to backfill reset-side-effect notes between {} and {}: {}",
-                reset.new_head_sha, reset.old_head_sha, error
-            ));
+            tracing::debug!(
+                %error,
+                new_head = %reset.new_head_sha,
+                old_head = %reset.old_head_sha,
+                "failed to backfill reset-side-effect notes"
+            );
         }
         let tracked_files = tracked_working_log_files(repository, &reset.old_head_sha)?;
         if !tracked_files.is_empty() && carryover_snapshot.is_none() {
@@ -3423,7 +3432,7 @@ fn maybe_setup_daemon_log_file(config: &DaemonConfig) -> Option<DaemonLogGuard> 
     match setup_daemon_log_file(config) {
         Ok(guard) => Some(guard),
         Err(e) => {
-            debug_log(&format!("daemon log file setup failed: {}", e));
+            tracing::error!(%e, "log file setup failed");
             None
         }
     }
@@ -3434,7 +3443,7 @@ fn maybe_setup_daemon_log_file(config: &DaemonConfig) -> Option<DaemonLogGuard> 
     match setup_daemon_log_file(config) {
         Ok(guard) => Some(guard),
         Err(e) => {
-            debug_log(&format!("daemon log file setup failed: {}", e));
+            tracing::error!(%e, "log file setup failed");
             None
         }
     }
@@ -3536,11 +3545,11 @@ fn redirect_windows_stdio_stream(
         )));
     }
     if unsafe { libc::close(fd) } == -1 {
-        debug_log(&format!(
-            "close failed for daemon log stream {} after successful redirect: {}",
+        tracing::debug!(
             std_fd,
-            std::io::Error::last_os_error()
-        ));
+            error = %std::io::Error::last_os_error(),
+            "close failed for log stream after successful redirect"
+        );
     }
 
     let set_handle_result = unsafe { SetStdHandle(std_handle, file.as_raw_handle()) };
@@ -4388,10 +4397,10 @@ impl ActorDaemonCoordinator {
                     json!(self.next_trace_ingest_seq()),
                 );
             }
-            debug_log(&format!(
-                "daemon trace connection close fallback finalized sid={}",
-                root_sid
-            ));
+            tracing::debug!(
+                sid = %root_sid,
+                "trace connection close fallback finalized"
+            );
             self.enqueue_trace_payload(payload)?;
         }
         Ok(())
@@ -4656,57 +4665,37 @@ impl ActorDaemonCoordinator {
                     _ = coordinator.wait_for_shutdown() => break,
                 };
                 let Some(seq) = payload.get(TRACE_INGEST_SEQ_FIELD).and_then(Value::as_u64) else {
-                    let error = GitAiError::Generic(
-                        "trace ingest payload missing ingress sequence".to_string(),
-                    );
-                    observability::log_error(
-                        &error,
-                        Some(serde_json::json!({
-                            "component": "daemon",
-                            "phase": "trace_ingest_worker",
-                            "reason": "missing_ingest_seq",
-                            "payload": payload,
-                        })),
+                    tracing::error!(
+                        component = "daemon",
+                        phase = "trace_ingest_worker",
+                        reason = "missing_ingest_seq",
+                        "trace ingest payload missing ingress sequence"
                     );
                     coordinator.request_shutdown();
                     break;
                 };
 
                 if pending_by_seq.len() >= TRACE_INGEST_QUEUE_CAPACITY {
-                    let error = GitAiError::Generic(format!(
-                        "trace ingest reorder buffer overflow at {} entries; next_seq={}",
-                        pending_by_seq.len(),
-                        next_seq
-                    ));
-                    debug_log(&format!("{}", error));
-                    observability::log_error(
-                        &error,
-                        Some(serde_json::json!({
-                            "component": "daemon",
-                            "phase": "trace_ingest_worker",
-                            "reason": "reorder_buffer_overflow",
-                            "buffered_count": pending_by_seq.len(),
-                            "next_seq": next_seq,
-                            "received_seq": seq,
-                        })),
+                    tracing::error!(
+                        component = "daemon",
+                        phase = "trace_ingest_worker",
+                        reason = "reorder_buffer_overflow",
+                        buffered_count = pending_by_seq.len(),
+                        next_seq,
+                        received_seq = seq,
+                        "trace ingest reorder buffer overflow"
                     );
                     coordinator.request_shutdown();
                     break;
                 }
 
                 if pending_by_seq.insert(seq, payload).is_some() {
-                    let error = GitAiError::Generic(format!(
-                        "duplicate trace ingest sequence received: {}",
-                        seq
-                    ));
-                    observability::log_error(
-                        &error,
-                        Some(serde_json::json!({
-                            "component": "daemon",
-                            "phase": "trace_ingest_worker",
-                            "reason": "duplicate_ingest_seq",
-                            "sequence": seq,
-                        })),
+                    tracing::error!(
+                        component = "daemon",
+                        phase = "trace_ingest_worker",
+                        reason = "duplicate_ingest_seq",
+                        sequence = seq,
+                        "duplicate trace ingest sequence received"
                     );
                     coordinator.request_shutdown();
                     break;
@@ -4726,16 +4715,14 @@ impl ActorDaemonCoordinator {
                         match futures::FutureExt::catch_unwind(caught).await {
                             Ok(Ok(())) => Ok(()),
                             Ok(Err(error)) => {
-                                debug_log(&format!("daemon trace ingest error: {}", error));
-                                observability::log_error(
-                                    &error,
-                                    Some(serde_json::json!({
-                                        "component": "daemon",
-                                        "phase": "trace_ingest_worker",
-                                        "reason": "ingest_error",
-                                        "sequence": processed_seq,
-                                        "root_sid": ordered_payload_root,
-                                    })),
+                                tracing::error!(
+                                    component = "daemon",
+                                    phase = "trace_ingest_worker",
+                                    reason = "ingest_error",
+                                    sequence = processed_seq,
+                                    root_sid = ?ordered_payload_root,
+                                    %error,
+                                    "trace ingest error"
                                 );
                                 Err(error)
                             }
@@ -4748,22 +4735,18 @@ impl ActorDaemonCoordinator {
                                     } else {
                                         "unknown panic".to_string()
                                     };
-                                let error = GitAiError::Generic(format!(
+                                tracing::error!(
+                                    component = "daemon",
+                                    phase = "trace_ingest_worker",
+                                    reason = "panic_in_ingest",
+                                    panic_msg = %panic_msg,
+                                    sequence = processed_seq,
+                                    "trace ingest panic"
+                                );
+                                Err(GitAiError::Generic(format!(
                                     "trace ingest worker panic: {}",
                                     panic_msg
-                                ));
-                                debug_log(&format!("daemon trace ingest panic: {}", panic_msg));
-                                observability::log_error(
-                                    &error,
-                                    Some(serde_json::json!({
-                                        "component": "daemon",
-                                        "phase": "trace_ingest_worker",
-                                        "reason": "panic_in_ingest",
-                                        "panic_message": panic_msg,
-                                        "sequence": processed_seq,
-                                    })),
-                                );
-                                Err(error)
+                                )))
                             }
                         }
                     };
@@ -4776,10 +4759,10 @@ impl ActorDaemonCoordinator {
                     if let Err(error) = coordinator
                         .record_trace_payload_processed_root(ordered_payload_root.as_deref())
                     {
-                        debug_log(&format!(
-                            "daemon trace payload accounting error after ingest: {}",
-                            error
-                        ));
+                        tracing::debug!(
+                            %error,
+                            "trace payload accounting error after ingest"
+                        );
                     }
                     // Release: pairs with Acquire loads in wait_for_trace_ingest_processed_through
                     // so waiters observe all ingest side-effects when seq advances.
@@ -4796,22 +4779,15 @@ impl ActorDaemonCoordinator {
             }
 
             if !pending_by_seq.is_empty() {
-                let error = GitAiError::Generic(format!(
-                    "trace ingest worker exiting with {} buffered out-of-order frame(s); next_seq={}",
-                    pending_by_seq.len(),
-                    next_seq
-                ));
-                observability::log_error(
-                    &error,
-                    Some(serde_json::json!({
-                        "component": "daemon",
-                        "phase": "trace_ingest_worker",
-                        "reason": "unflushed_buffer_on_shutdown",
-                        "buffered_count": pending_by_seq.len(),
-                        "next_seq": next_seq,
-                        "min_buffered_seq": pending_by_seq.keys().next().copied(),
-                        "max_buffered_seq": pending_by_seq.keys().last().copied(),
-                    })),
+                tracing::error!(
+                    component = "daemon",
+                    phase = "trace_ingest_worker",
+                    reason = "unflushed_buffer_on_shutdown",
+                    buffered_count = pending_by_seq.len(),
+                    next_seq,
+                    min_buffered_seq = ?pending_by_seq.keys().next().copied(),
+                    max_buffered_seq = ?pending_by_seq.keys().last().copied(),
+                    "trace ingest worker exiting with buffered out-of-order frames"
                 );
             }
         });
@@ -4846,24 +4822,21 @@ impl ActorDaemonCoordinator {
                 |current| Some(current.saturating_sub(1)),
             );
             if let Err(error) = self.record_trace_payload_processed_root(payload_root.as_deref()) {
-                debug_log(&format!(
-                    "daemon trace payload accounting rollback error: {}",
-                    error
-                ));
+                tracing::debug!(
+                    %error,
+                    "trace payload accounting rollback error"
+                );
             }
-            let error = GitAiError::Generic(
-                "trace ingest queue send failed: worker may have crashed".to_string(),
-            );
-            observability::log_error(
-                &error,
-                Some(serde_json::json!({
-                    "component": "daemon",
-                    "phase": "enqueue_trace_payload",
-                    "reason": "ingest_worker_channel_closed",
-                })),
+            tracing::error!(
+                component = "daemon",
+                phase = "enqueue_trace_payload",
+                reason = "ingest_worker_channel_closed",
+                "trace ingest queue send failed: worker may have crashed"
             );
             self.request_shutdown();
-            return Err(error);
+            return Err(GitAiError::Generic(
+                "trace ingest queue send failed: worker may have crashed".to_string(),
+            ));
         }
         Ok(())
     }
@@ -4998,14 +4971,12 @@ impl ActorDaemonCoordinator {
         let mut ingress = match self.trace_ingress_state.lock() {
             Ok(guard) => guard,
             Err(_) => {
-                observability::log_error(
-                    &GitAiError::Generic("trace ingress state lock poisoned".to_string()),
-                    Some(serde_json::json!({
-                        "component": "daemon",
-                        "phase": "augment_trace_payload_with_reflog_metadata",
-                        "sid": sid,
-                        "event": event,
-                    })),
+                tracing::error!(
+                    component = "daemon",
+                    phase = "augment_trace_payload_with_reflog_metadata",
+                    %sid,
+                    %event,
+                    "trace ingress state lock poisoned"
                 );
                 return false;
             }
@@ -5150,19 +5121,14 @@ impl ActorDaemonCoordinator {
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        debug_log(&format!(
-                            "daemon commit squash context capture failed sid={}: {}",
-                            sid, error
-                        ));
-                        observability::log_error(
-                            &error,
-                            Some(json!({
-                                "component": "daemon",
-                                "phase": "augment_trace_payload_with_reflog_metadata",
-                                "root_sid": root,
-                                "sid": sid,
-                                "argv": effective_argv,
-                            })),
+                        tracing::error!(
+                            component = "daemon",
+                            phase = "augment_trace_payload_with_reflog_metadata",
+                            root_sid = %root,
+                            %sid,
+                            ?effective_argv,
+                            %error,
+                            "commit squash context capture failed"
                         );
                     }
                 }
@@ -5179,19 +5145,14 @@ impl ActorDaemonCoordinator {
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        debug_log(&format!(
-                            "daemon stash target resolution failed sid={}: {}",
-                            sid, error
-                        ));
-                        observability::log_error(
-                            &error,
-                            Some(json!({
-                                "component": "daemon",
-                                "phase": "augment_trace_payload_with_reflog_metadata",
-                                "root_sid": root,
-                                "sid": sid,
-                                "argv": effective_argv,
-                            })),
+                        tracing::error!(
+                            component = "daemon",
+                            phase = "augment_trace_payload_with_reflog_metadata",
+                            root_sid = %root,
+                            %sid,
+                            ?effective_argv,
+                            %error,
+                            "stash target resolution failed"
                         );
                         object.insert(
                             "git_ai_stash_target_oid_error".to_string(),
@@ -5247,19 +5208,14 @@ impl ActorDaemonCoordinator {
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    debug_log(&format!(
-                        "daemon merge --squash context capture failed sid={}: {}",
-                        sid, error
-                    ));
-                    observability::log_error(
-                        &error,
-                        Some(json!({
-                            "component": "daemon",
-                            "phase": "augment_trace_payload_with_reflog_metadata",
-                            "root_sid": root,
-                            "sid": sid,
-                            "argv": effective_argv,
-                        })),
+                    tracing::error!(
+                        component = "daemon",
+                        phase = "augment_trace_payload_with_reflog_metadata",
+                        root_sid = %root,
+                        %sid,
+                        ?effective_argv,
+                        %error,
+                        "merge --squash context capture failed"
                     );
                 }
             }
@@ -5268,14 +5224,12 @@ impl ActorDaemonCoordinator {
         let mut ingress = match self.trace_ingress_state.lock() {
             Ok(guard) => guard,
             Err(_) => {
-                observability::log_error(
-                    &GitAiError::Generic("trace ingress state lock poisoned".to_string()),
-                    Some(serde_json::json!({
-                        "component": "daemon",
-                        "phase": "augment_trace_payload_with_reflog_metadata",
-                        "sid": sid,
-                        "event": event,
-                    })),
+                tracing::error!(
+                    component = "daemon",
+                    phase = "augment_trace_payload_with_reflog_metadata",
+                    %sid,
+                    %event,
+                    "trace ingress state lock poisoned"
                 );
                 return false;
             }
@@ -5362,10 +5316,11 @@ impl ActorDaemonCoordinator {
                                 terminal_ref_changes = Some(ref_changes);
                             }
                             Err(error) => {
-                                debug_log(&format!(
-                                    "daemon trace reflog delta capture error sid={}: {}",
-                                    sid, error
-                                ));
+                                tracing::debug!(
+                                    %error,
+                                    %sid,
+                                    "trace reflog delta capture error"
+                                );
                             }
                         }
                         object.insert("git_ai_family_reflog_end".to_string(), json!(end_offsets));
@@ -5387,19 +5342,14 @@ impl ActorDaemonCoordinator {
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        debug_log(&format!(
-                            "daemon terminal stash target resolution failed sid={}: {}",
-                            sid, error
-                        ));
-                        observability::log_error(
-                            &error,
-                            Some(json!({
-                                "component": "daemon",
-                                "phase": "augment_trace_payload_with_reflog_metadata",
-                                "root_sid": root,
-                                "sid": sid,
-                                "argv": effective_argv,
-                            })),
+                        tracing::error!(
+                            component = "daemon",
+                            phase = "augment_trace_payload_with_reflog_metadata",
+                            root_sid = %root,
+                            %sid,
+                            ?effective_argv,
+                            %error,
+                            "terminal stash target resolution failed"
                         );
                         object.insert(
                             "git_ai_stash_target_oid_error".to_string(),
@@ -5451,19 +5401,14 @@ impl ActorDaemonCoordinator {
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        debug_log(&format!(
-                            "daemon carryover snapshot capture failed sid={}: {}",
-                            sid, error
-                        ));
-                        observability::log_error(
-                            &error,
-                            Some(json!({
-                                "component": "daemon",
-                                "phase": "augment_trace_payload_with_reflog_metadata",
-                                "root_sid": root,
-                                "sid": sid,
-                                "argv": effective_argv,
-                            })),
+                        tracing::error!(
+                            component = "daemon",
+                            phase = "augment_trace_payload_with_reflog_metadata",
+                            root_sid = %root,
+                            %sid,
+                            ?effective_argv,
+                            %error,
+                            "carryover snapshot capture failed"
                         );
                     }
                 }
@@ -5599,10 +5544,12 @@ impl ActorDaemonCoordinator {
                         Ok(Ok((applied, side_effect_result))) => {
                             if let Err(error) = &side_effect_result {
                                 let _ = self.record_side_effect_error(family, order, error);
-                                debug_log(&format!(
-                                    "daemon command side effect failed for family {} seq {}: {}",
-                                    family, applied.seq, error
-                                ));
+                                tracing::error!(
+                                    %error,
+                                    %family,
+                                    seq = applied.seq,
+                                    "command side effect failed"
+                                );
                             }
                             if let Err(error) = self.append_command_completion_log(
                                 family,
@@ -5611,18 +5558,22 @@ impl ActorDaemonCoordinator {
                                 order,
                             ) {
                                 let _ = self.record_side_effect_error(family, order, &error);
-                                debug_log(&format!(
-                                    "daemon command completion log write failed for family {} order {}: {}",
-                                    family, order, error
-                                ));
+                                tracing::error!(
+                                    %error,
+                                    %family,
+                                    order,
+                                    "command completion log write failed"
+                                );
                             }
                         }
                         Ok(Err(error)) => {
                             let _ = self.record_side_effect_error(family, order, &error);
-                            debug_log(&format!(
-                                "daemon command apply failed for family {} order {}: {}",
-                                family, order, error
-                            ));
+                            tracing::error!(
+                                %error,
+                                %family,
+                                order,
+                                "command apply failed"
+                            );
                         }
                         Err(panic_payload) => {
                             let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>()
@@ -5638,20 +5589,14 @@ impl ActorDaemonCoordinator {
                                 panic_msg
                             ));
                             let _ = self.record_side_effect_error(family, order, &error);
-                            debug_log(&format!(
-                                "daemon command side effect panic for family {} order {}: {}",
-                                family, order, panic_msg
-                            ));
-                            observability::log_error(
-                                &error,
-                                Some(serde_json::json!({
-                                    "component": "daemon",
-                                    "phase": "command_side_effect",
-                                    "reason": "panic_in_side_effect",
-                                    "panic_message": panic_msg,
-                                    "family": family,
-                                    "order": order,
-                                })),
+                            tracing::error!(
+                                component = "daemon",
+                                phase = "command_side_effect",
+                                reason = "panic_in_side_effect",
+                                panic_msg = %panic_msg,
+                                %family,
+                                order,
+                                "command side effect panic"
                             );
                         }
                     }
@@ -5692,6 +5637,13 @@ impl ActorDaemonCoordinator {
                     );
                     let should_log_completion =
                         crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync(&request);
+                    let checkpoint_kind_str: &str = match request.as_ref() {
+                        CheckpointRunRequest::Live(req) => req.kind.as_deref().unwrap_or("human"),
+                        CheckpointRunRequest::Captured(_) => "captured",
+                    };
+                    let checkpoint_kind_str = checkpoint_kind_str.to_string();
+                    tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
+                    let checkpoint_start = std::time::Instant::now();
                     // Wrap checkpoint processing in catch_unwind to recover from panics.
                     let checkpoint_result = {
                         let future = async {
@@ -5718,23 +5670,14 @@ impl ActorDaemonCoordinator {
                             } else {
                                 "unknown panic".to_string()
                             };
-                            debug_log(&format!(
-                                "daemon checkpoint side effect panic for family {} order {}: {}",
-                                family, order, panic_msg
-                            ));
-                            observability::log_error(
-                                &GitAiError::Generic(format!(
-                                    "daemon checkpoint side effect panic: {}",
-                                    panic_msg
-                                )),
-                                Some(serde_json::json!({
-                                    "component": "daemon",
-                                    "phase": "checkpoint_side_effect",
-                                    "reason": "panic_in_side_effect",
-                                    "panic_message": panic_msg,
-                                    "family": family,
-                                    "order": order,
-                                })),
+                            tracing::error!(
+                                component = "daemon",
+                                phase = "checkpoint_side_effect",
+                                reason = "panic_in_side_effect",
+                                panic_msg = %panic_msg,
+                                %family,
+                                order,
+                                "checkpoint side effect panic"
                             );
                             Err(GitAiError::Generic(format!(
                                 "daemon checkpoint panic: {}",
@@ -5742,6 +5685,22 @@ impl ActorDaemonCoordinator {
                             )))
                         }
                     };
+                    let checkpoint_duration_ms = checkpoint_start.elapsed().as_millis();
+                    if result.is_ok() {
+                        tracing::info!(
+                            kind = %checkpoint_kind_str,
+                            repo = %repo_wd,
+                            duration_ms = checkpoint_duration_ms as u64,
+                            "checkpoint done"
+                        );
+                    } else {
+                        tracing::warn!(
+                            kind = %checkpoint_kind_str,
+                            repo = %repo_wd,
+                            duration_ms = checkpoint_duration_ms as u64,
+                            "checkpoint failed"
+                        );
+                    }
                     if result.is_ok() {
                         let per_file = if !checkpoint_file_paths.is_empty() {
                             compute_watermarks_from_stat(&repo_wd, &checkpoint_file_paths)
@@ -5794,18 +5753,23 @@ impl ActorDaemonCoordinator {
                         if result.is_ok() {
                             result = Err(cleanup_error);
                         } else {
-                            debug_log(&format!(
-                                "daemon captured checkpoint cleanup failed for family {} order {} capture {}: {}",
-                                family, order, capture_id, cleanup_error
-                            ));
+                            tracing::debug!(
+                                %cleanup_error,
+                                %family,
+                                order,
+                                %capture_id,
+                                "captured checkpoint cleanup failed"
+                            );
                         }
                     }
                     if let Err(error) = &result {
                         let _ = self.record_side_effect_error(family, order, error);
-                        debug_log(&format!(
-                            "daemon checkpoint side effect failed for family {} order {}: {}",
-                            family, order, error
-                        ));
+                        tracing::error!(
+                            %error,
+                            %family,
+                            order,
+                            "checkpoint side effect failed"
+                        );
                     }
                     if should_log_completion {
                         let log_entry = TestCompletionLogEntry {
@@ -5827,10 +5791,12 @@ impl ActorDaemonCoordinator {
                             self.maybe_append_test_completion_log(family, &log_entry)
                         {
                             let _ = self.record_side_effect_error(family, order, &error);
-                            debug_log(&format!(
-                                "daemon checkpoint completion log write failed for family {} order {}: {}",
-                                family, order, error
-                            ));
+                            tracing::error!(
+                                %error,
+                                %family,
+                                order,
+                                "checkpoint completion log write failed"
+                            );
                         }
                     }
                     if let Some(respond_to) = respond_to {
@@ -6364,10 +6330,10 @@ impl ActorDaemonCoordinator {
                             start_target_hint.as_deref(),
                         )?
                     else {
-                        debug_log(&format!(
-                            "rebase complete produced no unprocessed replay segment; skipping rewrite synthesis sid={}",
-                            cmd.root_sid
-                        ));
+                        tracing::debug!(
+                            sid = %cmd.root_sid,
+                            "rebase complete produced no unprocessed replay segment; skipping rewrite synthesis"
+                        );
                         if let Some(worktree) = cmd.worktree.as_ref() {
                             self.clear_pending_rebase_original_head_for_worktree(worktree)?;
                         }
@@ -6376,10 +6342,13 @@ impl ActorDaemonCoordinator {
                     if (!old_head.is_empty() && old_head != &mapping_old_head)
                         || (!new_head.is_empty() && new_head != &stable_new_head)
                     {
-                        debug_log(&format!(
-                            "rebase complete semantic heads diverged from stable reflog heads semantic_old={} semantic_new={} stable_old={} stable_new={}",
-                            old_head, new_head, mapping_old_head, stable_new_head
-                        ));
+                        tracing::debug!(
+                            semantic_old = %old_head,
+                            semantic_new = %new_head,
+                            stable_old = %mapping_old_head,
+                            stable_new = %stable_new_head,
+                            "rebase complete semantic heads diverged from stable reflog heads"
+                        );
                     }
                     if let Some((original_commits, new_commits)) =
                         maybe_rebase_mappings_from_repository(
@@ -6437,10 +6406,12 @@ impl ActorDaemonCoordinator {
                             "cherry_pick_complete",
                         )?;
                     if !original_head.is_empty() && original_head != &resolved_original_head {
-                        debug_log(&format!(
-                            "cherry-pick complete original head mismatch semantic={} resolved={} new={}",
-                            original_head, resolved_original_head, new_head
-                        ));
+                        tracing::debug!(
+                            semantic = %original_head,
+                            resolved = %resolved_original_head,
+                            new = %new_head,
+                            "cherry-pick complete original head mismatch"
+                        );
                     }
                     out.push(RewriteLogEvent::cherry_pick_complete(
                         CherryPickCompleteEvent::new(
@@ -6579,10 +6550,10 @@ impl ActorDaemonCoordinator {
                                 None,
                             )?
                         else {
-                            debug_log(&format!(
-                                "pull --rebase produced no unprocessed replay segment; skipping rewrite synthesis sid={}",
-                                cmd.root_sid
-                            ));
+                            tracing::debug!(
+                                sid = %cmd.root_sid,
+                                "pull --rebase produced no unprocessed replay segment; skipping rewrite synthesis"
+                            );
                             if let Some(worktree) = cmd.worktree.as_ref() {
                                 self.clear_pending_rebase_original_head_for_worktree(worktree)?;
                             }
@@ -6673,6 +6644,31 @@ impl ActorDaemonCoordinator {
         let cmd = &applied.command;
         let events = &applied.analysis.events;
         let parsed_invocation = parsed_invocation_for_normalized_command(cmd);
+
+        let primary = cmd.primary_command.as_deref().unwrap_or("unknown");
+        let is_write_op = matches!(
+            primary,
+            "commit" | "rebase" | "merge" | "cherry-pick" | "am" | "stash" | "reset" | "push"
+        );
+        if is_write_op && cmd.exit_code == 0 {
+            let repo_path = cmd
+                .worktree
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let post_head = cmd
+                .post_repo
+                .as_ref()
+                .and_then(|r| r.head.clone())
+                .unwrap_or_default();
+            tracing::info!(
+                op = primary,
+                repo = %repo_path,
+                new_head = %post_head,
+                "git write op completed"
+            );
+        }
+
         let saw_pull_event = events.iter().any(|event| {
             matches!(
                 event,
@@ -6694,24 +6690,24 @@ impl ActorDaemonCoordinator {
             .as_deref()
             .is_some_and(|v| v == "1")
         {
-            debug_log(&format!(
-                "daemon side-effect command={} primary={} seq={} argv={:?} invoked_args={:?} ref_changes_len={} ref_changes={:?} events={:?} pre_head={:?} post_head={:?} exit_code={}",
-                cmd.invoked_command.clone().unwrap_or_default(),
-                cmd.primary_command.clone().unwrap_or_default(),
-                applied.seq,
-                cmd.raw_argv,
-                cmd.invoked_args,
-                cmd.ref_changes.len(),
-                cmd.ref_changes,
-                events,
-                cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()),
-                cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()),
-                cmd.exit_code,
-            ));
-            debug_log(&format!(
-                "daemon side-effect inflight_rebase_original_head={:?}",
-                cmd.inflight_rebase_original_head
-            ));
+            tracing::debug!(
+                command = cmd.invoked_command.clone().unwrap_or_default(),
+                primary = cmd.primary_command.clone().unwrap_or_default(),
+                seq = applied.seq,
+                argv = ?cmd.raw_argv,
+                invoked_args = ?cmd.invoked_args,
+                ref_changes_len = cmd.ref_changes.len(),
+                ref_changes = ?cmd.ref_changes,
+                events = ?events,
+                pre_head = ?cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()),
+                post_head = ?cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()),
+                exit_code = cmd.exit_code,
+                "side-effect trace"
+            );
+            tracing::debug!(
+                inflight_rebase_original_head = ?cmd.inflight_rebase_original_head,
+                "side-effect inflight rebase state"
+            );
         }
         let carryover_snapshot = if let Some(snapshot_id) = cmd.carryover_snapshot_id.as_deref() {
             self.take_carryover_snapshot(&cmd.root_sid, snapshot_id)?
@@ -6785,10 +6781,10 @@ impl ActorDaemonCoordinator {
                     // snapshot — in that case carryover_snapshot would be Some and the guard would
                     // not fire.  So reaching here means there are no pre-rebase uncommitted files
                     // to carry over, and the warning is benign.
-                    debug_log(&format!(
-                        "{} missing captured carryover snapshot for async restore (likely AI conflict-resolution checkpoint; attribution handled via working-log fallback)",
-                        cmd.primary_command.as_deref().unwrap_or("pull")
-                    ));
+                    tracing::warn!(
+                        command = cmd.primary_command.as_deref().unwrap_or("pull"),
+                        "missing captured carryover snapshot for async restore (likely AI conflict-resolution checkpoint; attribution handled via working-log fallback)"
+                    );
                 }
             }
         }
@@ -6810,10 +6806,11 @@ impl ActorDaemonCoordinator {
                             .as_deref()
                             .is_some_and(|v| v == "1")
                         {
-                            debug_log(&format!(
-                                "daemon pending rebase original head set family={:?} head={}",
-                                family, old_head
-                            ));
+                            tracing::debug!(
+                                ?family,
+                                %old_head,
+                                "pending rebase original head set"
+                            );
                         }
                         self.set_pending_rebase_original_head_for_worktree(worktree, old_head)?;
                     }
@@ -6865,10 +6862,10 @@ impl ActorDaemonCoordinator {
                 return Ok(());
             }
             if is_stash_restore {
-                debug_log(&format!(
-                    "Stash restore with non-zero exit for sid={}, continuing to restore attribution",
-                    cmd.root_sid
-                ));
+                tracing::debug!(
+                    sid = %cmd.root_sid,
+                    "stash restore with non-zero exit, continuing to restore attribution"
+                );
             }
         }
 
@@ -6878,10 +6875,11 @@ impl ActorDaemonCoordinator {
                 match event {
                     crate::daemon::domain::SemanticEvent::CloneCompleted { .. } => {
                         if let Err(e) = apply_clone_notes_sync_side_effect(&worktree) {
-                            debug_log(&format!(
-                                "daemon clone notes side effect failed for {}: {}",
-                                worktree, e
-                            ));
+                            tracing::debug!(
+                                %e,
+                                %worktree,
+                                "clone notes side effect failed"
+                            );
                         }
                     }
                     crate::daemon::domain::SemanticEvent::PullCompleted { .. } => {
@@ -6906,20 +6904,15 @@ impl ActorDaemonCoordinator {
         let rewrite_events = match self.rewrite_events_from_semantic_events(cmd, events) {
             Ok(rewrite_events) => rewrite_events,
             Err(error) => {
-                debug_log(&format!(
-                    "daemon strict rewrite synthesis failed command={:?} invoked={:?} sid={} error={}",
-                    cmd.primary_command, cmd.invoked_command, cmd.root_sid, error
-                ));
-                crate::observability::log_error(
-                    &error,
-                    Some(json!({
-                        "component": "daemon",
-                        "operation": "rewrite_events_from_semantic_events",
-                        "command": cmd.primary_command,
-                        "invoked_command": cmd.invoked_command,
-                        "root_sid": cmd.root_sid,
-                        "family": family,
-                    })),
+                tracing::error!(
+                    component = "daemon",
+                    operation = "rewrite_events_from_semantic_events",
+                    command = ?cmd.primary_command,
+                    invoked_command = ?cmd.invoked_command,
+                    root_sid = %cmd.root_sid,
+                    ?family,
+                    %error,
+                    "strict rewrite synthesis failed"
                 );
                 return Err(error);
             }
@@ -7062,18 +7055,22 @@ impl ActorDaemonCoordinator {
                     let _ = self.end_family_effect(&family);
                     if let Err(error) = result {
                         let _ = self.record_side_effect_error(&family, applied.seq, &error);
-                        debug_log(&format!(
-                            "daemon async side-effect error for family {} seq {}: {}",
-                            family, applied.seq, error
-                        ));
+                        tracing::error!(
+                            %error,
+                            %family,
+                            seq = applied.seq,
+                            "async side-effect error"
+                        );
                     } else if let Err(error) =
                         self.append_command_completion_log(&family, &applied, &Ok(()), applied.seq)
                     {
                         let _ = self.record_side_effect_error(&family, applied.seq, &error);
-                        debug_log(&format!(
-                            "daemon async completion log write failed for family {} seq {}: {}",
-                            family, applied.seq, error
-                        ));
+                        tracing::error!(
+                            %error,
+                            %family,
+                            seq = applied.seq,
+                            "async completion log write failed"
+                        );
                     }
                 }
             }
@@ -7333,12 +7330,12 @@ fn control_listener_loop_actor(
             if std::thread::Builder::new()
                 .spawn(move || {
                     if let Err(e) = handle_control_connection_actor(stream, coord, handle) {
-                        debug_log(&format!("daemon control connection error: {}", e));
+                        tracing::debug!(%e, "control connection error");
                     }
                 })
                 .is_err()
             {
-                debug_log("daemon control listener: failed to spawn handler thread");
+                tracing::error!("control listener: failed to spawn handler thread");
                 break;
             }
         }
@@ -7357,7 +7354,7 @@ fn control_listener_loop_actor(
                 let result =
                     windows_control_pipe_worker_loop(path, first_connecting, coord.clone(), handle);
                 if let Err(error) = &result {
-                    debug_log(&format!("daemon control worker error: {}", error));
+                    tracing::error!(%error, "control worker error");
                     coord.request_shutdown();
                 }
                 result
@@ -7372,7 +7369,7 @@ fn control_listener_loop_actor(
                 let result =
                     windows_control_pipe_worker_loop(path, connecting, coord.clone(), handle);
                 if let Err(error) = &result {
-                    debug_log(&format!("daemon control worker error: {}", error));
+                    tracing::error!(%error, "control worker error");
                     coord.request_shutdown();
                 }
                 result
@@ -7449,7 +7446,7 @@ fn windows_control_pipe_worker_loop(
                 coordinator.clone(),
                 runtime_handle.clone(),
             ) {
-                debug_log(&format!("daemon control connection error: {}", e));
+                tracing::debug!(%e, "control connection error");
             }
         }
 
@@ -7528,12 +7525,12 @@ fn trace_listener_loop_actor(
             if std::thread::Builder::new()
                 .spawn(move || {
                     if let Err(e) = handle_trace_connection_actor(stream, coord) {
-                        debug_log(&format!("daemon trace connection error: {}", e));
+                        tracing::debug!(%e, "trace connection error");
                     }
                 })
                 .is_err()
             {
-                debug_log("daemon trace listener: failed to spawn handler thread");
+                tracing::error!("trace listener: failed to spawn handler thread");
                 break;
             }
         }
@@ -7550,7 +7547,7 @@ fn trace_listener_loop_actor(
             workers.push(std::thread::spawn(move || {
                 let result = windows_trace_pipe_worker_loop(path, first_connecting, coord.clone());
                 if let Err(error) = &result {
-                    debug_log(&format!("daemon trace worker error: {}", error));
+                    tracing::error!(%error, "trace worker error");
                     coord.request_shutdown();
                 }
                 result
@@ -7563,7 +7560,7 @@ fn trace_listener_loop_actor(
             workers.push(std::thread::spawn(move || {
                 let result = windows_trace_pipe_worker_loop(path, connecting, coord.clone());
                 if let Err(error) = &result {
-                    debug_log(&format!("daemon trace worker error: {}", error));
+                    tracing::error!(%error, "trace worker error");
                     coord.request_shutdown();
                 }
                 result
@@ -7610,7 +7607,7 @@ fn windows_trace_pipe_worker_loop(
         {
             let mut reader = BufReader::new(&mut server);
             if let Err(e) = handle_trace_connection_actor_reader(&mut reader, coordinator.clone()) {
-                debug_log(&format!("daemon trace connection error: {}", e));
+                tracing::debug!(%e, "trace connection error");
             }
         }
 
@@ -7674,18 +7671,18 @@ fn handle_trace_connection_actor_reader<R: Read>(
                 if let Err(error) =
                     coordinator.enqueue_stale_connection_close_fallbacks(&stale_candidates)
                 {
-                    debug_log(&format!(
-                        "daemon trace connection close fallback error: {}",
-                        error
-                    ));
+                    tracing::debug!(
+                        %error,
+                        "trace connection close fallback error"
+                    );
                 }
             }
             Ok(_) => {}
             Err(error) => {
-                debug_log(&format!(
-                    "daemon trace connection close bookkeeping error: {}",
-                    error
-                ));
+                tracing::debug!(
+                    %error,
+                    "trace connection close bookkeeping error"
+                );
             }
         }
     }
@@ -7797,21 +7794,21 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
 
         match check_for_update_available() {
             Ok(DaemonUpdateCheckResult::UpdateReady) => {
-                debug_log("daemon update check: newer version available, requesting shutdown");
+                tracing::info!("update check: newer version available, requesting shutdown");
                 coordinator.request_shutdown();
                 return;
             }
             Ok(DaemonUpdateCheckResult::NoUpdate) => {
-                debug_log("daemon update check: no update needed");
+                tracing::info!("update check: no update needed");
             }
             Err(err) => {
-                debug_log(&format!("daemon update check failed: {}", err));
+                tracing::warn!(%err, "update check failed");
             }
         }
 
         let uptime_ns = now_unix_nanos().saturating_sub(started_at_ns);
         if uptime_ns >= daemon_max_uptime_ns() {
-            debug_log("daemon uptime exceeded max, requesting restart");
+            tracing::info!("uptime exceeded max, requesting restart");
             coordinator.request_shutdown();
             return;
         }
@@ -7830,13 +7827,13 @@ pub(crate) fn daemon_run_pending_self_update() {
 
     match check_and_install_update_if_available() {
         Ok(DaemonUpdateCheckResult::UpdateReady) => {
-            debug_log("daemon self-update: installation completed successfully");
+            tracing::info!("self-update: installation completed successfully");
         }
         Ok(DaemonUpdateCheckResult::NoUpdate) => {
-            debug_log("daemon self-update: no update to install");
+            tracing::info!("self-update: no update to install");
         }
         Err(err) => {
-            debug_log(&format!("daemon self-update: installation failed: {}", err));
+            tracing::warn!(%err, "self-update: installation failed");
         }
     }
 }
@@ -7848,15 +7845,48 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     if let Err(error) = crate::commands::checkpoint::prune_stale_captured_checkpoints(
         Duration::from_secs(60 * 60 * 24),
     ) {
-        debug_log(&format!(
-            "daemon stale captured checkpoint pruning failed: {}",
-            error
-        ));
+        tracing::warn!(
+            %error,
+            "stale captured checkpoint pruning failed"
+        );
     }
     let _lock = DaemonLock::acquire(&config.lock_path)?;
     let _active_guard = DaemonProcessActiveGuard::enter();
     write_pid_metadata(&config)?;
+
+    // Initialize tracing subscriber before log file redirect so the fmt layer
+    // captures stderr (fd 2). After dup2, writes go to the daemon log file.
+    {
+        use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+
+        let env_filter = if std::env::var("GIT_AI_DEBUG").as_deref() == Ok("1") {
+            EnvFilter::new("debug")
+        } else {
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+        };
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(false)
+                    .with_thread_ids(false)
+                    .with_ansi(false),
+            )
+            .with(crate::daemon::sentry_layer::SentryLayer)
+            .init();
+    }
+
     let _log_guard = maybe_setup_daemon_log_file(&config);
+
+    tracing::info!(
+        pid = std::process::id(),
+        version = env!("CARGO_PKG_VERSION"),
+        os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
+        "daemon started"
+    );
+
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;
 
@@ -7881,10 +7911,10 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
         match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                debug_log(&format!("daemon control listener exited with error: {}", e));
+                tracing::error!(%e, "control listener exited with error");
             }
             Err(_) => {
-                debug_log("daemon control listener panicked");
+                tracing::error!("control listener panicked");
             }
         }
         // Always request shutdown so the daemon doesn't stay half-alive.
@@ -7900,10 +7930,10 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
         match result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                debug_log(&format!("daemon trace listener exited with error: {}", e));
+                tracing::error!(%e, "trace listener exited with error");
             }
             Err(_) => {
-                debug_log("daemon trace listener panicked");
+                tracing::error!("trace listener panicked");
             }
         }
         // Always request shutdown so the daemon doesn't stay half-alive.
@@ -7933,6 +7963,8 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;
     remove_pid_metadata(&config)?;
+
+    tracing::info!("daemon shutdown complete");
 
     Ok(())
 }

@@ -3,7 +3,6 @@ use crate::commands::hooks::commit_hooks::get_commit_default_author;
 use crate::commands::hooks::plumbing_rewrite_hooks::apply_wrapper_plumbing_rewrite_if_possible;
 use crate::git::cli_parser::ParsedGitInvocation;
 use crate::git::repository::Repository;
-use crate::utils::debug_log;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedUpdateRefCommand {
@@ -79,10 +78,12 @@ pub fn post_update_ref_hook(
     }
 
     if is_ancestor(repository, &new_target, &old_target) {
-        debug_log(&format!(
+        tracing::debug!(
             "Skipping wrapper update-ref rewind handling for {}: {} -> {}",
-            ref_name, old_target, new_target
-        ));
+            ref_name,
+            old_target,
+            new_target
+        );
         return;
     }
 
@@ -94,10 +95,10 @@ pub fn post_update_ref_hook(
         &commit_author,
         true,
     ) {
-        debug_log(&format!(
+        tracing::debug!(
             "Skipping wrapper update-ref rewrite handling for {}: could not derive safe mappings",
             ref_name
-        ));
+        );
     }
 }
 

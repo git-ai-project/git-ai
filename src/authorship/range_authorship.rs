@@ -10,8 +10,6 @@ use crate::authorship::stats::{CommitStats, stats_for_commit_stats, stats_from_a
 use crate::error::GitAiError;
 use crate::git::refs::{CommitAuthorship, get_commits_with_notes_from_list};
 use crate::git::repository::{CommitRange, InternalGitProfile, Repository, exec_git_with_profile};
-use crate::utils::debug_log;
-
 use std::io::IsTerminal;
 
 /// The git empty tree hash - represents an empty repository state
@@ -100,7 +98,7 @@ pub fn range_authorship(
             )));
         }
 
-        debug_log(&format!("✓ Fetched {} from {}", fetch_refspec, remote));
+        tracing::debug!("Fetched {} from {}", fetch_refspec, remote);
     }
 
     // Clone commit_range before consuming it
@@ -180,10 +178,11 @@ fn create_authorship_log_for_range(
         VirtualAttributions, merge_attributions_favoring_first,
     };
 
-    debug_log(&format!(
+    tracing::debug!(
         "Calculating authorship log for range: {} -> {}",
-        start_sha, end_sha
-    ));
+        start_sha,
+        end_sha
+    );
 
     // Step 1: Get list of changed files between the two commits
     let all_changed_files = repo.diff_changed_files(start_sha, end_sha)?;
@@ -202,7 +201,7 @@ fn create_authorship_log_for_range(
 
     if changed_files.is_empty() {
         // No files changed, return empty authorship log
-        debug_log("No files changed in range");
+        tracing::debug!("No files changed in range");
         return Ok(
             crate::authorship::authorship_log_serialization::AuthorshipLog {
                 attestations: Vec::new(),
@@ -214,15 +213,15 @@ fn create_authorship_log_for_range(
         );
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "Processing {} changed files for range authorship",
         changed_files.len()
-    ));
+    );
 
     // Special handling for empty tree: there's no start state to compare against
     // We only need the end state's attributions
     if start_sha == EMPTY_TREE_HASH {
-        debug_log("Start is empty tree - using only end commit attributions");
+        tracing::debug!("Start is empty tree - using only end commit attributions");
 
         let repo_clone = repo.clone();
         let mut end_va = smol::block_on(async {
@@ -243,11 +242,11 @@ fn create_authorship_log_for_range(
         let mut authorship_log = end_va.to_authorship_log()?;
         authorship_log.metadata.base_commit_sha = end_sha.to_string();
 
-        debug_log(&format!(
+        tracing::debug!(
             "Created authorship log with {} attestations, {} prompts",
             authorship_log.attestations.len(),
             authorship_log.metadata.prompts.len()
-        ));
+        );
 
         return Ok(authorship_log);
     }
@@ -291,10 +290,10 @@ fn create_authorship_log_for_range(
     // Step 4: Read committed files from end commit (final state)
     let committed_files = get_committed_files_content(repo, end_sha, &changed_files)?;
 
-    debug_log(&format!(
+    tracing::debug!(
         "Read {} committed files from end commit",
         committed_files.len()
-    ));
+    );
 
     // Step 5: Merge VirtualAttributions, favoring end commit (newer state)
     let merged_va = merge_attributions_favoring_first(end_va, start_va, committed_files)?;
@@ -303,11 +302,11 @@ fn create_authorship_log_for_range(
     let mut authorship_log = merged_va.to_authorship_log()?;
     authorship_log.metadata.base_commit_sha = end_sha.to_string();
 
-    debug_log(&format!(
+    tracing::debug!(
         "Created authorship log with {} attestations, {} prompts",
         authorship_log.attestations.len(),
         authorship_log.metadata.prompts.len()
-    ));
+    );
 
     Ok(authorship_log)
 }

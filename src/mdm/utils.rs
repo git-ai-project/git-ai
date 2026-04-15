@@ -1,6 +1,5 @@
 use crate::authorship::imara_diff_utils::{LineChangeTag, compute_line_changes};
 use crate::error::GitAiError;
-use crate::utils::debug_log;
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::CstRootNode;
 use std::fs;
@@ -193,11 +192,11 @@ fn find_editor_cli_js(cli_name: &str) -> Option<EditorCliCommand> {
 
     for (electron_path, cli_js_path) in candidates {
         if electron_path.is_file() && cli_js_path.is_file() {
-            debug_log(&format!(
+            tracing::debug!(
                 "{}: CLI not in PATH, using cli.js fallback at {}",
                 cli_name,
                 cli_js_path.display()
-            ));
+            );
             return Some(EditorCliCommand::from_cli_js(&electron_path, &cli_js_path));
         }
     }

@@ -4,61 +4,8 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// Check if debug logging is enabled via environment variable
-///
-/// This is checked once at module initialization to avoid repeated environment variable lookups.
-static DEBUG_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-static DEBUG_PERFORMANCE_LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
 static IS_TERMINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static IS_IN_BACKGROUND_AGENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-
-fn is_debug_enabled() -> bool {
-    *DEBUG_ENABLED.get_or_init(|| {
-        (cfg!(debug_assertions)
-            || std::env::var("GIT_AI_DEBUG").unwrap_or_default() == "1"
-            || std::env::var("GIT_AI_DEBUG_PERFORMANCE").unwrap_or_default() != "")
-            && std::env::var("GIT_AI_DEBUG").unwrap_or_default() != "0"
-    })
-}
-
-fn is_debug_performance_enabled() -> bool {
-    debug_performance_level() >= 1
-}
-
-fn debug_performance_level() -> u8 {
-    *DEBUG_PERFORMANCE_LEVEL.get_or_init(|| {
-        std::env::var("GIT_AI_DEBUG_PERFORMANCE")
-            .unwrap_or_default()
-            .parse::<u8>()
-            .unwrap_or(0)
-    })
-}
-
-pub fn debug_performance_log(msg: &str) {
-    if is_debug_performance_enabled() {
-        eprintln!("\x1b[1;33m[git-ai (perf)]\x1b[0m {}", msg);
-    }
-}
-
-pub fn debug_performance_log_structured(json: serde_json::Value) {
-    if debug_performance_level() >= 2 {
-        eprintln!("\x1b[1;33m[git-ai (perf-json)]\x1b[0m {}", json);
-    }
-}
-
-/// Debug logging utility function
-///
-/// Prints debug messages with a colored prefix when debug assertions are enabled or when
-/// the `GIT_AI_DEBUG` environment variable is set to "1".
-///
-/// # Arguments
-///
-/// * `msg` - The debug message to print
-pub fn debug_log(msg: &str) {
-    if is_debug_enabled() {
-        eprintln!("\x1b[1;33m[git-ai]\x1b[0m {}", msg);
-    }
-}
 
 /// Print a git diff in a readable format
 ///
@@ -1093,30 +1040,6 @@ mod tests {
     #[test]
     fn test_normalize_to_posix_empty() {
         assert_eq!(normalize_to_posix(""), "");
-    }
-
-    // =========================================================================
-    // Debug Logging Tests
-    // =========================================================================
-
-    #[test]
-    fn test_debug_log_no_panic() {
-        // Debug logging should not panic
-        debug_log("test message");
-    }
-
-    #[test]
-    fn test_debug_performance_log_no_panic() {
-        debug_performance_log("test performance message");
-    }
-
-    #[test]
-    fn test_debug_performance_log_structured_no_panic() {
-        use serde_json::json;
-        debug_performance_log_structured(json!({
-            "operation": "test",
-            "duration_ms": 100,
-        }));
     }
 
     // =========================================================================

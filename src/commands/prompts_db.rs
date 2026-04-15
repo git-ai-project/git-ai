@@ -827,10 +827,10 @@ fn fetch_from_git_notes(
     }
     eprintln!("    found {} notes in history", live_notes.len());
     if orphan_count > 0 {
-        crate::utils::debug_log(&format!(
+        tracing::debug!(
             "{} orphaned notes (skipped, commit no longer reachable)",
             orphan_count
-        ));
+        );
     }
     if live_notes.is_empty() {
         return Ok((0, deferred));
@@ -987,12 +987,10 @@ fn fetch_from_git_notes(
 /// SQLite path: `InternalDatabase::get_prompt(id)` → upsert if a body exists.
 ///
 /// Per-prompt accounting (NOT per-hash) is reported in the summary line.
-/// Skip reasons are aggregated and emitted via `debug_log` (one line per category)
-/// only when `GIT_AI_DEBUG=1` is set.
+/// Skip reasons are aggregated and emitted via `tracing::debug!` (one line per category).
 fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
     use crate::api::client::{ApiClient, ApiContext};
     use crate::api::types::CasMessagesObject;
-    use crate::utils::debug_log;
 
     // Determine the configured instance prefix once (e.g., "https://api.git-ai.com/cas/")
     let instance_prefix = {
@@ -1009,10 +1007,12 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
         if dp.messages_url.starts_with(&instance_prefix) {
             cas_indices.push(i);
         } else {
-            debug_log(&format!(
+            tracing::debug!(
                 "prompts: hostname mismatch id={} url={} expected_prefix={}",
-                dp.id, dp.messages_url, instance_prefix
-            ));
+                dp.id,
+                dp.messages_url,
+                instance_prefix
+            );
             foreign_indices.push(i);
         }
     }
@@ -1053,10 +1053,11 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
         for &idx in &foreign_indices {
             if !foreign_resolved.contains(&idx) {
                 let dp = &deferred[idx];
-                debug_log(&format!(
+                tracing::debug!(
                     "prompts: unresolved (foreign url + no local body) id={} url={}",
-                    dp.id, dp.messages_url
-                ));
+                    dp.id,
+                    dp.messages_url
+                );
             }
         }
     }
@@ -1098,10 +1099,10 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
         if !hashes_needing_fetch.is_empty() {
             let context = ApiContext::new(None);
             if context.auth_token.is_none() {
-                debug_log(&format!(
+                tracing::debug!(
                     "prompts: no auth token, skipping CAS API fetch for {} hashes",
                     hashes_needing_fetch.len()
-                ));
+                );
                 // All not-cached, CAS-eligible prompts are tentatively "not logged in".
                 // Log each affected prompt so debug output shows exactly which ones
                 // would have been fetched if the user were signed in.
@@ -1109,10 +1110,12 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                     if let Some(indices) = hash_to_indices.get(hash) {
                         for &idx in indices {
                             let dp = &deferred[idx];
-                            debug_log(&format!(
+                            tracing::debug!(
                                 "prompts: auth error (not logged in) id={} hash={} url={}",
-                                dp.id, hash, dp.messages_url
-                            ));
+                                dp.id,
+                                hash,
+                                dp.messages_url
+                            );
                             cas_initial_failures.insert(idx, "not logged in");
                         }
                     }
@@ -1162,10 +1165,12 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                                             {
                                                 for &idx in indices {
                                                     let dp = &deferred[idx];
-                                                    debug_log(&format!(
+                                                    tracing::debug!(
                                                         "prompts: CAS decode error id={} hash={} url={}",
-                                                        dp.id, result.hash, dp.messages_url
-                                                    ));
+                                                        dp.id,
+                                                        result.hash,
+                                                        dp.messages_url
+                                                    );
                                                 }
                                             }
                                         }
@@ -1174,10 +1179,13 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                                         if let Some(indices) = hash_to_indices.get(&result.hash) {
                                             for &idx in indices {
                                                 let dp = &deferred[idx];
-                                                debug_log(&format!(
+                                                tracing::debug!(
                                                     "prompts: CAS not-found id={} hash={} url={} reason=\"{}\"",
-                                                    dp.id, result.hash, dp.messages_url, reason
-                                                ));
+                                                    dp.id,
+                                                    result.hash,
+                                                    dp.messages_url,
+                                                    reason
+                                                );
                                             }
                                         }
                                     }
@@ -1194,10 +1202,13 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                             if let Some(indices) = hash_to_indices.get(hash) {
                                 for &idx in indices {
                                     let dp = &deferred[idx];
-                                    debug_log(&format!(
+                                    tracing::debug!(
                                         "prompts: CAS network error id={} hash={} url={} reason=\"{}\"",
-                                        dp.id, hash, dp.messages_url, err
-                                    ));
+                                        dp.id,
+                                        hash,
+                                        dp.messages_url,
+                                        err
+                                    );
                                 }
                             }
                         }
@@ -1287,10 +1298,12 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
                 .unwrap_or("no body in remote prompt store or local sqlite");
             *skip_reasons.entry(reason).or_insert(0) += 1;
             let dp = &deferred[idx];
-            debug_log(&format!(
+            tracing::debug!(
                 "prompts: unresolved id={} url={} reason=\"{}\"",
-                dp.id, dp.messages_url, reason
-            ));
+                dp.id,
+                dp.messages_url,
+                reason
+            );
         }
     }
 
@@ -1313,7 +1326,7 @@ fn resolve_cas_messages(conn: &Connection, deferred: &[DeferredPrompt]) {
 
     // Debug-only: one line per skip reason, with counts.
     for (reason, count) in &skip_reasons {
-        debug_log(&format!("  {} skipped: {}", count, reason));
+        tracing::debug!("  {} skipped: {}", count, reason);
     }
 }
 

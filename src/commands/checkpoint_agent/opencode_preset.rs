@@ -267,7 +267,7 @@ impl AgentCheckpointPreset for OpenCodePreset {
                 }
                 Ok(BashCheckpointAction::TakePreSnapshot) => None,
                 Err(e) => {
-                    crate::utils::debug_log(&format!("Bash tool post-hook error: {}", e));
+                    tracing::debug!("Bash tool post-hook error: {}", e);
                     None
                 }
             }

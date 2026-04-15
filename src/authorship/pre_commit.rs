@@ -2,8 +2,6 @@ use crate::authorship::working_log::CheckpointKind;
 use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
-use crate::utils::debug_log;
-
 pub fn pre_commit(repo: &Repository, default_author: String) -> Result<(), GitAiError> {
     let (checkpoint_kind, agent_run_result) = pre_commit_checkpoint_context(repo);
 
@@ -33,11 +31,11 @@ fn pre_commit_checkpoint_context(repo: &Repository) -> (CheckpointKind, Option<A
             &repo_workdir,
         )
     {
-        debug_log("pre-commit: using active bash context for AI checkpoint");
+        tracing::debug!("pre-commit: using active bash context for AI checkpoint");
         return (checkpoint_kind, agent_run_result);
     }
 
-    debug_log("pre-commit: no active inflight bash agent context, using human checkpoint");
+    tracing::debug!("pre-commit: no active inflight bash agent context, using human checkpoint");
     (CheckpointKind::Human, None)
 }
 

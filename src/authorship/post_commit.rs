@@ -12,7 +12,6 @@ use crate::config::{Config, PromptStorageMode};
 use crate::error::GitAiError;
 use crate::git::refs::notes_add;
 use crate::git::repository::Repository;
-use crate::utils::debug_log;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
 
@@ -97,10 +96,10 @@ pub fn post_commit_with_final_state(
 
     // Batch upsert all prompts to database after refreshing (non-fatal if it fails)
     if let Err(e) = batch_upsert_prompts_to_db(&parent_working_log, &working_log, &commit_sha) {
-        debug_log(&format!(
+        tracing::debug!(
             "[Warning] Failed to batch upsert prompts to database: {}",
             e
-        ));
+        );
         crate::observability::log_error(
             &e,
             Some(serde_json::json!({
@@ -185,7 +184,7 @@ pub fn post_commit_with_final_state(
             // Store in notes: redact secrets but keep messages in notes
             let count = redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
             if count > 0 {
-                debug_log(&format!("Redacted {} secrets from prompts", count));
+                tracing::debug!("Redacted {} secrets from prompts", count);
             }
         }
         PromptStorageMode::Default => {
@@ -202,19 +201,16 @@ pub fn post_commit_with_final_state(
                 let redaction_count =
                     redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
                 if redaction_count > 0 {
-                    debug_log(&format!(
+                    tracing::debug!(
                         "Redacted {} secrets from prompts before CAS upload",
                         redaction_count
-                    ));
+                    );
                 }
 
                 if let Err(e) =
                     enqueue_prompt_messages_to_cas(repo, &mut authorship_log.metadata.prompts)
                 {
-                    debug_log(&format!(
-                        "[Warning] Failed to enqueue prompt messages to CAS: {}",
-                        e
-                    ));
+                    tracing::debug!("[Warning] Failed to enqueue prompt messages to CAS: {}", e);
                     // Enqueue failed - still strip messages (never keep in notes for "default")
                     strip_prompt_messages(&mut authorship_log.metadata.prompts);
                 }
@@ -271,20 +267,17 @@ pub fn post_commit_with_final_state(
     } else {
         match skip_reason.as_ref() {
             Some(StatsSkipReason::MergeCommit) => {
-                debug_log(&format!(
-                    "Skipping post-commit stats for merge commit {}",
-                    commit_sha
-                ));
+                tracing::debug!("Skipping post-commit stats for merge commit {}", commit_sha);
             }
             Some(StatsSkipReason::Expensive(estimate)) => {
-                debug_log(&format!(
+                tracing::debug!(
                     "Skipping expensive post-commit stats for {} (files_with_additions={}, added_lines={}, deleted_lines={}, hunks={})",
                     commit_sha,
                     estimate.files_with_additions,
                     estimate.added_lines,
                     estimate.deleted_lines,
                     estimate.hunk_ranges
-                ));
+                );
             }
             None => {}
         }

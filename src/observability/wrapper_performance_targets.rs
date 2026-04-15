@@ -2,11 +2,7 @@ use std::{collections::HashMap, ops::Add, time::Duration};
 
 use serde_json::json;
 
-use crate::{
-    authorship::working_log::CheckpointKind,
-    observability::log_performance,
-    utils::{debug_performance_log, debug_performance_log_structured},
-};
+use crate::{authorship::working_log::CheckpointKind, observability::log_performance};
 
 pub const PERFORMANCE_FLOOR_MS: Duration = Duration::from_millis(270);
 
@@ -62,17 +58,17 @@ pub fn log_performance_target_if_violated(
         "within_target": within_target,
     });
 
-    debug_performance_log_structured(perf_json);
+    tracing::debug!(%perf_json, "performance");
 
     if !within_target {
-        debug_performance_log(&format!(
-            "ᕽ Performance target violated for command: {}. Total duration: {}ms, Git duration: {}ms. Pre-command: {}ms, Post-command: {}ms.",
+        tracing::debug!(
+            "Performance target violated for command: {}. Total duration: {}ms, Git duration: {}ms. Pre-command: {}ms, Post-command: {}ms.",
             command,
             total_duration.as_millis(),
             git_duration.as_millis(),
             pre_command.as_millis(),
             post_command.as_millis(),
-        ));
+        );
         log_performance(
             "performance_target_violated",
             total_duration,
@@ -88,12 +84,12 @@ pub fn log_performance_target_if_violated(
             )])),
         );
     } else {
-        debug_performance_log(&format!(
-            "✓ Performance target met for command: {}. Total duration: {}ms, Git duration: {}ms",
+        tracing::debug!(
+            "Performance target met for command: {}. Total duration: {}ms, Git duration: {}ms",
             command,
             total_duration.as_millis(),
             git_duration.as_millis(),
-        ));
+        );
     }
 }
 
@@ -116,7 +112,7 @@ pub fn log_performance_for_checkpoint(
         "checkpoint_kind": checkpoint_kind.to_string(),
         "within_target": within_target,
     });
-    debug_performance_log_structured(perf_json);
+    tracing::debug!(%perf_json, "performance");
 
     if !within_target {
         log_performance(
@@ -133,17 +129,17 @@ pub fn log_performance_for_checkpoint(
             )])),
         );
 
-        debug_performance_log(&format!(
-            "ᕽ Performance target violated for checkpoint: {}. Total duration. Files edited: {}",
+        tracing::debug!(
+            "Performance target violated for checkpoint: {}. Total duration. Files edited: {}",
             duration.as_millis(),
             files_edited,
-        ));
+        );
     } else {
-        debug_performance_log(&format!(
-            "✓ Performance target met for checkpoint: {}. Total duration. Files edited: {}",
+        tracing::debug!(
+            "Performance target met for checkpoint: {}. Total duration. Files edited: {}",
             duration.as_millis(),
             files_edited,
-        ));
+        );
     }
 }
 

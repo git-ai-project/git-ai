@@ -3,7 +3,6 @@ use crate::commands::upgrade;
 use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
 use crate::git::repository::{Repository, find_repository};
 use crate::git::sync_authorship::push_authorship_notes;
-use crate::utils::debug_log;
 
 pub fn push_pre_command_hook(
     parsed_args: &ParsedGitInvocation,
@@ -18,10 +17,7 @@ pub fn push_pre_command_hook(
     let remote = resolve_push_remote(parsed_args, repository);
 
     if let Some(remote) = remote {
-        debug_log(&format!(
-            "started pushing authorship notes to remote: {}",
-            remote
-        ));
+        tracing::debug!("started pushing authorship notes to remote: {}", remote);
         // Clone what we need for the background thread
         let global_args = repository.global_args_for_exec();
 
@@ -30,15 +26,15 @@ pub fn push_pre_command_hook(
             // Recreate repository in the background thread
             if let Ok(repo) = find_repository(&global_args) {
                 if let Err(e) = push_authorship_notes(&repo, &remote) {
-                    debug_log(&format!("authorship push failed: {}", e));
+                    tracing::debug!("authorship push failed: {}", e);
                 }
             } else {
-                debug_log("failed to open repository for authorship push");
+                tracing::debug!("failed to open repository for authorship push");
             }
         }))
     } else {
         // No remotes configured; skip silently
-        debug_log("no remotes found for authorship push; skipping");
+        tracing::debug!("no remotes found for authorship push; skipping");
         None
     }
 }
@@ -51,17 +47,14 @@ pub fn run_pre_push_hook_managed(parsed_args: &ParsedGitInvocation, repository: 
     }
 
     let Some(remote) = resolve_push_remote(parsed_args, repository) else {
-        debug_log("no remotes found for authorship push; skipping");
+        tracing::debug!("no remotes found for authorship push; skipping");
         return;
     };
 
-    debug_log(&format!(
-        "started pushing authorship notes to remote: {}",
-        remote
-    ));
+    tracing::debug!("started pushing authorship notes to remote: {}", remote);
 
     if let Err(e) = push_authorship_notes(repository, &remote) {
-        debug_log(&format!("authorship push failed: {}", e));
+        tracing::debug!("authorship push failed: {}", e);
     }
 }
 

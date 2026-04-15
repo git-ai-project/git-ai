@@ -1,7 +1,6 @@
 use crate::commands::hooks::rebase_hooks::build_rebase_commit_mappings;
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::{RebaseCompleteEvent, RewriteLogEvent};
-use crate::utils::debug_log;
 
 pub(crate) fn apply_wrapper_plumbing_rewrite_if_possible(
     repository: &mut Repository,
@@ -24,11 +23,11 @@ pub(crate) fn apply_wrapper_plumbing_rewrite_if_possible(
         return false;
     }
 
-    debug_log(&format!(
+    tracing::debug!(
         "Applying wrapper plumbing rewrite handling: {} original commits -> {} new commits",
         original_commits.len(),
         new_commits.len()
-    ));
+    );
 
     repository.handle_rewrite_log_event(
         RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(

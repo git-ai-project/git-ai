@@ -1100,7 +1100,7 @@ fn handle_checkpoint(args: &[String]) {
                 &effective_working_dir,
             )
         {
-            crate::utils::debug_log("Using active bash context for pre-commit AI checkpoint");
+            tracing::debug!("Using active bash context for pre-commit AI checkpoint");
             checkpoint_kind = resolved_kind;
             agent_run_result = resolved_agent_run_result;
         }
@@ -1347,10 +1347,10 @@ fn run_checkpoint_via_daemon_or_local(
                                 agent_run_result.as_ref(),
                             )
                         {
-                            crate::utils::debug_log(&format!(
+                            tracing::debug!(
                                 "Failed to update captured checkpoint agent context: {}",
                                 e
-                            ));
+                            );
                         }
 
                         let request = ControlRequest::CheckpointRun {

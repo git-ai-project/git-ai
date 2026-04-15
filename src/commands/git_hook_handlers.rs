@@ -9,7 +9,6 @@
 
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
-use crate::utils::debug_log;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -362,11 +361,11 @@ fn read_repo_hook_state(path: &Path) -> Result<Option<RepoHookState>, GitAiError
     match serde_json::from_str::<RepoHookState>(&content) {
         Ok(state) => Ok(Some(state)),
         Err(err) => {
-            debug_log(&format!(
+            tracing::debug!(
                 "ignoring invalid repo hook state {}: {}",
                 path.display(),
                 err
-            ));
+            );
             Ok(None)
         }
     }

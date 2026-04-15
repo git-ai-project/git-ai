@@ -2,7 +2,6 @@ use crate::authorship::authorship_log_serialization::{AUTHORSHIP_LOG_VERSION, Au
 use crate::authorship::working_log::Checkpoint;
 use crate::error::GitAiError;
 use crate::git::repository::{Repository, exec_git, exec_git_stdin};
-use crate::utils::debug_log;
 use serde_json;
 use std::collections::{HashMap, HashSet};
 
@@ -338,10 +337,10 @@ pub fn notes_add_blob_batch(
                 crate::authorship::git_ai_hooks::post_notes_updated(repo, &entries)
             }
             Ok(_) => {}
-            Err(e) => debug_log(&format!(
+            Err(e) => tracing::debug!(
                 "Failed to prepare post_notes_updated payload for notes_add_blob_batch: {}",
                 e
-            )),
+            ),
         }
     }
 
@@ -568,10 +567,7 @@ pub fn merge_notes_from_ref(repo: &Repository, source_ref: &str) -> Result<(), G
     args.push("--quiet".to_string());
     args.push(source_ref.to_string());
 
-    debug_log(&format!(
-        "Merging notes from {} into refs/notes/ai",
-        source_ref
-    ));
+    tracing::debug!("Merging notes from {} into refs/notes/ai", source_ref);
     exec_git(&args)?;
     Ok(())
 }
@@ -627,7 +623,7 @@ pub fn fallback_merge_notes_ours(repo: &Repository, source_ref: &str) -> Result<
     ]);
     exec_git_stdin(&args, stream.as_bytes())?;
 
-    debug_log("fallback merge via fast-import completed successfully");
+    tracing::debug!("fallback merge via fast-import completed successfully");
     Ok(())
 }
 
@@ -679,7 +675,7 @@ pub fn copy_ref(repo: &Repository, source_ref: &str, dest_ref: &str) -> Result<(
     args.push(dest_ref.to_string());
     args.push(source_ref.to_string());
 
-    debug_log(&format!("Copying ref {} to {}", source_ref, dest_ref));
+    tracing::debug!("Copying ref {} to {}", source_ref, dest_ref);
     exec_git(&args)?;
     Ok(())
 }
