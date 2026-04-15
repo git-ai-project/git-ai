@@ -4719,30 +4719,30 @@ impl ActorDaemonCoordinator {
                     // family sequencer.  Cancel it so subsequent commands
                     // for that family are not blocked forever by a stale
                     // PendingRoot at the head of the BTreeMap.
+                    //
+                    // Run inline (not spawned) so the cancel completes
+                    // before the next payload is processed.
+                    // replace_pending_root_entry is async in signature but
+                    // only uses std::sync::Mutex, so the .await resolves
+                    // immediately.
                     if ingest_result.is_err() {
                         if let Some(root_sid) = ordered_payload_root.as_deref() {
-                            let cancel_coord = coordinator.clone();
-                            let cancel_root = root_sid.to_string();
-                            // Spawn the async cancel on a separate task to
-                            // avoid blocking the ingest worker.
-                            tokio::spawn(async move {
-                                if let Ok(Some(family)) = cancel_coord
-                                    .replace_pending_root_entry(
-                                        &cancel_root,
-                                        FamilySequencerEntry::Canceled,
-                                    )
-                                    .await
-                                {
-                                    debug_log(&format!(
-                                        "canceled stale pending root sid={} family={} after ingest error",
-                                        cancel_root, family
-                                    ));
-                                    let _ = cancel_coord
-                                        .get_or_create_drain_notifier(&family)
-                                        .map(|n| n.notify_one());
-                                }
-                                let _ = cancel_coord.clear_trace_root_tracking(&cancel_root);
-                            });
+                            if let Ok(Some(family)) = coordinator
+                                .replace_pending_root_entry(
+                                    root_sid,
+                                    FamilySequencerEntry::Canceled,
+                                )
+                                .await
+                            {
+                                debug_log(&format!(
+                                    "canceled stale pending root sid={} family={} after ingest error",
+                                    root_sid, family
+                                ));
+                                let _ = coordinator
+                                    .get_or_create_drain_notifier(&family)
+                                    .map(|n| n.notify_one());
+                            }
+                            let _ = coordinator.clear_trace_root_tracking(root_sid);
                         }
                     }
                     let _ = coordinator.queued_trace_payloads.fetch_update(
