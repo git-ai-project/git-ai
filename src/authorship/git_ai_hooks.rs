@@ -26,7 +26,7 @@ struct RepoHookContext {
 /// The hook input is always passed through stdin as a JSON array of 1..N note entries.
 /// Commands are started in parallel, and we wait up to 3 seconds for completion before
 /// detaching and continuing so git-ai does not block.
-pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)], trigger: &str) {
+pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)]) {
     if notes.is_empty() {
         return;
     }
@@ -45,7 +45,6 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)], trigger
     let branch = context.branch;
     let is_default_branch = context.is_default_branch;
     let workdir = context.workdir;
-    let trigger = trigger.to_string();
     let payload = notes
         .iter()
         .map(|(commit_sha, note_content)| {
@@ -56,7 +55,6 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)], trigger
                 "branch": branch.as_str(),
                 "is_default_branch": is_default_branch,
                 "note_content": note_content,
-                "trigger": trigger.as_str(),
                 "workdir": workdir.as_str(),
             })
         })
@@ -110,9 +108,9 @@ pub fn post_notes_updated(repo: &Repository, notes: &[(String, String)], trigger
     wait_for_hooks_or_detach(running_children);
 }
 
-pub fn post_notes_updated_single(repo: &Repository, commit_sha: &str, note_content: &str, trigger: &str) {
+pub fn post_notes_updated_single(repo: &Repository, commit_sha: &str, note_content: &str) {
     let note_batch = vec![(commit_sha.to_string(), note_content.to_string())];
-    post_notes_updated(repo, &note_batch, trigger);
+    post_notes_updated(repo, &note_batch);
 }
 
 fn wait_for_hooks_or_detach(mut children: Vec<(String, Child)>) {

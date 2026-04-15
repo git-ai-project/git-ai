@@ -26,7 +26,7 @@ pub fn notes_add(
 
     // Use stdin to provide the note content to avoid command line length limits
     exec_git_stdin(&args, note_content.as_bytes())?;
-    crate::authorship::git_ai_hooks::post_notes_updated_single(repo, commit_sha, note_content, "notes_add");
+    crate::authorship::git_ai_hooks::post_notes_updated_single(repo, commit_sha, note_content);
     Ok(())
 }
 
@@ -242,7 +242,7 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
     fast_import_args.push("fast-import".to_string());
     fast_import_args.push("--quiet".to_string());
     exec_git_stdin(&fast_import_args, &script)?;
-    crate::authorship::git_ai_hooks::post_notes_updated(repo, &deduped_entries, "notes_add_batch");
+    crate::authorship::git_ai_hooks::post_notes_updated(repo, &deduped_entries);
 
     Ok(())
 }
@@ -335,7 +335,7 @@ pub fn notes_add_blob_batch(
         })();
         match hook_entries {
             Ok(entries) if !entries.is_empty() => {
-                crate::authorship::git_ai_hooks::post_notes_updated(repo, &entries, "notes_add_blob_batch")
+                crate::authorship::git_ai_hooks::post_notes_updated(repo, &entries)
             }
             Ok(_) => {}
             Err(e) => debug_log(&format!(
