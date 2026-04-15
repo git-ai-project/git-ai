@@ -612,8 +612,15 @@ impl OpenCodePreset {
     }
 
     fn open_sqlite_readonly(path: &Path) -> Result<Connection, GitAiError> {
-        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| GitAiError::Generic(format!("Failed to open {:?}: {}", path, e)))
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| GitAiError::Generic(format!("Failed to open {:?}: {}", path, e)))?;
+
+        // Limit SQLite page cache to ~2MB to prevent unbounded memory growth
+        // when scanning large databases without indexes.
+        // Default can grow much larger during repeated full table scans.
+        let _ = conn.execute_batch("PRAGMA cache_size = -2000;");
+
+        Ok(conn)
     }
 
     fn transcript_and_model_from_sqlite(
@@ -627,8 +634,14 @@ impl OpenCodePreset {
             return Ok((AiTranscript::new(), None));
         }
 
+        // Batch-load all parts for the session in a single query instead of
+        // one query per message (N+1). Without indexes on the OpenCode DB,
+        // each query requires a full table scan — doing this once instead of
+        // N times prevents extreme memory/CPU usage on large databases.
+        let mut parts_by_message = Self::read_all_session_parts_from_sqlite(&conn, session_id)?;
+
         Self::build_transcript_from_messages(messages, |message_id| {
-            Self::read_message_parts_from_sqlite(&conn, session_id, message_id)
+            Ok(parts_by_message.remove(message_id).unwrap_or_default())
         })
     }
 
@@ -905,22 +918,23 @@ impl OpenCodePreset {
         Ok(messages)
     }
 
-    fn read_message_parts_from_sqlite(
+    /// Read all parts for a session in a single query, grouped by message_id.
+    /// This avoids N+1 full table scans on databases without indexes.
+    fn read_all_session_parts_from_sqlite(
         conn: &Connection,
         session_id: &str,
-        message_id: &str,
-    ) -> Result<Vec<OpenCodePart>, GitAiError> {
+    ) -> Result<HashMap<String, Vec<OpenCodePart>>, GitAiError> {
         let mut stmt = conn
             .prepare(
-                "SELECT id, time_created, data FROM part WHERE session_id = ? AND message_id = ? ORDER BY id ASC",
+                "SELECT id, message_id, time_created, data FROM part WHERE session_id = ? ORDER BY message_id ASC, id ASC",
             )
             .map_err(|e| GitAiError::Generic(format!("SQLite query prepare failed: {}", e)))?;
 
         let mut rows = stmt
-            .query([session_id, message_id])
+            .query([session_id])
             .map_err(|e| GitAiError::Generic(format!("SQLite query failed: {}", e)))?;
 
-        let mut parts: Vec<(i64, OpenCodePart)> = Vec::new();
+        let mut parts_by_message: HashMap<String, Vec<(i64, OpenCodePart)>> = HashMap::new();
 
         while let Some(row) = rows
             .next()
@@ -929,17 +943,23 @@ impl OpenCodePreset {
             let part_id: String = row
                 .get(0)
                 .map_err(|e| GitAiError::Generic(format!("SQLite field read failed: {}", e)))?;
-            let created_column: i64 = row
+            let message_id: String = row
                 .get(1)
                 .map_err(|e| GitAiError::Generic(format!("SQLite field read failed: {}", e)))?;
-            let data_text: String = row
+            let created_column: i64 = row
                 .get(2)
+                .map_err(|e| GitAiError::Generic(format!("SQLite field read failed: {}", e)))?;
+            let data_text: String = row
+                .get(3)
                 .map_err(|e| GitAiError::Generic(format!("SQLite field read failed: {}", e)))?;
 
             match serde_json::from_str::<OpenCodePart>(&data_text) {
                 Ok(part) => {
                     let created = Self::part_created_for_sort(&part, created_column);
-                    parts.push((created, part));
+                    parts_by_message
+                        .entry(message_id)
+                        .or_default()
+                        .push((created, part));
                 }
                 Err(e) => {
                     eprintln!(
@@ -950,7 +970,16 @@ impl OpenCodePreset {
             }
         }
 
-        parts.sort_by_key(|(created, _)| *created);
-        Ok(parts.into_iter().map(|(_, part)| part).collect())
+        // Sort each message's parts by creation time
+        let mut result: HashMap<String, Vec<OpenCodePart>> = HashMap::new();
+        for (message_id, mut parts) in parts_by_message {
+            parts.sort_by_key(|(created, _)| *created);
+            result.insert(
+                message_id,
+                parts.into_iter().map(|(_, part)| part).collect(),
+            );
+        }
+
+        Ok(result)
     }
 }
