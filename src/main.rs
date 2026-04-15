@@ -44,7 +44,9 @@ fn main() {
         }
     }
 
-    if binary_name == "git-ai" || binary_name == "git-ai.exe" {
+    if binary_name == "git-ai" || binary_name == "git-ai.exe"
+        || binary_name == "easylife-ai" || binary_name == "easylife-ai.exe"
+    {
         commands::git_ai_handlers::handle_git_ai(&cli.args);
         std::process::exit(0);
     }

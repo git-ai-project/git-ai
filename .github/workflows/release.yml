@@ -246,9 +246,71 @@ jobs:
           path: release/git-ai-macos-x64
           retention-days: 30
 
+  package-easylife-ai:
+    name: Package easylife-ai
+    needs: [build, build-macos-intel]
+    runs-on: ubuntu-latest
+    if: success() && inputs.dry_run != true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Get version
+        id: get-version
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
+          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: artifacts
+
+      - name: Prepare easylife-ai binaries
+        run: |
+          mkdir -p easylife-pkg
+          # Copy and rename to easylife-ai-*
+          for f in linux-x64 linux-arm64 macos-x64 macos-arm64; do
+            src="artifacts/git-ai-$f/git-ai-$f"
+            if [ -f "$src" ]; then
+              cp "$src" "easylife-pkg/easylife-ai-$f"
+              chmod +x "easylife-pkg/easylife-ai-$f"
+            fi
+          done
+          for f in windows-x64 windows-arm64; do
+            src="artifacts/git-ai-$f/git-ai-$f.exe"
+            if [ -f "$src" ]; then
+              cp "$src" "easylife-pkg/easylife-ai-$f.exe"
+            fi
+          done
+          # Copy local install scripts
+          cp install-local.sh easylife-pkg/
+          cp install-local.ps1 easylife-pkg/
+          chmod +x easylife-pkg/install-local.sh
+
+      - name: Create SHA256SUMS
+        run: |
+          cd easylife-pkg
+          sha256sum easylife-ai-* install-local.sh install-local.ps1 > SHA256SUMS
+
+      - name: Package zip
+        run: |
+          VERSION="${{ steps.get-version.outputs.version }}"
+          cd easylife-pkg
+          zip "../easylife-ai-${VERSION}.zip" ./*
+          echo "Created easylife-ai-${VERSION}.zip"
+
+      - name: Upload easylife-ai zip artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: easylife-ai-bundle
+          path: easylife-ai-*.zip
+          retention-days: 30
+
   create-release:
     name: Create Release
-    needs: [build, build-macos-intel]
+    needs: [build, build-macos-intel, package-easylife-ai]
     runs-on: ubuntu-latest
     if: success() && inputs.dry_run != true
 
@@ -289,6 +351,7 @@ jobs:
       - name: Move artifacts to release directory
         run: |
           find artifacts -name "git-ai-*" -exec cp {} release/ \;
+          find artifacts -name "easylife-ai-*.zip" -exec cp {} release/ \;
 
       - name: List available artifacts
         run: |
@@ -416,6 +479,7 @@ jobs:
             release/SHA256SUMS
             release/install.sh
             release/install.ps1
+            release/easylife-ai-*.zip
           draft: false
           prerelease: ${{ steps.release-meta.outputs.prerelease == 'true' }}
           make_latest: ${{ steps.release-meta.outputs.make_latest }}
