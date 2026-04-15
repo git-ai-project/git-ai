@@ -190,6 +190,13 @@ pub fn rewrite_authorship_if_needed(
             );
         }
         RewriteLogEvent::RebaseComplete { rebase_complete } => {
+            // Fix #1079: fetch missing notes before attribution rewriting so that
+            // daemon mode has the same remote-note resolution as wrapper mode.
+            // This mirrors the fix applied to CherryPickComplete in #955.
+            crate::git::sync_authorship::fetch_missing_notes_for_commits(
+                repo,
+                &rebase_complete.original_commits,
+            );
             rewrite_authorship_after_rebase_v2(
                 repo,
                 &rebase_complete.original_head,
@@ -1764,6 +1771,66 @@ pub fn rewrite_authorship_after_rebase_v2(
             };
             pending_note_entries.push((new_commit.clone(), authorship_json));
             pending_note_debug.push((new_commit.clone(), file_count));
+        }
+    }
+
+    // Fix #1079: After the slow-path loop, remap metadata-only notes for commits that
+    // were not covered by the diff-based attribution transfer.  When a rebase contains a
+    // mix of AI-attested and human-only commits and the fast path fails (tracked file
+    // blobs differ between original and rebased), the slow path only writes notes for
+    // commits whose diff-tree intersects the AI-tracked pathspecs.  Metadata-only commits
+    // that touch different files are silently dropped.  Remap their original notes here.
+    //
+    // Important: only remap notes whose original was metadata-only (no file attestations
+    // before the `---` divider).  If the original had real attestations and the slow path
+    // didn't produce a note, the slow path intentionally decided not to write one (e.g.
+    // because a human conflict resolution replaced all AI content).
+    let processed_new_commits: HashSet<&str> = pending_note_entries
+        .iter()
+        .map(|(sha, _)| sha.as_str())
+        .collect();
+    let unprocessed_metadata_only_pairs: Vec<(String, String)> = commit_pairs_to_process
+        .iter()
+        .filter(|(orig, new)| {
+            if processed_new_commits.contains(new.as_str()) {
+                return false;
+            }
+            // Only remap if the original note is metadata-only (no attestation file paths).
+            if let Some(content) = note_cache.original_note_contents.get(orig) {
+                if content.starts_with("---\n") || content.starts_with("---\r") {
+                    true
+                } else {
+                    content
+                        .find("\n---\n")
+                        .map(|pos| content[..pos].trim().is_empty())
+                        .unwrap_or(false)
+                }
+            } else {
+                false
+            }
+        })
+        .cloned()
+        .collect();
+    if !unprocessed_metadata_only_pairs.is_empty() {
+        let original_note_contents: HashMap<String, String> = unprocessed_metadata_only_pairs
+            .iter()
+            .filter_map(|(orig, _)| {
+                note_cache
+                    .original_note_contents
+                    .get(orig)
+                    .map(|content| (orig.clone(), content.clone()))
+            })
+            .collect();
+        let remapped_count = remap_notes_for_commit_pairs(
+            repo,
+            &unprocessed_metadata_only_pairs,
+            &original_note_contents,
+        )?;
+        if remapped_count > 0 {
+            tracing::debug!(
+                remapped_count,
+                "remapped metadata-only notes for commits not covered by slow-path attribution transfer"
+            );
         }
     }
 
