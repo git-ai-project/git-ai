@@ -2642,7 +2642,7 @@ fn apply_rewrite_side_effect(
         )?;
     }
     if !rewrite_event_needs_authorship_processing(&repo, &rewrite_event)? {
-        let _ = repo.storage.append_rewrite_event(rewrite_event);
+        repo.storage.append_rewrite_event(rewrite_event)?;
         return Ok(());
     }
     match &rewrite_event {
@@ -2685,7 +2685,11 @@ fn apply_rewrite_side_effect(
         &author,
         normalized_carryover_snapshot_ref,
     )?;
-    let log = repo.storage.append_rewrite_event(rewrite_event.clone())?;
+    // Read the current log BEFORE appending, so we can pass it to authorship
+    // processing.  We intentionally defer the append until AFTER authorship
+    // succeeds — this prevents a failed rewrite from being permanently marked
+    // as processed (fix for non-conflict rebase note loss).
+    let pre_append_log = repo.storage.read_rewrite_events()?;
     match &rewrite_event {
         RewriteLogEvent::Commit { commit } => {
             let final_state_override =
@@ -2711,9 +2715,19 @@ fn apply_rewrite_side_effect(
             )?;
         }
         _ => {
-            rewrite_authorship_if_needed(&repo, &rewrite_event, author.clone(), &log, true)?;
+            rewrite_authorship_if_needed(
+                &repo,
+                &rewrite_event,
+                author.clone(),
+                &pre_append_log,
+                true,
+            )?;
         }
     }
+    // Append the event AFTER authorship processing succeeds.  If the
+    // processing above errored, the event is not recorded and the daemon
+    // can retry on the next cycle.
+    repo.storage.append_rewrite_event(rewrite_event.clone())?;
     if let Some((target_commit, carried_va, final_state)) = deferred_commit_carryover {
         restore_virtual_attribution_carryover(&repo, &target_commit, carried_va, final_state)?;
     }
@@ -6348,9 +6362,11 @@ impl ActorDaemonCoordinator {
                         );
                         (old_head.clone(), new_head.clone(), fallback_onto)
                     } else {
-                        tracing::debug!(
+                        tracing::warn!(
                             sid = %cmd.root_sid,
-                            "rebase complete produced no unprocessed replay segment; skipping rewrite synthesis"
+                            semantic_old = %old_head,
+                            semantic_new = %new_head,
+                            "rebase complete produced no unprocessed replay segment and semantic heads are empty/equal; skipping rewrite synthesis — authorship notes may be lost"
                         );
                         if let Some(worktree) = cmd.worktree.as_ref() {
                             self.clear_pending_rebase_original_head_for_worktree(worktree)?;
@@ -6384,6 +6400,14 @@ impl ActorDaemonCoordinator {
                             original_commits,
                             new_commits,
                         )));
+                    } else {
+                        tracing::warn!(
+                            old_head = %mapping_old_head,
+                            new_head = %stable_new_head,
+                            onto = %onto_head,
+                            sid = %cmd.root_sid,
+                            "rebase complete: commit mapping produced no commits; authorship notes will NOT be rewritten for this rebase"
+                        );
                     }
                     if let Some(worktree) = cmd.worktree.as_ref() {
                         self.clear_pending_rebase_original_head_for_worktree(worktree)?;
