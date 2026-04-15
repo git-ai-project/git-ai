@@ -26,6 +26,16 @@ const DEFAULT_IGNORE_PATTERNS: &[&str] = &[
     "**/*.snap",
     "**/*.snap.new",
     "**/drizzle/meta/**",
+    // Protobuf generated code
+    "*.pbobjc.h",
+    "*.pbobjc.m",
+    "*.pb.go",
+    "*.pb.h",
+    "*.pb.cc",
+    "*_pb2.py",
+    "*_pb2_grpc.py",
+    "*.pb.swift",
+    "*.pb.dart",
 ];
 
 #[derive(Clone, Debug)]
@@ -742,5 +752,81 @@ docs/**
         assert!(patterns.contains(&"generated/**".to_string()));
         assert!(patterns.contains(&"docs/**".to_string()));
         assert!(patterns.contains(&"*.lock".to_string()));
+    }
+
+    #[test]
+    fn defaults_include_protobuf_generated_patterns() {
+        let defaults = default_ignore_patterns();
+        // Objective-C protobuf
+        assert!(defaults.contains(&"*.pbobjc.h".to_string()));
+        assert!(defaults.contains(&"*.pbobjc.m".to_string()));
+        // Go protobuf
+        assert!(defaults.contains(&"*.pb.go".to_string()));
+        // C++ protobuf
+        assert!(defaults.contains(&"*.pb.h".to_string()));
+        assert!(defaults.contains(&"*.pb.cc".to_string()));
+        // Python protobuf
+        assert!(defaults.contains(&"*_pb2.py".to_string()));
+        assert!(defaults.contains(&"*_pb2_grpc.py".to_string()));
+        // Swift protobuf
+        assert!(defaults.contains(&"*.pb.swift".to_string()));
+        // Dart protobuf
+        assert!(defaults.contains(&"*.pb.dart".to_string()));
+    }
+
+    #[test]
+    fn defaults_ignore_protobuf_generated_files() {
+        let defaults = default_ignore_patterns();
+        let matcher = build_ignore_matcher(&defaults);
+
+        // Bare filenames
+        assert!(should_ignore_file_with_matcher(
+            "Message.pbobjc.h",
+            &matcher
+        ));
+        assert!(should_ignore_file_with_matcher(
+            "Message.pbobjc.m",
+            &matcher
+        ));
+        assert!(should_ignore_file_with_matcher("service.pb.go", &matcher));
+        assert!(should_ignore_file_with_matcher("message.pb.h", &matcher));
+        assert!(should_ignore_file_with_matcher("message.pb.cc", &matcher));
+        assert!(should_ignore_file_with_matcher("types_pb2.py", &matcher));
+        assert!(should_ignore_file_with_matcher(
+            "service_pb2_grpc.py",
+            &matcher
+        ));
+        assert!(should_ignore_file_with_matcher(
+            "message.pb.swift",
+            &matcher
+        ));
+        assert!(should_ignore_file_with_matcher("message.pb.dart", &matcher));
+
+        // Nested paths
+        assert!(should_ignore_file_with_matcher(
+            "proto/gen/service.pb.go",
+            &matcher
+        ));
+        assert!(should_ignore_file_with_matcher(
+            "ios/Proto/Message.pbobjc.h",
+            &matcher
+        ));
+        assert!(should_ignore_file_with_matcher(
+            "backend/api/types_pb2.py",
+            &matcher
+        ));
+        assert!(should_ignore_file_with_matcher(
+            "cpp/protos/message.pb.cc",
+            &matcher
+        ));
+
+        // Non-protobuf files should NOT be matched
+        assert!(!should_ignore_file_with_matcher("main.go", &matcher));
+        assert!(!should_ignore_file_with_matcher("service.py", &matcher));
+        assert!(!should_ignore_file_with_matcher("header.h", &matcher));
+        assert!(!should_ignore_file_with_matcher("source.cc", &matcher));
+        assert!(!should_ignore_file_with_matcher("app.swift", &matcher));
+        assert!(!should_ignore_file_with_matcher("widget.dart", &matcher));
+        assert!(!should_ignore_file_with_matcher("Objective.m", &matcher));
     }
 }
