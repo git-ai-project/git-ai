@@ -6322,14 +6322,32 @@ impl ActorDaemonCoordinator {
                     })?;
                     let repository = repository_for_rewrite_context(cmd, "rebase_complete")?;
                     let start_target_hint = rebase_start_target_hint_from_command(cmd);
-                    let Some((mapping_old_head, stable_new_head, onto_head)) =
+                    let (mapping_old_head, stable_new_head, onto_head) = if let Some(heads) =
                         Self::stable_rebase_heads_from_worktree(
                             &repository,
                             worktree,
                             &cmd.raw_argv,
                             start_target_hint.as_deref(),
-                        )?
-                    else {
+                        )? {
+                        heads
+                    } else if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
+                        // Fix #1079: Fall back to semantic event heads when the reflog
+                        // segment is not found.  This handles detached HEAD rebases
+                        // where git does not write a "rebase (finish): returning to
+                        // ..." reflog entry, causing reflog-based segment detection to
+                        // fail.
+                        let fallback_onto = repository
+                            .merge_base(old_head.to_string(), new_head.to_string())
+                            .unwrap_or_else(|_| new_head.clone());
+                        tracing::debug!(
+                            old_head = %old_head,
+                            new_head = %new_head,
+                            onto = %fallback_onto,
+                            sid = %cmd.root_sid,
+                            "rebase complete: using semantic event heads as fallback"
+                        );
+                        (old_head.clone(), new_head.clone(), fallback_onto)
+                    } else {
                         tracing::debug!(
                             sid = %cmd.root_sid,
                             "rebase complete produced no unprocessed replay segment; skipping rewrite synthesis"
