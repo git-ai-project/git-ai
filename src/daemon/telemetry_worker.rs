@@ -504,10 +504,14 @@ fn flush_sentry_and_posthog(
             });
             ph_event["timestamp"] = json!(msg.timestamp);
 
-            let _ = minreq::post(&endpoint)
-                .with_header("Content-Type", "application/json")
-                .with_body(serde_json::to_string(&ph_event).unwrap_or_default())
-                .send();
+            let agent = crate::http::build_agent(Some(30));
+            let request = agent
+                .post(&endpoint)
+                .set("Content-Type", "application/json");
+            let _ = crate::http::send_with_body(
+                request,
+                &serde_json::to_string(&ph_event).unwrap_or_default(),
+            );
         }
     }
 }
@@ -604,11 +608,12 @@ impl SentryClient {
         );
 
         let body = serde_json::to_string(&event)?;
-        let response = minreq::post(&self.endpoint)
-            .with_header("X-Sentry-Auth", auth_header)
-            .with_header("Content-Type", "application/json")
-            .with_body(body)
-            .send()?;
+        let agent = crate::http::build_agent(Some(30));
+        let request = agent
+            .post(&self.endpoint)
+            .set("X-Sentry-Auth", &auth_header)
+            .set("Content-Type", "application/json");
+        let response = crate::http::send_with_body(request, &body)?;
 
         let status = response.status_code;
         if (200..300).contains(&status) {

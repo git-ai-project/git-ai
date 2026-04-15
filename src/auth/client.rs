@@ -1,6 +1,7 @@
 use crate::api::client::ApiContext;
 use crate::auth::types::{DeviceAuthResponse, OAuthError, StoredCredentials, TokenResponse};
 use crate::config;
+use crate::http;
 use std::thread;
 use std::time::Duration;
 
@@ -58,11 +59,9 @@ impl OAuthClient {
     fn exchange_token(&self, body: serde_json::Value) -> Result<StoredCredentials, String> {
         let url = format!("{}/worker/oauth/token", self.base_url);
 
-        let response = ApiContext::http_post(&url)
-            .with_header("Content-Type", "application/json")
-            .with_body(body.to_string())
-            .with_timeout(30)
-            .send()
+        let (_agent, request) = ApiContext::http_post(&url, Some(30));
+        let request = request.set("Content-Type", "application/json");
+        let response = http::send_with_body(request, &body.to_string())
             .map_err(|e| format!("Failed to connect to server: {}", e))?;
 
         let response_body = response
@@ -98,11 +97,9 @@ impl OAuthClient {
     pub fn start_device_flow(&self) -> Result<DeviceAuthResponse, String> {
         let url = format!("{}/worker/oauth/device/code", self.base_url);
 
-        let response = ApiContext::http_post(&url)
-            .with_header("Content-Type", "application/json")
-            .with_body("{}")
-            .with_timeout(30)
-            .send()
+        let (_agent, request) = ApiContext::http_post(&url, Some(30));
+        let request = request.set("Content-Type", "application/json");
+        let response = http::send_with_body(request, "{}")
             .map_err(|e| format!("Failed to connect to server: {}", e))?;
 
         if response.status_code != 200 {
@@ -144,11 +141,9 @@ impl OAuthClient {
                 "client_id": "git-ai-cli"
             });
 
-            let response = ApiContext::http_post(&url)
-                .with_header("Content-Type", "application/json")
-                .with_body(body.to_string())
-                .with_timeout(30)
-                .send()
+            let (_agent, request) = ApiContext::http_post(&url, Some(30));
+            let request = request.set("Content-Type", "application/json");
+            let response = http::send_with_body(request, &body.to_string())
                 .map_err(|e| format!("Failed to connect to server: {}", e))?;
 
             let response_body = response
