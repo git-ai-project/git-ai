@@ -2292,6 +2292,99 @@ if __name__ == \"__main__\":
     );
 }
 
+/// Exact reproduction of the user's bug: AI creates a 3-line file + a 4-line file,
+/// user stages only the first file, AI then REPLACES line 3 and ADDS lines 4-5
+/// (replacement, not pure append). User commits the staged 3-line version, then
+/// stages and commits the rest. The second commit must attribute calca6.py.
+///
+/// This differs from test_partial_stage_then_ai_append_carries_over_to_second_commit
+/// because the AI edit involves a replacement (line 3 changes) rather than a pure append.
+#[test]
+fn test_partial_stage_replace_edit_carries_over_to_second_commit() {
+    let repo = TestRepo::new();
+    let calca_path = repo.path().join("calca6.py");
+    let calcb_path = repo.path().join("calcb6.py");
+
+    // Step 1: AI writes calca6.py (3 lines)
+    let calca_initial = "\
+a = int(input(\"First number: \"))
+b = int(input(\"Second number: \"))
+print(f\"{a} + {b} = {a + b}\")
+";
+    fs::write(&calca_path, calca_initial).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "calca6.py"])
+        .unwrap();
+
+    // Step 2: AI writes calcb6.py (4 lines)
+    let calcb_content = "\
+import sys
+
+nums = [int(x) for x in sys.argv[1:]]
+print(\"Sum:\", sum(nums))
+";
+    fs::write(&calcb_path, calcb_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "calcb6.py"])
+        .unwrap();
+
+    // Step 3: User stages ONLY calca6.py (the original 3-line version)
+    repo.git(&["add", "calca6.py"]).unwrap();
+
+    // Step 4: AI edits calca6.py — keeps lines 1-2, replaces line 3, adds lines 4-5
+    let calca_edited = "\
+a = int(input(\"First number: \"))
+b = int(input(\"Second number: \"))
+c = int(input(\"Third number: \"))
+d = int(input(\"Fourth number: \"))
+print(f\"{a} + {b} + {c} + {d} = {a + b + c + d}\")
+";
+    fs::write(&calca_path, calca_edited).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "calca6.py"])
+        .unwrap();
+
+    // Step 5: User commits — only the staged 3-line calca6.py goes in
+    let first_commit = repo.commit("test").unwrap();
+    first_commit.print_authorship();
+    assert!(
+        first_commit
+            .authorship_log
+            .attestations
+            .iter()
+            .any(|a| a.file_path == "calca6.py"),
+        "first commit attestations should reference calca6.py"
+    );
+
+    // Step 6: User stages everything remaining and commits
+    repo.git(&["add", "."]).unwrap();
+    let second_commit = repo.commit("test").unwrap();
+    second_commit.print_authorship();
+
+    // The second commit MUST have attribution for calca6.py (the edited lines 3-5)
+    let has_calca = second_commit
+        .authorship_log
+        .attestations
+        .iter()
+        .any(|a| a.file_path == "calca6.py");
+    assert!(
+        has_calca,
+        "second commit MUST have calca6.py attribution for the replacement+insertion lines. \
+         Attestations: {:?}",
+        second_commit
+            .authorship_log
+            .attestations
+            .iter()
+            .map(|a| &a.file_path)
+            .collect::<Vec<_>>()
+    );
+
+    // It must also have calcb6.py attribution (entirely new file in this commit)
+    let has_calcb = second_commit
+        .authorship_log
+        .attestations
+        .iter()
+        .any(|a| a.file_path == "calcb6.py");
+    assert!(has_calcb, "second commit MUST have calcb6.py attribution");
+}
+
 crate::reuse_tests_in_worktree!(
     test_simple_additions_empty_repo,
     test_simple_additions_with_base_commit,
