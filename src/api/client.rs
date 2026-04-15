@@ -251,8 +251,7 @@ impl ApiContext {
             request = request.set("Authorization", &format!("Bearer {}", token));
         }
 
-        http::send(request)
-            .map_err(|e| GitAiError::Generic(format!("HTTP request failed: {}", e)))
+        http::send(request).map_err(|e| GitAiError::Generic(format!("HTTP request failed: {}", e)))
     }
 }
 

@@ -360,8 +360,8 @@ fn fetch_and_verify_checksums(
 
     let (_agent, request) =
         ApiContext::http_get(&format!("{}{}", api_base_url, endpoint), Some(30));
-    let response = crate::http::send(request)
-        .map_err(|e| format!("Failed to fetch SHA256SUMS: {}", e))?;
+    let response =
+        crate::http::send(request).map_err(|e| format!("Failed to fetch SHA256SUMS: {}", e))?;
 
     if response.status_code != 200 {
         return Err(format!(
