@@ -8848,4 +8848,3 @@ mod tests {
         coord.request_shutdown();
     }
 }
-
