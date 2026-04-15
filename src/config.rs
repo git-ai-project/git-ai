@@ -1691,10 +1691,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let git_ai = dir.path().join("git-ai");
         fs::write(&git_ai, "fake-binary").unwrap();
-        let git = dir.path().join("git");
         #[cfg(unix)]
-        fs::hard_link(&git_ai, &git).unwrap();
-        #[cfg(unix)]
-        assert!(path_is_git_ai_binary(&git));
+        {
+            let git = dir.path().join("git");
+            fs::hard_link(&git_ai, &git).unwrap();
+            assert!(path_is_git_ai_binary(&git));
+        }
     }
 }
