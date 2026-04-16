@@ -4621,3 +4621,95 @@ fn daemon_recovers_from_panic_in_side_effect_pipeline() {
     // Clean shutdown.
     daemon.shutdown();
 }
+
+/// When the daemon's socket files are deleted from the filesystem while the
+/// daemon process is still running, the daemon becomes a zombie: alive but
+/// unreachable. New clients cannot connect because the filesystem entries are
+/// gone, even though the kernel-level socket fds are still open.
+///
+/// The daemon should detect that its socket files have been unlinked and
+/// initiate a graceful shutdown so that the next wrapper invocation can
+/// spawn a fresh daemon via ensure_daemon_running.
+#[test]
+#[serial]
+fn daemon_shuts_down_when_socket_files_are_deleted() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let control_socket_path = daemon_control_socket_path(&repo);
+    let trace_socket_path = daemon_trace_socket_path(&repo);
+
+    let mut daemon = DaemonGuard::start_with_env(
+        &repo,
+        &[
+            ("GIT_AI_DAEMON_SOCKET_HEALTH_CHECK_SECS", "1"),
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "86400"),
+            ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "86400"),
+        ],
+    );
+
+    // Verify the daemon is alive and both sockets exist on disk.
+    assert!(
+        control_socket_path.exists(),
+        "control socket should exist after daemon start"
+    );
+    assert!(
+        trace_socket_path.exists(),
+        "trace socket should exist after daemon start"
+    );
+    assert!(
+        send_control_request(
+            &control_socket_path,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir_string(&repo),
+            },
+        )
+        .is_ok(),
+        "daemon should respond to status requests"
+    );
+
+    // Verify daemon is actually still running before we delete sockets.
+    assert!(
+        daemon
+            .child
+            .try_wait()
+            .expect("failed to poll daemon")
+            .is_none(),
+        "daemon process should still be running before socket deletion"
+    );
+
+    // Delete the socket files out from under the running daemon.
+    fs::remove_file(&control_socket_path).expect("failed to delete control socket");
+    fs::remove_file(&trace_socket_path).expect("failed to delete trace socket");
+    assert!(
+        !control_socket_path.exists(),
+        "control socket should be deleted"
+    );
+    assert!(
+        !trace_socket_path.exists(),
+        "trace socket should be deleted"
+    );
+
+    // Wait for the daemon to notice and shut down. With a 1-second check
+    // interval, it should detect the missing sockets within a few seconds.
+    let mut daemon_exited = false;
+    for _ in 0..100 {
+        if daemon
+            .child
+            .try_wait()
+            .expect("failed to poll daemon")
+            .is_some()
+        {
+            daemon_exited = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        daemon_exited,
+        "daemon should shut down after its socket files are deleted, \
+         but the process is still running after 10 seconds"
+    );
+
+    // DaemonGuard::drop calls shutdown(), which is a no-op if already exited.
+    daemon.shutdown();
+}

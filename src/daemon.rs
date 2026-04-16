@@ -7804,6 +7804,68 @@ fn daemon_max_uptime_ns() -> u128 {
     secs as u128 * 1_000_000_000
 }
 
+const DAEMON_SOCKET_HEALTH_CHECK_SECS: u64 = 30;
+
+fn daemon_socket_health_check_interval() -> u64 {
+    std::env::var("GIT_AI_DAEMON_SOCKET_HEALTH_CHECK_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DAEMON_SOCKET_HEALTH_CHECK_SECS)
+}
+
+/// Background loop that verifies the daemon's socket files still exist on
+/// the filesystem.  If either socket path is missing (e.g. deleted by another
+/// process, a cleanup script, or a racing daemon instance), the daemon is
+/// unreachable and should shut down so the next wrapper invocation can spawn
+/// a fresh instance.
+fn daemon_socket_health_check_loop(
+    coordinator: Arc<ActorDaemonCoordinator>,
+    control_socket_path: PathBuf,
+    trace_socket_path: PathBuf,
+) {
+    let interval = daemon_socket_health_check_interval().max(1);
+    tracing::info!(
+        interval,
+        control = %control_socket_path.display(),
+        trace = %trace_socket_path.display(),
+        "socket health check started"
+    );
+
+    loop {
+        {
+            let guard = coordinator
+                .shutdown_condvar_mutex
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if coordinator.is_shutting_down() {
+                return;
+            }
+            let _ = coordinator
+                .shutdown_condvar
+                .wait_timeout(guard, std::time::Duration::from_secs(interval));
+        }
+
+        if coordinator.is_shutting_down() {
+            return;
+        }
+
+        let control_exists = control_socket_path.exists();
+        let trace_exists = trace_socket_path.exists();
+
+        if !control_exists || !trace_exists {
+            tracing::warn!(
+                control_exists,
+                trace_exists,
+                control_path = %control_socket_path.display(),
+                trace_path = %trace_socket_path.display(),
+                "socket file(s) missing from filesystem, requesting shutdown"
+            );
+            coordinator.request_shutdown();
+            return;
+        }
+    }
+}
+
 /// Background loop that periodically checks for available updates.
 ///
 /// Sleeps in short increments so it can exit promptly when the coordinator
@@ -7988,9 +8050,20 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
         daemon_update_check_loop(update_coord, started_at_ns);
     });
 
+    let health_coord = coordinator.clone();
+    let health_control = config.control_socket_path.clone();
+    let health_trace = config.trace_socket_path.clone();
+    let health_thread = std::thread::spawn(move || {
+        daemon_socket_health_check_loop(health_coord, health_control, health_trace);
+    });
+
     coordinator.wait_for_shutdown().await;
 
-    // best effort wake listeners to allow clean process exit
+    // Best-effort wake listeners to allow clean process exit.
+    // Connect to each socket to unblock `accept()`.  If the socket files
+    // were deleted (which is exactly what the health-check detects), the
+    // connection will fail — fall back to a timed join so the process still
+    // exits instead of hanging forever.
     let _ = local_socket_connects_with_timeout(
         &config.control_socket_path,
         DAEMON_SOCKET_PROBE_TIMEOUT,
@@ -7998,9 +8071,27 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     let _ =
         local_socket_connects_with_timeout(&config.trace_socket_path, DAEMON_SOCKET_PROBE_TIMEOUT);
 
-    let _ = control_thread.join();
-    let _ = trace_thread.join();
-    let _ = update_thread.join();
+    let join_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    for (name, thread) in [
+        ("control", control_thread),
+        ("trace", trace_thread),
+        ("update", update_thread),
+        ("health", health_thread),
+    ] {
+        let remaining = join_deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            tracing::debug!("skipping join for {} thread (deadline exceeded)", name);
+            continue;
+        }
+        let thread_name = name;
+        let handle = std::thread::spawn(move || {
+            let _ = thread.join();
+        });
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(500)));
+        if !handle.is_finished() {
+            tracing::debug!("{} thread did not join in time, proceeding", thread_name);
+        }
+    }
 
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;
