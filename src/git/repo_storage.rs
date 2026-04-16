@@ -588,6 +588,9 @@ impl PersistedWorkingLog {
     {
         let mut checkpoints = self.read_all_checkpoints()?;
         mutator(&mut checkpoints)?;
+        // Prune char-level attributions from older checkpoints to prevent
+        // unbounded growth of the checkpoints.jsonl file.
+        self.prune_old_char_attributions(&mut checkpoints);
         self.write_all_checkpoints(&checkpoints)?;
         Ok(checkpoints)
     }
