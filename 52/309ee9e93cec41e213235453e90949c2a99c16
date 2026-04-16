@@ -1,10 +1,10 @@
+src/daemon/family_actor.rs
+  1dbc0609c31414ab 150-153
 src/git/rewrite_log.rs
   1dbc0609c31414ab 2,588
 src/daemon.rs
   1dbc0609c31414ab 7970,8015-8020,8023
   a065c2579295dcd3 7971-7976,7978-7980,8021-8022
-src/daemon/family_actor.rs
-  1dbc0609c31414ab 150-153
 ---
 {
   "schema_version": "authorship/3.0.0",
