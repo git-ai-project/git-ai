@@ -1,4 +1,4 @@
-use crate::repos::test_repo::{real_git_executable, TestRepo};
+use crate::repos::test_repo::{TestRepo, real_git_executable};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -94,7 +94,12 @@ fn test_fetch_notes_with_locally_corrupted_mixed_fanout_tree() {
     let upstream_tree = git_plumbing(upstream.path(), &["rev-parse", "HEAD^{tree}"], None);
     let sha_c = git_plumbing(
         upstream.path(),
-        &["commit-tree", &upstream_tree, "-m", "other developer's commit"],
+        &[
+            "commit-tree",
+            &upstream_tree,
+            "-m",
+            "other developer's commit",
+        ],
         None,
     );
 
@@ -164,8 +169,7 @@ done\n"
 
     // -- Step 5: Set up the refs. --
     // Upstream refs/notes/ai = fixed remote (what the remote looks like now).
-    let fixed_commit =
-        git_plumbing(upstream.path(), &["rev-parse", "refs/notes/ai-fixed"], None);
+    let fixed_commit = git_plumbing(upstream.path(), &["rev-parse", "refs/notes/ai-fixed"], None);
     git_plumbing(
         upstream.path(),
         &["update-ref", "refs/notes/ai", &fixed_commit],
@@ -173,8 +177,7 @@ done\n"
     );
 
     // Transfer corrupted local notes to mirror via a temp ref.
-    let local_commit =
-        git_plumbing(upstream.path(), &["rev-parse", "refs/notes/ai-local"], None);
+    let local_commit = git_plumbing(upstream.path(), &["rev-parse", "refs/notes/ai-local"], None);
     git_plumbing(
         upstream.path(),
         &["update-ref", "refs/heads/tmp-local-notes", &local_commit],
@@ -204,8 +207,7 @@ done\n"
     // Mirror's local notes tree should be corrupted (both flat and fanout for A).
     let tree_listing = git_plumbing(mirror.path(), &["ls-tree", "-r", "refs/notes/ai"], None);
     assert!(
-        tree_listing.contains(&sha_a)
-            && tree_listing.contains(&format!("{}/{}", prefix_a, rest_a)),
+        tree_listing.contains(&sha_a) && tree_listing.contains(&format!("{}/{}", prefix_a, rest_a)),
         "precondition failed: local notes tree should have mixed fanout for commit A\n\
          tree listing:\n{}",
         tree_listing
