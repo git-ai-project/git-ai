@@ -530,16 +530,23 @@ fn recover_post_repo_head_if_missing(cmd: &mut crate::daemon::domain::Normalized
     let Some(worktree) = cmd.worktree.as_deref() else {
         return;
     };
-    // Direct file read — at this late point the ref should be stable.
-    if let Some(state) = read_head_state_for_worktree(worktree)
-        && state.head.is_some()
-    {
-        debug_log(&format!(
-            "pre-reducer HEAD recovery succeeded for sid={}",
-            cmd.root_sid
-        ));
-        cmd.post_repo = Some(repo_context_from_head_state(state));
-        return;
+    // Retry with short sleeps.  Prior recovery layers (augmentation,
+    // normalizer) already waited ~900ms.  This final layer adds up to
+    // ~500ms more, giving the filesystem time to flush.
+    for attempt in 0..=20u32 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        if let Some(state) = read_head_state_for_worktree(worktree)
+            && state.head.is_some()
+        {
+            debug_log(&format!(
+                "pre-reducer HEAD recovery succeeded on attempt {} for sid={}",
+                attempt, cmd.root_sid
+            ));
+            cmd.post_repo = Some(repo_context_from_head_state(state));
+            return;
+        }
     }
     // Subprocess fallback.
     if let Ok(output) = std::process::Command::new("git")
@@ -5990,7 +5997,10 @@ impl ActorDaemonCoordinator {
 
                     // Last-resort HEAD recovery: by now enough time has
                     // elapsed that the ref should be readable.
-                    recover_post_repo_head_if_missing(&mut command);
+                    // Use block_in_place because the recovery sleeps during retries.
+                    tokio::task::block_in_place(|| {
+                        recover_post_repo_head_if_missing(&mut command);
+                    });
 
                     let side_effect_result = {
                         let future = async {
@@ -7529,7 +7539,8 @@ impl ActorDaemonCoordinator {
         // Last-resort HEAD recovery: the normalizer and augmentation may
         // have failed to read HEAD under heavy I/O.  By now enough time has
         // elapsed since the git process exited that the ref should be stable.
-        recover_post_repo_head_if_missing(&mut command);
+        // Use block_in_place because the recovery sleeps during retries.
+        tokio::task::block_in_place(|| recover_post_repo_head_if_missing(&mut command));
 
         let root_sid = command.root_sid.clone();
 
