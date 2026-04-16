@@ -3675,6 +3675,10 @@ impl RecentReplayPrerequisite {
 #[derive(Debug, Default, Clone)]
 struct TraceIngressState {
     root_worktrees: HashMap<String, PathBuf>,
+    /// Worktree captured from the root start event — never overwritten by
+    /// child def_repo events.  Used for reading post_repo HEAD so that a
+    /// child in a different repo does not redirect the read.
+    root_invocation_worktrees: HashMap<String, PathBuf>,
     root_families: HashMap<String, String>,
     root_argv: HashMap<String, Vec<String>>,
     root_pre_repo: HashMap<String, RepoContext>,
@@ -4446,6 +4450,7 @@ impl ActorDaemonCoordinator {
             .lock()
             .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
         ingress.root_worktrees.remove(root_sid);
+        ingress.root_invocation_worktrees.remove(root_sid);
         ingress.root_families.remove(root_sid);
         ingress.root_argv.remove(root_sid);
         ingress.root_pre_repo.remove(root_sid);
@@ -5165,6 +5170,7 @@ impl ActorDaemonCoordinator {
                     ingress.root_argv.remove(&root);
                     ingress.root_pre_repo.remove(&root);
                     ingress.root_worktrees.remove(&root);
+                    ingress.root_invocation_worktrees.remove(&root);
                     ingress.root_inflight_merge_squash_contexts.remove(&root);
                     ingress.root_terminal_merge_squash_contexts.remove(&root);
                     ingress.root_reflog_refs.remove(&root);
@@ -5200,6 +5206,14 @@ impl ActorDaemonCoordinator {
                 ingress
                     .root_families
                     .insert(root.clone(), family.to_string_lossy().to_string());
+            }
+            // Capture the first (invocation) worktree before any child
+            // def_repo events can overwrite root_worktrees.
+            if event == "start" && sid == root {
+                ingress
+                    .root_invocation_worktrees
+                    .entry(root.clone())
+                    .or_insert_with(|| worktree.clone());
             }
             ingress.root_worktrees.insert(root.clone(), worktree);
         }
@@ -5246,6 +5260,7 @@ impl ActorDaemonCoordinator {
         let Some(worktree) = ingress.root_worktrees.get(&root).cloned() else {
             if is_terminal_root_trace_event(&event, &sid, &root) {
                 ingress.root_families.remove(&root);
+                ingress.root_invocation_worktrees.remove(&root);
                 ingress.root_mutating.remove(&root);
                 ingress.root_target_repo_only.remove(&root);
                 ingress.root_argv.remove(&root);
@@ -5306,6 +5321,18 @@ impl ActorDaemonCoordinator {
             .root_terminal_merge_squash_contexts
             .get(&root)
             .cloned();
+        // Capture the invocation worktree before dropping the lock.
+        // For clone/init (target_repo_only), use the def_repo-updated worktree
+        // since it correctly points to the newly created repo.
+        let head_read_worktree = if target_repo_only {
+            worktree.clone()
+        } else {
+            ingress
+                .root_invocation_worktrees
+                .get(&root)
+                .cloned()
+                .unwrap_or_else(|| worktree.clone())
+        };
         drop(ingress);
 
         let mut inflight_merge_squash_to_cache = None;
@@ -5397,7 +5424,11 @@ impl ActorDaemonCoordinator {
             None
         };
         let post_repo = if terminal_exit_code.is_some() {
-            let mut state = read_head_state_for_worktree(&worktree);
+            // Use head_read_worktree (captured before lock drop) which prefers
+            // the invocation worktree over the potentially-overwritten
+            // root_worktrees entry, except for clone/init where def_repo
+            // correctly points to the newly created repo.
+            let mut state = read_head_state_for_worktree(&head_read_worktree);
             // The HEAD ref file may be transiently unreadable under heavy I/O
             // (e.g. concurrent git-gc or packed-refs rewrite on CI).  Retry a
             // few times so we reliably capture post_repo.head — downstream
@@ -5405,7 +5436,7 @@ impl ActorDaemonCoordinator {
             if state.as_ref().is_none_or(|s| s.head.is_none()) {
                 for attempt in 1..=25 {
                     std::thread::sleep(std::time::Duration::from_millis(20));
-                    state = read_head_state_for_worktree(&worktree);
+                    state = read_head_state_for_worktree(&head_read_worktree);
                     if state.as_ref().is_some_and(|s| s.head.is_some()) {
                         debug_log(&format!(
                             "post_repo HEAD read succeeded on retry {} for sid={}",
@@ -5422,7 +5453,7 @@ impl ActorDaemonCoordinator {
             if state.as_ref().is_none_or(|s| s.head.is_none()) {
                 if let Ok(output) = std::process::Command::new("git")
                     .args(["rev-parse", "HEAD"])
-                    .current_dir(&worktree)
+                    .current_dir(&head_read_worktree)
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::null())
                     .output()
@@ -5717,6 +5748,7 @@ impl ActorDaemonCoordinator {
                 }
             }
             ingress.root_worktrees.remove(&root);
+            ingress.root_invocation_worktrees.remove(&root);
             ingress.root_families.remove(&root);
             ingress.root_argv.remove(&root);
             ingress.root_pre_repo.remove(&root);
