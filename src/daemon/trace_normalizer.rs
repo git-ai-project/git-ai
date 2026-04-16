@@ -1080,9 +1080,8 @@ impl<B: GitBackend> TraceNormalizer<B> {
             .post_repo
             .as_ref()
             .is_some_and(|r| r.head.is_none());
-        if may_mutate_refs
-            && exit_code == 0
-            && (head_missing || worktree_was_overwritten)
+        if exit_code == 0
+            && ((may_mutate_refs && head_missing) || worktree_was_overwritten)
             && let Some(inv_wt) = pending.invocation_worktree.as_deref()
         {
             let mut recovered = read_head_state_for_worktree(inv_wt);
