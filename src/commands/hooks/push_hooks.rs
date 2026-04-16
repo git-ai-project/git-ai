@@ -68,7 +68,7 @@ pub fn capture_tracker_state(
     let remote = resolve_push_remote(parsed_args, repository);
 
     let refs = std::process::Command::new("git")
-        .args(&[
+        .args([
             "-C",
             &repository.path().to_string_lossy(),
             "for-each-ref",
@@ -106,14 +106,14 @@ pub fn push_post_command_hook(
         let _ = handle.join();
     }
 
-    if exit_status.success() {
-        if let (Some(pre_push_refs), Some(remote)) = (
+    if exit_status.success()
+        && let (Some(pre_push_refs), Some(remote)) = (
             command_hooks_context.tracker_pre_push_refs.take(),
             command_hooks_context.tracker_push_remote.take(),
-        ) {
-            let repo_path = repository.path().to_string_lossy().to_string();
-            crate::commands::tracker::report_pushed_commits(&repo_path, &pre_push_refs, &remote);
-        }
+        )
+    {
+        let repo_path = repository.path().to_string_lossy().to_string();
+        crate::commands::tracker::report_pushed_commits(&repo_path, &pre_push_refs, &remote);
     }
 }
 

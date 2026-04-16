@@ -42,7 +42,7 @@ pub fn upload_commit(
 /// Encode bytes as base64 using the standard alphabet (A-Z, a-z, 0-9, +, /).
 fn encode_base64(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as usize;
         let b1 = if chunk.len() > 1 {
@@ -55,7 +55,7 @@ fn encode_base64(data: &[u8]) -> String {
         } else {
             0
         };
-        result.push(ALPHABET[(b0 >> 2)] as char);
+        result.push(ALPHABET[b0 >> 2] as char);
         result.push(ALPHABET[((b0 & 3) << 4) | (b1 >> 4)] as char);
         if chunk.len() > 1 {
             result.push(ALPHABET[((b1 & 0xf) << 2) | (b2 >> 6)] as char);

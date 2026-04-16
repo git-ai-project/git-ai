@@ -34,7 +34,7 @@ fn has_single_parent(repo_path: &str, commit_sha: &str) -> bool {
     match output {
         Ok(o) if o.status.success() => {
             let parents = String::from_utf8_lossy(&o.stdout);
-            parents.trim().split_whitespace().count() == 1
+            parents.split_whitespace().count() == 1
         }
         _ => false,
     }

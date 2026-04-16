@@ -10,7 +10,7 @@ const CODE_EXTENSIONS: &[&str] = &[
 
 pub fn collect_code_diff(repo_path: &str, commit_sha: &str) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
-        .args(&["-C", repo_path, "show", "--format=", commit_sha])
+        .args(["-C", repo_path, "show", "--format=", commit_sha])
         .output()
         .map_err(|e| e.to_string())?;
 

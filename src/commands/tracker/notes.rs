@@ -2,7 +2,7 @@ use std::process::Command;
 
 pub fn is_already_reported(repo_path: &str, commit_sha: &str) -> bool {
     Command::new("git")
-        .args(&[
+        .args([
             "-C",
             repo_path,
             "notes",
@@ -17,7 +17,7 @@ pub fn is_already_reported(repo_path: &str, commit_sha: &str) -> bool {
 
 pub fn mark_reported(repo_path: &str, commit_sha: &str) -> Result<(), String> {
     let output = Command::new("git")
-        .args(&[
+        .args([
             "-C",
             repo_path,
             "notes",
