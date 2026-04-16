@@ -2801,13 +2801,28 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
     let touched_files = working_log.all_touched_files()?;
     pathspecs.extend(touched_files);
 
-    // Check if original commit has an authorship log with prompts or humans
-    let has_existing_log = get_reference_as_authorship_log_v3(repo, original_commit).is_ok();
-    let has_existing_data = if has_existing_log {
-        let original_log = get_reference_as_authorship_log_v3(repo, original_commit).unwrap();
-        !original_log.metadata.prompts.is_empty() || !original_log.metadata.humans.is_empty()
-    } else {
-        false
+    // Check if original commit has an authorship log with prompts or humans.
+    // Under heavy I/O the note written by a prior command's side-effect pipeline
+    // may be transiently unreadable (loose object not yet visible to a new git
+    // subprocess, or notes ref update still in flight).  Retry briefly before
+    // falling back to the no-existing-data path.
+    let (has_existing_log, has_existing_data) = {
+        let mut found_log = false;
+        let mut found_data = false;
+        for attempt in 0..=20 {
+            if let Ok(original_log) =
+                get_reference_as_authorship_log_v3(repo, original_commit)
+            {
+                found_log = true;
+                found_data = !original_log.metadata.prompts.is_empty()
+                    || !original_log.metadata.humans.is_empty();
+                break;
+            }
+            if attempt < 20 {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+        (found_log, found_data)
     };
 
     // Phase 1: Load all attributions (committed + uncommitted)
