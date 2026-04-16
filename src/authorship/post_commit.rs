@@ -660,14 +660,33 @@ fn record_commit_metrics(
         return;
     }
 
+    // Subtract mock_ai contributions from the aggregates so the "all" entry
+    // only reflects real tools.
+    let mut agg_mixed = stats.mixed_additions;
+    let mut agg_ai = stats.ai_additions;
+    let mut agg_accepted = stats.ai_accepted;
+    let mut agg_total_add = stats.total_ai_additions;
+    let mut agg_total_del = stats.total_ai_deletions;
+    let mut agg_waiting: u64 = stats.time_waiting_for_ai;
+    for (key, ts) in &stats.tool_model_breakdown {
+        if key.starts_with("mock_ai::") {
+            agg_mixed = agg_mixed.saturating_sub(ts.mixed_additions);
+            agg_ai = agg_ai.saturating_sub(ts.ai_additions);
+            agg_accepted = agg_accepted.saturating_sub(ts.ai_accepted);
+            agg_total_add = agg_total_add.saturating_sub(ts.total_ai_additions);
+            agg_total_del = agg_total_del.saturating_sub(ts.total_ai_deletions);
+            agg_waiting = agg_waiting.saturating_sub(ts.time_waiting_for_ai);
+        }
+    }
+
     // Build parallel arrays: index 0 = "all" (aggregate), index 1+ = per tool/model
     let mut tool_model_pairs: Vec<String> = vec!["all".to_string()];
-    let mut mixed_additions: Vec<u32> = vec![stats.mixed_additions];
-    let mut ai_additions: Vec<u32> = vec![stats.ai_additions];
-    let mut ai_accepted: Vec<u32> = vec![stats.ai_accepted];
-    let mut total_ai_additions: Vec<u32> = vec![stats.total_ai_additions];
-    let mut total_ai_deletions: Vec<u32> = vec![stats.total_ai_deletions];
-    let mut time_waiting_for_ai: Vec<u64> = vec![stats.time_waiting_for_ai];
+    let mut mixed_additions: Vec<u32> = vec![agg_mixed];
+    let mut ai_additions: Vec<u32> = vec![agg_ai];
+    let mut ai_accepted: Vec<u32> = vec![agg_accepted];
+    let mut total_ai_additions: Vec<u32> = vec![agg_total_add];
+    let mut total_ai_deletions: Vec<u32> = vec![agg_total_del];
+    let mut time_waiting_for_ai: Vec<u64> = vec![agg_waiting];
 
     // Add per-tool/model breakdown, skipping mock_ai (test preset)
     for (tool_model, tool_stats) in &stats.tool_model_breakdown {
