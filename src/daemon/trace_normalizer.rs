@@ -1066,11 +1066,16 @@ impl<B: GitBackend> TraceNormalizer<B> {
         // the HEAD might be from the wrong repo), re-read HEAD from
         // invocation_worktree which is set once at creation and never
         // overwritten by child events.
-        let worktree_was_overwritten = pending
-            .invocation_worktree
-            .as_ref()
-            .zip(pending.worktree.as_ref())
-            .is_some_and(|(inv, cur)| inv != cur);
+        // For clone/init, def_repo correctly updates worktree to the newly
+        // created repo — don't treat that as an overwrite.
+        let is_clone_or_init =
+            matches!(primary_command.as_deref(), Some("clone" | "init"));
+        let worktree_was_overwritten = !is_clone_or_init
+            && pending
+                .invocation_worktree
+                .as_ref()
+                .zip(pending.worktree.as_ref())
+                .is_some_and(|(inv, cur)| inv != cur);
         let head_missing = pending
             .post_repo
             .as_ref()
