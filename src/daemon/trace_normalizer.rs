@@ -1075,7 +1075,14 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 .invocation_worktree
                 .as_ref()
                 .zip(pending.worktree.as_ref())
-                .is_some_and(|(inv, cur)| inv != cur);
+                .is_some_and(|(inv, cur)| {
+                    // Canonicalize both paths before comparing so that symlink
+                    // differences (e.g. macOS /var/folders vs /private/var/folders)
+                    // don't produce false positives.
+                    let inv_canon = inv.canonicalize().unwrap_or_else(|_| inv.clone());
+                    let cur_canon = cur.canonicalize().unwrap_or_else(|_| cur.clone());
+                    inv_canon != cur_canon
+                });
         let head_missing = pending
             .post_repo
             .as_ref()
