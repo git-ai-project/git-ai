@@ -41,3 +41,6 @@ fuzz/corpus/
 .worktrees/
 .claude/worktrees/
 
+# Claude lock files
+.claude/*.lock
+
