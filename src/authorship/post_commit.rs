@@ -1005,14 +1005,22 @@ mod tests {
         let file_b_content = "class Calculator:\n    def add(self, a, b):\n        return a + b\n";
 
         // Write both files WITHOUT staging
-        tmp_repo.write_file("file_a.py", file_a_content, false).unwrap();
-        tmp_repo.write_file("file_b.py", file_b_content, false).unwrap();
+        tmp_repo
+            .write_file("file_a.py", file_a_content, false)
+            .unwrap();
+        tmp_repo
+            .write_file("file_b.py", file_b_content, false)
+            .unwrap();
 
         // AI checkpoint covering both files
-        tmp_repo.trigger_checkpoint_with_ai("mock_ai", None, None).unwrap();
+        tmp_repo
+            .trigger_checkpoint_with_ai("mock_ai", None, None)
+            .unwrap();
 
         // Commit 1: only file_a.py, using snapshot (simulates daemon with incomplete snapshot)
-        let commit1_log = tmp_repo.commit_files_with_snapshot(&["file_a.py"], "add file_a").unwrap();
+        let commit1_log = tmp_repo
+            .commit_files_with_snapshot(&["file_a.py"], "add file_a")
+            .unwrap();
 
         assert!(
             !commit1_log.attestations.is_empty(),
@@ -1024,7 +1032,9 @@ mod tests {
         );
 
         // Commit 2: file_b.py, also using snapshot
-        let commit2_log = tmp_repo.commit_files_with_snapshot(&["file_b.py"], "add file_b").unwrap();
+        let commit2_log = tmp_repo
+            .commit_files_with_snapshot(&["file_b.py"], "add file_b")
+            .unwrap();
 
         assert!(
             !commit2_log.attestations.is_empty(),
