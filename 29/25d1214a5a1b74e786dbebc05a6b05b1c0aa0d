@@ -1,14 +1,14 @@
+src/daemon.rs
+  1dbc0609c31414ab 7970,8015-8023
 src/daemon/family_actor.rs
   1dbc0609c31414ab 150-153
-src/daemon.rs
-  1dbc0609c31414ab 7973-7981
 src/git/rewrite_log.rs
   1dbc0609c31414ab 2,588
 ---
 {
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "development:1.3.1",
-  "base_commit_sha": "104cb2de8fdee6e57f1d748add5144519846112c",
+  "base_commit_sha": "2925d1214a5a1b74e786dbebc05a6b05b1c0aa0d",
   "prompts": {
     "1dbc0609c31414ab": {
       "agent_id": {
@@ -757,7 +757,7 @@ src/git/rewrite_log.rs
       ],
       "total_additions": 25,
       "total_deletions": 28,
-      "accepted_lines": 16,
+      "accepted_lines": 24,
       "overriden_lines": 0
     }
   }
