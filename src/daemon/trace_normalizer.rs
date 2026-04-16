@@ -1094,12 +1094,15 @@ impl<B: GitBackend> TraceNormalizer<B> {
         // key check above only catches cross-repo overwrites; this catches
         // same-repo cross-worktree overwrites where child processes resolve
         // def_repo to the main worktree instead of the linked worktree.
+        // Only consider absolute invocation worktrees — relative paths
+        // (from -C argv args) may be unresolvable from the daemon's CWD
+        // and should not override the correctly-resolved def_repo path.
         let worktree_was_overwritten = !is_clone_or_init
             && pending
                 .invocation_worktree
                 .as_ref()
                 .zip(pending.worktree.as_ref())
-                .is_some_and(|(inv, cur)| inv != cur);
+                .is_some_and(|(inv, cur)| inv.is_absolute() && inv != cur);
         let head_missing = pending
             .post_repo
             .as_ref()
