@@ -5320,8 +5320,8 @@ impl ActorDaemonCoordinator {
             // few times so we reliably capture post_repo.head — downstream
             // analysis (HistoryAnalyzer::head_change) depends on it.
             if state.as_ref().is_none_or(|s| s.head.is_none()) {
-                for attempt in 1..=10 {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                for attempt in 1..=25 {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
                     state = read_head_state_for_worktree(&worktree);
                     if state.as_ref().is_some_and(|s| s.head.is_some()) {
                         debug_log(&format!(

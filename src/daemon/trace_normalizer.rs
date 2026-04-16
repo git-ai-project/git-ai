@@ -1092,17 +1092,30 @@ impl<B: GitBackend> TraceNormalizer<B> {
                         && may_mutate_refs
                     {
                         if let Some(worktree) = pending.worktree.as_deref() {
-                            if let Some(state) = read_head_state_for_worktree(worktree) {
-                                if state.head.is_some() {
-                                    debug_log(&format!(
-                                        "recovered post_repo.head at finalize for sid={}",
-                                        root_sid
-                                    ));
-                                    pr = Some(RepoContext {
-                                        head: state.head,
-                                        branch: state.branch,
-                                        detached: state.detached,
-                                    });
+                            for attempt in 0..10 {
+                                if attempt > 0 {
+                                    std::thread::sleep(std::time::Duration::from_millis(50));
+                                }
+                                if let Some(state) = read_head_state_for_worktree(worktree) {
+                                    if state.head.is_some() {
+                                        if attempt > 0 {
+                                            debug_log(&format!(
+                                                "recovered post_repo.head at finalize retry {} for sid={}",
+                                                attempt, root_sid
+                                            ));
+                                        } else {
+                                            debug_log(&format!(
+                                                "recovered post_repo.head at finalize for sid={}",
+                                                root_sid
+                                            ));
+                                        }
+                                        pr = Some(RepoContext {
+                                            head: state.head,
+                                            branch: state.branch,
+                                            detached: state.detached,
+                                        });
+                                        break;
+                                    }
                                 }
                             }
                         }
