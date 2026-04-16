@@ -23,6 +23,7 @@ fn write_raw_commit(repo: &TestRepo, filename: &str, content: &str, message: &st
 }
 
 /// Read the authorship note for HEAD, parse it, and return prompt IDs.
+#[cfg(not(target_os = "windows"))]
 fn head_prompt_ids(repo: &TestRepo) -> Vec<String> {
     let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
     let note = repo
