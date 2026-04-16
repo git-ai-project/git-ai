@@ -353,7 +353,7 @@ fn original_equivalent_for_rewritten_commit(
     None
 }
 
-pub(crate) fn build_rebase_commit_mappings(
+pub fn build_rebase_commit_mappings(
     repository: &Repository,
     original_head: &str,
     new_head: &str,
@@ -397,19 +397,24 @@ pub(crate) fn build_rebase_commit_mappings(
 
     // Prefer the rebase target (onto) as the lower bound for new commits. This prevents
     // skipped/no-op rebases from sweeping unrelated target-branch history.
-    let validated_onto = onto_head.filter(|onto| is_ancestor(repository, onto, new_head));
+    // When onto_head == merge_base the caller doesn't have a real onto (e.g. daemon
+    // fallback computes merge_base and passes it as onto).  Treat that the same as
+    // None to avoid sweeping in target-branch commits via the ancestry-path walk.
+    let validated_onto = onto_head
+        .filter(|onto| *onto != merge_base)
+        .filter(|onto| is_ancestor(repository, onto, new_head));
     let new_commits_base = validated_onto.unwrap_or(merge_base.as_str());
 
     let mut new_commits = if validated_onto.is_some() {
-        // onto_head is available and valid — use the full ancestry-path walk so
-        // --rebase-merges topologies are preserved.
+        // onto_head is available, valid, and distinct from merge_base — use the
+        // full ancestry-path walk so --rebase-merges topologies are preserved.
         walk_commits_to_base(repository, new_head, new_commits_base)?
     } else {
-        // onto_head is unavailable (daemon fallback, plumbing rewrite) and the
-        // walk base falls back to merge_base.  The range merge_base..new_head can
-        // include target-branch commits (including merge commits) that were never
-        // part of the rebase.  Use --first-parent capped at original_commits.len()
-        // to walk only the rebased tip of the branch.
+        // onto_head is unavailable, equals merge_base (daemon fallback), or
+        // invalid.  The range merge_base..new_head can include target-branch
+        // commits (including merge commits) that were never part of the rebase.
+        // Use --first-parent capped at original_commits.len() to walk only the
+        // rebased tip of the branch.
         walk_first_parent_commits(
             repository,
             new_head,
@@ -700,5 +705,119 @@ mod tests {
             "Should have exactly 1 new commit (the rebased feature), got: {:?}",
             new_commits
         );
+    }
+
+    #[test]
+    fn test_build_rebase_commit_mappings_excludes_merge_commits_when_onto_equals_merge_base() {
+        use crate::git::test_utils::TmpRepo;
+
+        let repo = TmpRepo::new().expect("tmp repo");
+        repo.write_file("base.txt", "base\n", true)
+            .expect("write base");
+        repo.commit_with_message("base commit").expect("base");
+        let base_sha = repo.get_head_commit_sha().expect("base sha");
+        let default_branch = repo.current_branch().expect("branch");
+
+        repo.create_branch("side").expect("create side");
+        repo.write_file("side.txt", "side\n", true)
+            .expect("write side");
+        repo.commit_with_message("side commit").expect("side");
+
+        repo.switch_branch(&default_branch).expect("switch");
+        repo.write_file("main.txt", "main\n", true)
+            .expect("write main");
+        repo.commit_with_message("main commit").expect("main");
+
+        repo.git_command(&["merge", "--no-ff", "side", "-m", "Merge side"])
+            .expect("merge");
+        let merge_sha = repo.get_head_commit_sha().expect("merge sha");
+
+        repo.git_command(&["checkout", "-b", "feature", &base_sha])
+            .expect("feature branch");
+        repo.write_file("feat.txt", "feat\n", true)
+            .expect("write feat");
+        repo.commit_with_message("feature commit").expect("feat");
+        let original_head = repo.get_head_commit_sha().expect("original head");
+
+        repo.git_command(&["rebase", &default_branch])
+            .expect("rebase");
+        let new_head = repo.get_head_commit_sha().expect("new head");
+
+        let computed_merge_base = repo
+            .gitai_repo()
+            .merge_base(original_head.clone(), new_head.clone())
+            .expect("merge_base");
+
+        let (original_commits, new_commits) = build_rebase_commit_mappings(
+            repo.gitai_repo(),
+            &original_head,
+            &new_head,
+            Some(&computed_merge_base),
+        )
+        .expect("build mappings");
+
+        assert!(
+            !new_commits.contains(&merge_sha),
+            "new_commits should not contain merge commit {} when onto_head == merge_base, got: {:?}",
+            merge_sha,
+            new_commits
+        );
+        assert_eq!(original_commits.len(), 1);
+        assert_eq!(new_commits.len(), 1);
+    }
+
+    #[test]
+    fn test_build_rebase_commit_mappings_multi_commit_with_onto_equals_merge_base() {
+        use crate::git::test_utils::TmpRepo;
+
+        let repo = TmpRepo::new().expect("tmp repo");
+        repo.write_file("base.txt", "base\n", true)
+            .expect("write base");
+        repo.commit_with_message("base commit").expect("base");
+        let base_sha = repo.get_head_commit_sha().expect("base sha");
+        let default_branch = repo.current_branch().expect("branch");
+
+        repo.create_branch("side").expect("create side");
+        repo.write_file("side.txt", "side\n", true)
+            .expect("write side");
+        repo.commit_with_message("side commit").expect("side");
+
+        repo.switch_branch(&default_branch).expect("switch");
+        repo.write_file("main.txt", "main\n", true)
+            .expect("write main");
+        repo.commit_with_message("main commit").expect("main");
+
+        repo.git_command(&["merge", "--no-ff", "side", "-m", "Merge side"])
+            .expect("merge");
+
+        repo.git_command(&["checkout", "-b", "feature", &base_sha])
+            .expect("feature branch");
+        repo.write_file("feat1.txt", "feat1\n", true)
+            .expect("write feat1");
+        repo.commit_with_message("feature commit 1").expect("feat1");
+        repo.write_file("feat2.txt", "feat2\n", true)
+            .expect("write feat2");
+        repo.commit_with_message("feature commit 2").expect("feat2");
+        let original_head = repo.get_head_commit_sha().expect("original head");
+
+        repo.git_command(&["rebase", &default_branch])
+            .expect("rebase");
+        let new_head = repo.get_head_commit_sha().expect("new head");
+
+        let computed_merge_base = repo
+            .gitai_repo()
+            .merge_base(original_head.clone(), new_head.clone())
+            .expect("merge_base");
+
+        let (original_commits, new_commits) = build_rebase_commit_mappings(
+            repo.gitai_repo(),
+            &original_head,
+            &new_head,
+            Some(&computed_merge_base),
+        )
+        .expect("build mappings");
+
+        assert_eq!(original_commits.len(), 2);
+        assert_eq!(new_commits.len(), 2);
     }
 }
