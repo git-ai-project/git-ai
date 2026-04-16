@@ -19,7 +19,7 @@ use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::find_repository;
 use crate::git::repository::{Repository, disable_internal_git_hooks};
 use crate::observability;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
 #[cfg(windows)]
@@ -98,6 +98,8 @@ pub struct CommandHooksContext {
     /// VirtualAttributions captured before a pull --rebase --autostash operation.
     /// Used to preserve uncommitted AI attributions that git's internal stash would lose.
     pub stashed_va: Option<VirtualAttributions>,
+    pub tracker_pre_push_refs: Option<HashMap<String, String>>,
+    pub tracker_push_remote: Option<String>,
 }
 
 pub fn handle_git(args: &[String]) {
@@ -231,6 +233,8 @@ pub fn handle_git(args: &[String]) {
             stash_sha: None,
             push_authorship_handle: None,
             stashed_va: None,
+            tracker_pre_push_refs: None,
+            tracker_push_remote: None,
         };
 
         let repository = repository_option.as_mut().unwrap();

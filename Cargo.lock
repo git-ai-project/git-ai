@@ -1107,6 +1107,7 @@ dependencies = [
  "dirs",
  "envy",
  "filetime",
+ "flate2",
  "futures",
  "git-ai",
  "git2",
