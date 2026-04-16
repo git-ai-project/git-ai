@@ -2607,24 +2607,24 @@ fn test_diff_json_commit_author_is_full_ident() {
 }
 
 /// Regression test: when AI reorders functions in a file, moved lines must be
-/// AI-attributed.  A single AI checkpoint diffs the file before vs after the
-/// edit, so moved lines appear as Insert operations and get AI attribution.
+/// AI-attributed.  Uses direct file writes + checkpoint calls instead of the
+/// two-pass `set_contents` helper.
 ///
 /// Scenario
 /// --------
-/// Commit A (initial):  [func_one, func_two] — no AI involvement.
-/// Commit B (AI):       [new_func, func_two, func_one] — AI adds new_func and
-///                      moves func_one to the end.  A single checkpoint covers
-///                      the whole change.
+/// Commit A (AI):   [func_one, func_two] — fully AI-attested via checkpoint.
+/// Commit B (AI):   [new_func, func_two, func_one] — AI adds new_func and
+///                  moves func_one to the end.  A single checkpoint covers
+///                  the whole change.
 ///
 /// Myers diff A→B shows func_one at its new position as `+` lines.
-/// Because the checkpoint attributed the full before→after diff to AI,
+/// Because B's checkpoint attributed the full before→after diff to AI,
 /// the authorship note covers those lines and git ai diff shows them as AI.
 #[test]
 fn test_diff_moved_ai_lines_attributed_correctly() {
     let repo = TestRepo::new();
 
-    // --- Commit A: human writes two functions (no AI involvement) ---
+    // --- Commit A: AI writes two functions (fully AI-attested) ---
     let file_path = repo.path().join("src.rs");
     let initial_content = "\
 fn func_one() {
@@ -2640,7 +2640,8 @@ fn func_two() {
     format!(\"{} {}\", a, b)
 }";
     fs::write(&file_path, initial_content).unwrap();
-    repo.stage_all_and_commit("A: human writes func_one and func_two")
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+    repo.stage_all_and_commit("A: AI writes func_one and func_two")
         .unwrap();
 
     // --- Commit B: AI adds new_func at top and moves func_one to end ---
