@@ -552,10 +552,7 @@ pub fn ref_exists(repo: &Repository, ref_name: &str) -> bool {
 /// This avoids `git notes merge` which can crash with an assertion failure
 /// (notes-merge.c diff_tree_remote) on mixed-fanout notes trees.
 pub fn merge_notes_from_ref(repo: &Repository, source_ref: &str) -> Result<(), GitAiError> {
-    debug_log(&format!(
-        "Merging notes from {} into refs/notes/ai",
-        source_ref
-    ));
+    tracing::debug!("Merging notes from {} into refs/notes/ai", source_ref);
     fallback_merge_notes_ours(repo, source_ref)
 }
 
@@ -579,6 +576,12 @@ pub fn fallback_merge_notes_ours(repo: &Repository, source_ref: &str) -> Result<
     // 2. Resolve parent commit SHAs for the merge commit
     let local_commit = rev_parse(repo, &local_ref)?;
     let source_commit = rev_parse(repo, source_ref)?;
+
+    // Nothing to merge if both refs point to the same commit.
+    if local_commit == source_commit {
+        tracing::debug!("notes refs already at same commit, nothing to merge");
+        return Ok(());
+    }
 
     // 3. Build the fast-import stream.
     //    Use explicit `M` (filemodify) commands instead of `N` (notemodify) because

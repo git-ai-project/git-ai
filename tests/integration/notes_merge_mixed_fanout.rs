@@ -51,8 +51,8 @@ fn git_plumbing(repo_path: &std::path::Path, args: &[&str], stdin_data: Option<&
 /// The failure chain on the main branch is:
 ///
 ///   1. `git notes merge -s ours` crashes with:
-///        Assertion failed: (is_null_oid(&mp->base)), function diff_tree_remote,
-///        file notes-merge.c, line 173
+///      "Assertion failed: (is_null_oid(&mp->base)), function diff_tree_remote,
+///      file notes-merge.c, line 173"
 ///      because the merge-base has mixed fanout (both flat `aabbcc…` and subtree
 ///      `aa/bbcc…` entries for the same annotated commit), and the fixed remote
 ///      removed the flat entries. The diff sees a MOD + DEL for the same object.

@@ -190,7 +190,7 @@ pub fn fetch_authorship_notes(
                 local_notes_ref
             );
             if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
-                debug_log(&format!("notes merge failed: {}", e));
+                tracing::debug!("notes merge failed: {}", e);
             }
         } else {
             // Only tracking ref exists - copy it to local
@@ -311,7 +311,7 @@ fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) {
         local_notes_ref
     );
     if let Err(e) = merge_notes_from_ref(repository, &tracking_ref) {
-        debug_log(&format!("pre-push notes merge failed: {}", e));
+        tracing::debug!("pre-push notes merge failed: {}", e);
     }
 }
 
