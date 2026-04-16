@@ -2606,77 +2606,96 @@ fn test_diff_json_commit_author_is_full_ident() {
     assert_eq!(author, "Test User <test@example.com>");
 }
 
-/// Regression test for the bug where `apply_blame_for_side` set `detect_copies: 1` on
-/// `GitAiBlameOptions` but `blame_hunks_for_ranges` never translated that field into a `-C`
-/// flag on the git-blame command line.  The result was that lines *moved* within a file in the
-/// same commit were attributed to that commit instead of to the commit that originally wrote
-/// them, so they fell through as Human when they should have been AI.
+/// Regression test: when AI reorders functions in a file, moved lines must be
+/// AI-attributed.  Uses direct file writes + checkpoint calls instead of the
+/// two-pass `set_contents` helper.
 ///
 /// Scenario
 /// --------
-/// Commit A (AI):   [func_one × 6 lines, func_two × 6 lines]  – fully AI-attested.
-/// Commit B (AI):   [new_func × 6 lines, func_two × 6 lines, func_one × 6 lines]
-///                  – AI attests only new_func (lines 1-6); func_one moved to lines 13-18.
+/// Commit A (AI):   [func_one, func_two] — fully AI-attested via checkpoint.
+/// Commit B (AI):   [new_func, func_two, func_one] — AI adds new_func and
+///                  moves func_one to the end.  A single checkpoint covers
+///                  the whole change.
 ///
-/// Myers diff A→B represents the change as:
-///   - func_one (lines 1-6 in A) deleted / replaced by new_func
-///   - func_two unchanged (context)
-///   - func_one (lines 13-18 in B) added at the end  ← these are in `added_lines`
-///
-/// `git blame A..B -L 13,18` without `-C` → commit B  (B has no attestation for 13-18 → Human)
-/// `git blame A..B -L 13,18`  with  `-C` → commit A  (A's attestation covers func_one  → AI)
+/// Myers diff A→B shows func_one at its new position as `+` lines.
+/// Because B's checkpoint attributed the full before→after diff to AI,
+/// the authorship note covers those lines and git ai diff shows them as AI.
 #[test]
-fn test_diff_blame_uses_detect_copies_for_moved_ai_lines() {
+fn test_diff_moved_ai_lines_attributed_correctly() {
     let repo = TestRepo::new();
 
-    // --- Commit A: AI writes two substantial functions ---
-    let mut file = repo.filename("src.rs");
-    file.set_contents(crate::lines![
-        "fn func_one() {".ai(),
-        "    // original function one body".ai(),
-        "    let x: u32 = 1;".ai(),
-        "    let y: u32 = 2;".ai(),
-        "    x + y".ai(),
-        "}".ai(),
-        "fn func_two() {".ai(),
-        "    // original function two body".ai(),
-        "    let a = String::from(\"hello\");".ai(),
-        "    let b = String::from(\"world\");".ai(),
-        "    format!(\"{} {}\", a, b)".ai(),
-        "}".ai()
-    ]);
+    // --- Commit A: AI writes two functions (fully AI-attested) ---
+    let file_path = repo.path().join("src.rs");
+    let initial_content = "\
+fn func_one() {
+    // original function one body
+    let x: u32 = 1;
+    let y: u32 = 2;
+    x + y
+}
+fn func_two() {
+    // original function two body
+    let a = String::from(\"hello\");
+    let b = String::from(\"world\");
+    format!(\"{} {}\", a, b)
+}";
+    fs::write(&file_path, initial_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
     repo.stage_all_and_commit("A: AI writes func_one and func_two")
         .unwrap();
 
-    // --- Commit B: AI adds new_func; func_one ends up at the bottom (moved, not re-written) ---
-    // Marking func_one / func_two as .human() here means B's AI attestation covers ONLY
-    // new_func (lines 1-6).  func_one at its new position (lines 13-18) is NOT in B's note.
-    file.set_contents(crate::lines![
+    // --- Commit B: AI adds new_func at top and moves func_one to end ---
+    let reordered_content = "\
+fn new_func() {
+    // brand new function
+    let z: u32 = 99;
+    let w: u32 = 100;
+    z + w
+}
+fn func_two() {
+    // original function two body
+    let a = String::from(\"hello\");
+    let b = String::from(\"world\");
+    format!(\"{} {}\", a, b)
+}
+fn func_one() {
+    // original function one body
+    let x: u32 = 1;
+    let y: u32 = 2;
+    x + y
+}";
+    fs::write(&file_path, reordered_content).unwrap();
+    // Single AI checkpoint: diffs initial_content → reordered_content.
+    // func_one at the bottom is an Insert → attributed to AI.
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+    let commit_b = repo
+        .stage_all_and_commit("B: AI adds new_func and moves func_one to end")
+        .unwrap();
+
+    // Every line in the file should be AI-attributed via blame.
+    let mut file = repo.filename("src.rs");
+    file.assert_lines_and_blame(crate::lines![
         "fn new_func() {".ai(),
         "    // brand new function".ai(),
         "    let z: u32 = 99;".ai(),
         "    let w: u32 = 100;".ai(),
         "    z + w".ai(),
         "}".ai(),
-        "fn func_two() {".human(),
-        "    // original function two body".human(),
-        "    let a = String::from(\"hello\");".human(),
-        "    let b = String::from(\"world\");".human(),
-        "    format!(\"{} {}\", a, b)".human(),
-        "}".human(),
-        "fn func_one() {".human(),
-        "    // original function one body".human(),
-        "    let x: u32 = 1;".human(),
-        "    let y: u32 = 2;".human(),
-        "    x + y".human(),
-        "}".human()
+        "fn func_two() {".ai(),
+        "    // original function two body".ai(),
+        "    let a = String::from(\"hello\");".ai(),
+        "    let b = String::from(\"world\");".ai(),
+        "    format!(\"{} {}\", a, b)".ai(),
+        "}".ai(),
+        "fn func_one() {".ai(),
+        "    // original function one body".ai(),
+        "    let x: u32 = 1;".ai(),
+        "    let y: u32 = 2;".ai(),
+        "    x + y".ai(),
+        "}".ai()
     ]);
-    let commit_b = repo
-        .stage_all_and_commit("B: AI adds new_func and moves func_one to end")
-        .unwrap();
 
-    // Confirm the Myers diff actually puts func_one as explicit `+` lines (not context),
-    // which is the precondition for the bug to fire.
+    // Confirm the Myers diff actually puts func_one as explicit `+` lines.
     let raw_diff = repo
         .git_og(&[
             "--no-pager",
@@ -2690,14 +2709,14 @@ fn test_diff_blame_uses_detect_copies_for_moved_ai_lines() {
         "precondition: Myers diff must show func_one as an explicit addition (+), got:\n{raw_diff}"
     );
 
-    // Run git-ai diff and check that func_one at its new position is attributed AI, not Human.
+    // Run git-ai diff and check attributions.
     let output = repo
         .git_ai(&["diff", &commit_b.commit_sha])
         .expect("git-ai diff should succeed");
 
     let lines = parse_diff_output(&output);
 
-    // new_func lines must be AI (B's own attestation).
+    // new_func must be AI (directly in B's attestation).
     let new_func_line = lines
         .iter()
         .find(|l| l.prefix == "+" && l.content.contains("fn new_func()"))
@@ -2712,9 +2731,8 @@ fn test_diff_blame_uses_detect_copies_for_moved_ai_lines() {
         new_func_line.attribution
     );
 
-    // func_one at its moved position must also be AI (traced to A via -C).
-    // Without the fix (detect_copies not wired through to the git-blame args),
-    // git blame attributes these lines to commit B → no attestation in B → Human.
+    // func_one at its moved position must also be AI (checkpoint covered
+    // the full before→after diff, so the insertion is AI-attributed).
     let func_one_line = lines
         .iter()
         .find(|l| l.prefix == "+" && l.content.contains("fn func_one()"))
@@ -2725,10 +2743,27 @@ fn test_diff_blame_uses_detect_copies_for_moved_ai_lines() {
             .as_ref()
             .map(|a| a.contains("ai"))
             .unwrap_or(false),
-        "func_one (moved to end of file by commit B) should be AI-attributed via -C move \
-         detection, but got: {:?}\nFull diff output:\n{}",
+        "func_one (moved to end of file by commit B) should be AI-attributed, \
+         but got: {:?}\nFull diff output:\n{}",
         func_one_line.attribution,
         output
+    );
+
+    // No line should show [no-data].
+    let no_data_lines: Vec<&DiffLine> = lines
+        .iter()
+        .filter(|l| {
+            l.attribution
+                .as_ref()
+                .map(|a| a.contains("no-data"))
+                .unwrap_or(false)
+        })
+        .collect();
+    assert!(
+        no_data_lines.is_empty(),
+        "No lines should have [no-data] attribution, but found {} lines: {:?}",
+        no_data_lines.len(),
+        no_data_lines
     );
 }
 
