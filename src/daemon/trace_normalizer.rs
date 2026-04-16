@@ -1088,6 +1088,18 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 .as_ref()
                 .zip(pending.family_key.as_ref())
                 .is_some_and(|(inv, cur)| inv != cur);
+        // Detect when a child process's def_repo overwrote the worktree path
+        // to a different worktree within the SAME repository (e.g. linked
+        // git worktrees that share the same .git common dir).  The family
+        // key check above only catches cross-repo overwrites; this catches
+        // same-repo cross-worktree overwrites where child processes resolve
+        // def_repo to the main worktree instead of the linked worktree.
+        let worktree_was_overwritten = !is_clone_or_init
+            && pending
+                .invocation_worktree
+                .as_ref()
+                .zip(pending.worktree.as_ref())
+                .is_some_and(|(inv, cur)| inv != cur);
         let head_missing = pending
             .post_repo
             .as_ref()
@@ -1148,13 +1160,21 @@ impl<B: GitBackend> TraceNormalizer<B> {
                     branch: state.branch,
                     detached: state.detached,
                 });
-                // Also restore the worktree to the original invocation path
-                // so downstream processing (reducer, side-effects) uses the
-                // correct repo path.
                 if family_was_overwritten {
                     pending.worktree = pending.invocation_worktree.clone();
                     pending.family_key = pending.invocation_family_key.clone();
                 }
+            }
+        }
+        // Restore the worktree to the original invocation path when a child
+        // def_repo overwrote it — whether to a different repo (family
+        // overwrite) or to a different worktree within the same repo
+        // (same-family cross-worktree overwrite).  This ensures downstream
+        // processing (reducer, side-effects) uses the correct repo path.
+        if worktree_was_overwritten {
+            pending.worktree = pending.invocation_worktree.clone();
+            if family_was_overwritten {
+                pending.family_key = pending.invocation_family_key.clone();
             }
         }
 
@@ -2663,6 +2683,82 @@ mod tests {
                 .as_ref()
                 .and_then(|repo| repo.branch.as_deref()),
             Some("main")
+        );
+    }
+
+    #[test]
+    fn same_family_worktree_overwrite_restores_invocation_worktree() {
+        // When two linked worktrees share the same .git common dir (same
+        // family key), a child def_repo that resolves to the main worktree
+        // should not overwrite the linked worktree path.
+        let backend = Arc::new(MockBackend::default());
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let main_wt = temp.path().join("main-repo");
+        let linked_wt = temp.path().join("linked-worktree");
+        let shared_family = "shared-family";
+
+        // Both worktrees share the same family (common .git dir)
+        fs::create_dir_all(main_wt.join(".git/refs/heads")).expect("create main git refs");
+        fs::write(main_wt.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write main HEAD");
+        fs::write(
+            main_wt.join(".git/refs/heads/main"),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        )
+        .expect("write main ref");
+
+        fs::create_dir_all(linked_wt.join(".git/refs/heads")).expect("create linked git refs");
+        fs::write(
+            linked_wt.join(".git/HEAD"),
+            "ref: refs/heads/linked\n",
+        )
+        .expect("write linked HEAD");
+        fs::write(
+            linked_wt.join(".git/refs/heads/linked"),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+        )
+        .expect("write linked ref");
+
+        backend.set_family(main_wt.to_str().unwrap(), shared_family);
+        backend.set_family(linked_wt.to_str().unwrap(), shared_family);
+        backend.set_context(
+            linked_wt.to_str().unwrap(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        // Start event from linked worktree (e.g., git commit in worker-b)
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"wt-overwrite",
+            "ts":1,
+            "argv":["git","commit","-m","test"],
+            "worktree": linked_wt.to_str().unwrap()
+        });
+        // Child def_repo resolves to the main worktree (same family)
+        let def_repo = serde_json::json!({
+            "event":"def_repo",
+            "sid":"wt-overwrite/child",
+            "ts":2,
+            "worktree": main_wt.to_str().unwrap()
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"wt-overwrite",
+            "ts":3,
+            "code":0
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&def_repo).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+
+        // The worktree should be restored to the linked worktree, not the
+        // main worktree that the child def_repo resolved to.
+        assert_eq!(
+            cmd.worktree.as_ref().map(|p| p.as_path()),
+            Some(linked_wt.as_path()),
+            "worktree should be restored to invocation worktree after same-family overwrite"
         );
     }
 }
