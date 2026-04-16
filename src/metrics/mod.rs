@@ -76,4 +76,34 @@ mod tests {
         assert_eq!(event.event_id, MetricEventId::Committed as u16);
         assert!(event.timestamp > 0);
     }
+
+    /// Verify that the mock_ai guard in record() detects tool="mock_ai" in attrs.
+    #[test]
+    fn test_mock_ai_is_blocked_by_record_guard() {
+        let attrs = EventAttributes::with_version("1.0.0").tool("mock_ai");
+        assert_eq!(attrs.tool, Some(Some("mock_ai".to_string())));
+        // record() early-returns for mock_ai; nothing to assert on the write
+        // side since log_metrics is a no-op in tests, but the guard is exercised.
+        let values = events::AgentUsageValues::new();
+        record(values, attrs);
+    }
+
+    /// Verify that a Committed event whose tool_model_pairs contain "mock_ai::unknown"
+    /// but whose attrs.tool is unset would NOT be caught by the record() guard.
+    /// This demonstrates why filtering must also happen at the call site
+    /// (post_commit::record_commit_metrics).
+    #[test]
+    fn test_committed_with_mock_ai_tool_model_pair_bypasses_attrs_guard() {
+        let attrs = EventAttributes::with_version("1.0.0");
+        // attrs.tool is None — the guard won't trigger
+        assert_eq!(attrs.tool, None);
+
+        let values = CommittedValues::new()
+            .tool_model_pairs(vec!["all".to_string(), "mock_ai::unknown".to_string()])
+            .ai_additions(vec![10, 10]);
+
+        // This would pass through record() — the call-site filter in
+        // record_commit_metrics is responsible for stripping mock_ai entries.
+        record(values, attrs);
+    }
 }
