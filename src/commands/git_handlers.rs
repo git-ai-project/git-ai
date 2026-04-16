@@ -167,9 +167,49 @@ pub fn handle_git(args: &[String]) {
 
         let exit_status = proxy_to_git(args, false, None, Some(&invocation_id));
 
-        let post_state = worktree
+        let mut post_state = worktree
             .as_deref()
             .and_then(crate::git::repo_state::read_head_state_for_worktree);
+        // Under heavy I/O the ref file may be transiently unresolvable.
+        // Retry so the daemon overlay receives a valid HEAD OID.
+        if post_state.as_ref().is_none_or(|s| s.head.is_none()) {
+            for _ in 0..25 {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                post_state = worktree
+                    .as_deref()
+                    .and_then(crate::git::repo_state::read_head_state_for_worktree);
+                if post_state.as_ref().is_some_and(|s| s.head.is_some()) {
+                    break;
+                }
+            }
+        }
+        // Last resort: use git rev-parse HEAD subprocess.
+        if post_state.as_ref().is_none_or(|s| s.head.is_none()) {
+            if let Some(wt) = worktree.as_deref() {
+                if let Ok(output) = std::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(wt)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .output()
+                {
+                    let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if output.status.success()
+                        && crate::git::repo_state::is_valid_git_oid(&oid)
+                    {
+                        let (branch, detached) = post_state
+                            .as_ref()
+                            .map(|s| (s.branch.clone(), s.detached))
+                            .unwrap_or((None, false));
+                        post_state = Some(crate::git::repo_state::HeadState {
+                            head: Some(oid),
+                            branch,
+                            detached,
+                        });
+                    }
+                }
+            }
+        }
 
         send_wrapper_post_state_to_daemon(&invocation_id, worktree.as_deref(), &post_state);
 
