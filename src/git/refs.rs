@@ -548,12 +548,20 @@ pub fn ref_exists(repo: &Repository, ref_name: &str) -> bool {
 }
 
 /// Merge notes from a source ref into refs/notes/ai
-/// Uses a fast-import based "ours" strategy to combine notes without data loss.
-/// This avoids `git notes merge` which can crash with an assertion failure
-/// (notes-merge.c diff_tree_remote) on mixed-fanout notes trees.
+/// Uses the 'ours' strategy to combine notes without data loss
 pub fn merge_notes_from_ref(repo: &Repository, source_ref: &str) -> Result<(), GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.push("notes".to_string());
+    args.push(format!("--ref={}", AI_AUTHORSHIP_REFNAME));
+    args.push("merge".to_string());
+    args.push("-s".to_string());
+    args.push("ours".to_string());
+    args.push("--quiet".to_string());
+    args.push(source_ref.to_string());
+
     tracing::debug!("Merging notes from {} into refs/notes/ai", source_ref);
-    fallback_merge_notes_ours(repo, source_ref)
+    exec_git(&args)?;
+    Ok(())
 }
 
 /// Fallback merge when `git notes merge -s ours` fails (e.g., due to git assertion

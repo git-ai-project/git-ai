@@ -221,29 +221,69 @@ done\n"
         tree_listing
     );
 
+    // -- Step 5b: Fetch the remote notes ref so the objects are available locally. --
+    // (fetch-notes does this internally, but we also need the tracking ref for
+    // the manual merge attempt below.)
+    mirror
+        .git_og(&[
+            "fetch",
+            "origin",
+            "refs/notes/ai:refs/notes/ai-remote/origin",
+        ])
+        .expect("fetch remote notes ref");
+
+    // -- Step 5c: Verify that `git notes merge -s ours` fails on this tree. --
+    // This is the bug we're working around. The mixed-fanout merge base causes
+    // an assertion failure (or error) in git's notes-merge.c diff_tree_remote.
+    // We save the local notes ref before the attempt so we can restore it after,
+    // since a failed merge may leave the ref in a dirty state.
+    let pre_merge_tip = git_plumbing(mirror.path(), &["rev-parse", "refs/notes/ai"], None);
+    let native_merge_result = mirror.git_og(&[
+        "notes",
+        "--ref=ai",
+        "merge",
+        "-s",
+        "ours",
+        "--quiet",
+        "refs/notes/ai-remote/origin",
+    ]);
+    assert!(
+        native_merge_result.is_err(),
+        "precondition: `git notes merge -s ours` should FAIL on a mixed-fanout notes tree, \
+         but it succeeded. This means the bug this test guards against may be fixed in this \
+         version of git, and the fallback path is no longer exercised."
+    );
+    // Restore refs/notes/ai to its pre-merge state in case the failed merge
+    // left behind a dirty .git/NOTES_MERGE_* worktree.
+    git_plumbing(
+        mirror.path(),
+        &["update-ref", "refs/notes/ai", &pre_merge_tip],
+        None,
+    );
+    // Clean up any leftover merge state
+    let _ = mirror.git_og(&["notes", "--ref=ai", "merge", "--abort"]);
+
     // -- Step 6: Run `git ai fetch-notes`. --
     // This fetches the fixed remote and tries to merge with the corrupted local.
-    //
-    // The merge base is corrupted_base. diff(corrupted_base, fixed_remote) sees:
-    //   - MODIFICATION at `prefix_a/rest_a` (blob_base → blob_fixed)
-    //   - DELETION at `sha_a` (flat entry removed in fixed remote)
-    //   Both map to the same annotated object → triggers assertion in notes-merge.c.
-    //   - ADDITION at `prefix_c/rest_c` (new note for commit C)
+    // `git notes merge -s ours` will fail (as verified above), then the fallback
+    // merge (fast-import with `M` commands) kicks in and succeeds.
     mirror
         .git_ai(&["fetch-notes"])
         .expect("fetch-notes should succeed despite corrupted local notes tree");
 
     // -- Step 7: Verify commit C's note was merged from the remote. --
     //
-    // On the main branch, this assertion FAILS because:
+    // On main before this fix, this assertion FAILS because:
     //   - `git notes merge -s ours` crashes (assertion in notes-merge.c)
     //   - The fallback's `N <blob> <sha_c>` fails (commit C doesn't exist locally;
     //     fast-import's `N` command requires the annotated object to be present)
     //   - Both errors are silently swallowed; local notes ref is unchanged
     //   - Commit C's note was never in the local tree, so it's missing
     //
-    // On this branch, this assertion PASSES because:
-    //   - merge_notes_from_ref uses fast-import with `M` commands (no object check)
+    // With the fix, this assertion PASSES because:
+    //   - `git notes merge -s ours` fails (as before)
+    //   - The fallback uses `M` (filemodify) instead of `N` (notemodify), so it
+    //     doesn't require the annotated object to exist locally
     //   - All notes (including commit C's) are written successfully
     let final_notes = git_plumbing(mirror.path(), &["notes", "--ref=ai", "list"], None);
     assert!(
