@@ -447,6 +447,11 @@ fn run_pre_command_hooks(
             Some("push") => {
                 command_hooks_context.push_authorship_handle =
                     push_hooks::push_pre_command_hook(parsed_args, repository);
+
+                let (tracker_refs, tracker_remote) =
+                    push_hooks::capture_tracker_state(parsed_args, repository);
+                command_hooks_context.tracker_pre_push_refs = tracker_refs;
+                command_hooks_context.tracker_push_remote = tracker_remote;
             }
             Some("pull") => {
                 fetch_hooks::pull_pre_command_hook(parsed_args, repository, command_hooks_context);

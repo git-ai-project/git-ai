@@ -1,7 +1,7 @@
 use crate::commands::git_handlers::CommandHooksContext;
 use crate::commands::upgrade;
-use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
-use crate::git::repository::{Repository, find_repository};
+use crate::git::cli_parser::{is_dry_run, ParsedGitInvocation};
+use crate::git::repository::{find_repository, Repository};
 use crate::git::sync_authorship::push_authorship_notes;
 
 pub fn push_pre_command_hook(
@@ -58,17 +58,62 @@ pub fn run_pre_push_hook_managed(parsed_args: &ParsedGitInvocation, repository: 
     }
 }
 
+pub fn capture_tracker_state(
+    parsed_args: &ParsedGitInvocation,
+    repository: &Repository,
+) -> (
+    Option<std::collections::HashMap<String, String>>,
+    Option<String>,
+) {
+    let remote = resolve_push_remote(parsed_args, repository);
+
+    let refs = std::process::Command::new("git")
+        .args(&[
+            "-C",
+            &repository.path().to_string_lossy(),
+            "for-each-ref",
+            "refs/heads/",
+            "--format=%(refname:short) %(objectname)",
+        ])
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut map = std::collections::HashMap::new();
+                for line in text.lines() {
+                    let parts: Vec<&str> = line.splitn(2, ' ').collect();
+                    if parts.len() == 2 {
+                        map.insert(parts[0].to_string(), parts[1].to_string());
+                    }
+                }
+                Some(map)
+            } else {
+                None
+            }
+        });
+
+    (refs, remote)
+}
+
 pub fn push_post_command_hook(
-    _repository: &Repository,
+    repository: &Repository,
     _parsed_args: &ParsedGitInvocation,
-    _exit_status: std::process::ExitStatus,
+    exit_status: std::process::ExitStatus,
     command_hooks_context: &mut CommandHooksContext,
 ) {
-    // Always wait for the authorship push thread to complete if it was started,
-    // regardless of whether the main push succeeded or failed.
-    // This ensures proper cleanup of the background thread.
     if let Some(handle) = command_hooks_context.push_authorship_handle.take() {
         let _ = handle.join();
+    }
+
+    if exit_status.success() {
+        if let (Some(pre_push_refs), Some(remote)) = (
+            command_hooks_context.tracker_pre_push_refs.take(),
+            command_hooks_context.tracker_push_remote.take(),
+        ) {
+            let repo_path = repository.path().to_string_lossy().to_string();
+            crate::commands::tracker::report_pushed_commits(&repo_path, &pre_push_refs, &remote);
+        }
     }
 }
 
