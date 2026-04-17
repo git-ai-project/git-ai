@@ -52,6 +52,8 @@ curl -sSL https://usegitai.com/install.sh | bash
 
 Windows (non-WSL)
 
+Non-WSL Windows support is currently experimental and under active development. We would love to hear your feedback while we work to get non-WSL Windows support production-ready.
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com/install.ps1 | iex"
 ```
