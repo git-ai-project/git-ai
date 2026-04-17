@@ -4,24 +4,29 @@ use std::process::Command;
 
 const MANUAL_ADDED_LINES_THRESHOLD: i32 = 300;
 
-pub fn should_upload(repo_path: &str, commit_sha: &str, blacklist: &[String]) -> bool {
+pub fn should_upload(
+    repo_path: &str,
+    repo_url: &str,
+    commit_sha: &str,
+    blacklist: &[String],
+) -> Result<(), String> {
     let sha7 = &commit_sha[..commit_sha.len().min(7)];
 
-    if is_blacklisted(repo_path, blacklist) {
+    if is_blacklisted(repo_url, blacklist) {
         tracing::debug!("tracker filter: {} skipped (blacklisted)", sha7);
-        return false;
+        return Err("blacklisted".to_string());
     }
     if notes::is_already_reported(repo_path, commit_sha) {
         tracing::debug!("tracker filter: {} skipped (already reported)", sha7);
-        return false;
+        return Err("already_reported".to_string());
     }
     if is_merge_commit(repo_path, commit_sha) {
         tracing::debug!("tracker filter: {} skipped (merge commit)", sha7);
-        return false;
+        return Err("merge_commit".to_string());
     }
     if is_synthetic_message(repo_path, commit_sha) {
         tracing::debug!("tracker filter: {} skipped (synthetic message)", sha7);
-        return false;
+        return Err("synthetic_message".to_string());
     }
     if is_likely_copy_paste(repo_path, commit_sha) {
         tracing::debug!(
@@ -29,17 +34,17 @@ pub fn should_upload(repo_path: &str, commit_sha: &str, blacklist: &[String]) ->
             sha7,
             MANUAL_ADDED_LINES_THRESHOLD
         );
-        return false;
+        return Err("copy_paste_threshold".to_string());
     }
 
     tracing::debug!("tracker filter: {} eligible", sha7);
-    true
+    Ok(())
 }
 
-fn is_blacklisted(repo_path: &str, blacklist: &[String]) -> bool {
+fn is_blacklisted(repo_url: &str, blacklist: &[String]) -> bool {
     blacklist
         .iter()
-        .any(|entry| repo_path.contains(entry.as_str()))
+        .any(|entry| repo_url.contains(entry.as_str()))
 }
 
 fn is_merge_commit(repo_path: &str, commit_sha: &str) -> bool {

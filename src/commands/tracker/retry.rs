@@ -86,6 +86,14 @@ pub fn process_retries(config: &TrackerConfig) -> Result<(), String> {
             ) {
                 Ok(()) => {
                     let _ = notes::mark_reported(&entry.repo_path, &entry.commit_sha);
+                    super::log::append_log(
+                        super::log::LogStatus::RetryOk,
+                        &entry.commit_sha,
+                        &entry.remote,
+                        &entry.branch,
+                        &entry.repo_path,
+                        None,
+                    );
                 }
                 Err(_) => {
                     entry.retry_count += 1;

@@ -199,11 +199,12 @@ pub fn handle_git(args: &[String]) {
             maybe_show_async_post_commit_stats(&parsed, repo);
         }
 
-        if exit_status.success() && let Some((pre_refs, remote)) = tracker_pre_push_state {
-            if let Some(repo) = repository.as_ref() {
-                let repo_path = repo.path().to_string_lossy().to_string();
-                crate::commands::tracker::report_pushed_commits(&repo_path, &pre_refs, &remote);
-            }
+        if exit_status.success()
+            && let Some((pre_refs, remote)) = tracker_pre_push_state
+            && let Some(repo) = repository.as_ref()
+        {
+            let repo_path = repo.path().to_string_lossy().to_string();
+            crate::commands::tracker::report_pushed_commits(&repo_path, &pre_refs, &remote);
         }
 
         exit_with_status(exit_status);

@@ -247,17 +247,113 @@ pub fn handle_git_ai(args: &[String]) {
             handle_show_transcript(&args[1..]);
         }
         "tracker" => {
-            let config = match crate::commands::tracker::config::load_config() {
-                Some(c) => c,
-                None => {
-                    eprintln!("tracker config not found at ~/.git-ai/tracker-config.json");
-                    std::process::exit(1);
+            if args.len() < 2 {
+                eprintln!("Usage: easylife-ai tracker <subcommand>");
+                eprintln!("Subcommands:");
+                eprintln!("  retry              Process retry queue");
+                eprintln!("  log [-n <lines>]   Show upload log (default: 100 lines)");
+                eprintln!("  blacklist list     List blacklist patterns");
+                eprintln!("  blacklist add <pattern>    Add pattern to blacklist");
+                eprintln!("  blacklist remove <pattern> Remove pattern from blacklist");
+                std::process::exit(1);
+            }
+
+            match args[1].as_str() {
+                "retry" => {
+                    let config = match crate::commands::tracker::config::load_config() {
+                        Some(c) => c,
+                        None => {
+                            eprintln!("tracker config not found at ~/.git-ai/tracker-config.json");
+                            std::process::exit(1);
+                        }
+                    };
+                    match crate::commands::tracker::retry::process_retries(&config) {
+                        Ok(()) => println!("tracker retry queue processed"),
+                        Err(e) => {
+                            eprintln!("tracker retry failed: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
                 }
-            };
-            match crate::commands::tracker::retry::process_retries(&config) {
-                Ok(()) => println!("tracker retry queue processed"),
-                Err(e) => {
-                    eprintln!("tracker retry failed: {}", e);
+                "log" => {
+                    let lines = if args.len() > 2 && args[2] == "-n" && args.len() > 3 {
+                        args[3].parse::<usize>().unwrap_or(100)
+                    } else {
+                        100
+                    };
+                    crate::commands::tracker::log::print_log(lines);
+                }
+                "blacklist" => {
+                    if args.len() < 3 {
+                        eprintln!("Usage: easylife-ai tracker blacklist <list|add|remove> [pattern]");
+                        std::process::exit(1);
+                    }
+                    match args[2].as_str() {
+                        "list" => match crate::commands::tracker::config::list_blacklist() {
+                            Ok(patterns) => {
+                                if patterns.is_empty() {
+                                    println!("Blacklist is empty");
+                                } else {
+                                    for pattern in patterns {
+                                        println!("{}", pattern);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Error: {}", e);
+                                std::process::exit(1);
+                            }
+                        },
+                        "add" => {
+                            let pattern = if args.len() >= 4 {
+                                args[3].clone()
+                            } else {
+                                match current_repo_url() {
+                                    Some(url) => url,
+                                    None => {
+                                        eprintln!("未检测到 git remote origin，请手动指定 repo URL");
+                                        eprintln!("Usage: easylife-ai tracker blacklist add <repo_url>");
+                                        std::process::exit(1);
+                                    }
+                                }
+                            };
+                            match crate::commands::tracker::config::add_to_blacklist(&pattern) {
+                                Ok(()) => println!("已将 '{}' 加入黑名单", pattern),
+                                Err(e) => {
+                                    eprintln!("Error: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        "remove" => {
+                            let pattern = if args.len() >= 4 {
+                                args[3].clone()
+                            } else {
+                                match current_repo_url() {
+                                    Some(url) => url,
+                                    None => {
+                                        eprintln!("未检测到 git remote origin，请手动指定 repo URL");
+                                        eprintln!("Usage: easylife-ai tracker blacklist remove <repo_url>");
+                                        std::process::exit(1);
+                                    }
+                                }
+                            };
+                            match crate::commands::tracker::config::remove_from_blacklist(&pattern) {
+                                Ok(()) => println!("已将 '{}' 从黑名单移除", pattern),
+                                Err(e) => {
+                                    eprintln!("Error: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        _ => {
+                            eprintln!("Unknown blacklist subcommand: {}", args[2]);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("Unknown tracker subcommand: {}", args[1]);
                     std::process::exit(1);
                 }
             }
@@ -2327,4 +2423,16 @@ fn exit_with_log_status(status: std::process::ExitStatus) -> ! {
         }
     }
     std::process::exit(status.code().unwrap_or(1));
+}
+
+fn current_repo_url() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() { None } else { Some(url) }
 }

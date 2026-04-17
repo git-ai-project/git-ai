@@ -1,6 +1,7 @@
 pub mod config;
 pub mod diff;
 pub mod filter;
+pub mod log;
 pub mod notes;
 pub mod retry;
 pub mod upload;
@@ -20,10 +21,11 @@ pub fn report_pushed_commits(
 
     tracing::debug!("tracker: processing push to remote {}", remote);
 
-    let current_refs = get_current_refs(repo_path);
+    let repo_url = get_remote_url(repo_path, remote).unwrap_or_default();
+    let post_push_refs = get_remote_refs(repo_path, remote);
 
     for (branch, old_sha) in pre_push_refs {
-        let new_sha = match current_refs.get(branch) {
+        let new_sha = match post_push_refs.get(branch) {
             Some(sha) if sha != old_sha => sha,
             _ => continue,
         };
@@ -31,7 +33,17 @@ pub fn report_pushed_commits(
         let commits = get_commits_in_range(repo_path, old_sha, new_sha);
 
         for commit_sha in commits {
-            if !filter::should_upload(repo_path, &commit_sha, &config.blacklist) {
+            if let Err(reason) =
+                filter::should_upload(repo_path, &repo_url, &commit_sha, &config.blacklist)
+            {
+                log::append_log(
+                    log::LogStatus::Skipped,
+                    &commit_sha,
+                    remote,
+                    branch,
+                    repo_path,
+                    Some(&reason),
+                );
                 continue;
             }
 
@@ -53,9 +65,25 @@ pub fn report_pushed_commits(
             ) {
                 Ok(()) => {
                     let _ = notes::mark_reported(repo_path, &commit_sha);
+                    log::append_log(
+                        log::LogStatus::Uploaded,
+                        &commit_sha,
+                        remote,
+                        branch,
+                        repo_path,
+                        None,
+                    );
                 }
                 Err(e) => {
                     tracing::debug!("tracker upload failed {}: {}", &commit_sha, e);
+                    log::append_log(
+                        log::LogStatus::Failed,
+                        &commit_sha,
+                        remote,
+                        branch,
+                        repo_path,
+                        Some(&e),
+                    );
                     let _ = retry::save_to_queue(repo_path, &commit_sha, diff_gz, remote, branch);
                 }
             }
@@ -63,15 +91,23 @@ pub fn report_pushed_commits(
     }
 }
 
-fn get_current_refs(repo_path: &str) -> HashMap<String, String> {
+fn get_remote_url(repo_path: &str, remote: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["-C", repo_path, "remote", "get-url", remote])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !url.is_empty() {
+            return Some(url);
+        }
+    }
+    None
+}
+
+fn get_remote_refs(repo_path: &str, remote: &str) -> HashMap<String, String> {
     let output = match Command::new("git")
-        .args([
-            "-C",
-            repo_path,
-            "for-each-ref",
-            "refs/heads/",
-            "--format=%(refname:short) %(objectname)",
-        ])
+        .args(["-C", repo_path, "ls-remote", "--heads", remote])
         .output()
     {
         Ok(o) if o.status.success() => o,
@@ -82,9 +118,11 @@ fn get_current_refs(repo_path: &str) -> HashMap<String, String> {
     let mut refs = HashMap::new();
 
     for line in text.lines() {
-        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        let parts: Vec<&str> = line.splitn(2, '\t').collect();
         if parts.len() == 2 {
-            refs.insert(parts[0].to_string(), parts[1].to_string());
+            let sha = parts[0];
+            let refname = parts[1].trim_start_matches("refs/heads/");
+            refs.insert(refname.to_string(), sha.to_string());
         }
     }
 
