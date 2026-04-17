@@ -46,7 +46,7 @@ fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  142)             let fro
 <td align="center" width="20%"><img src="assets/docs/agents/gray/opencode.png" alt="OpenCode" width="160" /></td>
 </tr>
 <tr>
-<td align="center"><img src="assets/docs/agents/gray/pi.svg" alt="Pi" width="160" /></td>
+<td align="center"><img src="assets/docs/agents/gray/pi.png" alt="Pi" width="160" /></td>
 <td align="center"><img src="assets/docs/agents/gray/windsurf.png" alt="Windsurf" width="160" /></td>
 <td align="center"><img src="assets/docs/agents/gray/droid.png" alt="Droid" width="160" /></td>
 <td align="center"><img src="assets/docs/agents/gray/amp.png" alt="Amp" width="160" /></td>
