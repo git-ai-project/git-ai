@@ -34,8 +34,8 @@ LOGO_MAX_H = 200
 def bake_png(src: Path) -> None:
     img = Image.open(src).convert("RGBA")
     w, h = img.size
-    # Never upscale past native size — preserves sharpness.
-    scale = min(LOGO_MAX_W / w, LOGO_MAX_H / h, 1.0)
+    # Fill the logo box; allow upscaling small sources so padding is consistent.
+    scale = min(LOGO_MAX_W / w, LOGO_MAX_H / h)
     nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
     if (nw, nh) != (w, h):
         img = img.resize((nw, nh), Image.LANCZOS)
