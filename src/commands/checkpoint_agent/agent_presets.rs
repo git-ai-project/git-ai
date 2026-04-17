@@ -777,10 +777,7 @@ impl AgentCheckpointPreset for WindsurfPreset {
         // Windsurf's run_command is the bash-tool equivalent.  Mirror the Claude
         // pre/post stat-diff flow so file changes made by shell commands can be
         // attributed to the Windsurf agent.
-        if matches!(
-            agent_action_name,
-            "pre_run_command" | "post_run_command"
-        ) {
+        if matches!(agent_action_name, "pre_run_command" | "post_run_command") {
             // run_command payloads nest cwd under tool_info; fall back to the
             // top-level cwd for payload-shape resilience.
             let bash_cwd = hook_data
