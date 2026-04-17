@@ -4621,3 +4621,186 @@ fn daemon_recovers_from_panic_in_side_effect_pipeline() {
     // Clean shutdown.
     daemon.shutdown();
 }
+
+/// When the daemon's socket files are deleted from the filesystem while the
+/// daemon process is still running, the daemon becomes a zombie: alive but
+/// unreachable. New clients cannot connect because the filesystem entries are
+/// gone, even though the kernel-level socket fds are still open.
+///
+/// The daemon should detect that its socket files have been unlinked and
+/// initiate a graceful shutdown so that the next wrapper invocation can
+/// spawn a fresh daemon via ensure_daemon_running.
+#[test]
+#[serial]
+#[cfg(unix)]
+fn daemon_shuts_down_when_socket_files_are_deleted() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let control_socket_path = daemon_control_socket_path(&repo);
+    let trace_socket_path = daemon_trace_socket_path(&repo);
+
+    let mut daemon = DaemonGuard::start_with_env(
+        &repo,
+        &[
+            ("GIT_AI_DAEMON_SOCKET_HEALTH_CHECK_SECS", "1"),
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "86400"),
+            ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "86400"),
+        ],
+    );
+
+    // Verify the daemon is alive and both sockets exist on disk.
+    assert!(
+        control_socket_path.exists(),
+        "control socket should exist after daemon start"
+    );
+    assert!(
+        trace_socket_path.exists(),
+        "trace socket should exist after daemon start"
+    );
+    assert!(
+        send_control_request(
+            &control_socket_path,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir_string(&repo),
+            },
+        )
+        .is_ok(),
+        "daemon should respond to status requests"
+    );
+
+    // Verify daemon is actually still running before we delete sockets.
+    assert!(
+        daemon
+            .child
+            .try_wait()
+            .expect("failed to poll daemon")
+            .is_none(),
+        "daemon process should still be running before socket deletion"
+    );
+
+    // Delete the socket files out from under the running daemon.
+    fs::remove_file(&control_socket_path).expect("failed to delete control socket");
+    fs::remove_file(&trace_socket_path).expect("failed to delete trace socket");
+    assert!(
+        !control_socket_path.exists(),
+        "control socket should be deleted"
+    );
+    assert!(
+        !trace_socket_path.exists(),
+        "trace socket should be deleted"
+    );
+
+    // Wait for the daemon to notice and shut down. With a 1-second check
+    // interval, it should detect the missing sockets within a few seconds.
+    let mut daemon_exited = false;
+    for _ in 0..100 {
+        if daemon
+            .child
+            .try_wait()
+            .expect("failed to poll daemon")
+            .is_some()
+        {
+            daemon_exited = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        daemon_exited,
+        "daemon should shut down after its socket files are deleted, \
+         but the process is still running after 10 seconds"
+    );
+
+    // DaemonGuard::drop calls shutdown(), which is a no-op if already exited.
+    daemon.shutdown();
+}
+
+/// After detecting that its sockets have been deleted, the daemon should
+/// spawn a detached `git-ai bg restart --hard` process that reaps the
+/// zombie and starts a fresh daemon. Verify that a new, reachable daemon
+/// is running after the original one dies.
+#[test]
+#[serial]
+#[cfg(unix)]
+fn daemon_self_heals_after_socket_deletion() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let control_socket_path = daemon_control_socket_path(&repo);
+    let trace_socket_path = daemon_trace_socket_path(&repo);
+
+    let mut daemon = DaemonGuard::start_with_env(
+        &repo,
+        &[
+            ("GIT_AI_DAEMON_SOCKET_HEALTH_CHECK_SECS", "1"),
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "86400"),
+            ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "86400"),
+            ("GIT_AI_DAEMON_MIN_UPTIME_FOR_RESTART_SECS", "0"),
+        ],
+    );
+
+    // Verify the daemon is alive and responsive.
+    assert!(
+        send_control_request(
+            &control_socket_path,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir_string(&repo),
+            },
+        )
+        .is_ok(),
+        "original daemon should respond to status requests"
+    );
+
+    // Delete both socket files.
+    fs::remove_file(&control_socket_path).expect("failed to delete control socket");
+    fs::remove_file(&trace_socket_path).expect("failed to delete trace socket");
+
+    // Wait for the original daemon to exit.
+    let mut original_exited = false;
+    for _ in 0..100 {
+        if daemon
+            .child
+            .try_wait()
+            .expect("failed to poll daemon")
+            .is_some()
+        {
+            original_exited = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        original_exited,
+        "original daemon should shut down after socket deletion"
+    );
+
+    // Wait for a new daemon to come up with fresh sockets.
+    let mut new_daemon_reachable = false;
+    for _ in 0..200 {
+        if control_socket_path.exists()
+            && send_control_request(
+                &control_socket_path,
+                &ControlRequest::StatusFamily {
+                    repo_working_dir: repo_workdir_string(&repo),
+                },
+            )
+            .is_ok()
+        {
+            new_daemon_reachable = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        new_daemon_reachable,
+        "a new daemon should be reachable after the original self-healed"
+    );
+
+    // Clean up the new daemon.
+    let _ = send_control_request(&control_socket_path, &ControlRequest::Shutdown);
+    for _ in 0..100 {
+        if !control_socket_path.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
