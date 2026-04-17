@@ -39,24 +39,24 @@ fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  142)             let fro
 
 <table>
 <tr>
-<td align="center" width="20%"><img src="assets/docs/agents/gray/claude_code.png" alt="Claude Code" height="80" /></td>
-<td align="center" width="20%"><img src="assets/docs/agents/gray/codex-black.png" alt="Codex" height="80" /></td>
-<td align="center" width="20%"><img src="assets/docs/agents/gray/cursor.png" alt="Cursor" height="80" /></td>
-<td align="center" width="20%"><img src="assets/docs/agents/gray/copilot.png" alt="GitHub Copilot" height="80" /></td>
-<td align="center" width="20%"><img src="assets/docs/agents/gray/opencode.png" alt="OpenCode" height="80" /></td>
+<td align="center" width="20%"><img src="assets/docs/agents/gray/claude_code.png" alt="Claude Code" width="160" /></td>
+<td align="center" width="20%"><img src="assets/docs/agents/gray/codex-black.png" alt="Codex" width="160" /></td>
+<td align="center" width="20%"><img src="assets/docs/agents/gray/cursor.png" alt="Cursor" width="160" /></td>
+<td align="center" width="20%"><img src="assets/docs/agents/gray/copilot.png" alt="GitHub Copilot" width="160" /></td>
+<td align="center" width="20%"><img src="assets/docs/agents/gray/opencode.png" alt="OpenCode" width="160" /></td>
 </tr>
 <tr>
-<td align="center"><img src="assets/docs/agents/gray/pi.svg" alt="Pi" height="80" /></td>
-<td align="center"><img src="assets/docs/agents/gray/windsurf.png" alt="Windsurf" height="80" /></td>
-<td align="center"><img src="assets/docs/agents/gray/droid.png" alt="Droid" height="80" /></td>
-<td align="center"><img src="assets/docs/agents/gray/amp.png" alt="Amp" height="80" /></td>
-<td align="center"><img src="assets/docs/agents/gray/gemini.png" alt="Gemini" height="80" /></td>
+<td align="center"><img src="assets/docs/agents/gray/pi.svg" alt="Pi" width="160" /></td>
+<td align="center"><img src="assets/docs/agents/gray/windsurf.png" alt="Windsurf" width="160" /></td>
+<td align="center"><img src="assets/docs/agents/gray/droid.png" alt="Droid" width="160" /></td>
+<td align="center"><img src="assets/docs/agents/gray/amp.png" alt="Amp" width="160" /></td>
+<td align="center"><img src="assets/docs/agents/gray/gemini.png" alt="Gemini" width="160" /></td>
 </tr>
 <tr>
-<td align="center"><img src="assets/docs/agents/gray/continue.png" alt="Continue" height="80" /></td>
-<td align="center"><img src="assets/docs/agents/gray/junie_white.png" alt="Junie" height="80" /></td>
-<td align="center"><img src="assets/docs/agents/gray/rovodev.png" alt="Rovo Dev" height="80" /></td>
-<td align="center"><img src="assets/docs/agents/gray/firebender.png" alt="Firebender" height="80" /></td>
+<td align="center"><img src="assets/docs/agents/gray/continue.png" alt="Continue" width="160" /></td>
+<td align="center"><img src="assets/docs/agents/gray/junie_white.png" alt="Junie" width="160" /></td>
+<td align="center"><img src="assets/docs/agents/gray/rovodev.png" alt="Rovo Dev" width="160" /></td>
+<td align="center"><img src="assets/docs/agents/gray/firebender.png" alt="Firebender" width="160" /></td>
 <td align="center"><a href="https://usegitai.com/docs/cli/add-your-agent">+ Add an Agent</a></td>
 </tr>
 </table>
