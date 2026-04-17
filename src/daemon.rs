@@ -8083,13 +8083,21 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
             tracing::debug!("skipping join for {} thread (deadline exceeded)", name);
             continue;
         }
-        let thread_name = name;
         let handle = std::thread::spawn(move || {
             let _ = thread.join();
         });
-        std::thread::sleep(remaining.min(std::time::Duration::from_millis(500)));
-        if !handle.is_finished() {
-            tracing::debug!("{} thread did not join in time, proceeding", thread_name);
+        let poll_until =
+            std::time::Instant::now() + remaining.min(std::time::Duration::from_millis(500));
+        loop {
+            if handle.is_finished() {
+                let _ = handle.join();
+                break;
+            }
+            if std::time::Instant::now() >= poll_until {
+                tracing::debug!("{} thread did not join in time, proceeding", name);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
