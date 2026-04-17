@@ -4803,14 +4803,12 @@ fn daemon_self_heals_after_socket_deletion() {
         .join("internal")
         .join("daemon")
         .join("daemon.pid.json");
-    let new_pid_raw =
-        fs::read_to_string(&pid_file_path).expect("should be able to read pid file");
+    let new_pid_raw = fs::read_to_string(&pid_file_path).expect("should be able to read pid file");
     let new_pid: serde_json::Value =
         serde_json::from_str(&new_pid_raw).expect("pid file should be valid json");
     let new_pid_num = new_pid["pid"].as_u64().expect("pid should be a number");
     assert_ne!(
-        new_pid_num,
-        original_pid as u64,
+        new_pid_num, original_pid as u64,
         "new daemon should have a different PID than the original"
     );
 
