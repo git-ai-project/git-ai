@@ -774,6 +774,94 @@ impl AgentCheckpointPreset for WindsurfPreset {
         let agent_metadata =
             HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]);
 
+        // Windsurf's run_command is the bash-tool equivalent.  Mirror the Claude
+        // pre/post stat-diff flow so file changes made by shell commands can be
+        // attributed to the Windsurf agent.
+        if matches!(agent_action_name, "pre_run_command" | "post_run_command") {
+            // run_command payloads nest cwd under tool_info; fall back to the
+            // top-level cwd for payload-shape resilience.
+            let bash_cwd = hook_data
+                .get("tool_info")
+                .and_then(|ti| ti.get("cwd"))
+                .and_then(|v| v.as_str())
+                .or_else(|| hook_data.get("cwd").and_then(|v| v.as_str()))
+                .map(|s| s.to_string());
+
+            let session_id = trajectory_id;
+            let tool_use_id = hook_data
+                .get("execution_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("bash");
+
+            if agent_action_name == "pre_run_command" {
+                let pre_hook_captured_id = prepare_agent_bash_pre_hook(
+                    true,
+                    bash_cwd.as_deref(),
+                    session_id,
+                    tool_use_id,
+                    &agent_id,
+                    Some(&agent_metadata),
+                    BashPreHookStrategy::EmitHumanCheckpoint,
+                )?
+                .captured_checkpoint_id();
+
+                return Ok(AgentRunResult {
+                    agent_id,
+                    agent_metadata: None,
+                    checkpoint_kind: CheckpointKind::Human,
+                    transcript: None,
+                    repo_working_dir: bash_cwd,
+                    edited_filepaths: None,
+                    will_edit_filepaths: None,
+                    dirty_files: None,
+                    captured_checkpoint_id: pre_hook_captured_id,
+                });
+            }
+
+            // post_run_command: diff snapshots to recover the files the shell
+            // command touched.
+            let (edited_filepaths, bash_captured_checkpoint_id) = match bash_cwd.as_deref() {
+                Some(cwd_str) => {
+                    let repo_root = Path::new(cwd_str);
+                    match bash_tool::handle_bash_tool(
+                        HookEvent::PostToolUse,
+                        repo_root,
+                        session_id,
+                        tool_use_id,
+                    ) {
+                        Ok(result) => {
+                            let paths = match &result.action {
+                                BashCheckpointAction::Checkpoint(paths) => Some(paths.clone()),
+                                _ => None,
+                            };
+                            let capture_id = result
+                                .captured_checkpoint
+                                .as_ref()
+                                .map(|info| info.capture_id.clone());
+                            (paths, capture_id)
+                        }
+                        Err(e) => {
+                            tracing::debug!("Windsurf bash post-hook error: {}", e);
+                            (None, None)
+                        }
+                    }
+                }
+                None => (None, None),
+            };
+
+            return Ok(AgentRunResult {
+                agent_id,
+                agent_metadata: Some(agent_metadata),
+                checkpoint_kind: CheckpointKind::AiAgent,
+                transcript: Some(transcript),
+                repo_working_dir: bash_cwd,
+                edited_filepaths,
+                will_edit_filepaths: None,
+                dirty_files: None,
+                captured_checkpoint_id: bash_captured_checkpoint_id,
+            });
+        }
+
         // pre_write_code is the human checkpoint (before AI edit)
         if agent_action_name == "pre_write_code" {
             return Ok(AgentRunResult {
