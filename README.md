@@ -227,7 +227,7 @@ Agents with access to the original intent and source code understand the "why." 
 
 
 <details>
-<summary><h1 style="display:inline"> Make Your Agents Smarter</h1></summary>
+<summary>Make Your Agents Smarter</summary>
 
 Agents make fewer mistakes and produce more maintainable code when they understand the requirements and decisions behind the code they build on. The best way to provide this context is to give agents the same `/ask` tool you use yourself. Tell your agents to use `/ask` in plan mode:
 
