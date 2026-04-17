@@ -80,7 +80,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com
 
 That's it — **no per-repo setup required.** Prompt and commit as normal. Git AI tracks attribution automatically.
 
-
 ### Our Choices
 - **No workflow changes** — Just prompt and commit. Git AI tracks AI code accurately without cluttering your git history.
 - **"Detecting" AI code is an anti-pattern** — Git AI does not guess whether a hunk is AI-generated. Supported agents report exactly which lines they wrote, giving you the most accurate attribution possible.
