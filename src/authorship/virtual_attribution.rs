@@ -25,6 +25,10 @@ pub struct VirtualAttributions {
     ts: u128,
     pub blame_start_commit: Option<String>,
     pub humans: BTreeMap<String, HumanRecord>,
+    // Prompt IDs that came from INITIAL attributions only (no matching checkpoint).
+    // These are stale prompts from prior commits and should only appear in the
+    // authorship note if they have committed lines in the current commit.
+    initial_only_prompt_ids: HashSet<String>,
 }
 
 impl VirtualAttributions {
@@ -49,6 +53,7 @@ impl VirtualAttributions {
             ts,
             blame_start_commit,
             humans: BTreeMap::new(),
+            initial_only_prompt_ids: HashSet::new(),
         };
 
         // Process all pathspecs concurrently
@@ -324,6 +329,10 @@ impl VirtualAttributions {
         let mut prompts = BTreeMap::new();
         let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut file_contents: HashMap<String, String> = HashMap::new();
+        // Prompt IDs that originate from INITIAL attributions (prior commits).
+        // If a checkpoint later references the same prompt_id, it is removed from
+        // this set because the prompt was actively used in this commit's session.
+        let mut initial_only_prompt_ids: HashSet<String> = HashSet::new();
 
         // Track additions and deletions per session_id for metrics
         let mut session_additions: HashMap<String, u32> = HashMap::new();
@@ -336,6 +345,7 @@ impl VirtualAttributions {
                 .entry(prompt_id.clone())
                 .or_insert_with(BTreeMap::new)
                 .insert(String::new(), prompt_record.clone());
+            initial_only_prompt_ids.insert(prompt_id.clone());
         }
 
         // Load known human records from INITIAL attributions
@@ -395,6 +405,9 @@ impl VirtualAttributions {
                     .entry(author_id.clone())
                     .or_insert_with(BTreeMap::new)
                     .insert(String::new(), prompt_record);
+                // This prompt was actively used in a checkpoint, so it's not
+                // INITIAL-only (even if it was also in INITIAL).
+                initial_only_prompt_ids.remove(&author_id);
 
                 // Track additions and deletions from checkpoint line_stats
                 *session_additions.entry(author_id.clone()).or_insert(0) +=
@@ -475,6 +488,7 @@ impl VirtualAttributions {
             ts: 0,
             blame_start_commit: None,
             humans,
+            initial_only_prompt_ids,
         })
     }
 
@@ -495,6 +509,7 @@ impl VirtualAttributions {
         let mut prompts = BTreeMap::new();
         let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut file_contents: HashMap<String, String> = HashMap::new();
+        let mut initial_only_prompt_ids: HashSet<String> = HashSet::new();
 
         let mut session_additions: HashMap<String, u32> = HashMap::new();
         let mut session_deletions: HashMap<String, u32> = HashMap::new();
@@ -504,6 +519,7 @@ impl VirtualAttributions {
                 .entry(prompt_id.clone())
                 .or_insert_with(BTreeMap::new)
                 .insert(String::new(), prompt_record.clone());
+            initial_only_prompt_ids.insert(prompt_id.clone());
         }
 
         // Load known human records from INITIAL attributions
@@ -554,6 +570,7 @@ impl VirtualAttributions {
                     .entry(author_id.clone())
                     .or_insert_with(BTreeMap::new)
                     .insert(String::new(), prompt_record);
+                initial_only_prompt_ids.remove(&author_id);
 
                 *session_additions.entry(author_id.clone()).or_insert(0) +=
                     checkpoint.line_stats.additions;
@@ -624,6 +641,7 @@ impl VirtualAttributions {
             ts: 0,
             blame_start_commit: None,
             humans,
+            initial_only_prompt_ids,
         })
     }
 
@@ -645,6 +663,7 @@ impl VirtualAttributions {
         let mut prompts = BTreeMap::new();
         let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut file_contents: HashMap<String, String> = HashMap::new();
+        let mut initial_only_prompt_ids: HashSet<String> = HashSet::new();
 
         let mut session_additions: HashMap<String, u32> = HashMap::new();
         let mut session_deletions: HashMap<String, u32> = HashMap::new();
@@ -654,6 +673,7 @@ impl VirtualAttributions {
                 .entry(prompt_id.clone())
                 .or_insert_with(BTreeMap::new)
                 .insert(String::new(), prompt_record.clone());
+            initial_only_prompt_ids.insert(prompt_id.clone());
         }
 
         // Load known human records from INITIAL attributions
@@ -704,6 +724,7 @@ impl VirtualAttributions {
                     .entry(author_id.clone())
                     .or_insert_with(BTreeMap::new)
                     .insert(String::new(), prompt_record);
+                initial_only_prompt_ids.remove(&author_id);
 
                 *session_additions.entry(author_id.clone()).or_insert(0) +=
                     checkpoint.line_stats.additions;
@@ -781,6 +802,7 @@ impl VirtualAttributions {
             ts: 0,
             blame_start_commit: None,
             humans,
+            initial_only_prompt_ids,
         })
     }
 
@@ -829,8 +851,14 @@ impl VirtualAttributions {
         // Save session prompt IDs before the merge consumes checkpoint_va.  These are
         // prompts from the *current* amend/commit session and must be kept in
         // metadata.prompts even if no lines landed (non-landing prompts).
-        let checkpoint_prompt_ids: std::collections::HashSet<String> =
-            checkpoint_va.prompts.keys().cloned().collect();
+        // Exclude INITIAL-only prompts — they are stale carry-overs from prior commits,
+        // not from the current session.
+        let checkpoint_prompt_ids: std::collections::HashSet<String> = checkpoint_va
+            .prompts
+            .keys()
+            .filter(|id| !checkpoint_va.initial_only_prompt_ids.contains(*id))
+            .cloned()
+            .collect();
 
         let mut final_state = checkpoint_va.file_contents.clone();
         if let Ok(workdir) = repo.workdir() {
@@ -850,6 +878,16 @@ impl VirtualAttributions {
         }
         let mut merged_va =
             merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
+
+        // Mark all non-session prompts (INITIAL-only + blame-sourced) so the
+        // downstream filter in `to_authorship_log_and_initial_working_log` can
+        // remove them when they have no committed lines in the attestations.
+        merged_va.initial_only_prompt_ids = merged_va
+            .prompts
+            .keys()
+            .filter(|id| !checkpoint_prompt_ids.contains(*id))
+            .cloned()
+            .collect();
 
         // Prune blame-history prompts whose lines were deleted (e.g. because the user
         // deleted an AI-authored line during an amend).  We keep:
@@ -903,8 +941,13 @@ impl VirtualAttributions {
         )?;
 
         // Save session prompt IDs before the merge consumes checkpoint_va.
-        let checkpoint_prompt_ids: std::collections::HashSet<String> =
-            checkpoint_va.prompts.keys().cloned().collect();
+        // Exclude INITIAL-only prompts (same logic as `from_working_log_for_commit`).
+        let checkpoint_prompt_ids: std::collections::HashSet<String> = checkpoint_va
+            .prompts
+            .keys()
+            .filter(|id| !checkpoint_va.initial_only_prompt_ids.contains(*id))
+            .cloned()
+            .collect();
 
         // Priority for `final_state` per file:
         //   1. checkpoint_va.file_contents  (working-log snapshot entries)
@@ -923,6 +966,14 @@ impl VirtualAttributions {
         }
         let mut merged_va =
             merge_attributions_favoring_first(checkpoint_va, blame_va, final_state)?;
+
+        // Mark all non-session prompts (same logic as `from_working_log_for_commit`).
+        merged_va.initial_only_prompt_ids = merged_va
+            .prompts
+            .keys()
+            .filter(|id| !checkpoint_prompt_ids.contains(*id))
+            .cloned()
+            .collect();
 
         // Prune blame-history prompts whose lines were deleted.  Same logic as
         // `from_working_log_for_commit`.
@@ -959,6 +1010,7 @@ impl VirtualAttributions {
             ts,
             blame_start_commit: None,
             humans: BTreeMap::new(),
+            initial_only_prompt_ids: HashSet::new(),
         }
     }
 
@@ -979,6 +1031,7 @@ impl VirtualAttributions {
             ts,
             blame_start_commit: None,
             humans: BTreeMap::new(), // TODO(known-human): propagate humans from caller when rebase path is wired (Task 12)
+            initial_only_prompt_ids: HashSet::new(),
         }
     }
 
@@ -1631,6 +1684,26 @@ impl VirtualAttributions {
             }
         }
 
+        // Remove INITIAL-only prompts that have no committed lines in the
+        // attestations.  Prompts originating from current-session checkpoints are
+        // kept unconditionally (they represent AI tools used during development,
+        // even if their lines didn't land — the "non-landing prompt" feature).
+        // Only INITIAL-carried prompts (from prior commits' uncommitted AI lines)
+        // are filtered out when they have no committed lines.
+        if !self.initial_only_prompt_ids.is_empty() {
+            let committed_prompt_ids: HashSet<&String> = authorship_log
+                .attestations
+                .iter()
+                .flat_map(|file_att| file_att.entries.iter())
+                .map(|entry| &entry.hash)
+                .collect();
+            authorship_log.metadata.prompts.retain(|prompt_id, _| {
+                // Keep if: not INITIAL-only, OR has committed lines
+                !self.initial_only_prompt_ids.contains(prompt_id)
+                    || committed_prompt_ids.contains(prompt_id)
+            });
+        }
+
         // Build prompts map for INITIAL (only prompts referenced by uncommitted lines)
         let mut initial_prompts = StdHashMap::new();
         for prompt_id in referenced_prompts {
@@ -1827,6 +1900,21 @@ impl VirtualAttributions {
                     file_attestation.add_entry(entry);
                 }
             }
+        }
+
+        // Remove INITIAL-only prompts without committed lines (same logic as the
+        // primary method — see comment there).
+        if !self.initial_only_prompt_ids.is_empty() {
+            let committed_prompt_ids: std::collections::HashSet<&String> = authorship_log
+                .attestations
+                .iter()
+                .flat_map(|file_att| file_att.entries.iter())
+                .map(|entry| &entry.hash)
+                .collect();
+            authorship_log.metadata.prompts.retain(|prompt_id, _| {
+                !self.initial_only_prompt_ids.contains(prompt_id)
+                    || committed_prompt_ids.contains(prompt_id)
+            });
         }
 
         Ok(authorship_log)
@@ -2096,6 +2184,7 @@ pub fn merge_attributions_favoring_first(
         ts,
         blame_start_commit: None,
         humans: merged_humans,
+        initial_only_prompt_ids: HashSet::new(),
     };
 
     // Get union of all files

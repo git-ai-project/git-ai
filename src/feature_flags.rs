@@ -52,7 +52,7 @@ macro_rules! define_feature_flags {
 // Define all feature flags in one place
 // Format: struct_field: file_and_env_name, debug = <bool>, release = <bool>
 define_feature_flags!(
-    rewrite_stash: rewrite_stash, debug = true, release = false,
+    rewrite_stash: rewrite_stash, debug = true, release = true,
     inter_commit_move: checkpoint_inter_commit_move, debug = false, release = false,
     auth_keyring: auth_keyring, debug = false, release = false,
     async_mode: async_mode, debug = false, release = true,
@@ -136,7 +136,7 @@ mod tests {
         }
         #[cfg(not(debug_assertions))]
         {
-            assert!(!flags.rewrite_stash);
+            assert!(flags.rewrite_stash);
             assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
             assert!(flags.async_mode);

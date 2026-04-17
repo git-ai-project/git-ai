@@ -937,14 +937,6 @@ fn execute_resolved_checkpoint(
         let attrs =
             build_checkpoint_attrs(repo, &resolved.base_commit, checkpoint.agent_id.as_ref());
 
-        if kind.is_ai()
-            && let Some(agent_id) = checkpoint.agent_id.as_ref()
-            && should_emit_agent_usage(agent_id)
-        {
-            let values = crate::metrics::AgentUsageValues::new();
-            crate::metrics::record(values, attrs.clone());
-        }
-
         for (entry, file_stat) in entries.iter().zip(file_stats.iter()) {
             let values = crate::metrics::CheckpointValues::new()
                 .checkpoint_ts(checkpoint.timestamp)

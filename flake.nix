@@ -44,6 +44,10 @@
             lockFile = ./Cargo.lock;
           };
 
+          # Prevent openssl-sys from vendoring OpenSSL (which requires perl).
+          # Instead, link against the system OpenSSL provided by buildInputs.
+          OPENSSL_NO_VENDOR = "1";
+
           # Native build inputs needed for rusqlite with bundled SQLite
           nativeBuildInputs = with pkgs; [
             pkg-config
@@ -55,6 +59,8 @@
           buildInputs = with pkgs; [
             # rusqlite bundled mode compiles its own SQLite, but needs these headers
             sqlite
+            # openssl-sys needs system OpenSSL headers and libraries
+            openssl
           ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
             # macOS-specific dependencies
             libiconv
@@ -296,7 +302,7 @@ GITOGEOF
           let
             commonNativeBuildInputs = with pkgs; [ pkg-config ]
               ++ [ rustPlatform.bindgenHook ];
-            commonBuildInputs = with pkgs; [ sqlite ]
+            commonBuildInputs = with pkgs; [ sqlite openssl ]
               ++ lib.optionals stdenv.hostPlatform.isDarwin [
                 libiconv apple-sdk_15
               ];
@@ -304,6 +310,7 @@ GITOGEOF
               version = git-ai-unwrapped.version;
               src = ./.;
               cargoLock.lockFile = ./Cargo.lock;
+              OPENSSL_NO_VENDOR = "1";
               nativeBuildInputs = commonNativeBuildInputs;
               buildInputs = commonBuildInputs;
               installPhase = "mkdir -p $out";

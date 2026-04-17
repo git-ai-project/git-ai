@@ -14,19 +14,11 @@ pub fn notes_add(
     commit_sha: &str,
     note_content: &str,
 ) -> Result<(), GitAiError> {
-    let mut args = repo.global_args_for_exec();
-    args.push("notes".to_string());
-    args.push("--ref=ai".to_string());
-    args.push("add".to_string());
-    args.push("-f".to_string()); // Always force overwrite
-    args.push("-F".to_string());
-    args.push("-".to_string()); // Read note content from stdin
-    args.push(commit_sha.to_string());
-
-    // Use stdin to provide the note content to avoid command line length limits
-    exec_git_stdin(&args, note_content.as_bytes())?;
-    crate::authorship::git_ai_hooks::post_notes_updated_single(repo, commit_sha, note_content);
-    Ok(())
+    // Route through notes_add_batch to ensure consistent fanout tree format.
+    // Using git's native `notes add` can produce flat entries for small trees,
+    // leading to mixed-fanout trees that trigger assertion failures in
+    // `git notes merge` (notes-merge.c diff_tree_remote).
+    notes_add_batch(repo, &[(commit_sha.to_string(), note_content.to_string())])
 }
 
 fn notes_path_for_object(oid: &str) -> String {
@@ -593,24 +585,39 @@ pub fn fallback_merge_notes_ours(repo: &Repository, source_ref: &str) -> Result<
     let local_commit = rev_parse(repo, &local_ref)?;
     let source_commit = rev_parse(repo, source_ref)?;
 
+    // Nothing to merge if both refs point to the same commit.
+    if local_commit == source_commit {
+        tracing::debug!("notes refs already at same commit, nothing to merge");
+        return Ok(());
+    }
+
     // 3. Build the fast-import stream.
+    //    Use explicit `M` (filemodify) commands instead of `N` (notemodify) because
+    //    `N` validates that the annotated object exists locally, which fails when
+    //    merging notes from a remote that annotates commits not yet fetched to this
+    //    repo (e.g., notes from another developer's push on a monorepo).
+    //
     //    Emit source (remote) notes first, then local notes. fast-import uses
-    //    last-writer-wins for duplicate annotated objects, so local notes take
-    //    precedence — this implements the "ours" merge strategy.
+    //    last-writer-wins for duplicate paths, so local notes take precedence —
+    //    this implements the "ours" merge strategy.
     let mut stream = String::new();
     stream.push_str(&format!("commit {}\n", local_ref));
     stream.push_str("committer git-ai <git-ai@noreply> 0 +0000\n");
     stream.push_str("data 23\nMerge notes (fallback)\n");
     stream.push_str(&format!("from {}\n", local_commit));
     stream.push_str(&format!("merge {}\n", source_commit));
+    // Start with a clean tree to avoid mixed-fanout issues
+    stream.push_str("deleteall\n");
 
     // Source notes first (will be overwritten by local on conflict)
     for (blob, object) in &source_notes {
-        stream.push_str(&format!("N {} {}\n", blob, object));
+        let path = notes_path_for_object(object);
+        stream.push_str(&format!("M 100644 {} {}\n", blob, path));
     }
     // Local notes second (wins on conflict)
     for (blob, object) in &local_notes {
-        stream.push_str(&format!("N {} {}\n", blob, object));
+        let path = notes_path_for_object(object);
+        stream.push_str(&format!("M 100644 {} {}\n", blob, path));
     }
     stream.push_str("done\n");
 

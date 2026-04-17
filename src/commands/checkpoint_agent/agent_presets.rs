@@ -728,10 +728,17 @@ impl AgentCheckpointPreset for WindsurfPreset {
                     .to_string()
             });
 
+        // Extract model_name from hook payload (Windsurf provides this on every hook event)
+        let hook_model = hook_data
+            .get("model_name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty() && *s != "Unknown")
+            .map(|s| s.to_string());
+
         // Parse transcript (best-effort)
-        let transcript =
+        let (transcript, transcript_model) =
             match WindsurfPreset::transcript_and_model_from_windsurf_jsonl(&transcript_path) {
-                Ok((transcript, _model)) => transcript,
+                Ok((transcript, model)) => (transcript, model),
                 Err(e) => {
                     eprintln!("[Warning] Failed to parse Windsurf JSONL: {e}");
                     log_error(
@@ -741,15 +748,19 @@ impl AgentCheckpointPreset for WindsurfPreset {
                             "operation": "transcript_and_model_from_windsurf_jsonl"
                         })),
                     );
-                    crate::authorship::transcript::AiTranscript::new()
+                    (crate::authorship::transcript::AiTranscript::new(), None)
                 }
             };
 
-        // Windsurf doesn't expose model info in hooks yet — hardcode to "unknown"
+        // Prefer hook-level model_name, fall back to transcript, then "unknown"
+        let model = hook_model
+            .or(transcript_model)
+            .unwrap_or_else(|| "unknown".to_string());
+
         let agent_id = AgentId {
             tool: "windsurf".to_string(),
             id: trajectory_id.to_string(),
-            model: "unknown".to_string(),
+            model,
         };
 
         // Extract file_path from tool_info if present
@@ -795,7 +806,8 @@ impl AgentCheckpointPreset for WindsurfPreset {
 impl WindsurfPreset {
     /// Parse a Windsurf JSONL transcript file into a transcript.
     /// Each line is a JSON object with a "type" field.
-    /// Model info is not present in the format — always returns None.
+    /// Model info is not present in the JSONL format — always returns None.
+    /// (Model is instead provided via `model_name` in the hook payload.)
     pub fn transcript_and_model_from_windsurf_jsonl(
         transcript_path: &str,
     ) -> Result<(AiTranscript, Option<String>), GitAiError> {

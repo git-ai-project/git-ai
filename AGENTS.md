@@ -75,7 +75,7 @@ Signal forwarding: On Unix, the git proxy installs signal handlers (SIGTERM, SIG
 
 `Config` is a global `OnceLock` singleton accessed via `Config::get()`. It reads from `~/.git-ai/config.json`. In tests, `GIT_AI_TEST_CONFIG_PATCH` env var allows overriding specific config fields without a real config file. Feature flags follow precedence: environment vars (`GIT_AI_*` prefix via `envy`) > config file > defaults.
 
-Feature flags have separate debug/release defaults defined via the `define_feature_flags!` macro in `src/feature_flags.rs`. Currently: `rewrite_stash` (debug=true, release=false), `inter_commit_move` (false/false), `auth_keyring` (false/false).
+Feature flags have separate debug/release defaults defined via the `define_feature_flags!` macro in `src/feature_flags.rs`. Currently: `rewrite_stash` (true/true), `inter_commit_move` (false/false), `auth_keyring` (false/false).
 
 ### Error handling
 
@@ -134,7 +134,7 @@ Uses `insta` crate. Snapshots live in `tests/snapshots/` and `tests/repos/snapsh
 
 - **Config is process-global**: `Config` uses `OnceLock`, so it's initialized once per process and cannot be changed. Tests run git-ai as a subprocess and pass config overrides via `GIT_AI_TEST_CONFIG_PATCH` env var. You cannot change config mid-test within the same process.
 
-- **Feature flag debug/release divergence**: `rewrite_stash` defaults to true in debug but false in release. Tests run debug builds, so they exercise stash rewriting by default. A test passing in debug may behave differently in release if it depends on this flag.
+- **Feature flag debug/release divergence**: Some flags have different debug/release defaults (see `define_feature_flags!` macro). Tests run debug builds, so a test passing in debug may behave differently in release if it depends on a flag that diverges.
 
 - **Working log base commit**: Working logs are keyed by the HEAD commit at checkpoint time (`.git/ai/working_logs/<sha>/`). If HEAD changes between checkpoint and commit (e.g., rebase), the post-commit hook must find and reconcile the correct working log.
 

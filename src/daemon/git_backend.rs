@@ -440,7 +440,7 @@ impl GitBackend for SystemGitBackend {
         } else {
             default_clone_target_from_source(&positional[0])?
         };
-        Some(resolve_target(target, cwd_hint))
+        resolve_target(target, cwd_hint)
     }
 
     fn init_target(&self, argv: &[String], cwd_hint: Option<&Path>) -> Option<PathBuf> {
@@ -450,7 +450,7 @@ impl GitBackend for SystemGitBackend {
             .first()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        Some(resolve_target(target, cwd_hint))
+        resolve_target(target, cwd_hint)
     }
 }
 
@@ -620,9 +620,18 @@ fn takes_value(arg: &str) -> bool {
             | "--template"
             | "--separate-git-dir"
             | "--reference"
-            | "--dissociate"
+            | "--reference-if-able"
+            | "-c"
             | "--config"
             | "--object-format"
+            | "--depth"
+            | "--shallow-since"
+            | "--shallow-exclude"
+            | "-j"
+            | "--jobs"
+            | "--filter"
+            | "--bundle-uri"
+            | "--server-option"
     )
 }
 
@@ -643,14 +652,18 @@ fn default_clone_target_from_source(source: &str) -> Option<PathBuf> {
     Some(PathBuf::from(name))
 }
 
-fn resolve_target(target: PathBuf, cwd_hint: Option<&Path>) -> PathBuf {
+fn resolve_target(target: PathBuf, cwd_hint: Option<&Path>) -> Option<PathBuf> {
     if target.is_absolute() {
-        return target;
+        return Some(target);
     }
     if let Some(cwd) = cwd_hint {
-        return cwd.join(target);
+        return Some(cwd.join(target));
     }
-    target
+    // Relative target with no cwd_hint: the path cannot be reliably resolved
+    // (filesystem checks would run against the daemon's own CWD rather than the
+    // git process's working directory).  Return None so the caller skips this
+    // candidate rather than logging a misleading error.
+    None
 }
 
 fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
@@ -718,8 +731,157 @@ fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{GitBackend, SystemGitBackend, default_clone_target_from_source};
+    use super::{
+        GitBackend, SystemGitBackend, clone_init_positionals, default_clone_target_from_source,
+    };
     use std::path::PathBuf;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    // --- Bug: `takes_value` is incomplete — options like --depth, -j, -c are not listed.
+    // When `git clone --depth 1 <url>` is parsed, "1" is treated as a positional arg and
+    // the URL ends up as positional[1] (the "target directory"), triggering the error:
+    //   "failed to resolve clone/init target family from filesystem: <url>"
+    //
+    // These tests pin the CORRECT behaviour (URL-derived name as the only positional)
+    // and will FAIL until `takes_value` includes those options.
+
+    #[test]
+    fn clone_positionals_skips_value_for_depth_flag() {
+        let args = argv(&["--depth", "1", "https://example.com/org/test-repo.git"]);
+        assert_eq!(
+            clone_init_positionals(&args),
+            vec!["https://example.com/org/test-repo.git".to_string()],
+            "--depth should consume its value, leaving only the URL as a positional"
+        );
+    }
+
+    #[test]
+    fn clone_positionals_skips_value_for_jobs_short_flag() {
+        let args = argv(&["-j", "4", "https://example.com/org/test-repo.git"]);
+        assert_eq!(
+            clone_init_positionals(&args),
+            vec!["https://example.com/org/test-repo.git".to_string()],
+            "-j should consume its value, leaving only the URL as a positional"
+        );
+    }
+
+    #[test]
+    fn clone_positionals_skips_value_for_jobs_long_flag() {
+        let args = argv(&["--jobs", "4", "https://example.com/org/test-repo.git"]);
+        assert_eq!(
+            clone_init_positionals(&args),
+            vec!["https://example.com/org/test-repo.git".to_string()],
+            "--jobs should consume its value, leaving only the URL as a positional"
+        );
+    }
+
+    #[test]
+    fn clone_positionals_skips_value_for_config_short_flag() {
+        let args = argv(&[
+            "-c",
+            "http.sslVerify=false",
+            "https://example.com/org/test-repo.git",
+        ]);
+        assert_eq!(
+            clone_init_positionals(&args),
+            vec!["https://example.com/org/test-repo.git".to_string()],
+            "-c should consume its value, leaving only the URL as a positional"
+        );
+    }
+
+    #[test]
+    fn clone_target_derives_name_from_url_with_depth_flag() {
+        let backend = SystemGitBackend::new();
+        let cwd = PathBuf::from("/home/testuser/projects");
+        let args = argv(&[
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "https://example.com/org/test-repo.git",
+        ]);
+        let result = backend.clone_target(&args, Some(&cwd)).unwrap();
+        assert_eq!(
+            result,
+            PathBuf::from("/home/testuser/projects/test-repo"),
+            "clone target should be derived from the URL, not the depth value"
+        );
+    }
+
+    // --- Bug: when `cwd_hint` is None and the derived target is relative (e.g. "." for
+    // `git init` with no args), the path cannot be resolved and filesystem checks run
+    // against the daemon's own CWD rather than the actual target, producing the error:
+    //   "failed to resolve clone/init target family from filesystem: ."
+    //
+    // These tests pin the CORRECT behaviour (return None so that the caller doesn't
+    // attempt a meaningless filesystem lookup against an unresolvable relative path).
+
+    #[test]
+    fn init_target_returns_none_for_implicit_dot_without_cwd_hint() {
+        let backend = SystemGitBackend::new();
+        let args = argv(&["git", "init"]);
+        assert!(
+            backend.init_target(&args, None).is_none(),
+            "init with no path and no cwd_hint should return None — \
+             relative '.' cannot be reliably resolved"
+        );
+    }
+
+    #[test]
+    fn clone_target_returns_none_for_explicit_dot_without_cwd_hint() {
+        let backend = SystemGitBackend::new();
+        let args = argv(&["git", "clone", "https://example.com/org/test-repo.git", "."]);
+        assert!(
+            backend.clone_target(&args, None).is_none(),
+            "clone into '.' with no cwd_hint should return None — \
+             relative '.' cannot be reliably resolved"
+        );
+    }
+
+    #[test]
+    fn init_target_resolves_dot_when_cwd_hint_is_provided() {
+        let backend = SystemGitBackend::new();
+        // Use temp_dir() so the base path is absolute on all platforms (Windows
+        // does not consider Unix-style paths like "/home/..." absolute).
+        let cwd = std::env::temp_dir().join("git-ai-test-my-repo");
+        assert!(
+            cwd.is_absolute(),
+            "temp_dir should be absolute on all platforms"
+        );
+        let args = argv(&["git", "init"]);
+        let result = backend.init_target(&args, Some(&cwd)).unwrap();
+        assert!(
+            result.is_absolute(),
+            "result must be absolute when cwd_hint is provided"
+        );
+        assert!(
+            result.starts_with(&cwd),
+            "result should be rooted at the cwd"
+        );
+    }
+
+    // --- Bug (pre-existing): `--dissociate` is a boolean flag but was listed in
+    // `takes_value`, causing the next argument (typically the URL) to be swallowed
+    // as its "value".  `git clone --reference /mirror --dissociate <url>` would leave
+    // the positionals list empty and `clone_target()` would return None.
+
+    #[test]
+    fn clone_positionals_treats_dissociate_as_boolean_not_value_taking() {
+        let args = argv(&[
+            "--reference",
+            "/mirror",
+            "--dissociate",
+            "https://example.com/org/test-repo.git",
+        ]);
+        assert_eq!(
+            clone_init_positionals(&args),
+            vec!["https://example.com/org/test-repo.git".to_string()],
+            "--dissociate is boolean and must not consume the following URL"
+        );
+    }
 
     #[test]
     fn builtin_primary_command_skips_repository_lookup() {
