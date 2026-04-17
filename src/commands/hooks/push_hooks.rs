@@ -67,31 +67,37 @@ pub fn capture_tracker_state(
 ) {
     let remote = resolve_push_remote(parsed_args, repository);
 
-    let refs = std::process::Command::new("git")
-        .args([
-            "-C",
-            &repository.path().to_string_lossy(),
-            "for-each-ref",
-            "refs/heads/",
-            "--format=%(refname:short) %(objectname)",
-        ])
-        .output()
-        .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                let text = String::from_utf8_lossy(&output.stdout);
-                let mut map = std::collections::HashMap::new();
-                for line in text.lines() {
-                    let parts: Vec<&str> = line.splitn(2, ' ').collect();
-                    if parts.len() == 2 {
-                        map.insert(parts[0].to_string(), parts[1].to_string());
+    let refs = remote.as_deref().and_then(|remote_name| {
+        std::process::Command::new("git")
+            .args([
+                "-C",
+                &repository.path().to_string_lossy(),
+                "ls-remote",
+                "--heads",
+                remote_name,
+            ])
+            .output()
+            .ok()
+            .and_then(|output| {
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    let mut map = std::collections::HashMap::new();
+                    for line in text.lines() {
+                        let parts: Vec<&str> = line.splitn(2, '\t').collect();
+                        if parts.len() == 2 {
+                            let sha = parts[0].trim().to_string();
+                            let refname = parts[1].trim();
+                            if let Some(branch) = refname.strip_prefix("refs/heads/") {
+                                map.insert(branch.to_string(), sha);
+                            }
+                        }
                     }
+                    Some(map)
+                } else {
+                    None
                 }
-                Some(map)
-            } else {
-                None
-            }
-        });
+            })
+    });
 
     (refs, remote)
 }

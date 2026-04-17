@@ -13,6 +13,10 @@ struct RetryEntry {
     commit_sha: String,
     diff_gz: Vec<u8>,
     retry_count: u32,
+    #[serde(default)]
+    remote: String,
+    #[serde(default)]
+    branch: String,
 }
 
 fn queue_path() -> PathBuf {
@@ -21,7 +25,13 @@ fn queue_path() -> PathBuf {
         .join("tracker-retry-queue.json")
 }
 
-pub fn save_to_queue(repo_path: &str, commit_sha: &str, diff_gz: Vec<u8>) -> Result<(), String> {
+pub fn save_to_queue(
+    repo_path: &str,
+    commit_sha: &str,
+    diff_gz: Vec<u8>,
+    remote: &str,
+    branch: &str,
+) -> Result<(), String> {
     let path = queue_path();
 
     let mut entries: Vec<RetryEntry> = if path.exists() {
@@ -36,6 +46,8 @@ pub fn save_to_queue(repo_path: &str, commit_sha: &str, diff_gz: Vec<u8>) -> Res
         commit_sha: commit_sha.to_string(),
         diff_gz,
         retry_count: 0,
+        remote: remote.to_string(),
+        branch: branch.to_string(),
     });
 
     let tmp_path = path.with_extension("json.tmp");
@@ -69,6 +81,8 @@ pub fn process_retries(config: &TrackerConfig) -> Result<(), String> {
                 &entry.commit_sha,
                 entry.diff_gz.clone(),
                 config,
+                &entry.remote,
+                &entry.branch,
             ) {
                 Ok(()) => {
                     let _ = notes::mark_reported(&entry.repo_path, &entry.commit_sha);

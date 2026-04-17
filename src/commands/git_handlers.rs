@@ -171,8 +171,17 @@ pub fn handle_git(args: &[String]) {
             .and_then(crate::git::repo_state::read_head_state_for_worktree);
         let invocation_id = uuid::Uuid::new_v4().to_string();
 
-        // Send pre-state BEFORE running git so it's available when the daemon
-        // processes the atexit trace event and starts the wrapper state timeout.
+        let tracker_pre_push_state = if parsed.command.as_deref() == Some("push") {
+            repository
+                .as_ref()
+                .and_then(|repo| {
+                    let (refs, remote) = push_hooks::capture_tracker_state(&parsed, repo);
+                    refs.zip(remote)
+                })
+        } else {
+            None
+        };
+
         send_wrapper_pre_state_to_daemon(&invocation_id, worktree.as_deref(), &pre_state);
 
         let exit_status = proxy_to_git(args, false, None, Some(&invocation_id));
@@ -183,13 +192,18 @@ pub fn handle_git(args: &[String]) {
 
         send_wrapper_post_state_to_daemon(&invocation_id, worktree.as_deref(), &post_state);
 
-        // After a successful commit, wait briefly for the daemon to produce an
-        // authorship note so we can show stats inline (same UX as plain wrapper mode).
         if exit_status.success()
             && parsed.command.as_deref() == Some("commit")
             && let Some(repo) = repository.as_ref()
         {
             maybe_show_async_post_commit_stats(&parsed, repo);
+        }
+
+        if exit_status.success() && let Some((pre_refs, remote)) = tracker_pre_push_state {
+            if let Some(repo) = repository.as_ref() {
+                let repo_path = repo.path().to_string_lossy().to_string();
+                crate::commands::tracker::report_pushed_commits(&repo_path, &pre_refs, &remote);
+            }
         }
 
         exit_with_status(exit_status);

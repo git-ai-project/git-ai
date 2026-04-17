@@ -43,13 +43,20 @@ pub fn report_pushed_commits(
                 }
             };
 
-            match upload::upload_commit(repo_path, &commit_sha, diff_gz.clone(), &config) {
+            match upload::upload_commit(
+                repo_path,
+                &commit_sha,
+                diff_gz.clone(),
+                &config,
+                remote,
+                branch,
+            ) {
                 Ok(()) => {
                     let _ = notes::mark_reported(repo_path, &commit_sha);
                 }
                 Err(e) => {
                     tracing::debug!("tracker upload failed {}: {}", &commit_sha, e);
-                    let _ = retry::save_to_queue(repo_path, &commit_sha, diff_gz);
+                    let _ = retry::save_to_queue(repo_path, &commit_sha, diff_gz, remote, branch);
                 }
             }
         }
