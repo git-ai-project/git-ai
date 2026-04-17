@@ -7813,12 +7813,45 @@ fn daemon_socket_health_check_interval() -> u64 {
         .unwrap_or(DAEMON_SOCKET_HEALTH_CHECK_SECS)
 }
 
+/// Spawn a detached `git-ai bg restart --hard` process that will reap the
+/// current (zombie) daemon and start a fresh one.  The child inherits the
+/// daemon env vars (GIT_AI_DAEMON_HOME, etc.) so it targets the same
+/// instance.  Returns Ok if the process was spawned; the caller should
+/// still request_shutdown so the current daemon exits promptly.
+fn spawn_self_restart() -> Result<(), String> {
+    let exe = crate::utils::current_git_ai_exe().map_err(|e| e.to_string())?;
+    tracing::info!(?exe, "spawning detached restart process");
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(["bg", "restart", "--hard"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    for var in GIT_ENV_VARS_TO_SANITIZE {
+        cmd.env_remove(var);
+    }
+    cmd.env_remove("GIT_AI");
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    }
+
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to spawn restart process: {}", e))
+}
+
 /// Background loop that verifies the daemon's sockets are reachable by
 /// actually connecting to them.  A successful connect proves the socket file
 /// exists, points to this daemon's listener, and that the listener thread is
 /// alive and calling accept().  If either probe fails (deleted file, stale
-/// socket, hung listener), the daemon is unreachable and should shut down so
-/// the next wrapper invocation can spawn a fresh instance.
+/// socket, hung listener), the daemon spawns a detached restart process and
+/// shuts down.
 fn daemon_socket_health_check_loop(
     coordinator: Arc<ActorDaemonCoordinator>,
     control_socket_path: PathBuf,
@@ -7859,8 +7892,11 @@ fn daemon_socket_health_check_loop(
             tracing::warn!(
                 control = %control_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
                 trace = %trace_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
-                "socket health check failed, requesting shutdown"
+                "socket health check failed, spawning restart and shutting down"
             );
+            if let Err(e) = spawn_self_restart() {
+                tracing::error!("failed to spawn self-restart: {}", e);
+            }
             coordinator.request_shutdown();
             return;
         }

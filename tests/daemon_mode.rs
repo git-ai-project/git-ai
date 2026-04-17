@@ -4714,3 +4714,112 @@ fn daemon_shuts_down_when_socket_files_are_deleted() {
     // DaemonGuard::drop calls shutdown(), which is a no-op if already exited.
     daemon.shutdown();
 }
+
+/// After detecting that its sockets have been deleted, the daemon should
+/// spawn a detached `git-ai bg restart --hard` process that reaps the
+/// zombie and starts a fresh daemon. Verify that a new, reachable daemon
+/// is running after the original one dies.
+#[test]
+#[serial]
+#[cfg(unix)]
+fn daemon_self_heals_after_socket_deletion() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let control_socket_path = daemon_control_socket_path(&repo);
+    let trace_socket_path = daemon_trace_socket_path(&repo);
+
+    let mut daemon = DaemonGuard::start_with_env(
+        &repo,
+        &[
+            ("GIT_AI_DAEMON_SOCKET_HEALTH_CHECK_SECS", "1"),
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "86400"),
+            ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "86400"),
+        ],
+    );
+
+    let original_pid = daemon.child.id();
+
+    // Verify the daemon is alive and responsive.
+    assert!(
+        send_control_request(
+            &control_socket_path,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir_string(&repo),
+            },
+        )
+        .is_ok(),
+        "original daemon should respond to status requests"
+    );
+
+    // Delete both socket files.
+    fs::remove_file(&control_socket_path).expect("failed to delete control socket");
+    fs::remove_file(&trace_socket_path).expect("failed to delete trace socket");
+
+    // Wait for the original daemon to exit.
+    let mut original_exited = false;
+    for _ in 0..100 {
+        if daemon
+            .child
+            .try_wait()
+            .expect("failed to poll daemon")
+            .is_some()
+        {
+            original_exited = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        original_exited,
+        "original daemon should shut down after socket deletion"
+    );
+
+    // Wait for a new daemon to come up with fresh sockets.
+    let mut new_daemon_reachable = false;
+    for _ in 0..200 {
+        if control_socket_path.exists()
+            && send_control_request(
+                &control_socket_path,
+                &ControlRequest::StatusFamily {
+                    repo_working_dir: repo_workdir_string(&repo),
+                },
+            )
+            .is_ok()
+        {
+            new_daemon_reachable = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        new_daemon_reachable,
+        "a new daemon should be reachable after the original self-healed"
+    );
+
+    // The new daemon should be a different process.
+    let pid_file_path = repo
+        .daemon_home_path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon")
+        .join("daemon.pid.json");
+    let new_pid_raw =
+        fs::read_to_string(&pid_file_path).expect("should be able to read pid file");
+    let new_pid: serde_json::Value =
+        serde_json::from_str(&new_pid_raw).expect("pid file should be valid json");
+    let new_pid_num = new_pid["pid"].as_u64().expect("pid should be a number");
+    assert_ne!(
+        new_pid_num,
+        original_pid as u64,
+        "new daemon should have a different PID than the original"
+    );
+
+    // Clean up the new daemon.
+    let _ = send_control_request(&control_socket_path, &ControlRequest::Shutdown);
+    for _ in 0..100 {
+        if !control_socket_path.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
