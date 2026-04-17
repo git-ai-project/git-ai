@@ -16,7 +16,10 @@ pub struct GitHubCopilotInstaller;
 
 impl GitHubCopilotInstaller {
     fn hooks_path() -> PathBuf {
-        home_dir().join(".copilot").join("hooks").join("git-ai.json")
+        home_dir()
+            .join(".copilot")
+            .join("hooks")
+            .join("git-ai.json")
     }
 
     fn legacy_hooks_path() -> PathBuf {
