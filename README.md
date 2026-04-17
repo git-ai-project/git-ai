@@ -208,8 +208,6 @@ There are community plugins that display AI-attribution in popular IDEs, color-c
 </table>
 
 
-
-
 ### Understand Why with the `/ask` Skill
 
 See something you don't understand? The `/ask` skill lets you talk to the agent that wrote the code about its instructions, decisions, and the intent of the engineer who assigned the task. Git AI adds the `/ask` skill to `~/.agents/skills/` at install time so you can talk to it from any agent. 
@@ -226,7 +224,7 @@ Agents with access to the original intent and source code understand the "why." 
 
 
 <details>
-<summary>Make Your Agents Smarter</summary>
+<summary>**Make Your Agents Smarter**</summary>
 
 Agents make fewer mistakes and produce more maintainable code when they understand the requirements and decisions behind the code they build on. The best way to provide this context is to give agents the same `/ask` tool you use yourself. Tell your agents to use `/ask` in plan mode:
 
@@ -236,6 +234,13 @@ Agents make fewer mistakes and produce more maintainable code when they understa
 ```
 
 </details>
+
+### Resources
+
+- [Config Options](https://usegitai.com/docs/cli/configuration)
+- [CLI Reference](https://usegitai.com/docs/cli/reference)
+- [How to measure the impact of coding agents](https://usegitai.com/how-to-measure-ai-code) 
+
 
 
 # License
