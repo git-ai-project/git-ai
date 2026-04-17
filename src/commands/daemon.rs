@@ -154,7 +154,7 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
                 config.trace_socket_path.display()
             ));
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -233,6 +233,9 @@ fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
 }
 
 pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {
+    if !config.control_socket_path.exists() || !config.trace_socket_path.exists() {
+        return false;
+    }
     local_socket_connects_with_timeout(&config.control_socket_path, Duration::from_millis(100))
         .is_ok()
         && local_socket_connects_with_timeout(&config.trace_socket_path, Duration::from_millis(100))
@@ -248,7 +251,7 @@ fn wait_for_daemon_up(config: &DaemonConfig, timeout: Duration) -> bool {
         if Instant::now() >= deadline {
             return false;
         }
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(10));
     }
 }
 

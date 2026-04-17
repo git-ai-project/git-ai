@@ -7133,10 +7133,18 @@ impl ActorDaemonCoordinator {
             ));
         }
         let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
-        let ingest_high_watermark = self.trace_ingest_high_watermark();
-        if ingest_high_watermark > 0 {
-            self.wait_for_trace_ingest_processed_through(ingest_high_watermark)
-                .await?;
+
+        // Captured checkpoints carry their own file-state snapshot and do not
+        // depend on trace-ingest ordering, so we skip the potentially expensive
+        // wait.  Live checkpoints still need the daemon's view of the repo to be
+        // current, and wait=true callers explicitly asked to block.
+        let needs_trace_ingest_wait = wait || matches!(request, CheckpointRunRequest::Live(_));
+        if needs_trace_ingest_wait {
+            let ingest_high_watermark = self.trace_ingest_high_watermark();
+            if ingest_high_watermark > 0 {
+                self.wait_for_trace_ingest_processed_through(ingest_high_watermark)
+                    .await?;
+            }
         }
 
         if wait {
