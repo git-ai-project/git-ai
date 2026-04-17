@@ -119,7 +119,12 @@ def main() -> None:
     for p in sorted(SRC.glob("*.png")):
         bake_png(p)
     for p in sorted(SRC.glob("*.svg")):
-        bake_svg(p)
+        # Prefer PNG output for consistency. Falls back to an SVG wrapper
+        # if cairosvg isn't installed (pip install cairosvg to enable).
+        if not bake_svg_to_png(p):
+            print(f"note: cairosvg not installed — wrapping {p.name} as SVG "
+                  f"instead. `pip install cairosvg` for PNG output.")
+            bake_svg(p)
 
 
 if __name__ == "__main__":
