@@ -81,12 +81,32 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://usegitai.com
 That's it — **no per-repo setup required.** Prompt and commit as normal. Git AI tracks attribution automatically.
 
 
-## Our Choices
+### Our Choices
 - **No workflow changes** — Just prompt and commit. Git AI tracks AI code accurately without cluttering your git history.
 - **"Detecting" AI code is an anti-pattern** — Git AI does not guess whether a hunk is AI-generated. Supported agents report exactly which lines they wrote, giving you the most accurate attribution possible.
 - **Local-first** — Works 100% offline, no login required.
 - **Git native and open standard** — Git AI built the [open standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) for tracking AI-generated code with Git Notes.
 - **Secure Prompt Storage** — Git AI links each line of AI-code to the prompt that generated it. Since v1.0.0 Agent Sessions are stored outside of Git and can optionaly be synced to your team's [cloud](https://usegitai.com/docs/platform/overview) or [self-hosted](https://usegitai.com/docs/platform/self-hosting) prompt store -- keeping repos lean, enabling fine-grained access control, and preventing PII or secrets from leaking into Git.
+
+### How Git AI works
+1. **`Edit|Write|Bash` Hooks** get triggered as Agents make changes to a repository
+2. **Hooks call `git-ai checkpoint`** to link each line of AI-Code to the model, Agent and prompt that generated it.
+3. **Post Commit** a Git Note with AI-attributions in it is attached to the commit
+4. **On `merge --squash`, `rebase`, `cherry-pick`, `stash`, `pop`, `commit --amend`, etc** AI-attributions are automatically moved 
+
+#### Example Note
+`refs/notes/ai/commit_sha`
+```
+hooks/post_clone_hook.rs
+  prompt_id_123 6-8
+  prompt_id_456 16,21,25
+main.rs
+  prompt_id_123 12-199,215,311
+---
+...Prompt metadata including agent, model, and a link to the full session transcript
+```
+[Git AI Standard v3.0.0](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md).
+
 
 
 <table style="table-layout:fixed; width:100%">
