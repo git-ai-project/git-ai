@@ -7813,11 +7813,12 @@ fn daemon_socket_health_check_interval() -> u64 {
         .unwrap_or(DAEMON_SOCKET_HEALTH_CHECK_SECS)
 }
 
-/// Background loop that verifies the daemon's socket files still exist on
-/// the filesystem.  If either socket path is missing (e.g. deleted by another
-/// process, a cleanup script, or a racing daemon instance), the daemon is
-/// unreachable and should shut down so the next wrapper invocation can spawn
-/// a fresh instance.
+/// Background loop that verifies the daemon's sockets are reachable by
+/// actually connecting to them.  A successful connect proves the socket file
+/// exists, points to this daemon's listener, and that the listener thread is
+/// alive and calling accept().  If either probe fails (deleted file, stale
+/// socket, hung listener), the daemon is unreachable and should shut down so
+/// the next wrapper invocation can spawn a fresh instance.
 fn daemon_socket_health_check_loop(
     coordinator: Arc<ActorDaemonCoordinator>,
     control_socket_path: PathBuf,
@@ -7849,16 +7850,16 @@ fn daemon_socket_health_check_loop(
             return;
         }
 
-        let control_exists = control_socket_path.exists();
-        let trace_exists = trace_socket_path.exists();
+        let control_ok =
+            local_socket_connects_with_timeout(&control_socket_path, DAEMON_SOCKET_PROBE_TIMEOUT);
+        let trace_ok =
+            local_socket_connects_with_timeout(&trace_socket_path, DAEMON_SOCKET_PROBE_TIMEOUT);
 
-        if !control_exists || !trace_exists {
+        if control_ok.is_err() || trace_ok.is_err() {
             tracing::warn!(
-                control_exists,
-                trace_exists,
-                control_path = %control_socket_path.display(),
-                trace_path = %trace_socket_path.display(),
-                "socket file(s) missing from filesystem, requesting shutdown"
+                control = %control_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                trace = %trace_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                "socket health check failed, requesting shutdown"
             );
             coordinator.request_shutdown();
             return;
