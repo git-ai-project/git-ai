@@ -1,5 +1,6 @@
 ---
-source: src/authorship/stats.rs
+source: tests/integration/stats_unit.rs
+assertion_line: 159
 expression: untracked_just_above_output
 ---
 "you  ███████████████████████████████████████· ai\n     98%          untracked   2%            0%\n"

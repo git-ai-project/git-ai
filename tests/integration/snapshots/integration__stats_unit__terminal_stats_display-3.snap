@@ -1,5 +1,6 @@
 ---
-source: src/authorship/stats.rs
+source: tests/integration/stats_unit.rs
+assertion_line: 70
 expression: human_only_output
 ---
 "you  ████████████████████████████████████████ ai\n     100%                                   0%\n"

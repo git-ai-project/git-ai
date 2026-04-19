@@ -1,5 +1,6 @@
 ---
-source: src/authorship/stats.rs
+source: tests/integration/stats_unit.rs
+assertion_line: 52
 expression: ai_only_output
 ---
 "you  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ ai\n     0%                                  100%\n"

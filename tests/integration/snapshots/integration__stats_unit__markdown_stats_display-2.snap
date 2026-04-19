@@ -1,5 +1,6 @@
 ---
-source: src/authorship/stats.rs
+source: tests/integration/stats_unit.rs
+assertion_line: 228
 expression: ai_only_output
 ---
 "Stats powered by [Git AI](https://github.com/git-ai-project/git-ai)\n\n```text\n🧠 you    ░░░░░░░░░░░░░░░░░░░░  0%\n🤖 ai     ░███████████████████  95%\n```\n\n<details>\n<summary>More stats</summary>\n\n\n</details>"
