@@ -26,6 +26,7 @@ mod checkpoint_perf;
 mod checkpoint_unit;
 mod checkpoint_size;
 mod cherry_pick;
+mod daemon_unit;
 mod chinese_text_edits;
 mod ci_context_unit;
 mod ci_handlers_comprehensive;
