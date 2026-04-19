@@ -835,7 +835,6 @@ Untracked line
         "Untracked line".unattributed_human(), // 'untracked'
     ]);
 
-
     let second_edit = "\
 Untracked line
 Human line
@@ -850,7 +849,7 @@ Human line
     repo.commit("Second commit").unwrap();
     file.assert_committed_lines(lines![
         "Untracked line".unattributed_human(), // still 'untracked'
-        "Human line".human(), // known human
+        "Human line".human(),                  // known human
     ]);
 
     let third_edit = "\
@@ -865,8 +864,8 @@ AI line
     repo.stage_all_and_commit("Third commit").unwrap();
     file.assert_committed_lines(lines![
         "Untracked line".unattributed_human(), // 'untracked'
-        "Human line".human(), // known human
-        "AI line".ai(), // AI line
+        "Human line".human(),                  // known human
+        "AI line".ai(),                        // AI line
     ]);
 
     let fourth_edit = "\
@@ -879,9 +878,8 @@ Another untracked line
     // Mocking an AI agent preset's pre edit checkpoint, which all the AI agent presets do to exclude
     // changes made by something else (impossible to know what) before the AI makes its own edit. We mock
     // that by calling a 'legacy human' (untracked) checkpoint.
-    repo.git_ai(&["checkpoint", "human", "example.md"])
-        .unwrap();
-    
+    repo.git_ai(&["checkpoint", "human", "example.md"]).unwrap();
+
     let fifth_edit = "\
 Untracked line
 Human line
@@ -896,11 +894,11 @@ Another AI line
         .unwrap();
     repo.stage_all_and_commit("Fourth commit").unwrap();
     file.assert_committed_lines(lines![
-        "Untracked line".unattributed_human(), // 'untracked'
-        "Human line".human(), // known human
-        "AI line".ai(), // AI line
+        "Untracked line".unattributed_human(),         // 'untracked'
+        "Human line".human(),                          // known human
+        "AI line".ai(),                                // AI line
         "Another untracked line".unattributed_human(), // 'untracked'
-        "Another AI line".ai(), // AI line
+        "Another AI line".ai(),                        // AI line
     ]);
 }
 

@@ -96,6 +96,7 @@ tasks:
 
   format:
     desc: Format code with rustfmt
+    aliases: [fmt]
     cmds:
       - cargo fmt
 
