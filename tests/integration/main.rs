@@ -75,6 +75,7 @@ mod post_commit_unit;
 mod pre_commit_unit;
 mod prompt_across_commit;
 mod prompt_hash_migration;
+mod prompt_utils_unit;
 mod range_authorship_unit;
 mod pull_rebase_ff;
 mod push_upstream_authorship;
