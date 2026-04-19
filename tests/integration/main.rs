@@ -96,6 +96,7 @@ mod stash_attribution;
 mod stash_hooks_unit;
 mod stats;
 mod status_ignore;
+mod status_unit;
 mod subdirs;
 mod sublime_merge_installer;
 mod sync_authorship_types;
