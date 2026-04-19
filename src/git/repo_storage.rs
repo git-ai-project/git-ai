@@ -68,7 +68,7 @@ impl RepoStorage {
         Ok(config)
     }
 
-    fn ensure_config_directory(&self) -> Result<(), GitAiError> {
+    pub fn ensure_config_directory(&self) -> Result<(), GitAiError> {
         fs::create_dir_all(&self.ai_dir)?;
 
         // Create working_logs directory
@@ -146,7 +146,7 @@ impl RepoStorage {
     /// Remove archived (`old-*`) working log directories whose `.archived_at`
     /// timestamp is older than [`OLD_WORKING_LOG_RETENTION_SECS`].
     /// Errors are intentionally swallowed so pruning never breaks the commit flow.
-    fn prune_expired_old_working_logs(&self) {
+    pub fn prune_expired_old_working_logs(&self) {
         let now_secs = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
