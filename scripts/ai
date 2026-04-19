@@ -40,7 +40,7 @@ def cmd_new(args):
 
     print(f"Launching claude in {worktree_dir}...")
     os.chdir(worktree_dir)
-    os.execvp("claude", ["claude"])
+    os.execvp("claude", ["claude", "--dangerously-skip-permissions"])
 
 
 def build_parser():
