@@ -20,23 +20,23 @@ use std::io::IsTerminal;
 
 /// Skip expensive post-commit stats when this threshold is exceeded.
 /// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
-const STATS_SKIP_MAX_HUNKS: usize = 1000;
+pub const STATS_SKIP_MAX_HUNKS: usize = 1000;
 /// Skip expensive stats for very large net additions even if hunks are moderate.
-const STATS_SKIP_MAX_ADDED_LINES: usize = 6000;
+pub const STATS_SKIP_MAX_ADDED_LINES: usize = 6000;
 /// Skip expensive stats for extremely wide commits touching many added-line files.
-const STATS_SKIP_MAX_FILES_WITH_ADDITIONS: usize = 200;
+pub const STATS_SKIP_MAX_FILES_WITH_ADDITIONS: usize = 200;
 /// Skip expensive stats for commits that delete a large number of lines.
 /// Deletion-heavy commits (e.g. removing many files) trigger the same expensive
 /// diff-parsing path as large addition commits, but the added-lines estimate is
 /// near zero, so the cost was previously invisible to the estimator.
-const STATS_SKIP_MAX_DELETED_LINES: usize = 6000;
+pub const STATS_SKIP_MAX_DELETED_LINES: usize = 6000;
 
 #[derive(Debug, Clone, Copy)]
-struct StatsCostEstimate {
-    files_with_additions: usize,
-    added_lines: usize,
-    hunk_ranges: usize,
-    deleted_lines: usize,
+pub struct StatsCostEstimate {
+    pub files_with_additions: usize,
+    pub added_lines: usize,
+    pub hunk_ranges: usize,
+    pub deleted_lines: usize,
 }
 
 fn checkpoint_entry_requires_post_processing(
@@ -337,7 +337,7 @@ enum StatsSkipReason {
     Expensive(StatsCostEstimate),
 }
 
-fn should_skip_expensive_post_commit_stats(estimate: &StatsCostEstimate) -> bool {
+pub fn should_skip_expensive_post_commit_stats(estimate: &StatsCostEstimate) -> bool {
     estimate.hunk_ranges >= STATS_SKIP_MAX_HUNKS
         || estimate.added_lines >= STATS_SKIP_MAX_ADDED_LINES
         || estimate.files_with_additions >= STATS_SKIP_MAX_FILES_WITH_ADDITIONS
@@ -415,7 +415,7 @@ fn estimate_stats_cost(
     })
 }
 
-fn count_line_ranges(lines: &[u32]) -> usize {
+pub fn count_line_ranges(lines: &[u32]) -> usize {
     if lines.is_empty() {
         return 0;
     }
@@ -764,267 +764,4 @@ fn record_commit_metrics(
 
     // Record the metric
     record(values, attrs);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        STATS_SKIP_MAX_ADDED_LINES, STATS_SKIP_MAX_DELETED_LINES,
-        STATS_SKIP_MAX_FILES_WITH_ADDITIONS, STATS_SKIP_MAX_HUNKS, StatsCostEstimate,
-        count_line_ranges, should_skip_expensive_post_commit_stats,
-    };
-    use crate::git::test_utils::TmpRepo;
-
-    #[test]
-    fn test_count_line_ranges_handles_scattered_and_contiguous_lines() {
-        assert_eq!(count_line_ranges(&[]), 0);
-        assert_eq!(count_line_ranges(&[1]), 1);
-        assert_eq!(count_line_ranges(&[1, 2, 3]), 1);
-        assert_eq!(count_line_ranges(&[1, 3, 5]), 3);
-        // Includes unsorted and duplicate values.
-        assert_eq!(count_line_ranges(&[5, 3, 3, 4, 10]), 2);
-    }
-
-    #[test]
-    fn test_should_skip_expensive_post_commit_stats_thresholds() {
-        let below_threshold = StatsCostEstimate {
-            files_with_additions: STATS_SKIP_MAX_FILES_WITH_ADDITIONS - 1,
-            added_lines: STATS_SKIP_MAX_ADDED_LINES - 1,
-            hunk_ranges: STATS_SKIP_MAX_HUNKS - 1,
-            deleted_lines: STATS_SKIP_MAX_DELETED_LINES - 1,
-        };
-        assert!(!should_skip_expensive_post_commit_stats(&below_threshold));
-
-        let by_hunks = StatsCostEstimate {
-            files_with_additions: 1,
-            added_lines: 1,
-            hunk_ranges: STATS_SKIP_MAX_HUNKS,
-            deleted_lines: 0,
-        };
-        assert!(should_skip_expensive_post_commit_stats(&by_hunks));
-
-        let by_added_lines = StatsCostEstimate {
-            files_with_additions: 1,
-            added_lines: STATS_SKIP_MAX_ADDED_LINES,
-            hunk_ranges: 1,
-            deleted_lines: 0,
-        };
-        assert!(should_skip_expensive_post_commit_stats(&by_added_lines));
-
-        let by_files = StatsCostEstimate {
-            files_with_additions: STATS_SKIP_MAX_FILES_WITH_ADDITIONS,
-            added_lines: 1,
-            hunk_ranges: 1,
-            deleted_lines: 0,
-        };
-        assert!(should_skip_expensive_post_commit_stats(&by_files));
-
-        let by_deleted_lines = StatsCostEstimate {
-            files_with_additions: 0,
-            added_lines: 0,
-            hunk_ranges: 0,
-            deleted_lines: STATS_SKIP_MAX_DELETED_LINES,
-        };
-        assert!(should_skip_expensive_post_commit_stats(&by_deleted_lines));
-    }
-
-    #[test]
-    fn test_post_commit_empty_repo_with_checkpoint() {
-        // Create an empty repo (no commits yet)
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Create a file and checkpoint it (no commit yet)
-        let mut file = tmp_repo
-            .write_file("test.txt", "Hello, world!\n", false)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-
-        // Make a change and checkpoint again
-        file.append("Second line\n").unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-
-        // Now make the first commit (empty repo case: base_commit is None)
-        let result = tmp_repo.commit_with_message("Initial commit");
-
-        // Should not panic or error - this is the key test
-        // The main goal is to ensure empty repos (base_commit=None) don't cause errors
-        assert!(
-            result.is_ok(),
-            "post_commit should handle empty repo (base_commit=None) without errors"
-        );
-
-        // The authorship log is created successfully (even if empty for human-only checkpoints)
-        let _authorship_log = result.unwrap();
-    }
-
-    #[test]
-    fn test_post_commit_empty_repo_no_checkpoint() {
-        // Create an empty repo (no commits yet)
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Create a file without checkpointing
-        tmp_repo
-            .write_file("test.txt", "Hello, world!\n", false)
-            .unwrap();
-
-        // Make the first commit with no prior checkpoints
-        let result = tmp_repo.commit_with_message("Initial commit");
-
-        // Should not panic or error even with no working log
-        assert!(
-            result.is_ok(),
-            "post_commit should handle empty repo with no checkpoints without errors"
-        );
-
-        let authorship_log = result.unwrap();
-
-        // The authorship log should be created but empty (no AI checkpoints)
-        // All changes will be attributed to the human author
-        assert!(
-            authorship_log.attestations.is_empty(),
-            "Should have empty attestations when no checkpoints exist"
-        );
-    }
-
-    #[test]
-    fn test_count_line_ranges_single_element() {
-        assert_eq!(count_line_ranges(&[42]), 1);
-    }
-
-    #[test]
-    fn test_count_line_ranges_all_contiguous() {
-        assert_eq!(count_line_ranges(&[1, 2, 3, 4, 5]), 1);
-    }
-
-    #[test]
-    fn test_count_line_ranges_all_scattered() {
-        assert_eq!(count_line_ranges(&[1, 10, 20, 30]), 4);
-    }
-
-    #[test]
-    fn test_count_line_ranges_duplicates() {
-        assert_eq!(count_line_ranges(&[5, 5, 5]), 1);
-    }
-
-    #[test]
-    fn test_count_line_ranges_unsorted() {
-        // After sort+dedup: [1, 2, 5, 6, 10] -> ranges: [1,2], [5,6], [10]
-        assert_eq!(count_line_ranges(&[10, 5, 6, 1, 2]), 3);
-    }
-
-    #[test]
-    fn test_count_line_ranges_two_ranges() {
-        assert_eq!(count_line_ranges(&[1, 2, 3, 10, 11, 12]), 2);
-    }
-
-    #[test]
-    fn test_should_skip_stats_exactly_at_thresholds() {
-        // Exactly at the hunks threshold alone should trigger skip.
-        let at_hunks = StatsCostEstimate {
-            files_with_additions: 0,
-            added_lines: 0,
-            hunk_ranges: STATS_SKIP_MAX_HUNKS,
-            deleted_lines: 0,
-        };
-        assert!(
-            should_skip_expensive_post_commit_stats(&at_hunks),
-            "Exactly at hunk threshold should skip"
-        );
-
-        // Exactly at added-lines threshold alone should trigger skip.
-        let at_added = StatsCostEstimate {
-            files_with_additions: 0,
-            added_lines: STATS_SKIP_MAX_ADDED_LINES,
-            hunk_ranges: 0,
-            deleted_lines: 0,
-        };
-        assert!(
-            should_skip_expensive_post_commit_stats(&at_added),
-            "Exactly at added-lines threshold should skip"
-        );
-
-        // Exactly at files-with-additions threshold alone should trigger skip.
-        let at_files = StatsCostEstimate {
-            files_with_additions: STATS_SKIP_MAX_FILES_WITH_ADDITIONS,
-            added_lines: 0,
-            hunk_ranges: 0,
-            deleted_lines: 0,
-        };
-        assert!(
-            should_skip_expensive_post_commit_stats(&at_files),
-            "Exactly at files-with-additions threshold should skip"
-        );
-
-        // Exactly at deleted-lines threshold alone should trigger skip.
-        let at_deleted = StatsCostEstimate {
-            files_with_additions: 0,
-            added_lines: 0,
-            hunk_ranges: 0,
-            deleted_lines: STATS_SKIP_MAX_DELETED_LINES,
-        };
-        assert!(
-            should_skip_expensive_post_commit_stats(&at_deleted),
-            "Exactly at deleted-lines threshold should skip"
-        );
-
-        // All at zero should NOT skip.
-        let all_zero = StatsCostEstimate {
-            files_with_additions: 0,
-            added_lines: 0,
-            hunk_ranges: 0,
-            deleted_lines: 0,
-        };
-        assert!(
-            !should_skip_expensive_post_commit_stats(&all_zero),
-            "All zero values should not skip"
-        );
-    }
-
-    #[test]
-    fn test_post_commit_utf8_filename_with_ai_attribution() {
-        // Create a repo with an initial commit
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Create initial file and commit
-        tmp_repo.write_file("README.md", "# Test\n", true).unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        // Create a file with Chinese characters in the filename
-        let chinese_filename = "中文文件.txt";
-        tmp_repo
-            .write_file(chinese_filename, "Hello, 世界!\n", true)
-            .unwrap();
-
-        // Trigger AI checkpoint
-        tmp_repo
-            .trigger_checkpoint_with_ai("mock_ai", None, None)
-            .unwrap();
-
-        // Commit
-        let authorship_log = tmp_repo.commit_with_message("Add Chinese file").unwrap();
-
-        // Debug output
-        println!(
-            "Authorship log attestations: {:?}",
-            authorship_log.attestations
-        );
-
-        // The attestation should include the Chinese filename
-        assert_eq!(
-            authorship_log.attestations.len(),
-            1,
-            "Should have 1 attestation for the Chinese-named file"
-        );
-        assert_eq!(
-            authorship_log.attestations[0].file_path, chinese_filename,
-            "File path should be the UTF-8 filename"
-        );
-    }
 }
