@@ -2,13 +2,14 @@ use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::{Attribution, LineAttribution};
 use git_ai::authorship::authorship_log::{LineRange, PromptRecord};
 use git_ai::authorship::authorship_log_serialization::{
-    AttestationEntry, AuthorshipLog, FileAttestation,
+    generate_short_hash, AttestationEntry, AuthorshipLog, FileAttestation,
 };
 use git_ai::authorship::rebase_authorship::{
     collect_changed_file_contents_from_diff, get_pathspecs_from_commits, load_rebase_note_cache,
     parse_cat_file_batch_output_with_oids, rewrite_authorship_after_cherry_pick,
-    rewrite_authorship_if_needed, transform_attributions_to_final_state,
-    try_fast_path_rebase_note_remap_cached, walk_commits_to_base,
+    rewrite_authorship_after_rebase_v2, rewrite_authorship_if_needed,
+    transform_attributions_to_final_state, try_fast_path_rebase_note_remap_cached,
+    walk_commits_to_base,
 };
 use git_ai::authorship::virtual_attribution::VirtualAttributions;
 use git_ai::authorship::working_log::{AgentId, Checkpoint, CheckpointKind};
@@ -1551,4 +1552,416 @@ fn diff_based_transfer_handles_duplicate_lines_correctly() {
     assert_eq!(result[1].author_id, "ai-b");
     assert_eq!(result[2].start_line, 4);
     assert_eq!(result[2].author_id, "ai-c");
+}
+
+#[test]
+fn regression_multi_tool_initial_with_disjoint_files_survives_rebase() {
+    let repo = TestRepo::new();
+
+    std::fs::write(repo.path().join("base.txt"), "base\n").expect("write base");
+    repo.git_og(&["add", "base.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "base commit"])
+        .expect("commit base");
+    let default_branch = repo.current_branch();
+
+    repo.git_og(&["checkout", "-b", "feature"])
+        .expect("create feature");
+    std::fs::write(repo.path().join("committed.py"), "print('committed')\n")
+        .expect("write committed");
+    repo.git_og(&["add", "committed.py"]).expect("add");
+    repo.git_og(&["commit", "-m", "feature commit"])
+        .expect("commit feature");
+    let original_head = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+
+    let mut initial_files = HashMap::new();
+    initial_files.insert(
+        "cursor_file.py".to_string(),
+        vec![LineAttribution {
+            start_line: 1,
+            end_line: 10,
+            author_id: "ai-cursor".to_string(),
+            overrode: None,
+        }],
+    );
+    initial_files.insert(
+        "copilot_file.py".to_string(),
+        vec![
+            LineAttribution {
+                start_line: 1,
+                end_line: 5,
+                author_id: "ai-copilot".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 10,
+                end_line: 15,
+                author_id: "ai-copilot".to_string(),
+                overrode: None,
+            },
+        ],
+    );
+    initial_files.insert(
+        "shared_file.py".to_string(),
+        vec![
+            LineAttribution {
+                start_line: 1,
+                end_line: 3,
+                author_id: "ai-cursor".to_string(),
+                overrode: None,
+            },
+            LineAttribution {
+                start_line: 4,
+                end_line: 8,
+                author_id: "ai-copilot".to_string(),
+                overrode: None,
+            },
+        ],
+    );
+
+    let mut prompts = HashMap::new();
+    prompts.insert(
+        "ai-cursor".to_string(),
+        PromptRecord {
+            agent_id: AgentId {
+                tool: "cursor".to_string(),
+                id: "sess-cursor".to_string(),
+                model: "gpt-4".to_string(),
+            },
+            human_author: None,
+            messages: vec![],
+            total_additions: 13,
+            total_deletions: 0,
+            accepted_lines: 13,
+            overriden_lines: 0,
+            messages_url: None,
+            custom_attributes: Some(HashMap::from([
+                ("employee_id".to_string(), "E500".to_string()),
+                ("team".to_string(), "security".to_string()),
+            ])),
+        },
+    );
+    prompts.insert(
+        "ai-copilot".to_string(),
+        PromptRecord {
+            agent_id: AgentId {
+                tool: "copilot".to_string(),
+                id: "sess-copilot".to_string(),
+                model: "gpt-4o".to_string(),
+            },
+            human_author: None,
+            messages: vec![],
+            total_additions: 16,
+            total_deletions: 0,
+            accepted_lines: 16,
+            overriden_lines: 0,
+            messages_url: None,
+            custom_attributes: Some(HashMap::from([
+                ("employee_id".to_string(), "E500".to_string()),
+                ("team".to_string(), "security".to_string()),
+            ])),
+        },
+    );
+
+    let old_wl = gitai_repo
+        .storage
+        .working_log_for_base_commit(&original_head)
+        .unwrap();
+    old_wl
+        .write_initial_attributions(initial_files, prompts)
+        .expect("write multi-tool INITIAL");
+
+    repo.git_og(&["checkout", &default_branch])
+        .expect("switch to default");
+    std::fs::write(repo.path().join("upstream.txt"), "upstream\n").expect("write upstream");
+    repo.git_og(&["add", "upstream.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "upstream commit"])
+        .expect("commit upstream");
+    let new_head = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let rebase_event = RewriteLogEvent::RebaseComplete {
+        rebase_complete: RebaseCompleteEvent::new(
+            original_head.clone(),
+            new_head.clone(),
+            false,
+            vec![original_head.clone()],
+            vec![new_head.clone()],
+        ),
+    };
+
+    rewrite_authorship_if_needed(
+        &gitai_repo,
+        &rebase_event,
+        "Test User".to_string(),
+        &vec![rebase_event.clone()],
+        true,
+    )
+    .expect("rewrite should succeed");
+
+    let migrated = gitai_repo
+        .storage
+        .working_log_for_base_commit(&new_head)
+        .unwrap()
+        .read_initial_attributions();
+
+    assert_eq!(
+        migrated.files.len(),
+        3,
+        "all three files should be migrated"
+    );
+    assert!(migrated.files.contains_key("cursor_file.py"));
+    assert!(migrated.files.contains_key("copilot_file.py"));
+    assert!(migrated.files.contains_key("shared_file.py"));
+
+    let copilot_attrs = &migrated.files["copilot_file.py"];
+    assert_eq!(
+        copilot_attrs.len(),
+        2,
+        "copilot_file.py should have both attribution ranges"
+    );
+    assert_eq!(copilot_attrs[0].start_line, 1);
+    assert_eq!(copilot_attrs[0].end_line, 5);
+    assert_eq!(copilot_attrs[1].start_line, 10);
+    assert_eq!(copilot_attrs[1].end_line, 15);
+
+    let shared_attrs = &migrated.files["shared_file.py"];
+    assert_eq!(
+        shared_attrs.len(),
+        2,
+        "shared_file.py should have attributions from both tools"
+    );
+
+    assert_eq!(
+        migrated.prompts.len(),
+        2,
+        "both prompt records should be migrated"
+    );
+    assert!(migrated.prompts.contains_key("ai-cursor"));
+    assert!(migrated.prompts.contains_key("ai-copilot"));
+
+    let cursor_prompt = &migrated.prompts["ai-cursor"];
+    assert_eq!(cursor_prompt.agent_id.tool, "cursor");
+    assert_eq!(cursor_prompt.total_additions, 13);
+
+    let copilot_prompt = &migrated.prompts["ai-copilot"];
+    assert_eq!(copilot_prompt.agent_id.tool, "copilot");
+    assert_eq!(copilot_prompt.total_additions, 16);
+}
+
+#[test]
+fn flatten_prompts_picks_per_commit_record_for_same_session_multi_commit() {
+    let repo = TestRepo::new();
+
+    let base_content = "line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n";
+    std::fs::write(repo.path().join("feature.txt"), base_content).expect("write base feature.txt");
+    repo.git_og(&["add", "feature.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "base"]).expect("commit base");
+    let default_branch = repo.current_branch();
+
+    repo.git_og(&["checkout", "-b", "feature"])
+        .expect("create feature branch");
+    let content_a =
+        "line1\nline2\nai-line3\nai-line4\nai-line5\nai-line6\nai-line7\nline8\nline9\nline10\n";
+    std::fs::write(repo.path().join("feature.txt"), content_a).expect("write feature.txt A");
+    repo.git_og(&["add", "feature.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "commit-A"])
+        .expect("commit A");
+    let sha_a = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let other_content = "ai-line1\nai-line2\nai-line3\nai-line4\nai-line5\nai-line6\nai-line7\nai-line8\nai-line9\nai-line10\n";
+    std::fs::write(repo.path().join("other.txt"), other_content).expect("write other.txt B");
+    repo.git_og(&["add", "other.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "commit-B"])
+        .expect("commit B");
+    let sha_b = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+
+    let agent_id = AgentId {
+        tool: "claude".to_string(),
+        id: "session-flatten-test-abc".to_string(),
+        model: "claude-sonnet-4".to_string(),
+    };
+    let prompt_hash = generate_short_hash(&agent_id.id, &agent_id.tool);
+
+    // Note for commit A: 5 AI lines (feature.txt lines 3-7)
+    {
+        let mut log = AuthorshipLog::new();
+        log.metadata.base_commit_sha = sha_a.clone();
+        log.metadata.prompts.insert(
+            prompt_hash.clone(),
+            PromptRecord {
+                agent_id: agent_id.clone(),
+                human_author: None,
+                messages: vec![],
+                total_additions: 5,
+                total_deletions: 0,
+                accepted_lines: 5,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: None,
+            },
+        );
+        let mut file = FileAttestation::new("feature.txt".to_string());
+        file.add_entry(AttestationEntry::new(
+            prompt_hash.clone(),
+            vec![LineRange::Range(3, 7)],
+        ));
+        log.attestations.push(file);
+        let note = log.serialize_to_string().expect("serialize note A");
+        notes_add(&gitai_repo, &sha_a, &note).expect("write note A");
+    }
+
+    // Note for commit B: 10 AI lines (other.txt lines 1-10)
+    {
+        let mut log = AuthorshipLog::new();
+        log.metadata.base_commit_sha = sha_b.clone();
+        log.metadata.prompts.insert(
+            prompt_hash.clone(),
+            PromptRecord {
+                agent_id: agent_id.clone(),
+                human_author: None,
+                messages: vec![],
+                total_additions: 10,
+                total_deletions: 0,
+                accepted_lines: 10,
+                overriden_lines: 0,
+                messages_url: None,
+                custom_attributes: None,
+            },
+        );
+        let mut file = FileAttestation::new("other.txt".to_string());
+        file.add_entry(AttestationEntry::new(
+            prompt_hash.clone(),
+            vec![LineRange::Range(1, 10)],
+        ));
+        log.attestations.push(file);
+        let note = log.serialize_to_string().expect("serialize note B");
+        notes_add(&gitai_repo, &sha_b, &note).expect("write note B");
+    }
+
+    // Main branch: prepend "header\n" to feature.txt (forces slow path)
+    repo.git_og(&["checkout", &default_branch])
+        .expect("switch to default branch");
+    let main_content = format!("header\n{}", base_content);
+    std::fs::write(repo.path().join("feature.txt"), &main_content)
+        .expect("write main feature.txt");
+    repo.git_og(&["add", "feature.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "main-advance"])
+        .expect("commit main advance");
+
+    // Cherry-pick A and B onto main
+    repo.git_og(&["cherry-pick", &sha_a])
+        .expect("cherry-pick A");
+    let new_a = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    repo.git_og(&["cherry-pick", &sha_b])
+        .expect("cherry-pick B");
+    let new_b = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Invoke rewrite_authorship_after_rebase_v2
+    rewrite_authorship_after_rebase_v2(
+        &gitai_repo,
+        &sha_b,
+        &[sha_a.clone(), sha_b.clone()],
+        &[new_a.clone(), new_b.clone()],
+        "human-tester",
+    )
+    .expect("rewrite authorship after rebase");
+
+    // Verify new_A note
+    {
+        let note_raw = show_authorship_note(&gitai_repo, &new_a).expect("read new_A note");
+        let log = AuthorshipLog::deserialize_from_string(&note_raw).expect("parse new_A note");
+
+        let record = log
+            .metadata
+            .prompts
+            .get(&prompt_hash)
+            .expect("prompt_hash must be in new_A note metadata");
+        assert_eq!(
+            record.total_additions, 5,
+            "new_A: total_additions should be 5 (from commit A's PromptRecord), got {}",
+            record.total_additions
+        );
+
+        let file_att = log
+            .attestations
+            .iter()
+            .find(|f| f.file_path == "feature.txt")
+            .expect("new_A note must have feature.txt attestation");
+        assert_eq!(
+            file_att.entries.len(),
+            1,
+            "feature.txt should have exactly one attestation entry"
+        );
+        assert_eq!(file_att.entries[0].hash, prompt_hash);
+        // header prepended by main shifted AI lines from 3-7 to 4-8
+        assert_eq!(
+            file_att.entries[0].line_ranges,
+            vec![LineRange::Range(4, 8)],
+            "feature.txt AI lines must shift by 1 to 4-8 after main prepended 'header\\n'; got {:?}",
+            file_att.entries[0].line_ranges
+        );
+    }
+
+    // Verify new_B note
+    {
+        let note_raw = show_authorship_note(&gitai_repo, &new_b).expect("read new_B note");
+        let log = AuthorshipLog::deserialize_from_string(&note_raw).expect("parse new_B note");
+
+        let record = log
+            .metadata
+            .prompts
+            .get(&prompt_hash)
+            .expect("prompt_hash must be in new_B note metadata");
+        assert_eq!(
+            record.total_additions, 10,
+            "new_B: total_additions should be 10 (from commit B's PromptRecord), got {}",
+            record.total_additions
+        );
+
+        let file_att = log
+            .attestations
+            .iter()
+            .find(|f| f.file_path == "other.txt")
+            .expect("new_B note must have other.txt attestation");
+        assert_eq!(
+            file_att.entries.len(),
+            1,
+            "other.txt should have exactly one attestation entry"
+        );
+        assert_eq!(file_att.entries[0].hash, prompt_hash);
+        assert_eq!(
+            file_att.entries[0].line_ranges,
+            vec![LineRange::Range(1, 10)],
+            "other.txt AI lines must remain at 1-10 (unchanged by rebase); got {:?}",
+            file_att.entries[0].line_ranges
+        );
+    }
 }
