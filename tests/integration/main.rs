@@ -92,6 +92,7 @@ mod simple_benchmark;
 mod squash_merge;
 mod stale_prompt_carry;
 mod stash_attribution;
+mod stash_hooks_unit;
 mod stats;
 mod status_ignore;
 mod subdirs;
