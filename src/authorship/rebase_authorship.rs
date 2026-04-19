@@ -3927,7 +3927,7 @@ fn flatten_prompts_for_metadata_filtered(
         .collect()
 }
 
-fn build_file_attestation_from_line_attributions(
+pub fn build_file_attestation_from_line_attributions(
     file_path: &str,
     line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
 ) -> Option<crate::authorship::authorship_log_serialization::FileAttestation> {
