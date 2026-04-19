@@ -76,6 +76,7 @@ mod prompt_hash_migration;
 mod pull_rebase_ff;
 mod push_upstream_authorship;
 mod realistic_complex_edits;
+mod refs_unit;
 mod rebase;
 mod rebase_attribution_remaining;
 mod rebase_benchmark;
