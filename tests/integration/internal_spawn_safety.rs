@@ -97,7 +97,6 @@ fn direct_git_command_spawns_are_centralized() {
     let allowed_suffixes = [
         "src/git/repository.rs",
         "src/commands/git_handlers.rs",
-        "src/git/test_utils/mod.rs",
     ];
     let pattern = Regex::new(r#"Command::new\(config::Config::get\(\)\.git_cmd\(\)\)"#).unwrap();
 

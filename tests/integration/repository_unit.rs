@@ -8,9 +8,30 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::repos::test_repo::TestRepo;
+use std::sync::OnceLock;
+
+fn init_test_git_config() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        let path = std::env::temp_dir().join("git-ai-test-global-gitconfig");
+        let _ = fs::write(
+            &path,
+            "[user]\n\tname = Test User\n\temail = test@example.com\n",
+        );
+        #[cfg(not(windows))]
+        let canonical = path.canonicalize().unwrap_or(path);
+        #[cfg(windows)]
+        let canonical = path;
+        unsafe {
+            std::env::set_var("GIT_CONFIG_GLOBAL", &canonical);
+            #[cfg(not(windows))]
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+        }
+    });
+}
 
 fn run_git(cwd: &Path, args: &[&str]) {
-    git_ai::git::test_utils::init_test_git_config();
+    init_test_git_config();
     let output = Command::new(git_ai::config::Config::get().git_cmd())
         .args(args)
         .current_dir(cwd)

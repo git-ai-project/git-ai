@@ -571,17 +571,17 @@ fn rebase_complete_migrates_initial_to_new_head() {
     let repo = TestRepo::new();
 
     std::fs::write(repo.path().join("base.txt"), "base\n").expect("write base");
-    repo.git(&["add", "base.txt"]).expect("add");
-    repo.stage_all_and_commit("base commit")
+    repo.git_og(&["add", "base.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "base commit"])
         .expect("commit base");
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let default_branch = repo.current_branch();
 
-    repo.git(&["checkout", "-b", "feature"])
+    repo.git_og(&["checkout", "-b", "feature"])
         .expect("create feature branch");
     std::fs::write(repo.path().join("feature.txt"), "feature code\n").expect("write feature");
-    repo.git(&["add", "feature.txt"]).expect("add");
-    repo.stage_all_and_commit("feature commit")
+    repo.git_og(&["add", "feature.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "feature commit"])
         .expect("commit feature");
     let original_head = repo
         .git_og(&["rev-parse", "HEAD"])
@@ -637,12 +637,18 @@ fn rebase_complete_migrates_initial_to_new_head() {
         "INITIAL should exist on old HEAD before rebase"
     );
 
-    repo.git(&["checkout", &default_branch])
+    repo.git_og(&["checkout", &default_branch])
         .expect("switch default branch");
     std::fs::write(repo.path().join("upstream.txt"), "upstream\n").expect("write upstream");
-    repo.git(&["add", "upstream.txt"]).expect("add");
-    repo.stage_all_and_commit("upstream commit")
+    repo.git_og(&["add", "upstream.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "upstream commit"])
         .expect("commit upstream");
+
+    // Now simulate the rebased feature commit (same content as original_head but based on upstream)
+    std::fs::write(repo.path().join("feature.txt"), "feature code\n").expect("write feature again");
+    repo.git_og(&["add", "feature.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "feature commit (rebased)"])
+        .expect("commit rebased feature");
     let new_head = repo
         .git_og(&["rev-parse", "HEAD"])
         .unwrap()
@@ -763,17 +769,17 @@ fn rebase_complete_no_initial_is_noop() {
 fn rebase_complete_migrates_multi_file_initial() {
     let repo = TestRepo::new();
     std::fs::write(repo.path().join("base.txt"), "base\n").expect("write base");
-    repo.git(&["add", "base.txt"]).expect("add");
-    repo.stage_all_and_commit("base commit")
+    repo.git_og(&["add", "base.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "base commit"])
         .expect("commit base");
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let default_branch = repo.current_branch();
 
-    repo.git(&["checkout", "-b", "feature"])
+    repo.git_og(&["checkout", "-b", "feature"])
         .expect("create feature");
     std::fs::write(repo.path().join("feature.txt"), "feature\n").expect("write feature");
-    repo.git(&["add", "feature.txt"]).expect("add");
-    repo.stage_all_and_commit("feature commit")
+    repo.git_og(&["add", "feature.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "feature commit"])
         .expect("commit feature");
     let original_head = repo
         .git_og(&["rev-parse", "HEAD"])
@@ -861,11 +867,11 @@ fn rebase_complete_migrates_multi_file_initial() {
         .write_initial_attributions(initial_files, prompts)
         .expect("write multi-file INITIAL");
 
-    repo.git(&["checkout", &default_branch])
+    repo.git_og(&["checkout", &default_branch])
         .expect("switch default branch");
     std::fs::write(repo.path().join("upstream.txt"), "upstream\n").expect("write upstream");
-    repo.git(&["add", "upstream.txt"]).expect("add");
-    repo.stage_all_and_commit("upstream")
+    repo.git_og(&["add", "upstream.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "upstream"])
         .expect("commit upstream");
     let new_head = repo
         .git_og(&["rev-parse", "HEAD"])
@@ -922,17 +928,17 @@ fn rebase_complete_migrates_multi_file_initial() {
 fn rebase_complete_merges_initial_when_both_working_logs_exist() {
     let repo = TestRepo::new();
     std::fs::write(repo.path().join("base.txt"), "base\n").expect("write base");
-    repo.git(&["add", "base.txt"]).expect("add");
-    repo.stage_all_and_commit("base commit")
+    repo.git_og(&["add", "base.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "base commit"])
         .expect("commit base");
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let default_branch = repo.current_branch();
 
-    repo.git(&["checkout", "-b", "feature"])
+    repo.git_og(&["checkout", "-b", "feature"])
         .expect("create feature");
     std::fs::write(repo.path().join("feature.txt"), "feature\n").expect("write feature");
-    repo.git(&["add", "feature.txt"]).expect("add");
-    repo.stage_all_and_commit("feature commit")
+    repo.git_og(&["add", "feature.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "feature commit"])
         .expect("commit feature");
     let original_head = repo
         .git_og(&["rev-parse", "HEAD"])
@@ -981,11 +987,11 @@ fn rebase_complete_merges_initial_when_both_working_logs_exist() {
         .write_initial_attributions(old_initial_files, old_prompts)
         .expect("write old INITIAL");
 
-    repo.git(&["checkout", &default_branch])
+    repo.git_og(&["checkout", &default_branch])
         .expect("switch default branch");
     std::fs::write(repo.path().join("upstream.txt"), "upstream\n").expect("write upstream");
-    repo.git(&["add", "upstream.txt"]).expect("add");
-    repo.stage_all_and_commit("upstream commit")
+    repo.git_og(&["add", "upstream.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "upstream commit"])
         .expect("commit upstream");
     let new_head = repo
         .git_og(&["rev-parse", "HEAD"])
@@ -1064,32 +1070,32 @@ fn regression_initial_preserved_through_checkpoint_commit_rebase() {
 
     std::fs::write(repo.path().join("app.py"), "def main():\n    print('hello')\n")
         .expect("write base app.py");
-    repo.git(&["add", "app.py"]).expect("add");
-    repo.stage_all_and_commit("initial commit")
+    repo.git_og(&["add", "app.py"]).expect("add");
+    repo.git_og(&["commit", "-m", "initial commit"])
         .expect("initial commit");
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let default_branch = repo.current_branch();
 
-    repo.git(&["checkout", "-b", "feature"])
+    repo.git_og(&["checkout", "-b", "feature"])
         .expect("create feature");
     std::fs::write(
         repo.path().join("app.py"),
         "import logging\ndef main():\n    logging.info('Starting')\n    return 42\n",
     )
     .expect("write AI app.py");
-    repo.git(&["add", "app.py"]).expect("add");
+    repo.git_og(&["add", "app.py"]).expect("add");
     std::fs::write(
         repo.path().join("utils.py"),
         "def helper():\n    return 'one'\ndef helper_two():\n    return 'two'\n",
     )
     .expect("write AI utils.py");
-    repo.git(&["add", "utils.py"]).expect("add");
+    repo.git_og(&["add", "utils.py"]).expect("add");
 
     // Trigger checkpoint directly
     repo.git_ai(&["checkpoint", "--ai", "cursor", "--", "app.py", "utils.py"])
         .expect("AI checkpoint for both files");
 
-    repo.stage_all_and_commit("AI feature work")
+    repo.git_og(&["commit", "-m", "AI feature work"])
         .expect("feature commit");
     let original_head = repo
         .git_og(&["rev-parse", "HEAD"])
@@ -1144,11 +1150,11 @@ fn regression_initial_preserved_through_checkpoint_commit_rebase() {
         "INITIAL should exist before rebase"
     );
 
-    repo.git(&["checkout", &default_branch])
+    repo.git_og(&["checkout", &default_branch])
         .expect("switch to default");
     std::fs::write(repo.path().join("README.md"), "# Test Project\n").expect("write upstream README");
-    repo.git(&["add", "README.md"]).expect("add");
-    repo.stage_all_and_commit("upstream: add README")
+    repo.git_og(&["add", "README.md"]).expect("add");
+    repo.git_og(&["commit", "-m", "upstream: add README"])
         .expect("upstream commit");
     let new_head = repo
         .git_og(&["rev-parse", "HEAD"])
@@ -1212,20 +1218,20 @@ fn regression_initial_survives_amend_then_rebase() {
 
     std::fs::write(repo.path().join("app.py"), "def main():\n    pass\n")
         .expect("write base");
-    repo.git(&["add", "app.py"]).expect("add");
-    repo.stage_all_and_commit("base commit")
+    repo.git_og(&["add", "app.py"]).expect("add");
+    repo.git_og(&["commit", "-m", "base commit"])
         .expect("commit base");
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let default_branch = repo.current_branch();
 
-    repo.git(&["checkout", "-b", "feature"]).expect("create feature");
+    repo.git_og(&["checkout", "-b", "feature"]).expect("create feature");
     std::fs::write(
         repo.path().join("app.py"),
         "import logging\ndef main():\n    logging.info('v1')\n    return 1\n",
     )
     .expect("write feature v1");
-    repo.git(&["add", "app.py"]).expect("add");
-    repo.stage_all_and_commit("feature v1")
+    repo.git_og(&["add", "app.py"]).expect("add");
+    repo.git_og(&["commit", "-m", "feature v1"])
         .expect("commit feature v1");
     let v1_head = repo
         .git_og(&["rev-parse", "HEAD"])
@@ -1278,8 +1284,8 @@ fn regression_initial_survives_amend_then_rebase() {
         "import logging\ndef main():\n    logging.info('v2')\n    return 2\n",
     )
     .expect("write feature v2");
-    repo.git(&["add", "app.py"]).expect("add");
-    repo.git(&["commit", "--amend", "-m", "feature v2"])
+    repo.git_og(&["add", "app.py"]).expect("add");
+    repo.git_og(&["commit", "--amend", "-m", "feature v2"])
         .expect("amend commit");
     let amend_sha = repo
         .git_og(&["rev-parse", "HEAD"])
@@ -1314,11 +1320,11 @@ fn regression_initial_survives_amend_then_rebase() {
     assert_eq!(amend_initial.files.len(), 1, "INITIAL should survive amend");
     assert!(amend_initial.files.contains_key("utils.py"));
 
-    repo.git(&["checkout", &default_branch])
+    repo.git_og(&["checkout", &default_branch])
         .expect("switch to default");
     std::fs::write(repo.path().join("upstream.txt"), "upstream change\n").expect("write upstream");
-    repo.git(&["add", "upstream.txt"]).expect("add");
-    repo.stage_all_and_commit("upstream commit")
+    repo.git_og(&["add", "upstream.txt"]).expect("add");
+    repo.git_og(&["commit", "-m", "upstream commit"])
         .expect("commit upstream");
     let rebase_new_head = repo
         .git_og(&["rev-parse", "HEAD"])
