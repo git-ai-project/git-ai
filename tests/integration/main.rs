@@ -85,6 +85,7 @@ mod rebase_merge_commit_note_leak;
 mod rebase_note_integrity;
 mod rebase_realworld;
 mod repo_storage_unit;
+mod repository_unit;
 mod reset;
 mod secrets_benchmark;
 mod sessions_backwards_compat;
