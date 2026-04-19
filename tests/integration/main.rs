@@ -85,6 +85,7 @@ mod realistic_complex_edits;
 mod refs_unit;
 mod rebase;
 mod rebase_attribution_remaining;
+mod rebase_authorship_unit;
 mod rebase_benchmark;
 mod rebase_hooks_unit;
 mod rebase_merge_commit_note_leak;
