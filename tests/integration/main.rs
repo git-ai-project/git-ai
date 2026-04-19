@@ -27,6 +27,7 @@ mod checkpoint_unit;
 mod checkpoint_size;
 mod cherry_pick;
 mod chinese_text_edits;
+mod ci_context_unit;
 mod ci_handlers_comprehensive;
 mod ci_local_skip_fetch;
 mod ci_partial_clone;
