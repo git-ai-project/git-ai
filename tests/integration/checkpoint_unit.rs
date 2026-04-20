@@ -1,13 +1,12 @@
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::transcript::AiTranscript;
+use git_ai::authorship::working_log::{AgentId, Checkpoint, CheckpointKind, WorkingLogEntry};
 use git_ai::commands::checkpoint::{
-    explicit_capture_target_paths, cleanup_failed_captured_checkpoint_prepare,
+    BaseOverrideResolutionPolicy, PreparedPathRole, cleanup_failed_captured_checkpoint_prepare,
+    compute_file_line_stats, explicit_capture_target_paths, is_ai_author_id,
     run_with_base_commit_override, run_with_base_commit_override_with_policy,
-    compute_file_line_stats, is_ai_author_id, PreparedPathRole,
-    BaseOverrideResolutionPolicy,
 };
 use git_ai::commands::checkpoint_agent::agent_presets::AgentRunResult;
-use git_ai::authorship::working_log::{AgentId, CheckpointKind, Checkpoint, WorkingLogEntry};
-use git_ai::authorship::transcript::AiTranscript;
 use git_ai::error::GitAiError;
 use git_ai::git::repository::find_repository_in_path;
 use std::collections::HashMap;
@@ -17,13 +16,16 @@ fn setup_repo_with_base_commit() -> (TestRepo, String, String) {
     let repo = TestRepo::new();
 
     let lines_content = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n16\n17\n18\n19\n20\n21\n22\n23\n24\n25\n26\n";
-    let alphabet_content = "A\nB\nC\nD\nE\nF\nG\nH\nI\nJ\nK\nL\nM\nN\nO\nP\nQ\nR\nS\nT\nU\nV\nW\nX\nY\nZ\n";
+    let alphabet_content =
+        "A\nB\nC\nD\nE\nF\nG\nH\nI\nJ\nK\nL\nM\nN\nO\nP\nQ\nR\nS\nT\nU\nV\nW\nX\nY\nZ\n";
 
     std::fs::write(repo.path().join("lines.md"), lines_content).unwrap();
     std::fs::write(repo.path().join("alphabet.md"), alphabet_content).unwrap();
     repo.git(&["add", "lines.md", "alphabet.md"]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "lines.md"]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "alphabet.md"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "lines.md"])
+        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "alphabet.md"])
+        .unwrap();
     repo.stage_all_and_commit("initial commit").unwrap();
 
     (repo, "lines.md".to_string(), "alphabet.md".to_string())
@@ -193,18 +195,27 @@ fn test_checkpoint_with_staged_changes() {
     repo.git(&["add", &lines_file]).unwrap();
 
     // Run checkpoint - it should track the changes even though they're staged
-    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
+        .unwrap();
 
     // Verify the checkpoint was created with correct entries
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let base_commit = repo.git_og(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit).unwrap();
+    let base_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit(&base_commit)
+        .unwrap();
     let checkpoints = working_log.read_all_checkpoints().unwrap();
     let latest = checkpoints.last().unwrap();
 
     // The bug: when changes are staged, entries_len is 0 instead of 1
     assert_eq!(
-        latest.entries.len(), 1,
+        latest.entries.len(),
+        1,
         "Should have 1 file entry in checkpoint (staged changes should be tracked)"
     );
 }
@@ -220,7 +231,8 @@ fn test_checkpoint_with_staged_changes_after_previous_checkpoint() {
     content.push_str("First change\n");
     std::fs::write(&file_path, &content).unwrap();
     repo.git(&["add", &lines_file]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
+        .unwrap();
 
     // Make second changes - these are staged
     let mut content = std::fs::read_to_string(&file_path).unwrap();
@@ -229,17 +241,26 @@ fn test_checkpoint_with_staged_changes_after_previous_checkpoint() {
     repo.git(&["add", &lines_file]).unwrap();
 
     // Run checkpoint again - it should track the staged changes even after a previous checkpoint
-    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
+        .unwrap();
 
     // Verify the checkpoint was created with correct entries
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let base_commit = repo.git_og(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit).unwrap();
+    let base_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit(&base_commit)
+        .unwrap();
     let checkpoints = working_log.read_all_checkpoints().unwrap();
     let latest = checkpoints.last().unwrap();
 
     assert_eq!(
-        latest.entries.len(), 1,
+        latest.entries.len(),
+        1,
         "Second checkpoint: should have 1 file entry in checkpoint (staged changes should be tracked)"
     );
 }
@@ -266,18 +287,27 @@ fn test_checkpoint_with_only_staged_no_unstaged_changes() {
     // And unstaged should be "Unmodified" because workdir == index
 
     // Now run checkpoint
-    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
+        .unwrap();
 
     // Verify the checkpoint was created with correct entries
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let base_commit = repo.git_og(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit).unwrap();
+    let base_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit(&base_commit)
+        .unwrap();
     let checkpoints = working_log.read_all_checkpoints().unwrap();
     let latest = checkpoints.last().unwrap();
 
     // This should work: we should see 1 file with 1 entry
     assert_eq!(
-        latest.entries.len(), 1,
+        latest.entries.len(),
+        1,
         "Should track the staged changes in checkpoint"
     );
 }
@@ -296,17 +326,26 @@ fn test_checkpoint_with_only_unstaged_changes_for_ai_without_pathspec() {
     fs::write(&file_path, &content).unwrap();
 
     // Trigger AI checkpoint without edited_filepaths (pathspec-less flow used by some agents)
-    repo.git_ai(&["checkpoint", "mock_ai", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", &lines_file])
+        .unwrap();
 
     // Verify the checkpoint was created
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let base_commit = repo.git_og(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit).unwrap();
+    let base_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit(&base_commit)
+        .unwrap();
     let checkpoints = working_log.read_all_checkpoints().unwrap();
     let latest = checkpoints.last().unwrap();
 
     assert_eq!(
-        latest.entries.len(), 1,
+        latest.entries.len(),
+        1,
         "Should create an AI checkpoint entry for unstaged changes without pathspecs"
     );
 }
@@ -321,7 +360,11 @@ fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
     fs::write(&file_path, "line from commit A\n").unwrap();
     repo.git(&["add", &lines_file]).unwrap();
     repo.stage_all_and_commit("commit A").unwrap();
-    let base_commit = repo.git_og(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let base_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
     fs::write(&file_path, "line from commit B\n").unwrap();
     repo.git(&["add", &lines_file]).unwrap();
@@ -382,7 +425,11 @@ fn test_checkpoint_base_override_strict_rejects_missing_dirty_snapshot() {
     fs::write(&file_path, "line from commit A\n").unwrap();
     repo.git(&["add", &lines_file]).unwrap();
     repo.stage_all_and_commit("commit A").unwrap();
-    let base_commit = repo.git_og(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let base_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
     fs::write(&file_path, "line from commit B\n").unwrap();
     repo.git(&["add", &lines_file]).unwrap();
@@ -421,9 +468,9 @@ fn test_checkpoint_base_override_strict_rejects_missing_dirty_snapshot() {
     .expect_err("strict base override should reject missing dirty snapshots");
 
     assert!(
-        error.to_string().contains(
-            "requires explicit in-repository target paths and a matching dirty snapshot"
-        ),
+        error
+            .to_string()
+            .contains("requires explicit in-repository target paths and a matching dirty snapshot"),
         "expected strict snapshot error, got: {}",
         error
     );
@@ -439,7 +486,11 @@ fn test_checkpoint_base_override_allow_fallback_scans_when_snapshot_missing() {
     fs::write(&file_path, "line from commit A\n").unwrap();
     repo.git(&["add", &lines_file]).unwrap();
     repo.stage_all_and_commit("commit A").unwrap();
-    let base_commit = repo.git_og(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let base_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
     fs::write(&file_path, "line from commit B\n").unwrap();
     repo.git(&["add", &lines_file]).unwrap();
@@ -503,7 +554,8 @@ fn test_checkpoint_skips_conflicted_files() {
     content.push_str("Feature branch change\n");
     std::fs::write(&file_path, &content).unwrap();
     repo.git(&["add", &lines_file]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
+        .unwrap();
     repo.stage_all_and_commit("Feature commit").unwrap();
 
     // Switch back to base branch and make conflicting changes
@@ -512,7 +564,8 @@ fn test_checkpoint_skips_conflicted_files() {
     content.push_str("Main branch change\n");
     std::fs::write(&file_path, &content).unwrap();
     repo.git(&["add", &lines_file]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
+        .unwrap();
     repo.stage_all_and_commit("Main commit").unwrap();
 
     // Attempt to merge feature-branch into base branch - this should create a conflict
@@ -522,12 +575,20 @@ fn test_checkpoint_skips_conflicted_files() {
 
     // Try to checkpoint while there are conflicts
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let base_commit = repo.git_og(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit).unwrap();
+    let base_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit(&base_commit)
+        .unwrap();
     let checkpoints_before = working_log.read_all_checkpoints().unwrap();
     let count_before = checkpoints_before.len();
 
-    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
+        .unwrap();
 
     // Checkpoint should skip conflicted files - check that either no new checkpoint was created
     // or the new checkpoint has 0 entries
@@ -535,7 +596,8 @@ fn test_checkpoint_skips_conflicted_files() {
     if checkpoints_after.len() > count_before {
         let latest = checkpoints_after.last().unwrap();
         assert_eq!(
-            latest.entries.len(), 0,
+            latest.entries.len(),
+            0,
             "Should have 0 entries (conflicted file should be skipped)"
         );
     }
@@ -605,8 +667,8 @@ fn test_checkpoint_filters_external_paths_from_stored_checkpoints() {
     let (repo, lines_file, _) = setup_repo_with_base_commit();
 
     // Get access to the working log storage
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Repository should exist");
+    let gitai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("Repository should exist");
     let base_commit = gitai_repo
         .head()
         .ok()
@@ -657,13 +719,17 @@ fn test_checkpoint_filters_external_paths_from_stored_checkpoints() {
     );
 
     // Verify the new checkpoint only processed the valid file
-    let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit).unwrap();
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit(&base_commit)
+        .unwrap();
     let checkpoints = working_log.read_all_checkpoints().unwrap();
     let latest = checkpoints.last().unwrap();
 
     // Should only process the valid file in the repo
     assert_eq!(
-        latest.entries.len(), 1,
+        latest.entries.len(),
+        1,
         "Should process 1 valid file (external path should be filtered)"
     );
 }
@@ -688,7 +754,8 @@ fn test_checkpoint_works_after_conflict_resolution_maintains_authorship() {
     content.push_str("Feature line 2\n");
     std::fs::write(&file_path, &content).unwrap();
     repo.git(&["add", &lines_file]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", &lines_file])
+        .unwrap();
     repo.stage_all_and_commit("Feature commit").unwrap();
 
     // Switch back to base branch and make conflicting changes
@@ -698,7 +765,8 @@ fn test_checkpoint_works_after_conflict_resolution_maintains_authorship() {
     content.push_str("Main line 2\n");
     std::fs::write(&file_path, &content).unwrap();
     repo.git(&["add", &lines_file]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
+        .unwrap();
     repo.stage_all_and_commit("Main commit").unwrap();
 
     // Attempt to merge feature-branch into base branch - this should create a conflict
@@ -708,12 +776,20 @@ fn test_checkpoint_works_after_conflict_resolution_maintains_authorship() {
 
     // While there are conflicts, checkpoint should skip the file
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let base_commit = repo.git_og(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit).unwrap();
+    let base_commit = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit(&base_commit)
+        .unwrap();
     let checkpoints_before_conflict_checkpoint = working_log.read_all_checkpoints().unwrap();
     let count_before = checkpoints_before_conflict_checkpoint.len();
 
-    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
+        .unwrap();
 
     // Checkpoint should skip conflicted files - check that either no new checkpoint was created
     // or the new checkpoint has 0 entries
@@ -721,7 +797,8 @@ fn test_checkpoint_works_after_conflict_resolution_maintains_authorship() {
     if checkpoints_after_conflict_checkpoint.len() > count_before {
         let checkpoint_during_conflict = checkpoints_after_conflict_checkpoint.last().unwrap();
         assert_eq!(
-            checkpoint_during_conflict.entries.len(), 0,
+            checkpoint_during_conflict.entries.len(),
+            0,
             "Should skip conflicted files during conflict"
         );
     }
@@ -754,9 +831,13 @@ fn test_checkpoint_works_after_conflict_resolution_maintains_authorship() {
     repo.git(&["add", &lines_file]).unwrap();
 
     // Now checkpoint should work and track the new changes
-    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
+        .unwrap();
 
-    let working_log = gitai_repo.storage.working_log_for_base_commit(&base_commit).unwrap();
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit(&base_commit)
+        .unwrap();
     let checkpoints = working_log.read_all_checkpoints().unwrap();
     let latest = checkpoints.last().unwrap();
 
@@ -767,7 +848,8 @@ fn test_checkpoint_works_after_conflict_resolution_maintains_authorship() {
 
     // The file should be tracked with the new changes
     assert_eq!(
-        latest.entries.len(), 1,
+        latest.entries.len(),
+        1,
         "Should create 1 entry for new changes after conflict resolution"
     );
 }
@@ -779,7 +861,8 @@ fn test_known_human_checkpoint_without_ai_history_records_h_hash_attributions() 
     std::fs::write(repo.path().join("simple.txt"), "one\n").unwrap();
     repo.git(&["add", "simple.txt"]).unwrap();
 
-    repo.git_ai(&["checkpoint", "mock_known_human", "simple.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "simple.txt"])
+        .unwrap();
     repo.stage_all_and_commit("seed commit").unwrap();
 
     let file_path = repo.path().join("simple.txt");
@@ -787,10 +870,11 @@ fn test_known_human_checkpoint_without_ai_history_records_h_hash_attributions() 
     content.push_str("two\n");
     std::fs::write(&file_path, &content).unwrap();
     repo.git(&["add", "simple.txt"]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "simple.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "simple.txt"])
+        .unwrap();
 
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Repository should exist");
+    let gitai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("Repository should exist");
     let base_commit = gitai_repo
         .head()
         .ok()
@@ -838,7 +922,8 @@ fn test_human_checkpoint_keeps_attributions_for_ai_touched_file() {
     content.push_str("ai change\n");
     std::fs::write(&lines_path, &content).unwrap();
     repo.git(&["add", &lines_file]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", &lines_file]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", &lines_file])
+        .unwrap();
 
     let mut lines_content = std::fs::read_to_string(&lines_path).unwrap();
     lines_content.push_str("human after ai\n");
@@ -850,10 +935,16 @@ fn test_human_checkpoint_keeps_attributions_for_ai_touched_file() {
     std::fs::write(&alphabet_path, &alphabet_content).unwrap();
     repo.git(&["add", &alphabet_file]).unwrap();
 
-    repo.git_ai(&["checkpoint", "mock_known_human", &lines_file, &alphabet_file]).unwrap();
+    repo.git_ai(&[
+        "checkpoint",
+        "mock_known_human",
+        &lines_file,
+        &alphabet_file,
+    ])
+    .unwrap();
 
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Repository should exist");
+    let gitai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("Repository should exist");
     let base_commit = gitai_repo
         .head()
         .ok()
@@ -872,8 +963,7 @@ fn test_human_checkpoint_keeps_attributions_for_ai_touched_file() {
         .find(|entry| entry.file == "lines.md")
         .unwrap();
     assert!(
-        !ai_touched_entry.attributions.is_empty()
-            || !ai_touched_entry.line_attributions.is_empty(),
+        !ai_touched_entry.attributions.is_empty() || !ai_touched_entry.line_attributions.is_empty(),
         "AI-touched file should keep attribution tracking"
     );
 
@@ -909,10 +999,11 @@ fn test_checkpoint_skips_default_ignored_files() {
 
     // Checkpoint both files explicitly (CLI doesn't support "." the same way)
     repo.git(&["add", "README.md"]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "README.md"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "README.md"])
+        .unwrap();
 
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Repository should exist");
+    let gitai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("Repository should exist");
     let base_commit = gitai_repo
         .head()
         .ok()
@@ -925,7 +1016,10 @@ fn test_checkpoint_skips_default_ignored_files() {
     let checkpoints = working_log.read_all_checkpoints().unwrap();
 
     // Should have at least one checkpoint
-    assert!(!checkpoints.is_empty(), "Should have at least one checkpoint");
+    assert!(
+        !checkpoints.is_empty(),
+        "Should have at least one checkpoint"
+    );
     let latest = checkpoints.last().unwrap();
 
     assert!(
@@ -948,7 +1042,11 @@ fn test_checkpoint_skips_linguist_generated_files_from_root_gitattributes() {
     repo.git(&["add", "README.md"]).unwrap();
     repo.stage_all_and_commit("initial").unwrap();
 
-    std::fs::write(repo.path().join(".gitattributes"), "generated/** linguist-generated\n").unwrap();
+    std::fs::write(
+        repo.path().join(".gitattributes"),
+        "generated/** linguist-generated\n",
+    )
+    .unwrap();
     repo.git(&["add", ".gitattributes"]).unwrap();
     repo.stage_all_and_commit("attrs").unwrap();
 
@@ -962,10 +1060,11 @@ fn test_checkpoint_skips_linguist_generated_files_from_root_gitattributes() {
     repo.git(&["add", "main.rs"]).unwrap();
 
     // Checkpoint the non-generated file
-    repo.git_ai(&["checkpoint", "mock_known_human", "main.rs"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.rs"])
+        .unwrap();
 
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Repository should exist");
+    let gitai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("Repository should exist");
     let base_commit = gitai_repo
         .head()
         .ok()
@@ -978,7 +1077,10 @@ fn test_checkpoint_skips_linguist_generated_files_from_root_gitattributes() {
     let checkpoints = working_log.read_all_checkpoints().unwrap();
 
     // Should have at least one checkpoint
-    assert!(!checkpoints.is_empty(), "Should have at least one checkpoint");
+    assert!(
+        !checkpoints.is_empty(),
+        "Should have at least one checkpoint"
+    );
     let latest = checkpoints.last().unwrap();
 
     assert!(
@@ -998,8 +1100,8 @@ fn test_checkpoint_skips_linguist_generated_files_from_root_gitattributes() {
 fn test_compute_line_stats_ignores_whitespace_only_lines() {
     let (repo, _lines_file, _alphabet_file) = setup_repo_with_base_commit();
 
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Repository should exist");
+    let gitai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("Repository should exist");
 
     let base_commit = gitai_repo
         .head()
@@ -1191,7 +1293,8 @@ fn test_checkpoint_crlf_blob_vs_lf_working_tree_stats_not_inflated() {
     let crlf_content = "line1\r\nline2\r\nline3\r\nline4\r\nline5\r\n";
     std::fs::write(repo.path().join("test.txt"), crlf_content).unwrap();
     repo.git(&["add", "test.txt"]).unwrap();
-    repo.stage_all_and_commit("initial commit with CRLF").unwrap();
+    repo.stage_all_and_commit("initial commit with CRLF")
+        .unwrap();
 
     // Step 2: Overwrite the file with LF endings + one new line,
     // simulating an AI tool that writes LF on a Windows repo.
@@ -1199,11 +1302,12 @@ fn test_checkpoint_crlf_blob_vs_lf_working_tree_stats_not_inflated() {
     std::fs::write(repo.path().join("test.txt"), lf_content_with_addition).unwrap();
 
     // Step 3: Run a checkpoint
-    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"])
+        .unwrap();
 
     // Step 4: Read back checkpoint stats
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Repository should exist");
+    let gitai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("Repository should exist");
     let base_commit = gitai_repo
         .head()
         .ok()
@@ -1241,16 +1345,18 @@ fn test_checkpoint_crlf_blob_vs_lf_working_tree_no_changes_skipped() {
     let crlf_content = "line1\r\nline2\r\nline3\r\n";
     std::fs::write(repo.path().join("test.txt"), crlf_content).unwrap();
     repo.git(&["add", "test.txt"]).unwrap();
-    repo.stage_all_and_commit("initial commit with CRLF").unwrap();
+    repo.stage_all_and_commit("initial commit with CRLF")
+        .unwrap();
 
     // Overwrite with LF-only — same text content, different line endings
     let lf_content = "line1\nline2\nline3\n";
     std::fs::write(repo.path().join("test.txt"), lf_content).unwrap();
 
-    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"])
+        .unwrap();
 
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Repository should exist");
+    let gitai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("Repository should exist");
     let base_commit = gitai_repo
         .head()
         .ok()
@@ -1289,18 +1395,21 @@ fn test_checkpoint_stale_crlf_blob_causes_ai_reattribution() {
     let crlf_initial = "human_line1\r\nhuman_line2\r\nhuman_line3\r\n";
     std::fs::write(repo.path().join("test.txt"), crlf_initial).unwrap();
     repo.git(&["add", "test.txt"]).unwrap();
-    repo.stage_all_and_commit("initial commit with CRLF").unwrap();
+    repo.stage_all_and_commit("initial commit with CRLF")
+        .unwrap();
 
     // Step 1: Human checkpoint on CRLF file → creates entry with CRLF blob
     // (need to add a line so the checkpoint creates an entry)
     let crlf_with_edit = "human_line1\r\nhuman_line2\r\nhuman_line3\r\nhuman_line4\r\n";
     std::fs::write(repo.path().join("test.txt"), crlf_with_edit).unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"])
+        .unwrap();
 
     // Step 2: Convert file to LF (same content, only line endings change)
     let lf_with_edit = "human_line1\nhuman_line2\nhuman_line3\nhuman_line4\n";
     std::fs::write(repo.path().join("test.txt"), lf_with_edit).unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "test.txt"])
+        .unwrap();
 
     // Step 3: AI adds one line (LF) → AI checkpoint
     let lf_with_ai = "human_line1\nhuman_line2\nhuman_line3\nhuman_line4\nai_new_line\n";
@@ -1308,8 +1417,8 @@ fn test_checkpoint_stale_crlf_blob_causes_ai_reattribution() {
     repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
 
     // Read the AI checkpoint
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("Repository should exist");
+    let gitai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("Repository should exist");
     let base_commit = gitai_repo
         .head()
         .ok()

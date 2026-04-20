@@ -774,5 +774,3 @@ impl PersistedWorkingLog {
         }
     }
 }
-
-

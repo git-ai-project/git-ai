@@ -1,7 +1,7 @@
 use git_ai::git::repository::{
-    args_with_disabled_hooks_if_needed, args_with_internal_git_profile, disable_internal_git_hooks,
-    find_repository_in_path, parse_diff_added_lines_with_insertions, parse_git_version,
-    resolve_command_base_dir, worktree_storage_ai_dir, InternalGitProfile,
+    InternalGitProfile, args_with_disabled_hooks_if_needed, args_with_internal_git_profile,
+    disable_internal_git_hooks, find_repository_in_path, parse_diff_added_lines_with_insertions,
+    parse_git_version, resolve_command_base_dir, worktree_storage_ai_dir,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -115,10 +115,9 @@ fn disable_internal_git_hooks_guard_applies_to_spawned_threads() {
     let _guard = disable_internal_git_hooks();
 
     let spawned_args = args.clone();
-    let forwarded =
-        std::thread::spawn(move || args_with_disabled_hooks_if_needed(&spawned_args))
-            .join()
-            .expect("thread should join");
+    let forwarded = std::thread::spawn(move || args_with_disabled_hooks_if_needed(&spawned_args))
+        .join()
+        .expect("thread should join");
 
     assert_eq!(forwarded[0], "-c");
     assert!(forwarded[1].starts_with("core.hooksPath="));

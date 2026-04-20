@@ -56,8 +56,7 @@ fn make_bare_repo(
     );
 
     if let Some(parent_attrs) = parent_gitattributes {
-        fs::write(temp.path().join(".gitattributes"), parent_attrs)
-            .expect("write parent attrs");
+        fs::write(temp.path().join(".gitattributes"), parent_attrs).expect("write parent attrs");
     }
 
     (
@@ -429,11 +428,7 @@ fn git_ai_ignore_returns_empty_when_file_missing() {
 #[test]
 fn effective_patterns_include_git_ai_ignore() {
     let repo = TestRepo::new();
-    std::fs::write(
-        repo.path().join(".git-ai-ignore"),
-        "custom/**\n*.secret\n",
-    )
-    .unwrap();
+    std::fs::write(repo.path().join(".git-ai-ignore"), "custom/**\n*.secret\n").unwrap();
     repo.git(&["add", ".git-ai-ignore"]).unwrap();
     repo.stage_all_and_commit("add .git-ai-ignore").unwrap();
 

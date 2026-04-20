@@ -49,10 +49,7 @@ fn test_pre_commit_no_changes() {
 
     // Now try to commit with no staged changes.
     let result = repo.commit("no changes commit");
-    assert!(
-        result.is_err(),
-        "commit with no staged changes should fail"
-    );
+    assert!(result.is_err(), "commit with no staged changes should fail");
 }
 
 /// Migrated from src/authorship/pre_commit.rs test_pre_commit_result_mapping

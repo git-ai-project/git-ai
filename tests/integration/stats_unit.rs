@@ -1,10 +1,10 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log::LineRange;
 use git_ai::authorship::authorship_log::PromptRecord;
-use git_ai::authorship::authorship_log_serialization::generate_short_hash;
 use git_ai::authorship::authorship_log_serialization::AttestationEntry;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::authorship_log_serialization::FileAttestation;
+use git_ai::authorship::authorship_log_serialization::generate_short_hash;
 use git_ai::authorship::stats::*;
 use git_ai::authorship::transcript::{AiTranscript, Message};
 use git_ai::authorship::working_log::AgentId;
@@ -298,8 +298,7 @@ fn test_stats_for_simple_ai_commit() {
     std::fs::write(repo.path().join("test.txt"), "Line1\nLine 2\nLine 3\n").unwrap();
     repo.git(&["add", "test.txt"]).unwrap();
 
-    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"])
-        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
 
     repo.stage_all_and_commit("AI adds lines").unwrap();
 
@@ -349,10 +348,13 @@ fn test_stats_for_mixed_commit() {
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // AI adds lines
-    std::fs::write(repo.path().join("test.txt"), "Base line\nAI line 1\nAI line 2\n").unwrap();
+    std::fs::write(
+        repo.path().join("test.txt"),
+        "Base line\nAI line 1\nAI line 2\n",
+    )
+    .unwrap();
     repo.git(&["add", "test.txt"]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"])
-        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
 
     // Human adds lines
     std::fs::write(
@@ -445,7 +447,11 @@ fn test_stats_ignores_single_lockfile() {
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // Commit that adds source code and a large lockfile
-    std::fs::write(repo.path().join("src/main.rs"), "fn main() {}\nfn helper() {}\n").unwrap();
+    std::fs::write(
+        repo.path().join("src/main.rs"),
+        "fn main() {}\nfn helper() {}\n",
+    )
+    .unwrap();
     repo.git(&["add", "src/main.rs"]).unwrap();
     std::fs::write(repo.path().join("Cargo.lock"), &"# lockfile\n".repeat(1000)).unwrap();
     repo.git(&["add", "Cargo.lock"]).unwrap();
@@ -539,8 +545,7 @@ fn test_stats_with_lockfile_only_commit() {
     repo.git(&["add", "Cargo.lock"]).unwrap();
     repo.git_ai(&["checkpoint", "mock_known_human", "Cargo.lock"])
         .unwrap();
-    repo.stage_all_and_commit("Update dependencies")
-        .unwrap();
+    repo.stage_all_and_commit("Update dependencies").unwrap();
 
     let head_sha = repo
         .git_og(&["rev-parse", "HEAD"])
@@ -576,8 +581,7 @@ fn test_stats_empty_ignore_patterns() {
     // Add lines
     std::fs::write(repo.path().join("test.txt"), "Line1\nLine2\nLine3\n").unwrap();
     repo.git(&["add", "test.txt"]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"])
-        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
     repo.stage_all_and_commit("Add lines").unwrap();
 
     let head_sha = repo
@@ -692,10 +696,7 @@ fn test_accepted_lines_merge_commit() {
     );
 
     let mut file_att = FileAttestation::new("foo.rs".to_string());
-    file_att.add_entry(AttestationEntry::new(
-        hash,
-        vec![LineRange::Range(1, 3)],
-    ));
+    file_att.add_entry(AttestationEntry::new(hash, vec![LineRange::Range(1, 3)]));
     log.attestations.push(file_att);
 
     let mut added_lines: HashMap<String, Vec<u32>> = HashMap::new();
@@ -733,10 +734,7 @@ fn test_accepted_lines_no_matching_files() {
     );
 
     let mut file_att = FileAttestation::new("foo.rs".to_string());
-    file_att.add_entry(AttestationEntry::new(
-        hash,
-        vec![LineRange::Range(1, 3)],
-    ));
+    file_att.add_entry(AttestationEntry::new(hash, vec![LineRange::Range(1, 3)]));
     log.attestations.push(file_att);
 
     // added_lines has "bar.rs" but NOT "foo.rs"
@@ -847,8 +845,7 @@ fn test_stats_for_merge_commit_skips_ai_acceptance() {
     repo.git(&["checkout", "-b", "feature"]).unwrap();
     std::fs::write(repo.path().join("test.txt"), "base\nfeature line\n").unwrap();
     repo.git(&["add", "test.txt"]).unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"])
-        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
     repo.stage_all_and_commit("Feature change").unwrap();
 
     repo.git(&["checkout", &default_branch]).unwrap();

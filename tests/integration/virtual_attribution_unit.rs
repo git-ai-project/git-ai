@@ -51,8 +51,7 @@ fn test_virtual_attributions() {
     println!("timestamp: {}", virtual_attributions.timestamp());
 
     // Print attribution details if available (for debugging)
-    if let Some((char_attrs, line_attrs)) = virtual_attributions.get_attributions("test_file.rs")
-    {
+    if let Some((char_attrs, line_attrs)) = virtual_attributions.get_attributions("test_file.rs") {
         println!("\n=== test_file.rs Attribution Info ===");
         println!("Character-level attributions: {} ranges", char_attrs.len());
         println!("Line-level attributions: {} ranges", line_attrs.len());

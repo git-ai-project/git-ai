@@ -1,9 +1,9 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::post_commit::{
-    count_line_ranges, should_skip_expensive_post_commit_stats, StatsCostEstimate,
-    STATS_SKIP_MAX_ADDED_LINES, STATS_SKIP_MAX_DELETED_LINES,
-    STATS_SKIP_MAX_FILES_WITH_ADDITIONS, STATS_SKIP_MAX_HUNKS,
+    STATS_SKIP_MAX_ADDED_LINES, STATS_SKIP_MAX_DELETED_LINES, STATS_SKIP_MAX_FILES_WITH_ADDITIONS,
+    STATS_SKIP_MAX_HUNKS, StatsCostEstimate, count_line_ranges,
+    should_skip_expensive_post_commit_stats,
 };
 
 #[test]
@@ -259,10 +259,7 @@ fn test_post_commit_utf8_filename_with_ai_attribution() {
     let log = AuthorshipLog::deserialize_from_string(&note).unwrap();
 
     // Debug output
-    println!(
-        "Authorship log attestations: {:?}",
-        log.attestations
-    );
+    println!("Authorship log attestations: {:?}", log.attestations);
 
     // The attestation should include the Chinese filename
     assert_eq!(

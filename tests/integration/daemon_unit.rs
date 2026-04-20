@@ -1,7 +1,7 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::authorship_log::HumanRecord;
-use git_ai::daemon::{restore_recent_working_log_snapshot, RecentWorkingLogSnapshot};
+use git_ai::daemon::{RecentWorkingLogSnapshot, restore_recent_working_log_snapshot};
 use git_ai::git::find_repository_in_path;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;

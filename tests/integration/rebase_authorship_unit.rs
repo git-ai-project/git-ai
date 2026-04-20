@@ -1,10 +1,10 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::{
-    attributions_to_line_attributions, Attribution, AttributionTracker, LineAttribution,
+    Attribution, AttributionTracker, LineAttribution, attributions_to_line_attributions,
 };
 use git_ai::authorship::authorship_log::{LineRange, PromptRecord};
 use git_ai::authorship::authorship_log_serialization::{
-    generate_short_hash, AttestationEntry, AuthorshipLog, FileAttestation,
+    AttestationEntry, AuthorshipLog, FileAttestation, generate_short_hash,
 };
 use git_ai::authorship::rebase_authorship::{
     build_file_attestation_from_line_attributions, collect_changed_file_contents_from_diff,
@@ -144,8 +144,8 @@ fn walk_commits_to_base_merge_history_includes_both_sides_without_full_dag_walk(
         .trim()
         .to_string();
 
-    let commits = walk_commits_to_base(&gitai_repo, &merge_head, &base)
-        .expect("walk should succeed");
+    let commits =
+        walk_commits_to_base(&gitai_repo, &merge_head, &base).expect("walk should succeed");
 
     assert_eq!(commits.first(), Some(&merge_head));
     assert_eq!(commits.len(), 3);
@@ -230,8 +230,8 @@ fn get_pathspecs_from_commits_keeps_hex_filenames() {
         .trim()
         .to_string();
 
-    let paths =
-        get_pathspecs_from_commits(&gitai_repo, &[commit_sha]).expect("collect pathspecs from commit");
+    let paths = get_pathspecs_from_commits(&gitai_repo, &[commit_sha])
+        .expect("collect pathspecs from commit");
 
     assert!(
         paths.iter().any(|p| p == hex_name),
@@ -255,7 +255,8 @@ fn collect_changed_file_contents_from_diff_handles_add_modify_delete_and_filteri
     std::fs::write(repo.path().join("b.txt"), "b1\n").expect("add b");
     repo.git(&["add", "b.txt"]).expect("add");
     repo.git_og(&["rm", "c.txt"]).expect("delete c");
-    repo.stage_all_and_commit("rewrite").expect("commit rewrite");
+    repo.stage_all_and_commit("rewrite")
+        .expect("commit rewrite");
 
     let head_sha = repo
         .git_og(&["rev-parse", "HEAD"])
@@ -299,8 +300,7 @@ fn collect_changed_file_contents_from_diff_handles_add_modify_delete_and_filteri
 #[test]
 fn parse_cat_file_batch_output_with_oids_parses_empty_and_multiline_blobs() {
     let data = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa blob 6\nx\ny\nz\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb blob 0\n\n";
-    let parsed =
-        parse_cat_file_batch_output_with_oids(data).expect("parse cat-file batch output");
+    let parsed = parse_cat_file_batch_output_with_oids(data).expect("parse cat-file batch output");
 
     assert_eq!(
         parsed
@@ -376,7 +376,8 @@ fn fast_path_rebase_note_remap_copies_logs_when_tracked_blobs_match() {
 
     assert!(did_remap, "expected fast-path remap to trigger");
 
-    let remapped_note_raw = show_authorship_note(&gitai_repo, &new_commit).expect("new note content");
+    let remapped_note_raw =
+        show_authorship_note(&gitai_repo, &new_commit).expect("new note content");
     let remapped =
         AuthorshipLog::deserialize_from_string(&remapped_note_raw).expect("parse new note");
     assert_eq!(remapped.metadata.base_commit_sha, new_commit);
@@ -434,8 +435,7 @@ fn fast_path_rebase_note_remap_copies_multiple_commits_in_one_pass() {
         );
     }
 
-    let commits_to_process_lookup: HashSet<&str> =
-        new_commits.iter().map(String::as_str).collect();
+    let commits_to_process_lookup: HashSet<&str> = new_commits.iter().map(String::as_str).collect();
     let did_remap = try_fast_path_rebase_note_remap(
         &gitai_repo,
         &original_commits,
@@ -555,8 +555,8 @@ fn transform_attributions_to_final_state_preserves_unchanged_files() {
     let mut final_state = HashMap::new();
     final_state.insert("a.txt".to_string(), "aaa!\n".to_string());
 
-    let transformed = transform_attributions_to_final_state(&source_va, final_state, None)
-        .expect("transform");
+    let transformed =
+        transform_attributions_to_final_state(&source_va, final_state, None).expect("transform");
 
     assert_eq!(
         transformed
@@ -1072,8 +1072,11 @@ fn rebase_complete_merges_initial_when_both_working_logs_exist() {
 fn regression_initial_preserved_through_checkpoint_commit_rebase() {
     let repo = TestRepo::new();
 
-    std::fs::write(repo.path().join("app.py"), "def main():\n    print('hello')\n")
-        .expect("write base app.py");
+    std::fs::write(
+        repo.path().join("app.py"),
+        "def main():\n    print('hello')\n",
+    )
+    .expect("write base app.py");
     repo.git_og(&["add", "app.py"]).expect("add");
     repo.git_og(&["commit", "-m", "initial commit"])
         .expect("initial commit");
@@ -1156,7 +1159,8 @@ fn regression_initial_preserved_through_checkpoint_commit_rebase() {
 
     repo.git_og(&["checkout", &default_branch])
         .expect("switch to default");
-    std::fs::write(repo.path().join("README.md"), "# Test Project\n").expect("write upstream README");
+    std::fs::write(repo.path().join("README.md"), "# Test Project\n")
+        .expect("write upstream README");
     repo.git_og(&["add", "README.md"]).expect("add");
     repo.git_og(&["commit", "-m", "upstream: add README"])
         .expect("upstream commit");
@@ -1220,15 +1224,15 @@ fn regression_initial_preserved_through_checkpoint_commit_rebase() {
 fn regression_initial_survives_amend_then_rebase() {
     let repo = TestRepo::new();
 
-    std::fs::write(repo.path().join("app.py"), "def main():\n    pass\n")
-        .expect("write base");
+    std::fs::write(repo.path().join("app.py"), "def main():\n    pass\n").expect("write base");
     repo.git_og(&["add", "app.py"]).expect("add");
     repo.git_og(&["commit", "-m", "base commit"])
         .expect("commit base");
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let default_branch = repo.current_branch();
 
-    repo.git_og(&["checkout", "-b", "feature"]).expect("create feature");
+    repo.git_og(&["checkout", "-b", "feature"])
+        .expect("create feature");
     std::fs::write(
         repo.path().join("app.py"),
         "import logging\ndef main():\n    logging.info('v1')\n    return 1\n",
@@ -1378,7 +1382,7 @@ fn regression_initial_survives_amend_then_rebase() {
 #[test]
 fn diff_based_transfer_equal_content() {
     use git_ai::authorship::rebase_authorship::diff_based_line_attribution_transfer;
-    
+
     let old = "line1\nline2\nline3\n";
     let new = "line1\nline2\nline3\n";
     let attrs = vec![
@@ -1411,7 +1415,7 @@ fn diff_based_transfer_equal_content() {
 #[test]
 fn diff_based_transfer_insertion_shifts_lines() {
     use git_ai::authorship::rebase_authorship::diff_based_line_attribution_transfer;
-    
+
     let old = "line1\nline2\nline3\n";
     let new = "line1\nnew_line\nline2\nline3\n";
     let attrs = vec![
@@ -1448,7 +1452,7 @@ fn diff_based_transfer_insertion_shifts_lines() {
 #[test]
 fn diff_based_transfer_deletion_removes_line() {
     use git_ai::authorship::rebase_authorship::diff_based_line_attribution_transfer;
-    
+
     let old = "line1\nline2\nline3\n";
     let new = "line1\nline3\n";
     let attrs = vec![
@@ -1483,7 +1487,7 @@ fn diff_based_transfer_deletion_removes_line() {
 #[test]
 fn diff_based_transfer_replacement_drops_attribution() {
     use git_ai::authorship::rebase_authorship::diff_based_line_attribution_transfer;
-    
+
     let old = "line1\nline2\nline3\n";
     let new = "line1\nmodified\nline3\n";
     let attrs = vec![
@@ -1518,7 +1522,7 @@ fn diff_based_transfer_replacement_drops_attribution() {
 #[test]
 fn diff_based_transfer_handles_duplicate_lines_correctly() {
     use git_ai::authorship::rebase_authorship::diff_based_line_attribution_transfer;
-    
+
     // This tests the case that the old content-matching approach got wrong:
     // identical lines from different authors should be tracked by position, not content
     let old = "let x = 42;\nlet y = 0;\nlet x = 42;\n";
@@ -1864,8 +1868,7 @@ fn flatten_prompts_picks_per_commit_record_for_same_session_multi_commit() {
     repo.git_og(&["checkout", &default_branch])
         .expect("switch to default branch");
     let main_content = format!("header\n{}", base_content);
-    std::fs::write(repo.path().join("feature.txt"), &main_content)
-        .expect("write main feature.txt");
+    std::fs::write(repo.path().join("feature.txt"), &main_content).expect("write main feature.txt");
     repo.git_og(&["add", "feature.txt"]).expect("add");
     repo.git_og(&["commit", "-m", "main-advance"])
         .expect("commit main advance");
@@ -2130,8 +2133,7 @@ fn diff_based_transfer_benchmark() {
     }
     let full_fast_duration = start.elapsed();
 
-    let transform_speedup =
-        char_level_duration.as_secs_f64() / diff_based_duration.as_secs_f64();
+    let transform_speedup = char_level_duration.as_secs_f64() / diff_based_duration.as_secs_f64();
     let pipeline_speedup = full_slow_duration.as_secs_f64() / full_fast_duration.as_secs_f64();
 
     println!("\n--- Transform-Only Results ---");

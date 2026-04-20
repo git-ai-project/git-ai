@@ -265,7 +265,11 @@ impl CiContext {
     /// Get the rebased commits by walking back from merge_commit_sha.
     /// For a rebase merge with N original commits, there should be N new commits
     /// ending at merge_commit_sha.
-    pub fn get_rebased_commits(&self, merge_commit_sha: &str, expected_count: usize) -> Vec<String> {
+    pub fn get_rebased_commits(
+        &self,
+        merge_commit_sha: &str,
+        expected_count: usize,
+    ) -> Vec<String> {
         let mut commits = Vec::new();
         let mut current_sha = merge_commit_sha.to_string();
 

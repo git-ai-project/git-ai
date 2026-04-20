@@ -1,7 +1,9 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::transcript::AiTranscript;
-use git_ai::authorship::working_log::{AgentId, Checkpoint, CheckpointKind, CHECKPOINT_API_VERSION};
+use git_ai::authorship::working_log::{
+    AgentId, CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind,
+};
 use git_ai::git::repo_storage::{InitialAttributions, RepoStorage};
 use std::collections::HashMap;
 use std::fs;

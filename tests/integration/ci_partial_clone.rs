@@ -8,9 +8,7 @@ fn direct_test_repo() -> TestRepo {
 }
 
 fn parent_count(repo: &TestRepo, sha: &str) -> usize {
-    let output = repo
-        .git_og(&["cat-file", "-p", sha])
-        .unwrap();
+    let output = repo.git_og(&["cat-file", "-p", sha]).unwrap();
     output.lines().filter(|l| l.starts_with("parent ")).count()
 }
 
@@ -33,7 +31,14 @@ fn test_squash_merge_single_parent_not_on_base_ref() {
     let tree_id = repo.git_og(&["write-tree"]).unwrap().trim().to_string();
 
     let feature_sha = repo
-        .git_og(&["commit-tree", &tree_id, "-p", &init_sha, "-m", "feature commit"])
+        .git_og(&[
+            "commit-tree",
+            &tree_id,
+            "-p",
+            &init_sha,
+            "-m",
+            "feature commit",
+        ])
         .unwrap()
         .trim()
         .to_string();
@@ -240,7 +245,14 @@ fn test_regular_two_parent_merge_skipped() {
     repo.git_og(&["add", "file.txt"]).unwrap();
     let feature_tree = repo.git_og(&["write-tree"]).unwrap().trim().to_string();
     let feature_sha = repo
-        .git_og(&["commit-tree", &feature_tree, "-p", &init_sha, "-m", "feature commit"])
+        .git_og(&[
+            "commit-tree",
+            &feature_tree,
+            "-p",
+            &init_sha,
+            "-m",
+            "feature commit",
+        ])
         .unwrap()
         .trim()
         .to_string();
@@ -257,10 +269,14 @@ fn test_regular_two_parent_merge_skipped() {
     let merge_tree = repo.git_og(&["write-tree"]).unwrap().trim().to_string();
     let merge_sha = repo
         .git_og(&[
-            "commit-tree", &merge_tree,
-            "-p", &adv_sha,
-            "-p", &feature_sha,
-            "-m", "Merge feature",
+            "commit-tree",
+            &merge_tree,
+            "-p",
+            &adv_sha,
+            "-p",
+            &feature_sha,
+            "-m",
+            "Merge feature",
         ])
         .unwrap()
         .trim()

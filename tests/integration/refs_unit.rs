@@ -5,8 +5,8 @@ use git_ai::git::refs::{
     CommitAuthorship, commits_with_authorship_notes, copy_ref, fanout_note_pathspec_for_commit,
     flat_note_pathspec_for_commit, get_commits_with_notes_from_list,
     get_reference_as_authorship_log_v3, get_reference_as_working_log, grep_ai_notes,
-    merge_notes_from_ref, note_blob_oids_for_commits, notes_add, notes_add_blob_batch,
-    notes_add_batch, notes_path_for_object, parse_batch_check_blob_oid, ref_exists,
+    merge_notes_from_ref, note_blob_oids_for_commits, notes_add, notes_add_batch,
+    notes_add_blob_batch, notes_path_for_object, parse_batch_check_blob_oid, ref_exists,
     sanitize_remote_name, show_authorship_note, tracking_ref_for_remote,
 };
 use git_ai::git::repository::{exec_git, find_repository_in_path};
@@ -47,9 +47,7 @@ fn test_notes_path_for_object() {
 
     // SHA-256 (64 chars)
     assert_eq!(
-        notes_path_for_object(
-            "abc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd"
-        ),
+        notes_path_for_object("abc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd"),
         "ab/c1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd"
     );
 }
@@ -156,10 +154,8 @@ fn test_notes_add_and_show_authorship_note() {
     assert_eq!(retrieved_content, note_content);
 
     // Test that non-existent commit returns None
-    let non_existent_content = show_authorship_note(
-        &gitai_repo,
-        "0000000000000000000000000000000000000000",
-    );
+    let non_existent_content =
+        show_authorship_note(&gitai_repo, "0000000000000000000000000000000000000000");
     assert!(non_existent_content.is_none());
 }
 
@@ -205,9 +201,8 @@ fn test_notes_add_blob_batch_reuses_existing_note_blob() {
     let note_content = log.serialize_to_string().expect("serialize authorship log");
     notes_add(&gitai_repo, &commit_a, &note_content).expect("add note A");
 
-    let blob_oids =
-        note_blob_oids_for_commits(&gitai_repo, std::slice::from_ref(&commit_a))
-            .expect("resolve note blob oid");
+    let blob_oids = note_blob_oids_for_commits(&gitai_repo, std::slice::from_ref(&commit_a))
+        .expect("resolve note blob oid");
     let blob_oid = blob_oids
         .get(&commit_a)
         .expect("blob oid for commit A")
@@ -231,8 +226,7 @@ fn test_ref_exists() {
 
     // Create initial commit
     fs::write(repo.path().join("test.txt"), "content\n").unwrap();
-    repo.stage_all_and_commit("Initial commit")
-        .expect("commit");
+    repo.stage_all_and_commit("Initial commit").expect("commit");
 
     // HEAD should exist
     assert!(ref_exists(&gitai_repo, "HEAD"));
@@ -321,8 +315,7 @@ fn test_copy_ref() {
     assert!(ref_exists(&gitai_repo, "refs/notes/ai-backup"));
 
     // Verify content is accessible from both refs
-    let note_from_ai =
-        show_authorship_note(&gitai_repo, &commit_sha).expect("note from ai");
+    let note_from_ai = show_authorship_note(&gitai_repo, &commit_sha).expect("note from ai");
 
     // Read from backup ref
     let mut args = gitai_repo.global_args_for_exec();
@@ -463,8 +456,7 @@ fn test_get_commits_with_notes_from_list() {
 
     // Get authorship for all commits
     let commit_list = vec![commit_a.clone(), commit_b.clone(), commit_c.clone()];
-    let result = get_commits_with_notes_from_list(&gitai_repo, &commit_list)
-        .expect("get commits");
+    let result = get_commits_with_notes_from_list(&gitai_repo, &commit_list).expect("get commits");
 
     assert_eq!(result.len(), 3);
 
@@ -506,8 +498,7 @@ fn test_note_blob_oids_for_commits_no_notes() {
     let commit_sha = head_sha(&repo);
 
     // Commit exists but has no note
-    let result =
-        note_blob_oids_for_commits(&gitai_repo, &[commit_sha]).expect("no notes");
+    let result = note_blob_oids_for_commits(&gitai_repo, &[commit_sha]).expect("no notes");
     assert!(result.is_empty());
 }
 
@@ -528,8 +519,7 @@ fn test_commits_with_authorship_notes() {
     notes_add(&gitai_repo, &commit_a, "{\"test\":\"note\"}").expect("add note");
 
     let commits = vec![commit_a.clone(), commit_b.clone()];
-    let result =
-        commits_with_authorship_notes(&gitai_repo, &commits).expect("check notes");
+    let result = commits_with_authorship_notes(&gitai_repo, &commits).expect("check notes");
 
     // Commit A should definitely be in results
     assert!(result.contains(&commit_a), "Commit A should have a note");
@@ -554,8 +544,7 @@ fn test_get_reference_as_working_log() {
     let working_log_json = "[]";
     notes_add(&gitai_repo, &commit_sha, working_log_json).expect("add note");
 
-    let result = get_reference_as_working_log(&gitai_repo, &commit_sha)
-        .expect("get working log");
+    let result = get_reference_as_working_log(&gitai_repo, &commit_sha).expect("get working log");
     assert_eq!(result.len(), 0); // Empty array
 }
 

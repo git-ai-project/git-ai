@@ -1,10 +1,10 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::prompt_utils::{
-    find_prompt, find_prompt_in_commit, find_prompt_in_history, find_prompt_with_db_fallback,
-    format_transcript, update_codex_prompt, update_claude_prompt, update_continue_cli_prompt,
-    update_droid_prompt, update_gemini_prompt, update_github_copilot_prompt,
-    update_prompt_from_tool, update_windsurf_prompt, PromptUpdateResult,
+    PromptUpdateResult, find_prompt, find_prompt_in_commit, find_prompt_in_history,
+    find_prompt_with_db_fallback, format_transcript, update_claude_prompt, update_codex_prompt,
+    update_continue_cli_prompt, update_droid_prompt, update_gemini_prompt,
+    update_github_copilot_prompt, update_prompt_from_tool, update_windsurf_prompt,
 };
 use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::AgentId;
@@ -212,13 +212,7 @@ fn test_find_prompt_in_commit_integration() {
 
     // Get authorship log from the commit
     let authorship = get_authorship(&gitai_repo, &head_sha).unwrap();
-    let prompt_id = authorship
-        .metadata
-        .prompts
-        .keys()
-        .next()
-        .unwrap()
-        .clone();
+    let prompt_id = authorship.metadata.prompts.keys().next().unwrap().clone();
 
     // Test finding the prompt
     let result = find_prompt_in_commit(&gitai_repo, &prompt_id, "HEAD");

@@ -109,8 +109,7 @@ fn setup_merge_on_default(repo: &TestRepo) -> (String, String, String) {
     let default_branch = repo.current_branch();
 
     // Side branch with a commit
-    repo.git(&["checkout", "-b", "side"])
-        .expect("create side");
+    repo.git(&["checkout", "-b", "side"]).expect("create side");
     let mut side = repo.filename("side.txt");
     side.set_contents(vec!["side".human()]);
     repo.stage_all_and_commit("side commit")
@@ -160,8 +159,7 @@ fn test_build_rebase_commit_mappings_excludes_merge_commits_from_new_commits() {
         .to_string();
 
     // Rebase through the wrapper
-    repo.git(&["rebase", &default_branch])
-        .expect("rebase");
+    repo.git(&["rebase", &default_branch]).expect("rebase");
     let new_head = repo
         .git(&["rev-parse", "HEAD"])
         .expect("new head")
@@ -170,8 +168,7 @@ fn test_build_rebase_commit_mappings_excludes_merge_commits_from_new_commits() {
 
     // Call build_rebase_commit_mappings with onto_head = None (daemon fallback)
     let path_str = repo.path().to_str().expect("valid path");
-    let gitai_repo =
-        git_ai::git::repository::find_repository_in_path(path_str).expect("open repo");
+    let gitai_repo = git_ai::git::repository::find_repository_in_path(path_str).expect("open repo");
     let (original_commits, new_commits) =
         git_ai::commands::hooks::rebase_hooks::build_rebase_commit_mappings(
             &gitai_repo,
@@ -225,8 +222,7 @@ fn test_build_rebase_commit_mappings_excludes_merge_commits_when_onto_equals_mer
         .trim()
         .to_string();
 
-    repo.git(&["rebase", &default_branch])
-        .expect("rebase");
+    repo.git(&["rebase", &default_branch]).expect("rebase");
     let new_head = repo
         .git(&["rev-parse", "HEAD"])
         .expect("new head")
@@ -240,8 +236,7 @@ fn test_build_rebase_commit_mappings_excludes_merge_commits_when_onto_equals_mer
         .to_string();
 
     let path_str = repo.path().to_str().expect("valid path");
-    let gitai_repo =
-        git_ai::git::repository::find_repository_in_path(path_str).expect("open repo");
+    let gitai_repo = git_ai::git::repository::find_repository_in_path(path_str).expect("open repo");
     let (original_commits, new_commits) =
         git_ai::commands::hooks::rebase_hooks::build_rebase_commit_mappings(
             &gitai_repo,
@@ -291,8 +286,7 @@ fn test_build_rebase_commit_mappings_multi_commit_with_onto_equals_merge_base() 
         .trim()
         .to_string();
 
-    repo.git(&["rebase", &default_branch])
-        .expect("rebase");
+    repo.git(&["rebase", &default_branch]).expect("rebase");
     let new_head = repo
         .git(&["rev-parse", "HEAD"])
         .expect("new head")
@@ -306,8 +300,7 @@ fn test_build_rebase_commit_mappings_multi_commit_with_onto_equals_merge_base() 
         .to_string();
 
     let path_str = repo.path().to_str().expect("valid path");
-    let gitai_repo =
-        git_ai::git::repository::find_repository_in_path(path_str).expect("open repo");
+    let gitai_repo = git_ai::git::repository::find_repository_in_path(path_str).expect("open repo");
     let (original_commits, new_commits) =
         git_ai::commands::hooks::rebase_hooks::build_rebase_commit_mappings(
             &gitai_repo,
