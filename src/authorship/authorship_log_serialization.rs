@@ -1,6 +1,7 @@
 use crate::authorship::authorship_log::{Author, HumanRecord, LineRange, PromptRecord, SessionRecord};
 use crate::authorship::working_log::CheckpointKind;
 use crate::git::repository::Repository;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -673,6 +674,31 @@ pub fn generate_human_short_hash(author_identity: &str) -> String {
     hasher.update(author_identity.as_bytes());
     let hex = format!("{:x}", hasher.finalize());
     format!("h_{}", &hex[..14])
+}
+
+/// Generate a session ID: "s_" + first 14 hex chars of SHA256(tool:agent_id) = 16 chars total.
+/// Uses the same hash base as `generate_short_hash` but with a prefix and shorter hash portion.
+/// The "s_" prefix distinguishes session IDs from legacy prompt hashes throughout the system.
+pub fn generate_session_id(agent_id: &str, tool: &str) -> String {
+    let combined = format!("{}:{}", tool, agent_id);
+    let mut hasher = Sha256::new();
+    hasher.update(combined.as_bytes());
+    let hex = format!("{:x}", hasher.finalize());
+    format!("s_{}", &hex[..14])
+}
+
+/// Generate a trace ID: "t_" + 14 random hex chars = 16 chars total.
+/// Unique per checkpoint call (not deterministic). Used for per-checkpoint granularity
+/// in attestation keys.
+pub fn generate_trace_id() -> String {
+    let mut rng = rand::rng();
+    let hex: String = (0..14)
+        .map(|_| {
+            let idx: u8 = rng.random_range(0..16);
+            char::from_digit(idx as u32, 16).unwrap()
+        })
+        .collect();
+    format!("t_{}", hex)
 }
 
 #[cfg(test)]
@@ -1492,4 +1518,34 @@ mod tests {
     // and cannot be unit-tested here without significant mocking infrastructure.
     // The h_-routing path (returning HumanRecord data instead of PromptRecord) is covered by
     // integration tests in the authorship integration test suite.
+
+    #[test]
+    fn test_generate_session_id() {
+        let id = generate_session_id("session_123", "cursor");
+        assert!(id.starts_with("s_"));
+        assert_eq!(id.len(), 16);
+        // Deterministic
+        assert_eq!(id, generate_session_id("session_123", "cursor"));
+        // Different inputs produce different output
+        assert_ne!(id, generate_session_id("session_456", "cursor"));
+    }
+
+    #[test]
+    fn test_generate_trace_id() {
+        let id = generate_trace_id();
+        assert!(id.starts_with("t_"));
+        assert_eq!(id.len(), 16);
+        // Random: two calls produce different output
+        assert_ne!(id, generate_trace_id());
+        // All chars after prefix are hex
+        assert!(id[2..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_session_id_uses_same_hash_base_as_prompt_id() {
+        let session = generate_session_id("session_123", "cursor");
+        let prompt = generate_short_hash("session_123", "cursor");
+        // The hex portion of session (after "s_") should be a prefix of the prompt hash
+        assert_eq!(&session[2..], &prompt[..14]);
+    }
 }
