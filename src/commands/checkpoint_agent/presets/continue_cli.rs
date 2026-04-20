@@ -38,10 +38,7 @@ impl AgentPreset for ContinueCliPreset {
             session_id,
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd),
-            metadata: HashMap::from([(
-                "transcript_path".to_string(),
-                transcript_path.to_string(),
-            )]),
+            metadata: HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]),
         };
 
         let transcript_source = Some(TranscriptSource::Path {

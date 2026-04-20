@@ -169,8 +169,7 @@ fn resolve_repo_cwd(file_path: &str, workspace_roots: &[String]) -> Option<Strin
     if file_path.is_empty() {
         return workspace_roots.first().cloned();
     }
-    matching_workspace_root(file_path, workspace_roots)
-        .or_else(|| workspace_roots.first().cloned())
+    matching_workspace_root(file_path, workspace_roots).or_else(|| workspace_roots.first().cloned())
 }
 
 #[cfg(test)]
@@ -356,9 +355,6 @@ mod tests {
             matching_workspace_root("/home/user/project-b/src/main.rs", &roots),
             Some("/home/user/project-b".to_string())
         );
-        assert_eq!(
-            matching_workspace_root("/other/path/file.rs", &roots),
-            None
-        );
+        assert_eq!(matching_workspace_root("/other/path/file.rs", &roots), None);
     }
 }

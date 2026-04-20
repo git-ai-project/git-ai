@@ -16,8 +16,9 @@ impl AgentPreset for GithubCopilotPreset {
         let data: serde_json::Value = serde_json::from_str(hook_input)
             .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
 
-        let hook_event_name = parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"])
-            .unwrap_or("after_edit");
+        let hook_event_name =
+            parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"])
+                .unwrap_or("after_edit");
 
         if hook_event_name == "before_edit" || hook_event_name == "after_edit" {
             return parse_legacy_extension_hooks(&data, hook_event_name, trace_id);
@@ -96,13 +97,15 @@ fn parse_legacy_extension_hooks(
     }
 
     // after_edit path
-    let chat_session_path = parse::optional_str_multi(data, &["chat_session_path", "chatSessionPath"])
-        .ok_or_else(|| {
-            GitAiError::PresetError(
-                "chat_session_path or chatSessionPath not found in hook_input for after_edit"
-                    .to_string(),
-            )
-        })?;
+    let chat_session_path =
+        parse::optional_str_multi(data, &["chat_session_path", "chatSessionPath"]).ok_or_else(
+            || {
+                GitAiError::PresetError(
+                    "chat_session_path or chatSessionPath not found in hook_input for after_edit"
+                        .to_string(),
+                )
+            },
+        )?;
 
     let edited_filepaths = data
         .get("edited_filepaths")
@@ -162,7 +165,8 @@ fn parse_vscode_native_hooks(
     let dirty_files = dirty_files_from_hook_data(data, cwd);
     let session_id = extract_session_id(data);
 
-    let tool_name = parse::optional_str_multi(data, &["tool_name", "toolName"]).unwrap_or("unknown");
+    let tool_name =
+        parse::optional_str_multi(data, &["tool_name", "toolName"]).unwrap_or("unknown");
 
     // Enforce tool filtering to avoid creating checkpoints for read/search tools
     if !is_supported_vscode_edit_tool_name(tool_name) {
@@ -178,7 +182,8 @@ fn parse_vscode_native_hooks(
         .or_else(|| data.get("toolResponse"));
 
     // Extract file paths from tool_input and tool_response only (not session-level data)
-    let extracted_paths = extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, cwd);
+    let extracted_paths =
+        extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, cwd);
 
     let transcript_path = transcript_path_from_hook_data(data).map(|s| s.to_string());
 
@@ -314,7 +319,12 @@ fn parse_vscode_native_hooks(
 fn extract_session_id(data: &serde_json::Value) -> String {
     parse::optional_str_multi(
         data,
-        &["chat_session_id", "session_id", "chatSessionId", "sessionId"],
+        &[
+            "chat_session_id",
+            "session_id",
+            "chatSessionId",
+            "sessionId",
+        ],
     )
     .unwrap_or("unknown")
     .to_string()
@@ -423,8 +433,12 @@ fn classify_copilot_tool(tool_name: &str) -> ToolClass {
     let lower = tool_name.to_ascii_lowercase();
     match lower.as_str() {
         "run_in_terminal" => ToolClass::Bash,
-        "create_file" | "replace_string_in_file" | "apply_patch" | "delete_file"
-        | "rename_file" | "move_file" => ToolClass::FileEdit,
+        "create_file"
+        | "replace_string_in_file"
+        | "apply_patch"
+        | "delete_file"
+        | "rename_file"
+        | "move_file" => ToolClass::FileEdit,
         _ if lower.contains("edit") || lower.contains("write") || lower.contains("replace") => {
             ToolClass::FileEdit
         }
@@ -576,7 +590,9 @@ mod tests {
             "dirty_files": {"/home/user/project/src/main.rs": "old content"}
         })
         .to_string();
-        let events = GithubCopilotPreset.parse(&input, "t_test123456789a").unwrap();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
@@ -603,7 +619,9 @@ mod tests {
             "edited_filepaths": ["src/main.rs"]
         })
         .to_string();
-        let events = GithubCopilotPreset.parse(&input, "t_test123456789a").unwrap();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
@@ -654,7 +672,9 @@ mod tests {
             "transcript_path": "/home/user/.vscode/data/github.copilot-chat/transcripts/sess-456.json"
         })
         .to_string();
-        let events = GithubCopilotPreset.parse(&input, "t_test123456789a").unwrap();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
@@ -681,7 +701,9 @@ mod tests {
             "transcript_path": "/home/user/.vscode/data/github.copilot-chat/transcripts/sess-456.json"
         })
         .to_string();
-        let events = GithubCopilotPreset.parse(&input, "t_test123456789a").unwrap();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
@@ -713,7 +735,9 @@ mod tests {
             "transcript_path": "/home/user/.vscode/data/github.copilot-chat/transcripts/sess-456.json"
         })
         .to_string();
-        let events = GithubCopilotPreset.parse(&input, "t_test123456789a").unwrap();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedHookEvent::PreBashCall(e) => {
@@ -736,7 +760,9 @@ mod tests {
             "transcript_path": "/home/user/.vscode/data/github.copilot-chat/transcripts/sess-456.json"
         })
         .to_string();
-        let events = GithubCopilotPreset.parse(&input, "t_test123456789a").unwrap();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedHookEvent::PostBashCall(e) => {
@@ -758,7 +784,9 @@ mod tests {
             "transcript_path": "/home/user/.vscode/data/github.copilot-chat/transcripts/sess-456.json"
         })
         .to_string();
-        let events = GithubCopilotPreset.parse(&input, "t_test123456789a").unwrap();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
@@ -814,7 +842,9 @@ mod tests {
             "will_edit_filepaths": ["/home/user/project/src/main.rs"],
         })
         .to_string();
-        let events = GithubCopilotPreset.parse(&input, "t_test123456789a").unwrap();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.session_id, "unknown");
@@ -849,10 +879,7 @@ mod tests {
             classify_copilot_tool("custom_edit_tool"),
             ToolClass::FileEdit
         );
-        assert_eq!(
-            classify_copilot_tool("write_changes"),
-            ToolClass::FileEdit
-        );
+        assert_eq!(classify_copilot_tool("write_changes"), ToolClass::FileEdit);
     }
 
     #[test]
@@ -959,7 +986,9 @@ mod tests {
             "chatSessionId": "sess-789"
         })
         .to_string();
-        let events = GithubCopilotPreset.parse(&input, "t_test123456789a").unwrap();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
@@ -979,7 +1008,9 @@ mod tests {
             "edited_filepaths": ["src/main.rs"]
         })
         .to_string();
-        let events = GithubCopilotPreset.parse(&input, "t_test123456789a").unwrap();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], ParsedHookEvent::PostFileEdit(_)));
     }
@@ -994,7 +1025,9 @@ mod tests {
             "dirtyFiles": {"/home/user/project/src/main.rs": "content"}
         })
         .to_string();
-        let events = GithubCopilotPreset.parse(&input, "t_test123456789a").unwrap();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert!(e.dirty_files.is_some());
@@ -1016,7 +1049,9 @@ mod tests {
             "transcript_path": "/home/user/.vscode/data/workspaceStorage/abc/chatSessions/sess-456.json"
         })
         .to_string();
-        let events = GithubCopilotPreset.parse(&input, "t_test123456789a").unwrap();
+        let events = GithubCopilotPreset
+            .parse(&input, "t_test123456789a")
+            .unwrap();
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert!(matches!(

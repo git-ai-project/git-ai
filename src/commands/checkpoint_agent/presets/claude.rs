@@ -216,10 +216,7 @@ mod tests {
         let events = ClaudePreset.parse(&input, "t_test123456789a").unwrap();
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
-                assert_eq!(
-                    e.context.session_id,
-                    "cb947e5b-246e-4253-a953-631f7e464c6b"
-                );
+                assert_eq!(e.context.session_id, "cb947e5b-246e-4253-a953-631f7e464c6b");
             }
             _ => panic!("Expected PostFileEdit"),
         }

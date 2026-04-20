@@ -103,8 +103,7 @@ impl AgentPreset for DroidPreset {
         let transcript_path =
             parse::optional_str_multi(&data, &["transcript_path", "transcriptPath"]);
 
-        let (resolved_transcript_path, resolved_settings_path) = if let Some(tp) = transcript_path
-        {
+        let (resolved_transcript_path, resolved_settings_path) = if let Some(tp) = transcript_path {
             let settings = tp.replace(".jsonl", ".settings.json");
             (tp.to_string(), settings)
         } else {
@@ -493,8 +492,10 @@ mod tests {
         let (jsonl, settings) = droid_session_paths("test-sess", "/home/user/project");
         assert!(jsonl.to_string_lossy().contains(".factory/sessions/"));
         assert!(jsonl.to_string_lossy().ends_with("test-sess.jsonl"));
-        assert!(settings
-            .to_string_lossy()
-            .ends_with("test-sess.settings.json"));
+        assert!(
+            settings
+                .to_string_lossy()
+                .ends_with("test-sess.settings.json")
+        );
     }
 }

@@ -128,11 +128,8 @@ impl AgentPreset for PiPreset {
             model_stripped
         };
 
-        let dirty = dirty_files.map(|df| {
-            df.into_iter()
-                .map(|(k, v)| (PathBuf::from(k), v))
-                .collect()
-        });
+        let dirty =
+            dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
 
         // Build agent metadata
         let mut metadata = HashMap::new();
@@ -378,10 +375,12 @@ mod tests {
         .to_string();
         let result = PiPreset.parse(&input, "t_test");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Unsupported Pi tool_name"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unsupported Pi tool_name")
+        );
     }
 
     #[test]
@@ -398,10 +397,12 @@ mod tests {
         .to_string();
         let result = PiPreset.parse(&input, "t_test");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("before_edit/after_edit events cannot be used with bash"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("before_edit/after_edit events cannot be used with bash")
+        );
     }
 
     #[test]
@@ -417,10 +418,12 @@ mod tests {
         .to_string();
         let result = PiPreset.parse(&input, "t_test");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("before_command/after_command events require a bash tool"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("before_command/after_command events require a bash tool")
+        );
     }
 
     #[test]
@@ -436,10 +439,12 @@ mod tests {
         .to_string();
         let result = PiPreset.parse(&input, "t_test");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("non-empty will_edit_filepaths"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("non-empty will_edit_filepaths")
+        );
     }
 
     #[test]
@@ -455,10 +460,12 @@ mod tests {
         .to_string();
         let result = PiPreset.parse(&input, "t_test");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("non-empty edited_filepaths"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("non-empty edited_filepaths")
+        );
     }
 
     #[test]
