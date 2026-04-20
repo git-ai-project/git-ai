@@ -395,6 +395,7 @@ pub fn prepare_working_log_after_squash(
             initial_attributions.prompts,
             initial_attributions.humans,
             initial_file_contents,
+            initial_attributions.sessions,
         )?;
     }
 
@@ -471,6 +472,7 @@ pub fn prepare_working_log_after_squash_from_final_state(
             initial_attributions.prompts,
             initial_attributions.humans,
             initial_file_contents,
+            initial_attributions.sessions,
         )?;
     }
 
@@ -533,7 +535,10 @@ pub fn restore_virtual_attribution_carryover(
         final_state.clone(),
     )?;
     let initial_attributions = merged_va.to_initial_working_log_only();
-    if initial_attributions.files.is_empty() && initial_attributions.prompts.is_empty() {
+    if initial_attributions.files.is_empty()
+        && initial_attributions.prompts.is_empty()
+        && initial_attributions.sessions.is_empty()
+    {
         return Ok(());
     }
 
@@ -543,6 +548,7 @@ pub fn restore_virtual_attribution_carryover(
         initial_attributions.prompts,
         initial_attributions.humans,
         final_state,
+        initial_attributions.sessions,
     )?;
     Ok(())
 }
@@ -1503,8 +1509,10 @@ pub fn rewrite_authorship_after_rebase_v2(
     // changed files, mirroring the same scoping applied to prompts/accepted_lines.
     let mut prev_delta_humans: BTreeMap<String, crate::authorship::authorship_log::HumanRecord> =
         BTreeMap::new();
-    let mut prev_delta_sessions: BTreeMap<String, crate::authorship::authorship_log::SessionRecord> =
-        BTreeMap::new();
+    let mut prev_delta_sessions: BTreeMap<
+        String,
+        crate::authorship::authorship_log::SessionRecord,
+    > = BTreeMap::new();
 
     for (idx, new_commit) in commits_to_process.iter().enumerate() {
         tracing::debug!(
@@ -2908,7 +2916,9 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
     let has_existing_log = get_reference_as_authorship_log_v3(repo, original_commit).is_ok();
     let has_existing_data = if has_existing_log {
         let original_log = get_reference_as_authorship_log_v3(repo, original_commit).unwrap();
-        !original_log.metadata.prompts.is_empty() || !original_log.metadata.humans.is_empty() || !original_log.metadata.sessions.is_empty()
+        !original_log.metadata.prompts.is_empty()
+            || !original_log.metadata.humans.is_empty()
+            || !original_log.metadata.sessions.is_empty()
     } else {
         false
     };
@@ -2978,18 +2988,44 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
         for (id, record) in original_log.metadata.humans {
             authorship_log.metadata.humans.entry(id).or_insert(record);
         }
+        // Only preserve sessions from the original commit if they are still
+        // referenced by attestations in the amended commit.
+        let referenced_session_ids: std::collections::HashSet<String> = authorship_log
+            .attestations
+            .iter()
+            .flat_map(|fa| fa.entries.iter())
+            .filter_map(|entry| {
+                if entry.hash.starts_with("s_") {
+                    Some(
+                        entry
+                            .hash
+                            .split("::")
+                            .next()
+                            .unwrap_or(&entry.hash)
+                            .to_string(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect();
         for (id, record) in original_log.metadata.sessions {
-            authorship_log.metadata.sessions.entry(id).or_insert(record);
+            if referenced_session_ids.contains(&id) {
+                authorship_log.metadata.sessions.entry(id).or_insert(record);
+            }
         }
     }
 
-    // Inject custom attributes into all PromptRecords (same behavior as post_commit).
+    // Inject custom attributes into all PromptRecords and SessionRecords (same behavior as post_commit).
     // Always use Config::fresh() to support runtime config updates
     // (especially important for daemon mode, but also good for consistency)
     let custom_attrs = crate::config::Config::fresh().custom_attributes().clone();
     if !custom_attrs.is_empty() {
         for pr in authorship_log.metadata.prompts.values_mut() {
             pr.custom_attributes = Some(custom_attrs.clone());
+        }
+        for sr in authorship_log.metadata.sessions.values_mut() {
+            sr.custom_attributes = Some(custom_attrs.clone());
         }
     }
 
@@ -3009,6 +3045,7 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
             initial_attributions.prompts,
             initial_attributions.humans,
             initial_file_contents,
+            initial_attributions.sessions,
         )?;
     }
 
@@ -3274,6 +3311,7 @@ pub fn reconstruct_working_log_after_reset(
             initial_attributions.prompts,
             initial_attributions.humans,
             final_state,
+            initial_attributions.sessions,
         )?;
     }
 
@@ -4214,31 +4252,49 @@ fn build_note_from_conflict_wl(
         }
 
         // Skip checkpoints without an agent_id: their line_attributions would
-        // reference an author_id not present in metadata.prompts, causing blame
-        // to fall back to human attribution.
+        // reference an author_id not present in metadata.prompts/sessions, causing
+        // blame to fall back to human attribution.
         let agent_id = match &checkpoint.agent_id {
             Some(id) => id,
             None => continue,
         };
 
-        let author_id = generate_short_hash(&agent_id.id, &agent_id.tool);
-
-        // Record the prompt from this AI checkpoint in the metadata.
-        authorship_log
-            .metadata
-            .prompts
-            .entry(author_id)
-            .or_insert_with(|| crate::authorship::authorship_log::PromptRecord {
-                agent_id: agent_id.clone(),
-                human_author: None,
-                messages: Vec::new(),
-                total_additions: checkpoint.line_stats.additions,
-                total_deletions: checkpoint.line_stats.deletions,
-                accepted_lines: 0,
-                overriden_lines: 0,
-                messages_url: None,
-                custom_attributes: None,
-            });
+        if checkpoint.trace_id.is_some() {
+            // New session format: generate session_id and record in metadata.sessions.
+            let session_id = crate::authorship::authorship_log_serialization::generate_session_id(
+                &agent_id.id,
+                &agent_id.tool,
+            );
+            authorship_log
+                .metadata
+                .sessions
+                .entry(session_id)
+                .or_insert_with(|| crate::authorship::authorship_log::SessionRecord {
+                    agent_id: agent_id.clone(),
+                    human_author: None,
+                    messages: Vec::new(),
+                    messages_url: None,
+                    custom_attributes: None,
+                });
+        } else {
+            // Old prompt format: generate prompt hash and record in metadata.prompts.
+            let author_id = generate_short_hash(&agent_id.id, &agent_id.tool);
+            authorship_log
+                .metadata
+                .prompts
+                .entry(author_id)
+                .or_insert_with(|| crate::authorship::authorship_log::PromptRecord {
+                    agent_id: agent_id.clone(),
+                    human_author: None,
+                    messages: Vec::new(),
+                    total_additions: checkpoint.line_stats.additions,
+                    total_deletions: checkpoint.line_stats.deletions,
+                    accepted_lines: 0,
+                    overriden_lines: 0,
+                    messages_url: None,
+                    custom_attributes: None,
+                });
+        }
 
         for entry in &checkpoint.entries {
             if !changed_files.contains(&entry.file) {
