@@ -1,4 +1,4 @@
-use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+use crate::commands::checkpoint_agent::orchestrator::CheckpointResult;
 use crate::daemon::domain::RepoContext;
 use crate::metrics::MetricEvent;
 use serde::{Deserialize, Serialize};
@@ -72,7 +72,7 @@ pub struct LiveCheckpointRunRequest {
     #[serde(default)]
     pub is_pre_commit: Option<bool>,
     #[serde(default)]
-    pub agent_run_result: Option<AgentRunResult>,
+    pub checkpoint_result: Option<CheckpointResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

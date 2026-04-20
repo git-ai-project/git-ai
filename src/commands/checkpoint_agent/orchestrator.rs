@@ -1,12 +1,10 @@
 use crate::authorship::authorship_log_serialization::generate_trace_id;
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint::PreparedPathRole;
-use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
 use crate::commands::checkpoint_agent::bash_tool::{self, HookEvent};
 use crate::commands::checkpoint_agent::presets::{
     ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit, TranscriptSource,
 };
-use crate::commands::checkpoint_agent::transcript_readers;
 use crate::error::GitAiError;
 use crate::git::repository::find_repository_for_file;
 use serde::{Deserialize, Serialize};
@@ -25,75 +23,6 @@ pub struct CheckpointResult {
     pub transcript_source: Option<TranscriptSource>,
     pub metadata: HashMap<String, String>,
     pub captured_checkpoint_id: Option<String>,
-}
-
-impl CheckpointResult {
-    /// Convert a `CheckpointResult` into the legacy `AgentRunResult` used by
-    /// the existing checkpoint pipeline in `git_ai_handlers.rs`.
-    /// This is a temporary bridge until the downstream code is migrated to
-    /// consume `CheckpointResult` directly.
-    pub fn into_agent_run_result(mut self) -> AgentRunResult {
-        // Read transcript from source (if any) and extract model
-        let (transcript, transcript_model) = self
-            .transcript_source
-            .as_ref()
-            .and_then(|src| transcript_readers::read_transcript(src).ok())
-            .unwrap_or_default();
-
-        // If the preset set model to "unknown", prefer the transcript-extracted model
-        if self.agent_id.model == "unknown"
-            && let Some(model) = transcript_model
-        {
-            self.agent_id.model = model;
-        }
-
-        let (edited_filepaths, will_edit_filepaths) = match self.path_role {
-            PreparedPathRole::Edited => {
-                let paths: Vec<String> = self
-                    .file_paths
-                    .iter()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .collect();
-                (if paths.is_empty() { None } else { Some(paths) }, None)
-            }
-            PreparedPathRole::WillEdit => {
-                let paths: Vec<String> = self
-                    .file_paths
-                    .iter()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .collect();
-                (None, if paths.is_empty() { None } else { Some(paths) })
-            }
-        };
-
-        let dirty_files = self.dirty_files.map(|df| {
-            df.into_iter()
-                .map(|(k, v)| (k.to_string_lossy().to_string(), v))
-                .collect()
-        });
-
-        let transcript_opt = if transcript.messages().is_empty() {
-            None
-        } else {
-            Some(transcript)
-        };
-
-        AgentRunResult {
-            agent_id: self.agent_id,
-            agent_metadata: if self.metadata.is_empty() {
-                None
-            } else {
-                Some(self.metadata)
-            },
-            checkpoint_kind: self.checkpoint_kind,
-            transcript: transcript_opt,
-            repo_working_dir: Some(self.repo_working_dir.to_string_lossy().to_string()),
-            edited_filepaths,
-            will_edit_filepaths,
-            dirty_files,
-            captured_checkpoint_id: self.captured_checkpoint_id,
-        }
-    }
 }
 
 pub fn execute_preset_checkpoint(
