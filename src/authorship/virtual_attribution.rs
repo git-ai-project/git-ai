@@ -1,7 +1,7 @@
 use crate::authorship::attribution_tracker::{
     Attribution, LineAttribution, line_attributions_to_attributions,
 };
-use crate::authorship::authorship_log::{HumanRecord, LineRange, PromptRecord};
+use crate::authorship::authorship_log::{HumanRecord, LineRange, PromptRecord, SessionRecord};
 use crate::authorship::working_log::CheckpointKind;
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
 use crate::error::GitAiError;
@@ -29,6 +29,8 @@ pub struct VirtualAttributions {
     // These are stale prompts from prior commits and should only appear in the
     // authorship note if they have committed lines in the current commit.
     initial_only_prompt_ids: HashSet<String>,
+    pub sessions: BTreeMap<String, SessionRecord>,
+    initial_only_session_ids: HashSet<String>,
 }
 
 impl VirtualAttributions {
@@ -54,6 +56,8 @@ impl VirtualAttributions {
             blame_start_commit,
             humans: BTreeMap::new(),
             initial_only_prompt_ids: HashSet::new(),
+            sessions: BTreeMap::new(),
+            initial_only_session_ids: HashSet::new(),
         };
 
         // Process all pathspecs concurrently
@@ -333,6 +337,8 @@ impl VirtualAttributions {
         // If a checkpoint later references the same prompt_id, it is removed from
         // this set because the prompt was actively used in this commit's session.
         let mut initial_only_prompt_ids: HashSet<String> = HashSet::new();
+        let mut sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
+        let mut initial_only_session_ids: HashSet<String> = HashSet::new();
 
         // Track additions and deletions per session_id for metrics
         let mut session_additions: HashMap<String, u32> = HashMap::new();
@@ -375,45 +381,97 @@ impl VirtualAttributions {
 
         // Collect attributions from all checkpoints (later checkpoints override earlier ones)
         for checkpoint in &checkpoints {
-            // Add prompts from checkpoint
+            // Add prompts or sessions from checkpoint
             if let Some(agent_id) = &checkpoint.agent_id {
-                let author_id =
-                    crate::authorship::authorship_log_serialization::generate_short_hash(
-                        &agent_id.id,
-                        &agent_id.tool,
-                    );
-                // For working log checkpoints, use empty string as commit_sha since they're uncommitted
-                // Always overwrite with the latest checkpoint for this agent so refreshed
-                // transcripts/models from post-commit aren't lost.
-                let prompt_record = crate::authorship::authorship_log::PromptRecord {
-                    agent_id: agent_id.clone(),
-                    human_author: human_author.clone(),
-                    messages: checkpoint
-                        .transcript
-                        .as_ref()
-                        .map(|t| t.messages().to_vec())
-                        .unwrap_or_default(),
-                    total_additions: 0,
-                    total_deletions: 0,
-                    accepted_lines: 0,
-                    overriden_lines: 0,
-                    messages_url: None,
-                    custom_attributes: None,
-                };
+                // Detect format by checking if entries have s_-prefixed author_ids
+                let is_session_format = checkpoint.entries.iter().any(|entry| {
+                    entry
+                        .line_attributions
+                        .iter()
+                        .any(|la| la.author_id.starts_with("s_"))
+                });
 
-                prompts
-                    .entry(author_id.clone())
-                    .or_insert_with(BTreeMap::new)
-                    .insert(String::new(), prompt_record);
-                // This prompt was actively used in a checkpoint, so it's not
-                // INITIAL-only (even if it was also in INITIAL).
-                initial_only_prompt_ids.remove(&author_id);
+                if is_session_format {
+                    // New format: extract session_id from attributions
+                    let session_id = checkpoint
+                        .entries
+                        .iter()
+                        .flat_map(|e| e.line_attributions.iter())
+                        .find(|la| la.author_id.starts_with("s_"))
+                        .map(|la| {
+                            la.author_id
+                                .split("::")
+                                .next()
+                                .unwrap_or(&la.author_id)
+                                .to_string()
+                        })
+                        .unwrap_or_else(|| {
+                            crate::authorship::authorship_log_serialization::generate_session_id(
+                                &agent_id.id,
+                                &agent_id.tool,
+                            )
+                        });
 
-                // Track additions and deletions from checkpoint line_stats
-                *session_additions.entry(author_id.clone()).or_insert(0) +=
-                    checkpoint.line_stats.additions;
-                *session_deletions.entry(author_id.clone()).or_insert(0) +=
-                    checkpoint.line_stats.deletions;
+                    let session_record = SessionRecord {
+                        agent_id: agent_id.clone(),
+                        human_author: human_author.clone(),
+                        messages: checkpoint
+                            .transcript
+                            .as_ref()
+                            .map(|t| t.messages().to_vec())
+                            .unwrap_or_default(),
+                        messages_url: None,
+                        custom_attributes: None,
+                    };
+
+                    sessions.entry(session_id.clone()).or_insert(session_record);
+                    initial_only_session_ids.remove(&session_id);
+
+                    // Track additions/deletions keyed by session_id
+                    *session_additions.entry(session_id.clone()).or_insert(0) +=
+                        checkpoint.line_stats.additions;
+                    *session_deletions.entry(session_id).or_insert(0) +=
+                        checkpoint.line_stats.deletions;
+                } else {
+                    // Old format: use existing prompts logic
+                    let author_id =
+                        crate::authorship::authorship_log_serialization::generate_short_hash(
+                            &agent_id.id,
+                            &agent_id.tool,
+                        );
+                    // For working log checkpoints, use empty string as commit_sha since they're uncommitted
+                    // Always overwrite with the latest checkpoint for this agent so refreshed
+                    // transcripts/models from post-commit aren't lost.
+                    let prompt_record = crate::authorship::authorship_log::PromptRecord {
+                        agent_id: agent_id.clone(),
+                        human_author: human_author.clone(),
+                        messages: checkpoint
+                            .transcript
+                            .as_ref()
+                            .map(|t| t.messages().to_vec())
+                            .unwrap_or_default(),
+                        total_additions: 0,
+                        total_deletions: 0,
+                        accepted_lines: 0,
+                        overriden_lines: 0,
+                        messages_url: None,
+                        custom_attributes: None,
+                    };
+
+                    prompts
+                        .entry(author_id.clone())
+                        .or_insert_with(BTreeMap::new)
+                        .insert(String::new(), prompt_record);
+                    // This prompt was actively used in a checkpoint, so it's not
+                    // INITIAL-only (even if it was also in INITIAL).
+                    initial_only_prompt_ids.remove(&author_id);
+
+                    // Track additions and deletions from checkpoint line_stats
+                    *session_additions.entry(author_id.clone()).or_insert(0) +=
+                        checkpoint.line_stats.additions;
+                    *session_deletions.entry(author_id).or_insert(0) +=
+                        checkpoint.line_stats.deletions;
+                }
             }
 
             if checkpoint.kind == CheckpointKind::KnownHuman {
@@ -489,6 +547,8 @@ impl VirtualAttributions {
             blame_start_commit: None,
             humans,
             initial_only_prompt_ids,
+            sessions,
+            initial_only_session_ids,
         })
     }
 
@@ -510,6 +570,8 @@ impl VirtualAttributions {
         let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut file_contents: HashMap<String, String> = HashMap::new();
         let mut initial_only_prompt_ids: HashSet<String> = HashSet::new();
+        let mut sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
+        let mut initial_only_session_ids: HashSet<String> = HashSet::new();
 
         let mut session_additions: HashMap<String, u32> = HashMap::new();
         let mut session_deletions: HashMap<String, u32> = HashMap::new();
@@ -545,37 +607,89 @@ impl VirtualAttributions {
 
         for checkpoint in &checkpoints {
             if let Some(agent_id) = &checkpoint.agent_id {
-                let author_id =
-                    crate::authorship::authorship_log_serialization::generate_short_hash(
-                        &agent_id.id,
-                        &agent_id.tool,
-                    );
-                let prompt_record = crate::authorship::authorship_log::PromptRecord {
-                    agent_id: agent_id.clone(),
-                    human_author: human_author.clone(),
-                    messages: checkpoint
-                        .transcript
-                        .as_ref()
-                        .map(|t| t.messages().to_vec())
-                        .unwrap_or_default(),
-                    total_additions: 0,
-                    total_deletions: 0,
-                    accepted_lines: 0,
-                    overriden_lines: 0,
-                    messages_url: None,
-                    custom_attributes: None,
-                };
+                // Detect format by checking if entries have s_-prefixed author_ids
+                let is_session_format = checkpoint.entries.iter().any(|entry| {
+                    entry
+                        .line_attributions
+                        .iter()
+                        .any(|la| la.author_id.starts_with("s_"))
+                });
 
-                prompts
-                    .entry(author_id.clone())
-                    .or_insert_with(BTreeMap::new)
-                    .insert(String::new(), prompt_record);
-                initial_only_prompt_ids.remove(&author_id);
+                if is_session_format {
+                    // New format: extract session_id from attributions
+                    let session_id = checkpoint
+                        .entries
+                        .iter()
+                        .flat_map(|e| e.line_attributions.iter())
+                        .find(|la| la.author_id.starts_with("s_"))
+                        .map(|la| {
+                            la.author_id
+                                .split("::")
+                                .next()
+                                .unwrap_or(&la.author_id)
+                                .to_string()
+                        })
+                        .unwrap_or_else(|| {
+                            crate::authorship::authorship_log_serialization::generate_session_id(
+                                &agent_id.id,
+                                &agent_id.tool,
+                            )
+                        });
 
-                *session_additions.entry(author_id.clone()).or_insert(0) +=
-                    checkpoint.line_stats.additions;
-                *session_deletions.entry(author_id.clone()).or_insert(0) +=
-                    checkpoint.line_stats.deletions;
+                    let session_record = SessionRecord {
+                        agent_id: agent_id.clone(),
+                        human_author: human_author.clone(),
+                        messages: checkpoint
+                            .transcript
+                            .as_ref()
+                            .map(|t| t.messages().to_vec())
+                            .unwrap_or_default(),
+                        messages_url: None,
+                        custom_attributes: None,
+                    };
+
+                    sessions.entry(session_id.clone()).or_insert(session_record);
+                    initial_only_session_ids.remove(&session_id);
+
+                    // Track additions/deletions keyed by session_id
+                    *session_additions.entry(session_id.clone()).or_insert(0) +=
+                        checkpoint.line_stats.additions;
+                    *session_deletions.entry(session_id).or_insert(0) +=
+                        checkpoint.line_stats.deletions;
+                } else {
+                    // Old format: use existing prompts logic
+                    let author_id =
+                        crate::authorship::authorship_log_serialization::generate_short_hash(
+                            &agent_id.id,
+                            &agent_id.tool,
+                        );
+                    let prompt_record = crate::authorship::authorship_log::PromptRecord {
+                        agent_id: agent_id.clone(),
+                        human_author: human_author.clone(),
+                        messages: checkpoint
+                            .transcript
+                            .as_ref()
+                            .map(|t| t.messages().to_vec())
+                            .unwrap_or_default(),
+                        total_additions: 0,
+                        total_deletions: 0,
+                        accepted_lines: 0,
+                        overriden_lines: 0,
+                        messages_url: None,
+                        custom_attributes: None,
+                    };
+
+                    prompts
+                        .entry(author_id.clone())
+                        .or_insert_with(BTreeMap::new)
+                        .insert(String::new(), prompt_record);
+                    initial_only_prompt_ids.remove(&author_id);
+
+                    *session_additions.entry(author_id.clone()).or_insert(0) +=
+                        checkpoint.line_stats.additions;
+                    *session_deletions.entry(author_id.clone()).or_insert(0) +=
+                        checkpoint.line_stats.deletions;
+                }
             }
 
             if checkpoint.kind == CheckpointKind::KnownHuman {
@@ -642,6 +756,8 @@ impl VirtualAttributions {
             blame_start_commit: None,
             humans,
             initial_only_prompt_ids,
+            sessions,
+            initial_only_session_ids,
         })
     }
 
@@ -664,6 +780,8 @@ impl VirtualAttributions {
         let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut file_contents: HashMap<String, String> = HashMap::new();
         let mut initial_only_prompt_ids: HashSet<String> = HashSet::new();
+        let mut sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
+        let mut initial_only_session_ids: HashSet<String> = HashSet::new();
 
         let mut session_additions: HashMap<String, u32> = HashMap::new();
         let mut session_deletions: HashMap<String, u32> = HashMap::new();
@@ -699,37 +817,89 @@ impl VirtualAttributions {
 
         for checkpoint in &checkpoints {
             if let Some(agent_id) = &checkpoint.agent_id {
-                let author_id =
-                    crate::authorship::authorship_log_serialization::generate_short_hash(
-                        &agent_id.id,
-                        &agent_id.tool,
-                    );
-                let prompt_record = crate::authorship::authorship_log::PromptRecord {
-                    agent_id: agent_id.clone(),
-                    human_author: human_author.clone(),
-                    messages: checkpoint
-                        .transcript
-                        .as_ref()
-                        .map(|t| t.messages().to_vec())
-                        .unwrap_or_default(),
-                    total_additions: 0,
-                    total_deletions: 0,
-                    accepted_lines: 0,
-                    overriden_lines: 0,
-                    messages_url: None,
-                    custom_attributes: None,
-                };
+                // Detect format by checking if entries have s_-prefixed author_ids
+                let is_session_format = checkpoint.entries.iter().any(|entry| {
+                    entry
+                        .line_attributions
+                        .iter()
+                        .any(|la| la.author_id.starts_with("s_"))
+                });
 
-                prompts
-                    .entry(author_id.clone())
-                    .or_insert_with(BTreeMap::new)
-                    .insert(String::new(), prompt_record);
-                initial_only_prompt_ids.remove(&author_id);
+                if is_session_format {
+                    // New format: extract session_id from attributions
+                    let session_id = checkpoint
+                        .entries
+                        .iter()
+                        .flat_map(|e| e.line_attributions.iter())
+                        .find(|la| la.author_id.starts_with("s_"))
+                        .map(|la| {
+                            la.author_id
+                                .split("::")
+                                .next()
+                                .unwrap_or(&la.author_id)
+                                .to_string()
+                        })
+                        .unwrap_or_else(|| {
+                            crate::authorship::authorship_log_serialization::generate_session_id(
+                                &agent_id.id,
+                                &agent_id.tool,
+                            )
+                        });
 
-                *session_additions.entry(author_id.clone()).or_insert(0) +=
-                    checkpoint.line_stats.additions;
-                *session_deletions.entry(author_id.clone()).or_insert(0) +=
-                    checkpoint.line_stats.deletions;
+                    let session_record = SessionRecord {
+                        agent_id: agent_id.clone(),
+                        human_author: human_author.clone(),
+                        messages: checkpoint
+                            .transcript
+                            .as_ref()
+                            .map(|t| t.messages().to_vec())
+                            .unwrap_or_default(),
+                        messages_url: None,
+                        custom_attributes: None,
+                    };
+
+                    sessions.entry(session_id.clone()).or_insert(session_record);
+                    initial_only_session_ids.remove(&session_id);
+
+                    // Track additions/deletions keyed by session_id
+                    *session_additions.entry(session_id.clone()).or_insert(0) +=
+                        checkpoint.line_stats.additions;
+                    *session_deletions.entry(session_id).or_insert(0) +=
+                        checkpoint.line_stats.deletions;
+                } else {
+                    // Old format: use existing prompts logic
+                    let author_id =
+                        crate::authorship::authorship_log_serialization::generate_short_hash(
+                            &agent_id.id,
+                            &agent_id.tool,
+                        );
+                    let prompt_record = crate::authorship::authorship_log::PromptRecord {
+                        agent_id: agent_id.clone(),
+                        human_author: human_author.clone(),
+                        messages: checkpoint
+                            .transcript
+                            .as_ref()
+                            .map(|t| t.messages().to_vec())
+                            .unwrap_or_default(),
+                        total_additions: 0,
+                        total_deletions: 0,
+                        accepted_lines: 0,
+                        overriden_lines: 0,
+                        messages_url: None,
+                        custom_attributes: None,
+                    };
+
+                    prompts
+                        .entry(author_id.clone())
+                        .or_insert_with(BTreeMap::new)
+                        .insert(String::new(), prompt_record);
+                    initial_only_prompt_ids.remove(&author_id);
+
+                    *session_additions.entry(author_id.clone()).or_insert(0) +=
+                        checkpoint.line_stats.additions;
+                    *session_deletions.entry(author_id.clone()).or_insert(0) +=
+                        checkpoint.line_stats.deletions;
+                }
             }
 
             if checkpoint.kind == CheckpointKind::KnownHuman {
@@ -803,6 +973,8 @@ impl VirtualAttributions {
             blame_start_commit: None,
             humans,
             initial_only_prompt_ids,
+            sessions,
+            initial_only_session_ids,
         })
     }
 
@@ -1011,6 +1183,8 @@ impl VirtualAttributions {
             blame_start_commit: None,
             humans: BTreeMap::new(),
             initial_only_prompt_ids: HashSet::new(),
+            sessions: BTreeMap::new(),
+            initial_only_session_ids: HashSet::new(),
         }
     }
 
@@ -1032,7 +1206,14 @@ impl VirtualAttributions {
             blame_start_commit: None,
             humans: BTreeMap::new(), // TODO(known-human): propagate humans from caller when rebase path is wired (Task 12)
             initial_only_prompt_ids: HashSet::new(),
+            sessions: BTreeMap::new(),
+            initial_only_session_ids: HashSet::new(),
         }
+    }
+
+    /// Get sessions map
+    pub fn sessions(&self) -> &BTreeMap<String, SessionRecord> {
+        &self.sessions
     }
 
     /// Convert this VirtualAttributions to an AuthorshipLog
@@ -2185,6 +2366,8 @@ pub fn merge_attributions_favoring_first(
         blame_start_commit: None,
         humans: merged_humans,
         initial_only_prompt_ids: HashSet::new(),
+        sessions: BTreeMap::new(),
+        initial_only_session_ids: HashSet::new(),
     };
 
     // Get union of all files
