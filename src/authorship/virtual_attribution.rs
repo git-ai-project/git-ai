@@ -1555,10 +1555,12 @@ impl VirtualAttributions {
             })
             .collect();
         authorship_log.metadata.humans = self.humans.clone();
+        authorship_log.metadata.sessions = self.sessions.clone();
 
         let mut initial_files: StdHashMap<String, Vec<LineAttribution>> = StdHashMap::new();
         let mut referenced_prompts: HashSet<String> = HashSet::new();
         let mut initial_humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
+        let mut initial_sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
 
         // Get committed hunks (in commit coordinates) and unstaged hunks (in working directory coordinates)
         let committed_hunks = collect_committed_hunks(repo, parent_sha, commit_sha, pathspecs)?;
@@ -1832,6 +1834,14 @@ impl VirtualAttributions {
                         }
                     }
 
+                    // Track s_ sessions for INITIAL sessions map
+                    if author_id.starts_with("s_") {
+                        let session_key = author_id.split("::").next().unwrap_or(&author_id).to_string();
+                        if let Some(record) = self.sessions.get(&session_key) {
+                            initial_sessions.insert(session_key, record.clone());
+                        }
+                    }
+
                     // Create ranges from individual lines
                     let mut range_start = lines[0];
                     let mut range_end = lines[0];
@@ -1885,6 +1895,34 @@ impl VirtualAttributions {
             });
         }
 
+        // Filter INITIAL-only sessions with no committed lines
+        if !self.initial_only_session_ids.is_empty() {
+            let committed_session_ids: HashSet<String> = authorship_log
+                .attestations
+                .iter()
+                .flat_map(|file_att| file_att.entries.iter())
+                .filter_map(|entry| {
+                    if entry.hash.starts_with("s_") {
+                        Some(
+                            entry
+                                .hash
+                                .split("::")
+                                .next()
+                                .unwrap_or(&entry.hash)
+                                .to_string(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            authorship_log.metadata.sessions.retain(|session_id, _| {
+                !self.initial_only_session_ids.contains(session_id)
+                    || committed_session_ids.contains(session_id)
+            });
+        }
+
         // Build prompts map for INITIAL (only prompts referenced by uncommitted lines)
         let mut initial_prompts = StdHashMap::new();
         for prompt_id in referenced_prompts {
@@ -1901,6 +1939,7 @@ impl VirtualAttributions {
             prompts: initial_prompts,
             file_blobs: HashMap::new(),
             humans: initial_humans,
+            sessions: initial_sessions,
         };
 
         Ok((authorship_log, initial_attributions))
@@ -2140,11 +2179,23 @@ impl VirtualAttributions {
             }
         }
 
+        // Collect s_ session records referenced by retained attributions
+        let mut initial_sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
+        for author_id in &referenced_prompts {
+            if author_id.starts_with("s_") {
+                let session_key = author_id.split("::").next().unwrap_or(author_id).to_string();
+                if let Some(record) = self.sessions.get(&session_key) {
+                    initial_sessions.insert(session_key, record.clone());
+                }
+            }
+        }
+
         crate::git::repo_storage::InitialAttributions {
             files: initial_files,
             prompts: initial_prompts,
             file_blobs: HashMap::new(),
             humans: initial_humans,
+            sessions: initial_sessions,
         }
     }
 
