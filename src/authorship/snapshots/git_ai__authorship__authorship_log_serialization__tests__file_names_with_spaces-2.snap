@@ -70,5 +70,6 @@ AuthorshipLogV3 {
             },
         },
         humans: {},
+        sessions: {},
     },
 }
