@@ -1,4 +1,4 @@
-use crate::authorship::authorship_log::{Author, HumanRecord, LineRange, PromptRecord};
+use crate::authorship::authorship_log::{Author, HumanRecord, LineRange, PromptRecord, SessionRecord};
 use crate::authorship::working_log::CheckpointKind;
 use crate::git::repository::Repository;
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,8 @@ pub struct AuthorshipMetadata {
     pub prompts: BTreeMap<String, PromptRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub humans: BTreeMap<String, HumanRecord>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sessions: BTreeMap<String, SessionRecord>,
 }
 
 impl AuthorshipMetadata {
@@ -39,6 +41,7 @@ impl AuthorshipMetadata {
             base_commit_sha: String::new(),
             prompts: BTreeMap::new(),
             humans: BTreeMap::new(),
+            sessions: BTreeMap::new(),
         }
     }
 }
