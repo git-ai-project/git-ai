@@ -89,6 +89,7 @@ mod reset;
 mod search;
 mod secrets_benchmark;
 mod sessions_backwards_compat;
+mod sessions_cutover;
 mod share_tui_comprehensive;
 mod show_prompt;
 mod simple_additions;
