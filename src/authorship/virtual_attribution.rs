@@ -451,13 +451,7 @@ impl VirtualAttributions {
         for checkpoint in &checkpoints {
             // Add prompts or sessions from checkpoint
             if let Some(agent_id) = &checkpoint.agent_id {
-                // Detect format by checking if entries have s_-prefixed author_ids
-                let is_session_format = checkpoint.entries.iter().any(|entry| {
-                    entry
-                        .line_attributions
-                        .iter()
-                        .any(|la| la.author_id.starts_with("s_"))
-                });
+                let is_session_format = checkpoint.trace_id.is_some();
 
                 if is_session_format {
                     // New format: derive session_id from this checkpoint's own agent_id
@@ -666,13 +660,7 @@ impl VirtualAttributions {
 
         for checkpoint in &checkpoints {
             if let Some(agent_id) = &checkpoint.agent_id {
-                // Detect format by checking if entries have s_-prefixed author_ids
-                let is_session_format = checkpoint.entries.iter().any(|entry| {
-                    entry
-                        .line_attributions
-                        .iter()
-                        .any(|la| la.author_id.starts_with("s_"))
-                });
+                let is_session_format = checkpoint.trace_id.is_some();
 
                 if is_session_format {
                     // New format: derive session_id from this checkpoint's own agent_id
@@ -867,13 +855,7 @@ impl VirtualAttributions {
 
         for checkpoint in &checkpoints {
             if let Some(agent_id) = &checkpoint.agent_id {
-                // Detect format by checking if entries have s_-prefixed author_ids
-                let is_session_format = checkpoint.entries.iter().any(|entry| {
-                    entry
-                        .line_attributions
-                        .iter()
-                        .any(|la| la.author_id.starts_with("s_"))
-                });
+                let is_session_format = checkpoint.trace_id.is_some();
 
                 if is_session_format {
                     // New format: derive session_id from this checkpoint's own agent_id
