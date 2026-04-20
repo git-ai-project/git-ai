@@ -591,26 +591,26 @@ fn test_opencode_e2e_checkpoint_and_commit() {
     // Commit
     let commit = repo.stage_all_and_commit("Add AI line").unwrap();
 
-    // Should have a prompt record
+    // Should have a session record
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Should have at least one prompt record"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Should have at least one session record"
     );
 
-    let prompt_record = commit
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Prompt record should exist");
+        .expect("Session record should exist");
 
     assert_eq!(
-        prompt_record.agent_id.tool, "opencode",
+        session_record.agent_id.tool, "opencode",
         "Agent tool should be opencode"
     );
     assert_eq!(
-        prompt_record.agent_id.model, "anthropic/claude-3-5-sonnet-20241022",
+        session_record.agent_id.model, "anthropic/claude-3-5-sonnet-20241022",
         "Model should match fixture"
     );
 }

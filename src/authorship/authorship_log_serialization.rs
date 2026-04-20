@@ -1,4 +1,6 @@
-use crate::authorship::authorship_log::{Author, HumanRecord, LineRange, PromptRecord, SessionRecord};
+use crate::authorship::authorship_log::{
+    Author, HumanRecord, LineRange, PromptRecord, SessionRecord,
+};
 use crate::authorship::working_log::CheckpointKind;
 use crate::git::repository::Repository;
 use rand::RngExt;

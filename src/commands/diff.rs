@@ -1482,6 +1482,16 @@ fn calculate_diff_commit_stats(
     for (key, ai_lines_added) in ai_lines_added_by_tool_model {
         let tool_stats = stats.tool_model_breakdown.entry(key).or_default();
         tool_stats.ai_lines_added += ai_lines_added;
+        // Session-format records don't carry total_additions/total_deletions stats.
+        // Use landed lines as the generated count when no prompts contributed stats.
+        if tool_stats.ai_lines_generated == 0 && ai_lines_added > 0 {
+            tool_stats.ai_lines_generated = ai_lines_added;
+        }
+    }
+
+    // Same fallback at the top level for session-only commits.
+    if stats.ai_lines_generated == 0 && stats.ai_lines_added > 0 {
+        stats.ai_lines_generated = stats.ai_lines_added;
     }
 
     stats
