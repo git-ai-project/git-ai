@@ -287,9 +287,66 @@ The individual reader functions are unchanged — they just live in a new home a
 
 ---
 
-## Dispatch Site Changes
+## Daemon Integration (First-Class Path)
 
-### git_ai_handlers.rs
+The daemon is the primary execution path. The wrapper (direct CLI) is legacy and will be deprecated. The architecture reflects this:
+
+### Execution Model
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Wrapper Process (git-ai checkpoint <agent>)            │
+│                                                         │
+│  1. Generate trace_id                                   │
+│  2. Run preset.parse(hook_input, trace_id)              │
+│  3. Run orchestrator.execute_event(parsed_event)        │
+│     → Produces CheckpointResult                         │
+│  4. Dispatch to daemon:                                 │
+│     a. If captured_checkpoint_id present → Captured req │
+│     b. Else try prepare_captured_checkpoint → Captured  │
+│     c. Fallback: Live request with CheckpointResult     │
+│                                                         │
+└─────────────────────┬───────────────────────────────────┘
+                      │ Unix socket
+┌─────────────────────▼───────────────────────────────────┐
+│  Daemon Process                                         │
+│                                                         │
+│  • Receives CheckpointResult (Live) or capture_id       │
+│  • Never calls presets — never needs to                 │
+│  • Family sequencer orders per-repo                     │
+│  • Applies checkpoint via checkpoint::run()             │
+│  • Updates watermarks                                   │
+│  • Cleans up captured checkpoint files                  │
+│                                                         │
+│  Also constructs CheckpointResult directly for:         │
+│  • Commit-inside-bash replay (bash_tool context)        │
+│  • Daemon-internal human replay                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+1. **Preset parsing + orchestration happen in the wrapper** — the daemon receives fully-resolved `CheckpointResult`, never raw hook JSON.
+2. **`CheckpointResult` is serializable** (Serialize + Deserialize) — it travels over the Unix socket as part of `LiveCheckpointRunRequest`.
+3. **Captured checkpoints remain unchanged** — `prepare_captured_checkpoint` consumes `CheckpointResult` (replacing `AgentRunResult`) to write the manifest to disk. The daemon loads and executes captures without needing the result type.
+4. **Daemon-internal construction** — the daemon's `build_human_replay_agent_result` and bash-in-flight logic construct `CheckpointResult` directly (they're not preset-driven).
+5. **The wrapper's fallback local path** (`checkpoint::run()` without daemon) also consumes `CheckpointResult` — same type regardless of execution path.
+
+### Control API Changes
+
+```rust
+// LiveCheckpointRunRequest replaces AgentRunResult with CheckpointResult
+pub struct LiveCheckpointRunRequest {
+    pub repo_working_dir: String,
+    pub kind: Option<String>,
+    pub author: Option<String>,
+    pub quiet: Option<bool>,
+    pub is_pre_commit: Option<bool>,
+    pub checkpoint_result: Option<CheckpointResult>,  // replaces agent_run_result
+}
+```
+
+### Wrapper Dispatch (git_ai_handlers.rs)
 
 The current 220-line match block with 14 nearly identical arms becomes:
 
@@ -307,7 +364,7 @@ if !args.is_empty() {
                 Ok(results) => {
                     for result in results {
                         repository_working_dir = result.repo_working_dir.to_string_lossy().to_string();
-                        // Feed into existing checkpoint machinery
+                        // Dispatch to daemon (or fallback to local)
                     }
                 }
                 Err(e) => {
@@ -319,10 +376,6 @@ if !args.is_empty() {
     }
 }
 ```
-
-### daemon.rs
-
-The daemon's `build_human_replay_agent_result` and bash-in-flight construction switch to building `CheckpointResult` directly. These are daemon-internal (not preset-driven) so they bypass the trait and construct the result type directly.
 
 ---
 
