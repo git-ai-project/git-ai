@@ -136,6 +136,8 @@ pub struct Checkpoint {
     pub git_ai_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_human_metadata: Option<KnownHumanMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl Checkpoint {
@@ -163,6 +165,7 @@ impl Checkpoint {
             api_version: CHECKPOINT_API_VERSION.to_string(),
             git_ai_version: Some(GIT_AI_VERSION.to_string()),
             known_human_metadata: None,
+            trace_id: None,
         }
     }
 }
@@ -373,5 +376,39 @@ mod tests {
         assert_eq!(meta.editor, "vscode");
         assert_eq!(meta.editor_version, "1.85.0");
         assert_eq!(meta.extension_version, "0.4.1");
+    }
+
+    #[test]
+    fn test_checkpoint_trace_id_backwards_compat() {
+        // Old JSON without trace_id should deserialize with trace_id = None
+        let json = r#"{
+            "kind": "AiAgent",
+            "diff": "",
+            "author": "claude",
+            "entries": [],
+            "timestamp": 1234567890,
+            "transcript": null,
+            "agent_id": {"tool": "claude", "id": "sess1", "model": "opus"},
+            "line_stats": {"additions": 0, "deletions": 0, "additions_sloc": 0, "deletions_sloc": 0},
+            "api_version": "checkpoint/1.0.0"
+        }"#;
+        let checkpoint: Checkpoint = serde_json::from_str(json).unwrap();
+        assert_eq!(checkpoint.trace_id, None);
+
+        // New JSON with trace_id should deserialize correctly
+        let json_with_trace = r#"{
+            "kind": "AiAgent",
+            "diff": "",
+            "author": "claude",
+            "entries": [],
+            "timestamp": 1234567890,
+            "transcript": null,
+            "agent_id": {"tool": "claude", "id": "sess1", "model": "opus"},
+            "line_stats": {"additions": 0, "deletions": 0, "additions_sloc": 0, "deletions_sloc": 0},
+            "api_version": "checkpoint/1.0.0",
+            "trace_id": "t_abcdef01234567"
+        }"#;
+        let checkpoint: Checkpoint = serde_json::from_str(json_with_trace).unwrap();
+        assert_eq!(checkpoint.trace_id, Some("t_abcdef01234567".to_string()));
     }
 }
