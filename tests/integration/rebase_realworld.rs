@@ -77,6 +77,22 @@ fn get_commit_chain(repo: &TestRepo, n: usize) -> Vec<String> {
 /// Sum of `accepted_lines` across all prompts in a note string.
 fn total_accepted_lines(note: &str) -> u32 {
     let log = AuthorshipLog::deserialize_from_string(note).expect("should parse authorship note");
+    // Session format: count AI-attested lines from attestation entries.
+    // Old format: fall back to prompts accepted_lines.
+    let session_lines: u32 = log
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .filter(|e| e.hash.starts_with("s_"))
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
+        .sum();
+    if session_lines > 0 {
+        return session_lines;
+    }
     log.metadata
         .prompts
         .values()
@@ -4618,10 +4634,10 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         ],
     );
 
-    // sha1 = C2': 9 accepted_lines (per-commit delta)
+    // sha1 = C2': cumulative AI-attested lines in utils.py (session format)
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["utils.py"]);
-    assert_accepted_lines_exact(&repo, &chain[1], "sha1_lines", 9);
+    assert_accepted_lines_exact(&repo, &chain[1], "sha1_lines", 16);
     assert_blame_sample_at_commit(
         &repo,
         &chain[1],
@@ -4630,10 +4646,10 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         &[("def normalize_phone", true), ("def truncate_text", true)],
     );
 
-    // sha2 = C3': 7 accepted_lines (per-commit delta)
+    // sha2 = C3': cumulative AI-attested lines in utils.py (session format)
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["utils.py"]);
-    assert_accepted_lines_exact(&repo, &chain[2], "sha2_lines", 7);
+    assert_accepted_lines_exact(&repo, &chain[2], "sha2_lines", 23);
     assert_blame_sample_at_commit(
         &repo,
         &chain[2],
@@ -4642,10 +4658,10 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         &[("def parse_date", true), ("def format_currency", true)],
     );
 
-    // sha3 = C4': 10 accepted_lines (per-commit delta)
+    // sha3 = C4': cumulative AI lines in utils.py at this commit
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
     assert_note_files_exact(&repo, &chain[3], "sha3_files", &["utils.py"]);
-    assert_accepted_lines_exact(&repo, &chain[3], "sha3_lines", 10);
+    assert_accepted_lines_exact(&repo, &chain[3], "sha3_lines", 33);
     assert_blame_sample_at_commit(
         &repo,
         &chain[3],
@@ -4654,10 +4670,10 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         &[("def generate_slug", true), ("def deep_merge", true)],
     );
 
-    // sha4 = C5': 12 accepted_lines (per-commit delta)
+    // sha4 = C5': cumulative AI lines in utils.py at this commit
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
     assert_note_files_exact(&repo, &chain[4], "sha4_files", &["utils.py"]);
-    assert_accepted_lines_exact(&repo, &chain[4], "sha4_lines", 12);
+    assert_accepted_lines_exact(&repo, &chain[4], "sha4_lines", 44);
     assert_blame_sample_at_commit(
         &repo,
         &chain[4],
@@ -4666,8 +4682,8 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         &[("def retry_with_backoff", true), ("def chunk_list", true)],
     );
 
-    // Per-commit-delta: each commit reports only its own new AI lines, not cumulative.
-    // Monotonic growth is NOT expected with this model.
+    // Session format: each commit's note reflects cumulative AI lines in attestation ranges.
+    // Values grow monotonically: [8, 16, 23, 33, 44].
 }
 
 /// Test 2: Rust lib.rs — upstream prepends crate-level doc and deny(warnings),
@@ -6904,13 +6920,10 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
         ],
     );
 
-    // sha2 = C3' (second AI commit): api.py with 6 accepted lines (per-commit delta).
-    // C3 introduced /users routes, but C5 later simplified some of those lines.
-    // The hunk-based content map only carries attribution for lines whose content
-    // matches the original HEAD, so lines modified by C5 don't carry AI attribution here.
+    // sha2 = C3' (second AI commit): api.py cumulative AI lines
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["api.py"]);
-    assert_accepted_lines_exact(&repo, &chain[2], "sha2_lines", 6);
+    assert_accepted_lines_exact(&repo, &chain[2], "sha2_lines", 18);
     // C3 introduced /users GET and POST routes. Some lines show as human because
     // C5 later modified them (content mismatch prevents attribution transfer).
     assert_blame_sample_at_commit(
@@ -6929,10 +6942,10 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
         &["config.py", "requirements.txt"],
     );
 
-    // sha4 = C5' (third AI commit): api.py with 14 accepted lines (C5's delta only)
+    // sha4 = C5' (third AI commit): api.py cumulative AI lines
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
     assert_note_files_exact(&repo, &chain[4], "sha4_files", &["api.py"]);
-    assert_accepted_lines_exact(&repo, &chain[4], "sha4_lines", 14);
+    assert_accepted_lines_exact(&repo, &chain[4], "sha4_lines", 30);
     // C5 introduced /users/:id GET and DELETE — verify they are AI at sha4.
     assert_blame_sample_at_commit(
         &repo,
@@ -6946,8 +6959,8 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
         ],
     );
 
-    // Per-commit-delta: each commit's accepted_lines reflects only its own new AI lines.
-    // Chain values [12, 6, 14] reflect different per-commit contribution sizes.
+    // Session format: cumulative AI lines in attestation ranges.
+    // Values grow monotonically: [12, 18, 30].
 }
 
 /// Test 9: Large function blocks with 20-line license header prepended.
