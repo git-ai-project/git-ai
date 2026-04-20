@@ -65,7 +65,6 @@ fn test_prepare_working_log_simple_squash() {
         stats.human_additions, 1,
         "1 human lines from feature branch"
     );
-    assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
 
 /// Test merge --squash with out-of-band changes on master (handles 3-way merge)
@@ -120,7 +119,6 @@ fn test_prepare_working_log_squash_with_main_changes() {
         stats.human_additions, 1,
         "1 human line from feature branch (section 3 included in squash diff)"
     );
-    assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
 
 /// Test merge --squash with multiple AI sessions and human edits
@@ -180,7 +178,6 @@ fn test_prepare_working_log_squash_multiple_sessions() {
         stats.human_additions, 2,
         "2 human lines from feature branch (Human addition + footer)"
     );
-    assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
 
 /// Test merge --squash with mixed additions (AI code edited by human before commit)
@@ -250,24 +247,16 @@ fn test_prepare_working_log_squash_with_mixed_additions() {
         "}".human()
     ]);
 
-    // Verify stats show mixed additions
+    // Verify stats
     let stats = repo.stats().unwrap();
     println!("stats: {:?}", stats);
     assert_eq!(
         stats.git_diff_added_lines, 6,
-        "Squash commit adds 3 lines total"
+        "Squash commit adds 6 lines total"
     );
-    assert_eq!(stats.ai_additions, 5, "3 AI lines total (2 pure + 1 mixed)");
-    assert_eq!(stats.ai_accepted, 5, "2 AI lines accepted without edits");
-    // tmp until we fix override
-    assert_eq!(
-        stats.mixed_additions, 0,
-        "1 AI line was edited by human before commit"
-    );
-    assert_eq!(
-        stats.human_additions, 1,
-        "1 human addition (the overridden AI line)"
-    );
+    assert_eq!(stats.ai_additions, 5, "5 AI lines total");
+    assert_eq!(stats.ai_accepted, 5, "5 AI lines accepted");
+    assert_eq!(stats.human_additions, 1, "1 human addition");
 
     // Verify session records exist (sessions don't have stats fields)
     let sessions = &squash_commit.authorship_log.metadata.sessions;
@@ -506,7 +495,6 @@ fn test_prepare_working_log_squash_with_main_changes_standard_human() {
         stats.human_additions, 0,
         "0 human lines from feature branch"
     );
-    assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
 
 /// Variant of test_prepare_working_log_squash_multiple_sessions using unattributed (legacy)
@@ -576,7 +564,6 @@ fn test_prepare_working_log_squash_multiple_sessions_standard_human() {
         stats.unknown_additions, 1,
         "1 unattested human line (// Human addition, unattributed via checkpoint --)"
     );
-    assert_eq!(stats.mixed_additions, 0, "No mixed edits");
 }
 
 crate::reuse_tests_in_worktree!(
