@@ -1,5 +1,5 @@
 use crate::auth::CredentialStore;
-use crate::authorship::authorship_log::{HumanRecord, PromptRecord};
+use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::prompt_utils::enrich_prompt_messages;
 use crate::authorship::working_log::CheckpointKind;
@@ -61,6 +61,8 @@ pub struct BlameHunk {
 pub struct BlameAnalysisResult {
     pub line_authors: HashMap<u32, String>,
     pub prompt_records: HashMap<String, PromptRecord>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub session_records: HashMap<String, SessionRecord>,
     pub blame_hunks: Vec<BlameHunk>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub humans: BTreeMap<String, HumanRecord>,
@@ -420,6 +422,7 @@ impl Repository {
             BlameAnalysisResult {
                 line_authors,
                 prompt_records,
+                session_records: HashMap::new(), // TODO: populate in Task 8
                 blame_hunks,
                 humans,
             },
@@ -549,6 +552,7 @@ impl Repository {
         let BlameAnalysisResult {
             line_authors,
             prompt_records,
+            session_records: _,
             blame_hunks: _,
             humans: _,
         } = analysis;
