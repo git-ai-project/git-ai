@@ -180,6 +180,56 @@ easylife-ai tracker retry
 
 配置文件不存在时，tracker 静默跳过（不报错，不阻塞 push）。
 
+#### 6.1.1 安装时自动配置
+
+安装脚本支持通过环境变量自动创建 tracker 配置文件。
+
+**本地脚本安装（推荐）**
+
+用户本地已有 `install-easylife-ai.sh` 或 `install-easylife-ai.ps1` 脚本时：
+
+Linux/macOS:
+```bash
+TRACKER_URL="http://your-server.com" \
+TEAM_ID="1" \
+TEAM_KEY="your-key" \
+bash install-easylife-ai.sh
+```
+
+Windows PowerShell:
+```powershell
+$env:TRACKER_URL = "http://your-server.com"
+$env:TEAM_ID = "1"
+$env:TEAM_KEY = "your-key"
+.\install-easylife-ai.ps1
+```
+
+**远程脚本安装**
+
+从 GitHub 下载并安装：
+
+Linux/macOS:
+```bash
+TRACKER_URL="http://your-server.com" \
+TEAM_ID="1" \
+TEAM_KEY="your-key" \
+curl -sSL https://github.com/easylife88-2026/easylife-ai/releases/latest/download/install-easylife-ai.sh | bash
+```
+
+Windows PowerShell:
+```powershell
+$env:TRACKER_URL = "http://your-server.com"
+$env:TEAM_ID = "1"
+$env:TEAM_KEY = "your-key"
+irm https://github.com/easylife88-2026/easylife-ai/releases/latest/download/install-easylife-ai.ps1 | iex
+```
+
+**行为说明**：
+- 三个环境变量（`TRACKER_URL`、`TEAM_ID`、`TEAM_KEY`）必须同时提供，缺一不创建配置文件
+- 如果 `tracker-config.json` 已存在，会覆盖 `tracker_url`、`team_id`、`team_key` 字段，但保留原有 `blacklist`
+- 如果文件不存在，创建新文件，`blacklist` 默认为空数组 `[]`
+- 配置写入失败不会中断安装流程，仅输出警告信息
+
 ### 6.2 Git-AI 主配置
 
 **路径**：`~/.git-ai/config.json`

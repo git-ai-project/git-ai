@@ -769,7 +769,7 @@ async fn async_run_install(
                 "This is expected — once you commit and start a fresh session, attribution will work correctly."
             );
             println!(
-                "If the issue persists, please open an issue at https://github.com/git-ai-project/git-ai/issues"
+                // "If the issue persists, please open an issue at https://github.com/git-ai-project/git-ai/issues"
             );
         }
     }
