@@ -2,4 +2,4 @@
 source: src/authorship/stats.rs
 expression: minimal_human_output
 ---
-"you  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ ai\n     2%                                   98%\n     \u{1b}[90mwaited 30s for ai\u{1b}[0m\n"
+"you  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ ai\n     2%                                   98%\n"

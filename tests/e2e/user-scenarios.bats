@@ -446,14 +446,12 @@ EOF
       "human_additions": 2,
       "ai_additions": 2,
       "ai_accepted": 2,
-      "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 4,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 2,
-          "ai_accepted": 2,
-          "time_waiting_for_ai": 0
+          "ai_accepted": 2
         }
       }
     }'
@@ -496,14 +494,12 @@ EOF
       "human_additions": 1,
       "ai_additions": 3,
       "ai_accepted": 3,
-      "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 4,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 3,
-          "ai_accepted": 3,
-          "time_waiting_for_ai": 0
+          "ai_accepted": 3
         }
       }
     }'
@@ -566,14 +562,12 @@ EOF
       "human_additions": 7,
       "ai_additions": 0,
       "ai_accepted": 0,
-      "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 7,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 0,
-          "ai_accepted": 0,
-          "time_waiting_for_ai": 0
+          "ai_accepted": 0
         }
       }
     }'
@@ -629,14 +623,12 @@ EOF
       "human_additions": 0,
       "ai_additions": 4,
       "ai_accepted": 4,
-      "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 4,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 4,
-          "ai_accepted": 4,
-          "time_waiting_for_ai": 0
+          "ai_accepted": 4
         }
       }
     }'
@@ -702,14 +694,12 @@ EOF
       "human_additions": 1,
       "ai_additions": 16,
       "ai_accepted": 16,
-      "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 17,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 16,
-          "ai_accepted": 16,
-          "time_waiting_for_ai": 0
+          "ai_accepted": 16
         }
       }
     }'
@@ -760,14 +750,12 @@ EOF
       "human_additions": 0,
       "ai_additions": 8,
       "ai_accepted": 8,
-      "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 8,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 8,
-          "ai_accepted": 8,
-          "time_waiting_for_ai": 0
+          "ai_accepted": 8
         }
       }
     }'
@@ -840,14 +828,12 @@ EOF
         "human_additions": 2,
         "ai_additions": 3,
         "ai_accepted": 3,
-        "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 2,
         "git_diff_added_lines": 5,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 3,
-                "ai_accepted": 3,
-                "time_waiting_for_ai": 0
+                "ai_accepted": 3
             }
         }
     }'
@@ -899,14 +885,12 @@ EOF
         "human_additions": 0,
         "ai_additions": 2,
         "ai_accepted": 2,
-        "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 4,
         "git_diff_added_lines": 2,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 2,
-                "ai_accepted": 2,
-                "time_waiting_for_ai": 0
+                "ai_accepted": 2
             }
         }
     }'
@@ -979,14 +963,12 @@ EOF
         "human_additions": 2,
         "ai_additions": 4,
         "ai_accepted": 4,
-        "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 0,
         "git_diff_added_lines": 6,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 4,
-                "ai_accepted": 4,
-                "time_waiting_for_ai": 0
+                "ai_accepted": 4
             }
         }
     }'
@@ -1098,7 +1080,6 @@ EOF
           "ai_additions": 6,
           "ai_accepted": 6,
           "ai_deletions": 0,
-          "time_waiting_for_ai": 0
         }
       }
     }'
@@ -1157,14 +1138,12 @@ EOF
       "human_additions": 0,
       "ai_additions": 5,
       "ai_accepted": 5,
-      "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 5,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 5,
-          "ai_accepted": 5,
-          "time_waiting_for_ai": 0
+          "ai_accepted": 5
         }
       }
     }'
@@ -1278,14 +1257,12 @@ EOF
       "human_additions": 0,
       "ai_additions": 8,
       "ai_accepted": 8,
-      "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 8,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 8,
-          "ai_accepted": 8,
-          "time_waiting_for_ai": 0
+          "ai_accepted": 8
         }
       }
     }'
@@ -1393,14 +1370,12 @@ EOF
         "human_additions": 0,
         "ai_additions": 6,
         "ai_accepted": 6,
-        "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 1,
         "git_diff_added_lines": 6,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
             "ai_additions": 6,
-            "ai_accepted": 6,
-            "time_waiting_for_ai": 0
+            "ai_accepted": 6
             }
         }
     }'
@@ -1436,7 +1411,6 @@ EOF
         "human_additions": 5,
         "ai_additions": 0,
         "ai_accepted": 0,
-        "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 1,
         "git_diff_added_lines": 5,
         "tool_model_breakdown": {}
@@ -1497,14 +1471,12 @@ EOF
       "human_additions": 0,
       "ai_additions": 6,
       "ai_accepted": 6,
-      "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 3,
       "git_diff_added_lines": 6,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 6,
-          "ai_accepted": 6,
-          "time_waiting_for_ai": 0
+          "ai_accepted": 6
         }
       }
     }'
@@ -1624,14 +1596,12 @@ EOF
         "human_additions": 3,
         "ai_additions": 5,
         "ai_accepted": 5,
-        "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 0,
         "git_diff_added_lines": 8,
         "tool_model_breakdown": {
           "mock_ai::unknown": {
             "ai_additions": 5,
-            "ai_accepted": 5,
-            "time_waiting_for_ai": 0
+            "ai_accepted": 5
           }
         }
       }
@@ -1673,14 +1643,12 @@ EOF
         "human_additions": 0,
         "ai_additions": 5,
         "ai_accepted": 5,
-        "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 0,
         "git_diff_added_lines": 5,
         "tool_model_breakdown": {
           "mock_ai::unknown": {
             "ai_additions": 5,
-            "ai_accepted": 5,
-            "time_waiting_for_ai": 0
+            "ai_accepted": 5
           }
         }
       }
@@ -1748,14 +1716,12 @@ EOF
         "human_additions": 2,
         "ai_additions": 3,
         "ai_accepted": 3,
-        "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 0,
         "git_diff_added_lines": 5,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 3,
-                "ai_accepted": 3,
-                "time_waiting_for_ai": 0
+                "ai_accepted": 3
             }
         }
     }'
@@ -1825,14 +1791,12 @@ EOF
         "human_additions": 2,
         "ai_additions": 2,
         "ai_accepted": 2,
-        "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 1,
         "git_diff_added_lines": 4,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 2,
-                "ai_accepted": 2,
-                "time_waiting_for_ai": 0
+                "ai_accepted": 2
             }
         }
     }'
@@ -1906,14 +1870,12 @@ EOF
         "human_additions": 4,
         "ai_additions": 4,
         "ai_accepted": 4,
-        "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 0,
         "git_diff_added_lines": 8,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 4,
-                "ai_accepted": 4,
-                "time_waiting_for_ai": 0
+                "ai_accepted": 4
             }
         }
     }'
@@ -2013,14 +1975,12 @@ EOF
         "human_additions": 3,
         "ai_additions": 4,
         "ai_accepted": 4,
-        "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 0,
         "git_diff_added_lines": 7,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 4,
-                "ai_accepted": 4,
-                "time_waiting_for_ai": 0
+                "ai_accepted": 4
             }
         }
     }'

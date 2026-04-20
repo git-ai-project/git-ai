@@ -2,4 +2,4 @@
 source: src/authorship/stats.rs
 expression: ai_only_output
 ---
-"you  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ ai\n     0%                                  100%\n     \u{1b}[90mwaited 45s for ai\u{1b}[0m\n"
+"you  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ ai\n     0%                                  100%\n"

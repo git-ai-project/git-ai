@@ -753,12 +753,10 @@ fn record_commit_metrics(
     // only reflects real tools.
     let mut agg_ai = stats.ai_additions;
     let mut agg_accepted = stats.ai_accepted;
-    let mut agg_waiting: u64 = stats.time_waiting_for_ai;
     for (key, ts) in &stats.tool_model_breakdown {
         if key.starts_with("mock_ai::") {
             agg_ai = agg_ai.saturating_sub(ts.ai_additions);
             agg_accepted = agg_accepted.saturating_sub(ts.ai_accepted);
-            agg_waiting = agg_waiting.saturating_sub(ts.time_waiting_for_ai);
         }
     }
 
@@ -766,7 +764,6 @@ fn record_commit_metrics(
     let mut tool_model_pairs: Vec<String> = vec!["all".to_string()];
     let mut ai_additions: Vec<u32> = vec![agg_ai];
     let mut ai_accepted: Vec<u32> = vec![agg_accepted];
-    let mut time_waiting_for_ai: Vec<u64> = vec![agg_waiting];
 
     // Add per-tool/model breakdown, skipping mock_ai (test preset)
     for (tool_model, tool_stats) in &stats.tool_model_breakdown {
@@ -776,7 +773,6 @@ fn record_commit_metrics(
         tool_model_pairs.push(tool_model.clone());
         ai_additions.push(tool_stats.ai_additions);
         ai_accepted.push(tool_stats.ai_accepted);
-        time_waiting_for_ai.push(tool_stats.time_waiting_for_ai);
     }
 
     // Build values with all stats
@@ -786,8 +782,7 @@ fn record_commit_metrics(
         .git_diff_added_lines(stats.git_diff_added_lines)
         .tool_model_pairs(tool_model_pairs)
         .ai_additions(ai_additions)
-        .ai_accepted(ai_accepted)
-        .time_waiting_for_ai(time_waiting_for_ai);
+        .ai_accepted(ai_accepted);
 
     // Add first checkpoint timestamp (null if no checkpoints)
     let values = if let Some(first) = checkpoints.first() {
