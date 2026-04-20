@@ -467,11 +467,7 @@ fn test_range_authorship_multiple_lockfile_types() {
         .to_string();
 
     // Add multiple lockfiles and one real source change
-    std::fs::write(
-        repo.path().join("Cargo.lock"),
-        "# Cargo lock\n".repeat(500),
-    )
-    .unwrap();
+    std::fs::write(repo.path().join("Cargo.lock"), "# Cargo lock\n".repeat(500)).unwrap();
     std::fs::write(repo.path().join("yarn.lock"), "# yarn lock\n".repeat(500)).unwrap();
     std::fs::write(
         repo.path().join("poetry.lock"),
