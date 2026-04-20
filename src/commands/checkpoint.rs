@@ -2,7 +2,9 @@ use crate::authorship::attribution_tracker::{
     Attribution, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
 use crate::authorship::authorship_log::PromptRecord;
-use crate::authorship::authorship_log_serialization::generate_short_hash;
+use crate::authorship::authorship_log_serialization::{
+    generate_session_id, generate_short_hash, generate_trace_id,
+};
 use crate::authorship::ignore::{
     IgnoreMatcher, build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
@@ -846,6 +848,8 @@ fn execute_resolved_checkpoint(
         hash_compute_start.elapsed()
     );
 
+    let trace_id = generate_trace_id();
+
     let entries_start = Instant::now();
     let (entries, file_stats) = smol::block_on(get_checkpoint_entries(
         kind,
@@ -859,6 +863,7 @@ fn execute_resolved_checkpoint(
         resolved.ts,
         is_pre_commit,
         Some(resolved.base_commit.as_str()),
+        trace_id.clone(),
     ))?;
     tracing::debug!(
         "[BENCHMARK] get_checkpoint_entries generated {} entries, took {:?}",
@@ -876,6 +881,7 @@ fn execute_resolved_checkpoint(
         );
         checkpoint.timestamp = (resolved.ts / 1000) as u64;
         checkpoint.line_stats = compute_line_stats(&file_stats)?;
+        checkpoint.trace_id = Some(trace_id.clone());
 
         if kind.is_ai() {
             if let Some(agent_run) = &agent_run_result {
@@ -1880,6 +1886,7 @@ async fn get_checkpoint_entries(
     ts: u128,
     is_pre_commit: bool,
     head_commit_override: Option<&str>,
+    trace_id: String,
 ) -> Result<(Vec<WorkingLogEntry>, Vec<FileLineStats>), GitAiError> {
     let entries_fn_start = Instant::now();
 
@@ -1916,13 +1923,14 @@ async fn get_checkpoint_entries(
             crate::authorship::authorship_log_serialization::generate_human_short_hash(author)
         }
         _ => {
-            // AI kinds: use session hash
+            // AI kinds: compose session_id::trace_id
             agent_run_result
                 .map(|result| {
-                    crate::authorship::authorship_log_serialization::generate_short_hash(
+                    let session_id = generate_session_id(
                         &result.agent_id.id,
                         &result.agent_id.tool,
-                    )
+                    );
+                    format!("{}::{}", session_id, trace_id)
                 })
                 .unwrap_or_else(|| kind.to_str())
         }
