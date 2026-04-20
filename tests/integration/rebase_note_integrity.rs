@@ -59,10 +59,16 @@ use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 fn total_accepted_lines(note: &str) -> u32 {
     let log = AuthorshipLog::deserialize_from_string(note)
         .expect("should parse authorship note as AuthorshipLog");
-    log.metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
+    // Count AI lines from attestations where hash starts with "s_" (sessions)
+    log.attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .filter(|e| e.hash.starts_with("s_"))
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
         .sum()
 }
 
@@ -316,18 +322,17 @@ fn test_rebase_intermediate_commit_accepted_lines_not_inflated() {
     let lines1 = total_accepted_lines(&note1);
     let lines2 = total_accepted_lines(&note2);
 
-    // Per-commit-delta: commit 1 introduced exactly 10 AI lines; commit 2 introduced
-    // 10 more. Each note reports its own delta only — NOT the cumulative total.
-    // C1′ uses the content-diff path → 10 matched lines.
-    // C2′ uses the hunk-based path → 11 (10 new lines plus one carried via content map).
+    // Session format: attestation line ranges reflect the file state at each commit.
+    // Commit 1 has 10 AI lines in impl.rs. Commit 2 has all 20 (10 original + 10 new).
+    // The key invariant: commit 1′ must NOT show 20 (that would mean future-commit leakage).
     assert_eq!(
         lines1, 10,
-        "REBASE NOTE CORRUPTION: commit 1′ should report exactly 10 AI lines (its own delta), got {}. If > 10, the slow path is accumulating lines from future commits.",
+        "REBASE NOTE CORRUPTION: commit 1′ should report exactly 10 AI lines (file state at commit 1), got {}. If > 10, the slow path is leaking future commit lines.",
         lines1
     );
     assert_eq!(
-        lines2, 11,
-        "REBASE NOTE CORRUPTION: commit 2′ should report exactly 11 AI lines (its own delta), got {}. If == 20, the slow path is writing the full-chain total instead of the per-commit share.",
+        lines2, 20,
+        "REBASE NOTE CORRUPTION: commit 2′ should report exactly 20 AI lines (file state at commit 2), got {}.",
         lines2
     );
 }
@@ -848,18 +853,18 @@ fn test_rebase_second_commit_note_attributes_its_own_ai_lines() {
 
     let lines_a = total_accepted_lines(&note_a);
     let lines_b = total_accepted_lines(&note_b);
+    // Session format: attestation line ranges reflect the cumulative file state.
     // A′: content-diff path carries 3 AI lines (fn a1..a3) → exactly 3.
-    // B′: hunk-based path. B's diff inserts fn b1..b3 (3 new lines) which are in the
-    // original-HEAD content map → attributed. Plus one carried line → exactly 4.
-    // The regression case (hunk-path bug): B′ gets 0 because inserts are dropped.
+    // B′: file has all 6 AI lines (fn a1..a3 from A + fn b1..b3 from B) → 6.
+    // The regression case: B′ gets 0 because inserts are dropped.
     assert_eq!(
         lines_a, 3,
-        "REBASE ATTRIBUTION LOSS: A′ should have exactly 3 accepted_lines (fn a1..a3), got {}.",
+        "REBASE ATTRIBUTION LOSS: A′ should have exactly 3 AI lines (fn a1..a3), got {}.",
         lines_a
     );
     assert_eq!(
-        lines_b, 4,
-        "REBASE ATTRIBUTION LOSS: B′ should have exactly 4 accepted_lines (fn b1..b3 + 1 carried), got {}. If 0: hunk-path is treating newly-inserted AI lines as unattributed.",
+        lines_b, 6,
+        "REBASE ATTRIBUTION LOSS: B′ should have exactly 6 AI lines (fn a1..a3 + fn b1..b3), got {}. If 0: hunk-path is treating newly-inserted AI lines as unattributed.",
         lines_b
     );
 }

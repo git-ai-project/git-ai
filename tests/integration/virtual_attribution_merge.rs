@@ -1,56 +1,59 @@
 use std::collections::BTreeMap;
 
-use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::virtual_attribution::VirtualAttributions;
+use git_ai::authorship::working_log::AgentId;
 
 #[test]
 fn test_merge_prompts_picking_newest_sums_totals_on_collision() {
-    let repo = TestRepo::new();
-    let mut file = repo.filename("file.txt");
+    // This test verifies the old prompts format merge behavior.
+    // Since mock_ai now produces sessions, we manually construct PromptRecord objects.
 
-    file.set_contents(crate::lines!["AI line 1".ai()]);
-    let commit1 = repo.stage_all_and_commit("commit 1").unwrap();
-    let prompt1 = commit1
-        .authorship_log
-        .metadata
-        .prompts
-        .values()
-        .next()
-        .expect("prompt record should exist")
-        .clone();
+    let agent_id1 = AgentId {
+        tool: "test_tool".to_string(),
+        id: "id1".to_string(),
+        model: "model1".to_string(),
+    };
+    let agent_id2 = AgentId {
+        tool: "test_tool".to_string(),
+        id: "id2".to_string(),
+        model: "model2".to_string(),
+    };
 
-    file.set_contents(crate::lines!["AI line 1".ai(), "AI line 2".ai()]);
-    let commit2 = repo.stage_all_and_commit("commit 2").unwrap();
-    let prompt2 = commit2
-        .authorship_log
-        .metadata
-        .prompts
-        .values()
-        .next()
-        .expect("prompt record should exist")
-        .clone();
+    let record1 = PromptRecord {
+        agent_id: agent_id1.clone(),
+        human_author: Some("Author 1".to_string()),
+        messages: vec![],
+        total_additions: 2,
+        total_deletions: 1,
+        accepted_lines: 0,
+        overriden_lines: 3,
+        messages_url: None,
+        custom_attributes: None,
+    };
 
-    let mut record1 = prompt1.clone();
-    record1.total_additions = 2;
-    record1.total_deletions = 1;
-    record1.overriden_lines = 3;
-
-    let mut record2 = prompt2.clone();
-    record2.total_additions = 5;
-    record2.total_deletions = 4;
-    record2.overriden_lines = 7;
+    let record2 = PromptRecord {
+        agent_id: agent_id2.clone(),
+        human_author: Some("Author 2".to_string()),
+        messages: vec![],
+        total_additions: 5,
+        total_deletions: 4,
+        accepted_lines: 0,
+        overriden_lines: 7,
+        messages_url: None,
+        custom_attributes: None,
+    };
 
     let mut source1 = BTreeMap::new();
     source1.insert(
         "collision_hash".to_string(),
-        BTreeMap::from([(commit1.commit_sha.clone(), record1.clone())]),
+        BTreeMap::from([("commit1".to_string(), record1.clone())]),
     );
 
     let mut source2 = BTreeMap::new();
     source2.insert(
         "collision_hash".to_string(),
-        BTreeMap::from([(commit2.commit_sha.clone(), record2.clone())]),
+        BTreeMap::from([("commit2".to_string(), record2.clone())]),
     );
 
     let merged = VirtualAttributions::merge_prompts_picking_newest(&[&source1, &source2]);

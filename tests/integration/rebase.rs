@@ -298,11 +298,11 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
     let old_log =
         AuthorshipLog::deserialize_from_string(&old_note).expect("parse original authorship note");
     assert!(
-        old_log.metadata.prompts.is_empty(),
+        old_log.metadata.sessions.is_empty(),
         "precondition: human-only commit should have no attestations"
     );
     assert!(
-        old_log.metadata.prompts.is_empty(),
+        old_log.metadata.sessions.is_empty(),
         "precondition: human-only commit should have no prompts"
     );
 
@@ -317,11 +317,11 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
     let rebased_log = AuthorshipLog::deserialize_from_string(&rebased_note)
         .expect("parse rebased authorship note");
     assert!(
-        rebased_log.metadata.prompts.is_empty(),
+        rebased_log.metadata.sessions.is_empty(),
         "rebased human-only commit should still have no attestations"
     );
     assert!(
-        rebased_log.metadata.prompts.is_empty(),
+        rebased_log.metadata.sessions.is_empty(),
         "rebased human-only commit should still have no prompts"
     );
     assert_eq!(rebased_log.metadata.base_commit_sha, rebased_sha);
@@ -355,11 +355,11 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
     let mut original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse source note");
     assert!(
-        original_log.metadata.prompts.is_empty(),
+        original_log.metadata.sessions.is_empty(),
         "precondition: should start metadata-only"
     );
     assert!(
-        original_log.metadata.prompts.is_empty(),
+        original_log.metadata.sessions.is_empty(),
         "precondition: source commit should not have prompts before test mutation"
     );
 
@@ -1475,7 +1475,7 @@ fn test_rebase_preserves_custom_attributes_from_config() {
         .expect("original commit should have authorship note");
     let original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
-    for prompt in original_log.metadata.prompts.values() {
+    for prompt in original_log.metadata.sessions.values() {
         assert_eq!(
             prompt.custom_attributes.as_ref(),
             Some(&attrs),
@@ -1501,10 +1501,10 @@ fn test_rebase_preserves_custom_attributes_from_config() {
     let rebased_log =
         AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
     assert!(
-        !rebased_log.metadata.prompts.is_empty(),
-        "rebased commit should have prompt records"
+        !rebased_log.metadata.sessions.is_empty(),
+        "rebased commit should have session records"
     );
-    for prompt in rebased_log.metadata.prompts.values() {
+    for prompt in rebased_log.metadata.sessions.values() {
         assert_eq!(
             prompt.custom_attributes.as_ref(),
             Some(&attrs),
@@ -1556,23 +1556,40 @@ fn test_rebase_prompt_metrics_update_per_commit() {
         .expect("commit 2 should have note");
     let log2 = AuthorshipLog::deserialize_from_string(&note2).expect("parse note 2");
 
-    let pre_accepted_1: u32 = log1
-        .metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
+    // Session format: verify pre-rebase sessions exist and attestation line counts differ
+    assert!(
+        !log1.metadata.sessions.is_empty(),
+        "precondition: commit 1 should have session records"
+    );
+    assert!(
+        !log2.metadata.sessions.is_empty(),
+        "precondition: commit 2 should have session records"
+    );
+    let pre_lines_1: u32 = log1
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
         .sum();
-    let pre_accepted_2: u32 = log2
-        .metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
+    let pre_lines_2: u32 = log2
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
         .sum();
     assert!(
-        pre_accepted_1 < pre_accepted_2,
-        "precondition: commit 2 ({}) should have more accepted_lines than commit 1 ({})",
-        pre_accepted_2,
-        pre_accepted_1
+        pre_lines_1 < pre_lines_2,
+        "precondition: commit 2 ({}) should have more attested lines than commit 1 ({})",
+        pre_lines_2,
+        pre_lines_1
     );
 
     // Advance default branch
@@ -1605,25 +1622,41 @@ fn test_rebase_prompt_metrics_update_per_commit() {
     let rebased_log2 =
         AuthorshipLog::deserialize_from_string(&rebased_note2).expect("parse rebased note 2");
 
-    let post_accepted_1: u32 = rebased_log1
-        .metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
-        .sum();
-    let post_accepted_2: u32 = rebased_log2
-        .metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
-        .sum();
-
+    // Session format: verify sessions survive rebase and attestation line counts differ
     assert!(
-        post_accepted_1 < post_accepted_2,
-        "regression: rebased commit 2 ({}) should have more accepted_lines than commit 1 ({}). \
+        !rebased_log1.metadata.sessions.is_empty(),
+        "regression: rebased commit 1 should have session records"
+    );
+    assert!(
+        !rebased_log2.metadata.sessions.is_empty(),
+        "regression: rebased commit 2 should have session records"
+    );
+    let post_lines_1: u32 = rebased_log1
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
+        .sum();
+    let post_lines_2: u32 = rebased_log2
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
+        .sum();
+    assert!(
+        post_lines_1 < post_lines_2,
+        "regression: rebased commit 2 ({}) should have more attested lines than commit 1 ({}). \
          If equal, the fast path is freezing metrics across commits.",
-        post_accepted_2,
-        post_accepted_1
+        post_lines_2,
+        post_lines_1
     );
 }
 

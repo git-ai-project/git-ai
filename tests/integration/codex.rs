@@ -379,35 +379,35 @@ fn test_codex_e2e_commit_resync_uses_latest_rollout() {
         .expect("commit should succeed");
 
     assert_eq!(
-        commit.authorship_log.metadata.prompts.len(),
+        commit.authorship_log.metadata.sessions.len(),
         1,
-        "Expected one prompt record"
+        "Expected one session record"
     );
 
-    let prompt = commit
+    let session = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Prompt record should exist");
+        .expect("Session record should exist");
 
     assert_eq!(
-        prompt.agent_id.tool, "codex",
-        "Prompt should be attributed to codex"
+        session.agent_id.tool, "codex",
+        "Session should be attributed to codex"
     );
     assert_eq!(
-        prompt.agent_id.model, "gpt-5.1-codex",
+        session.agent_id.model, "gpt-5.1-codex",
         "Commit-time resync should update the model from latest rollout"
     );
     assert!(
-        prompt.messages.iter().any(|m| {
+        session.messages.iter().any(|m| {
             matches!(
                 m,
                 Message::Assistant { text, .. } if text.contains("Implemented the refactor")
             )
         }),
-        "Prompt transcript should be refreshed from latest rollout"
+        "Session transcript should be refreshed from latest rollout"
     );
 }
 
@@ -458,26 +458,26 @@ fn test_codex_commit_inside_bash_inflight_is_attributed_to_codex() {
         .expect("commit should succeed");
 
     assert_eq!(
-        commit.authorship_log.metadata.prompts.len(),
+        commit.authorship_log.metadata.sessions.len(),
         1,
-        "Expected one prompt record from the Codex bash context"
+        "Expected one session record from the Codex bash context"
     );
 
-    let prompt = commit
+    let session = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Prompt record should exist");
+        .expect("Session record should exist");
 
     assert_eq!(
-        prompt.agent_id.tool, "codex",
-        "Commit-time bash override should attribute the prompt to codex"
+        session.agent_id.tool, "codex",
+        "Commit-time bash override should attribute the session to codex"
     );
     assert_eq!(
-        prompt.agent_id.id, "codex-bash-session",
-        "Prompt should be linked to the active Codex session"
+        session.agent_id.id, "codex-bash-session",
+        "Session should be linked to the active Codex session"
     );
 
     let mut tracked_file = repo.filename("src/main.rs");

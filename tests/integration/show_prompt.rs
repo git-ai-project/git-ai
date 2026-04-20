@@ -104,9 +104,13 @@ fn show_prompt_returns_latest_prompt_by_default() {
     file.insert_at(2, crate::lines!["AI line 2".ai()]);
     let second_commit = repo.stage_all_and_commit("Second commit").unwrap();
 
-    // Grab one of the prompt IDs from the latest commit's authorship log
-    let prompts = &second_commit.authorship_log.metadata.prompts;
-    let (prompt_id, _prompt) = prompts.iter().next().expect("expected at least one prompt");
+    // Grab one of the session IDs from the latest commit's authorship log
+    // (mock_ai now produces sessions instead of prompts)
+    let sessions = &second_commit.authorship_log.metadata.sessions;
+    let (prompt_id, _session) = sessions
+        .iter()
+        .next()
+        .expect("expected at least one session");
 
     // show-prompt should return the latest occurrence by default
     let output = repo
@@ -134,12 +138,12 @@ fn show_prompt_with_offset_skips_occurrences() {
     file.insert_at(2, crate::lines!["AI line 2".ai()]);
     repo.stage_all_and_commit("Second commit").unwrap();
 
-    // Use a prompt ID from the first commit
-    let prompts_first = &first_commit.authorship_log.metadata.prompts;
-    let (prompt_id, _) = prompts_first
+    // Use a session ID from the first commit (mock_ai now produces sessions)
+    let sessions_first = &first_commit.authorship_log.metadata.sessions;
+    let (prompt_id, _) = sessions_first
         .iter()
         .next()
-        .expect("expected at least one prompt in first commit");
+        .expect("expected at least one session in first commit");
 
     // Default (no offset) and explicit offset 0 should both succeed and point to the same commit
     let default_output = repo

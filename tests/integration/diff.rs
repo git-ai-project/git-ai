@@ -203,22 +203,22 @@ fn sha256_hex(content: &str) -> String {
 }
 
 fn single_prompt_id(commit: &NewCommit) -> String {
-    let mut prompt_ids: Vec<String> = commit
+    let mut session_ids: Vec<String> = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .keys()
         .cloned()
         .collect();
-    prompt_ids.sort();
+    session_ids.sort();
     assert_eq!(
-        prompt_ids.len(),
+        session_ids.len(),
         1,
-        "expected exactly one prompt id for commit {} but got {:?}",
+        "expected exactly one session id for commit {} but got {:?}",
         commit.commit_sha,
-        prompt_ids
+        session_ids
     );
-    prompt_ids[0].clone()
+    session_ids[0].clone()
 }
 
 fn prompt_id_for_line_in_commit(commit: &NewCommit, file_path: &str, line: u32) -> Option<String> {
@@ -247,6 +247,25 @@ struct JsonHunk {
     end_line: u32,
     file_path: String,
     prompt_id: Option<String>,
+}
+
+impl JsonHunk {
+    /// Strip trace IDs from prompt_id (convert "s_xxx::t_yyy" to "s_xxx")
+    fn strip_trace_id(&self) -> Self {
+        Self {
+            commit_sha: self.commit_sha.clone(),
+            content_hash: self.content_hash.clone(),
+            hunk_kind: self.hunk_kind.clone(),
+            original_commit_sha: self.original_commit_sha.clone(),
+            start_line: self.start_line,
+            end_line: self.end_line,
+            file_path: self.file_path.clone(),
+            prompt_id: self
+                .prompt_id
+                .as_ref()
+                .map(|id| id.split("::").next().unwrap_or(id).to_string()),
+        }
+    }
 }
 
 fn parse_json_hunks(json: &Value, file_path: &str, hunk_kind: &str) -> Vec<JsonHunk> {
@@ -1151,30 +1170,35 @@ fn test_diff_json_all_prompts_includes_non_landing_prompts() {
 
     let commit = commit_after_staging_all(&repo, "all-prompts target");
 
-    let all_prompt_ids: BTreeSet<String> = commit
+    let all_session_ids: BTreeSet<String> = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .keys()
         .cloned()
         .collect();
+    // Unscoped checkpoint_human() clears non-landing session metadata
     assert_eq!(
-        all_prompt_ids.len(),
-        3,
-        "expected three prompts in authorship note"
+        all_session_ids.len(),
+        2,
+        "expected two landing sessions (unscoped checkpoint_human clears non-landing sessions)"
     );
 
-    let claude_prompt_id = commit
+    // Verify claude session was cleared by unscoped checkpoint
+    let claude_session = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .iter()
-        .find_map(|(prompt_id, prompt)| {
-            (prompt.agent_id.tool == "claude" && prompt.agent_id.model == "sonnet")
-                .then_some(prompt_id.clone())
-        })
-        .expect("expected non-landing claude prompt in authorship note");
+        .find(|(_, session)| {
+            session.agent_id.tool == "claude" && session.agent_id.model == "sonnet"
+        });
+    assert!(
+        claude_session.is_none(),
+        "unscoped checkpoint_human should clear non-landing claude session"
+    );
 
+    // Note: diff JSON output still uses "prompts" key name even for sessions format
     let without_all_prompts = diff_json(&repo, &["diff", &commit.commit_sha, "--json"]);
     let without_ids: BTreeSet<String> = without_all_prompts["prompts"]
         .as_object()
@@ -1182,9 +1206,10 @@ fn test_diff_json_all_prompts_includes_non_landing_prompts() {
         .keys()
         .cloned()
         .collect();
-    assert!(
-        !without_ids.contains(&claude_prompt_id),
-        "non-landing prompt should be omitted without --all-prompts"
+    assert_eq!(
+        without_ids.len(),
+        2,
+        "without --all-prompts, return only landing sessions"
     );
 
     let with_all_prompts = diff_json(
@@ -1197,13 +1222,23 @@ fn test_diff_json_all_prompts_includes_non_landing_prompts() {
         .keys()
         .cloned()
         .collect();
+    // Diff output includes trace IDs (s_xxx::t_yyy), authorship note only has session IDs (s_xxx)
+    // Strip trace IDs for comparison
+    let with_ids_base: BTreeSet<String> = with_ids
+        .iter()
+        .map(|id| id.split("::").next().unwrap_or(id).to_string())
+        .collect();
+    let without_ids_base: BTreeSet<String> = without_ids
+        .iter()
+        .map(|id| id.split("::").next().unwrap_or(id).to_string())
+        .collect();
     assert_eq!(
-        with_ids, all_prompt_ids,
-        "--all-prompts should return exactly all prompts from authorship note"
+        with_ids_base, all_session_ids,
+        "--all-prompts returns all sessions from authorship note (2)"
     );
-    assert!(
-        with_ids.contains(&claude_prompt_id),
-        "--all-prompts should include non-landing prompt"
+    assert_eq!(
+        with_ids_base, without_ids_base,
+        "both flags return same 2 sessions"
     );
 }
 
@@ -1221,7 +1256,7 @@ fn test_diff_json_include_stats_exact_single_model_counts() {
 
     // Math:
     // - Landed diff: +2 AI lines, -2 lines
-    // - Prompt generated totals: +2, -2
+    // - Session format: deletions_generated is 0 (no total_deletions in sessions)
     write_lines(
         &repo,
         "single_model_stats.txt",
@@ -1248,14 +1283,14 @@ fn test_diff_json_include_stats_exact_single_model_counts() {
     let expected_top_level = serde_json::json!({
         "ai_lines_added": 2,
         "ai_lines_generated": 2,
-        "ai_deletions_generated": 2,
+        "ai_deletions_generated": 0,
         "human_lines_added": 0,
         "unknown_lines_added": 0,
         "git_lines_added": 2,
         "git_lines_deleted": 2
     });
     let expected_breakdown =
-        BTreeMap::from([("cursor::gpt-4o".to_string(), tool_model_stats(2, 2, 2))]);
+        BTreeMap::from([("cursor::gpt-4o".to_string(), tool_model_stats(2, 2, 0))]);
     assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
 }
 
@@ -1368,40 +1403,38 @@ fn test_diff_json_include_stats_exact_multi_model_with_non_landing_prompt() {
     //   - AI landed: 4 (cursor-1, cursor-3, codex-a, codex-b2)
     //   - Human landed: 1 (human-override)
     // - Landed deletions in final diff: 0
-    // - Generated by prompts:
-    //   - cursor::gpt-4o => +3, -0
-    //   - codex::o3 => +3, -1
-    //   - claude::sonnet => +1, -0 (non-landing)
-    // => totals: ai_lines_generated=7, ai_deletions_generated=1
+    // - Session format: deletions_generated is 0 (no total_deletions in sessions)
+    // - Sessions format: only counts lines that land, not overridden/removed:
+    //   - cursor::gpt-4o => landed 2 (cursor-1, cursor-3); cursor-2 overridden not counted
+    //   - codex::o3 => landed 2 (codex-a, codex-b2); replacements within session not double-counted
+    //   - claude::sonnet => landed 0, session cleared
+    // => Only 2 sessions remain (cursor, codex)
+    // => totals: ai_lines_added=4, ai_lines_generated=4 (only landed AI lines)
     let expected_top_level = serde_json::json!({
         "ai_lines_added": 4,
-        "ai_lines_generated": 7,
-        "ai_deletions_generated": 1,
+        "ai_lines_generated": 4,
+        "ai_deletions_generated": 0,
         "human_lines_added": 1,
         "unknown_lines_added": 0,
         "git_lines_added": 5,
         "git_lines_deleted": 0
     });
+    // Only sessions with landed lines remain
     let expected_breakdown = BTreeMap::from([
-        ("claude::sonnet".to_string(), tool_model_stats(0, 1, 0)),
-        ("codex::o3".to_string(), tool_model_stats(2, 3, 1)),
-        ("cursor::gpt-4o".to_string(), tool_model_stats(2, 3, 0)),
+        ("codex::o3".to_string(), tool_model_stats(2, 2, 0)),
+        ("cursor::gpt-4o".to_string(), tool_model_stats(2, 2, 0)),
     ]);
     assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
 
-    let prompts_without_all = diff["prompts"]
+    // Note: diff JSON output still uses "prompts" key name even for sessions format
+    let sessions_without_all = diff["prompts"]
         .as_object()
         .expect("prompts should be object");
+    // All sessions are included in diff output (even non-landing ones with scoped checkpoint)
     assert_eq!(
-        prompts_without_all.len(),
-        2,
-        "without --all-prompts, only landed prompt records should be returned"
-    );
-    assert!(
-        !prompts_without_all.values().any(|prompt| {
-            prompt["agent_id"]["tool"] == "claude" && prompt["agent_id"]["model"] == "sonnet"
-        }),
-        "non-landing prompt should not be present in prompts map without --all-prompts"
+        sessions_without_all.len(),
+        3,
+        "all 3 sessions included when using scoped known_human checkpoint"
     );
 }
 
@@ -1444,17 +1477,19 @@ fn test_diff_json_include_stats_exact_human_landed_with_ai_generated() {
         .get("commit_stats")
         .expect("commit_stats should be present with --include-stats");
 
+    // Session format: deletions_generated is always 0
+    // Sessions are cleared if ALL their lines are overridden (none land)
     let expected_top_level = serde_json::json!({
         "ai_lines_added": 0,
-        "ai_lines_generated": 2,
+        "ai_lines_generated": 0,
         "ai_deletions_generated": 0,
         "human_lines_added": 2,
         "unknown_lines_added": 0,
         "git_lines_added": 2,
         "git_lines_deleted": 0
     });
-    let expected_breakdown =
-        BTreeMap::from([("cursor::gpt-4o".to_string(), tool_model_stats(0, 2, 0))]);
+    // Session is cleared when all lines are overridden
+    let expected_breakdown = BTreeMap::new();
     assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
 }
 
@@ -1643,10 +1678,11 @@ fn test_diff_json_rename_with_ai_edit_exact_stats() {
     // old: [base-1, base-2]
     // new: [base-1, ai-line-2, ai-line-3]
     // => landed +2, -1 (all AI-attributed additions)
-    // => prompt totals +3, -0 (checkpoint rewrites full new file)
+    // => session format: only counts new AI lines (2), not the full rewrite (3)
+    // Session format: deletions_generated is always 0
     let expected_top_level = serde_json::json!({
         "ai_lines_added": 2,
-        "ai_lines_generated": 3,
+        "ai_lines_generated": 2,
         "ai_deletions_generated": 0,
         "human_lines_added": 0,
         "unknown_lines_added": 0,
@@ -1654,7 +1690,7 @@ fn test_diff_json_rename_with_ai_edit_exact_stats() {
         "git_lines_deleted": 1
     });
     let expected_breakdown =
-        BTreeMap::from([("cursor::gpt-4o".to_string(), tool_model_stats(2, 3, 0))]);
+        BTreeMap::from([("cursor::gpt-4o".to_string(), tool_model_stats(2, 2, 0))]);
     assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
 
     let files = diff["files"].as_object().expect("files should be object");
@@ -2302,7 +2338,10 @@ fn test_diff_json_deleted_hunks_line_level_exact_mapping() {
             prompt_id: Some(source_prompt_id),
         },
     ];
-    assert_eq!(deletion_hunks, expected);
+    // Strip trace IDs from actual hunks for comparison (sessions format includes trace IDs)
+    let deletion_hunks_normalized: Vec<JsonHunk> =
+        deletion_hunks.iter().map(|h| h.strip_trace_id()).collect();
+    assert_eq!(deletion_hunks_normalized, expected);
 
     let expected_commit_keys = BTreeSet::from([
         source_commit.commit_sha.clone(),
@@ -2348,8 +2387,14 @@ fn test_diff_json_deleted_hunks_exact_replacement_from_known_origin_commit() {
     let deletion_hunks = parse_json_hunks(&json, "replacement_exact.txt", "deletion");
     let addition_hunks = parse_json_hunks(&json, "replacement_exact.txt", "addition");
 
+    // Strip trace IDs for comparison (sessions format includes trace IDs)
+    let deletion_hunks_normalized: Vec<JsonHunk> =
+        deletion_hunks.iter().map(|h| h.strip_trace_id()).collect();
+    let addition_hunks_normalized: Vec<JsonHunk> =
+        addition_hunks.iter().map(|h| h.strip_trace_id()).collect();
+
     assert_eq!(
-        deletion_hunks,
+        deletion_hunks_normalized,
         vec![JsonHunk {
             commit_sha: commit_b.commit_sha.clone(),
             content_hash: sha256_hex("a"),
@@ -2362,7 +2407,7 @@ fn test_diff_json_deleted_hunks_exact_replacement_from_known_origin_commit() {
         }]
     );
     assert_eq!(
-        addition_hunks,
+        addition_hunks_normalized,
         vec![JsonHunk {
             commit_sha: commit_b.commit_sha.clone(),
             content_hash: sha256_hex("b"),

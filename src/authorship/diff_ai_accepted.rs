@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
 use crate::authorship::authorship_log::SessionRecord;
+use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
 use crate::commands::blame::GitAiBlameOptions;
 use crate::error::GitAiError;
-use crate::git::repository::Repository;
 use crate::git::refs::get_reference_as_authorship_log_v3;
+use crate::git::repository::Repository;
 
 #[derive(Debug, Default)]
 pub struct DiffAiAcceptedStats {
@@ -86,7 +86,8 @@ pub fn diff_ai_accepted_stats(
 
                     // Look up the tool/model for this session
                     if let Some(record) = session_cache.get(session_key) {
-                        let tool_model = format!("{}::{}", record.agent_id.tool, record.agent_id.model);
+                        let tool_model =
+                            format!("{}::{}", record.agent_id.tool, record.agent_id.model);
                         author_tool_map.insert(author_hash.clone(), tool_model);
                     }
                 }

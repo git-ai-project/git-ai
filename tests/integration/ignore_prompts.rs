@@ -105,23 +105,23 @@ fn test_checkpoint_with_prompt_sharing_enabled() {
     repo.git(&["add", "-A"]).unwrap();
     let commit = repo.commit("Add example").expect("commit should succeed");
 
-    // Verify we have the AI prompt in the commit
+    // Verify we have the AI session in the commit
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log when prompt sharing is enabled"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected AI sessions in authorship log when prompt sharing is enabled"
     );
 
-    // Verify the prompt message is captured
-    let prompts: Vec<_> = commit.authorship_log.metadata.prompts.values().collect();
-    assert_eq!(prompts.len(), 1, "Expected exactly one prompt");
-    let prompt = prompts[0];
+    // Verify the session message is captured
+    let sessions: Vec<_> = commit.authorship_log.metadata.sessions.values().collect();
+    assert_eq!(sessions.len(), 1, "Expected exactly one session");
+    let session = sessions[0];
     assert!(
-        !prompt.messages.is_empty(),
-        "Expected messages in prompt when sharing is enabled"
+        !session.messages.is_empty(),
+        "Expected messages in session when sharing is enabled"
     );
 
     // First message should be the user message
-    if let Some(Message::User { text, .. }) = prompt.messages.first() {
+    if let Some(Message::User { text, .. }) = session.messages.first() {
         assert_eq!(text, "Add example file");
     } else {
         panic!("Expected first message to be a user message");
@@ -172,21 +172,21 @@ fn test_checkpoint_with_prompt_sharing_disabled_strips_messages() {
     // Verify commit succeeded
     assert!(!commit.commit_sha.is_empty());
 
-    // KEY ASSERTION: With prompt sharing disabled, the prompt RECORD should exist
+    // KEY ASSERTION: With prompt sharing disabled, the session RECORD should exist
     // (so we know AI was involved) but the MESSAGES should be empty (stripped)
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected prompt record to exist even when prompt sharing is disabled"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected session record to exist even when prompt sharing is disabled"
     );
 
-    let prompts: Vec<_> = commit.authorship_log.metadata.prompts.values().collect();
-    assert_eq!(prompts.len(), 1, "Expected exactly one prompt record");
+    let sessions: Vec<_> = commit.authorship_log.metadata.sessions.values().collect();
+    assert_eq!(sessions.len(), 1, "Expected exactly one session record");
 
     // The messages should be EMPTY because prompt sharing is disabled
     assert!(
-        prompts[0].messages.is_empty(),
+        sessions[0].messages.is_empty(),
         "Expected messages to be stripped (empty) when prompt sharing is disabled, but found: {:?}",
-        prompts[0].messages
+        sessions[0].messages
     );
 }
 
@@ -233,31 +233,31 @@ fn test_multiple_checkpoints_with_messages() {
         .commit("Add both files")
         .expect("commit should succeed");
 
-    // Verify we captured both prompts
+    // Verify we captured both sessions
     assert_eq!(
-        commit.authorship_log.metadata.prompts.len(),
+        commit.authorship_log.metadata.sessions.len(),
         2,
-        "Expected 2 prompts in authorship log"
+        "Expected 2 sessions in authorship log"
     );
 
-    // Collect prompts into a Vec for indexed access
-    let prompts: Vec<_> = commit.authorship_log.metadata.prompts.values().collect();
-    assert_eq!(prompts.len(), 2, "Expected exactly 2 prompts");
+    // Collect sessions into a Vec for indexed access
+    let sessions: Vec<_> = commit.authorship_log.metadata.sessions.values().collect();
+    assert_eq!(sessions.len(), 2, "Expected exactly 2 sessions");
 
-    // Verify both prompts have messages (order may vary due to BTreeMap)
-    for prompt in &prompts {
+    // Verify both sessions have messages (order may vary due to BTreeMap)
+    for session in &sessions {
         assert!(
-            !prompt.messages.is_empty(),
-            "Expected messages in prompt, but found empty messages for agent_id: {:?}",
-            prompt.agent_id
+            !session.messages.is_empty(),
+            "Expected messages in session, but found empty messages for agent_id: {:?}",
+            session.agent_id
         );
     }
 
     // Verify we have the expected user messages (content may be in either order)
-    let user_messages: Vec<&str> = prompts
+    let user_messages: Vec<&str> = sessions
         .iter()
-        .filter_map(|p| {
-            if let Some(Message::User { text, .. }) = p.messages.first() {
+        .filter_map(|s| {
+            if let Some(Message::User { text, .. }) = s.messages.first() {
                 Some(text.as_str())
             } else {
                 None

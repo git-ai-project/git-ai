@@ -1926,10 +1926,8 @@ async fn get_checkpoint_entries(
             // AI kinds: compose session_id::trace_id
             agent_run_result
                 .map(|result| {
-                    let session_id = generate_session_id(
-                        &result.agent_id.id,
-                        &result.agent_id.tool,
-                    );
+                    let session_id =
+                        generate_session_id(&result.agent_id.id, &result.agent_id.tool);
                     format!("{}::{}", session_id, trace_id)
                 })
                 .unwrap_or_else(|| kind.to_str())

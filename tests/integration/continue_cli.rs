@@ -576,30 +576,30 @@ fn test_continue_cli_e2e_with_attribution() {
         "Should have at least one attestation"
     );
 
-    // Verify the metadata has prompts with transcript data
+    // Verify the metadata has sessions with transcript data
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Should have at least one prompt record in metadata"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Should have at least one session record in metadata"
     );
 
-    // Get the first prompt record
-    let prompt_record = commit
+    // Get the first session record
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Should have at least one prompt record");
+        .expect("Should have at least one session record");
 
-    // Verify that the prompt record has messages (transcript)
+    // Verify that the session record has messages (transcript)
     assert!(
-        !prompt_record.messages.is_empty(),
-        "Prompt record should contain messages from the continue-cli session"
+        !session_record.messages.is_empty(),
+        "Session record should contain messages from the continue-cli session"
     );
 
     // Verify the model was preserved correctly
     assert_eq!(
-        prompt_record.agent_id.model, "claude-3.5-sonnet",
+        session_record.agent_id.model, "claude-3.5-sonnet",
         "Model should be 'claude-3.5-sonnet'"
     );
 }
@@ -747,19 +747,19 @@ fn test_continue_cli_e2e_preserves_model_on_commit() {
     let commit = repo.stage_all_and_commit("Add line").unwrap();
 
     // Verify the model was preserved (not overwritten by post-commit)
-    let prompt_record = commit
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Should have a prompt record");
+        .expect("Should have a session record");
 
     assert_eq!(
-        prompt_record.agent_id.model, "claude-opus-4",
+        session_record.agent_id.model, "claude-opus-4",
         "Model should be preserved from hook_input"
     );
-    assert_eq!(prompt_record.agent_id.tool, "continue-cli");
+    assert_eq!(session_record.agent_id.tool, "continue-cli");
 }
 
 crate::reuse_tests_in_worktree!(

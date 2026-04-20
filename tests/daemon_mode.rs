@@ -972,19 +972,20 @@ fn assert_post_commit_uploads_prompt_cas(mode: GitTestMode) {
             &note,
         )
         .expect("authorship note should deserialize");
-    let prompt = log
+    // AI checkpoints now produce sessions (not prompts)
+    let session = log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("authorship note should contain one prompt");
+        .expect("authorship note should contain one session");
     assert!(
-        prompt.messages.is_empty(),
-        "prompt messages should be stripped from the note after CAS handoff"
+        session.messages.is_empty(),
+        "session messages should be stripped from the note after CAS handoff"
     );
     assert!(
-        prompt.messages_url.is_some(),
-        "prompt should retain a CAS URL after upload handoff"
+        session.messages_url.is_some(),
+        "session should retain a CAS URL after upload handoff"
     );
 }
 

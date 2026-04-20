@@ -293,9 +293,10 @@ pub(crate) fn restore_stash_attributions(
         .collect();
 
     let initial_humans = authorship_log.metadata.humans.clone();
+    let initial_sessions = authorship_log.metadata.sessions.clone();
 
     // Write INITIAL attributions to working log
-    if !initial_files.is_empty() || !initial_prompts.is_empty() {
+    if !initial_files.is_empty() || !initial_prompts.is_empty() || !initial_sessions.is_empty() {
         let working_log = repo.storage.working_log_for_base_commit(head_sha)?;
         let initial_file_contents =
             load_stashed_file_contents(repo, stash_sha, initial_files.keys())?;
@@ -304,6 +305,7 @@ pub(crate) fn restore_stash_attributions(
             initial_prompts.clone(),
             initial_humans,
             initial_file_contents,
+            initial_sessions,
         )?;
 
         tracing::debug!(

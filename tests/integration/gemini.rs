@@ -602,30 +602,30 @@ fn test_gemini_e2e_with_attribution() {
         "Should have at least one attestation"
     );
 
-    // Verify the metadata has prompts with transcript data
+    // Verify the metadata has sessions with transcript data
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Should have at least one prompt record in metadata"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Should have at least one session record in metadata"
     );
 
-    // Get the first prompt record
-    let prompt_record = commit
+    // Get the first session record
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Should have at least one prompt record");
+        .expect("Should have at least one session record");
 
-    // Verify that the prompt record has messages (transcript)
+    // Verify that the session record has messages (transcript)
     assert!(
-        !prompt_record.messages.is_empty(),
-        "Prompt record should contain messages from the gemini session"
+        !session_record.messages.is_empty(),
+        "Session record should contain messages from the gemini session"
     );
 
     // Verify the model was extracted correctly
     assert_eq!(
-        prompt_record.agent_id.model, "gemini-2.5-flash",
+        session_record.agent_id.model, "gemini-2.5-flash",
         "Model should be 'gemini-2.5-flash'"
     );
 }
@@ -814,31 +814,31 @@ fn test_gemini_e2e_with_resync() {
     let mut file = repo.filename("test.ts");
     file.assert_lines_and_blame(crate::lines!["const x = 1;".human(), "const y = 2;".ai(),]);
 
-    // Verify the authorship log contains prompts
+    // Verify the authorship log contains sessions
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Should have at least one prompt record"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Should have at least one session record"
     );
 
-    // Get the first prompt record
-    let prompt_record = commit
+    // Get the first session record
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Should have at least one prompt record");
+        .expect("Should have at least one session record");
 
     // Verify that resync logic picked up the updated message
     let _transcript_json =
-        serde_json::to_string(&prompt_record.messages).expect("Should serialize messages");
+        serde_json::to_string(&session_record.messages).expect("Should serialize messages");
 
     // Note: The resync logic reads from metadata.transcript_path, so we need to verify
     // that the post_commit logic would pick up the new message if transcript_path is in metadata
     // For now, we just verify the basic structure is correct
     assert!(
-        !prompt_record.messages.is_empty(),
-        "Prompt record should contain messages"
+        !session_record.messages.is_empty(),
+        "Session record should contain messages"
     );
 }
 

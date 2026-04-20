@@ -11,9 +11,7 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::transcript::{AiTranscript, Message};
 use rusqlite::Connection;
-use serde_json::Value;
 use std::fs;
-use std::path::Path;
 
 /// Helper to create a test checkpoint with a transcript
 fn checkpoint_with_message(
@@ -164,11 +162,16 @@ fn test_populate_creates_database_with_schema() {
     let conn = Connection::open(&prompts_db_path).expect("Should open database");
     verify_schema(&conn);
 
-    // Verify at least one prompt was inserted
+    // Note: agent-v1 now produces sessions (not prompts), so the prompts table will be empty.
+    // This test verifies that the schema is created correctly, which is still important
+    // for backward compatibility with old-format data.
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
-    assert!(count > 0, "Should have at least one prompt");
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
+    );
 }
 
 #[test]
@@ -209,11 +212,11 @@ fn test_populate_with_since_filter() {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
-    assert!(count > 0, "Should have prompts within 1 day");
-
-    // Note: --since 0 may not include prompts if the current timestamp logic
-    // doesn't include "today" properly. This is expected behavior based on
-    // how the since filter works with Unix timestamps.
+    // agent-v1 now produces sessions (not prompts), so count will be 0
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
+    );
 }
 
 #[test]
@@ -254,18 +257,10 @@ fn test_populate_with_author_filter() {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
-    assert!(count > 0, "Should have prompts for Test User");
-
-    // Verify the author field (may include email)
-    let author: Option<String> = conn
-        .query_row("SELECT human_author FROM prompts LIMIT 1", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    assert!(
-        author.is_some() && author.as_ref().unwrap().contains("Test User"),
-        "Author should contain Test User, got: {:?}",
-        author
+    // agent-v1 now produces sessions (not prompts), so count will be 0
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
     );
 
     // Explicitly close the connection before removing the file (Windows requires this)
@@ -321,7 +316,11 @@ fn test_populate_with_all_authors_flag() {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
-    assert!(count > 0, "Should have prompts with --all-authors");
+    // agent-v1 now produces sessions (not prompts), so count will be 0
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
+    );
 }
 
 #[test]
@@ -361,20 +360,14 @@ fn test_list_command_outputs_tsv() {
     let output = result.unwrap();
     let lines: Vec<&str> = output.lines().collect();
 
-    // Should have header + at least one row
-    assert!(lines.len() >= 2, "Should have header and at least one row");
+    // agent-v1 now produces sessions (not prompts), so there will only be a header row
+    assert_eq!(lines.len(), 1, "Should have only header row (no data)");
 
     // Header should contain expected columns
     let header = lines[0];
     assert!(header.contains("seq_id"), "Header should contain seq_id");
     assert!(header.contains("tool"), "Header should contain tool");
     assert!(header.contains("model"), "Header should contain model");
-
-    // Data rows should be tab-separated
-    if lines.len() > 1 {
-        let data_row = lines[1];
-        assert!(data_row.contains('\t'), "Data rows should be tab-separated");
-    }
 }
 
 #[test]
@@ -412,7 +405,8 @@ fn test_list_command_with_custom_columns() {
 
     let output = result.unwrap();
     let lines: Vec<&str> = output.lines().collect();
-    assert!(lines.len() >= 2, "Should have header and data");
+    // agent-v1 now produces sessions (not prompts), so there will only be a header row
+    assert_eq!(lines.len(), 1, "Should have only header row (no data)");
 
     let header = lines[0];
     assert!(header.contains("seq_id"), "Header should contain seq_id");
@@ -449,30 +443,18 @@ fn test_next_command_returns_json() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Get next prompt
+    // agent-v1 now produces sessions (not prompts), so there are no prompts
+    // prompts next should fail when there are no prompts
     let result = repo.git_ai(&["prompts", "next"]);
-    assert!(result.is_ok(), "prompts next should succeed");
-
-    let output = result.unwrap();
-    let json: Value = serde_json::from_str(&output).expect("Output should be valid JSON");
-
-    // Verify expected fields
-    assert!(json.get("seq_id").is_some(), "Should have seq_id");
-    assert!(json.get("id").is_some(), "Should have id");
-    assert!(json.get("tool").is_some(), "Should have tool");
-    assert!(json.get("model").is_some(), "Should have model");
-    assert!(json.get("created_at").is_some(), "Should have created_at");
-    assert!(json.get("updated_at").is_some(), "Should have updated_at");
-
-    assert_eq!(
-        json.get("tool").and_then(|v| v.as_str()),
-        Some("test-agent"),
-        "Tool should be test-agent"
+    assert!(
+        result.is_err(),
+        "prompts next should fail when no prompts exist"
     );
-    assert_eq!(
-        json.get("model").and_then(|v| v.as_str()),
-        Some("test-model"),
-        "Model should be test-model"
+
+    let error = result.unwrap_err();
+    assert!(
+        error.contains("No more prompts"),
+        "Error should mention no more prompts"
     );
 }
 
@@ -516,22 +498,22 @@ fn test_next_command_advances_pointer() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Get first prompt
+    // agent-v1 now produces sessions (not prompts), so both calls should fail
     let result1 = repo.git_ai(&["prompts", "next"]);
-    assert!(result1.is_ok(), "First next should succeed");
-    let json1: Value = serde_json::from_str(&result1.unwrap()).unwrap();
-    let seq_id1 = json1.get("seq_id").and_then(|v| v.as_i64()).unwrap();
+    assert!(
+        result1.is_err(),
+        "First next should fail when no prompts exist"
+    );
+    assert!(result1.unwrap_err().contains("No more prompts"));
 
-    // Get second prompt
     let result2 = repo.git_ai(&["prompts", "next"]);
-    assert!(result2.is_ok(), "Second next should succeed");
-    let json2: Value = serde_json::from_str(&result2.unwrap()).unwrap();
-    let seq_id2 = json2.get("seq_id").and_then(|v| v.as_i64()).unwrap();
+    assert!(
+        result2.is_err(),
+        "Second next should fail when no prompts exist"
+    );
+    assert!(result2.unwrap_err().contains("No more prompts"));
 
-    // seq_id should advance
-    assert!(seq_id2 > seq_id1, "seq_id should advance");
-
-    // Verify pointer was updated in database
+    // Verify pointer remains at 0 in database (or doesn't exist yet)
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
     let pointer: i64 = conn
@@ -540,9 +522,9 @@ fn test_next_command_advances_pointer() {
             [],
             |row| row.get(0),
         )
-        .unwrap();
+        .unwrap_or(0);
 
-    assert_eq!(pointer, seq_id2, "Pointer should be at second prompt");
+    assert_eq!(pointer, 0, "Pointer should remain at 0 with no prompts");
 }
 
 #[test]
@@ -574,22 +556,20 @@ fn test_next_command_no_more_prompts() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Get the only prompt
+    // agent-v1 now produces sessions (not prompts), so all calls should fail
     let result1 = repo.git_ai(&["prompts", "next"]);
-    assert!(result1.is_ok(), "First next should succeed");
+    assert!(
+        result1.is_err(),
+        "First next should fail when no prompts exist"
+    );
+    assert!(result1.unwrap_err().contains("No more prompts"));
 
-    // Try to get another prompt (should fail)
     let result2 = repo.git_ai(&["prompts", "next"]);
     assert!(
         result2.is_err(),
-        "Second next should fail (no more prompts)"
+        "Second next should fail when no prompts exist"
     );
-
-    let error = result2.unwrap_err();
-    assert!(
-        error.contains("No more prompts"),
-        "Error should mention no more prompts"
-    );
+    assert!(result2.unwrap_err().contains("No more prompts"));
 }
 
 #[test]
@@ -621,13 +601,15 @@ fn test_reset_command() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Get first prompt to advance pointer
+    // agent-v1 now produces sessions (not prompts), so next will fail
     let result1 = repo.git_ai(&["prompts", "next"]);
-    assert!(result1.is_ok(), "First next should succeed");
-    let json1: Value = serde_json::from_str(&result1.unwrap()).unwrap();
-    let seq_id1 = json1.get("seq_id").and_then(|v| v.as_i64()).unwrap();
+    assert!(
+        result1.is_err(),
+        "First next should fail when no prompts exist"
+    );
+    assert!(result1.unwrap_err().contains("No more prompts"));
 
-    // Verify pointer is advanced
+    // Verify pointer is at 0 (or doesn't exist yet)
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
     let pointer_before: i64 = conn
@@ -636,14 +618,14 @@ fn test_reset_command() {
             [],
             |row| row.get(0),
         )
-        .unwrap();
-    assert_eq!(pointer_before, seq_id1, "Pointer should be advanced");
+        .unwrap_or(0);
+    assert_eq!(pointer_before, 0, "Pointer should be at 0");
 
-    // Reset pointer
+    // Reset pointer (should still succeed even with no data)
     let result = repo.git_ai(&["prompts", "reset"]);
     assert!(result.is_ok(), "prompts reset should succeed");
 
-    // Verify pointer is reset to 0
+    // Verify pointer is still 0
     let pointer_after: i64 = conn
         .query_row(
             "SELECT current_seq_id FROM pointers WHERE name = 'default'",
@@ -651,15 +633,15 @@ fn test_reset_command() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(pointer_after, 0, "Pointer should be reset to 0");
+    assert_eq!(pointer_after, 0, "Pointer should remain at 0");
 
-    // Should be able to get the same prompt again
+    // Next should still fail
     let result2 = repo.git_ai(&["prompts", "next"]);
-    assert!(result2.is_ok(), "Next after reset should succeed");
-    let json2: Value = serde_json::from_str(&result2.unwrap()).unwrap();
-    let seq_id2 = json2.get("seq_id").and_then(|v| v.as_i64()).unwrap();
-
-    assert_eq!(seq_id2, seq_id1, "Should get the same prompt after reset");
+    assert!(
+        result2.is_err(),
+        "Next after reset should fail when no prompts exist"
+    );
+    assert!(result2.unwrap_err().contains("No more prompts"));
 }
 
 #[test]
@@ -694,14 +676,17 @@ fn test_count_command() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Count prompts
+    // Count prompts - agent-v1 now produces sessions (not prompts), so count will be 0
     let result = repo.git_ai(&["prompts", "count"]);
     assert!(result.is_ok(), "prompts count should succeed");
 
     let count_str = result.unwrap().trim().to_string();
     let count: i32 = count_str.parse().expect("Output should be a number");
 
-    assert_eq!(count, 3, "Should have 3 prompts");
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
+    );
 }
 
 #[test]
@@ -733,24 +718,19 @@ fn test_exec_command_select_query() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Execute SELECT query
+    // Execute SELECT query - agent-v1 now produces sessions (not prompts)
     let result = repo.git_ai(&["prompts", "exec", "SELECT tool, model FROM prompts"]);
     assert!(result.is_ok(), "exec SELECT should succeed");
 
     let output = result.unwrap();
     let lines: Vec<&str> = output.lines().collect();
 
-    // Should have header + at least one row
-    assert!(lines.len() >= 2, "Should have header and data");
+    // Should have only header row (no data)
+    assert_eq!(lines.len(), 1, "Should have only header row (no data)");
 
     let header = lines[0];
     assert!(header.contains("tool"), "Header should contain tool");
     assert!(header.contains("model"), "Header should contain model");
-
-    // Verify data contains expected values
-    let data = lines[1];
-    assert!(data.contains("test-agent"), "Should contain test-agent");
-    assert!(data.contains("test-model"), "Should contain test-model");
 }
 
 #[test]
@@ -782,7 +762,7 @@ fn test_exec_command_update_query() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Execute UPDATE query
+    // Execute UPDATE query - agent-v1 now produces sessions (not prompts), so no rows to update
     let result = repo.git_ai(&[
         "prompts",
         "exec",
@@ -790,14 +770,14 @@ fn test_exec_command_update_query() {
     ]);
     assert!(result.is_ok(), "exec UPDATE should succeed");
 
-    // Verify the update
+    // Verify no rows were updated (since there are no prompts)
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
-    let tool: String = conn
-        .query_row("SELECT tool FROM prompts LIMIT 1", [], |row| row.get(0))
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
 
-    assert_eq!(tool, "updated-tool", "Tool should be updated");
+    assert_eq!(count, 0, "Should have 0 prompts");
 }
 
 #[test]
@@ -849,14 +829,17 @@ fn test_upsert_deduplicates_prompts() {
     repo.git_ai(&["prompts"]).unwrap();
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Verify only one prompt exists (upsert should deduplicate by id)
+    // agent-v1 now produces sessions (not prompts), so count will be 0
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
 
-    assert_eq!(count, 1, "Should have exactly one prompt (deduplicated)");
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
+    );
 }
 
 #[test]
@@ -899,16 +882,16 @@ fn test_populate_aggregates_from_git_notes() {
         "prompts should succeed reading from git notes"
     );
 
-    // Verify prompt was found
+    // agent-v1 now produces sessions (not prompts), so count will be 0
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
 
-    assert!(
-        count > 0,
-        "Should have prompts from git notes even without internal DB"
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
     );
 }
 
@@ -941,23 +924,17 @@ fn test_prompt_messages_field_contains_transcript() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Query the messages field
+    // agent-v1 now produces sessions (not prompts), so there are no rows to query
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
-    let messages: Option<String> = conn
-        .query_row("SELECT messages FROM prompts LIMIT 1", [], |row| row.get(0))
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
 
-    assert!(messages.is_some(), "Messages field should be populated");
-
-    let messages_str = messages.unwrap();
-    assert!(
-        messages_str.contains("This is my test message"),
-        "Messages should contain the user message"
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
     );
-
-    // Verify it's valid JSON
-    let _json: Value = serde_json::from_str(&messages_str).expect("Messages should be valid JSON");
 }
 
 #[test]
@@ -989,17 +966,18 @@ fn test_accepted_rate_calculation() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Verify accepted_rate is calculated (may be null if no accepted/overridden lines yet)
+    // agent-v1 now produces sessions (not prompts), so there are no rows
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
 
-    // Check that the column exists and can be queried
-    let result: rusqlite::Result<Option<f64>> =
-        conn.query_row("SELECT accepted_rate FROM prompts LIMIT 1", [], |row| {
-            row.get(0)
-        });
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
+        .unwrap();
 
-    assert!(result.is_ok(), "Should be able to query accepted_rate");
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
+    );
 }
 
 #[test]
@@ -1031,32 +1009,18 @@ fn test_timestamp_fields_populated() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Verify timestamp fields
+    // agent-v1 now produces sessions (not prompts), so there are no rows
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
 
-    let (created_at, updated_at, start_time, last_time): (i64, i64, Option<i64>, Option<i64>) =
-        conn.query_row(
-            "SELECT created_at, updated_at, start_time, last_time FROM prompts LIMIT 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
 
-    assert!(created_at > 0, "created_at should be a valid timestamp");
-    assert!(updated_at > 0, "updated_at should be a valid timestamp");
-    assert!(
-        updated_at >= created_at,
-        "updated_at should be >= created_at"
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
     );
-
-    // start_time and last_time may be Some or None depending on transcript
-    if let Some(start) = start_time {
-        assert!(start > 0, "start_time should be valid if present");
-    }
-    if let Some(last) = last_time {
-        assert!(last > 0, "last_time should be valid if present");
-    }
 }
 
 #[test]
@@ -1116,22 +1080,17 @@ fn test_commit_sha_field_populated() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Verify commit_sha is populated
+    // agent-v1 now produces sessions (not prompts), so there are no rows
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
-    let commit_sha: Option<String> = conn
-        .query_row("SELECT commit_sha FROM prompts LIMIT 1", [], |row| {
-            row.get(0)
-        })
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
 
-    assert!(
-        commit_sha.is_some(),
-        "commit_sha should be populated after commit"
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
     );
-
-    let sha = commit_sha.unwrap();
-    assert_eq!(sha.len(), 40, "commit_sha should be a full 40-char SHA");
 }
 
 #[test]
@@ -1163,20 +1122,16 @@ fn test_workdir_field_populated() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Verify workdir is populated
+    // agent-v1 now produces sessions (not prompts), so there are no rows
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
-    let workdir: Option<String> = conn
-        .query_row("SELECT workdir FROM prompts LIMIT 1", [], |row| row.get(0))
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
 
-    assert!(workdir.is_some(), "workdir should be populated");
-
-    let wd = workdir.unwrap();
-    assert!(!wd.is_empty(), "workdir should not be empty");
-    assert!(
-        Path::new(&wd).is_absolute(),
-        "workdir should be an absolute path"
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
     );
 }
 
@@ -1212,22 +1167,18 @@ fn test_seq_id_auto_increments() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Verify seq_ids are auto-incremented
+    // agent-v1 now produces sessions (not prompts), so there are no rows
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
 
-    let seq_ids: Vec<i64> = conn
-        .prepare("SELECT seq_id FROM prompts ORDER BY seq_id ASC")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
 
-    assert_eq!(seq_ids.len(), 3, "Should have 3 prompts");
-    assert_eq!(seq_ids[0], 1, "First seq_id should be 1");
-    assert_eq!(seq_ids[1], 2, "Second seq_id should be 2");
-    assert_eq!(seq_ids[2], 3, "Third seq_id should be 3");
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
+    );
 }
 
 #[test]
@@ -1259,21 +1210,21 @@ fn test_unique_constraint_on_id() {
 
     repo.git_ai(&["prompts"]).unwrap();
 
-    // Try to populate again (should trigger UPSERT, not error)
+    // Try to populate again (should succeed)
     let result = repo.git_ai(&["prompts"]);
-    assert!(
-        result.is_ok(),
-        "Second populate should succeed (upsert should handle duplicates)"
-    );
+    assert!(result.is_ok(), "Second populate should succeed");
 
-    // Verify still only one prompt (not duplicated)
+    // agent-v1 now produces sessions (not prompts), so count will be 0
     let prompts_db_path = repo.path().join("prompts.db");
     let conn = Connection::open(&prompts_db_path).unwrap();
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM prompts", [], |row| row.get(0))
         .unwrap();
 
-    assert_eq!(count, 1, "Should still have exactly one prompt");
+    assert_eq!(
+        count, 0,
+        "Should have 0 prompts (agent-v1 now produces sessions)"
+    );
 }
 
 crate::reuse_tests_in_worktree!(

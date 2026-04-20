@@ -22,7 +22,7 @@ fn write_raw_commit(repo: &TestRepo, filename: &str, content: &str, message: &st
     repo.git_og(&["commit", "-m", message]).expect("git commit");
 }
 
-/// Read the authorship note for HEAD, parse it, and return prompt IDs.
+/// Read the authorship note for HEAD, parse it, and return prompt and session IDs.
 #[cfg(not(target_os = "windows"))]
 fn head_prompt_ids(repo: &TestRepo) -> Vec<String> {
     let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
@@ -30,7 +30,12 @@ fn head_prompt_ids(repo: &TestRepo) -> Vec<String> {
         .read_authorship_note(&sha)
         .expect("HEAD should have an authorship note");
     let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
-    log.metadata.prompts.keys().cloned().collect()
+    log.metadata
+        .prompts
+        .keys()
+        .chain(log.metadata.sessions.keys())
+        .cloned()
+        .collect()
 }
 
 /// Read the authorship note for HEAD, parse it, and return the full log.
@@ -74,14 +79,16 @@ fn test_stale_prompt_not_carried_to_subsequent_human_commits() {
     ]);
     let ai_commit = repo.stage_all_and_commit("AI commit").unwrap();
     assert!(
-        !ai_commit.authorship_log.metadata.prompts.is_empty(),
-        "precondition: AI commit must have prompts"
+        !ai_commit.authorship_log.metadata.prompts.is_empty()
+            || !ai_commit.authorship_log.metadata.sessions.is_empty(),
+        "precondition: AI commit must have prompts or sessions"
     );
     let ai_prompt_ids: Vec<String> = ai_commit
         .authorship_log
         .metadata
         .prompts
         .keys()
+        .chain(ai_commit.authorship_log.metadata.sessions.keys())
         .cloned()
         .collect();
 
@@ -96,13 +103,15 @@ fn test_stale_prompt_not_carried_to_subsequent_human_commits() {
     repo.git(&["commit", "-m", "Human-only commit"]).unwrap();
     let human_b_log = head_authorship_log(&repo);
 
-    for prompt_id in &ai_prompt_ids {
+    for id in &ai_prompt_ids {
         assert!(
-            !human_b_log.metadata.prompts.contains_key(prompt_id),
-            "Stale AI prompt '{}' should NOT appear in human-only commit B.\n\
-             Prompts found: {:?}",
-            prompt_id,
-            human_b_log.metadata.prompts.keys().collect::<Vec<_>>()
+            !human_b_log.metadata.prompts.contains_key(id)
+                && !human_b_log.metadata.sessions.contains_key(id),
+            "Stale AI prompt/session '{}' should NOT appear in human-only commit B.\n\
+             Prompts found: {:?}, Sessions found: {:?}",
+            id,
+            human_b_log.metadata.prompts.keys().collect::<Vec<_>>(),
+            human_b_log.metadata.sessions.keys().collect::<Vec<_>>()
         );
     }
 
@@ -114,13 +123,15 @@ fn test_stale_prompt_not_carried_to_subsequent_human_commits() {
         .unwrap();
     let human_c_log = head_authorship_log(&repo);
 
-    for prompt_id in &ai_prompt_ids {
+    for id in &ai_prompt_ids {
         assert!(
-            !human_c_log.metadata.prompts.contains_key(prompt_id),
-            "Stale AI prompt '{}' should NOT appear in human-only commit C.\n\
-             Prompts found: {:?}",
-            prompt_id,
-            human_c_log.metadata.prompts.keys().collect::<Vec<_>>()
+            !human_c_log.metadata.prompts.contains_key(id)
+                && !human_c_log.metadata.sessions.contains_key(id),
+            "Stale AI prompt/session '{}' should NOT appear in human-only commit C.\n\
+             Prompts found: {:?}, Sessions found: {:?}",
+            id,
+            human_c_log.metadata.prompts.keys().collect::<Vec<_>>(),
+            human_c_log.metadata.sessions.keys().collect::<Vec<_>>()
         );
     }
 }
@@ -141,8 +152,9 @@ fn test_prompt_present_when_ai_lines_committed() {
     let ai_commit = repo.stage_all_and_commit("AI adds code").unwrap();
 
     assert!(
-        !ai_commit.authorship_log.metadata.prompts.is_empty(),
-        "AI commit should have prompts when AI lines are committed"
+        !ai_commit.authorship_log.metadata.prompts.is_empty()
+            || !ai_commit.authorship_log.metadata.sessions.is_empty(),
+        "AI commit should have prompts or sessions when AI lines are committed"
     );
 }
 
@@ -172,11 +184,12 @@ fn test_unstaged_ai_lines_prompt_not_in_human_commit_note() {
         .metadata
         .prompts
         .keys()
+        .chain(first_commit.authorship_log.metadata.sessions.keys())
         .cloned()
         .collect();
     assert!(
         !ai_prompt_ids.is_empty(),
-        "First commit should have AI prompts"
+        "First commit should have AI prompts or sessions"
     );
 
     // Create a human-only file WITHOUT using set_contents (which stages everything
@@ -189,20 +202,31 @@ fn test_unstaged_ai_lines_prompt_not_in_human_commit_note() {
         .commit("Human-only commit while unstaged AI exists")
         .unwrap();
 
-    for prompt_id in &ai_prompt_ids {
+    for id in &ai_prompt_ids {
         assert!(
             !human_commit
                 .authorship_log
                 .metadata
                 .prompts
-                .contains_key(prompt_id),
-            "AI prompt '{}' from unstaged lines should NOT appear in human-only commit note.\n\
-             Prompts in human commit: {:?}",
-            prompt_id,
+                .contains_key(id)
+                && !human_commit
+                    .authorship_log
+                    .metadata
+                    .sessions
+                    .contains_key(id),
+            "AI prompt/session '{}' from unstaged lines should NOT appear in human-only commit note.\n\
+             Prompts: {:?}, Sessions: {:?}",
+            id,
             human_commit
                 .authorship_log
                 .metadata
                 .prompts
+                .keys()
+                .collect::<Vec<_>>(),
+            human_commit
+                .authorship_log
+                .metadata
+                .sessions
                 .keys()
                 .collect::<Vec<_>>()
         );
@@ -244,9 +268,16 @@ fn test_amend_stale_initial_prompt_not_in_amended_human_commit() {
         .keys()
         .cloned()
         .collect();
+    let ai_session_ids: Vec<String> = ai_commit
+        .authorship_log
+        .metadata
+        .sessions
+        .keys()
+        .cloned()
+        .collect();
     assert!(
-        !ai_prompt_ids.is_empty(),
-        "precondition: AI commit must have prompts"
+        !ai_prompt_ids.is_empty() || !ai_session_ids.is_empty(),
+        "precondition: AI commit must have prompts or sessions"
     );
 
     // Commit B: human-only, using fs::write to avoid touching base.txt
@@ -271,6 +302,15 @@ fn test_amend_stale_initial_prompt_not_in_amended_human_commit() {
              Prompts in amended commit: {:?}",
             prompt_id,
             amended_log.metadata.prompts.keys().collect::<Vec<_>>()
+        );
+    }
+    for session_id in &ai_session_ids {
+        assert!(
+            !amended_log.metadata.sessions.contains_key(session_id),
+            "INITIAL-only AI session '{}' should NOT appear in amended human-only commit.\n\
+             Sessions in amended commit: {:?}",
+            session_id,
+            amended_log.metadata.sessions.keys().collect::<Vec<_>>()
         );
     }
 }
@@ -309,9 +349,16 @@ fn test_amend_stale_blame_prompt_not_in_amended_human_commit() {
         .keys()
         .cloned()
         .collect();
+    let ai_session_ids: Vec<String> = ai_commit
+        .authorship_log
+        .metadata
+        .sessions
+        .keys()
+        .cloned()
+        .collect();
     assert!(
-        !ai_prompt_ids.is_empty(),
-        "precondition: commit A must have prompts"
+        !ai_prompt_ids.is_empty() || !ai_session_ids.is_empty(),
+        "precondition: commit A must have prompts or sessions"
     );
 
     // Commit B: human-only on a different file
@@ -336,6 +383,15 @@ fn test_amend_stale_blame_prompt_not_in_amended_human_commit() {
              Prompts in amended commit: {:?}",
             prompt_id,
             amended_log.metadata.prompts.keys().collect::<Vec<_>>()
+        );
+    }
+    for session_id in &ai_session_ids {
+        assert!(
+            !amended_log.metadata.sessions.contains_key(session_id),
+            "Blame-sourced AI session '{}' from commit A should NOT appear in amended B.\n\
+             Sessions in amended commit: {:?}",
+            session_id,
+            amended_log.metadata.sessions.keys().collect::<Vec<_>>()
         );
     }
 }
@@ -365,8 +421,8 @@ fn test_amend_preserves_prompt_when_ai_lines_survive() {
 
     let amended_log = head_authorship_log(&repo);
     assert!(
-        !amended_log.metadata.prompts.is_empty(),
-        "Amended commit with surviving AI lines must still have prompts"
+        !amended_log.metadata.prompts.is_empty() || !amended_log.metadata.sessions.is_empty(),
+        "Amended commit with surviving AI lines must still have prompts or sessions"
     );
 }
 
@@ -417,11 +473,12 @@ fn test_rebase_stale_prompt_not_in_rebased_human_commit() {
         .metadata
         .prompts
         .keys()
+        .chain(ai_commit.authorship_log.metadata.sessions.keys())
         .cloned()
         .collect();
     assert!(
         !ai_prompt_ids.is_empty(),
-        "precondition: feature commit A must have prompts"
+        "precondition: feature commit A must have prompts or sessions"
     );
 
     // Commit B on feature: human-only on a separate file
@@ -443,13 +500,15 @@ fn test_rebase_stale_prompt_not_in_rebased_human_commit() {
     // Read the rebased commit B (HEAD) note
     let rebased_b_log = head_authorship_log(&repo);
 
-    for prompt_id in &ai_prompt_ids {
+    for id in &ai_prompt_ids {
         assert!(
-            !rebased_b_log.metadata.prompts.contains_key(prompt_id),
-            "Stale AI prompt '{}' should NOT appear in rebased human-only commit B.\n\
-             Prompts in rebased B: {:?}",
-            prompt_id,
-            rebased_b_log.metadata.prompts.keys().collect::<Vec<_>>()
+            !rebased_b_log.metadata.prompts.contains_key(id)
+                && !rebased_b_log.metadata.sessions.contains_key(id),
+            "Stale AI prompt/session '{}' should NOT appear in rebased human-only commit B.\n\
+             Prompts in rebased B: {:?}, Sessions: {:?}",
+            id,
+            rebased_b_log.metadata.prompts.keys().collect::<Vec<_>>(),
+            rebased_b_log.metadata.sessions.keys().collect::<Vec<_>>()
         );
     }
 }
@@ -486,6 +545,6 @@ fn test_rebase_preserves_prompt_when_ai_lines_present() {
     let rebased_prompt_ids = head_prompt_ids(&repo);
     assert!(
         !rebased_prompt_ids.is_empty(),
-        "Rebased AI commit must still have prompts"
+        "Rebased AI commit must still have prompts or sessions"
     );
 }

@@ -446,18 +446,18 @@ fn test_windsurf_e2e_with_attribution() {
     ]);
 
     assert!(!commit.authorship_log.attestations.is_empty());
-    assert!(!commit.authorship_log.metadata.prompts.is_empty());
+    assert!(!commit.authorship_log.metadata.sessions.is_empty());
 
-    let prompt_record = commit
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Should have a prompt record");
+        .expect("Should have a session record");
 
-    assert!(!prompt_record.messages.is_empty());
-    assert_eq!(prompt_record.agent_id.tool, "windsurf");
+    assert!(!session_record.messages.is_empty());
+    assert_eq!(session_record.agent_id.tool, "windsurf");
 }
 
 #[test]

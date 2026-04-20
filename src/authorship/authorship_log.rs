@@ -241,6 +241,23 @@ pub struct SessionRecord {
     pub custom_attributes: Option<HashMap<String, String>>,
 }
 
+impl SessionRecord {
+    /// Convert to a PromptRecord (with zeroed stats) for backwards-compatible lookup
+    pub fn to_prompt_record(&self) -> PromptRecord {
+        PromptRecord {
+            agent_id: self.agent_id.clone(),
+            human_author: self.human_author.clone(),
+            messages: self.messages.clone(),
+            total_additions: 0,
+            total_deletions: 0,
+            accepted_lines: 0,
+            overriden_lines: 0,
+            messages_url: self.messages_url.clone(),
+            custom_attributes: self.custom_attributes.clone(),
+        }
+    }
+}
+
 impl PartialOrd for PromptRecord {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
