@@ -2423,10 +2423,9 @@ fn test_diff_json_history_with_mixed_old_and_new_format_commits() {
         Some("windsurf")
     );
     assert!(
-        old_json.get("sessions").is_none()
-            || old_json["sessions"]
-                .as_object()
-                .is_none_or(|s| s.is_empty()),
+        old_json["sessions"]
+            .as_object()
+            .is_none_or(|s| s.is_empty()),
         "old commit should have no sessions"
     );
 
@@ -2449,8 +2448,7 @@ fn test_diff_json_history_with_mixed_old_and_new_format_commits() {
         session_key
     );
     assert!(
-        new_json.get("prompts").is_none()
-            || new_json["prompts"].as_object().is_none_or(|p| p.is_empty()),
+        new_json["prompts"].as_object().is_none_or(|p| p.is_empty()),
         "new commit should have no prompts"
     );
 
@@ -2564,7 +2562,7 @@ fn test_diff_json_stats_with_old_format_note_only() {
         "prompts should have old-format hash"
     );
     assert!(
-        json.get("sessions").is_none() || json["sessions"].as_object().is_none_or(|s| s.is_empty()),
+        json["sessions"].as_object().is_none_or(|s| s.is_empty()),
         "sessions should be empty for old-format-only commit"
     );
 }

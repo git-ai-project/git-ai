@@ -46,7 +46,7 @@ impl AgentPreset for WindsurfPreset {
         let cwd_path = cwd
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let cwd_str = cwd.unwrap_or(".");
+        let cwd_str = cwd_path.to_string_lossy().to_string();
 
         let context = PresetContext {
             agent_id: AgentId {
@@ -73,17 +73,24 @@ impl AgentPreset for WindsurfPreset {
         let is_pre_bash = matches!(agent_action, Some("pre_run_command"));
         let is_pre_write = matches!(agent_action, Some("pre_write_code"));
 
+        let execution_id = tool_info
+            .and_then(|ti| ti.get("execution_id"))
+            .and_then(|v| v.as_str())
+            .or_else(|| parse::optional_str(&data, "execution_id"))
+            .unwrap_or("bash")
+            .to_string();
+
         let event = if is_bash {
             if is_pre_bash {
                 ParsedHookEvent::PreBashCall(PreBashCall {
                     context,
-                    tool_use_id: "bash".to_string(),
+                    tool_use_id: execution_id,
                     strategy: BashPreHookStrategy::EmitHumanCheckpoint,
                 })
             } else {
                 ParsedHookEvent::PostBashCall(PostBashCall {
                     context,
-                    tool_use_id: "bash".to_string(),
+                    tool_use_id: execution_id,
                     transcript_source,
                 })
             }
@@ -91,7 +98,7 @@ impl AgentPreset for WindsurfPreset {
             let file_path = tool_info
                 .and_then(|ti| ti.get("file_path"))
                 .and_then(|v| v.as_str())
-                .map(|p| vec![parse::resolve_absolute(p, cwd_str)])
+                .map(|p| vec![parse::resolve_absolute(p, &cwd_str)])
                 .unwrap_or_default();
 
             ParsedHookEvent::PreFileEdit(PreFileEdit {
@@ -103,7 +110,7 @@ impl AgentPreset for WindsurfPreset {
             let file_path = tool_info
                 .and_then(|ti| ti.get("file_path"))
                 .and_then(|v| v.as_str())
-                .map(|p| vec![parse::resolve_absolute(p, cwd_str)])
+                .map(|p| vec![parse::resolve_absolute(p, &cwd_str)])
                 .unwrap_or_default();
 
             ParsedHookEvent::PostFileEdit(PostFileEdit {
@@ -165,7 +172,8 @@ mod tests {
         let input = json!({
             "trajectory_id": "traj-123",
             "agent_action_name": "pre_run_command",
-            "cwd": "/home/user/project"
+            "cwd": "/home/user/project",
+            "execution_id": "exec-bash-1"
         })
         .to_string();
         let events = WindsurfPreset.parse(&input, "t_test123456789a").unwrap();
@@ -173,7 +181,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "windsurf");
-                assert_eq!(e.tool_use_id, "bash");
+                assert_eq!(e.tool_use_id, "exec-bash-1");
                 assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
@@ -185,7 +193,8 @@ mod tests {
         let input = json!({
             "trajectory_id": "traj-123",
             "agent_action_name": "post_run_command",
-            "cwd": "/home/user/project"
+            "cwd": "/home/user/project",
+            "execution_id": "exec-bash-2"
         })
         .to_string();
         let events = WindsurfPreset.parse(&input, "t_test123456789a").unwrap();
@@ -193,9 +202,26 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PostBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "windsurf");
-                assert_eq!(e.tool_use_id, "bash");
+                assert_eq!(e.tool_use_id, "exec-bash-2");
             }
             _ => panic!("Expected PostBashCall"),
+        }
+    }
+
+    #[test]
+    fn test_windsurf_bash_fallback_tool_use_id() {
+        let input = json!({
+            "trajectory_id": "traj-123",
+            "agent_action_name": "pre_run_command",
+            "cwd": "/home/user/project"
+        })
+        .to_string();
+        let events = WindsurfPreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PreBashCall(e) => {
+                assert_eq!(e.tool_use_id, "bash");
+            }
+            _ => panic!("Expected PreBashCall"),
         }
     }
 
