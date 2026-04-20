@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
     AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PresetContext, TranscriptFormat, TranscriptSource,
+    PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
 use crate::error::GitAiError;
@@ -22,8 +22,7 @@ impl AgentPreset for WindsurfPreset {
         let cwd = tool_info
             .and_then(|ti| ti.get("cwd"))
             .and_then(|v| v.as_str())
-            .or_else(|| parse::optional_str(&data, "cwd"))
-            .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
+            .or_else(|| parse::optional_str(&data, "cwd"));
 
         let model = parse::optional_str(&data, "model_name")
             .unwrap_or("unknown")
@@ -42,6 +41,13 @@ impl AgentPreset for WindsurfPreset {
                 )
             });
 
+        // cwd is optional: prefer tool_info.cwd, fall back to top-level cwd, then
+        // current working directory as last resort.
+        let cwd_path = cwd
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let cwd_str = cwd.unwrap_or(".");
+
         let context = PresetContext {
             agent_id: AgentId {
                 tool: "windsurf".to_string(),
@@ -50,7 +56,7 @@ impl AgentPreset for WindsurfPreset {
             },
             session_id: trajectory_id,
             trace_id: trace_id.to_string(),
-            cwd: PathBuf::from(cwd),
+            cwd: cwd_path,
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.clone())]),
         };
 
@@ -64,10 +70,11 @@ impl AgentPreset for WindsurfPreset {
             agent_action,
             Some("pre_run_command") | Some("post_run_command")
         );
-        let is_pre = matches!(agent_action, Some("pre_run_command"));
+        let is_pre_bash = matches!(agent_action, Some("pre_run_command"));
+        let is_pre_write = matches!(agent_action, Some("pre_write_code"));
 
         let event = if is_bash {
-            if is_pre {
+            if is_pre_bash {
                 ParsedHookEvent::PreBashCall(PreBashCall {
                     context,
                     tool_use_id: "bash".to_string(),
@@ -80,11 +87,23 @@ impl AgentPreset for WindsurfPreset {
                     transcript_source,
                 })
             }
+        } else if is_pre_write {
+            let file_path = tool_info
+                .and_then(|ti| ti.get("file_path"))
+                .and_then(|v| v.as_str())
+                .map(|p| vec![parse::resolve_absolute(p, cwd_str)])
+                .unwrap_or_default();
+
+            ParsedHookEvent::PreFileEdit(PreFileEdit {
+                context,
+                file_paths: file_path,
+                dirty_files: None,
+            })
         } else {
             let file_path = tool_info
                 .and_then(|ti| ti.get("file_path"))
                 .and_then(|v| v.as_str())
-                .map(|p| vec![parse::resolve_absolute(p, cwd)])
+                .map(|p| vec![parse::resolve_absolute(p, cwd_str)])
                 .unwrap_or_default();
 
             ParsedHookEvent::PostFileEdit(PostFileEdit {
@@ -237,13 +256,45 @@ mod tests {
     }
 
     #[test]
-    fn test_windsurf_missing_cwd() {
+    fn test_windsurf_missing_cwd_falls_back() {
         let input = json!({
             "trajectory_id": "traj-123",
             "agent_action_name": "post_code_action"
         })
         .to_string();
-        let result = WindsurfPreset.parse(&input, "t_test123456789a");
-        assert!(result.is_err());
+        let events = WindsurfPreset.parse(&input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                // cwd should fall back to current_dir or "."
+                assert!(!e.context.cwd.as_os_str().is_empty());
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_windsurf_pre_write_code() {
+        let input = json!({
+            "trajectory_id": "traj-123",
+            "agent_action_name": "pre_write_code",
+            "cwd": "/home/user/project",
+            "tool_info": {
+                "file_path": "src/main.rs"
+            }
+        })
+        .to_string();
+        let events = WindsurfPreset.parse(&input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert_eq!(e.context.agent_id.tool, "windsurf");
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/main.rs")]
+                );
+            }
+            _ => panic!("Expected PreFileEdit"),
+        }
     }
 }

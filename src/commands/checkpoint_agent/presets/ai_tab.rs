@@ -53,7 +53,7 @@ impl AgentPreset for AiTabPreset {
 
         let context = PresetContext {
             agent_id: AgentId {
-                tool: "ai_tab".to_string(),
+                tool: tool.clone(),
                 id: session_id.clone(),
                 model,
             },
@@ -110,7 +110,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert_eq!(e.context.agent_id.tool, "ai_tab");
+                assert_eq!(e.context.agent_id.tool, "supermaven");
                 assert_eq!(e.context.session_id, "ai_tab-comp-123");
                 assert_eq!(e.context.agent_id.model, "supermaven-v1");
                 assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
-                assert_eq!(e.context.agent_id.tool, "ai_tab");
+                assert_eq!(e.context.agent_id.tool, "copilot");
                 assert_eq!(e.context.session_id, "ai_tab-comp-456");
                 assert_eq!(
                     e.file_paths,

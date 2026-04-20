@@ -143,9 +143,7 @@ impl OpenCodePreset {
         Some(joined.to_string_lossy().replace('\\', "/"))
     }
 
-    fn resolve_transcript_source(
-        session_id: &str,
-    ) -> Option<(TranscriptSource, PathBuf)> {
+    fn resolve_transcript_source(session_id: &str) -> Option<(TranscriptSource, PathBuf)> {
         let opencode_path = if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
             PathBuf::from(test_path)
         } else {
@@ -464,7 +462,7 @@ mod tests {
         let events = OpenCodePreset.parse(&input, "t_test").unwrap();
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
-                assert!(e.file_paths.len() >= 1);
+                assert!(!e.file_paths.is_empty());
             }
             _ => panic!("Expected PostFileEdit"),
         }

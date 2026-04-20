@@ -74,6 +74,7 @@ impl AmpPreset {
     fn resolve_transcript_path(
         transcript_path: Option<&str>,
         thread_id: Option<&str>,
+        tool_use_id: Option<&str>,
     ) -> Option<PathBuf> {
         // 1. Direct transcript_path field
         if let Some(path) = transcript_path {
@@ -93,17 +94,104 @@ impl AmpPreset {
             }
         }
 
-        // 3. Platform-specific threads directory + thread_id
-        if let Some(thread_id) = thread_id {
-            if let Ok(threads_dir) = Self::amp_threads_dir() {
+        if let Ok(threads_dir) = Self::amp_threads_dir() {
+            // 3a. If threads_dir is actually a file (test override), use it directly
+            if threads_dir.is_file()
+                && threads_dir
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            {
+                return Some(threads_dir);
+            }
+
+            // 3b. Platform-specific threads directory + thread_id
+            if let Some(thread_id) = thread_id {
                 let candidate = threads_dir.join(format!("{}.json", thread_id));
                 if candidate.exists() {
                     return Some(candidate);
                 }
             }
+
+            // 3c. Search thread files for matching tool_use_id
+            if let Some(tool_use_id) = tool_use_id
+                && let Some(path) = Self::find_thread_file_by_tool_use_id(&threads_dir, tool_use_id)
+            {
+                return Some(path);
+            }
         }
 
         None
+    }
+
+    /// Scan thread JSON files in `threads_dir` for one containing the given
+    /// `tool_use_id`. Returns the newest matching file.
+    fn find_thread_file_by_tool_use_id(
+        threads_dir: &std::path::Path,
+        tool_use_id: &str,
+    ) -> Option<PathBuf> {
+        let entries = std::fs::read_dir(threads_dir).ok()?;
+        let mut newest_match: Option<(PathBuf, std::time::SystemTime)> = None;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            {
+                continue;
+            }
+
+            // Quick string check before full parse
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if !content.contains(tool_use_id) {
+                continue;
+            }
+
+            // Verify structurally: look for tool_use content block with matching id
+            let parsed: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let has_match = parsed
+                .get("messages")
+                .and_then(|v| v.as_array())
+                .map(|msgs| {
+                    msgs.iter().any(|msg| {
+                        msg.get("content")
+                            .and_then(|v| v.as_array())
+                            .map(|blocks| {
+                                blocks.iter().any(|block| {
+                                    block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
+                                        && block.get("id").and_then(|v| v.as_str())
+                                            == Some(tool_use_id)
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+
+            if !has_match {
+                continue;
+            }
+
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+
+            match &newest_match {
+                Some((_, newest_modified)) if modified <= *newest_modified => {}
+                _ => newest_match = Some((path, modified)),
+            }
+        }
+
+        newest_match.map(|(path, _)| path)
     }
 
     fn amp_threads_dir() -> Result<PathBuf, GitAiError> {
@@ -168,10 +256,7 @@ impl AgentPreset for AmpPreset {
             .map(|name| bash_tool::classify_tool(Agent::Amp, name) == ToolClass::Bash)
             .unwrap_or(false);
 
-        let cwd = hook_input
-            .cwd
-            .as_deref()
-            .unwrap_or(".");
+        let cwd = hook_input.cwd.as_deref().unwrap_or(".");
 
         let thread_id = hook_input.thread_id.clone();
         let tool_use_id = hook_input.tool_use_id.clone();
@@ -183,6 +268,7 @@ impl AgentPreset for AmpPreset {
         let resolved_transcript_path = Self::resolve_transcript_path(
             hook_input.transcript_path.as_deref(),
             thread_id.as_deref(),
+            tool_use_id.as_deref(),
         );
 
         // Build metadata

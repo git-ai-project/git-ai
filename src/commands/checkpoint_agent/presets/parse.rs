@@ -19,9 +19,7 @@ pub fn optional_str_multi<'a>(data: &'a Value, keys: &[&str]) -> Option<&'a str>
 }
 
 pub fn str_or_default<'a>(data: &'a Value, key: &str, default: &'a str) -> &'a str {
-    data.get(key)
-        .and_then(|v| v.as_str())
-        .unwrap_or(default)
+    data.get(key).and_then(|v| v.as_str()).unwrap_or(default)
 }
 
 pub fn required_file_stem(data: &Value, path_key: &str) -> Result<String, GitAiError> {
@@ -31,10 +29,7 @@ pub fn required_file_stem(data: &Value, path_key: &str) -> Result<String, GitAiE
         .and_then(|s| s.to_str())
         .map(|s| s.to_string())
         .ok_or_else(|| {
-            GitAiError::PresetError(format!(
-                "Could not extract file stem from {}",
-                path_key
-            ))
+            GitAiError::PresetError(format!("Could not extract file stem from {}", path_key))
         })
 }
 
