@@ -352,28 +352,28 @@ fn test_droid_e2e_prefers_latest_checkpoint_for_prompts() {
     // Commit
     let commit = repo.stage_all_and_commit("Add AI lines").unwrap();
 
-    // Should have exactly one prompt record
+    // Should have exactly one session record
     assert_eq!(
-        commit.authorship_log.metadata.prompts.len(),
+        commit.authorship_log.metadata.sessions.len(),
         1,
-        "Expected a single prompt record"
+        "Expected a single session record"
     );
-    let prompt_record = commit
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Prompt record should exist");
+        .expect("Session record should exist");
 
     // The latest checkpoint (with the real transcript) should win
     assert!(
-        !prompt_record.messages.is_empty(),
-        "Prompt record should contain messages from the latest checkpoint"
+        !session_record.messages.is_empty(),
+        "Session record should contain messages from the latest checkpoint"
     );
     assert_eq!(
-        prompt_record.agent_id.model, "custom:BYOK-GPT-5-MINI-0",
-        "Prompt record should use the model from settings.json"
+        session_record.agent_id.model, "custom:BYOK-GPT-5-MINI-0",
+        "Session record should use the model from settings.json"
     );
 }
 

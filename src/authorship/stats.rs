@@ -461,6 +461,7 @@ pub fn stats_from_authorship_log(
 
     // Process authorship log if present
     if let Some(log) = authorship_log {
+        // Process old-format prompts (with stats fields)
         for prompt_record in log.metadata.prompts.values() {
             commit_stats.total_ai_additions += prompt_record.total_additions;
             commit_stats.total_ai_deletions += prompt_record.total_deletions;
@@ -479,6 +480,23 @@ pub fn stats_from_authorship_log(
             // Create a transcript from the messages
             let transcript = crate::authorship::transcript::AiTranscript {
                 messages: prompt_record.messages.clone(),
+            };
+            let waiting = calculate_waiting_time(&transcript);
+            commit_stats.time_waiting_for_ai += waiting;
+            tool_stats.time_waiting_for_ai += waiting;
+        }
+
+        // Process new-format sessions (no stats fields, only time calculation)
+        for session_record in log.metadata.sessions.values() {
+            let key = format!(
+                "{}::{}",
+                session_record.agent_id.tool, session_record.agent_id.model
+            );
+            let tool_stats = commit_stats.tool_model_breakdown.entry(key).or_default();
+
+            // Calculate time waiting for AI from transcript
+            let transcript = crate::authorship::transcript::AiTranscript {
+                messages: session_record.messages.clone(),
             };
             let waiting = calculate_waiting_time(&transcript);
             commit_stats.time_waiting_for_ai += waiting;
@@ -640,7 +658,7 @@ fn accepted_lines_from_attestations(
                 }
             } else if let Some(prompt_record) = log.metadata.prompts.get(&entry.hash) {
                 let tool_model = format!(
-                        "{}::{}",
+                    "{}::{}",
                     prompt_record.agent_id.tool, prompt_record.agent_id.model
                 );
                 *per_tool_model.entry(tool_model).or_insert(0) += accepted;

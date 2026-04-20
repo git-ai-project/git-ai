@@ -240,28 +240,28 @@ fn test_claude_e2e_prefers_latest_checkpoint_for_prompts() {
     // Commit the changes
     let commit = repo.stage_all_and_commit("Add AI lines").unwrap();
 
-    // We should have exactly one prompt record keyed by the claude agent_id
+    // We should have exactly one session record keyed by the claude agent_id
     assert_eq!(
-        commit.authorship_log.metadata.prompts.len(),
+        commit.authorship_log.metadata.sessions.len(),
         1,
-        "Expected a single prompt record"
+        "Expected a single session record"
     );
-    let prompt_record = commit
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Prompt record should exist");
+        .expect("Session record should exist");
 
     // The latest checkpoint (with the real transcript) should win
     assert!(
-        !prompt_record.messages.is_empty(),
-        "Prompt record should contain messages from the latest checkpoint"
+        !session_record.messages.is_empty(),
+        "Session record should contain messages from the latest checkpoint"
     );
     assert_eq!(
-        prompt_record.agent_id.model, "claude-sonnet-4-20250514",
-        "Prompt record should use the model from the latest checkpoint transcript"
+        session_record.agent_id.model, "claude-sonnet-4-20250514",
+        "Session record should use the model from the latest checkpoint transcript"
     );
 }
 

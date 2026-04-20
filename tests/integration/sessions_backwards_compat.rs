@@ -37,8 +37,8 @@ fn test_old_format_note_without_sessions_deserializes() {
   }
 }"#;
 
-    let log = AuthorshipLog::deserialize_from_string(note)
-        .expect("should deserialize old format note");
+    let log =
+        AuthorshipLog::deserialize_from_string(note).expect("should deserialize old format note");
 
     assert_eq!(log.metadata.prompts.len(), 1, "should have 1 prompt");
     assert_eq!(log.metadata.humans.len(), 1, "should have 1 human");
@@ -80,18 +80,26 @@ fn test_old_format_note_roundtrips_without_adding_sessions() {
   }
 }"#;
 
-    let log = AuthorshipLog::deserialize_from_string(note)
-        .expect("should deserialize old format note");
+    let log =
+        AuthorshipLog::deserialize_from_string(note).expect("should deserialize old format note");
 
-    let serialized = log.serialize_to_string()
-        .expect("should serialize note");
+    let serialized = log.serialize_to_string().expect("should serialize note");
 
     // Assert re-serialized does NOT contain "sessions" key
-    assert!(!serialized.contains("\"sessions\""), "should not add sessions key");
+    assert!(
+        !serialized.contains("\"sessions\""),
+        "should not add sessions key"
+    );
 
     // Assert prompts data preserved
-    assert!(serialized.contains("\"prompts\""), "should preserve prompts");
-    assert!(serialized.contains("5a1b2c3d4e5f6789"), "should preserve hash");
+    assert!(
+        serialized.contains("\"prompts\""),
+        "should preserve prompts"
+    );
+    assert!(
+        serialized.contains("5a1b2c3d4e5f6789"),
+        "should preserve hash"
+    );
 }
 
 #[test]
@@ -102,26 +110,20 @@ fn test_old_format_working_log_produces_prompts_not_sessions() {
 
     // Use set_contents which creates prompts (not sessions) via the mock_ai checkpoint
     let mut file = repo.filename("test.txt");
-    file.set_contents(crate::lines![
-        "Human line".human(),
-        "AI line".ai(),
-    ]);
+    file.set_contents(crate::lines!["Human line".human(), "AI line".ai(),]);
 
     repo.stage_all_and_commit("Test commit").unwrap();
 
     // Assert attribution works
-    file.assert_committed_lines(crate::lines![
-        "Human line".human(),
-        "AI line".ai(),
-    ]);
+    file.assert_committed_lines(crate::lines!["Human line".human(), "AI line".ai(),]);
 
     // Read the note and verify it has the expected structure
     // Note: This test documents current behavior - set_contents uses sessions in the new format
     let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let note = repo.read_authorship_note(&sha)
+    let note = repo
+        .read_authorship_note(&sha)
         .expect("commit should have authorship note");
-    let log = AuthorshipLog::deserialize_from_string(&note)
-        .expect("should parse note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("should parse note");
 
     // In the current implementation, set_contents produces sessions, not prompts
     // This is expected behavior - old format is only for compatibility with existing notes
@@ -173,8 +175,8 @@ new_file.txt
   }
 }"#;
 
-    let log = AuthorshipLog::deserialize_from_string(note)
-        .expect("should deserialize mixed format note");
+    let log =
+        AuthorshipLog::deserialize_from_string(note).expect("should deserialize mixed format note");
 
     assert_eq!(log.metadata.prompts.len(), 1, "should have 1 prompt");
     assert_eq!(log.metadata.sessions.len(), 1, "should have 1 session");
@@ -232,23 +234,37 @@ fn test_mixed_format_both_count_as_ai_in_blame() {
   }
 }"#;
 
-    let log = AuthorshipLog::deserialize_from_string(note)
-        .expect("should deserialize mixed format note");
+    let log =
+        AuthorshipLog::deserialize_from_string(note).expect("should deserialize mixed format note");
 
     // Verify all attestation entries are present
     assert_eq!(log.attestations.len(), 1, "should have 1 file");
-    assert_eq!(log.attestations[0].entries.len(), 2, "should have 2 attestation entries");
+    assert_eq!(
+        log.attestations[0].entries.len(),
+        2,
+        "should have 2 attestation entries"
+    );
 
     // Verify both prompt and session entries exist
     assert_eq!(log.metadata.prompts.len(), 1, "should have 1 prompt entry");
-    assert_eq!(log.metadata.sessions.len(), 1, "should have 1 session entry");
+    assert_eq!(
+        log.metadata.sessions.len(),
+        1,
+        "should have 1 session entry"
+    );
 
     // Verify attestation hashes
     let entry1 = &log.attestations[0].entries[0];
     let entry2 = &log.attestations[0].entries[1];
 
-    assert_eq!(entry1.hash, "5a1b2c3d4e5f6789", "first entry should be old format");
-    assert_eq!(entry2.hash, "s_1234567890abcd::t_fedcba0987654321", "second entry should be new format");
+    assert_eq!(
+        entry1.hash, "5a1b2c3d4e5f6789",
+        "first entry should be old format"
+    );
+    assert_eq!(
+        entry2.hash, "s_1234567890abcd::t_fedcba0987654321",
+        "second entry should be new format"
+    );
 }
 
 // Task 13: End-to-end session flow tests
@@ -259,36 +275,36 @@ fn test_new_session_checkpoint_to_commit_to_blame() {
 
     // Create file with AI lines via set_contents
     let mut file = repo.filename("test.txt");
-    file.set_contents(crate::lines![
-        "Line 1".human(),
-        "AI line".ai(),
-    ]);
+    file.set_contents(crate::lines!["Line 1".human(), "AI line".ai(),]);
 
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // Assert lines are AI-attributed
-    file.assert_committed_lines(crate::lines![
-        "Line 1".human(),
-        "AI line".ai(),
-    ]);
+    file.assert_committed_lines(crate::lines!["Line 1".human(), "AI line".ai(),]);
 
     // Read the authorship note
     let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let note = repo.read_authorship_note(&sha)
+    let note = repo
+        .read_authorship_note(&sha)
         .expect("commit should have authorship note");
 
     // Assert note contains sessions
-    assert!(note.contains("\"sessions\""), "note should contain sessions");
+    assert!(
+        note.contains("\"sessions\""),
+        "note should contain sessions"
+    );
 
     // Check for session ID format (s_<14hex>)
     assert!(note.contains("s_"), "note should contain session ID prefix");
 
     // Check for trace ID format (::t_<14hex>)
-    assert!(note.contains("::t_"), "note should contain trace ID separator");
+    assert!(
+        note.contains("::t_"),
+        "note should contain trace ID separator"
+    );
 
     // Deserialize and assert structure
-    let log = AuthorshipLog::deserialize_from_string(&note)
-        .expect("should parse note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("should parse note");
 
     assert!(log.metadata.prompts.is_empty(), "should not have prompts");
     assert!(!log.metadata.sessions.is_empty(), "should have sessions");
@@ -311,10 +327,10 @@ fn test_trace_ids_are_unique_per_checkpoint() {
 
     // Read note and deserialize
     let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let note = repo.read_authorship_note(&sha)
+    let note = repo
+        .read_authorship_note(&sha)
         .expect("commit should have authorship note");
-    let log = AuthorshipLog::deserialize_from_string(&note)
-        .expect("should parse note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("should parse note");
 
     // Collect all attestation entry hashes
     let mut hashes = Vec::new();
@@ -326,7 +342,11 @@ fn test_trace_ids_are_unique_per_checkpoint() {
 
     // All should start with s_ and contain ::t_
     for hash in &hashes {
-        assert!(hash.starts_with("s_"), "hash should start with s_: {}", hash);
+        assert!(
+            hash.starts_with("s_"),
+            "hash should start with s_: {}",
+            hash
+        );
         assert!(hash.contains("::t_"), "hash should contain ::t_: {}", hash);
     }
 
@@ -379,15 +399,18 @@ fn test_rebase_preserves_sessions() {
 
     // Read note on HEAD
     let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let note = repo.read_authorship_note(&sha)
+    let note = repo
+        .read_authorship_note(&sha)
         .expect("rebased commit should have authorship note");
 
     // Deserialize
-    let log = AuthorshipLog::deserialize_from_string(&note)
-        .expect("should parse note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("should parse note");
 
     // Assert sessions is not empty
-    assert!(!log.metadata.sessions.is_empty(), "rebased commit should preserve sessions");
+    assert!(
+        !log.metadata.sessions.is_empty(),
+        "rebased commit should preserve sessions"
+    );
 
     // Assert attestations have s_ entries
     let mut has_session_attestation = false;
@@ -399,5 +422,8 @@ fn test_rebase_preserves_sessions() {
             }
         }
     }
-    assert!(has_session_attestation, "rebased commit should have session attestations");
+    assert!(
+        has_session_attestation,
+        "rebased commit should have session attestations"
+    );
 }

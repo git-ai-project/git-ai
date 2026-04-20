@@ -4,7 +4,10 @@ use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
 use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
-use crate::authorship::secrets::{redact_secrets_from_prompts, strip_prompt_messages};
+use crate::authorship::secrets::{
+    redact_secrets_from_prompts, redact_secrets_from_sessions, strip_prompt_messages,
+    strip_session_messages,
+};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
@@ -168,10 +171,13 @@ pub fn post_commit_with_final_state(
         config.custom_attributes().clone(),
     );
 
-    // Inject custom attributes into all PromptRecords.
+    // Inject custom attributes into all PromptRecords and SessionRecords.
     if !custom_attrs.is_empty() {
         for pr in authorship_log.metadata.prompts.values_mut() {
             pr.custom_attributes = Some(custom_attrs.clone());
+        }
+        for sr in authorship_log.metadata.sessions.values_mut() {
+            sr.custom_attributes = Some(custom_attrs.clone());
         }
     }
 
@@ -179,12 +185,14 @@ pub fn post_commit_with_final_state(
         PromptStorageMode::Local => {
             // Local only: strip all messages from notes (they stay in sqlite only)
             strip_prompt_messages(&mut authorship_log.metadata.prompts);
+            strip_session_messages(&mut authorship_log.metadata.sessions);
         }
         PromptStorageMode::Notes => {
             // Store in notes: redact secrets but keep messages in notes
             let count = redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
-            if count > 0 {
-                tracing::debug!("Redacted {} secrets from prompts", count);
+            let count2 = redact_secrets_from_sessions(&mut authorship_log.metadata.sessions);
+            if count + count2 > 0 {
+                tracing::debug!("Redacted {} secrets from prompts/sessions", count + count2);
             }
         }
         PromptStorageMode::Default => {
@@ -200,10 +208,12 @@ pub fn post_commit_with_final_state(
                 // Redact secrets before uploading to CAS
                 let redaction_count =
                     redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
-                if redaction_count > 0 {
+                let redaction_count2 =
+                    redact_secrets_from_sessions(&mut authorship_log.metadata.sessions);
+                if redaction_count + redaction_count2 > 0 {
                     tracing::debug!(
-                        "Redacted {} secrets from prompts before CAS upload",
-                        redaction_count
+                        "Redacted {} secrets from prompts/sessions before CAS upload",
+                        redaction_count + redaction_count2
                     );
                 }
 
@@ -211,18 +221,23 @@ pub fn post_commit_with_final_state(
                     enqueue_prompt_messages_to_cas(repo, &mut authorship_log.metadata.prompts)
                 {
                     tracing::debug!("[Warning] Failed to enqueue prompt messages to CAS: {}", e);
-                    // Enqueue failed - still strip messages (never keep in notes for "default")
                     strip_prompt_messages(&mut authorship_log.metadata.prompts);
                 }
-                // Success: enqueue function already cleared messages
+
+                if let Err(e) =
+                    enqueue_session_messages_to_cas(repo, &mut authorship_log.metadata.sessions)
+                {
+                    tracing::debug!("[Warning] Failed to enqueue session messages to CAS: {}", e);
+                    strip_session_messages(&mut authorship_log.metadata.sessions);
+                }
             } else {
                 // Not enqueueing - strip messages (never keep in notes for "default")
                 strip_prompt_messages(&mut authorship_log.metadata.prompts);
+                strip_session_messages(&mut authorship_log.metadata.sessions);
             }
         }
     }
 
-    // Serialize the authorship log
     let authorship_json = authorship_log
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
@@ -293,6 +308,7 @@ pub fn post_commit_with_final_state(
             initial_attributions.prompts,
             initial_attributions.humans,
             initial_file_contents,
+            initial_attributions.sessions,
         )?;
     }
 
@@ -630,6 +646,79 @@ fn enqueue_prompt_messages_to_cas(
             // Set full URL and clear messages
             prompt.messages_url = Some(format!("{}/cas/{}", api_base_url, hash));
             prompt.messages.clear();
+        }
+    }
+
+    Ok(())
+}
+
+fn enqueue_session_messages_to_cas(
+    repo: &Repository,
+    sessions: &mut std::collections::BTreeMap<
+        String,
+        crate::authorship::authorship_log::SessionRecord,
+    >,
+) -> Result<(), GitAiError> {
+    use crate::authorship::internal_db::InternalDatabase;
+
+    let db = InternalDatabase::global()?;
+    let mut db_lock = db
+        .lock()
+        .map_err(|e| GitAiError::Generic(format!("Failed to lock database: {}", e)))?;
+
+    let mut metadata = HashMap::new();
+    metadata.insert("api_version".to_string(), "v1".to_string());
+    metadata.insert("kind".to_string(), "session".to_string());
+
+    let repo_url = repo
+        .get_default_remote()
+        .ok()
+        .flatten()
+        .and_then(|remote_name| {
+            repo.remotes_with_urls().ok().and_then(|remotes| {
+                remotes
+                    .into_iter()
+                    .find(|(name, _)| name == &remote_name)
+                    .map(|(_, url)| url)
+            })
+        });
+
+    if let Some(url) = repo_url
+        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
+    {
+        metadata.insert("repo_url".to_string(), normalized);
+    }
+
+    let api_base_url = Config::fresh().api_base_url().to_string();
+
+    for (_key, session) in sessions.iter_mut() {
+        if !session.messages.is_empty() {
+            let messages_obj = crate::api::types::CasMessagesObject {
+                messages: session.messages.clone(),
+            };
+            let messages_json = serde_json::to_value(&messages_obj)
+                .map_err(|e| GitAiError::Generic(format!("Failed to serialize messages: {}", e)))?;
+
+            let hash = db_lock.enqueue_cas_object(&messages_json, Some(&metadata))?;
+
+            let metadata_json = serde_json::to_string(&metadata).ok();
+            let canonical = serde_json_canonicalizer::to_string(&messages_json)
+                .unwrap_or_else(|_| messages_json.to_string());
+            let cas_payload = crate::daemon::control_api::CasSyncPayload {
+                hash: hash.clone(),
+                data: canonical,
+                metadata: metadata_json,
+            };
+
+            if crate::daemon::daemon_process_active() {
+                let _ =
+                    crate::daemon::telemetry_worker::submit_daemon_internal_cas(vec![cas_payload]);
+            } else if crate::daemon::telemetry_handle::daemon_telemetry_available() {
+                crate::daemon::telemetry_handle::submit_cas(vec![cas_payload]);
+            }
+
+            session.messages_url = Some(format!("{}/cas/{}", api_base_url, hash));
+            session.messages.clear();
         }
     }
 

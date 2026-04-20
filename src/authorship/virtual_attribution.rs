@@ -30,7 +30,6 @@ pub struct VirtualAttributions {
     // authorship note if they have committed lines in the current commit.
     initial_only_prompt_ids: HashSet<String>,
     pub sessions: BTreeMap<String, SessionRecord>,
-    initial_only_session_ids: HashSet<String>,
 }
 
 impl VirtualAttributions {
@@ -57,7 +56,6 @@ impl VirtualAttributions {
             humans: BTreeMap::new(),
             initial_only_prompt_ids: HashSet::new(),
             sessions: BTreeMap::new(),
-            initial_only_session_ids: HashSet::new(),
         };
 
         // Process all pathspecs concurrently
@@ -71,7 +69,7 @@ impl VirtualAttributions {
         Ok(virtual_attrs)
     }
 
-    /// Discover and load prompts from blamed commits that aren't in our prompts map
+    /// Discover and load prompts/sessions from blamed commits that aren't in our maps
     async fn discover_and_load_foreign_prompts(&mut self) -> Result<(), GitAiError> {
         use std::collections::HashSet;
 
@@ -83,28 +81,40 @@ impl VirtualAttributions {
             }
         }
 
-        // Find missing author_ids (not in prompts or humans maps)
-        // An author_id is missing if it doesn't exist in prompts or humans
-        // h_-prefixed KnownHuman IDs are stored in self.humans, not self.prompts
-        let missing_ids: Vec<String> = all_author_ids
-            .into_iter()
-            .filter(|id| !self.prompts.contains_key(id) && !self.humans.contains_key(id))
-            .collect();
+        // Separate session IDs from prompt/human IDs
+        let mut missing_session_ids: HashSet<String> = HashSet::new();
+        let mut missing_prompt_ids: Vec<String> = Vec::new();
 
-        if missing_ids.is_empty() {
-            return Ok(());
+        for id in all_author_ids {
+            if id.starts_with("s_") {
+                let session_key = id.split("::").next().unwrap_or(&id).to_string();
+                if !self.sessions.contains_key(&session_key) {
+                    missing_session_ids.insert(session_key);
+                }
+            } else if !self.prompts.contains_key(&id) && !self.humans.contains_key(&id) {
+                missing_prompt_ids.push(id);
+            }
         }
 
-        // Load prompts in parallel using the established MAX_CONCURRENT pattern
-        let prompts = self.load_prompts_concurrent(&missing_ids).await?;
+        // Load missing prompts in parallel
+        if !missing_prompt_ids.is_empty() {
+            let prompts = self.load_prompts_concurrent(&missing_prompt_ids).await?;
+            for (id, commit_sha, prompt) in prompts {
+                self.prompts
+                    .entry(id)
+                    .or_default()
+                    .insert(commit_sha, prompt);
+            }
+        }
 
-        // Insert loaded prompts into our map
-        // Each prompt is associated with the commit it was found in
-        for (id, commit_sha, prompt) in prompts {
-            self.prompts
-                .entry(id)
-                .or_default()
-                .insert(commit_sha, prompt);
+        // Load missing sessions from history
+        if !missing_session_ids.is_empty() {
+            let sessions = self
+                .load_sessions_concurrent(&missing_session_ids.into_iter().collect::<Vec<_>>())
+                .await?;
+            for (session_id, session_record) in sessions {
+                self.sessions.entry(session_id).or_insert(session_record);
+            }
         }
 
         Ok(())
@@ -178,6 +188,58 @@ impl VirtualAttributions {
         Err(GitAiError::Generic(format!(
             "Prompt not found in history: {}",
             prompt_id
+        )))
+    }
+
+    /// Load multiple sessions concurrently from git note history
+    async fn load_sessions_concurrent(
+        &self,
+        missing_ids: &[String],
+    ) -> Result<Vec<(String, SessionRecord)>, GitAiError> {
+        const MAX_CONCURRENT: usize = 30;
+
+        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+        let mut tasks = Vec::new();
+
+        for missing_id in missing_ids {
+            let missing_id = missing_id.clone();
+            let repo = self.repo.clone();
+            let semaphore = Arc::clone(&semaphore);
+
+            let task = smol::spawn(async move {
+                let _permit = semaphore.acquire().await;
+                smol::unblock(move || {
+                    Self::find_session_in_history_static(&repo, &missing_id)
+                        .map(|record| (missing_id, record))
+                })
+                .await
+            });
+
+            tasks.push(task);
+        }
+
+        let results = futures::future::join_all(tasks).await;
+        let sessions: Vec<_> = results.into_iter().filter_map(Result::ok).collect();
+        Ok(sessions)
+    }
+
+    fn find_session_in_history_static(
+        repo: &Repository,
+        session_id: &str,
+    ) -> Result<SessionRecord, GitAiError> {
+        let shas = crate::git::refs::grep_ai_notes(repo, &format!("\"{}\"", session_id))
+            .unwrap_or_default();
+
+        if let Some(latest_sha) = shas.first()
+            && let Ok(log) = crate::git::refs::get_reference_as_authorship_log_v3(repo, latest_sha)
+            && let Some(session) = log.metadata.sessions.get(session_id)
+        {
+            return Ok(session.clone());
+        }
+
+        Err(GitAiError::Generic(format!(
+            "Session not found in history: {}",
+            session_id
         )))
     }
 
@@ -338,7 +400,6 @@ impl VirtualAttributions {
         // this set because the prompt was actively used in this commit's session.
         let mut initial_only_prompt_ids: HashSet<String> = HashSet::new();
         let mut sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
-        let mut initial_only_session_ids: HashSet<String> = HashSet::new();
 
         // Track additions and deletions per session_id for metrics
         let mut session_additions: HashMap<String, u32> = HashMap::new();
@@ -359,6 +420,13 @@ impl VirtualAttributions {
             humans
                 .entry(hash.clone())
                 .or_insert_with(|| human_record.clone());
+        }
+
+        // Load session records from INITIAL attributions
+        for (session_id, session_record) in &initial_attributions.sessions {
+            sessions
+                .entry(session_id.clone())
+                .or_insert_with(|| session_record.clone());
         }
 
         // Process INITIAL attributions
@@ -392,25 +460,12 @@ impl VirtualAttributions {
                 });
 
                 if is_session_format {
-                    // New format: extract session_id from attributions
-                    let session_id = checkpoint
-                        .entries
-                        .iter()
-                        .flat_map(|e| e.line_attributions.iter())
-                        .find(|la| la.author_id.starts_with("s_"))
-                        .map(|la| {
-                            la.author_id
-                                .split("::")
-                                .next()
-                                .unwrap_or(&la.author_id)
-                                .to_string()
-                        })
-                        .unwrap_or_else(|| {
-                            crate::authorship::authorship_log_serialization::generate_session_id(
-                                &agent_id.id,
-                                &agent_id.tool,
-                            )
-                        });
+                    // New format: derive session_id from this checkpoint's own agent_id
+                    let session_id =
+                        crate::authorship::authorship_log_serialization::generate_session_id(
+                            &agent_id.id,
+                            &agent_id.tool,
+                        );
 
                     let session_record = SessionRecord {
                         agent_id: agent_id.clone(),
@@ -424,8 +479,7 @@ impl VirtualAttributions {
                         custom_attributes: None,
                     };
 
-                    sessions.entry(session_id.clone()).or_insert(session_record);
-                    initial_only_session_ids.remove(&session_id);
+                    sessions.insert(session_id.clone(), session_record);
 
                     // Track additions/deletions keyed by session_id
                     *session_additions.entry(session_id.clone()).or_insert(0) +=
@@ -548,7 +602,6 @@ impl VirtualAttributions {
             humans,
             initial_only_prompt_ids,
             sessions,
-            initial_only_session_ids,
         })
     }
 
@@ -571,7 +624,6 @@ impl VirtualAttributions {
         let mut file_contents: HashMap<String, String> = HashMap::new();
         let mut initial_only_prompt_ids: HashSet<String> = HashSet::new();
         let mut sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
-        let mut initial_only_session_ids: HashSet<String> = HashSet::new();
 
         let mut session_additions: HashMap<String, u32> = HashMap::new();
         let mut session_deletions: HashMap<String, u32> = HashMap::new();
@@ -589,6 +641,13 @@ impl VirtualAttributions {
             humans
                 .entry(hash.clone())
                 .or_insert_with(|| human_record.clone());
+        }
+
+        // Load session records from INITIAL attributions
+        for (session_id, session_record) in &initial_attributions.sessions {
+            sessions
+                .entry(session_id.clone())
+                .or_insert_with(|| session_record.clone());
         }
 
         for (file_path, line_attrs) in &initial_attributions.files {
@@ -616,25 +675,12 @@ impl VirtualAttributions {
                 });
 
                 if is_session_format {
-                    // New format: extract session_id from attributions
-                    let session_id = checkpoint
-                        .entries
-                        .iter()
-                        .flat_map(|e| e.line_attributions.iter())
-                        .find(|la| la.author_id.starts_with("s_"))
-                        .map(|la| {
-                            la.author_id
-                                .split("::")
-                                .next()
-                                .unwrap_or(&la.author_id)
-                                .to_string()
-                        })
-                        .unwrap_or_else(|| {
-                            crate::authorship::authorship_log_serialization::generate_session_id(
-                                &agent_id.id,
-                                &agent_id.tool,
-                            )
-                        });
+                    // New format: derive session_id from this checkpoint's own agent_id
+                    let session_id =
+                        crate::authorship::authorship_log_serialization::generate_session_id(
+                            &agent_id.id,
+                            &agent_id.tool,
+                        );
 
                     let session_record = SessionRecord {
                         agent_id: agent_id.clone(),
@@ -648,8 +694,7 @@ impl VirtualAttributions {
                         custom_attributes: None,
                     };
 
-                    sessions.entry(session_id.clone()).or_insert(session_record);
-                    initial_only_session_ids.remove(&session_id);
+                    sessions.insert(session_id.clone(), session_record);
 
                     // Track additions/deletions keyed by session_id
                     *session_additions.entry(session_id.clone()).or_insert(0) +=
@@ -757,7 +802,6 @@ impl VirtualAttributions {
             humans,
             initial_only_prompt_ids,
             sessions,
-            initial_only_session_ids,
         })
     }
 
@@ -781,7 +825,6 @@ impl VirtualAttributions {
         let mut file_contents: HashMap<String, String> = HashMap::new();
         let mut initial_only_prompt_ids: HashSet<String> = HashSet::new();
         let mut sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
-        let mut initial_only_session_ids: HashSet<String> = HashSet::new();
 
         let mut session_additions: HashMap<String, u32> = HashMap::new();
         let mut session_deletions: HashMap<String, u32> = HashMap::new();
@@ -799,6 +842,13 @@ impl VirtualAttributions {
             humans
                 .entry(hash.clone())
                 .or_insert_with(|| human_record.clone());
+        }
+
+        // Load session records from INITIAL attributions
+        for (session_id, session_record) in &initial_attributions.sessions {
+            sessions
+                .entry(session_id.clone())
+                .or_insert_with(|| session_record.clone());
         }
 
         for (file_path, line_attrs) in &initial_attributions.files {
@@ -826,25 +876,12 @@ impl VirtualAttributions {
                 });
 
                 if is_session_format {
-                    // New format: extract session_id from attributions
-                    let session_id = checkpoint
-                        .entries
-                        .iter()
-                        .flat_map(|e| e.line_attributions.iter())
-                        .find(|la| la.author_id.starts_with("s_"))
-                        .map(|la| {
-                            la.author_id
-                                .split("::")
-                                .next()
-                                .unwrap_or(&la.author_id)
-                                .to_string()
-                        })
-                        .unwrap_or_else(|| {
-                            crate::authorship::authorship_log_serialization::generate_session_id(
-                                &agent_id.id,
-                                &agent_id.tool,
-                            )
-                        });
+                    // New format: derive session_id from this checkpoint's own agent_id
+                    let session_id =
+                        crate::authorship::authorship_log_serialization::generate_session_id(
+                            &agent_id.id,
+                            &agent_id.tool,
+                        );
 
                     let session_record = SessionRecord {
                         agent_id: agent_id.clone(),
@@ -858,8 +895,7 @@ impl VirtualAttributions {
                         custom_attributes: None,
                     };
 
-                    sessions.entry(session_id.clone()).or_insert(session_record);
-                    initial_only_session_ids.remove(&session_id);
+                    sessions.insert(session_id.clone(), session_record);
 
                     // Track additions/deletions keyed by session_id
                     *session_additions.entry(session_id.clone()).or_insert(0) +=
@@ -974,7 +1010,6 @@ impl VirtualAttributions {
             humans,
             initial_only_prompt_ids,
             sessions,
-            initial_only_session_ids,
         })
     }
 
@@ -1081,6 +1116,16 @@ impl VirtualAttributions {
         merged_va
             .humans
             .retain(|id, _| referenced_in_merged.contains(id));
+        // Prune sessions whose lines were all deleted. A session is referenced if any
+        // author_id in merged attributions starts with that session_id (before "::").
+        let referenced_session_ids: std::collections::HashSet<String> = referenced_in_merged
+            .iter()
+            .filter(|id| id.starts_with("s_"))
+            .map(|id| id.split("::").next().unwrap_or(id).to_string())
+            .collect();
+        merged_va
+            .sessions
+            .retain(|id, _| referenced_session_ids.contains(id));
 
         Ok(merged_va)
     }
@@ -1161,6 +1206,14 @@ impl VirtualAttributions {
         merged_va
             .humans
             .retain(|id, _| referenced_in_merged.contains(id));
+        let referenced_session_ids: std::collections::HashSet<String> = referenced_in_merged
+            .iter()
+            .filter(|id| id.starts_with("s_"))
+            .map(|id| id.split("::").next().unwrap_or(id).to_string())
+            .collect();
+        merged_va
+            .sessions
+            .retain(|id, _| referenced_session_ids.contains(id));
 
         Ok(merged_va)
     }
@@ -1184,7 +1237,6 @@ impl VirtualAttributions {
             humans: BTreeMap::new(),
             initial_only_prompt_ids: HashSet::new(),
             sessions: BTreeMap::new(),
-            initial_only_session_ids: HashSet::new(),
         }
     }
 
@@ -1207,7 +1259,6 @@ impl VirtualAttributions {
             humans: BTreeMap::new(), // TODO(known-human): propagate humans from caller when rebase path is wired (Task 12)
             initial_only_prompt_ids: HashSet::new(),
             sessions: BTreeMap::new(),
-            initial_only_session_ids: HashSet::new(),
         }
     }
 
@@ -1837,7 +1888,11 @@ impl VirtualAttributions {
 
                     // Track s_ sessions for INITIAL sessions map
                     if author_id.starts_with("s_") {
-                        let session_key = author_id.split("::").next().unwrap_or(&author_id).to_string();
+                        let session_key = author_id
+                            .split("::")
+                            .next()
+                            .unwrap_or(&author_id)
+                            .to_string();
                         if let Some(record) = self.sessions.get(&session_key) {
                             initial_sessions.insert(session_key, record.clone());
                         }
@@ -1896,8 +1951,10 @@ impl VirtualAttributions {
             });
         }
 
-        // Filter INITIAL-only sessions with no committed lines
-        if !self.initial_only_session_ids.is_empty() {
+        // Prune sessions that have no corresponding attestation entries.
+        // Unlike prompts (which keep "non-landing" records for historical reasons),
+        // sessions are only retained if at least one attestation references them.
+        {
             let committed_session_ids: HashSet<String> = authorship_log
                 .attestations
                 .iter()
@@ -1918,10 +1975,10 @@ impl VirtualAttributions {
                 })
                 .collect();
 
-            authorship_log.metadata.sessions.retain(|session_id, _| {
-                !self.initial_only_session_ids.contains(session_id)
-                    || committed_session_ids.contains(session_id)
-            });
+            authorship_log
+                .metadata
+                .sessions
+                .retain(|session_id, _| committed_session_ids.contains(session_id));
         }
 
         // Build prompts map for INITIAL (only prompts referenced by uncommitted lines)
@@ -1982,6 +2039,7 @@ impl VirtualAttributions {
             })
             .collect();
         authorship_log.metadata.humans = self.humans.clone();
+        authorship_log.metadata.sessions = self.sessions.clone();
 
         // Get committed hunks only (no need to check working copy)
         let committed_hunks = collect_committed_hunks(repo, parent_sha, commit_sha, pathspecs)?;
@@ -2184,7 +2242,11 @@ impl VirtualAttributions {
         let mut initial_sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
         for author_id in &referenced_prompts {
             if author_id.starts_with("s_") {
-                let session_key = author_id.split("::").next().unwrap_or(author_id).to_string();
+                let session_key = author_id
+                    .split("::")
+                    .next()
+                    .unwrap_or(author_id)
+                    .to_string();
                 if let Some(record) = self.sessions.get(&session_key) {
                     initial_sessions.insert(session_key, record.clone());
                 }
@@ -2408,6 +2470,12 @@ pub fn merge_attributions_favoring_first(
     // Merge humans from both VAs
     let merged_humans = VirtualAttributions::merge_humans(&primary.humans, &secondary.humans);
 
+    // Merge sessions from both VAs (primary wins on conflict)
+    let mut merged_sessions = secondary.sessions.clone();
+    for (id, record) in &primary.sessions {
+        merged_sessions.insert(id.clone(), record.clone());
+    }
+
     let mut merged = VirtualAttributions {
         repo,
         base_commit,
@@ -2418,8 +2486,7 @@ pub fn merge_attributions_favoring_first(
         blame_start_commit: None,
         humans: merged_humans,
         initial_only_prompt_ids: HashSet::new(),
-        sessions: BTreeMap::new(),
-        initial_only_session_ids: HashSet::new(),
+        sessions: merged_sessions,
     };
 
     // Get union of all files
@@ -2625,6 +2692,7 @@ pub fn restore_stashed_va(
             initial_attributions.prompts,
             initial_attributions.humans,
             initial_file_contents,
+            initial_attributions.sessions,
         ) {
             tracing::debug!("Failed to write INITIAL attributions: {}", e);
             return;

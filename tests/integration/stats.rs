@@ -148,19 +148,21 @@ fn test_authorship_log_stats() {
     assert_eq!(stats.mixed_additions, 0);
     assert_eq!(stats.ai_additions, 5); // Neptune (override) no longer counted as mixed AI
     assert_eq!(stats.ai_accepted, 5);
-    assert_eq!(stats.total_ai_additions, 11);
-    assert_eq!(stats.total_ai_deletions, 11);
+    // With sessions format (no stats fields), total_ai_additions/deletions are 0
+    assert_eq!(stats.total_ai_additions, 0);
+    assert_eq!(stats.total_ai_deletions, 0);
     assert_eq!(stats.git_diff_deleted_lines, 0);
     assert_eq!(stats.git_diff_added_lines, 9);
 
     assert_eq!(stats.tool_model_breakdown.len(), 1);
+    // With sessions format, ai_additions = ai_accepted + mixed_additions = 5 + 0 = 5
     assert_eq!(
         stats
             .tool_model_breakdown
             .get("mock_ai::unknown")
             .unwrap()
             .ai_additions,
-        6
+        5
     );
     assert_eq!(
         stats
@@ -170,13 +172,14 @@ fn test_authorship_log_stats() {
             .ai_accepted,
         5
     );
+    // With sessions format, total_ai_additions/deletions are 0
     assert_eq!(
         stats
             .tool_model_breakdown
             .get("mock_ai::unknown")
             .unwrap()
             .total_ai_additions,
-        11
+        0
     );
     assert_eq!(
         stats
@@ -184,15 +187,16 @@ fn test_authorship_log_stats() {
             .get("mock_ai::unknown")
             .unwrap()
             .total_ai_deletions,
-        11
+        0
     );
+    // With sessions format, mixed_additions is 0 (not tracked)
     assert_eq!(
         stats
             .tool_model_breakdown
             .get("mock_ai::unknown")
             .unwrap()
             .mixed_additions,
-        1
+        0
     );
     assert_eq!(
         stats

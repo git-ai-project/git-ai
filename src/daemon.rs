@@ -1848,7 +1848,7 @@ fn capture_recent_working_log_snapshot(
     repo: &Repository,
     base_commit: &str,
     human_author: Option<String>,
-) -> Result<Option<RecentWorkingLogSnapshot>, GitAiError> {
+) -> Result<Option<Box<RecentWorkingLogSnapshot>>, GitAiError> {
     if base_commit.trim().is_empty()
         || base_commit == "initial"
         || !working_log_has_tracked_state_for_base(repo, base_commit)
@@ -1863,16 +1863,17 @@ fn capture_recent_working_log_snapshot(
             human_author,
         )?;
     let initial = va.to_initial_working_log_only();
-    if initial.files.is_empty() && initial.prompts.is_empty() {
+    if initial.files.is_empty() && initial.prompts.is_empty() && initial.sessions.is_empty() {
         return Ok(None);
     }
 
-    Ok(Some(RecentWorkingLogSnapshot {
+    Ok(Some(Box::new(RecentWorkingLogSnapshot {
         file_contents: va.snapshot_contents_for_files(initial.files.keys()),
         files: initial.files,
         prompts: initial.prompts,
         humans: initial.humans,
-    }))
+        sessions: initial.sessions,
+    })))
 }
 
 fn restore_recent_working_log_snapshot(
@@ -1891,6 +1892,7 @@ fn restore_recent_working_log_snapshot(
             snapshot.prompts.clone(),
             snapshot.humans.clone(),
             snapshot.file_contents.clone(),
+            snapshot.sessions.clone(),
         )?;
     Ok(working_log_has_tracked_state_for_base(repo, base_commit))
 }
@@ -3667,11 +3669,12 @@ struct RecentWorkingLogSnapshot {
     prompts: HashMap<String, crate::authorship::authorship_log::PromptRecord>,
     file_contents: HashMap<String, String>,
     humans: std::collections::BTreeMap<String, crate::authorship::authorship_log::HumanRecord>,
+    sessions: std::collections::BTreeMap<String, crate::authorship::authorship_log::SessionRecord>,
 }
 
 impl RecentWorkingLogSnapshot {
     fn is_empty(&self) -> bool {
-        self.files.is_empty() && self.prompts.is_empty()
+        self.files.is_empty() && self.prompts.is_empty() && self.sessions.is_empty()
     }
 }
 
@@ -3682,7 +3685,7 @@ enum RecentReplayPrerequisite {
         old_head: String,
         pathspecs: Vec<String>,
         final_state: Option<HashMap<String, String>>,
-        working_log_snapshot: Option<RecentWorkingLogSnapshot>,
+        working_log_snapshot: Option<Box<RecentWorkingLogSnapshot>>,
     },
     CheckoutSwitchRename {
         target_head: String,
@@ -8703,6 +8706,7 @@ mod tests {
             prompts: HashMap::new(),
             file_contents: HashMap::from([(file_path.to_string(), "test line\n".to_string())]),
             humans: humans.clone(),
+            sessions: BTreeMap::new(),
         };
 
         // Restore the snapshot

@@ -224,23 +224,23 @@ fn test_amp_e2e_checkpoint_and_commit() {
     let commit = repo.stage_all_and_commit("Add amp-authored line").unwrap();
 
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected a prompt record after amp checkpoint + commit"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected a session record after amp checkpoint + commit"
     );
 
-    let prompt_record = commit
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("prompt record should exist");
+        .expect("session record should exist");
 
-    assert_eq!(prompt_record.agent_id.tool, "amp");
-    assert_eq!(prompt_record.agent_id.model, "claude-opus-4-6");
+    assert_eq!(session_record.agent_id.tool, "amp");
+    assert_eq!(session_record.agent_id.model, "claude-opus-4-6");
     assert!(
-        !prompt_record.messages.is_empty(),
-        "Prompt record should include transcript messages"
+        !session_record.messages.is_empty(),
+        "Session record should include transcript messages"
     );
 }
 
@@ -305,15 +305,15 @@ fn test_amp_post_commit_resyncs_latest_thread_transcript() {
         .stage_all_and_commit("Commit with amp transcript resync")
         .unwrap();
 
-    let prompt_record = commit
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Expected a prompt record");
+        .expect("Expected a session record");
 
-    let has_resync_message = prompt_record.messages.iter().any(|msg| match msg {
+    let has_resync_message = session_record.messages.iter().any(|msg| match msg {
         Message::Assistant { text, .. } => text.contains("RESYNC_TEST_MESSAGE"),
         _ => false,
     });
