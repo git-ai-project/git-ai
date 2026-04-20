@@ -1,5 +1,5 @@
 use crate::authorship::attribution_tracker::LineAttribution;
-use crate::authorship::authorship_log::{HumanRecord, PromptRecord};
+use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord};
 use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::working_log::{CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind};
 use crate::error::GitAiError;
@@ -25,6 +25,9 @@ pub struct InitialAttributions {
     /// Known human records: `h_<hash>` -> HumanRecord
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub humans: std::collections::BTreeMap<String, HumanRecord>,
+    /// Session records: `s_<session_id>` -> SessionRecord
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sessions: std::collections::BTreeMap<String, SessionRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -638,6 +641,7 @@ impl PersistedWorkingLog {
             prompts,
             file_blobs: HashMap::new(),
             humans: std::collections::BTreeMap::new(),
+            sessions: std::collections::BTreeMap::new(),
         })
     }
 
@@ -666,6 +670,7 @@ impl PersistedWorkingLog {
             prompts,
             file_blobs,
             humans,
+            sessions: std::collections::BTreeMap::new(),
         })
     }
 
@@ -692,6 +697,7 @@ impl PersistedWorkingLog {
             prompts: initial.prompts,
             file_blobs,
             humans: initial.humans,
+            sessions: initial.sessions,
         };
 
         let json = serde_json::to_string_pretty(&initial_data)?;
