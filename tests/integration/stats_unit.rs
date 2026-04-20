@@ -453,7 +453,7 @@ fn test_stats_ignores_single_lockfile() {
     )
     .unwrap();
     repo.git(&["add", "src/main.rs"]).unwrap();
-    std::fs::write(repo.path().join("Cargo.lock"), &"# lockfile\n".repeat(1000)).unwrap();
+    std::fs::write(repo.path().join("Cargo.lock"), "# lockfile\n".repeat(1000)).unwrap();
     repo.git(&["add", "Cargo.lock"]).unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "src/main.rs"])
         .unwrap();
@@ -493,11 +493,11 @@ fn test_stats_ignores_multiple_lockfiles() {
     // Commit that updates multiple lockfiles and one source file
     std::fs::write(repo.path().join("README.md"), "# Project\n## New\n").unwrap();
     repo.git(&["add", "README.md"]).unwrap();
-    std::fs::write(repo.path().join("Cargo.lock"), &"# cargo\n".repeat(500)).unwrap();
+    std::fs::write(repo.path().join("Cargo.lock"), "# cargo\n".repeat(500)).unwrap();
     repo.git(&["add", "Cargo.lock"]).unwrap();
-    std::fs::write(repo.path().join("package-lock.json"), &"{}\n".repeat(500)).unwrap();
+    std::fs::write(repo.path().join("package-lock.json"), "{}\n".repeat(500)).unwrap();
     repo.git(&["add", "package-lock.json"]).unwrap();
-    std::fs::write(repo.path().join("yarn.lock"), &"# yarn\n".repeat(500)).unwrap();
+    std::fs::write(repo.path().join("yarn.lock"), "# yarn\n".repeat(500)).unwrap();
     repo.git(&["add", "yarn.lock"]).unwrap();
     repo.git_ai(&["checkpoint", "mock_known_human", "README.md"])
         .unwrap();
@@ -541,7 +541,7 @@ fn test_stats_with_lockfile_only_commit() {
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // Commit that ONLY updates lockfiles (common during dependency updates)
-    std::fs::write(repo.path().join("Cargo.lock"), &"# updated\n".repeat(2000)).unwrap();
+    std::fs::write(repo.path().join("Cargo.lock"), "# updated\n".repeat(2000)).unwrap();
     repo.git(&["add", "Cargo.lock"]).unwrap();
     repo.git_ai(&["checkpoint", "mock_known_human", "Cargo.lock"])
         .unwrap();
@@ -617,19 +617,19 @@ fn test_stats_with_glob_patterns() {
     )
     .unwrap();
     repo.git(&["add", "src/lib.rs"]).unwrap();
-    std::fs::write(repo.path().join("Cargo.lock"), &"# lock\n".repeat(1000)).unwrap();
+    std::fs::write(repo.path().join("Cargo.lock"), "# lock\n".repeat(1000)).unwrap();
     repo.git(&["add", "Cargo.lock"]).unwrap();
-    std::fs::write(repo.path().join("package-lock.json"), &"{}\n".repeat(500)).unwrap();
+    std::fs::write(repo.path().join("package-lock.json"), "{}\n".repeat(500)).unwrap();
     repo.git(&["add", "package-lock.json"]).unwrap();
     std::fs::write(
         repo.path().join("api.generated.ts"),
-        &"// generated\n".repeat(300),
+        "// generated\n".repeat(300),
     )
     .unwrap();
     repo.git(&["add", "api.generated.ts"]).unwrap();
     std::fs::write(
         repo.path().join("schema.generated.js"),
-        &"// schema\n".repeat(200),
+        "// schema\n".repeat(200),
     )
     .unwrap();
     repo.git(&["add", "schema.generated.js"]).unwrap();

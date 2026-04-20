@@ -330,7 +330,7 @@ fn test_range_authorship_ignores_single_lockfile() {
     .unwrap();
     std::fs::write(
         repo.path().join("Cargo.lock"),
-        &"# Large lockfile with 1000 lines\n".repeat(1000),
+        "# Large lockfile with 1000 lines\n".repeat(1000),
     )
     .unwrap();
     repo.git(&["add", "src/main.rs", "Cargo.lock"]).unwrap();
@@ -406,7 +406,7 @@ fn test_range_authorship_mixed_lockfile_and_source() {
     .unwrap();
     std::fs::write(
         repo.path().join("package-lock.json"),
-        &"{\n  \"lockfileVersion\": 2,\n}\n".repeat(1000),
+        "{\n  \"lockfileVersion\": 2,\n}\n".repeat(1000),
     )
     .unwrap();
     repo.git(&["add", "src/lib.rs", "package-lock.json"])
@@ -469,16 +469,16 @@ fn test_range_authorship_multiple_lockfile_types() {
     // Add multiple lockfiles and one real source change
     std::fs::write(
         repo.path().join("Cargo.lock"),
-        &"# Cargo lock\n".repeat(500),
+        "# Cargo lock\n".repeat(500),
     )
     .unwrap();
-    std::fs::write(repo.path().join("yarn.lock"), &"# yarn lock\n".repeat(500)).unwrap();
+    std::fs::write(repo.path().join("yarn.lock"), "# yarn lock\n".repeat(500)).unwrap();
     std::fs::write(
         repo.path().join("poetry.lock"),
-        &"# poetry lock\n".repeat(500),
+        "# poetry lock\n".repeat(500),
     )
     .unwrap();
-    std::fs::write(repo.path().join("go.sum"), &"# go sum\n".repeat(500)).unwrap();
+    std::fs::write(repo.path().join("go.sum"), "# go sum\n".repeat(500)).unwrap();
     std::fs::write(repo.path().join("README.md"), "# Project\n## New Section\n").unwrap();
     repo.git(&[
         "add",
@@ -544,10 +544,10 @@ fn test_range_authorship_lockfile_only_commit() {
     // Commit that only changes lockfiles (common scenario)
     std::fs::write(
         repo.path().join("package-lock.json"),
-        &"{\n  \"version\": \"1.0.0\"\n}\n".repeat(1000),
+        "{\n  \"version\": \"1.0.0\"\n}\n".repeat(1000),
     )
     .unwrap();
-    std::fs::write(repo.path().join("yarn.lock"), &"# yarn\n".repeat(500)).unwrap();
+    std::fs::write(repo.path().join("yarn.lock"), "# yarn\n".repeat(500)).unwrap();
     repo.git(&["add", "package-lock.json", "yarn.lock"])
         .unwrap();
     repo.git_ai(&["checkpoint", "mock_known_human", "package-lock.json"])
@@ -987,11 +987,11 @@ fn test_range_authorship_with_glob_patterns() {
         "fn main() {}\nfn helper() {}\n",
     )
     .unwrap();
-    std::fs::write(repo.path().join("Cargo.lock"), &"# lock\n".repeat(1000)).unwrap();
-    std::fs::write(repo.path().join("package-lock.json"), &"{}\n".repeat(500)).unwrap();
+    std::fs::write(repo.path().join("Cargo.lock"), "# lock\n".repeat(1000)).unwrap();
+    std::fs::write(repo.path().join("package-lock.json"), "{}\n".repeat(500)).unwrap();
     std::fs::write(
         repo.path().join("api.generated.js"),
-        &"// generated\n".repeat(200),
+        "// generated\n".repeat(200),
     )
     .unwrap();
     repo.git(&[

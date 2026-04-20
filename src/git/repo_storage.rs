@@ -144,7 +144,7 @@ impl RepoStorage {
     const OLD_WORKING_LOG_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 
     /// Remove archived (`old-*`) working log directories whose `.archived_at`
-    /// timestamp is older than [`OLD_WORKING_LOG_RETENTION_SECS`].
+    /// timestamp is older than `OLD_WORKING_LOG_RETENTION_SECS`.
     /// Errors are intentionally swallowed so pruning never breaks the commit flow.
     pub fn prune_expired_old_working_logs(&self) {
         let now_secs = SystemTime::now()

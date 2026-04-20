@@ -2216,8 +2216,8 @@ fn diff_based_transfer_scaling() {
         let mut prev = file_contents.clone();
         for ci in 0..num_commits {
             let mut new_batch = Vec::new();
-            for fi in 0..num_files {
-                let old_lines: Vec<&str> = prev[fi].lines().collect();
+            for (fi, prev_content) in prev.iter().enumerate().take(num_files) {
+                let old_lines: Vec<&str> = prev_content.lines().collect();
                 let mut new_lines = Vec::new();
                 if ci == 0 {
                     for h in 0..5 {

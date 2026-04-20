@@ -61,10 +61,7 @@ fn test_pre_commit_result_mapping() {
     let repo = TestRepo::new();
     let result = repo.commit("result mapping test");
     // Result should be either Ok or Err — the important thing is no panic.
-    match result {
-        Ok(_) => {}
-        Err(_) => {}
-    }
+    let _ = result;
 }
 
 /// Migrated from src/authorship/pre_commit.rs
