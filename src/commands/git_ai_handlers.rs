@@ -5,7 +5,8 @@ use crate::authorship::range_authorship;
 use crate::authorship::stats::stats_command;
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands;
-use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+use crate::commands::checkpoint::PreparedPathRole;
+use crate::commands::checkpoint_agent::orchestrator::CheckpointResult;
 use crate::commands::checkpoint_agent::transcript_readers;
 use crate::config;
 use crate::daemon::{
@@ -402,7 +403,7 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
-    let mut agent_run_result = None;
+    let mut agent_run_result: Option<CheckpointResult> = None;
     // Handle preset arguments after parsing all flags
     if !args.is_empty() {
         // Route recognized presets through the new orchestrator; mock/test presets
@@ -423,7 +424,7 @@ fn handle_checkpoint(args: &[String]) {
                             if let Some(first) = results.into_iter().next() {
                                 repository_working_dir =
                                     first.repo_working_dir.to_string_lossy().to_string();
-                                agent_run_result = Some(first.into_agent_run_result());
+                                agent_run_result = Some(first);
                             }
                         }
                         Err(e) => {
@@ -447,37 +448,41 @@ fn handle_checkpoint(args: &[String]) {
                 );
 
                 // Collect all remaining args (after mock_ai and flags) as pathspecs
-                let edited_filepaths = if args.len() > 1 {
+                let edited_filepaths: Vec<std::path::PathBuf> = if args.len() > 1 {
                     let mut paths = Vec::new();
                     for arg in &args[1..] {
                         // Skip flags
                         if !arg.starts_with("--") {
-                            paths.push(arg.clone());
+                            paths.push(std::path::PathBuf::from(arg));
                         }
                     }
-                    if paths.is_empty() { None } else { Some(paths) }
+                    paths
                 } else {
                     let working_dir = agent_run_result
                         .as_ref()
-                        .and_then(|r| r.repo_working_dir.clone())
+                        .map(|r| r.repo_working_dir.to_string_lossy().to_string())
                         .unwrap_or(repository_working_dir.clone());
                     // Find the git repository
-                    Some(get_all_files_for_mock_ai(&working_dir))
+                    get_all_files_for_mock_ai(&working_dir)
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect()
                 };
 
-                agent_run_result = Some(AgentRunResult {
+                agent_run_result = Some(CheckpointResult {
+                    trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+                    checkpoint_kind: CheckpointKind::AiAgent,
                     agent_id: AgentId {
                         tool: "mock_ai".to_string(),
                         id: mock_agent_id,
                         model: "unknown".to_string(),
                     },
-                    agent_metadata: None,
-                    checkpoint_kind: CheckpointKind::AiAgent,
-                    transcript: None,
-                    repo_working_dir: None,
-                    edited_filepaths,
-                    will_edit_filepaths: None,
+                    repo_working_dir: std::path::PathBuf::from(&repository_working_dir),
+                    file_paths: edited_filepaths,
+                    path_role: PreparedPathRole::Edited,
                     dirty_files: None,
+                    transcript_source: None,
+                    metadata: std::collections::HashMap::new(),
                     captured_checkpoint_id: None,
                 });
             }
@@ -584,19 +589,30 @@ fn handle_checkpoint(args: &[String]) {
                     m
                 };
 
-                agent_run_result = Some(AgentRunResult {
+                agent_run_result = Some(CheckpointResult {
+                    trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+                    checkpoint_kind: CheckpointKind::KnownHuman,
                     agent_id: AgentId {
                         tool: "known_human".to_string(),
                         id: "known_human_session".to_string(),
                         model: "unknown".to_string(),
                     },
-                    agent_metadata: Some(known_human_agent_metadata),
-                    checkpoint_kind: CheckpointKind::KnownHuman,
-                    transcript: None,
-                    repo_working_dir,
-                    edited_filepaths,
-                    will_edit_filepaths: None,
-                    dirty_files,
+                    repo_working_dir: std::path::PathBuf::from(
+                        repo_working_dir.unwrap_or(repository_working_dir.clone()),
+                    ),
+                    file_paths: edited_filepaths
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect(),
+                    path_role: PreparedPathRole::Edited,
+                    dirty_files: dirty_files.map(|df| {
+                        df.into_iter()
+                            .map(|(k, v)| (std::path::PathBuf::from(k), v))
+                            .collect()
+                    }),
+                    transcript_source: None,
+                    metadata: known_human_agent_metadata,
                     captured_checkpoint_id: None,
                 });
             }
@@ -614,19 +630,24 @@ fn handle_checkpoint(args: &[String]) {
                     None
                 };
 
-                agent_run_result = Some(AgentRunResult {
+                agent_run_result = Some(CheckpointResult {
+                    trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+                    checkpoint_kind: CheckpointKind::KnownHuman,
                     agent_id: AgentId {
                         tool: "mock_known_human".to_string(),
                         id: "mock_known_human_session".to_string(),
                         model: "unknown".to_string(),
                     },
-                    agent_metadata: None,
-                    checkpoint_kind: CheckpointKind::KnownHuman,
-                    transcript: None,
-                    repo_working_dir: None,
-                    edited_filepaths,
-                    will_edit_filepaths: None,
+                    repo_working_dir: std::path::PathBuf::from(&repository_working_dir),
+                    file_paths: edited_filepaths
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect(),
+                    path_role: PreparedPathRole::Edited,
                     dirty_files: None,
+                    transcript_source: None,
+                    metadata: std::collections::HashMap::new(),
                     captured_checkpoint_id: None,
                 });
             }
@@ -655,7 +676,7 @@ fn handle_checkpoint(args: &[String]) {
 
     let final_working_dir = agent_run_result
         .as_ref()
-        .and_then(|r| r.repo_working_dir.clone())
+        .map(|r| r.repo_working_dir.to_string_lossy().to_string())
         .unwrap_or_else(|| repository_working_dir.clone());
 
     // Try to find the git repository
@@ -680,18 +701,13 @@ fn handle_checkpoint(args: &[String]) {
     // which cannot see changes inside the linked worktree's working tree.
     let needs_file_based_repo_detection = repo_result.is_err()
         || if let Ok(ref cwd_repo) = repo_result {
-            let edited = agent_run_result.as_ref().and_then(|r| {
-                if r.checkpoint_kind == CheckpointKind::Human {
-                    r.will_edit_filepaths.as_ref()
-                } else {
-                    r.edited_filepaths.as_ref()
-                }
-            });
-            edited
-                .map(|fs| {
-                    fs.iter().any(|f| {
-                        let pb = if std::path::Path::new(f).is_absolute() {
-                            std::path::PathBuf::from(f)
+            agent_run_result
+                .as_ref()
+                .filter(|r| !r.file_paths.is_empty())
+                .map(|r| {
+                    r.file_paths.iter().any(|f| {
+                        let pb = if f.is_absolute() {
+                            f.clone()
                         } else {
                             std::path::Path::new(&repository_working_dir).join(f)
                         };
@@ -705,13 +721,7 @@ fn handle_checkpoint(args: &[String]) {
 
     if needs_file_based_repo_detection {
         // Workspace root is not a git repo - try to detect repositories from edited files
-        let files_to_check = agent_run_result.as_ref().and_then(|r| {
-            if r.checkpoint_kind == CheckpointKind::Human {
-                r.will_edit_filepaths.as_ref()
-            } else {
-                r.edited_filepaths.as_ref()
-            }
-        });
+        let files_to_check = agent_run_result.as_ref().map(|r| &r.file_paths);
 
         if let Some(files) = files_to_check
             && !files.is_empty()
@@ -720,9 +730,8 @@ fn handle_checkpoint(args: &[String]) {
             let absolute_files: Vec<String> = files
                 .iter()
                 .map(|f| {
-                    let path = std::path::Path::new(f);
-                    if path.is_absolute() {
-                        f.clone()
+                    if f.is_absolute() {
+                        f.to_string_lossy().to_string()
                     } else {
                         std::path::Path::new(&repository_working_dir)
                             .join(f)
@@ -803,17 +812,14 @@ fn handle_checkpoint(args: &[String]) {
                 // Get user name from this repo's config
                 let default_user_name = repo.git_author_identity().name_or_unknown();
 
-                // Create a modified agent_run_result with only this repo's files
+                // Create a modified checkpoint_result with only this repo's files
                 let repo_agent_result = agent_run_result.as_ref().map(|r| {
                     let mut modified = r.clone();
-                    modified.repo_working_dir = Some(repo_workdir.to_string_lossy().to_string());
-                    if r.checkpoint_kind == CheckpointKind::Human {
-                        modified.will_edit_filepaths = Some(repo_file_paths.clone());
-                        modified.edited_filepaths = None;
-                    } else {
-                        modified.edited_filepaths = Some(repo_file_paths.clone());
-                        modified.will_edit_filepaths = None;
-                    }
+                    modified.repo_working_dir = repo_workdir.clone();
+                    modified.file_paths = repo_file_paths
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
                     modified
                 });
 
@@ -945,7 +951,9 @@ fn handle_checkpoint(args: &[String]) {
             Some(get_all_files_for_mock_ai(&effective_working_dir))
         };
 
-        agent_run_result = Some(AgentRunResult {
+        agent_run_result = Some(CheckpointResult {
+            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+            checkpoint_kind: CheckpointKind::Human,
             agent_id: AgentId {
                 tool: "mock_ai".to_string(),
                 id: format!(
@@ -957,13 +965,16 @@ fn handle_checkpoint(args: &[String]) {
                 ),
                 model: "unknown".to_string(),
             },
-            agent_metadata: None,
-            checkpoint_kind: CheckpointKind::Human,
-            transcript: None,
-            will_edit_filepaths: Some(will_edit_filepaths.unwrap_or_default()),
-            edited_filepaths: None,
-            repo_working_dir: Some(effective_working_dir),
+            repo_working_dir: std::path::PathBuf::from(&effective_working_dir),
+            file_paths: will_edit_filepaths
+                .unwrap_or_default()
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect(),
+            path_role: PreparedPathRole::WillEdit,
             dirty_files: None,
+            transcript_source: None,
+            metadata: std::collections::HashMap::new(),
             captured_checkpoint_id: None,
         });
     }
@@ -976,35 +987,30 @@ fn handle_checkpoint(args: &[String]) {
 
     let external_files: Vec<String> = agent_run_result
         .as_ref()
-        .and_then(|r| {
-            let paths = if r.checkpoint_kind == CheckpointKind::Human {
-                r.will_edit_filepaths.as_ref()
-            } else {
-                r.edited_filepaths.as_ref()
-            };
-            paths.map(|p| {
-                let repo_workdir = repo.workdir().ok();
-                p.iter()
-                    .filter_map(|path| {
-                        let workdir = repo_workdir.as_ref()?;
-                        let path_buf = if std::path::Path::new(path).is_absolute() {
-                            std::path::PathBuf::from(path)
+        .filter(|r| !r.file_paths.is_empty())
+        .map(|r| {
+            let repo_workdir = repo.workdir().ok();
+            r.file_paths
+                .iter()
+                .filter_map(|path| {
+                    let workdir = repo_workdir.as_ref()?;
+                    let path_buf = if path.is_absolute() {
+                        path.clone()
+                    } else {
+                        workdir.join(path)
+                    };
+                    if repo.path_is_in_workdir(&path_buf) {
+                        None
+                    } else {
+                        let abs = if path.is_absolute() {
+                            path.to_string_lossy().to_string()
                         } else {
-                            workdir.join(path)
+                            workdir.join(path).to_string_lossy().to_string()
                         };
-                        if repo.path_is_in_workdir(&path_buf) {
-                            None
-                        } else {
-                            let abs = if std::path::Path::new(path).is_absolute() {
-                                path.clone()
-                            } else {
-                                workdir.join(path).to_string_lossy().to_string()
-                            };
-                            Some(abs)
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            })
+                        Some(abs)
+                    }
+                })
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
 
@@ -1067,18 +1073,15 @@ fn handle_checkpoint(args: &[String]) {
             let ext_user_name = ext_repo.git_author_identity().name_or_unknown();
 
             let mut modified = base_result.clone();
-            modified.repo_working_dir = Some(repo_workdir.to_string_lossy().to_string());
+            modified.repo_working_dir = repo_workdir.clone();
             // Clear stale captured checkpoint ID — the original capture was consumed
             // (or will be consumed) by the primary repo's checkpoint dispatch and
             // the on-disk files may already be deleted by the daemon.
             modified.captured_checkpoint_id = None;
-            if base_result.checkpoint_kind == CheckpointKind::Human {
-                modified.will_edit_filepaths = Some(repo_file_paths);
-                modified.edited_filepaths = None;
-            } else {
-                modified.edited_filepaths = Some(repo_file_paths);
-                modified.will_edit_filepaths = None;
-            }
+            modified.file_paths = repo_file_paths
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect();
 
             match run_checkpoint_via_daemon_or_local(
                 &ext_repo,
@@ -1138,7 +1141,7 @@ fn run_checkpoint_via_daemon_or_local(
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
-    agent_run_result: Option<AgentRunResult>,
+    agent_run_result: Option<CheckpointResult>,
     allow_captured_async: bool,
     is_pre_commit: bool,
 ) -> Result<CheckpointDispatchOutcome, crate::error::GitAiError> {
@@ -1319,7 +1322,7 @@ fn run_checkpoint_via_daemon_or_local(
                                 author: Some(author.to_string()),
                                 quiet: Some(quiet),
                                 is_pre_commit: Some(is_pre_commit),
-                                agent_run_result: agent_run_result.clone(),
+                                checkpoint_result: agent_run_result.clone(),
                             },
                         ))),
                         wait: Some(true),
@@ -1375,7 +1378,7 @@ fn run_checkpoint_via_daemon_or_local(
 
 fn checkpoint_request_has_explicit_capture_scope(
     args: &[String],
-    agent_run_result: Option<&AgentRunResult>,
+    agent_run_result: Option<&CheckpointResult>,
 ) -> bool {
     if args.first().map(String::as_str) == Some("mock_ai") {
         return args.iter().skip(1).any(|arg| !arg.starts_with("--"));
@@ -1458,22 +1461,13 @@ fn checkpoint_kind_to_str(kind: CheckpointKind) -> &'static str {
 }
 
 fn estimate_checkpoint_file_count(
-    kind: CheckpointKind,
-    agent_run_result: &Option<AgentRunResult>,
+    _kind: CheckpointKind,
+    checkpoint_result: &Option<CheckpointResult>,
 ) -> usize {
-    match (kind, agent_run_result) {
-        (CheckpointKind::Human, Some(result)) => result
-            .will_edit_filepaths
-            .as_ref()
-            .map(|v| v.len())
-            .unwrap_or(0),
-        (_, Some(result)) => result
-            .edited_filepaths
-            .as_ref()
-            .map(|v| v.len())
-            .unwrap_or(0),
-        _ => 0,
-    }
+    checkpoint_result
+        .as_ref()
+        .map(|r| r.file_paths.len())
+        .unwrap_or(0)
 }
 
 fn strip_utf8_bom(input: String) -> String {
