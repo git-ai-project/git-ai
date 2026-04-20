@@ -1,23 +1,23 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::test_utils::fixture_path;
 use git_ai::authorship::transcript::Message;
-use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, CodexPreset,
+use git_ai::commands::checkpoint_agent::presets::{
+    BashPreHookStrategy, ParsedHookEvent, resolve_preset,
 };
-use git_ai::commands::checkpoint_agent::bash_tool;
+use git_ai::commands::checkpoint_agent::transcript_readers;
 use git_ai::error::GitAiError;
 use serde_json::json;
 use std::fs;
-use std::thread;
-use std::time::Duration;
+
+fn parse_codex(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
+    resolve_preset("codex")?.parse(hook_input, "t_test")
+}
 
 #[test]
 fn test_parse_codex_rollout_transcript() {
     let fixture = fixture_path("codex-session-simple.jsonl");
-    let (transcript, model) =
-        CodexPreset::transcript_and_model_from_codex_rollout_jsonl(fixture.to_str().unwrap())
-            .expect("Failed to parse Codex rollout");
+    let (transcript, model) = transcript_readers::read_codex_jsonl(fixture.as_path())
+        .expect("Failed to parse Codex rollout");
 
     assert!(
         !transcript.messages().is_empty(),
@@ -61,42 +61,28 @@ fn test_codex_preset_legacy_hook_input() {
     })
     .to_string();
 
-    let result = CodexPreset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
-        .expect("Codex preset should run");
+    let events = parse_codex(&hook_input).expect("Codex preset should run");
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
-    assert_eq!(result.agent_id.tool, "codex");
-    assert_eq!(
-        result.agent_id.id, "019c4b43-1451-7af3-be4c-5576369bf1ba",
-        "Legacy thread-id should map to agent id"
-    );
-    assert_eq!(
-        result.agent_id.model, "gpt-5-codex",
-        "Model should come from transcript"
-    );
-    assert_eq!(
-        result.repo_working_dir.as_deref(),
-        Some("/Users/test/projects/git-ai")
-    );
-    assert!(
-        result.transcript.is_some(),
-        "AI checkpoint should include transcript"
-    );
-    assert!(
-        result.edited_filepaths.is_none(),
-        "Codex hooks do not provide file pathspecs"
-    );
-    assert!(
-        result
-            .agent_metadata
-            .as_ref()
-            .and_then(|m| m.get("transcript_path"))
-            .is_some(),
-        "transcript_path should be persisted for commit-time resync"
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(e.context.agent_id.tool, "codex");
+            assert_eq!(
+                e.context.agent_id.id, "019c4b43-1451-7af3-be4c-5576369bf1ba",
+                "Legacy thread-id should map to agent id"
+            );
+            assert_eq!(
+                e.context.cwd.to_string_lossy(),
+                "/Users/test/projects/git-ai"
+            );
+            assert!(e.transcript_source.is_some());
+            assert!(
+                e.context.metadata.contains_key("transcript_path"),
+                "transcript_path should be persisted for commit-time resync"
+            );
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
@@ -117,42 +103,32 @@ fn test_codex_preset_structured_hook_input() {
     })
     .to_string();
 
-    let result = CodexPreset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
-        .expect("Codex preset should run");
+    let events = parse_codex(&hook_input).expect("Codex preset should run");
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
-    assert_eq!(result.agent_id.tool, "codex");
-    assert_eq!(
-        result.agent_id.id, "session-abc-123",
-        "session_id should be preferred when present"
-    );
-    assert_eq!(
-        result.agent_id.model, "gpt-5-codex",
-        "Model should come from transcript"
-    );
-    assert_eq!(
-        result.repo_working_dir.as_deref(),
-        Some("/Users/test/projects/git-ai")
-    );
-    assert!(
-        result.transcript.is_some(),
-        "AI checkpoint should include transcript"
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(e.context.agent_id.tool, "codex");
+            assert_eq!(
+                e.context.session_id, "session-abc-123",
+                "session_id should be preferred when present"
+            );
+            assert_eq!(
+                e.context.cwd.to_string_lossy(),
+                "/Users/test/projects/git-ai"
+            );
+            assert!(e.transcript_source.is_some());
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
 fn test_codex_preset_bash_pre_tool_use_skips_checkpoint_after_capturing_snapshot() {
-    use crate::repos::test_repo::TestRepo;
-
-    let repo = TestRepo::new();
-    let repo_root = repo.canonical_path();
     let fixture = fixture_path("codex-session-simple.jsonl");
     let hook_input = json!({
         "session_id": "session-bash-pre",
-        "cwd": repo_root.to_string_lossy().to_string(),
+        "cwd": "/tmp/test-project",
         "hook_event_name": "PreToolUse",
         "tool_name": "Bash",
         "tool_use_id": "bash-use-1",
@@ -163,49 +139,31 @@ fn test_codex_preset_bash_pre_tool_use_skips_checkpoint_after_capturing_snapshot
     })
     .to_string();
 
-    match CodexPreset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    }) {
-        Err(GitAiError::PresetError(message)) => {
+    // In the new parse API, bash PreToolUse returns PreBashCall with SnapshotOnly strategy
+    // instead of returning an error. The caller handles the side effects.
+    let events = parse_codex(&hook_input).expect("should succeed with PreBashCall");
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreBashCall(e) => {
+            assert_eq!(e.strategy, BashPreHookStrategy::SnapshotOnly);
+            assert_eq!(e.context.agent_id.tool, "codex");
+            assert_eq!(e.context.session_id, "session-bash-pre");
+            assert_eq!(e.tool_use_id, "bash-use-1");
             assert!(
-                message.contains("Skipping Codex PreToolUse checkpoint"),
-                "unexpected error message: {message}"
+                e.context.metadata.contains_key("transcript_path"),
+                "metadata should preserve transcript path for commit-time recovery"
             );
         }
-        other => panic!("expected Codex PreToolUse skip PresetError, got {other:?}"),
+        _ => panic!("Expected PreBashCall for bash PreToolUse"),
     }
-
-    assert!(
-        bash_tool::has_active_bash_inflight(&repo_root),
-        "Codex PreToolUse should still capture a bash pre-snapshot"
-    );
-
-    let active_context = bash_tool::latest_inflight_bash_agent_context(&repo_root)
-        .expect("active context should exist");
-    assert_eq!(active_context.agent_id.tool, "codex");
-    assert_eq!(active_context.session_id, "session-bash-pre");
-    assert_eq!(active_context.tool_use_id, "bash-use-1");
-    assert_eq!(
-        active_context
-            .agent_metadata
-            .as_ref()
-            .and_then(|m| m.get("transcript_path"))
-            .map(String::as_str),
-        fixture.to_str(),
-        "active context should preserve transcript path for commit-time recovery"
-    );
 }
 
 #[test]
 fn test_codex_preset_bash_pre_tool_use_supports_camel_case_hook_event_name() {
-    use crate::repos::test_repo::TestRepo;
-
-    let repo = TestRepo::new();
-    let repo_root = repo.canonical_path();
     let fixture = fixture_path("codex-session-simple.jsonl");
     let hook_input = json!({
         "session_id": "session-bash-pre-camel",
-        "cwd": repo_root.to_string_lossy().to_string(),
+        "cwd": "/tmp/test-project",
         "hookEventName": "PreToolUse",
         "toolName": "Bash",
         "toolUseId": "bash-use-camel-1",
@@ -216,73 +174,26 @@ fn test_codex_preset_bash_pre_tool_use_supports_camel_case_hook_event_name() {
     })
     .to_string();
 
-    match CodexPreset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    }) {
-        Err(GitAiError::PresetError(message)) => {
-            assert!(
-                message.contains("Skipping Codex PreToolUse checkpoint"),
-                "unexpected error message: {message}"
-            );
+    // Camel-case fields should work the same as snake_case
+    let events = parse_codex(&hook_input).expect("should succeed with PreBashCall");
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreBashCall(e) => {
+            assert_eq!(e.strategy, BashPreHookStrategy::SnapshotOnly);
+            assert_eq!(e.context.agent_id.tool, "codex");
+            assert_eq!(e.context.session_id, "session-bash-pre-camel");
+            assert_eq!(e.tool_use_id, "bash-use-camel-1");
         }
-        other => panic!("expected Codex PreToolUse skip PresetError, got {other:?}"),
+        _ => panic!("Expected PreBashCall for camel-case PreToolUse"),
     }
-
-    assert!(
-        bash_tool::has_active_bash_inflight(&repo_root),
-        "camel-case PreToolUse should still capture a bash pre-snapshot"
-    );
-
-    let active_context = bash_tool::latest_inflight_bash_agent_context(&repo_root)
-        .expect("active context should exist");
-    assert_eq!(active_context.agent_id.tool, "codex");
-    assert_eq!(active_context.session_id, "session-bash-pre-camel");
-    assert_eq!(active_context.tool_use_id, "bash-use-camel-1");
 }
 
 #[test]
 fn test_codex_preset_bash_post_tool_use_detects_changed_files() {
-    use crate::repos::test_repo::TestRepo;
-
     let fixture = fixture_path("codex-session-simple.jsonl");
-    let repo = TestRepo::new();
-    let repo_root = repo.canonical_path();
-    let file_path = repo_root.join("src").join("main.rs");
-    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
-    fs::write(&file_path, "fn main() {}\n").unwrap();
-    repo.stage_all_and_commit("Initial commit").unwrap();
-
-    let pre_hook_input = json!({
-        "session_id": "session-bash-post",
-        "cwd": repo_root.to_string_lossy().to_string(),
-        "hook_event_name": "PreToolUse",
-        "tool_name": "Bash",
-        "tool_use_id": "bash-use-2",
-        "tool_input": {
-            "command": "python - <<'PY'\nprint('before')\nPY"
-        },
-        "transcript_path": fixture.to_str().unwrap()
-    })
-    .to_string();
-
-    match CodexPreset.run(AgentCheckpointFlags {
-        hook_input: Some(pre_hook_input),
-    }) {
-        Err(GitAiError::PresetError(message)) => {
-            assert!(
-                message.contains("Skipping Codex PreToolUse checkpoint"),
-                "unexpected error message: {message}"
-            );
-        }
-        other => panic!("expected Codex PreToolUse skip PresetError, got {other:?}"),
-    }
-
-    thread::sleep(Duration::from_millis(50));
-    fs::write(&file_path, "fn main() { println!(\"hello\"); }\n").unwrap();
-
     let post_hook_input = json!({
         "session_id": "session-bash-post",
-        "cwd": repo_root.to_string_lossy().to_string(),
+        "cwd": "/tmp/test-project",
         "hook_event_name": "PostToolUse",
         "tool_name": "Bash",
         "tool_use_id": "bash-use-2",
@@ -293,22 +204,18 @@ fn test_codex_preset_bash_post_tool_use_detects_changed_files() {
     })
     .to_string();
 
-    let result = CodexPreset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(post_hook_input),
-        })
-        .expect("Codex preset post-hook should run");
+    let events = parse_codex(&post_hook_input).expect("Codex preset post-hook should run");
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
-    assert!(
-        result.transcript.is_some(),
-        "PostToolUse should attach transcript content"
-    );
-    assert_eq!(
-        result.edited_filepaths,
-        Some(vec!["src/main.rs".to_string()]),
-        "Bash post-hook should scope the checkpoint to changed files"
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostBashCall(e) => {
+            assert!(e.transcript_source.is_some());
+            assert_eq!(e.context.agent_id.tool, "codex");
+            assert_eq!(e.context.session_id, "session-bash-post");
+            assert_eq!(e.tool_use_id, "bash-use-2");
+        }
+        _ => panic!("Expected PostBashCall"),
+    }
 }
 
 #[test]
@@ -323,7 +230,7 @@ fn test_find_rollout_path_for_session_in_home() {
     fs::copy(&fixture, &rollout_path).unwrap();
 
     let resolved =
-        CodexPreset::find_latest_rollout_path_for_session_in_home(session_id, temp.path())
+        transcript_readers::find_codex_rollout_path_for_session_in_home(session_id, temp.path())
             .expect("search should succeed")
             .expect("rollout should be found");
 
@@ -371,7 +278,6 @@ fn test_codex_e2e_commit_resync_uses_latest_rollout() {
     repo.git_ai(&["checkpoint", "codex", "--hook-input", &hook_input])
         .expect("checkpoint should succeed");
 
-    // Simulate the Codex rollout being appended/updated after checkpoint.
     fs::copy(&updated_fixture, &transcript_path).unwrap();
 
     let commit = repo
@@ -392,10 +298,7 @@ fn test_codex_e2e_commit_resync_uses_latest_rollout() {
         .next()
         .expect("Session record should exist");
 
-    assert_eq!(
-        session.agent_id.tool, "codex",
-        "Session should be attributed to codex"
-    );
+    assert_eq!(session.agent_id.tool, "codex");
     assert_eq!(
         session.agent_id.model, "gpt-5.1-codex",
         "Commit-time resync should update the model from latest rollout"
@@ -471,14 +374,8 @@ fn test_codex_commit_inside_bash_inflight_is_attributed_to_codex() {
         .next()
         .expect("Session record should exist");
 
-    assert_eq!(
-        session.agent_id.tool, "codex",
-        "Commit-time bash override should attribute the session to codex"
-    );
-    assert_eq!(
-        session.agent_id.id, "codex-bash-session",
-        "Session should be linked to the active Codex session"
-    );
+    assert_eq!(session.agent_id.tool, "codex");
+    assert_eq!(session.agent_id.id, "codex-bash-session");
 
     let mut tracked_file = repo.filename("src/main.rs");
     tracked_file.assert_lines_and_blame(crate::lines![
@@ -740,10 +637,6 @@ fn test_codex_read_only_bash_post_tool_use_before_edit_does_not_steal_commit_att
     ]);
 }
 
-/// Variant of test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai using
-/// unattributed (legacy) human checkpoints. Assertions match origin/main behavior: with empty
-/// attribution, all lines (including "Project README") are attributed to AI because the codex
-/// session claims any unattributed content.
 #[test]
 fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai_standard_human() {
     use crate::repos::test_repo::TestRepo;

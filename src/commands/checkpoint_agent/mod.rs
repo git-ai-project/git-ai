@@ -1,13 +1,5 @@
 pub mod agent_presets;
-#[cfg(feature = "test-support")]
-pub mod agent_v1_preset;
-#[cfg(feature = "test-support")]
-pub mod amp_preset;
 pub mod bash_tool;
-#[cfg(feature = "test-support")]
-pub mod opencode_preset;
 pub mod orchestrator;
-#[cfg(feature = "test-support")]
-pub mod pi_preset;
 pub mod presets;
 pub mod transcript_readers;

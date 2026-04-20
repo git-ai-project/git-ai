@@ -1,37 +1,18 @@
-use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, AiTabPreset, ClaudePreset, CodexPreset,
-    ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset, GithubCopilotPreset,
-};
-use git_ai::commands::checkpoint_agent::amp_preset::AmpPreset;
+use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
+use git_ai::commands::checkpoint_agent::transcript_readers;
 use git_ai::error::GitAiError;
 use serde_json::json;
 use std::fs;
+use std::path::Path;
 
 // ==============================================================================
 // ClaudePreset Error Cases
 // ==============================================================================
 
 #[test]
-fn test_claude_preset_missing_hook_input() {
-    let preset = ClaudePreset;
-    let result = preset.run(AgentCheckpointFlags { hook_input: None });
-
-    assert!(result.is_err());
-    match result {
-        Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("hook_input is required"));
-        }
-        _ => panic!("Expected PresetError for missing hook_input"),
-    }
-}
-
-#[test]
 fn test_claude_preset_invalid_json() {
-    let preset = ClaudePreset;
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some("not valid json".to_string()),
-    });
+    let preset = resolve_preset("claude").unwrap();
+    let result = preset.parse("not valid json", "t_test");
 
     assert!(result.is_err());
     match result {
@@ -44,16 +25,14 @@ fn test_claude_preset_invalid_json() {
 
 #[test]
 fn test_claude_preset_missing_transcript_path() {
-    let preset = ClaudePreset;
+    let preset = resolve_preset("claude").unwrap();
     let hook_input = json!({
         "cwd": "/some/path",
         "hook_event_name": "PostToolUse"
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -66,16 +45,14 @@ fn test_claude_preset_missing_transcript_path() {
 
 #[test]
 fn test_claude_preset_missing_cwd() {
-    let preset = ClaudePreset;
+    let preset = resolve_preset("claude").unwrap();
     let hook_input = json!({
         "transcript_path": "tests/fixtures/example-claude-code.jsonl",
         "hook_event_name": "PostToolUse"
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -88,7 +65,7 @@ fn test_claude_preset_missing_cwd() {
 
 #[test]
 fn test_claude_preset_pretooluse_checkpoint() {
-    let preset = ClaudePreset;
+    let preset = resolve_preset("claude").unwrap();
     let hook_input = json!({
         "cwd": "/some/path",
         "hook_event_name": "PreToolUse",
@@ -99,24 +76,25 @@ fn test_claude_preset_pretooluse_checkpoint() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = preset
+        .parse(&hook_input, "t_test")
         .expect("Should succeed for PreToolUse");
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
-    assert!(result.transcript.is_none());
-    assert!(result.edited_filepaths.is_none());
-    assert_eq!(
-        result.will_edit_filepaths,
-        Some(vec!["/some/file.rs".to_string()])
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert_eq!(
+                e.file_paths,
+                vec![std::path::PathBuf::from("/some/file.rs")]
+            );
+        }
+        _ => panic!("Expected PreFileEdit for PreToolUse"),
+    }
 }
 
 #[test]
 fn test_claude_preset_invalid_transcript_path() {
-    let preset = ClaudePreset;
+    let preset = resolve_preset("claude").unwrap();
     let hook_input = json!({
         "cwd": "/some/path",
         "hook_event_name": "PostToolUse",
@@ -124,15 +102,18 @@ fn test_claude_preset_invalid_transcript_path() {
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let events = preset.parse(&hook_input, "t_test");
 
-    // Should succeed but have empty transcript due to error handling
-    assert!(result.is_ok());
-    let result = result.unwrap();
-    assert!(result.transcript.is_some());
-    assert_eq!(result.agent_id.model, "unknown");
+    // Should succeed - parse doesn't read the transcript, it just records the path
+    assert!(events.is_ok());
+    let events = events.unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(e.transcript_source.is_some());
+        }
+        _ => panic!("Expected PostFileEdit for PostToolUse"),
+    }
 }
 
 #[test]
@@ -140,8 +121,7 @@ fn test_claude_transcript_parsing_empty_file() {
     let temp_file = std::env::temp_dir().join("empty_claude.jsonl");
     fs::write(&temp_file, "").expect("Failed to write temp file");
 
-    let result =
-        ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap());
+    let result = transcript_readers::read_claude_jsonl(Path::new(temp_file.to_str().unwrap()));
 
     assert!(result.is_ok());
     let (transcript, model) = result.unwrap();
@@ -156,8 +136,7 @@ fn test_claude_transcript_parsing_malformed_json() {
     let temp_file = std::env::temp_dir().join("malformed_claude.jsonl");
     fs::write(&temp_file, "{invalid json}\n").expect("Failed to write temp file");
 
-    let result =
-        ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap());
+    let result = transcript_readers::read_claude_jsonl(Path::new(temp_file.to_str().unwrap()));
 
     assert!(result.is_err());
     fs::remove_file(temp_file).ok();
@@ -173,8 +152,7 @@ fn test_claude_transcript_parsing_with_empty_lines() {
     "#;
     fs::write(&temp_file, content).expect("Failed to write temp file");
 
-    let result =
-        ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap());
+    let result = transcript_readers::read_claude_jsonl(Path::new(temp_file.to_str().unwrap()));
 
     assert!(result.is_ok());
     let (transcript, model) = result.unwrap();
@@ -186,7 +164,7 @@ fn test_claude_transcript_parsing_with_empty_lines() {
 
 #[test]
 fn test_claude_vscode_copilot_detection() {
-    let preset = ClaudePreset;
+    let preset = resolve_preset("claude").unwrap();
     let hook_input = json!({
         "hookEventName": "PostToolUse",
         "toolName": "copilot",
@@ -196,9 +174,7 @@ fn test_claude_vscode_copilot_detection() {
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -211,7 +187,7 @@ fn test_claude_vscode_copilot_detection() {
 
 #[test]
 fn test_claude_cursor_detection() {
-    let preset = ClaudePreset;
+    let preset = resolve_preset("claude").unwrap();
     let hook_input = json!({
         "conversation_id": "cursor-session-1",
         "hook_event_name": "postToolUse",
@@ -225,9 +201,7 @@ fn test_claude_cursor_detection() {
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -243,25 +217,9 @@ fn test_claude_cursor_detection() {
 // ==============================================================================
 
 #[test]
-fn test_gemini_preset_missing_hook_input() {
-    let preset = GeminiPreset;
-    let result = preset.run(AgentCheckpointFlags { hook_input: None });
-
-    assert!(result.is_err());
-    match result {
-        Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("hook_input is required"));
-        }
-        _ => panic!("Expected PresetError"),
-    }
-}
-
-#[test]
 fn test_gemini_preset_invalid_json() {
-    let preset = GeminiPreset;
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some("invalid{json".to_string()),
-    });
+    let preset = resolve_preset("gemini").unwrap();
+    let result = preset.parse("invalid{json", "t_test");
 
     assert!(result.is_err());
     match result {
@@ -274,16 +232,14 @@ fn test_gemini_preset_invalid_json() {
 
 #[test]
 fn test_gemini_preset_missing_session_id() {
-    let preset = GeminiPreset;
+    let preset = resolve_preset("gemini").unwrap();
     let hook_input = json!({
         "transcript_path": "tests/fixtures/gemini-session-simple.json",
         "cwd": "/path"
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -296,16 +252,14 @@ fn test_gemini_preset_missing_session_id() {
 
 #[test]
 fn test_gemini_preset_missing_transcript_path() {
-    let preset = GeminiPreset;
+    let preset = resolve_preset("gemini").unwrap();
     let hook_input = json!({
         "session_id": "test-session",
         "cwd": "/path"
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -318,16 +272,14 @@ fn test_gemini_preset_missing_transcript_path() {
 
 #[test]
 fn test_gemini_preset_missing_cwd() {
-    let preset = GeminiPreset;
+    let preset = resolve_preset("gemini").unwrap();
     let hook_input = json!({
         "session_id": "test-session",
         "transcript_path": "tests/fixtures/gemini-session-simple.json"
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -340,7 +292,7 @@ fn test_gemini_preset_missing_cwd() {
 
 #[test]
 fn test_gemini_preset_beforetool_checkpoint() {
-    let preset = GeminiPreset;
+    let preset = resolve_preset("gemini").unwrap();
     let hook_input = json!({
         "session_id": "test-session",
         "transcript_path": "tests/fixtures/gemini-session-simple.json",
@@ -352,23 +304,22 @@ fn test_gemini_preset_beforetool_checkpoint() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = preset
+        .parse(&hook_input, "t_test")
         .expect("Should succeed for BeforeTool");
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
-    assert!(result.transcript.is_none());
-    assert_eq!(
-        result.will_edit_filepaths,
-        Some(vec!["/file.js".to_string()])
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert_eq!(e.file_paths, vec![std::path::PathBuf::from("/file.js")]);
+        }
+        _ => panic!("Expected PreFileEdit for BeforeTool"),
+    }
 }
 
 #[test]
 fn test_gemini_transcript_parsing_invalid_path() {
-    let result = GeminiPreset::transcript_and_model_from_gemini_json("/nonexistent/path.json");
+    let result = transcript_readers::read_gemini_json(Path::new("/nonexistent/path.json"));
 
     assert!(result.is_err());
     match result {
@@ -385,7 +336,7 @@ fn test_gemini_transcript_parsing_empty_messages() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let result = GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap());
+    let result = transcript_readers::read_gemini_json(Path::new(temp_file.to_str().unwrap()));
 
     assert!(result.is_ok());
     let (transcript, model) = result.unwrap();
@@ -403,7 +354,7 @@ fn test_gemini_transcript_parsing_missing_messages_field() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let result = GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap());
+    let result = transcript_readers::read_gemini_json(Path::new(temp_file.to_str().unwrap()));
 
     assert!(result.is_err());
     match result {
@@ -421,32 +372,16 @@ fn test_gemini_transcript_parsing_missing_messages_field() {
 // ==============================================================================
 
 #[test]
-fn test_continue_preset_missing_hook_input() {
-    let preset = ContinueCliPreset;
-    let result = preset.run(AgentCheckpointFlags { hook_input: None });
-
-    assert!(result.is_err());
-    match result {
-        Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("hook_input is required"));
-        }
-        _ => panic!("Expected PresetError"),
-    }
-}
-
-#[test]
 fn test_continue_preset_invalid_json() {
-    let preset = ContinueCliPreset;
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some("not json".to_string()),
-    });
+    let preset = resolve_preset("continue-cli").unwrap();
+    let result = preset.parse("not json", "t_test");
 
     assert!(result.is_err());
 }
 
 #[test]
 fn test_continue_preset_missing_session_id() {
-    let preset = ContinueCliPreset;
+    let preset = resolve_preset("continue-cli").unwrap();
     let hook_input = json!({
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json",
         "cwd": "/path",
@@ -454,9 +389,7 @@ fn test_continue_preset_missing_session_id() {
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -469,7 +402,7 @@ fn test_continue_preset_missing_session_id() {
 
 #[test]
 fn test_continue_preset_missing_transcript_path() {
-    let preset = ContinueCliPreset;
+    let preset = resolve_preset("continue-cli").unwrap();
     let hook_input = json!({
         "session_id": "test-session",
         "cwd": "/path",
@@ -477,9 +410,7 @@ fn test_continue_preset_missing_transcript_path() {
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -492,7 +423,7 @@ fn test_continue_preset_missing_transcript_path() {
 
 #[test]
 fn test_continue_preset_missing_model_defaults_to_unknown() {
-    let preset = ContinueCliPreset;
+    let preset = resolve_preset("continue-cli").unwrap();
     let hook_input = json!({
         "session_id": "test-session",
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json",
@@ -500,19 +431,22 @@ fn test_continue_preset_missing_model_defaults_to_unknown() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = preset
+        .parse(&hook_input, "t_test")
         .expect("Should succeed with default model");
 
-    // Model should default to "unknown" when not provided
-    assert_eq!(result.agent_id.model, "unknown");
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(e.context.agent_id.model, "unknown");
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
 fn test_continue_preset_pretooluse_checkpoint() {
-    let preset = ContinueCliPreset;
+    let preset = resolve_preset("continue-cli").unwrap();
     let hook_input = json!({
         "session_id": "test-session",
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json",
@@ -525,18 +459,17 @@ fn test_continue_preset_pretooluse_checkpoint() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = preset
+        .parse(&hook_input, "t_test")
         .expect("Should succeed for PreToolUse");
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
-    assert!(result.transcript.is_none());
-    assert_eq!(
-        result.will_edit_filepaths,
-        Some(vec!["/file.py".to_string()])
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert_eq!(e.file_paths, vec![std::path::PathBuf::from("/file.py")]);
+        }
+        _ => panic!("Expected PreFileEdit for PreToolUse"),
+    }
 }
 
 // ==============================================================================
@@ -544,32 +477,16 @@ fn test_continue_preset_pretooluse_checkpoint() {
 // ==============================================================================
 
 #[test]
-fn test_codex_preset_missing_hook_input() {
-    let preset = CodexPreset;
-    let result = preset.run(AgentCheckpointFlags { hook_input: None });
-
-    assert!(result.is_err());
-    match result {
-        Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("hook_input is required"));
-        }
-        _ => panic!("Expected PresetError"),
-    }
-}
-
-#[test]
 fn test_codex_preset_invalid_json() {
-    let preset = CodexPreset;
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some("{bad json".to_string()),
-    });
+    let preset = resolve_preset("codex").unwrap();
+    let result = preset.parse("{bad json", "t_test");
 
     assert!(result.is_err());
 }
 
 #[test]
 fn test_codex_preset_missing_session_id() {
-    let preset = CodexPreset;
+    let preset = resolve_preset("codex").unwrap();
     let hook_input = json!({
         "type": "agent-turn-complete",
         "transcript_path": "tests/fixtures/codex-session-simple.jsonl",
@@ -577,14 +494,12 @@ fn test_codex_preset_missing_session_id() {
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
         Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("session_id/thread_id not found"));
+            assert!(msg.contains("session_id") || msg.contains("thread_id"));
         }
         _ => panic!("Expected PresetError for missing session_id/thread_id"),
     }
@@ -592,7 +507,7 @@ fn test_codex_preset_missing_session_id() {
 
 #[test]
 fn test_codex_preset_invalid_transcript_path() {
-    let preset = CodexPreset;
+    let preset = resolve_preset("codex").unwrap();
     let hook_input = json!({
         "type": "agent-turn-complete",
         "session_id": "test-session-12345",
@@ -601,62 +516,44 @@ fn test_codex_preset_invalid_transcript_path() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = preset
+        .parse(&hook_input, "t_test")
         .expect("Should succeed with fallback to empty transcript");
 
-    // Should have empty transcript due to error handling
-    assert!(result.transcript.is_some());
-    // Model defaults to "unknown" when transcript parsing fails
-    assert_eq!(result.agent_id.model, "unknown");
-    assert_eq!(result.agent_id.id, "test-session-12345");
+    // parse() doesn't read the transcript, it just records the path
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(e.transcript_source.is_some());
+            assert_eq!(e.context.agent_id.model, "unknown");
+            assert_eq!(e.context.agent_id.id, "test-session-12345");
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
-
-// Note: session_id_from_hook_data is a private function and tested indirectly
-// through the public run() method tests above
 
 // ==============================================================================
 // CursorPreset Error Cases
 // ==============================================================================
 
 #[test]
-fn test_cursor_preset_missing_hook_input() {
-    let preset = CursorPreset;
-    let result = preset.run(AgentCheckpointFlags { hook_input: None });
-
-    assert!(result.is_err());
-    match result {
-        Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("hook_input is required"));
-        }
-        _ => panic!("Expected PresetError"),
-    }
-}
-
-#[test]
 fn test_cursor_preset_invalid_json() {
-    let preset = CursorPreset;
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some("invalid".to_string()),
-    });
+    let preset = resolve_preset("cursor").unwrap();
+    let result = preset.parse("invalid", "t_test");
 
     assert!(result.is_err());
 }
 
 #[test]
 fn test_cursor_preset_missing_conversation_id() {
-    let preset = CursorPreset;
+    let preset = resolve_preset("cursor").unwrap();
     let hook_input = json!({
         "type": "composer_turn_complete",
         "cwd": "/path"
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -669,7 +566,7 @@ fn test_cursor_preset_missing_conversation_id() {
 
 #[test]
 fn test_cursor_preset_missing_workspace_roots() {
-    let preset = CursorPreset;
+    let preset = resolve_preset("cursor").unwrap();
     let hook_input = json!({
         "type": "composer_turn_complete",
         "conversation_id": "test-conv",
@@ -677,9 +574,7 @@ fn test_cursor_preset_missing_workspace_roots() {
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -690,40 +585,21 @@ fn test_cursor_preset_missing_workspace_roots() {
     }
 }
 
-// Note: normalize_cursor_path is a private function and tested indirectly
-// through the database operations in the cursor.rs test file
-
 // ==============================================================================
 // GithubCopilotPreset Error Cases
 // ==============================================================================
 
 #[test]
-fn test_github_copilot_preset_missing_hook_input() {
-    let preset = GithubCopilotPreset;
-    let result = preset.run(AgentCheckpointFlags { hook_input: None });
-
-    assert!(result.is_err());
-    match result {
-        Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("hook_input is required"));
-        }
-        _ => panic!("Expected PresetError"),
-    }
-}
-
-#[test]
 fn test_github_copilot_preset_invalid_json() {
-    let preset = GithubCopilotPreset;
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some("not json".to_string()),
-    });
+    let preset = resolve_preset("github-copilot").unwrap();
+    let result = preset.parse("not json", "t_test");
 
     assert!(result.is_err());
 }
 
 #[test]
 fn test_github_copilot_preset_invalid_hook_event_name() {
-    let preset = GithubCopilotPreset;
+    let preset = resolve_preset("github-copilot").unwrap();
     let hook_input = json!({
         "hook_event_name": "invalid_event_name",
         "sessionId": "test-session",
@@ -731,9 +607,7 @@ fn test_github_copilot_preset_invalid_hook_event_name() {
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -750,32 +624,16 @@ fn test_github_copilot_preset_invalid_hook_event_name() {
 // ==============================================================================
 
 #[test]
-fn test_droid_preset_missing_hook_input() {
-    let preset = DroidPreset;
-    let result = preset.run(AgentCheckpointFlags { hook_input: None });
-
-    assert!(result.is_err());
-    match result {
-        Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("hook_input is required"));
-        }
-        _ => panic!("Expected PresetError"),
-    }
-}
-
-#[test]
 fn test_droid_preset_invalid_json() {
-    let preset = DroidPreset;
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some("{invalid".to_string()),
-    });
+    let preset = resolve_preset("droid").unwrap();
+    let result = preset.parse("{invalid", "t_test");
 
     assert!(result.is_err());
 }
 
 #[test]
 fn test_droid_preset_generates_fallback_session_id() {
-    let preset = DroidPreset;
+    let preset = resolve_preset("droid").unwrap();
     let hook_input = json!({
         "transcript_path": "tests/fixtures/droid-session.jsonl",
         "cwd": "/path",
@@ -784,15 +642,18 @@ fn test_droid_preset_generates_fallback_session_id() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = preset
+        .parse(&hook_input, "t_test")
         .expect("Should succeed with generated session_id");
 
-    // Droid generates a fallback session_id if not provided
-    assert!(result.agent_id.id.starts_with("droid-"));
-    assert_eq!(result.agent_id.tool, "droid");
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(e.context.agent_id.id.starts_with("droid-"));
+            assert_eq!(e.context.agent_id.tool, "droid");
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 // ==============================================================================
@@ -800,32 +661,16 @@ fn test_droid_preset_generates_fallback_session_id() {
 // ==============================================================================
 
 #[test]
-fn test_aitab_preset_missing_hook_input() {
-    let preset = AiTabPreset;
-    let result = preset.run(AgentCheckpointFlags { hook_input: None });
-
-    assert!(result.is_err());
-    match result {
-        Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("hook_input is required"));
-        }
-        _ => panic!("Expected PresetError"),
-    }
-}
-
-#[test]
 fn test_aitab_preset_invalid_json() {
-    let preset = AiTabPreset;
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some("bad json".to_string()),
-    });
+    let preset = resolve_preset("ai_tab").unwrap();
+    let result = preset.parse("bad json", "t_test");
 
     assert!(result.is_err());
 }
 
 #[test]
 fn test_aitab_preset_invalid_hook_event_name() {
-    let preset = AiTabPreset;
+    let preset = resolve_preset("ai_tab").unwrap();
     let hook_input = json!({
         "hook_event_name": "invalid_event",
         "tool": "test_tool",
@@ -833,9 +678,7 @@ fn test_aitab_preset_invalid_hook_event_name() {
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -849,7 +692,7 @@ fn test_aitab_preset_invalid_hook_event_name() {
 
 #[test]
 fn test_aitab_preset_empty_tool() {
-    let preset = AiTabPreset;
+    let preset = resolve_preset("ai_tab").unwrap();
     let hook_input = json!({
         "hook_event_name": "after_edit",
         "tool": "  ",
@@ -857,9 +700,7 @@ fn test_aitab_preset_empty_tool() {
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -872,7 +713,7 @@ fn test_aitab_preset_empty_tool() {
 
 #[test]
 fn test_aitab_preset_empty_model() {
-    let preset = AiTabPreset;
+    let preset = resolve_preset("ai_tab").unwrap();
     let hook_input = json!({
         "hook_event_name": "after_edit",
         "tool": "test_tool",
@@ -880,9 +721,7 @@ fn test_aitab_preset_empty_model() {
     })
     .to_string();
 
-    let result = preset.run(AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    });
+    let result = preset.parse(&hook_input, "t_test");
 
     assert!(result.is_err());
     match result {
@@ -895,7 +734,7 @@ fn test_aitab_preset_empty_model() {
 
 #[test]
 fn test_aitab_preset_before_edit_checkpoint() {
-    let preset = AiTabPreset;
+    let preset = resolve_preset("ai_tab").unwrap();
     let hook_input = json!({
         "hook_event_name": "before_edit",
         "tool": "test_tool",
@@ -905,25 +744,30 @@ fn test_aitab_preset_before_edit_checkpoint() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = preset
+        .parse(&hook_input, "t_test")
         .expect("Should succeed for before_edit");
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
-    assert!(result.transcript.is_none());
-    assert_eq!(result.agent_id.tool, "test_tool");
-    assert_eq!(result.agent_id.model, "gpt-4");
-    assert_eq!(
-        result.will_edit_filepaths,
-        Some(vec!["/file1.rs".to_string(), "/file2.rs".to_string()])
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert_eq!(e.context.agent_id.tool, "test_tool");
+            assert_eq!(e.context.agent_id.model, "gpt-4");
+            assert_eq!(
+                e.file_paths,
+                vec![
+                    std::path::PathBuf::from("/file1.rs"),
+                    std::path::PathBuf::from("/file2.rs"),
+                ]
+            );
+        }
+        _ => panic!("Expected PreFileEdit for before_edit"),
+    }
 }
 
 #[test]
 fn test_aitab_preset_after_edit_checkpoint() {
-    let preset = AiTabPreset;
+    let preset = resolve_preset("ai_tab").unwrap();
     let hook_input = json!({
         "hook_event_name": "after_edit",
         "tool": "test_tool",
@@ -933,20 +777,23 @@ fn test_aitab_preset_after_edit_checkpoint() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = preset
+        .parse(&hook_input, "t_test")
         .expect("Should succeed for after_edit");
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::AiTab);
-    assert!(result.transcript.is_none());
-    assert_eq!(result.edited_filepaths, Some(vec!["/file1.rs".to_string()]));
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(e.transcript_source.is_none());
+            assert_eq!(e.file_paths, vec![std::path::PathBuf::from("/file1.rs")]);
+        }
+        _ => panic!("Expected PostFileEdit for after_edit"),
+    }
 }
 
 #[test]
 fn test_aitab_preset_with_dirty_files() {
-    let preset = AiTabPreset;
+    let preset = resolve_preset("ai_tab").unwrap();
     let mut dirty_files = std::collections::HashMap::new();
     dirty_files.insert("/file1.rs".to_string(), "content1".to_string());
     dirty_files.insert("/file2.rs".to_string(), "content2".to_string());
@@ -959,21 +806,28 @@ fn test_aitab_preset_with_dirty_files() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = preset
+        .parse(&hook_input, "t_test")
         .expect("Should succeed with dirty_files");
 
-    assert!(result.dirty_files.is_some());
-    let dirty = result.dirty_files.unwrap();
-    assert_eq!(dirty.len(), 2);
-    assert_eq!(dirty.get("/file1.rs"), Some(&"content1".to_string()));
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(e.dirty_files.is_some());
+            let dirty = e.dirty_files.as_ref().unwrap();
+            assert_eq!(dirty.len(), 2);
+            assert_eq!(
+                dirty.get(&std::path::PathBuf::from("/file1.rs")),
+                Some(&"content1".to_string())
+            );
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
 fn test_aitab_preset_empty_repo_working_dir_filtered() {
-    let preset = AiTabPreset;
+    let preset = resolve_preset("ai_tab").unwrap();
     let hook_input = json!({
         "hook_event_name": "after_edit",
         "tool": "test_tool",
@@ -982,14 +836,16 @@ fn test_aitab_preset_empty_repo_working_dir_filtered() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
-        .expect("Should succeed");
+    let events = preset.parse(&hook_input, "t_test").expect("Should succeed");
 
-    // Empty/whitespace-only repo_working_dir should be filtered to None
-    assert!(result.repo_working_dir.is_none());
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            // Empty/whitespace-only repo_working_dir should fall back to "."
+            assert_eq!(e.context.cwd, std::path::PathBuf::from("."));
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 // ==============================================================================
@@ -997,53 +853,27 @@ fn test_aitab_preset_empty_repo_working_dir_filtered() {
 // ==============================================================================
 
 #[test]
-fn test_all_presets_handle_missing_hook_input_consistently() {
-    let presets: Vec<Box<dyn AgentCheckpointPreset>> = vec![
-        Box::new(ClaudePreset),
-        Box::new(GeminiPreset),
-        Box::new(ContinueCliPreset),
-        Box::new(CodexPreset),
-        Box::new(CursorPreset),
-        Box::new(GithubCopilotPreset),
-        Box::new(AmpPreset),
-        Box::new(DroidPreset),
-        Box::new(AiTabPreset),
+fn test_all_presets_handle_invalid_json_consistently() {
+    let preset_names = vec![
+        "claude",
+        "gemini",
+        "continue-cli",
+        "codex",
+        "cursor",
+        "github-copilot",
+        "amp",
+        "droid",
+        "ai_tab",
     ];
 
-    for preset in presets {
-        let result = preset.run(AgentCheckpointFlags { hook_input: None });
+    for name in preset_names {
+        let preset = resolve_preset(name).unwrap();
+        let result = preset.parse("{invalid json}", "t_test");
         assert!(
             result.is_err(),
-            "All presets should fail with missing hook_input"
+            "Preset '{}' should fail with invalid JSON",
+            name,
         );
-        match result {
-            Err(GitAiError::PresetError(msg)) => {
-                assert!(msg.contains("hook_input is required"));
-            }
-            _ => panic!("Expected PresetError"),
-        }
-    }
-}
-
-#[test]
-fn test_all_presets_handle_invalid_json_consistently() {
-    let presets: Vec<Box<dyn AgentCheckpointPreset>> = vec![
-        Box::new(ClaudePreset),
-        Box::new(GeminiPreset),
-        Box::new(ContinueCliPreset),
-        Box::new(CodexPreset),
-        Box::new(CursorPreset),
-        Box::new(GithubCopilotPreset),
-        Box::new(AmpPreset),
-        Box::new(DroidPreset),
-        Box::new(AiTabPreset),
-    ];
-
-    for preset in presets {
-        let result = preset.run(AgentCheckpointFlags {
-            hook_input: Some("{invalid json}".to_string()),
-        });
-        assert!(result.is_err(), "All presets should fail with invalid JSON");
     }
 }
 
@@ -1053,7 +883,7 @@ fn test_all_presets_handle_invalid_json_consistently() {
 
 #[test]
 fn test_claude_preset_with_tool_input_no_file_path() {
-    let preset = ClaudePreset;
+    let preset = resolve_preset("claude").unwrap();
     let hook_input = json!({
         "cwd": "/path",
         "hook_event_name": "PostToolUse",
@@ -1064,18 +894,20 @@ fn test_claude_preset_with_tool_input_no_file_path() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
-        .expect("Should succeed");
+    let events = preset.parse(&hook_input, "t_test").expect("Should succeed");
 
-    assert!(result.edited_filepaths.is_none());
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(e.file_paths.is_empty());
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
 fn test_gemini_preset_with_tool_input_no_file_path() {
-    let preset = GeminiPreset;
+    let preset = resolve_preset("gemini").unwrap();
     let hook_input = json!({
         "session_id": "test",
         "transcript_path": "tests/fixtures/gemini-session-simple.json",
@@ -1086,18 +918,20 @@ fn test_gemini_preset_with_tool_input_no_file_path() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
-        .expect("Should succeed");
+    let events = preset.parse(&hook_input, "t_test").expect("Should succeed");
 
-    assert!(result.edited_filepaths.is_none());
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(e.file_paths.is_empty());
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
 fn test_continue_preset_with_tool_input_no_file_path() {
-    let preset = ContinueCliPreset;
+    let preset = resolve_preset("continue-cli").unwrap();
     let hook_input = json!({
         "session_id": "test",
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json",
@@ -1107,18 +941,20 @@ fn test_continue_preset_with_tool_input_no_file_path() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
-        .expect("Should succeed");
+    let events = preset.parse(&hook_input, "t_test").expect("Should succeed");
 
-    assert!(result.edited_filepaths.is_none());
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(e.file_paths.is_empty());
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
 fn test_claude_preset_with_unicode_in_path() {
-    let preset = ClaudePreset;
+    let preset = resolve_preset("claude").unwrap();
     let hook_input = json!({
         "cwd": "/Users/测试/项目",
         "hook_event_name": "PostToolUse",
@@ -1129,17 +965,21 @@ fn test_claude_preset_with_unicode_in_path() {
     })
     .to_string();
 
-    let result = preset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = preset
+        .parse(&hook_input, "t_test")
         .expect("Should handle unicode paths");
 
-    assert!(result.edited_filepaths.is_some());
-    assert_eq!(
-        result.edited_filepaths.unwrap()[0],
-        "/Users/测试/项目/文件.rs"
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(!e.file_paths.is_empty());
+            assert_eq!(
+                e.file_paths[0],
+                std::path::PathBuf::from("/Users/测试/项目/文件.rs")
+            );
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
@@ -1155,7 +995,7 @@ fn test_gemini_transcript_with_unknown_message_types() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let result = GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap())
+    let result = transcript_readers::read_gemini_json(Path::new(temp_file.to_str().unwrap()))
         .expect("Should parse successfully");
 
     let (transcript, _) = result;
@@ -1172,9 +1012,8 @@ fn test_claude_transcript_with_tool_result_in_user_content() {
 {"type":"assistant","timestamp":"2025-01-01T00:00:01Z","message":{"model":"claude-3","content":[{"type":"text","text":"response"}]}}"#;
     fs::write(&temp_file, content).expect("Failed to write temp file");
 
-    let result =
-        ClaudePreset::transcript_and_model_from_claude_code_jsonl(temp_file.to_str().unwrap())
-            .expect("Should parse successfully");
+    let result = transcript_readers::read_claude_jsonl(Path::new(temp_file.to_str().unwrap()))
+        .expect("Should parse successfully");
 
     let (transcript, _) = result;
     // Should skip tool_result but include the text content
@@ -1202,7 +1041,7 @@ fn test_gemini_transcript_with_empty_tool_calls() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let result = GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap())
+    let result = transcript_readers::read_gemini_json(Path::new(temp_file.to_str().unwrap()))
         .expect("Should parse successfully");
 
     let (transcript, _) = result;
@@ -1226,7 +1065,7 @@ fn test_gemini_transcript_tool_call_without_args() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let result = GeminiPreset::transcript_and_model_from_gemini_json(temp_file.to_str().unwrap())
+    let result = transcript_readers::read_gemini_json(Path::new(temp_file.to_str().unwrap()))
         .expect("Should parse successfully");
 
     let (transcript, _) = result;

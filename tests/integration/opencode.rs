@@ -1,12 +1,15 @@
 use crate::test_utils::fixture_path;
 use git_ai::authorship::transcript::Message;
-use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset,
-};
-use git_ai::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
+use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
+use git_ai::commands::checkpoint_agent::transcript_readers;
+use git_ai::error::GitAiError;
 use serde_json::json;
 use std::fs;
+use std::path::PathBuf;
+
+fn parse_opencode(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
+    resolve_preset("opencode")?.parse(hook_input, "t_test")
+}
 
 fn opencode_storage_fixture_path() -> std::path::PathBuf {
     fixture_path("opencode-storage")
@@ -26,16 +29,14 @@ fn test_parse_opencode_storage_transcript() {
     let session_id = "test-session-123";
 
     let (transcript, model) =
-        OpenCodePreset::transcript_and_model_from_storage(&storage_path, session_id)
+        transcript_readers::read_opencode_from_storage(&storage_path, session_id)
             .expect("Failed to parse OpenCode storage");
 
-    // Verify we parsed messages
     assert!(
         !transcript.messages().is_empty(),
         "Transcript should contain messages"
     );
 
-    // Model should be extracted from first assistant message
     assert!(
         model.is_some(),
         "Model should be extracted from assistant message"
@@ -46,7 +47,6 @@ fn test_parse_opencode_storage_transcript() {
         "Model should be provider/model format"
     );
 
-    // Verify correct message types exist
     let has_user = transcript
         .messages()
         .iter()
@@ -71,7 +71,7 @@ fn test_parse_opencode_sqlite_transcript() {
     let session_id = "test-session-123";
 
     let (transcript, model) =
-        OpenCodePreset::transcript_and_model_from_storage(&opencode_root, session_id)
+        transcript_readers::read_opencode_from_storage(&opencode_root, session_id)
             .expect("Failed to parse OpenCode sqlite storage");
 
     assert!(
@@ -108,7 +108,7 @@ fn test_opencode_sqlite_takes_precedence_over_legacy_storage() {
     copy_dir_all(&legacy_storage, &opencode_root.join("storage")).unwrap();
 
     let (transcript, model) =
-        OpenCodePreset::transcript_and_model_from_storage(opencode_root, "test-session-123")
+        transcript_readers::read_opencode_from_storage(opencode_root, "test-session-123")
             .expect("Should parse from sqlite first");
 
     assert_eq!(model.as_deref(), Some("openai/gpt-5"));
@@ -136,7 +136,7 @@ fn test_opencode_sqlite_falls_back_to_legacy_storage_when_sqlite_empty() {
     copy_dir_all(&legacy_storage, &opencode_root.join("storage")).unwrap();
 
     let (transcript, model) =
-        OpenCodePreset::transcript_and_model_from_storage(opencode_root, "test-session-123")
+        transcript_readers::read_opencode_from_storage(opencode_root, "test-session-123")
             .expect("Should fallback to legacy storage when sqlite has no session data");
 
     assert_eq!(
@@ -156,18 +156,14 @@ fn test_opencode_transcript_message_order() {
     let storage_path = opencode_storage_fixture_path();
     let session_id = "test-session-123";
 
-    let (transcript, _) =
-        OpenCodePreset::transcript_and_model_from_storage(&storage_path, session_id)
-            .expect("Failed to parse OpenCode storage");
+    let (transcript, _) = transcript_readers::read_opencode_from_storage(&storage_path, session_id)
+        .expect("Failed to parse OpenCode storage");
 
-    // Messages should be sorted by creation time
-    // User message comes first (earlier timestamp), then assistant message
     assert!(
         matches!(transcript.messages()[0], Message::User { .. }),
         "First message should be from user"
     );
 
-    // Verify user message text
     if let Message::User { text, .. } = &transcript.messages()[0] {
         assert!(
             text.contains("Update the comment"),
@@ -181,9 +177,8 @@ fn test_opencode_transcript_timestamps_are_rfc3339() {
     let storage_path = opencode_storage_fixture_path();
     let session_id = "test-session-123";
 
-    let (transcript, _) =
-        OpenCodePreset::transcript_and_model_from_storage(&storage_path, session_id)
-            .expect("Failed to parse OpenCode storage");
+    let (transcript, _) = transcript_readers::read_opencode_from_storage(&storage_path, session_id)
+        .expect("Failed to parse OpenCode storage");
 
     for message in transcript.messages() {
         match message {
@@ -193,7 +188,6 @@ fn test_opencode_transcript_timestamps_are_rfc3339() {
             | Message::Thinking { timestamp, .. }
             | Message::Plan { timestamp, .. } => {
                 if let Some(ts) = timestamp {
-                    // RFC3339 format: 2024-01-28T15:30:30+00:00 or similar
                     assert!(
                         ts.contains("T") && (ts.contains("+") || ts.ends_with("Z")),
                         "Timestamp should be RFC3339 format, got: {}",
@@ -206,7 +200,7 @@ fn test_opencode_transcript_timestamps_are_rfc3339() {
 }
 
 #[test]
-#[serial_test::serial] // Run serially to avoid env var conflicts with other tests
+#[serial_test::serial]
 fn test_opencode_preset_pretooluse_returns_human_checkpoint() {
     let storage_path = opencode_storage_fixture_path();
 
@@ -220,7 +214,6 @@ fn test_opencode_preset_pretooluse_returns_human_checkpoint() {
     })
     .to_string();
 
-    // Set the test storage path via env var
     unsafe {
         std::env::set_var(
             "GIT_AI_OPENCODE_STORAGE_PATH",
@@ -228,41 +221,29 @@ fn test_opencode_preset_pretooluse_returns_human_checkpoint() {
         );
     }
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    };
+    let events = parse_opencode(&hook_input).expect("Failed to run OpenCodePreset");
 
-    let result = OpenCodePreset
-        .run(flags)
-        .expect("Failed to run OpenCodePreset");
-
-    // Clean up env var
     unsafe {
         std::env::remove_var("GIT_AI_OPENCODE_STORAGE_PATH");
     }
 
-    assert_eq!(
-        result.checkpoint_kind,
-        CheckpointKind::Human,
-        "PreToolUse should produce a Human checkpoint"
-    );
-
-    assert!(
-        result.will_edit_filepaths.is_some(),
-        "will_edit_filepaths should be populated for PreToolUse"
-    );
-
-    let will_edit = result.will_edit_filepaths.unwrap();
-    assert_eq!(will_edit[0], "/Users/test/project/index.ts");
-
-    assert!(
-        result.transcript.is_none(),
-        "Transcript should be None for Human checkpoint"
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
+            assert!(
+                e.file_paths
+                    .iter()
+                    .any(|p| p.to_string_lossy().contains("index.ts")),
+                "will_edit_filepaths should contain the target file"
+            );
+        }
+        _ => panic!("Expected PreFileEdit for PreToolUse"),
+    }
 }
 
 #[test]
-#[serial_test::serial] // Run serially to avoid env var conflicts with other tests
+#[serial_test::serial]
 fn test_opencode_preset_posttooluse_returns_ai_checkpoint() {
     let storage_path = opencode_storage_fixture_path();
 
@@ -276,7 +257,6 @@ fn test_opencode_preset_posttooluse_returns_ai_checkpoint() {
     })
     .to_string();
 
-    // Set the test storage path via env var
     unsafe {
         std::env::set_var(
             "GIT_AI_OPENCODE_STORAGE_PATH",
@@ -284,48 +264,36 @@ fn test_opencode_preset_posttooluse_returns_ai_checkpoint() {
         );
     }
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    };
+    let events = parse_opencode(&hook_input).expect("Failed to run OpenCodePreset");
 
-    let result = OpenCodePreset
-        .run(flags)
-        .expect("Failed to run OpenCodePreset");
-
-    // Clean up env var
     unsafe {
         std::env::remove_var("GIT_AI_OPENCODE_STORAGE_PATH");
     }
 
-    assert_eq!(
-        result.checkpoint_kind,
-        CheckpointKind::AiAgent,
-        "PostToolUse should produce an AiAgent checkpoint"
-    );
-
-    assert!(
-        result.transcript.is_some(),
-        "Transcript should be present for AI checkpoint"
-    );
-
-    assert!(
-        result.edited_filepaths.is_some(),
-        "edited_filepaths should be populated for PostToolUse"
-    );
-
-    let edited = result.edited_filepaths.unwrap();
-    assert_eq!(edited[0], "/Users/test/project/index.ts");
-
-    assert_eq!(result.agent_id.tool, "opencode");
-    assert_eq!(result.agent_id.id, "test-session-123");
-    assert_eq!(
-        result.agent_id.model,
-        "anthropic/claude-3-5-sonnet-20241022"
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(
+                e.transcript_source.is_some(),
+                "Transcript should be present for AI checkpoint"
+            );
+            assert!(
+                e.file_paths
+                    .iter()
+                    .any(|p| p.to_string_lossy().contains("index.ts")),
+                "edited_filepaths should contain the target file"
+            );
+            assert_eq!(e.context.agent_id.tool, "opencode");
+            assert_eq!(e.context.agent_id.id, "test-session-123");
+            // Model is lazily resolved from transcript, so at parse time it's "unknown"
+            assert_eq!(e.context.agent_id.model, "unknown");
+        }
+        _ => panic!("Expected PostFileEdit for PostToolUse"),
+    }
 }
 
 #[test]
-#[serial_test::serial] // Run serially to avoid env var conflicts with other tests
+#[serial_test::serial]
 fn test_opencode_preset_stores_session_id_in_metadata() {
     let storage_path = opencode_storage_fixture_path();
 
@@ -346,29 +314,27 @@ fn test_opencode_preset_stores_session_id_in_metadata() {
         );
     }
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    };
-
-    let result = OpenCodePreset
-        .run(flags)
-        .expect("Failed to run OpenCodePreset");
+    let events = parse_opencode(&hook_input).expect("Failed to run OpenCodePreset");
 
     unsafe {
         std::env::remove_var("GIT_AI_OPENCODE_STORAGE_PATH");
     }
 
-    assert!(result.agent_metadata.is_some());
-    let metadata = result.agent_metadata.unwrap();
-    assert!(
-        metadata.contains_key("session_id"),
-        "Metadata should contain session_id"
-    );
-    assert_eq!(metadata["session_id"], "test-session-123");
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(
+                e.context.metadata.contains_key("session_id"),
+                "Metadata should contain session_id"
+            );
+            assert_eq!(e.context.metadata["session_id"], "test-session-123");
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
-#[serial_test::serial] // Run serially to avoid env var conflicts with other tests
+#[serial_test::serial]
 fn test_opencode_preset_sets_repo_working_dir() {
     let storage_path = opencode_storage_fixture_path();
 
@@ -389,35 +355,32 @@ fn test_opencode_preset_sets_repo_working_dir() {
         );
     }
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    };
-
-    let result = OpenCodePreset
-        .run(flags)
-        .expect("Failed to run OpenCodePreset");
+    let events = parse_opencode(&hook_input).expect("Failed to run OpenCodePreset");
 
     unsafe {
         std::env::remove_var("GIT_AI_OPENCODE_STORAGE_PATH");
     }
 
-    assert!(result.repo_working_dir.is_some());
-    assert_eq!(result.repo_working_dir.unwrap(), "/Users/test/my-project");
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(e.context.cwd, PathBuf::from("/Users/test/my-project"));
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
 fn test_opencode_empty_session_returns_empty_transcript() {
-    // Create a temp directory with empty session structure
     let temp_dir = tempfile::tempdir().unwrap();
     let storage_path = temp_dir.path();
     let session_id = "empty-session";
 
-    // Create message directory but no files
     let message_dir = storage_path.join("message").join(session_id);
     fs::create_dir_all(&message_dir).unwrap();
 
     let (transcript, model) =
-        OpenCodePreset::transcript_and_model_from_storage(storage_path, session_id)
+        transcript_readers::read_opencode_from_storage(storage_path, session_id)
             .expect("Should handle empty session");
 
     assert!(
@@ -433,7 +396,7 @@ fn test_opencode_nonexistent_session_returns_empty_transcript() {
     let session_id = "nonexistent-session";
 
     let (transcript, model) =
-        OpenCodePreset::transcript_and_model_from_storage(&storage_path, session_id)
+        transcript_readers::read_opencode_from_storage(&storage_path, session_id)
             .expect("Should handle nonexistent session");
 
     assert!(
@@ -448,11 +411,9 @@ fn test_opencode_tool_use_only_from_assistant() {
     let storage_path = opencode_storage_fixture_path();
     let session_id = "test-session-123";
 
-    let (transcript, _) =
-        OpenCodePreset::transcript_and_model_from_storage(&storage_path, session_id)
-            .expect("Failed to parse OpenCode storage");
+    let (transcript, _) = transcript_readers::read_opencode_from_storage(&storage_path, session_id)
+        .expect("Failed to parse OpenCode storage");
 
-    // Find tool use messages
     let tool_uses: Vec<_> = transcript
         .messages()
         .iter()
@@ -461,7 +422,6 @@ fn test_opencode_tool_use_only_from_assistant() {
 
     assert!(!tool_uses.is_empty(), "Should have tool use messages");
 
-    // Verify tool use has expected content
     if let Message::ToolUse { name, input, .. } = tool_uses[0] {
         assert_eq!(name, "edit", "Tool name should be 'edit'");
         assert!(
@@ -497,25 +457,32 @@ fn test_opencode_preset_extracts_apply_patch_paths() {
         );
     }
 
-    let result = OpenCodePreset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
-        .expect("Failed to run OpenCodePreset");
+    let events = parse_opencode(&hook_input).expect("Failed to run OpenCodePreset");
 
     unsafe {
         std::env::remove_var("GIT_AI_OPENCODE_STORAGE_PATH");
     }
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
-    assert_eq!(
-        result.edited_filepaths,
-        Some(vec!["/Users/test/my-project/src/main.ts".to_string()])
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            let path_strs: Vec<String> = e
+                .file_paths
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            assert!(
+                path_strs.iter().any(|p| p.contains("src/main.ts")),
+                "Should extract file paths from apply_patch, got: {:?}",
+                path_strs
+            );
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
-#[serial_test::serial] // Run serially to avoid env var conflicts with other tests
+#[serial_test::serial]
 fn test_opencode_e2e_checkpoint_and_commit() {
     use crate::repos::test_repo::TestRepo;
 
@@ -527,22 +494,18 @@ fn test_opencode_e2e_checkpoint_and_commit() {
 
     let repo_root = repo.canonical_path();
 
-    // Create initial file and commit
     let src_dir = repo_root.join("src");
     fs::create_dir_all(&src_dir).unwrap();
     let file_path = src_dir.join("main.ts");
     fs::write(&file_path, "// initial\n").unwrap();
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    // Copy fixture storage to temp location
     let temp_storage = tempfile::tempdir().unwrap();
     let storage_path = temp_storage.path();
 
-    // Copy the fixture storage structure
     let fixture_storage = opencode_storage_fixture_path();
     copy_dir_all(&fixture_storage, storage_path).unwrap();
 
-    // Set up environment for the test
     unsafe {
         std::env::set_var(
             "GIT_AI_OPENCODE_STORAGE_PATH",
@@ -550,7 +513,6 @@ fn test_opencode_e2e_checkpoint_and_commit() {
         );
     }
 
-    // Create hook input for PreToolUse (human checkpoint)
     let pre_hook_input = json!({
         "hook_event_name": "PreToolUse",
         "session_id": "test-session-123",
@@ -561,14 +523,11 @@ fn test_opencode_e2e_checkpoint_and_commit() {
     })
     .to_string();
 
-    // Run human checkpoint
     repo.git_ai(&["checkpoint", "opencode", "--hook-input", &pre_hook_input])
         .unwrap();
 
-    // Make AI edit
     fs::write(&file_path, "// initial\n// Hello World\n").unwrap();
 
-    // Create hook input for PostToolUse (AI checkpoint)
     let post_hook_input = json!({
         "hook_event_name": "PostToolUse",
         "session_id": "test-session-123",
@@ -579,19 +538,15 @@ fn test_opencode_e2e_checkpoint_and_commit() {
     })
     .to_string();
 
-    // Run AI checkpoint
     repo.git_ai(&["checkpoint", "opencode", "--hook-input", &post_hook_input])
         .unwrap();
 
-    // Clean up env var
     unsafe {
         std::env::remove_var("GIT_AI_OPENCODE_STORAGE_PATH");
     }
 
-    // Commit
     let commit = repo.stage_all_and_commit("Add AI line").unwrap();
 
-    // Should have a session record
     assert!(
         !commit.authorship_log.metadata.sessions.is_empty(),
         "Should have at least one session record"
@@ -615,7 +570,6 @@ fn test_opencode_e2e_checkpoint_and_commit() {
     );
 }
 
-/// Helper function to recursively copy a directory
 fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {

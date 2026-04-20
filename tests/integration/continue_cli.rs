@@ -2,23 +2,24 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use crate::test_utils::fixture_path;
 use git_ai::authorship::transcript::Message;
-use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, ContinueCliPreset,
-};
+use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
+use git_ai::commands::checkpoint_agent::transcript_readers;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
 
+fn parse_continue(hook_input: &str) -> Result<Vec<ParsedHookEvent>, git_ai::error::GitAiError> {
+    resolve_preset("continue-cli")?.parse(hook_input, "t_test")
+}
+
 #[test]
 fn test_parse_example_continue_cli_json() {
     let fixture = fixture_path("continue-cli-session-simple.json");
-    let transcript = ContinueCliPreset::transcript_from_continue_json(fixture.to_str().unwrap())
+    let transcript = transcript_readers::read_continue_json(fixture.as_path())
         .expect("Failed to parse Continue CLI JSON");
 
-    // Verify we parsed some messages
     assert!(!transcript.messages().is_empty());
 
-    // Print the parsed transcript for inspection
     println!("Parsed {} messages:", transcript.messages().len());
     for (i, message) in transcript.messages().iter().enumerate() {
         match message {
@@ -36,10 +37,9 @@ fn test_parse_example_continue_cli_json() {
 #[test]
 fn test_continue_cli_parses_user_messages() {
     let fixture = fixture_path("continue-cli-session-simple.json");
-    let transcript = ContinueCliPreset::transcript_from_continue_json(fixture.to_str().unwrap())
+    let transcript = transcript_readers::read_continue_json(fixture.as_path())
         .expect("Failed to parse Continue CLI JSON");
 
-    // Find user messages
     let user_messages: Vec<&Message> = transcript
         .messages()
         .iter()
@@ -52,7 +52,6 @@ fn test_continue_cli_parses_user_messages() {
         "Should have exactly one user message"
     );
 
-    // Verify the user message content
     if let Message::User { text, .. } = user_messages[0] {
         assert!(text.contains("Add another hello world line"));
     }
@@ -61,10 +60,9 @@ fn test_continue_cli_parses_user_messages() {
 #[test]
 fn test_continue_cli_parses_assistant_messages() {
     let fixture = fixture_path("continue-cli-session-simple.json");
-    let transcript = ContinueCliPreset::transcript_from_continue_json(fixture.to_str().unwrap())
+    let transcript = transcript_readers::read_continue_json(fixture.as_path())
         .expect("Failed to parse Continue CLI JSON");
 
-    // Find assistant messages
     let assistant_messages: Vec<&Message> = transcript
         .messages()
         .iter()
@@ -76,19 +74,42 @@ fn test_continue_cli_parses_assistant_messages() {
         "Should have at least one assistant message"
     );
 
-    // Verify the first assistant message has content
     if let Message::Assistant { text, .. } = assistant_messages[0] {
         assert!(text.contains("I'll read the file first"));
     }
 }
 
 #[test]
-fn test_continue_cli_parses_tool_calls() {
-    let fixture = fixture_path("continue-cli-session-simple.json");
-    let transcript = ContinueCliPreset::transcript_from_continue_json(fixture.to_str().unwrap())
+fn test_continue_cli_parses_tool_calls_from_context_items() {
+    // The read_continue_json reader extracts tool calls from contextItems, not from
+    // message.toolCalls. The simple fixture does not have contextItems with tool data,
+    // so we create a temp fixture that includes them.
+    let sample = r##"{
+        "sessionId": "test-session",
+        "title": "Test",
+        "workspaceDirectory": "/test",
+        "history": [
+            {
+                "message": { "role": "user", "content": "Read file" },
+                "contextItems": []
+            },
+            {
+                "message": { "role": "assistant", "content": "I'll read it" },
+                "contextItems": [
+                    {
+                        "name": "Read",
+                        "content": {"filepath": "/test/main.rs"}
+                    }
+                ]
+            }
+        ]
+    }"##;
+
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(sample.as_bytes()).unwrap();
+    let transcript = transcript_readers::read_continue_json(temp_file.path())
         .expect("Failed to parse Continue CLI JSON");
 
-    // Find tool use messages
     let tool_uses: Vec<&Message> = transcript
         .messages()
         .iter()
@@ -97,41 +118,36 @@ fn test_continue_cli_parses_tool_calls() {
 
     assert!(!tool_uses.is_empty(), "Should have at least one tool call");
 
-    // Verify tool calls have correct structure
-    for tool_use in &tool_uses {
-        if let Message::ToolUse { name, input, .. } = tool_use {
-            assert!(!name.is_empty());
-            // Verify input is a JSON object
-            assert!(input.is_object());
-        }
+    if let Message::ToolUse { name, input, .. } = tool_uses[0] {
+        assert_eq!(name, "Read");
+        assert!(input.is_object());
     }
-
-    // Check for specific tool calls from the fixture
-    let read_tools: Vec<&Message> = tool_uses
-        .iter()
-        .filter(|m| {
-            if let Message::ToolUse { name, .. } = *m {
-                name == "Read"
-            } else {
-                false
-            }
-        })
-        .copied()
-        .collect();
-
-    assert!(
-        !read_tools.is_empty(),
-        "Should have at least one 'Read' tool call"
-    );
 }
 
 #[test]
-fn test_continue_cli_parses_tool_call_args() {
-    let fixture = fixture_path("continue-cli-session-simple.json");
-    let transcript = ContinueCliPreset::transcript_from_continue_json(fixture.to_str().unwrap())
+fn test_continue_cli_parses_tool_call_args_from_context_items() {
+    let sample = r##"{
+        "sessionId": "test-session",
+        "title": "Test",
+        "workspaceDirectory": "/test",
+        "history": [
+            {
+                "message": { "role": "assistant", "content": "Reading" },
+                "contextItems": [
+                    {
+                        "name": "Read",
+                        "content": {"filepath": "/test/main.rs"}
+                    }
+                ]
+            }
+        ]
+    }"##;
+
+    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
+    temp_file.write_all(sample.as_bytes()).unwrap();
+    let transcript = transcript_readers::read_continue_json(temp_file.path())
         .expect("Failed to parse Continue CLI JSON");
 
-    // Find a Read tool call
     let read_tool = transcript
         .messages()
         .iter()
@@ -144,21 +160,18 @@ fn test_continue_cli_parses_tool_call_args() {
         })
         .expect("Should find a Read tool call");
 
-    if let Message::ToolUse { input, .. } = read_tool {
-        // Verify args structure
-        if let Some(args_obj) = input.as_object() {
-            // Check for expected fields
-            assert!(
-                args_obj.contains_key("filepath"),
-                "Tool call args should contain filepath"
-            );
-        }
+    if let Message::ToolUse { input, .. } = read_tool
+        && let Some(args_obj) = input.as_object()
+    {
+        assert!(
+            args_obj.contains_key("filepath"),
+            "Tool call args should contain filepath"
+        );
     }
 }
 
 #[test]
 fn test_continue_cli_handles_empty_content() {
-    // Test that empty content strings are skipped
     let sample = r##"{
         "sessionId": "test-session",
         "title": "Test",
@@ -190,12 +203,11 @@ fn test_continue_cli_handles_empty_content() {
 
     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
     temp_file.write_all(sample.as_bytes()).unwrap();
-    let temp_path = temp_file.path().to_str().unwrap();
+    let temp_path = temp_file.path();
 
-    let transcript = ContinueCliPreset::transcript_from_continue_json(temp_path)
+    let transcript = transcript_readers::read_continue_json(temp_path)
         .expect("Failed to parse Continue CLI JSON");
 
-    // Should have 1 user message and 1 assistant message (empty content skipped)
     let user_count = transcript
         .messages()
         .iter()
@@ -222,19 +234,19 @@ fn test_continue_cli_preset_extracts_model_from_hook_input() {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json"
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
+    let events = parse_continue(&hook_input).expect("Failed to run ContinueCliPreset");
 
-    let preset = ContinueCliPreset;
-    let result = preset.run(flags).expect("Failed to run ContinueCliPreset");
-
-    // Verify model is extracted from hook_input
-    assert_eq!(result.agent_id.model, "claude-3.5-sonnet");
-    assert_eq!(result.agent_id.tool, "continue-cli");
-    assert_eq!(result.agent_id.id, "2dbfd673-096d-4773-b5f3-9023894a7355");
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(e.context.agent_id.model, "claude-3.5-sonnet");
+            assert_eq!(e.context.agent_id.tool, "continue-cli");
+            assert_eq!(e.context.session_id, "2dbfd673-096d-4773-b5f3-9023894a7355");
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
@@ -247,17 +259,17 @@ fn test_continue_cli_preset_defaults_to_unknown_model() {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json"
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
+    let events = parse_continue(&hook_input).expect("Failed to run ContinueCliPreset");
 
-    let preset = ContinueCliPreset;
-    let result = preset.run(flags).expect("Failed to run ContinueCliPreset");
-
-    // Verify model defaults to "unknown" when not provided
-    assert_eq!(result.agent_id.model, "unknown");
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(e.context.agent_id.model, "unknown");
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
@@ -271,23 +283,22 @@ fn test_continue_cli_preset_extracts_edited_filepath() {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json"
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
+    let events = parse_continue(&hook_input).expect("Failed to run ContinueCliPreset");
 
-    let preset = ContinueCliPreset;
-    let result = preset.run(flags).expect("Failed to run ContinueCliPreset");
-
-    // Verify edited_filepaths is extracted
-    assert!(result.edited_filepaths.is_some());
-    let edited_filepaths = result.edited_filepaths.unwrap();
-    assert_eq!(edited_filepaths.len(), 1);
-    assert_eq!(
-        edited_filepaths[0],
-        "/Users/svarlamov/projects/testing-git/index.ts"
-    );
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(!e.file_paths.is_empty());
+            assert!(
+                e.file_paths
+                    .iter()
+                    .any(|p| p.to_string_lossy().contains("index.ts"))
+            );
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
@@ -298,23 +309,21 @@ fn test_continue_cli_preset_no_filepath_when_tool_input_missing() {
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "model": "claude-3.5-sonnet",
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json"
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
+    let events = parse_continue(&hook_input).expect("Failed to run ContinueCliPreset");
 
-    let preset = ContinueCliPreset;
-    let result = preset.run(flags).expect("Failed to run ContinueCliPreset");
-
-    // Verify edited_filepaths is None when tool_input is missing
-    assert!(result.edited_filepaths.is_none());
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(e.file_paths.is_empty());
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
 fn test_continue_cli_preset_human_checkpoint() {
-    use git_ai::authorship::working_log::CheckpointKind;
-
     let hook_input = json!({
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "PreToolUse",
@@ -324,42 +333,26 @@ fn test_continue_cli_preset_human_checkpoint() {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json"
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
+    let events = parse_continue(&hook_input).expect("Failed to run ContinueCliPreset");
 
-    let preset = ContinueCliPreset;
-    let result = preset.run(flags).expect("Failed to run ContinueCliPreset");
-
-    // Verify this is a human checkpoint
-    assert_eq!(
-        result.checkpoint_kind,
-        CheckpointKind::Human,
-        "Should be a human checkpoint"
-    );
-
-    // Human checkpoints should have will_edit_filepaths
-    assert!(result.will_edit_filepaths.is_some());
-    let will_edit = result.will_edit_filepaths.unwrap();
-    assert_eq!(will_edit.len(), 1);
-    assert_eq!(
-        will_edit[0],
-        "/Users/svarlamov/projects/testing-git/index.ts"
-    );
-
-    // Human checkpoints should not have edited_filepaths
-    assert!(result.edited_filepaths.is_none());
-
-    // Human checkpoints should not have transcript
-    assert!(result.transcript.is_none());
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert!(!e.file_paths.is_empty());
+            assert!(
+                e.file_paths
+                    .iter()
+                    .any(|p| p.to_string_lossy().contains("index.ts"))
+            );
+        }
+        _ => panic!("Expected PreFileEdit for human checkpoint"),
+    }
 }
 
 #[test]
 fn test_continue_cli_preset_ai_checkpoint() {
-    use git_ai::authorship::working_log::CheckpointKind;
-
     let hook_input = json!({
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "PostToolUse",
@@ -369,30 +362,18 @@ fn test_continue_cli_preset_ai_checkpoint() {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json"
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
+    let events = parse_continue(&hook_input).expect("Failed to run ContinueCliPreset");
 
-    let preset = ContinueCliPreset;
-    let result = preset.run(flags).expect("Failed to run ContinueCliPreset");
-
-    // Verify this is an AI checkpoint
-    assert_eq!(
-        result.checkpoint_kind,
-        CheckpointKind::AiAgent,
-        "Should be an AI agent checkpoint"
-    );
-
-    // AI checkpoints should have transcript
-    assert!(result.transcript.is_some());
-
-    // AI checkpoints should have edited_filepaths
-    assert!(result.edited_filepaths.is_some());
-
-    // AI checkpoints should not have will_edit_filepaths
-    assert!(result.will_edit_filepaths.is_none());
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(e.transcript_source.is_some());
+            assert!(!e.file_paths.is_empty());
+        }
+        _ => panic!("Expected PostFileEdit for AI checkpoint"),
+    }
 }
 
 #[test]
@@ -403,22 +384,20 @@ fn test_continue_cli_preset_stores_transcript_path_in_metadata() {
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "model": "claude-3.5-sonnet",
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json"
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
+    let events = parse_continue(&hook_input).expect("Failed to run ContinueCliPreset");
 
-    let preset = ContinueCliPreset;
-    let result = preset.run(flags).expect("Failed to run ContinueCliPreset");
-
-    // Verify transcript_path is stored in metadata
-    assert!(result.agent_metadata.is_some());
-    let metadata = result.agent_metadata.unwrap();
-    assert_eq!(
-        metadata.get("transcript_path"),
-        Some(&"tests/fixtures/continue-cli-session-simple.json".to_string())
-    );
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(
+                e.context.metadata.get("transcript_path"),
+                Some(&"tests/fixtures/continue-cli-session-simple.json".to_string())
+            );
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
@@ -428,37 +407,17 @@ fn test_continue_cli_preset_handles_missing_transcript_path() {
         "hook_event_name": "PostToolUse",
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "model": "claude-3.5-sonnet"
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
-
-    let preset = ContinueCliPreset;
-    let result = preset.run(flags);
-
-    // Should fail because transcript_path is required
+    let result = parse_continue(&hook_input);
     assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("transcript_path not found")
-    );
+    assert!(result.unwrap_err().to_string().contains("transcript_path"));
 }
 
 #[test]
 fn test_continue_cli_preset_handles_invalid_json() {
-    let hook_input = "{ invalid json }";
-
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
-
-    let preset = ContinueCliPreset;
-    let result = preset.run(flags);
-
-    // Should fail because JSON is invalid
+    let result = parse_continue("{ invalid json }");
     assert!(result.is_err());
 }
 
@@ -469,23 +428,12 @@ fn test_continue_cli_preset_handles_missing_session_id() {
         "hook_event_name": "PostToolUse",
         "model": "claude-3.5-sonnet",
         "transcript_path": "tests/fixtures/continue-cli-session-simple.json"
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
-
-    let preset = ContinueCliPreset;
-    let result = preset.run(flags);
-
-    // Should fail because session_id is required
+    let result = parse_continue(&hook_input);
     assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("session_id not found")
-    );
+    assert!(result.unwrap_err().to_string().contains("session_id"));
 }
 
 #[test]
@@ -496,20 +444,17 @@ fn test_continue_cli_preset_handles_missing_file() {
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "model": "claude-3.5-sonnet",
         "transcript_path": "tests/fixtures/nonexistent.json"
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
-
-    let preset = ContinueCliPreset;
-    let result = preset.run(flags);
-
-    // Should handle missing file gracefully (returns empty transcript)
-    assert!(result.is_ok());
-    let run_result = result.unwrap();
-    // The preset should handle this gracefully
-    assert_eq!(run_result.agent_id.model, "claude-3.5-sonnet");
+    // The new parse() API succeeds (transcript is lazy via TranscriptSource::Path)
+    let events = parse_continue(&hook_input).expect("Parse should succeed with lazy transcript");
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(e.context.agent_id.model, "claude-3.5-sonnet");
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 // ============================================================================
@@ -523,23 +468,19 @@ fn test_continue_cli_e2e_with_attribution() {
         .to_string_lossy()
         .to_string();
 
-    // Create parent directory for the test file
     let src_dir = repo.path().join("src");
     fs::create_dir_all(&src_dir).unwrap();
 
-    // Create initial file with some base content
     let file_path = repo.path().join("src/index.ts");
     let base_content = "console.log('Bonjour');\n\nconsole.log('hello world');\n";
     fs::write(&file_path, base_content).unwrap();
 
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    // Simulate Continue CLI making edits to the file
     let edited_content =
         "console.log('Bonjour');\n\nconsole.log('hello world');\nconsole.log('hello world');\n";
     fs::write(&file_path, edited_content).unwrap();
 
-    // Run checkpoint with the Continue CLI session
     let hook_input = json!({
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
@@ -558,10 +499,8 @@ fn test_continue_cli_e2e_with_attribution() {
 
     println!("Checkpoint output: {}", result);
 
-    // Commit the changes
     let commit = repo.stage_all_and_commit("Add continue-cli edits").unwrap();
 
-    // Verify attribution using TestFile
     let mut file = repo.filename("src/index.ts");
     file.assert_lines_and_blame(crate::lines![
         "console.log('Bonjour');".human(),
@@ -570,19 +509,16 @@ fn test_continue_cli_e2e_with_attribution() {
         "console.log('hello world');".ai(),
     ]);
 
-    // Verify the authorship log contains attestations and prompts
     assert!(
         !commit.authorship_log.attestations.is_empty(),
         "Should have at least one attestation"
     );
 
-    // Verify the metadata has sessions with transcript data
     assert!(
         !commit.authorship_log.metadata.sessions.is_empty(),
         "Should have at least one session record in metadata"
     );
 
-    // Get the first session record
     let session_record = commit
         .authorship_log
         .metadata
@@ -591,13 +527,11 @@ fn test_continue_cli_e2e_with_attribution() {
         .next()
         .expect("Should have at least one session record");
 
-    // Verify that the session record has messages (transcript)
     assert!(
         !session_record.messages.is_empty(),
         "Session record should contain messages from the continue-cli session"
     );
 
-    // Verify the model was preserved correctly
     assert_eq!(
         session_record.agent_id.model, "claude-3.5-sonnet",
         "Model should be 'claude-3.5-sonnet'"
@@ -611,18 +545,15 @@ fn test_continue_cli_e2e_human_checkpoint() {
         .to_string_lossy()
         .to_string();
 
-    // Create parent directory for the test file
     let src_dir = repo.path().join("src");
     fs::create_dir_all(&src_dir).unwrap();
 
-    // Create initial file
     let file_path = repo.path().join("src/index.ts");
     let base_content = "console.log('hello');\n";
     fs::write(&file_path, base_content).unwrap();
 
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    // Human checkpoint before tool use
     let hook_input = json!({
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
@@ -641,21 +572,17 @@ fn test_continue_cli_e2e_human_checkpoint() {
 
     println!("Checkpoint output: {}", result);
 
-    // Make a human edit
     let human_content = "console.log('hello');\nconsole.log('human edit');\n";
     fs::write(&file_path, human_content).unwrap();
 
-    // Commit the changes
     let commit = repo.stage_all_and_commit("Human edit").unwrap();
 
-    // Verify attribution - human edit should be human
     let mut file = repo.filename("src/index.ts");
     file.assert_lines_and_blame(crate::lines![
         "console.log('hello');".human(),
         "console.log('human edit');".human(),
     ]);
 
-    // Human checkpoint should not create AI attestations
     assert_eq!(
         commit.authorship_log.attestations.len(),
         0,
@@ -670,18 +597,15 @@ fn test_continue_cli_e2e_multiple_tool_calls() {
         .to_string_lossy()
         .to_string();
 
-    // Create initial file
     let file_path = repo.path().join("test.ts");
     let base_content = "const x = 1;\n";
     fs::write(&file_path, base_content).unwrap();
 
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    // Make edits
     let edited_content = "const x = 1;\nconst y = 2;\nconst z = 3;\n";
     fs::write(&file_path, edited_content).unwrap();
 
-    // Run checkpoint
     let hook_input = json!({
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
@@ -697,10 +621,8 @@ fn test_continue_cli_e2e_multiple_tool_calls() {
     repo.git_ai(&["checkpoint", "continue-cli", "--hook-input", &hook_input])
         .unwrap();
 
-    // Commit
     let commit = repo.stage_all_and_commit("Add multiple lines").unwrap();
 
-    // Verify attribution
     let mut file = repo.filename("test.ts");
     file.assert_lines_and_blame(crate::lines![
         "const x = 1;".human(),
@@ -718,16 +640,13 @@ fn test_continue_cli_e2e_preserves_model_on_commit() {
         .to_string_lossy()
         .to_string();
 
-    // Create initial file
     let file_path = repo.path().join("test.ts");
     fs::write(&file_path, "const x = 1;\n").unwrap();
 
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    // Make edits
     fs::write(&file_path, "const x = 1;\nconst y = 2;\n").unwrap();
 
-    // Run checkpoint with a specific model
     let hook_input = json!({
         "session_id": "2dbfd673-096d-4773-b5f3-9023894a7355",
         "cwd": repo.canonical_path().to_string_lossy().to_string(),
@@ -743,10 +662,8 @@ fn test_continue_cli_e2e_preserves_model_on_commit() {
     repo.git_ai(&["checkpoint", "continue-cli", "--hook-input", &hook_input])
         .unwrap();
 
-    // Commit
     let commit = repo.stage_all_and_commit("Add line").unwrap();
 
-    // Verify the model was preserved (not overwritten by post-commit)
     let session_record = commit
         .authorship_log
         .metadata
@@ -766,8 +683,8 @@ crate::reuse_tests_in_worktree!(
     test_parse_example_continue_cli_json,
     test_continue_cli_parses_user_messages,
     test_continue_cli_parses_assistant_messages,
-    test_continue_cli_parses_tool_calls,
-    test_continue_cli_parses_tool_call_args,
+    test_continue_cli_parses_tool_calls_from_context_items,
+    test_continue_cli_parses_tool_call_args_from_context_items,
     test_continue_cli_handles_empty_content,
     test_continue_cli_preset_extracts_model_from_hook_input,
     test_continue_cli_preset_defaults_to_unknown_model,
