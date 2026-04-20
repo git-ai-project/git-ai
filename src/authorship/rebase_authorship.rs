@@ -694,6 +694,9 @@ pub fn rewrite_authorship_after_squash_or_rebase(
             for (hash, record) in log.metadata.humans {
                 authorship_log.metadata.humans.entry(hash).or_insert(record);
             }
+            for (id, record) in log.metadata.sessions {
+                authorship_log.metadata.sessions.entry(id).or_insert(record);
+            }
         }
     }
 
@@ -750,9 +753,10 @@ fn try_reconstruct_attributions_from_notes_cached(
     HashMap<String, String>,
     BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
     BTreeMap<String, crate::authorship::authorship_log::HumanRecord>,
+    BTreeMap<String, crate::authorship::authorship_log::SessionRecord>,
 )> {
     use crate::authorship::attribution_tracker::LineAttribution;
-    use crate::authorship::authorship_log::HumanRecord;
+    use crate::authorship::authorship_log::{HumanRecord, SessionRecord};
     use crate::authorship::authorship_log_serialization::AuthorshipLog;
 
     let pathspec_set: HashSet<&str> = pathspecs.iter().map(String::as_str).collect();
@@ -761,6 +765,7 @@ fn try_reconstruct_attributions_from_notes_cached(
         BTreeMap<String, crate::authorship::authorship_log::PromptRecord>,
     > = BTreeMap::new();
     let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
+    let mut sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
 
     // Parse all notes and check if any exist.
     let mut parsed_logs: HashMap<String, AuthorshipLog> = HashMap::new();
@@ -844,6 +849,10 @@ fn try_reconstruct_attributions_from_notes_cached(
             for (hash, record) in &log.metadata.humans {
                 humans.entry(hash.clone()).or_insert(record.clone());
             }
+            // Collect sessions (union-merge: first writer wins).
+            for (id, record) in &log.metadata.sessions {
+                sessions.entry(id.clone()).or_insert(record.clone());
+            }
         }
     }
 
@@ -863,7 +872,7 @@ fn try_reconstruct_attributions_from_notes_cached(
         }
     }
 
-    Some((attributions, file_contents, prompts, humans))
+    Some((attributions, file_contents, prompts, humans, sessions))
 }
 
 /// Overlay a new attribution range onto an existing sorted attribution list.
@@ -1269,8 +1278,9 @@ pub fn rewrite_authorship_after_rebase_v2(
         mut current_file_contents,
         initial_prompts,
         initial_humans,
+        initial_sessions,
         _rebase_ts,
-    ) = if let Some((attrs, contents, prompts, humans)) =
+    ) = if let Some((attrs, contents, prompts, humans, sessions)) =
         try_reconstruct_attributions_from_notes_cached(
             repo,
             original_head,
@@ -1285,7 +1295,7 @@ pub fn rewrite_authorship_after_rebase_v2(
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        (attrs, contents, prompts, humans, ts)
+        (attrs, contents, prompts, humans, sessions, ts)
     } else {
         tracing::debug!("Falling back to VirtualAttributions (blame-based reconstruction)");
         let new_head = new_commits.last().unwrap();
@@ -1329,8 +1339,9 @@ pub fn rewrite_authorship_after_rebase_v2(
         }
 
         let humans = current_va.humans.clone();
+        let sessions = current_va.sessions.clone();
         let ts = current_va.timestamp();
-        (attrs, contents, prompts, humans, ts)
+        (attrs, contents, prompts, humans, sessions, ts)
     };
 
     timing_phases.push((
@@ -1425,6 +1436,7 @@ pub fn rewrite_authorship_after_rebase_v2(
         original_head,
         &current_prompts,
         &initial_humans,
+        &initial_sessions,
         &current_attributions,
         &existing_files,
     );
@@ -1490,6 +1502,8 @@ pub fn rewrite_authorship_after_rebase_v2(
     // Per-commit-delta humans: only h_<hash> entries that appear in the current commit's
     // changed files, mirroring the same scoping applied to prompts/accepted_lines.
     let mut prev_delta_humans: BTreeMap<String, crate::authorship::authorship_log::HumanRecord> =
+        BTreeMap::new();
+    let mut prev_delta_sessions: BTreeMap<String, crate::authorship::authorship_log::SessionRecord> =
         BTreeMap::new();
 
     for (idx, new_commit) in commits_to_process.iter().enumerate() {
@@ -1680,13 +1694,38 @@ pub fn rewrite_authorship_after_rebase_v2(
                 }
                 map
             };
+            // Per-commit-delta sessions: s_<id> entries for session-attributed lines in this commit.
+            // Extract session IDs from current attributions for files changed in this commit.
+            let delta_sessions: BTreeMap<String, crate::authorship::authorship_log::SessionRecord> = {
+                let mut map = BTreeMap::new();
+                for file_path in &changed_files_in_commit {
+                    if let Some((_, line_attrs)) = current_attributions.get(file_path) {
+                        for line_attr in line_attrs {
+                            // Session author IDs start with "s_" and may include "::prompt_hash"
+                            if line_attr.author_id.starts_with("s_") {
+                                let session_id = line_attr
+                                    .author_id
+                                    .split("::")
+                                    .next()
+                                    .unwrap_or(&line_attr.author_id)
+                                    .to_string();
+                                if let Some(record) = initial_sessions.get(&session_id) {
+                                    map.entry(session_id).or_insert_with(|| record.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                map
+            };
             // Only rebuild the (expensive) serde_json metadata template when the active-prompt
             // set OR accepted_lines values changed, OR when the original commit changed, OR
-            // when per-commit humans changed.
+            // when per-commit humans or sessions changed.
             let current_original_commit = new_to_original.get(new_commit).map(String::as_str);
             if active_prompt_key != prev_active_prompt_key
                 || current_original_commit != prev_original_commit.as_deref()
                 || delta_humans != prev_delta_humans
+                || delta_sessions != prev_delta_sessions
             {
                 let active_ids: HashSet<String> = active_prompt_key.keys().cloned().collect();
                 metadata_json_template_parts = build_metadata_template_parts_filtered(
@@ -1695,10 +1734,12 @@ pub fn rewrite_authorship_after_rebase_v2(
                     Some(&active_ids),
                     current_original_commit,
                     Some(&delta_humans),
+                    Some(&delta_sessions),
                 );
                 prev_active_prompt_key = active_prompt_key;
                 prev_original_commit = current_original_commit.map(str::to_string);
                 prev_delta_humans = delta_humans;
+                prev_delta_sessions = delta_sessions;
             }
             loop_metrics_ms += tmetrics.elapsed().as_micros();
         }
@@ -2867,7 +2908,7 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
     let has_existing_log = get_reference_as_authorship_log_v3(repo, original_commit).is_ok();
     let has_existing_data = if has_existing_log {
         let original_log = get_reference_as_authorship_log_v3(repo, original_commit).unwrap();
-        !original_log.metadata.prompts.is_empty() || !original_log.metadata.humans.is_empty()
+        !original_log.metadata.prompts.is_empty() || !original_log.metadata.humans.is_empty() || !original_log.metadata.sessions.is_empty()
     } else {
         false
     };
@@ -2936,6 +2977,9 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
     if let Ok(original_log) = get_reference_as_authorship_log_v3(repo, original_commit) {
         for (id, record) in original_log.metadata.humans {
             authorship_log.metadata.humans.entry(id).or_insert(record);
+        }
+        for (id, record) in original_log.metadata.sessions {
+            authorship_log.metadata.sessions.entry(id).or_insert(record);
         }
     }
 
@@ -3435,11 +3479,12 @@ fn build_metadata_only_authorship_log_from_source_notes(
     source_commits: &[String],
     target_commit_sha: &str,
 ) -> Result<Option<AuthorshipLog>, GitAiError> {
-    use crate::authorship::authorship_log::HumanRecord;
+    use crate::authorship::authorship_log::{HumanRecord, SessionRecord};
 
     let mut merged_prompts = BTreeMap::new();
     let mut prompt_totals: HashMap<String, (u32, u32)> = HashMap::new();
     let mut merged_humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
+    let mut merged_sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
     let mut saw_any_note = false;
 
     for commit_sha in source_commits {
@@ -3456,6 +3501,9 @@ fn build_metadata_only_authorship_log_from_source_notes(
         }
         for (hash, record) in log.metadata.humans {
             merged_humans.entry(hash).or_insert(record);
+        }
+        for (id, record) in log.metadata.sessions {
+            merged_sessions.entry(id).or_insert(record);
         }
     }
 
@@ -3474,6 +3522,7 @@ fn build_metadata_only_authorship_log_from_source_notes(
     authorship_log.metadata.base_commit_sha = target_commit_sha.to_string();
     authorship_log.metadata.prompts = merged_prompts;
     authorship_log.metadata.humans = merged_humans;
+    authorship_log.metadata.sessions = merged_sessions;
     Ok(Some(authorship_log))
 }
 
@@ -3775,7 +3824,7 @@ fn build_metadata_template_parts(
     metadata: &crate::authorship::authorship_log_serialization::AuthorshipMetadata,
     prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
 ) -> Option<(String, String)> {
-    build_metadata_template_parts_filtered(metadata, prompts, None, None, None)
+    build_metadata_template_parts_filtered(metadata, prompts, None, None, None, None)
 }
 
 /// Like `build_metadata_template_parts` but only includes prompts whose IDs are in
@@ -3791,12 +3840,14 @@ fn build_metadata_template_parts(
 /// `delta_humans` overrides `metadata.humans` with per-commit-delta humans (only `h_<hash>`
 /// entries that appear in this commit's changed files). Passing `None` leaves metadata.humans
 /// unchanged (used for the initial/non-per-commit path).
+/// `delta_sessions` overrides `metadata.sessions` similarly.
 fn build_metadata_template_parts_filtered(
     metadata: &crate::authorship::authorship_log_serialization::AuthorshipMetadata,
     prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
     active_ids: Option<&HashSet<String>>,
     original_commit: Option<&str>,
     delta_humans: Option<&BTreeMap<String, crate::authorship::authorship_log::HumanRecord>>,
+    delta_sessions: Option<&BTreeMap<String, crate::authorship::authorship_log::SessionRecord>>,
 ) -> Option<(String, String)> {
     let mut template_meta = metadata.clone();
     template_meta.base_commit_sha = "BASE_COMMIT_SHA_PLACEHOLDER".to_string();
@@ -3806,6 +3857,9 @@ fn build_metadata_template_parts_filtered(
     // An empty map serializes to nothing (humans field is skip_serializing_if = is_empty).
     if let Some(humans) = delta_humans {
         template_meta.humans = humans.clone();
+    }
+    if let Some(sessions) = delta_sessions {
+        template_meta.sessions = sessions.clone();
     }
     serde_json::to_string_pretty(&template_meta)
         .ok()
@@ -4236,6 +4290,7 @@ fn build_authorship_log_from_state(
     base_commit_sha: &str,
     prompts: &BTreeMap<String, BTreeMap<String, crate::authorship::authorship_log::PromptRecord>>,
     humans: &BTreeMap<String, crate::authorship::authorship_log::HumanRecord>,
+    sessions: &BTreeMap<String, crate::authorship::authorship_log::SessionRecord>,
     attributions: &HashMap<
         String,
         (
@@ -4249,6 +4304,7 @@ fn build_authorship_log_from_state(
     authorship_log.metadata.base_commit_sha = base_commit_sha.to_string();
     authorship_log.metadata.prompts = flatten_prompts_for_metadata(prompts);
     authorship_log.metadata.humans = humans.clone();
+    authorship_log.metadata.sessions = sessions.clone();
 
     for (file_path, (_, line_attrs)) in attributions {
         if !existing_files.contains(file_path) {
