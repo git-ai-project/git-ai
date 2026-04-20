@@ -413,15 +413,9 @@ fn diff_json(repo: &TestRepo, args: &[&str]) -> Value {
     serde_json::from_str(&output).expect("diff JSON should parse")
 }
 
-fn tool_model_stats(
-    ai_lines_added: u64,
-    ai_lines_generated: u64,
-    ai_deletions_generated: u64,
-) -> Value {
+fn tool_model_stats(ai_lines_added: u64) -> Value {
     serde_json::json!({
-        "ai_lines_added": ai_lines_added,
-        "ai_lines_generated": ai_lines_generated,
-        "ai_deletions_generated": ai_deletions_generated
+        "ai_lines_added": ai_lines_added
     })
 }
 
@@ -433,14 +427,6 @@ fn assert_stats_exact(
     assert_eq!(
         commit_stats["ai_lines_added"], expected_top_level["ai_lines_added"],
         "ai_lines_added mismatch"
-    );
-    assert_eq!(
-        commit_stats["ai_lines_generated"], expected_top_level["ai_lines_generated"],
-        "ai_lines_generated mismatch"
-    );
-    assert_eq!(
-        commit_stats["ai_deletions_generated"], expected_top_level["ai_deletions_generated"],
-        "ai_deletions_generated mismatch"
     );
     assert_eq!(
         commit_stats["human_lines_added"], expected_top_level["human_lines_added"],
@@ -1282,15 +1268,12 @@ fn test_diff_json_include_stats_exact_single_model_counts() {
 
     let expected_top_level = serde_json::json!({
         "ai_lines_added": 2,
-        "ai_lines_generated": 2,
-        "ai_deletions_generated": 0,
         "human_lines_added": 0,
         "unknown_lines_added": 0,
         "git_lines_added": 2,
         "git_lines_deleted": 2
     });
-    let expected_breakdown =
-        BTreeMap::from([("cursor::gpt-4o".to_string(), tool_model_stats(2, 2, 0))]);
+    let expected_breakdown = BTreeMap::from([("cursor::gpt-4o".to_string(), tool_model_stats(2))]);
     assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
 }
 
@@ -1409,11 +1392,9 @@ fn test_diff_json_include_stats_exact_multi_model_with_non_landing_prompt() {
     //   - codex::o3 => landed 2 (codex-a, codex-b2); replacements within session not double-counted
     //   - claude::sonnet => landed 0, session cleared
     // => Only 2 sessions remain (cursor, codex)
-    // => totals: ai_lines_added=4, ai_lines_generated=4 (only landed AI lines)
+    // => totals: ai_lines_added=4 (only landed AI lines)
     let expected_top_level = serde_json::json!({
         "ai_lines_added": 4,
-        "ai_lines_generated": 4,
-        "ai_deletions_generated": 0,
         "human_lines_added": 1,
         "unknown_lines_added": 0,
         "git_lines_added": 5,
@@ -1421,8 +1402,8 @@ fn test_diff_json_include_stats_exact_multi_model_with_non_landing_prompt() {
     });
     // Only sessions with landed lines remain
     let expected_breakdown = BTreeMap::from([
-        ("codex::o3".to_string(), tool_model_stats(2, 2, 0)),
-        ("cursor::gpt-4o".to_string(), tool_model_stats(2, 2, 0)),
+        ("codex::o3".to_string(), tool_model_stats(2)),
+        ("cursor::gpt-4o".to_string(), tool_model_stats(2)),
     ]);
     assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
 
@@ -1481,8 +1462,6 @@ fn test_diff_json_include_stats_exact_human_landed_with_ai_generated() {
     // Sessions are cleared if ALL their lines are overridden (none land)
     let expected_top_level = serde_json::json!({
         "ai_lines_added": 0,
-        "ai_lines_generated": 0,
-        "ai_deletions_generated": 0,
         "human_lines_added": 2,
         "unknown_lines_added": 0,
         "git_lines_added": 2,
@@ -1599,10 +1578,6 @@ fn test_diff_json_include_stats_blame_deletions_devin_added_prompts_only() {
     assert_eq!(commit_stats["git_lines_deleted"], serde_json::json!(2));
     assert_eq!(commit_stats["human_lines_added"], serde_json::json!(0));
     assert_eq!(commit_stats["unknown_lines_added"], serde_json::json!(0));
-    assert!(
-        commit_stats["ai_lines_generated"].as_u64().unwrap_or(0) > 0,
-        "Devin synthetic prompt should still contribute generated stats"
-    );
 }
 
 #[test]
@@ -1634,8 +1609,6 @@ fn test_diff_json_rename_only_has_no_hunks_and_zero_stats() {
         .expect("commit_stats should be present");
     let expected_top_level = serde_json::json!({
         "ai_lines_added": 0,
-        "ai_lines_generated": 0,
-        "ai_deletions_generated": 0,
         "human_lines_added": 0,
         "unknown_lines_added": 0,
         "git_lines_added": 0,
@@ -1695,19 +1668,14 @@ fn test_diff_json_rename_with_ai_edit_exact_stats() {
     // old: [base-1, base-2]
     // new: [base-1, ai-line-2, ai-line-3]
     // => landed +2, -1 (all AI-attributed additions)
-    // => session format: only counts new AI lines (2), not the full rewrite (3)
-    // Session format: deletions_generated is always 0
     let expected_top_level = serde_json::json!({
         "ai_lines_added": 2,
-        "ai_lines_generated": 2,
-        "ai_deletions_generated": 0,
         "human_lines_added": 0,
         "unknown_lines_added": 0,
         "git_lines_added": 2,
         "git_lines_deleted": 1
     });
-    let expected_breakdown =
-        BTreeMap::from([("cursor::gpt-4o".to_string(), tool_model_stats(2, 2, 0))]);
+    let expected_breakdown = BTreeMap::from([("cursor::gpt-4o".to_string(), tool_model_stats(2))]);
     assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
 
     let files = diff["files"].as_object().expect("files should be object");
