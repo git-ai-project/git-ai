@@ -48,6 +48,7 @@ pub enum BashPreHookStrategy {
     SnapshotOnly,
 }
 
+#[allow(dead_code)]
 pub(crate) enum BashPreHookResult {
     EmitHumanCheckpoint {
         captured_checkpoint_id: Option<String>,
@@ -58,6 +59,7 @@ pub(crate) enum BashPreHookResult {
 }
 
 impl BashPreHookResult {
+    #[allow(dead_code)]
     pub(crate) fn captured_checkpoint_id(self) -> Option<String> {
         match self {
             Self::EmitHumanCheckpoint {
