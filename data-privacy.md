@@ -34,7 +34,7 @@ If you opt in to a personal dashboard, the following is uploaded to Git AI Cloud
 - **Personal Agent usage data** - % AI, # of Parallel agents and other stats on the dashboard are visible only to you unless you share them with others. 
 - **SCM profile metadata** from GitHub, Bitbucket, or GitLab
 
-See our [Cloud Privacy Policy](https://usegitai.com/privacy) for details.
+See our [Cloud Privacy Policy](https://usegitai.com/privacy-policy) for details.
 
 ---
 
@@ -54,6 +54,6 @@ Teams and Enterprise deployments store additional data in the team instance:
   - PR diffs — processed for computing % AI code, but not stored
 - **Error & exception telemetry** — shared by default with Git AI, unless disabled or redirected to your own endpoint. See [configuration options](https://usegitai.com/docs/cli/configuration#configuration-options).
 
-For more information, see our [Trust Center](https://usegitai.com/trust).
+For more information, see our [Trust Center](https://trust.usegitai.com).
 
 In [self-hosted deployments](https://github.com/git-ai-project/self-hosted), all data is sent only to your team's Git AI instance.
