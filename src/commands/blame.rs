@@ -412,6 +412,7 @@ impl Repository {
         let (
             line_authors,
             prompt_records,
+            session_records,
             humans,
             authorship_logs,
             prompt_commits,
@@ -422,7 +423,7 @@ impl Repository {
             BlameAnalysisResult {
                 line_authors,
                 prompt_records,
-                session_records: HashMap::new(), // TODO: populate in Task 8
+                session_records,
                 blame_hunks,
                 humans,
             },
@@ -1038,6 +1039,7 @@ fn overlay_ai_authorship(
     (
         HashMap<u32, String>,
         HashMap<String, PromptRecord>,
+        HashMap<String, SessionRecord>,
         BTreeMap<String, HumanRecord>, // humans map
         Vec<AuthorshipLog>,
         HashMap<String, Vec<String>>,      // prompt_hash -> commit_shas
@@ -1047,6 +1049,7 @@ fn overlay_ai_authorship(
 > {
     let mut line_authors: HashMap<u32, String> = HashMap::new();
     let mut prompt_records: HashMap<String, PromptRecord> = HashMap::new();
+    let mut session_records: HashMap<String, SessionRecord> = HashMap::new();
     let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
     // Track which commits contain each prompt hash
     let mut prompt_commits: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
@@ -1082,6 +1085,13 @@ fn overlay_ai_authorship(
                 humans
                     .entry(human_id.clone())
                     .or_insert_with(|| human_record.clone());
+            }
+
+            // Collect session records from this authorship log
+            for (session_id, session_record) in &authorship_log.metadata.sessions {
+                session_records
+                    .entry(session_id.clone())
+                    .or_insert_with(|| session_record.clone());
             }
 
             // Check each line in this hunk for AI authorship using compact schema
@@ -1246,6 +1256,7 @@ fn overlay_ai_authorship(
     Ok((
         line_authors,
         prompt_records,
+        session_records,
         humans,
         authorship_logs,
         prompt_commits_vec,
