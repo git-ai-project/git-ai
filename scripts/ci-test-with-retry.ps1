@@ -26,16 +26,17 @@ if ($TestMode -ne "daemon" -and $TestMode -ne "wrapper-daemon") {
 }
 
 # Parse failed test names from cargo test output
-$lines = $output -split "`n"
+$lines = $output -split "`r?`n"
 $inFailures = $false
 $failedTests = @()
 
 foreach ($line in $lines) {
-    if ($line -match "^failures:$") {
+    $line = $line.TrimEnd()
+    if ($line -eq "failures:") {
         $inFailures = $true
         continue
     }
-    if ($inFailures -and ($line -match "^$" -or $line -match "^test result:")) {
+    if ($inFailures -and ($line -eq "" -or $line -match "^test result:")) {
         $inFailures = $false
         continue
     }
