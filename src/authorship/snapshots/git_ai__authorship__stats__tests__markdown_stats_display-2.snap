@@ -2,4 +2,4 @@
 source: src/authorship/stats.rs
 expression: ai_only_output
 ---
-"Stats powered by [Git AI](https://github.com/git-ai-project/git-ai)\n\n```text\n🧠 you    ░░░░░░░░░░░░░░░░░░░░  0%\n🤖 ai     ░███████████████████  95%\n```\n\n<details>\n<summary>More stats</summary>\n\n- 45 seconds waiting for AI \n\n</details>"
+"Stats powered by [Git AI](https://github.com/git-ai-project/git-ai)\n\n```text\n🧠 you    ░░░░░░░░░░░░░░░░░░░░  0%\n🤖 ai     ░███████████████████  95%\n```\n\n<details>\n<summary>More stats</summary>\n\n\n</details>"
