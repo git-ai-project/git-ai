@@ -298,12 +298,12 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
     let old_log =
         AuthorshipLog::deserialize_from_string(&old_note).expect("parse original authorship note");
     assert!(
-        old_log.metadata.sessions.is_empty(),
-        "precondition: human-only commit should have no attestations"
+        old_log.metadata.prompts.is_empty(),
+        "precondition: human-only commit should have no prompts"
     );
     assert!(
         old_log.metadata.sessions.is_empty(),
-        "precondition: human-only commit should have no prompts"
+        "precondition: human-only commit should have no sessions"
     );
 
     // Rebase prod onto dev.
@@ -317,12 +317,12 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
     let rebased_log = AuthorshipLog::deserialize_from_string(&rebased_note)
         .expect("parse rebased authorship note");
     assert!(
-        rebased_log.metadata.sessions.is_empty(),
-        "rebased human-only commit should still have no attestations"
+        rebased_log.metadata.prompts.is_empty(),
+        "rebased human-only commit should still have no prompts"
     );
     assert!(
         rebased_log.metadata.sessions.is_empty(),
-        "rebased human-only commit should still have no prompts"
+        "rebased human-only commit should still have no sessions"
     );
     assert_eq!(rebased_log.metadata.base_commit_sha, rebased_sha);
 }
@@ -355,12 +355,12 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
     let mut original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse source note");
     assert!(
-        original_log.metadata.sessions.is_empty(),
-        "precondition: should start metadata-only"
+        original_log.metadata.prompts.is_empty(),
+        "precondition: source commit should not have prompts before test mutation"
     );
     assert!(
         original_log.metadata.sessions.is_empty(),
-        "precondition: source commit should not have prompts before test mutation"
+        "precondition: source commit should not have sessions before test mutation"
     );
 
     let mut test_attrs = HashMap::new();
@@ -1475,9 +1475,17 @@ fn test_rebase_preserves_custom_attributes_from_config() {
         .expect("original commit should have authorship note");
     let original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
-    for prompt in original_log.metadata.sessions.values() {
+    assert!(
+        original_log.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        !original_log.metadata.sessions.is_empty(),
+        "precondition: original commit should have session records"
+    );
+    for session in original_log.metadata.sessions.values() {
         assert_eq!(
-            prompt.custom_attributes.as_ref(),
+            session.custom_attributes.as_ref(),
             Some(&attrs),
             "precondition: original commit should have custom_attributes from config"
         );
@@ -1501,12 +1509,16 @@ fn test_rebase_preserves_custom_attributes_from_config() {
     let rebased_log =
         AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
     assert!(
+        rebased_log.metadata.prompts.is_empty(),
+        "rebased commit should not have prompts"
+    );
+    assert!(
         !rebased_log.metadata.sessions.is_empty(),
         "rebased commit should have session records"
     );
-    for prompt in rebased_log.metadata.sessions.values() {
+    for session in rebased_log.metadata.sessions.values() {
         assert_eq!(
-            prompt.custom_attributes.as_ref(),
+            session.custom_attributes.as_ref(),
             Some(&attrs),
             "custom_attributes should be preserved through rebase"
         );
@@ -1557,6 +1569,14 @@ fn test_rebase_prompt_metrics_update_per_commit() {
     let log2 = AuthorshipLog::deserialize_from_string(&note2).expect("parse note 2");
 
     // Session format: verify pre-rebase sessions exist and attestation line counts differ
+    assert!(
+        log1.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        log2.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
     assert!(
         !log1.metadata.sessions.is_empty(),
         "precondition: commit 1 should have session records"
@@ -1623,6 +1643,14 @@ fn test_rebase_prompt_metrics_update_per_commit() {
         AuthorshipLog::deserialize_from_string(&rebased_note2).expect("parse rebased note 2");
 
     // Session format: verify sessions survive rebase and attestation line counts differ
+    assert!(
+        rebased_log1.metadata.prompts.is_empty(),
+        "rebased commit 1 should not have prompts"
+    );
+    assert!(
+        rebased_log2.metadata.prompts.is_empty(),
+        "rebased commit 2 should not have prompts"
+    );
     assert!(
         !rebased_log1.metadata.sessions.is_empty(),
         "regression: rebased commit 1 should have session records"
