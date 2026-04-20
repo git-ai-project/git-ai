@@ -192,24 +192,24 @@ fn handle_run(args: &[String]) -> Result<(), String> {
         .block_on(async move { crate::daemon::run_daemon(config).await })
         .map_err(|e| e.to_string())?;
 
-    // Daemon is fully dead (lock released, sockets removed, threads joined).
-    // Now safe to self-update — the daemon can decide whether a fresh instance
-    // should be started based on the shutdown reason and install outcome.
-    #[cfg(not(windows))]
-    let update_installed = crate::daemon::daemon_run_pending_self_update();
-
-    #[cfg(windows)]
-    crate::daemon::daemon_run_pending_self_update();
-
     match exit_action {
         crate::daemon::DaemonExitAction::Stop => {}
         crate::daemon::DaemonExitAction::Restart => {
             ensure_daemon_running(Duration::from_secs(5)).map(|_| ())?;
         }
         crate::daemon::DaemonExitAction::RestartAfterUpdate => {
-            #[cfg(not(windows))]
-            {
-                if update_installed {
+            // Daemon is fully dead (lock released, sockets removed, threads joined).
+            // Now safe to self-update — if the install cannot proceed, bring the
+            // daemon back so a failed update does not leave the service down.
+            match crate::daemon::daemon_run_pending_self_update() {
+                crate::daemon::DaemonSelfUpdateOutcome::Installed => {
+                    #[cfg(not(windows))]
+                    {
+                        ensure_daemon_running(Duration::from_secs(5)).map(|_| ())?;
+                    }
+                }
+                crate::daemon::DaemonSelfUpdateOutcome::NoUpdate
+                | crate::daemon::DaemonSelfUpdateOutcome::Failed => {
                     ensure_daemon_running(Duration::from_secs(5)).map(|_| ())?;
                 }
             }

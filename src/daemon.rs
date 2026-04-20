@@ -3903,6 +3903,13 @@ pub(crate) enum DaemonExitAction {
     RestartAfterUpdate,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DaemonSelfUpdateOutcome {
+    Installed,
+    NoUpdate,
+    Failed,
+}
+
 impl DaemonExitAction {
     fn as_u8(self) -> u8 {
         match self {
@@ -8286,7 +8293,7 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
 /// On Unix the installer atomically replaces the binary via `mv`; on Windows
 /// the installer is spawned as a detached process that polls until the exe is
 /// unlocked.
-pub(crate) fn daemon_run_pending_self_update() -> bool {
+pub(crate) fn daemon_run_pending_self_update() -> DaemonSelfUpdateOutcome {
     use crate::commands::upgrade::{
         DaemonUpdateCheckResult, check_and_install_update_if_available,
     };
@@ -8294,15 +8301,16 @@ pub(crate) fn daemon_run_pending_self_update() -> bool {
     match check_and_install_update_if_available() {
         Ok(DaemonUpdateCheckResult::UpdateReady) => {
             tracing::info!("self-update: installation completed successfully");
-            true
+            DaemonSelfUpdateOutcome::Installed
         }
         Ok(DaemonUpdateCheckResult::NoUpdate) => {
             tracing::info!("self-update: no update to install");
-            false
+            DaemonSelfUpdateOutcome::NoUpdate
         }
         Err(err) => {
             tracing::warn!(%err, "self-update: installation failed");
-            false
+            crate::commands::upgrade::clear_cached_update_state();
+            DaemonSelfUpdateOutcome::Failed
         }
     }
 }

@@ -50,6 +50,8 @@ unsafe extern "system" {
 
 const UPDATE_CHECK_INTERVAL_HOURS: u64 = 24;
 const GIT_AI_RELEASE_ENV: &str = "GIT_AI_RELEASE_TAG";
+#[cfg(windows)]
+const GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV: &str = "GIT_AI_RESTART_DAEMON_AFTER_INSTALL";
 const BACKGROUND_SPAWN_THROTTLE_SECS: u64 = 60;
 const ENV_BACKGROUND_UPGRADE_WORKER: &str = "GIT_AI_BACKGROUND_UPGRADE_WORKER";
 
@@ -311,6 +313,11 @@ fn persist_update_state(channel: UpdateChannel, release: Option<&ChannelRelease>
     write_update_cache(&cache);
 }
 
+pub(crate) fn clear_cached_update_state() {
+    let channel = config::Config::fresh().update_channel();
+    persist_update_state(channel, None);
+}
+
 fn releases_endpoint() -> &'static str {
     "/worker/releases"
 }
@@ -530,17 +537,21 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
              Start-Transcript -Path $logFile -Append -Force | Out-Null; \
              Write-Host 'Running verified install script...'; \
              try {{ \
-                 $ErrorActionPreference = 'Continue'; \
-                 & '{}'; \
-                 Write-Host 'Install script completed'; \
-             }} catch {{ \
-                 Write-Host \"Error: $_\"; \
-                 Write-Host \"Stack trace: $($_.ScriptStackTrace)\"; \
-             }} finally {{ \
-                 Stop-Transcript | Out-Null; \
-                 Remove-Item -Path '{}' -Force -ErrorAction SilentlyContinue; \
-             }}",
-            log_path_str, script_path_str, script_path_str
+                  $ErrorActionPreference = 'Continue'; \
+                  & '{}'; \
+                  Write-Host 'Install script completed'; \
+              }} catch {{ \
+                  Write-Host \"Error: $_\"; \
+                  Write-Host \"Stack trace: $($_.ScriptStackTrace)\"; \
+              }} finally {{ \
+                  if ($env:{} -eq '1') {{ \
+                      $daemonExe = Join-Path $HOME '.git-ai\\bin\\git-ai.exe'; \
+                      if (Test-Path $daemonExe) {{ try {{ & $daemonExe bg start *> $null }} catch {{ }} }} \
+                  }}; \
+                  Stop-Transcript | Out-Null; \
+                  Remove-Item -Path '{}' -Force -ErrorAction SilentlyContinue; \
+              }}",
+            log_path_str, script_path_str, GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV, script_path_str
         );
 
         let spawn_powershell = |exe: &str| -> std::io::Result<std::process::Child> {
@@ -556,6 +567,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
             cmd.creation_flags(CREATE_NO_WINDOW);
 
             if silent {
+                cmd.env(GIT_AI_RESTART_DAEMON_AFTER_INSTALL_ENV, "1");
                 cmd.stdout(Stdio::null()).stderr(Stdio::null());
             }
 
