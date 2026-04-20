@@ -1539,6 +1539,7 @@ fn remove_working_log_attributions_for_pathspecs(
             prompts: initial.prompts,
             file_blobs: filtered_blobs,
             humans: initial.humans,
+            sessions: initial.sessions,
         })?;
     }
 
