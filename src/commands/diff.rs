@@ -1390,6 +1390,11 @@ fn merge_missing_prompts_from_authorship_note(
         for (prompt_id, prompt_record) in authorship_log.metadata.prompts {
             prompts.entry(prompt_id).or_insert(prompt_record);
         }
+        for (session_id, session_record) in authorship_log.metadata.sessions {
+            prompts
+                .entry(session_id)
+                .or_insert_with(|| session_record.to_prompt_record());
+        }
     }
 }
 
@@ -1415,7 +1420,11 @@ fn prompt_ids_from_added_hunks(artifacts: &DiffBuildArtifacts) -> HashSet<String
 
 fn prompt_ids_from_authorship_note(repo: &Repository, commit_sha: &str) -> HashSet<String> {
     get_authorship(repo, commit_sha)
-        .map(|authorship_log| authorship_log.metadata.prompts.into_keys().collect())
+        .map(|authorship_log| {
+            let mut ids: HashSet<String> = authorship_log.metadata.prompts.into_keys().collect();
+            ids.extend(authorship_log.metadata.sessions.into_keys());
+            ids
+        })
         .unwrap_or_default()
 }
 
