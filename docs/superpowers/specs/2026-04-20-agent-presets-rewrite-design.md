@@ -54,13 +54,26 @@ pub enum ParsedHookEvent {
 
 pub struct PreFileEdit {
     pub context: PresetContext,
-    pub file_paths: Vec<PathBuf>,                    // absolute paths
-    pub dirty_files: Option<HashMap<PathBuf, String>>, // pre-edit content overrides
+    pub file_paths: Vec<PathBuf>,                      // absolute paths
+    /// Explicit pre-edit file content, keyed by absolute path.
+    /// When provided, the checkpoint uses this as the "before" state rather than
+    /// reading from disk. Use cases:
+    /// - create_file: empty string signals file doesn't exist yet
+    /// - Race avoidance: hook captures content before concurrent edits can interfere
+    /// When None, the checkpoint reads current disk content as the baseline.
+    pub dirty_files: Option<HashMap<PathBuf, String>>,
 }
 
 pub struct PostFileEdit {
     pub context: PresetContext,
-    pub file_paths: Vec<PathBuf>,                    // absolute paths
+    pub file_paths: Vec<PathBuf>,                      // absolute paths
+    /// Explicit file content at checkpoint time, keyed by absolute path.
+    /// When provided, the checkpoint uses this as the "current" state for diffing
+    /// against the stored baseline, rather than reading from disk.
+    /// Used by agents that send file content inline in hook data (e.g., GithubCopilot,
+    /// Pi, AgentV1, AiTab, Firebender).
+    /// When None, the checkpoint reads current disk content.
+    pub dirty_files: Option<HashMap<PathBuf, String>>,
     pub transcript_source: Option<TranscriptSource>,
 }
 
@@ -149,14 +162,17 @@ fn execute_event(event: ParsedHookEvent, trace_id: &str) -> Result<CheckpointRes
             //    - checkpoint_kind: Human
             //    - path_role: WillEdit
             //    - file_paths from event
-            //    - dirty_files if provided
+            //    - dirty_files if provided (explicit pre-edit content; e.g., empty string
+            //      for create_file to mark file as not-yet-existing, or current content
+            //      captured by the hook to avoid races with concurrent tool calls)
         }
         ParsedHookEvent::PostFileEdit(e) => {
             // 1. Resolve repo from cwd
             // 2. Return CheckpointResult with:
-            //    - checkpoint_kind: AiAgent
+            //    - checkpoint_kind: AiAgent (or AiTab if agent_id.tool == "ai_tab")
             //    - path_role: Edited
             //    - file_paths from event
+            //    - dirty_files passed through (used as baseline for diffing)
             //    - transcript_source passed through
         }
         ParsedHookEvent::PreBashCall(e) => {
@@ -371,6 +387,7 @@ impl AgentPreset for ClaudePreset {
             (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
+                dirty_files: None, // Claude doesn't provide pre-edit content via hook
                 transcript_source,
             }),
         };
@@ -474,7 +491,7 @@ The session_id from `PresetContext`:
 | `checkpoint_kind` | `checkpoint_kind` |
 | `repo_working_dir: Option<String>` | `repo_working_dir: PathBuf` (always present, resolved by orchestrator) |
 | `edited_filepaths` / `will_edit_filepaths` | `file_paths` + `path_role` (unified) |
-| `dirty_files: Option<HashMap<String, String>>` | `dirty_files: Option<HashMap<PathBuf, String>>` |
+| `dirty_files: Option<HashMap<String, String>>` | `dirty_files: Option<HashMap<PathBuf, String>>` (on both PreFileEdit and PostFileEdit; flows through to CheckpointResult) |
 | `transcript: Option<AiTranscript>` | `transcript_source: Option<TranscriptSource>` (lazy) |
 | `agent_metadata` | `metadata` |
 | `captured_checkpoint_id` | `captured_checkpoint_id` |
