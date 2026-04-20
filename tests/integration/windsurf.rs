@@ -473,7 +473,7 @@ fn test_windsurf_preset_pre_run_command_captures_bash_snapshot() {
             assert_eq!(e.context.agent_id.tool, "windsurf");
             assert_eq!(e.context.agent_id.id, "traj-bash-pre");
             assert_eq!(e.context.agent_id.model, "GPT 4.1");
-            assert_eq!(e.tool_use_id, "bash");
+            assert_eq!(e.tool_use_id, "exec-bash-1");
         }
         _ => panic!("Expected PreBashCall for pre_run_command"),
     }
