@@ -2,13 +2,13 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
+use git_ai::authorship::working_log::AgentId;
 use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::authorship::{transcript::AiTranscript, working_log::AgentId};
 use git_ai::commands::checkpoint::{
     PreparedCheckpointFile, PreparedCheckpointFileSource, PreparedCheckpointManifest,
     PreparedPathRole, prepare_captured_checkpoint,
 };
-use git_ai::commands::checkpoint_agent::agent_presets::AgentRunResult;
+use git_ai::commands::checkpoint_agent::orchestrator::CheckpointResult;
 use git_ai::daemon::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, DaemonConfig, DaemonLock,
     local_socket_connects_with_timeout, open_local_socket_stream_with_timeout, read_daemon_pid,
@@ -580,12 +580,15 @@ fn write_base_files(repo: &TestRepo) {
         .expect("initial commit should succeed");
 }
 
-fn ai_agent_run_result(
+fn ai_checkpoint_result(
     repo: &TestRepo,
     edited_filepaths: Vec<String>,
     dirty_files: Option<HashMap<String, String>>,
-) -> AgentRunResult {
-    AgentRunResult {
+) -> CheckpointResult {
+    use std::path::PathBuf;
+    CheckpointResult {
+        trace_id: git_ai::authorship::authorship_log_serialization::generate_trace_id(),
+        checkpoint_kind: CheckpointKind::AiAgent,
         agent_id: AgentId {
             tool: "test-agent".to_string(),
             id: format!(
@@ -597,13 +600,13 @@ fn ai_agent_run_result(
             ),
             model: "test-model".to_string(),
         },
-        agent_metadata: None,
-        checkpoint_kind: CheckpointKind::AiAgent,
-        transcript: Some(AiTranscript { messages: vec![] }),
-        repo_working_dir: Some(repo.path().to_string_lossy().to_string()),
-        edited_filepaths: Some(edited_filepaths),
-        will_edit_filepaths: None,
-        dirty_files,
+        repo_working_dir: repo.path().to_path_buf(),
+        file_paths: edited_filepaths.into_iter().map(PathBuf::from).collect(),
+        path_role: PreparedPathRole::Edited,
+        dirty_files: dirty_files
+            .map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect()),
+        transcript_source: None,
+        metadata: std::collections::HashMap::new(),
         captured_checkpoint_id: None,
     }
 }
@@ -639,7 +642,7 @@ fn prepare_captured_checkpoint_only_captures_explicit_files_when_other_ai_touche
         &repo_storage(&repo),
         "Test User",
         CheckpointKind::AiAgent,
-        Some(&ai_agent_run_result(
+        Some(&ai_checkpoint_result(
             &repo,
             vec!["alphabet.md".to_string()],
             None,
@@ -1424,7 +1427,7 @@ fn daemon_captured_checkpoint_replay_uses_blob_snapshot_after_worktree_changes()
                     blob_name: "captured-race-blob".to_string(),
                 },
             }],
-            agent_run_result: Some(ai_agent_run_result(
+            checkpoint_result: Some(ai_checkpoint_result(
                 &repo,
                 vec!["captured-race.txt".to_string()],
                 None,
@@ -1522,7 +1525,7 @@ fn daemon_captured_checkpoint_replay_supports_mixed_dirty_and_blob_sources() {
                     },
                 },
             ],
-            agent_run_result: Some(ai_agent_run_result(
+            checkpoint_result: Some(ai_checkpoint_result(
                 &repo,
                 vec![
                     "dirty-source.txt".to_string(),
@@ -1601,7 +1604,7 @@ fn daemon_captured_checkpoint_failure_cleans_up_capture_dir() {
                     blob_name: "missing-blob".to_string(),
                 },
             }],
-            agent_run_result: Some(ai_agent_run_result(
+            checkpoint_result: Some(ai_checkpoint_result(
                 &repo,
                 vec!["broken-capture.txt".to_string()],
                 None,
@@ -1665,7 +1668,7 @@ fn daemon_captured_checkpoint_rejects_manifest_for_different_repo() {
                     blob_name: "wrong-repo-blob".to_string(),
                 },
             }],
-            agent_run_result: Some(ai_agent_run_result(
+            checkpoint_result: Some(ai_checkpoint_result(
                 &repo,
                 vec!["wrong-repo-capture.txt".to_string()],
                 None,

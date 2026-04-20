@@ -1,4 +1,8 @@
 #[cfg(feature = "test-support")]
+use crate::authorship::transcript::AiTranscript;
+#[cfg(feature = "test-support")]
+use crate::authorship::working_log::CheckpointKind;
+#[cfg(feature = "test-support")]
 use crate::{
     authorship::transcript::Message,
     commands::checkpoint_agent::bash_tool::{Agent, BashCheckpointAction, HookEvent, ToolClass},
@@ -7,10 +11,7 @@ use crate::{
     utils::normalize_to_posix,
 };
 use crate::{
-    authorship::{
-        transcript::AiTranscript,
-        working_log::{AgentId, CheckpointKind},
-    },
+    authorship::working_log::AgentId,
     commands::checkpoint_agent::bash_tool::{self},
     error::GitAiError,
 };
@@ -26,6 +27,7 @@ use std::env;
 use std::path::PathBuf;
 use std::path::{Component, Path};
 
+#[cfg(feature = "test-support")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentRunResult {
     pub agent_id: AgentId,
