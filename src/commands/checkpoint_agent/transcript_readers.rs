@@ -20,7 +20,9 @@ use std::path::Path;
 // ---------------------------------------------------------------------------
 
 /// Read a transcript from the given source.
-pub fn read_transcript(source: &TranscriptSource) -> Result<(AiTranscript, Option<String>), GitAiError> {
+pub fn read_transcript(
+    source: &TranscriptSource,
+) -> Result<(AiTranscript, Option<String>), GitAiError> {
     match source {
         TranscriptSource::Path {
             path,
@@ -50,9 +52,7 @@ fn read_from_path(
             let content = std::fs::read_to_string(path).map_err(GitAiError::IoError)?;
             read_copilot_event_stream_jsonl(&content).map(|(t, m, _)| (t, m))
         }
-        TranscriptFormat::AmpThreadJson => {
-            read_amp_thread_json(path).map(|(t, m, _)| (t, m))
-        }
+        TranscriptFormat::AmpThreadJson => read_amp_thread_json(path).map(|(t, m, _)| (t, m)),
         TranscriptFormat::OpenCodeSqlite => {
             let sid = session_id.ok_or_else(|| {
                 GitAiError::PresetError(
@@ -109,9 +109,7 @@ pub fn read_claude_jsonl(path: &Path) -> Result<(AiTranscript, Option<String>), 
                                 timestamp: timestamp.clone(),
                             });
                         }
-                    } else if let Some(content_array) =
-                        raw_entry["message"]["content"].as_array()
-                    {
+                    } else if let Some(content_array) = raw_entry["message"]["content"].as_array() {
                         // Handle user messages with content array
                         for item in content_array {
                             // Skip tool_result items - those are system-generated responses, not human input
@@ -455,8 +453,7 @@ pub fn read_codex_jsonl(path: &Path) -> Result<(AiTranscript, Option<String>), G
                             .unwrap_or_default();
 
                         let mut text_parts: Vec<String> = Vec::new();
-                        if let Some(content_arr) =
-                            payload.get("content").and_then(|v| v.as_array())
+                        if let Some(content_arr) = payload.get("content").and_then(|v| v.as_array())
                         {
                             for item in content_arr {
                                 let content_type = item
@@ -466,8 +463,7 @@ pub fn read_codex_jsonl(path: &Path) -> Result<(AiTranscript, Option<String>), G
                                 if (role == "assistant" || role == "user")
                                     && (content_type == "output_text"
                                         || content_type == "input_text")
-                                    && let Some(text) =
-                                        item.get("text").and_then(|v| v.as_str())
+                                    && let Some(text) = item.get("text").and_then(|v| v.as_str())
                                 {
                                     let trimmed = text.trim();
                                     if !trimmed.is_empty() {
@@ -504,18 +500,15 @@ pub fn read_codex_jsonl(path: &Path) -> Result<(AiTranscript, Option<String>), G
                             if let Some(arguments) =
                                 payload.get("arguments").and_then(|v| v.as_str())
                             {
-                                serde_json::from_str::<serde_json::Value>(arguments)
-                                    .unwrap_or_else(|_| {
-                                        serde_json::Value::String(arguments.to_string())
-                                    })
+                                serde_json::from_str::<serde_json::Value>(arguments).unwrap_or_else(
+                                    |_| serde_json::Value::String(arguments.to_string()),
+                                )
                             } else {
                                 payload.get("arguments").cloned().unwrap_or_else(|| {
                                     serde_json::Value::Object(serde_json::Map::new())
                                 })
                             }
-                        } else if let Some(input) =
-                            payload.get("input").and_then(|v| v.as_str())
-                        {
+                        } else if let Some(input) = payload.get("input").and_then(|v| v.as_str()) {
                             serde_json::Value::String(input.to_string())
                         } else {
                             payload.clone()
@@ -630,10 +623,8 @@ pub fn read_cursor_jsonl(path: &Path) -> Result<(AiTranscript, Option<String>), 
                                 if let Some(text) = item["text"].as_str()
                                     && !text.trim().is_empty()
                                 {
-                                    transcript.add_message(Message::assistant(
-                                        text.to_string(),
-                                        None,
-                                    ));
+                                    transcript
+                                        .add_message(Message::assistant(text.to_string(), None));
                                 }
                             }
                             Some("thinking") => {
@@ -650,8 +641,7 @@ pub fn read_cursor_jsonl(path: &Path) -> Result<(AiTranscript, Option<String>), 
                                 if let Some(name) = item["name"].as_str() {
                                     let input = &item["input"];
                                     // Normalize tool input: Cursor uses `path` where git-ai uses `file_path`
-                                    let normalized_input =
-                                        normalize_cursor_tool_input(name, input);
+                                    let normalized_input = normalize_cursor_tool_input(name, input);
 
                                     // Check for plan file writes
                                     if let Some(plan_text) = extract_plan_from_tool_use(
@@ -701,10 +691,7 @@ fn strip_cursor_user_query_tags(text: &str) -> String {
 
 /// Normalize Cursor tool input field names to git-ai conventions.
 /// Cursor uses `path`/`contents` where git-ai uses `file_path`/`content`.
-fn normalize_cursor_tool_input(
-    tool_name: &str,
-    input: &serde_json::Value,
-) -> serde_json::Value {
+fn normalize_cursor_tool_input(tool_name: &str, input: &serde_json::Value) -> serde_json::Value {
     let mut normalized = input.clone();
     if let Some(obj) = normalized.as_object_mut() {
         // Rename `path` -> `file_path`
@@ -984,9 +971,7 @@ pub fn read_copilot_session_json(
         .get("requests")
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
-            GitAiError::PresetError(
-                "requests array not found in Copilot chat session".to_string(),
-            )
+            GitAiError::PresetError("requests array not found in Copilot chat session".to_string())
         })?;
 
     // Extract session-level model from inputState as fallback
@@ -1790,9 +1775,7 @@ where
     for message in &messages {
         // Extract model from first assistant message
         if model.is_none() && message.role == "assistant" {
-            if let (Some(provider_id), Some(model_id)) =
-                (&message.provider_id, &message.model_id)
-            {
+            if let (Some(provider_id), Some(model_id)) = (&message.provider_id, &message.model_id) {
                 model = Some(format!("{}/{}", provider_id, model_id));
             } else if let Some(model_id) = &message.model_id {
                 model = Some(model_id.clone());
@@ -1802,8 +1785,7 @@ where
         let parts = read_parts(&message.id)?;
 
         // Convert Unix ms to RFC3339 timestamp
-        let timestamp =
-            DateTime::from_timestamp_millis(message.created).map(|dt| dt.to_rfc3339());
+        let timestamp = DateTime::from_timestamp_millis(message.created).map(|dt| dt.to_rfc3339());
 
         for part in parts {
             match part {
@@ -1865,12 +1847,8 @@ fn opencode_part_created_for_sort(part: &OpenCodePart, fallback: i64) -> i64 {
                     .map(|t| t.start)
             })
             .unwrap_or(fallback),
-        OpenCodePart::StepStart { time, .. } => {
-            time.as_ref().map(|t| t.start).unwrap_or(fallback)
-        }
-        OpenCodePart::StepFinish { time, .. } => {
-            time.as_ref().map(|t| t.start).unwrap_or(fallback)
-        }
+        OpenCodePart::StepStart { time, .. } => time.as_ref().map(|t| t.start).unwrap_or(fallback),
+        OpenCodePart::StepFinish { time, .. } => time.as_ref().map(|t| t.start).unwrap_or(fallback),
         OpenCodePart::Unknown => fallback,
     }
 }
