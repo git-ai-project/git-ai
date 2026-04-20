@@ -57,7 +57,13 @@ pub fn find_prompt_in_commit(
     }
 
     // Fall back to sessions map (session IDs start with "s_")
-    if let Some(session) = authorship_log.metadata.sessions.get(prompt_id) {
+    // Strip ::t_ trace suffix if present — attestation hashes use s_xxx::t_yyy but session keys are just s_xxx
+    let session_key = if prompt_id.starts_with("s_") {
+        prompt_id.split("::").next().unwrap_or(prompt_id)
+    } else {
+        prompt_id
+    };
+    if let Some(session) = authorship_log.metadata.sessions.get(session_key) {
         return Ok((commit_sha, session.to_prompt_record()));
     }
 
@@ -74,9 +80,17 @@ pub fn find_prompt_in_history(
     prompt_id: &str,
     offset: usize,
 ) -> Result<(String, PromptRecord), GitAiError> {
+    // Strip ::t_ trace suffix for session lookups — attestation hashes use s_xxx::t_yyy
+    // but session keys in metadata are just s_xxx
+    let session_key = if prompt_id.starts_with("s_") {
+        prompt_id.split("::").next().unwrap_or(prompt_id)
+    } else {
+        prompt_id
+    };
+
     // Use git grep to search for the prompt ID in authorship notes
     // grep_ai_notes returns commits sorted by date (newest first)
-    let shas = grep_ai_notes(repo, &format!("\"{}\"", prompt_id)).unwrap_or_default();
+    let shas = grep_ai_notes(repo, &format!("\"{}\"", session_key)).unwrap_or_default();
 
     if shas.is_empty() {
         return Err(GitAiError::Generic(format!(
@@ -96,7 +110,7 @@ pub fn find_prompt_in_history(
                 }
                 found_count += 1;
             // Then check sessions map
-            } else if let Some(session) = authorship_log.metadata.sessions.get(prompt_id) {
+            } else if let Some(session) = authorship_log.metadata.sessions.get(session_key) {
                 if found_count == offset {
                     return Ok((sha.clone(), session.to_prompt_record()));
                 }
