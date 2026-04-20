@@ -35,7 +35,7 @@ pub fn execute_preset_checkpoint(
 
     events
         .into_iter()
-        .map(|event| execute_event(event))
+        .map(execute_event)
         .collect()
 }
 
@@ -161,7 +161,7 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<CheckpointResult, GitAiErro
         Ok(result) => {
             let paths = match &result.action {
                 bash_tool::BashCheckpointAction::Checkpoint(paths) => {
-                    paths.iter().map(|p| PathBuf::from(p)).collect()
+                    paths.iter().map(PathBuf::from).collect()
                 }
                 bash_tool::BashCheckpointAction::NoChanges => vec![],
                 bash_tool::BashCheckpointAction::Fallback => vec![],
