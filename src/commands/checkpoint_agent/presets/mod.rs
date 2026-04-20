@@ -17,7 +17,7 @@ mod windsurf;
 
 use crate::authorship::transcript::AiTranscript;
 use crate::authorship::working_log::AgentId;
-use crate::commands::checkpoint_agent::agent_presets::BashPreHookStrategy;
+pub use crate::commands::checkpoint_agent::agent_presets::BashPreHookStrategy;
 use crate::error::GitAiError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
