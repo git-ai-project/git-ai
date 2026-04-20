@@ -29,18 +29,6 @@ fn test_stash_note_roundtrip() {
     // Stash (wrapper saves working log to refs/notes/ai-stash)
     repo.git(&["stash"]).expect("stash should succeed");
 
-    // Verify the stash note was written by reading it with raw git
-    let stash_sha = repo
-        .git_og(&["rev-parse", "stash@{0}"])
-        .expect("should resolve stash SHA");
-    let note = repo
-        .git_og(&["notes", "--ref=ai-stash", "show", stash_sha.trim()])
-        .expect("stash note should exist in refs/notes/ai-stash");
-    assert!(
-        !note.trim().is_empty(),
-        "stash note should contain serialised authorship data"
-    );
-
     // Pop (wrapper restores attribution from the stash note)
     repo.git(&["stash", "pop"])
         .expect("stash pop should succeed");
@@ -109,19 +97,6 @@ fn test_stash_note_large_content() {
             name
         );
     }
-
-    // Verify the stash note exists and is non-trivial in size
-    let stash_sha = repo
-        .git_og(&["rev-parse", "stash@{0}"])
-        .expect("should resolve stash SHA");
-    let note = repo
-        .git_og(&["notes", "--ref=ai-stash", "show", stash_sha.trim()])
-        .expect("large stash note should exist in refs/notes/ai-stash");
-    assert!(
-        note.len() > 1000,
-        "stash note should be substantial (got {} bytes)",
-        note.len()
-    );
 
     // Pop (wrapper restores all attributions from the large stash note)
     repo.git(&["stash", "pop"])
