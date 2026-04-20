@@ -17,6 +17,7 @@ struct PromptLineMetrics {
 
 /// Pre-loaded note data for all commits involved in a rebase.
 /// Eliminates redundant git subprocess calls by reading everything once upfront.
+#[doc(hidden)]
 pub struct RebaseNoteCache {
     /// Which new commits already have authorship notes (to skip reprocessing)
     new_commits_with_notes: HashSet<String>,
@@ -28,6 +29,7 @@ pub struct RebaseNoteCache {
     ai_touched_files: HashSet<String>,
 }
 
+#[doc(hidden)]
 pub fn load_rebase_note_cache(
     repo: &Repository,
     original_commits: &[String],
@@ -2205,6 +2207,7 @@ fn is_blob_mode(mode: &str) -> bool {
     mode.starts_with("100") || mode == "120000"
 }
 
+#[doc(hidden)]
 pub fn collect_changed_file_contents_from_diff(
     repo: &Repository,
     diff: &crate::git::diff_tree_to_tree::Diff,
@@ -2323,6 +2326,7 @@ fn batch_read_blob_contents(
     parse_cat_file_batch_output_with_oids(&output.stdout)
 }
 
+#[doc(hidden)]
 pub fn parse_cat_file_batch_output_with_oids(
     data: &[u8],
 ) -> Result<HashMap<String, String>, GitAiError> {
@@ -3329,6 +3333,7 @@ pub fn reconstruct_working_log_after_reset(
 }
 
 /// Get all file paths modified across a list of commits
+#[doc(hidden)]
 pub fn get_pathspecs_from_commits(
     repo: &Repository,
     commits: &[String],
@@ -3566,6 +3571,7 @@ fn build_metadata_only_authorship_log_from_source_notes(
 }
 
 /// Cached version of try_fast_path_rebase_note_remap that uses pre-loaded note data.
+#[doc(hidden)]
 pub fn try_fast_path_rebase_note_remap_cached(
     repo: &Repository,
     original_commits: &[String],
@@ -3927,6 +3933,7 @@ fn flatten_prompts_for_metadata_filtered(
         .collect()
 }
 
+#[doc(hidden)]
 pub fn build_file_attestation_from_line_attributions(
     file_path: &str,
     line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
@@ -4114,6 +4121,7 @@ fn compute_line_attrs_for_changed_file(
 /// - Inserted lines: no attribution (new content)
 /// - Deleted lines: dropped
 /// - Replaced lines: no attribution (content changed)
+#[doc(hidden)]
 pub fn diff_based_line_attribution_transfer(
     old_content: &str,
     new_content: &str,
@@ -4524,6 +4532,7 @@ fn apply_prompt_line_metrics_to_prompts(
 }
 
 /// Transform VirtualAttributions to match a new final state (single-source variant)
+#[doc(hidden)]
 pub fn transform_attributions_to_final_state(
     source_va: &crate::authorship::virtual_attribution::VirtualAttributions,
     final_state: HashMap<String, String>,

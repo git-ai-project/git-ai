@@ -1884,6 +1884,7 @@ fn capture_recent_working_log_snapshot(
     })))
 }
 
+#[doc(hidden)]
 pub fn restore_recent_working_log_snapshot(
     repo: &Repository,
     base_commit: &str,

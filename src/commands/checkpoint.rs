@@ -33,6 +33,7 @@ use unicode_normalization::UnicodeNormalization;
 
 /// Per-file line statistics (in-memory only, not persisted)
 #[derive(Debug, Clone, Default)]
+#[doc(hidden)]
 pub struct FileLineStats {
     pub additions: u32,
     pub deletions: u32,
@@ -108,6 +109,7 @@ struct ResolvedCheckpointExecution {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub enum BaseOverrideResolutionPolicy {
     AllowFallback,
     RequireExplicitSnapshot,
@@ -243,6 +245,7 @@ fn async_checkpoint_manifest_path(capture_id: &str) -> Result<PathBuf, GitAiErro
     Ok(async_checkpoint_capture_dir(capture_id)?.join("manifest.json"))
 }
 
+#[doc(hidden)]
 pub fn cleanup_failed_captured_checkpoint_prepare(
     capture_dir: &std::path::Path,
     capture_id: &str,
@@ -351,6 +354,7 @@ pub fn run_with_base_commit_override(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[doc(hidden)]
 pub fn run_with_base_commit_override_with_policy(
     repo: &Repository,
     author: &str,
@@ -1579,6 +1583,7 @@ fn content_eq_normalized(a: &str, b: &str) -> bool {
     normalize_line_endings(a) == normalize_line_endings(b)
 }
 
+#[doc(hidden)]
 pub fn is_ai_author_id(author_id: &str) -> bool {
     author_id != "human" && !author_id.starts_with("h_")
 }
@@ -2147,6 +2152,7 @@ fn make_entry_for_file(
 }
 
 /// Compute line statistics for a single file by diffing previous and current content
+#[doc(hidden)]
 pub fn compute_file_line_stats(previous_content: &str, current_content: &str) -> FileLineStats {
     let mut stats = FileLineStats::default();
 

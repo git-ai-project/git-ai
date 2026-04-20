@@ -14,6 +14,7 @@ use std::io::IsTerminal;
 
 /// The git empty tree hash - represents an empty repository state
 /// This is the hash of the empty tree object that git uses internally
+#[doc(hidden)]
 pub const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// Check if a file path should be ignored based on the provided patterns

@@ -265,6 +265,7 @@ impl CiContext {
     /// Get the rebased commits by walking back from merge_commit_sha.
     /// For a rebase merge with N original commits, there should be N new commits
     /// ending at merge_commit_sha.
+    #[doc(hidden)]
     pub fn get_rebased_commits(
         &self,
         merge_commit_sha: &str,

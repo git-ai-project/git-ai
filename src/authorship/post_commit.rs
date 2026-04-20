@@ -20,18 +20,23 @@ use std::io::IsTerminal;
 
 /// Skip expensive post-commit stats when this threshold is exceeded.
 /// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
+#[doc(hidden)]
 pub const STATS_SKIP_MAX_HUNKS: usize = 1000;
 /// Skip expensive stats for very large net additions even if hunks are moderate.
+#[doc(hidden)]
 pub const STATS_SKIP_MAX_ADDED_LINES: usize = 6000;
 /// Skip expensive stats for extremely wide commits touching many added-line files.
+#[doc(hidden)]
 pub const STATS_SKIP_MAX_FILES_WITH_ADDITIONS: usize = 200;
 /// Skip expensive stats for commits that delete a large number of lines.
 /// Deletion-heavy commits (e.g. removing many files) trigger the same expensive
 /// diff-parsing path as large addition commits, but the added-lines estimate is
 /// near zero, so the cost was previously invisible to the estimator.
+#[doc(hidden)]
 pub const STATS_SKIP_MAX_DELETED_LINES: usize = 6000;
 
 #[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
 pub struct StatsCostEstimate {
     pub files_with_additions: usize,
     pub added_lines: usize,
@@ -337,6 +342,7 @@ enum StatsSkipReason {
     Expensive(StatsCostEstimate),
 }
 
+#[doc(hidden)]
 pub fn should_skip_expensive_post_commit_stats(estimate: &StatsCostEstimate) -> bool {
     estimate.hunk_ranges >= STATS_SKIP_MAX_HUNKS
         || estimate.added_lines >= STATS_SKIP_MAX_ADDED_LINES
@@ -415,6 +421,7 @@ fn estimate_stats_cost(
     })
 }
 
+#[doc(hidden)]
 pub fn count_line_ranges(lines: &[u32]) -> usize {
     if lines.is_empty() {
         return 0;

@@ -71,6 +71,7 @@ fn null_hooks_path() -> &'static str {
     "/dev/null"
 }
 
+#[doc(hidden)]
 pub fn args_with_disabled_hooks_if_needed(args: &[String]) -> Vec<String> {
     if !should_disable_internal_git_hooks() {
         return args.to_vec();
@@ -249,6 +250,7 @@ fn profile_options(profile: InternalGitProfile) -> &'static [&'static str] {
     }
 }
 
+#[doc(hidden)]
 pub fn args_with_internal_git_profile(args: &[String], profile: InternalGitProfile) -> Vec<String> {
     if profile == InternalGitProfile::General {
         return args.to_vec();
@@ -2555,6 +2557,7 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
     })
 }
 
+#[doc(hidden)]
 pub fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAiError> {
     let mut base: Option<PathBuf> = None;
     let mut idx = 0usize;
@@ -2587,6 +2590,7 @@ pub fn resolve_command_base_dir(global_args: &[String]) -> Result<PathBuf, GitAi
     }
 }
 
+#[doc(hidden)]
 pub fn worktree_storage_ai_dir(git_dir: &Path, git_common_dir: &Path) -> PathBuf {
     if git_dir == git_common_dir {
         return git_common_dir.join("ai");
@@ -3333,6 +3337,7 @@ pub fn exec_git_stdin_with_env_with_profile(
 
 /// Parse git version string (e.g., "git version 2.39.3 (Apple Git-146)") to extract major, minor, patch.
 /// Returns None if the version cannot be parsed.
+#[doc(hidden)]
 pub fn parse_git_version(version_str: &str) -> Option<(u32, u32, u32)> {
     // Expected format: "git version X.Y.Z" or "git version X.Y.Z.windows.N" etc.
     let version_str = version_str.trim();
@@ -3406,6 +3411,7 @@ fn parse_diff_added_lines(
 ///
 /// Returns (all_added_lines, pure_insertion_lines)
 #[allow(clippy::type_complexity)]
+#[doc(hidden)]
 pub fn parse_diff_added_lines_with_insertions(
     diff_output: &str,
 ) -> Result<(HashMap<String, Vec<u32>>, HashMap<String, Vec<u32>>), GitAiError> {

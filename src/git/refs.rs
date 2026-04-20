@@ -21,6 +21,7 @@ pub fn notes_add(
     notes_add_batch(repo, &[(commit_sha.to_string(), note_content.to_string())])
 }
 
+#[doc(hidden)]
 pub fn notes_path_for_object(oid: &str) -> String {
     if oid.len() <= 2 {
         oid.to_string()
@@ -29,14 +30,17 @@ pub fn notes_path_for_object(oid: &str) -> String {
     }
 }
 
+#[doc(hidden)]
 pub fn flat_note_pathspec_for_commit(commit_sha: &str) -> String {
     format!("refs/notes/ai:{}", commit_sha)
 }
 
+#[doc(hidden)]
 pub fn fanout_note_pathspec_for_commit(commit_sha: &str) -> String {
     format!("refs/notes/ai:{}", notes_path_for_object(commit_sha))
 }
 
+#[doc(hidden)]
 pub fn parse_batch_check_blob_oid(line: &str) -> Option<String> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     let oid = parts.first().copied().unwrap_or_default();
@@ -510,6 +514,7 @@ pub fn get_reference_as_authorship_log_v3(
 
 /// Sanitize a remote name to create a safe ref name
 /// Replaces special characters with underscores to ensure valid ref names
+#[doc(hidden)]
 pub fn sanitize_remote_name(remote: &str) -> String {
     remote
         .chars()
