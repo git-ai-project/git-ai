@@ -1237,6 +1237,7 @@ impl VirtualAttributions {
             })
             .collect();
         authorship_log.metadata.humans = self.humans.clone();
+        authorship_log.metadata.sessions = self.sessions.clone();
 
         // Process each file
         for (file_path, (_, line_attrs)) in &self.attributions {
