@@ -475,7 +475,7 @@ crate::worktree_test_wrappers! {
         let stats = repo.stats().expect("stats should succeed");
         if matches!(TestRepo::git_mode(), GitTestMode::Hooks) {
             assert_eq!(
-                stats.human_additions + stats.ai_additions + stats.mixed_additions,
+                stats.human_additions + stats.ai_additions + stats.unknown_additions,
                 3
             );
             assert_eq!(stats.git_diff_added_lines, 3);
