@@ -157,7 +157,8 @@ pub fn execute_preset_checkpoint(
 fn execute_event(event: ParsedHookEvent, trace_id: &str) -> Result<CheckpointResult, GitAiError> {
     match event {
         ParsedHookEvent::PreFileEdit(e) => {
-            // 1. Resolve repo from cwd (find_repository_for_file)
+            // 1. Resolve repo from file_paths (find_repository_for_file on first path)
+            //    cwd is NOT used for repo discovery — files may be outside cwd
             // 2. Return CheckpointResult with:
             //    - checkpoint_kind: Human
             //    - path_role: WillEdit
@@ -167,7 +168,8 @@ fn execute_event(event: ParsedHookEvent, trace_id: &str) -> Result<CheckpointRes
             //      captured by the hook to avoid races with concurrent tool calls)
         }
         ParsedHookEvent::PostFileEdit(e) => {
-            // 1. Resolve repo from cwd
+            // 1. Resolve repo from file_paths (find_repository_for_file on first path)
+            //    cwd is NOT used for repo discovery — files may be outside cwd
             // 2. Return CheckpointResult with:
             //    - checkpoint_kind: AiAgent (or AiTab if agent_id.tool == "ai_tab")
             //    - path_role: Edited
@@ -176,17 +178,20 @@ fn execute_event(event: ParsedHookEvent, trace_id: &str) -> Result<CheckpointRes
             //    - transcript_source passed through
         }
         ParsedHookEvent::PreBashCall(e) => {
-            // 1. Call prepare_agent_bash_pre_hook (takes snapshot)
-            // 2. Return CheckpointResult with:
+            // 1. Resolve repo from cwd (bash calls don't have file paths yet;
+            //    cwd is the best available signal for where the command runs)
+            // 2. Call prepare_agent_bash_pre_hook (takes snapshot)
+            // 3. Return CheckpointResult with:
             //    - checkpoint_kind: Human
             //    - captured_checkpoint_id from snapshot
         }
         ParsedHookEvent::PostBashCall(e) => {
-            // 1. Call handle_bash_tool to diff snapshots
-            // 2. Discover changed file paths from diff
-            // 3. Return CheckpointResult with:
+            // 1. Resolve repo from cwd (same as pre — bash operates in cwd)
+            // 2. Call handle_bash_tool to diff snapshots
+            // 3. Discover changed file paths from diff
+            // 4. Return CheckpointResult with:
             //    - checkpoint_kind: AiAgent
-            //    - file_paths: discovered from diff
+            //    - file_paths: discovered from diff (these ARE absolute)
             //    - captured_checkpoint_id if present
         }
     }
@@ -489,7 +494,7 @@ The session_id from `PresetContext`:
 |---|---|
 | `agent_id` | `agent_id` |
 | `checkpoint_kind` | `checkpoint_kind` |
-| `repo_working_dir: Option<String>` | `repo_working_dir: PathBuf` (always present, resolved by orchestrator) |
+| `repo_working_dir: Option<String>` | `repo_working_dir: PathBuf` (always present, resolved by orchestrator via `find_repository_for_file` on file paths, or from cwd for bash calls) |
 | `edited_filepaths` / `will_edit_filepaths` | `file_paths` + `path_role` (unified) |
 | `dirty_files: Option<HashMap<String, String>>` | `dirty_files: Option<HashMap<PathBuf, String>>` (on both PreFileEdit and PostFileEdit; flows through to CheckpointResult) |
 | `transcript: Option<AiTranscript>` | `transcript_source: Option<TranscriptSource>` (lazy) |
