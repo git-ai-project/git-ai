@@ -6,3 +6,4 @@ pub mod opencode_preset;
 pub mod orchestrator;
 pub mod pi_preset;
 pub mod presets;
+pub mod transcript_readers;

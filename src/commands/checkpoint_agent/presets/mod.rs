@@ -74,6 +74,9 @@ pub enum TranscriptSource {
     Path {
         path: PathBuf,
         format: TranscriptFormat,
+        /// Extra context needed by some formats (e.g., session_id for OpenCode).
+        #[serde(default)]
+        session_id: Option<String>,
     },
     Inline(AiTranscript),
 }
