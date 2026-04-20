@@ -473,14 +473,10 @@ crate::worktree_test_wrappers! {
         repo.stage_all_and_commit("stats seed").unwrap();
 
         let stats = repo.stats().expect("stats should succeed");
-        if matches!(TestRepo::git_mode(), GitTestMode::Hooks) {
-            assert_eq!(stats.unknown_additions, 0);
-            assert_eq!(stats.human_additions + stats.ai_additions, 3);
-            assert_eq!(stats.git_diff_added_lines, 3);
-            assert_eq!(stats.git_diff_deleted_lines, 0);
-        } else {
-            assert_debug_snapshot!(stats);
-        }
+        assert_eq!(stats.unknown_additions, 0);
+        assert_eq!(stats.human_additions + stats.ai_additions, 3);
+        assert_eq!(stats.git_diff_added_lines, 3);
+        assert_eq!(stats.git_diff_deleted_lines, 0);
     }
 }
 
