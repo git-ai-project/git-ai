@@ -2132,8 +2132,9 @@ pub fn rewrite_authorship_after_cherry_pick(
         authorship_log.metadata.base_commit_sha = new_commit.clone();
 
         // Save computed note when it has payload; otherwise preserve original metadata-only notes.
-        let computed_note_has_payload =
-            !authorship_log.attestations.is_empty() || !authorship_log.metadata.prompts.is_empty();
+        let computed_note_has_payload = !authorship_log.attestations.is_empty()
+            || !authorship_log.metadata.prompts.is_empty()
+            || !authorship_log.metadata.sessions.is_empty();
         let authorship_json = if computed_note_has_payload {
             authorship_log.serialize_to_string().map_err(|_| {
                 GitAiError::Generic("Failed to serialize authorship log".to_string())
