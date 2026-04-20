@@ -36,8 +36,8 @@ impl CodexPreset {
         }
 
         // 2. Search for latest rollout file on disk
-        use crate::commands::checkpoint_agent::agent_presets::CodexPreset as OldCodexPreset;
-        match OldCodexPreset::find_latest_rollout_path_for_session(session_id) {
+        use crate::commands::checkpoint_agent::transcript_readers;
+        match transcript_readers::find_codex_rollout_path_for_session(session_id) {
             Ok(Some(path)) => Some(path.to_string_lossy().to_string()),
             Ok(None) => None,
             Err(e) => {

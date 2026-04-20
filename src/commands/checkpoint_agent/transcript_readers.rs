@@ -2292,3 +2292,573 @@ fn pi_message_timestamp(
         .and_then(serde_json::Value::as_str)
         .map(|value| value.to_string())
 }
+
+// ---------------------------------------------------------------------------
+// Continue CLI JSON
+// ---------------------------------------------------------------------------
+
+/// Parse a Continue CLI JSON file into a transcript.
+pub fn read_continue_json(path: &Path) -> Result<AiTranscript, GitAiError> {
+    let json_content = std::fs::read_to_string(path).map_err(GitAiError::IoError)?;
+    let conversation: serde_json::Value =
+        serde_json::from_str(&json_content).map_err(GitAiError::JsonError)?;
+
+    let history = conversation
+        .get("history")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            GitAiError::PresetError("history array not found in Continue CLI JSON".to_string())
+        })?;
+
+    let mut transcript = AiTranscript::new();
+
+    for history_item in history {
+        let message = match history_item.get("message") {
+            Some(m) => m,
+            None => continue,
+        };
+
+        let role = match message.get("role").and_then(|v| v.as_str()) {
+            Some(r) => r,
+            None => continue,
+        };
+
+        let timestamp = message
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        match role {
+            "user" => {
+                if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
+                    let trimmed = content.trim();
+                    if !trimmed.is_empty() {
+                        transcript.add_message(Message::User {
+                            text: trimmed.to_string(),
+                            timestamp: timestamp.clone(),
+                        });
+                    }
+                }
+            }
+            "assistant" => {
+                if let Some(content) = message.get("content") {
+                    match content {
+                        serde_json::Value::String(text) => {
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                transcript.add_message(Message::Assistant {
+                                    text: trimmed.to_string(),
+                                    timestamp: timestamp.clone(),
+                                });
+                            }
+                        }
+                        serde_json::Value::Array(parts) => {
+                            for part in parts {
+                                let part_type = part
+                                    .get("type")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default();
+                                if part_type == "text"
+                                    && let Some(text) = part.get("text").and_then(|v| v.as_str())
+                                    && !text.trim().is_empty()
+                                {
+                                    transcript.add_message(Message::Assistant {
+                                        text: text.trim().to_string(),
+                                        timestamp: timestamp.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Extract tool use from contextItems
+                if let Some(context_items) =
+                    history_item.get("contextItems").and_then(|v| v.as_array())
+                {
+                    for item in context_items {
+                        if let Some(name) = item.get("name").and_then(|v| v.as_str())
+                            && !name.trim().is_empty()
+                        {
+                            let input = item.get("content").cloned().unwrap_or_else(|| {
+                                serde_json::Value::Object(serde_json::Map::new())
+                            });
+                            transcript.add_message(Message::ToolUse {
+                                name: name.to_string(),
+                                input,
+                                timestamp: timestamp.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Ok(transcript)
+}
+
+// ---------------------------------------------------------------------------
+// Droid settings helper
+// ---------------------------------------------------------------------------
+
+/// Read model name from a Droid settings.json file.
+pub fn read_droid_model_from_settings(path: &Path) -> Result<Option<String>, GitAiError> {
+    let content = std::fs::read_to_string(path).map_err(GitAiError::IoError)?;
+    let settings: serde_json::Value =
+        serde_json::from_str(&content).map_err(GitAiError::JsonError)?;
+    Ok(settings["model"].as_str().map(|s| s.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Amp thread discovery helpers
+// ---------------------------------------------------------------------------
+
+/// Get the default Amp threads directory based on platform.
+pub fn amp_threads_path() -> Result<std::path::PathBuf, GitAiError> {
+    if let Ok(test_path) = std::env::var("GIT_AI_AMP_THREADS_PATH") {
+        return Ok(std::path::PathBuf::from(test_path));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
+            return Ok(std::path::PathBuf::from(xdg_data)
+                .join("amp")
+                .join("threads"));
+        }
+
+        let home = dirs::home_dir()
+            .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
+        Ok(home
+            .join(".local")
+            .join("share")
+            .join("amp")
+            .join("threads"))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            return Ok(std::path::PathBuf::from(local_app_data)
+                .join("amp")
+                .join("threads"));
+        }
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            return Ok(std::path::PathBuf::from(app_data)
+                .join("amp")
+                .join("threads"));
+        }
+
+        let home = dirs::home_dir()
+            .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
+        Ok(home
+            .join("AppData")
+            .join("Local")
+            .join("amp")
+            .join("threads"))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err(GitAiError::Generic(
+            "Amp threads path not supported on this platform".to_string(),
+        ))
+    }
+}
+
+/// Read transcript from an Amp thread ID (resolves to default threads dir).
+pub fn read_amp_thread_by_id(
+    thread_id: &str,
+) -> Result<(AiTranscript, Option<String>), GitAiError> {
+    let thread_path = amp_threads_path()?.join(format!("{}.json", thread_id));
+    let (transcript, model, _) = read_amp_thread_json(&thread_path)?;
+    Ok((transcript, model))
+}
+
+/// Read transcript from an Amp thread ID in a specific directory.
+pub fn read_amp_thread_by_id_in_dir(
+    threads_dir: &Path,
+    thread_id: &str,
+) -> Result<(AiTranscript, Option<String>), GitAiError> {
+    let thread_path = threads_dir.join(format!("{}.json", thread_id));
+    let (transcript, model, _) = read_amp_thread_json(&thread_path)?;
+    Ok((transcript, model))
+}
+
+/// Find and read an Amp thread by tool_use_id in a directory.
+pub fn read_amp_thread_by_tool_use_id_in_dir(
+    threads_dir: &Path,
+    tool_use_id: &str,
+) -> Result<(AiTranscript, Option<String>), GitAiError> {
+    let thread_path =
+        find_amp_thread_file_by_tool_use_id(threads_dir, tool_use_id)?.ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "No Amp thread file found for tool_use_id {} in {}",
+                tool_use_id,
+                threads_dir.display()
+            ))
+        })?;
+    let (transcript, model, _) = read_amp_thread_json(&thread_path)?;
+    Ok((transcript, model))
+}
+
+fn find_amp_thread_file_by_tool_use_id(
+    threads_path: &Path,
+    tool_use_id: &str,
+) -> Result<Option<std::path::PathBuf>, GitAiError> {
+    if !threads_path.exists() {
+        return Ok(None);
+    }
+
+    let mut newest_match: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+
+    for entry in std::fs::read_dir(threads_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        {
+            continue;
+        }
+
+        if !amp_thread_file_contains_tool_use_id(&path, tool_use_id)? {
+            continue;
+        }
+
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+
+        match &newest_match {
+            Some((_, newest_modified)) if modified <= *newest_modified => {}
+            _ => newest_match = Some((path, modified)),
+        }
+    }
+
+    Ok(newest_match.map(|(path, _)| path))
+}
+
+fn amp_thread_file_contains_tool_use_id(
+    thread_path: &Path,
+    tool_use_id: &str,
+) -> Result<bool, GitAiError> {
+    let content = std::fs::read_to_string(thread_path)
+        .map_err(|e| GitAiError::Generic(format!("Failed to read thread file: {}", e)))?;
+
+    if !content.contains(tool_use_id) {
+        return Ok(false);
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| GitAiError::Generic(format!("Failed to parse Amp thread JSON: {}", e)))?;
+
+    let messages = parsed
+        .get("messages")
+        .and_then(|messages| messages.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    for message in messages {
+        let content_items = message
+            .get("content")
+            .and_then(|content| content.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for item in content_items {
+            let item_type = item
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if item_type == "tool_use"
+                && item
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|value| value == tool_use_id)
+            {
+                return Ok(true);
+            }
+            if item_type == "tool_result"
+                && item
+                    .get("toolUseID")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|value| value == tool_use_id)
+            {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode discovery helpers
+// ---------------------------------------------------------------------------
+
+/// Get the OpenCode data directory based on platform.
+pub fn opencode_data_path() -> Result<std::path::PathBuf, GitAiError> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir()
+            .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
+        Ok(home.join(".local").join("share").join("opencode"))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
+            Ok(std::path::PathBuf::from(xdg_data).join("opencode"))
+        } else {
+            let home = dirs::home_dir().ok_or_else(|| {
+                GitAiError::Generic("Could not determine home directory".to_string())
+            })?;
+            Ok(home.join(".local").join("share").join("opencode"))
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            Ok(std::path::PathBuf::from(app_data).join("opencode"))
+        } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            Ok(std::path::PathBuf::from(local_app_data).join("opencode"))
+        } else {
+            Err(GitAiError::Generic(
+                "Neither APPDATA nor LOCALAPPDATA is set".to_string(),
+            ))
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err(GitAiError::PresetError(
+            "OpenCode storage path not supported on this platform".to_string(),
+        ))
+    }
+}
+
+/// Fetch transcript and model from OpenCode using default data path.
+pub fn read_opencode_from_session(
+    session_id: &str,
+) -> Result<(AiTranscript, Option<String>), GitAiError> {
+    let opencode_path = opencode_data_path()?;
+    read_opencode_from_storage(&opencode_path, session_id)
+}
+
+/// Fetch transcript and model from OpenCode path (sqlite first, fallback to legacy storage).
+///
+/// `opencode_path` may be one of:
+/// - OpenCode data dir (contains `opencode.db` and optional `storage/`)
+/// - Legacy storage dir (contains `message/` and `part/`)
+/// - Direct path to `opencode.db`
+pub fn read_opencode_from_storage(
+    opencode_path: &Path,
+    session_id: &str,
+) -> Result<(AiTranscript, Option<String>), GitAiError> {
+    if !opencode_path.exists() {
+        return Err(GitAiError::PresetError(format!(
+            "OpenCode path does not exist: {:?}",
+            opencode_path
+        )));
+    }
+
+    let mut sqlite_empty_result: Option<(AiTranscript, Option<String>)> = None;
+    let mut sqlite_error: Option<GitAiError> = None;
+
+    if let Some(db_path) = resolve_opencode_sqlite_db_path(opencode_path) {
+        match read_opencode_sqlite(&db_path, session_id) {
+            Ok((transcript, model)) => {
+                if !transcript.messages().is_empty() || model.is_some() {
+                    return Ok((transcript, model));
+                }
+                sqlite_empty_result = Some((transcript, model));
+            }
+            Err(e) => {
+                eprintln!(
+                    "[Warning] Failed to parse OpenCode sqlite db {:?}: {}",
+                    db_path, e
+                );
+                sqlite_error = Some(e);
+            }
+        }
+    }
+
+    if let Some(storage_path) = resolve_opencode_legacy_storage_path(opencode_path) {
+        let legacy_json_path = storage_path.join("messages").join(session_id);
+        match read_opencode_legacy_json(&legacy_json_path, session_id) {
+            Ok((transcript, model)) => {
+                if !transcript.messages().is_empty() || model.is_some() {
+                    return Ok((transcript, model));
+                }
+                if let Some(result) = sqlite_empty_result.take() {
+                    return Ok(result);
+                }
+                return Ok((transcript, model));
+            }
+            Err(e) => {
+                if let Some(result) = sqlite_empty_result.take() {
+                    return Ok(result);
+                }
+                if let Some(sqlite_err) = sqlite_error {
+                    return Err(sqlite_err);
+                }
+                return Err(e);
+            }
+        }
+    }
+
+    if let Some(result) = sqlite_empty_result {
+        return Ok(result);
+    }
+
+    if let Some(sqlite_err) = sqlite_error {
+        return Err(sqlite_err);
+    }
+
+    Err(GitAiError::PresetError(format!(
+        "No OpenCode sqlite database or legacy storage found under {:?}",
+        opencode_path
+    )))
+}
+
+fn resolve_opencode_sqlite_db_path(path: &Path) -> Option<std::path::PathBuf> {
+    if path.is_file() {
+        return path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| *name == "opencode.db")
+            .map(|_| path.to_path_buf());
+    }
+
+    if !path.is_dir() {
+        return None;
+    }
+
+    let direct_db = path.join("opencode.db");
+    if direct_db.exists() {
+        return Some(direct_db);
+    }
+
+    // If caller passed legacy storage path, check sibling opencode.db
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "storage")
+    {
+        let sibling_db = path.parent()?.join("opencode.db");
+        if sibling_db.exists() {
+            return Some(sibling_db);
+        }
+    }
+
+    None
+}
+
+fn resolve_opencode_legacy_storage_path(path: &Path) -> Option<std::path::PathBuf> {
+    if path.is_file() {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "opencode.db")
+        {
+            let storage = path.parent()?.join("storage");
+            if storage.exists() {
+                return Some(storage);
+            }
+        }
+        return None;
+    }
+
+    if !path.is_dir() {
+        return None;
+    }
+
+    // Direct storage directory
+    if path.join("message").exists() || path.join("part").exists() {
+        return Some(path.to_path_buf());
+    }
+
+    // Subdirectory named storage
+    let sub = path.join("storage");
+    if sub.exists() {
+        return Some(sub);
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Codex filesystem helpers
+// ---------------------------------------------------------------------------
+
+/// Get the Codex home directory.
+pub fn codex_home_dir() -> std::path::PathBuf {
+    if let Ok(codex_home) = std::env::var("CODEX_HOME")
+        && !codex_home.trim().is_empty()
+    {
+        return std::path::PathBuf::from(codex_home);
+    }
+
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("~"))
+        .join(".codex")
+}
+
+/// Find the latest Codex rollout file for a given session ID.
+pub fn find_codex_rollout_path_for_session(
+    session_id: &str,
+) -> Result<Option<std::path::PathBuf>, GitAiError> {
+    find_codex_rollout_path_for_session_in_home(session_id, &codex_home_dir())
+}
+
+/// Find the latest Codex rollout file for a given session ID in a specific home dir.
+pub fn find_codex_rollout_path_for_session_in_home(
+    session_id: &str,
+    codex_home: &Path,
+) -> Result<Option<std::path::PathBuf>, GitAiError> {
+    let mut candidates = Vec::new();
+    for subdir in ["sessions", "archived_sessions"] {
+        let base = codex_home.join(subdir);
+        if !base.exists() {
+            continue;
+        }
+
+        let pattern = format!(
+            "{}/**/rollout-*{}*.jsonl",
+            base.to_string_lossy(),
+            session_id
+        );
+        let entries = glob::glob(&pattern)
+            .map_err(|e| GitAiError::Generic(format!("Failed to glob Codex rollout files: {e}")))?;
+
+        for entry in entries.flatten() {
+            if entry.is_file() {
+                candidates.push(entry);
+            }
+        }
+    }
+
+    let newest = candidates.into_iter().max_by_key(|path| {
+        std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH)
+    });
+
+    Ok(newest)
+}
+
+// ---------------------------------------------------------------------------
+// Pi convenience wrapper
+// ---------------------------------------------------------------------------
+
+/// Read transcript from a Pi session file path (string form).
+pub fn read_pi_session(session_path: &str) -> Result<(AiTranscript, Option<String>), GitAiError> {
+    read_pi_jsonl(Path::new(session_path))
+}

@@ -5,11 +5,8 @@ use crate::authorship::range_authorship;
 use crate::authorship::stats::stats_command;
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands;
-use crate::commands::checkpoint_agent::agent_presets::{
-    AgentRunResult, ClaudePreset, CodexPreset, ContinueCliPreset, CursorPreset, GeminiPreset,
-    GithubCopilotPreset, WindsurfPreset,
-};
-use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
+use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+use crate::commands::checkpoint_agent::transcript_readers;
 use crate::config;
 use crate::daemon::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, LiveCheckpointRunRequest,
@@ -1992,43 +1989,47 @@ fn handle_show_transcript(args: &[String]) {
         (crate::authorship::transcript::AiTranscript, Option<String>),
         crate::error::GitAiError,
     > = match agent_name.as_str() {
-        "claude" => match ClaudePreset::transcript_and_model_from_claude_code_jsonl(path_or_id) {
+        "claude" => match transcript_readers::read_claude_jsonl(std::path::Path::new(path_or_id)) {
             Ok((transcript, model)) => Ok((transcript, model)),
             Err(e) => {
                 eprintln!("Error loading Claude transcript: {}", e);
                 std::process::exit(1);
             }
         },
-        "codex" => match CodexPreset::transcript_and_model_from_codex_rollout_jsonl(path_or_id) {
+        "codex" => match transcript_readers::read_codex_jsonl(std::path::Path::new(path_or_id)) {
             Ok((transcript, model)) => Ok((transcript, model)),
             Err(e) => {
                 eprintln!("Error loading Codex transcript: {}", e);
                 std::process::exit(1);
             }
         },
-        "gemini" => match GeminiPreset::transcript_and_model_from_gemini_json(path_or_id) {
+        "gemini" => match transcript_readers::read_gemini_json(std::path::Path::new(path_or_id)) {
             Ok((transcript, model)) => Ok((transcript, model)),
             Err(e) => {
                 eprintln!("Error loading Gemini transcript: {}", e);
                 std::process::exit(1);
             }
         },
-        "windsurf" => match WindsurfPreset::transcript_and_model_from_windsurf_jsonl(path_or_id) {
-            Ok((transcript, model)) => Ok((transcript, model)),
-            Err(e) => {
-                eprintln!("Error loading Windsurf transcript: {}", e);
-                std::process::exit(1);
+        "windsurf" => {
+            match transcript_readers::read_windsurf_jsonl(std::path::Path::new(path_or_id)) {
+                Ok((transcript, model)) => Ok((transcript, model)),
+                Err(e) => {
+                    eprintln!("Error loading Windsurf transcript: {}", e);
+                    std::process::exit(1);
+                }
             }
-        },
-        "continue-cli" => match ContinueCliPreset::transcript_from_continue_json(path_or_id) {
-            Ok(transcript) => Ok((transcript, None)),
-            Err(e) => {
-                eprintln!("Error loading Continue CLI transcript: {}", e);
-                std::process::exit(1);
+        }
+        "continue-cli" => {
+            match transcript_readers::read_continue_json(std::path::Path::new(path_or_id)) {
+                Ok(transcript) => Ok((transcript, None)),
+                Err(e) => {
+                    eprintln!("Error loading Continue CLI transcript: {}", e);
+                    std::process::exit(1);
+                }
             }
-        },
+        }
         "github-copilot" => {
-            match GithubCopilotPreset::transcript_and_model_from_copilot_session_json(path_or_id) {
+            match transcript_readers::read_copilot_session_json(std::path::Path::new(path_or_id)) {
                 Ok((transcript, model, _file_paths)) => Ok((transcript, model)),
                 Err(e) => {
                     eprintln!("Error loading GitHub Copilot transcript: {}", e);
@@ -2036,7 +2037,7 @@ fn handle_show_transcript(args: &[String]) {
                 }
             }
         }
-        "cursor" => match CursorPreset::transcript_and_model_from_cursor_jsonl(path_or_id) {
+        "cursor" => match transcript_readers::read_cursor_jsonl(std::path::Path::new(path_or_id)) {
             Ok((transcript, model)) => Ok((transcript, model)),
             Err(e) => {
                 eprintln!("Error loading Cursor transcript: {}", e);
@@ -2046,10 +2047,10 @@ fn handle_show_transcript(args: &[String]) {
         "amp" => {
             let path = std::path::Path::new(path_or_id);
             let amp_result = if path.exists() {
-                AmpPreset::transcript_and_model_from_thread_path(path)
+                transcript_readers::read_amp_thread_json(path)
                     .map(|(transcript, model, _thread_id)| (transcript, model))
             } else {
-                AmpPreset::transcript_and_model_from_thread_id(path_or_id)
+                transcript_readers::read_amp_thread_by_id(path_or_id)
             };
 
             match amp_result {
