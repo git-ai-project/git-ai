@@ -1198,11 +1198,11 @@ fn test_diff_json_all_prompts_includes_non_landing_prompts() {
         "unscoped checkpoint_human should clear non-landing claude session"
     );
 
-    // Note: diff JSON output still uses "prompts" key name even for sessions format
+    // Sessions appear in the dedicated "sessions" key in diff JSON output
     let without_all_prompts = diff_json(&repo, &["diff", &commit.commit_sha, "--json"]);
-    let without_ids: BTreeSet<String> = without_all_prompts["prompts"]
+    let without_ids: BTreeSet<String> = without_all_prompts["sessions"]
         .as_object()
-        .expect("prompts should be an object")
+        .expect("sessions should be an object")
         .keys()
         .cloned()
         .collect();
@@ -1216,9 +1216,9 @@ fn test_diff_json_all_prompts_includes_non_landing_prompts() {
         &repo,
         &["diff", &commit.commit_sha, "--json", "--all-prompts"],
     );
-    let with_ids: BTreeSet<String> = with_all_prompts["prompts"]
+    let with_ids: BTreeSet<String> = with_all_prompts["sessions"]
         .as_object()
-        .expect("prompts should be an object")
+        .expect("sessions should be an object")
         .keys()
         .cloned()
         .collect();
@@ -1426,10 +1426,10 @@ fn test_diff_json_include_stats_exact_multi_model_with_non_landing_prompt() {
     ]);
     assert_stats_exact(commit_stats, &expected_top_level, &expected_breakdown);
 
-    // Note: diff JSON output still uses "prompts" key name even for sessions format
-    let sessions_without_all = diff["prompts"]
+    // Sessions appear in the dedicated "sessions" key in diff JSON output
+    let sessions_without_all = diff["sessions"]
         .as_object()
-        .expect("prompts should be object");
+        .expect("sessions should be object");
     // All sessions are included in diff output (even non-landing ones with scoped checkpoint)
     assert_eq!(
         sessions_without_all.len(),
@@ -1543,6 +1543,7 @@ fn test_diff_json_include_stats_blame_deletions_devin_added_prompts_only() {
         ],
     );
 
+    // Devin (simulated from agent email) goes to prompts; codex (session-format) goes to sessions
     let prompts = diff["prompts"]
         .as_object()
         .expect("prompts should be object");
@@ -1555,10 +1556,26 @@ fn test_diff_json_include_stats_blame_deletions_devin_added_prompts_only() {
                 .to_string()
         })
         .collect();
-    assert_eq!(
-        prompt_tools,
-        BTreeSet::from(["codex".to_string(), "devin".to_string()]),
-        "prompt payload should include deleted-origin codex plus added-hunk Devin prompt records"
+    assert!(
+        prompt_tools.contains("devin"),
+        "prompts should include simulated Devin prompt record"
+    );
+
+    let sessions = diff["sessions"]
+        .as_object()
+        .expect("sessions should be object");
+    let session_tools: BTreeSet<String> = sessions
+        .values()
+        .map(|session| {
+            session["agent_id"]["tool"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect();
+    assert!(
+        session_tools.contains("codex"),
+        "sessions should include deleted-origin codex session record"
     );
 
     let commit_stats = diff

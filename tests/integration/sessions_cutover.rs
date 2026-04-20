@@ -1529,7 +1529,7 @@ fn test_stats_json_works_with_old_format_notes() {
 }
 
 // Test 18: git-ai diff --json --all-prompts with new-format (sessions-only) commit
-// includes non-landing sessions in the output
+// includes sessions in the dedicated "sessions" output key
 #[test]
 fn test_diff_json_all_prompts_includes_sessions() {
     let repo = TestRepo::new();
@@ -1549,20 +1549,35 @@ fn test_diff_json_all_prompts_includes_sessions() {
         .expect("diff --json --all-prompts should work");
     let json: Value = serde_json::from_str(output.trim()).unwrap();
 
-    // The prompts array in diff output should include the session (converted to prompt format)
-    let prompts = json["prompts"].as_object();
+    // Sessions appear in the dedicated "sessions" key, not in "prompts"
+    let sessions = json["sessions"].as_object();
     assert!(
-        prompts.is_some() && !prompts.unwrap().is_empty(),
-        "diff --json --all-prompts should include sessions as prompts, got: {:?}",
-        json["prompts"]
+        sessions.is_some() && !sessions.unwrap().is_empty(),
+        "diff --json --all-prompts should include sessions in 'sessions' key, got: {:?}",
+        json["sessions"]
     );
 
-    // The prompt should have mock_ai as the tool
-    let first_prompt = prompts.unwrap().values().next().unwrap();
+    // prompts should be empty for new-format-only commits
+    let prompts = json["prompts"].as_object();
+    assert!(
+        prompts.is_none() || prompts.unwrap().is_empty(),
+        "new-format commit should not have entries in 'prompts'"
+    );
+
+    // Session keys should use s_xxx::t_yyy format
+    let first_key = sessions.unwrap().keys().next().unwrap();
+    assert!(
+        first_key.starts_with("s_") && first_key.contains("::t_"),
+        "session key should use s_xxx::t_yyy format, got: {}",
+        first_key
+    );
+
+    // The session should have mock_ai as the tool
+    let first_session = sessions.unwrap().values().next().unwrap();
     assert_eq!(
-        first_prompt["agent_id"]["tool"].as_str(),
+        first_session["agent_id"]["tool"].as_str(),
         Some("mock_ai"),
-        "session should be included as prompt with correct agent_id"
+        "session should have correct agent_id"
     );
 }
 

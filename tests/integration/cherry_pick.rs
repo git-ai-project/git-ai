@@ -61,6 +61,18 @@ fn test_single_commit_cherry_pick() {
         !log.metadata.sessions.is_empty(),
         "Should have at least one session record"
     );
+    for (session_id, session_record) in &log.metadata.sessions {
+        assert!(
+            !session_record.agent_id.tool.is_empty(),
+            "Session {} should have a non-empty tool",
+            session_id
+        );
+        assert!(
+            !session_record.agent_id.model.is_empty(),
+            "Session {} should have a non-empty model",
+            session_id
+        );
+    }
 }
 
 #[test]
@@ -260,6 +272,18 @@ fn test_multiple_commits_cherry_pick() {
         !log.metadata.sessions.is_empty(),
         "Should have session records"
     );
+    for (session_id, session_record) in &log.metadata.sessions {
+        assert!(
+            !session_record.agent_id.tool.is_empty(),
+            "Session {} should have a non-empty tool",
+            session_id
+        );
+        assert!(
+            !session_record.agent_id.model.is_empty(),
+            "Session {} should have a non-empty model",
+            session_id
+        );
+    }
 }
 
 /// Test cherry-pick with conflicts and --continue
@@ -450,6 +474,18 @@ fn test_cherry_pick_multiple_ai_sessions() {
         !log.metadata.sessions.is_empty(),
         "Should have at least one session record"
     );
+    for (session_id, session_record) in &log.metadata.sessions {
+        assert!(
+            !session_record.agent_id.tool.is_empty(),
+            "Session {} should have a non-empty tool",
+            session_id
+        );
+        assert!(
+            !session_record.agent_id.model.is_empty(),
+            "Session {} should have a non-empty model",
+            session_id
+        );
+    }
 }
 
 /// Test that trees-identical fast path works
