@@ -2129,3 +2129,75 @@ fn test_amend_old_prompts_different_file_gets_session_edits() {
     let mut fb = repo.filename("file_b.txt");
     fb.assert_committed_lines(crate::lines!["New session AI line B".ai(),]);
 }
+
+// Test 25: git ai status correctly counts AI lines from old-format INITIAL entries.
+// When a reset brings old-format prompts into the INITIAL working log, `git ai status`
+// should recognize those author_ids as AI (via prompts map lookup) and report them.
+#[test]
+fn test_status_counts_ai_lines_from_old_format_initial() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("status_test.txt");
+
+    // Step 1: Base commit
+    let base = "Base line\n";
+    fs::write(&file_path, base).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "status_test.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("Base").unwrap();
+
+    // Step 2: Commit with AI content
+    let ai_edit = "Base line\nAI status line\nAnother AI line\n";
+    fs::write(&file_path, ai_edit).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "status_test.txt"])
+        .unwrap();
+    let ai_commit = repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Step 3: Replace with old-format note
+    let old_hash = "statustest123456";
+    let old_note = format!(
+        r#"status_test.txt
+  {} 2-3
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.0",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "cursor", "id": "status_agent", "model": "gpt-4"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }}
+  }}
+}}"#,
+        old_hash, ai_commit.commit_sha, old_hash
+    );
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &ai_commit.commit_sha, &old_note).expect("attach old-format note");
+
+    // Step 4: Reset --soft to bring content into working log with old-format INITIAL
+    repo.git(&["reset", "--soft", "HEAD~1"]).unwrap();
+    repo.sync_daemon_force();
+
+    // Step 5: Run git ai status --json and check it counts AI lines from old-format INITIAL
+    let status_output = repo.git_ai(&["status", "--json"]);
+    assert!(
+        status_output.is_ok(),
+        "git ai status should work with old-format INITIAL"
+    );
+    let output = status_output.unwrap();
+    let json: Value = serde_json::from_str(output.trim()).unwrap();
+
+    // The status should report AI lines from the old-format INITIAL
+    let ai_accepted = json["stats"]["ai_accepted"].as_u64().unwrap_or(0);
+    assert!(
+        ai_accepted >= 2,
+        "status should count AI lines from old-format INITIAL (got {})",
+        ai_accepted
+    );
+}
