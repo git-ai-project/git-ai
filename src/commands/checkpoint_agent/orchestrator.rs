@@ -36,7 +36,8 @@ pub fn execute_preset_checkpoint(
     events
         .into_iter()
         .map(|event| execute_event(event, preset_name))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+        .map(|v| v.into_iter().flatten().collect())
 }
 
 fn resolve_repo_working_dir_from_file_paths(file_paths: &[PathBuf]) -> Result<PathBuf, GitAiError> {
@@ -55,12 +56,12 @@ fn resolve_repo_working_dir_from_cwd(cwd: &std::path::Path) -> Result<PathBuf, G
 fn execute_event(
     event: ParsedHookEvent,
     preset_name: &str,
-) -> Result<CheckpointResult, GitAiError> {
+) -> Result<Option<CheckpointResult>, GitAiError> {
     match event {
-        ParsedHookEvent::PreFileEdit(e) => execute_pre_file_edit(e),
-        ParsedHookEvent::PostFileEdit(e) => execute_post_file_edit(e, preset_name),
+        ParsedHookEvent::PreFileEdit(e) => execute_pre_file_edit(e).map(Some),
+        ParsedHookEvent::PostFileEdit(e) => execute_post_file_edit(e, preset_name).map(Some),
         ParsedHookEvent::PreBashCall(e) => execute_pre_bash_call(e),
-        ParsedHookEvent::PostBashCall(e) => execute_post_bash_call(e),
+        ParsedHookEvent::PostBashCall(e) => execute_post_bash_call(e).map(Some),
     }
 }
 
@@ -115,7 +116,7 @@ fn execute_post_file_edit(
     })
 }
 
-fn execute_pre_bash_call(e: PreBashCall) -> Result<CheckpointResult, GitAiError> {
+fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointResult>, GitAiError> {
     let repo_working_dir = resolve_repo_working_dir_from_cwd(&e.context.cwd)?;
 
     let pre_hook_result = super::agent_presets::prepare_agent_bash_pre_hook(
@@ -131,7 +132,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<CheckpointResult, GitAiError>
     match pre_hook_result {
         super::agent_presets::BashPreHookResult::EmitHumanCheckpoint {
             captured_checkpoint_id,
-        } => Ok(CheckpointResult {
+        } => Ok(Some(CheckpointResult {
             trace_id: e.context.trace_id,
             checkpoint_kind: CheckpointKind::Human,
             agent_id: e.context.agent_id,
@@ -142,16 +143,8 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<CheckpointResult, GitAiError>
             transcript_source: None,
             metadata: e.context.metadata,
             captured_checkpoint_id,
-        }),
-        super::agent_presets::BashPreHookResult::SkipCheckpoint { .. } => {
-            // SnapshotOnly strategy: the bash pre-hook already took a snapshot
-            // but we should NOT emit a Human checkpoint downstream. Return an
-            // error so the caller skips checkpoint processing (matches old preset
-            // behavior where the old code returned early/exited).
-            Err(GitAiError::PresetError(
-                "PreBashCall with SnapshotOnly strategy: checkpoint skipped".to_string(),
-            ))
-        }
+        })),
+        super::agent_presets::BashPreHookResult::SkipCheckpoint { .. } => Ok(None),
     }
 }
 
