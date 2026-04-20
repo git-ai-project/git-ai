@@ -927,3 +927,409 @@ fn test_mixed_working_log_old_and_new_checkpoints_produce_both_prompts_and_sessi
         "AI line from new version".ai(),
     ]);
 }
+
+// Test 11: Reset --soft of a commit with old-format note, then make new AI edits (sessions),
+// then re-commit. The working log after reset has INITIAL from old note (bare hex prompts).
+// New checkpoints produce sessions. Re-commit must have BOTH prompts and sessions.
+#[test]
+fn test_reset_soft_old_note_then_new_session_checkpoints() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("reset_test.txt");
+
+    // Step 1: Create initial commit (needed as parent)
+    let base = "Base line\n";
+    fs::write(&file_path, base).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "reset_test.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("Base commit").unwrap();
+
+    // Step 2: Create second commit with AI content
+    let second = "Base line\nOld AI line\n";
+    fs::write(&file_path, second).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "reset_test.txt"])
+        .unwrap();
+    let commit = repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Step 3: Replace the note with old-format (simulating pre-upgrade git-ai)
+    let old_hash = "f1e2d3c4b5a69788";
+    let old_note = format!(
+        r#"reset_test.txt
+  {} 2-2
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.0",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "cursor", "id": "old_reset_session", "model": "gpt-4"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }}
+  }}
+}}"#,
+        old_hash, commit.commit_sha, old_hash
+    );
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &commit.commit_sha, &old_note).expect("attach old-format note");
+
+    // Step 4: Reset --soft HEAD~1 (uncommit, triggers working log reconstruction with old prompts)
+    repo.git(&["reset", "--soft", "HEAD~1"]).unwrap();
+
+    // Step 5: Make new AI edits (produces session-format checkpoints)
+    let third = "Base line\nOld AI line\nNew session AI line\n";
+    fs::write(&file_path, third).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "reset_test.txt"])
+        .unwrap();
+
+    // Step 6: Re-commit
+    repo.git(&["add", "."]).unwrap();
+    repo.commit("Re-committed with new edits").unwrap();
+
+    // Step 7: Verify the resulting note has BOTH formats
+    let new_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let note = repo
+        .read_authorship_note(&new_sha)
+        .expect("re-committed commit should have note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
+
+    // Old-format prompt from the reset commit's note should be preserved
+    assert!(
+        !log.metadata.prompts.is_empty(),
+        "re-committed note should have prompts from old-format note (via reset reconstruction)"
+    );
+
+    // New-format session from the fresh checkpoint should be present
+    assert!(
+        !log.metadata.sessions.is_empty(),
+        "re-committed note should have sessions from new checkpoint"
+    );
+
+    // Verify attestations have both formats
+    let mut has_old_att = false;
+    let mut has_new_att = false;
+    for file_att in &log.attestations {
+        for entry in &file_att.entries {
+            if !entry.hash.starts_with("s_")
+                && !entry.hash.starts_with("h_")
+                && entry.hash.len() == 16
+            {
+                has_old_att = true;
+            }
+            if entry.hash.starts_with("s_") && entry.hash.contains("::t_") {
+                has_new_att = true;
+            }
+        }
+    }
+    assert!(has_old_att, "should have old-format attestation hash");
+    assert!(has_new_att, "should have new-format (s_::t_) attestation hash");
+
+    // Verify blame
+    let mut file = repo.filename("reset_test.txt");
+    file.assert_committed_lines(crate::lines![
+        "Base line".human(),
+        "Old AI line".ai(),
+        "New session AI line".ai(),
+    ]);
+}
+
+// Test 12: Squash merge a feature branch where some commits have old-format notes
+// and others have new-format notes. The squashed commit must contain BOTH prompts and sessions.
+#[test]
+fn test_squash_merge_mixed_format_commits() {
+    let repo = TestRepo::new();
+
+    // Step 1: Create base commit on main
+    let mut base = repo.filename("base.txt");
+    base.set_contents(crate::lines!["Base line"]);
+    repo.stage_all_and_commit("Base commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Step 2: Create feature branch
+    repo.git(&["checkout", "-b", "feature-mixed"]).unwrap();
+
+    // Step 3: Commit C1 with AI content, then replace with old-format note
+    let mut file_a = repo.filename("feature_a.txt");
+    file_a.set_contents(crate::lines!["Human A", "AI A".ai()]);
+    let commit_a = repo.stage_all_and_commit("Feature commit A").unwrap();
+
+    let old_hash = "aaaa1111bbbb2222";
+    let old_note = format!(
+        r#"feature_a.txt
+  {} 2-2
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.0",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "windsurf", "id": "old_squash_session", "model": "gpt-4"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }}
+  }}
+}}"#,
+        old_hash, commit_a.commit_sha, old_hash
+    );
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &commit_a.commit_sha, &old_note).expect("attach old-format note");
+
+    // Step 4: Commit C2 with AI content using standard helpers (produces new-format/sessions)
+    let mut file_b = repo.filename("feature_b.txt");
+    file_b.set_contents(crate::lines!["Human B", "AI B".ai()]);
+    repo.stage_all_and_commit("Feature commit B").unwrap();
+
+    // Step 5: Switch to main, squash merge
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.git(&["merge", "--squash", "feature-mixed"]).unwrap();
+    repo.commit("Squash merge mixed formats").unwrap();
+
+    // Step 6: Verify squashed commit note has BOTH prompts and sessions
+    let squash_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let note = repo
+        .read_authorship_note(&squash_sha)
+        .expect("squash commit should have note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse squash note");
+
+    // C1's old-format prompts should be preserved
+    assert!(
+        !log.metadata.prompts.is_empty(),
+        "squash note should have prompts from old-format commit C1"
+    );
+
+    // C2's new-format sessions should be present
+    assert!(
+        !log.metadata.sessions.is_empty(),
+        "squash note should have sessions from new-format commit C2"
+    );
+
+    // Verify both file attestations work for blame
+    file_a.assert_committed_lines(crate::lines!["Human A".human(), "AI A".ai(),]);
+    file_b.assert_committed_lines(crate::lines!["Human B".human(), "AI B".ai(),]);
+}
+
+// Test 13: Stash and pop a mixed-format working log.
+// The working log has old-format checkpoints (downgraded, no trace_id) + new-format checkpoints.
+// After stash push + pop + commit, the note should have BOTH prompts and sessions.
+#[test]
+fn test_stash_pop_mixed_format_working_log() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("stash_test.txt");
+
+    // Step 1: Create base commit
+    let base = "Base line\n";
+    fs::write(&file_path, base).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "stash_test.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("Base commit").unwrap();
+
+    // Step 2: Make an AI edit (new format checkpoint)
+    let edit1 = "Base line\nAI old line\n";
+    fs::write(&file_path, edit1).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "stash_test.txt"])
+        .unwrap();
+
+    // Step 3: Downgrade that checkpoint to old format
+    let working_log = repo.current_working_logs();
+    let checkpoints_file = working_log.dir.join("checkpoints.jsonl");
+    assert!(checkpoints_file.exists(), "checkpoints.jsonl should exist");
+
+    let content = fs::read_to_string(&checkpoints_file).expect("read checkpoints");
+    let mut modified_lines = Vec::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut checkpoint: Value = serde_json::from_str(line).expect("parse checkpoint");
+        let kind = checkpoint.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+        if kind == "AiAgent" && checkpoint.get("trace_id").and_then(|t| t.as_str()).is_some() {
+            let agent_tool = checkpoint
+                .get("agent_id")
+                .and_then(|a| a.get("tool"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            let agent_id_str = checkpoint
+                .get("agent_id")
+                .and_then(|a| a.get("id"))
+                .and_then(|i| i.as_str())
+                .unwrap_or("");
+            let old_author_id =
+                git_ai::authorship::authorship_log_serialization::generate_short_hash(
+                    agent_id_str,
+                    agent_tool,
+                );
+            checkpoint["trace_id"] = Value::Null;
+            if let Some(entries) = checkpoint.get_mut("entries").and_then(|e| e.as_array_mut()) {
+                for entry in entries {
+                    if let Some(attributions) =
+                        entry.get_mut("attributions").and_then(|a| a.as_array_mut())
+                    {
+                        for attr in attributions {
+                            if let Some(author_id) =
+                                attr.get("author_id").and_then(|id| id.as_str())
+                                && author_id.starts_with("s_")
+                            {
+                                attr["author_id"] = Value::String(old_author_id.clone());
+                            }
+                        }
+                    }
+                    if let Some(line_attrs) = entry
+                        .get_mut("line_attributions")
+                        .and_then(|a| a.as_array_mut())
+                    {
+                        for line_attr in line_attrs {
+                            if let Some(author_id) =
+                                line_attr.get("author_id").and_then(|id| id.as_str())
+                                && author_id.starts_with("s_")
+                            {
+                                line_attr["author_id"] = Value::String(old_author_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        modified_lines.push(serde_json::to_string(&checkpoint).expect("serialize"));
+    }
+    fs::write(&checkpoints_file, modified_lines.join("\n") + "\n").expect("write");
+
+    // Step 4: Make another AI edit (new format)
+    let edit2 = "Base line\nAI old line\nAI new line\n";
+    fs::write(&file_path, edit2).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "stash_test.txt"])
+        .unwrap();
+
+    // Step 5: Stash
+    repo.git(&["stash", "push", "-u"]).unwrap();
+
+    // Step 6: Pop
+    repo.git(&["stash", "pop"]).unwrap();
+
+    // Step 7: Commit
+    repo.git(&["add", "."]).unwrap();
+    repo.commit("After stash pop").unwrap();
+
+    // Step 8: Verify the note
+    let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let note = repo
+        .read_authorship_note(&sha)
+        .expect("post-stash commit should have note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
+
+    // Old-format checkpoint should produce prompt
+    assert!(
+        !log.metadata.prompts.is_empty(),
+        "post-stash note should have prompts from old-format checkpoint"
+    );
+
+    // New-format checkpoint should produce session
+    assert!(
+        !log.metadata.sessions.is_empty(),
+        "post-stash note should have sessions from new-format checkpoint"
+    );
+
+    // Verify blame
+    let mut file = repo.filename("stash_test.txt");
+    file.assert_committed_lines(crate::lines![
+        "Base line".human(),
+        "AI old line".ai(),
+        "AI new line".ai(),
+    ]);
+}
+
+// Test 14: Rebase a commit with old-format note that conflicts, AI resolves the conflict
+// (producing new session-format checkpoints). The resulting note should have sessions from
+// the conflict resolution. This documents that build_note_from_conflict_wl uses the
+// working log's format, not the original commit's note format.
+#[test]
+fn test_rebase_conflict_old_note_ai_resolves_with_sessions() {
+    let repo = TestRepo::new();
+
+    // Step 1: Create base commit
+    let mut file = repo.filename("conflict.txt");
+    file.set_contents(crate::lines!["Original line"]);
+    repo.stage_all_and_commit("Base commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Step 2: Create feature branch with AI content
+    repo.git(&["checkout", "-b", "feature-conflict"]).unwrap();
+    file.set_contents(crate::lines!["Original line", "AI feature line".ai()]);
+    let feature_commit = repo.stage_all_and_commit("Feature commit").unwrap();
+
+    // Replace with old-format note
+    let old_hash = "cccc3333dddd4444";
+    let old_note = format!(
+        r#"conflict.txt
+  {} 2-2
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.0",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "claude", "id": "old_rebase_session", "model": "claude-3.5"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }}
+  }}
+}}"#,
+        old_hash, feature_commit.commit_sha, old_hash
+    );
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &feature_commit.commit_sha, &old_note)
+        .expect("attach old-format note");
+
+    // Step 3: Go back to main, make conflicting change
+    repo.git(&["checkout", &default_branch]).unwrap();
+    file.set_contents(crate::lines!["Modified base line"]);
+    repo.stage_all_and_commit("Conflicting commit on main").unwrap();
+
+    // Step 4: Rebase feature onto main (will conflict)
+    repo.git(&["checkout", "feature-conflict"]).unwrap();
+    let rebase_result = repo.git(&["rebase", &default_branch]);
+    assert!(rebase_result.is_err(), "rebase should conflict");
+
+    // Step 5: AI resolves the conflict by writing the merged file and checkpointing
+    // (using set_contents which calls checkpoint mock_ai + stages the file)
+    file.set_contents(crate::lines!["Modified base line".human(), "AI resolved line".ai()]);
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
+
+    // Step 6: Verify the rebased commit's note
+    let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let note = repo
+        .read_authorship_note(&rebased_sha)
+        .expect("rebased commit should have note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse rebased note");
+
+    // The conflict was re-resolved from scratch, so build_note_from_conflict_wl
+    // creates the note from the conflict working log. The AI checkpoint used new-format
+    // (with trace_id), so the result should have sessions.
+    assert!(
+        !log.metadata.sessions.is_empty(),
+        "rebased note should have sessions from AI conflict resolution checkpoint"
+    );
+
+    // Verify AI attribution on the resolved line
+    file.assert_committed_lines(crate::lines![
+        "Modified base line".human(),
+        "AI resolved line".ai(),
+    ]);
+}
