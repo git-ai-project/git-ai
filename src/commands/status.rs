@@ -123,11 +123,16 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         Some(default_user_name.clone()),
     )?;
 
-    let pathspecs: HashSet<String> = checkpoints
+    let mut pathspecs: HashSet<String> = checkpoints
         .iter()
         .flat_map(|cp| cp.entries.iter().map(|e| e.file.clone()))
         .filter(|file| !should_ignore_file_with_matcher(file, &ignore_matcher))
         .collect();
+    for file_path in working_va.files() {
+        if !should_ignore_file_with_matcher(&file_path, &ignore_matcher) {
+            pathspecs.insert(file_path);
+        }
+    }
 
     let (authorship_log, initial) = working_va.to_authorship_log_and_initial_working_log(
         &repo,
