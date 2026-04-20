@@ -59,8 +59,8 @@ fn test_old_format_note_can_be_attached_and_read() {
     let read_note = repo
         .read_authorship_note(base_sha)
         .expect("should have note");
-    let log = AuthorshipLog::deserialize_from_string(&read_note)
-        .expect("should deserialize old note");
+    let log =
+        AuthorshipLog::deserialize_from_string(&read_note).expect("should deserialize old note");
 
     // Verify structure
     assert_eq!(log.metadata.prompts.len(), 1, "should have 1 prompt");
@@ -105,12 +105,18 @@ fn test_mixed_format_note_with_both_prompts_and_sessions() {
     let original_note = repo
         .read_authorship_note(&commit.commit_sha)
         .expect("should have original note");
-    let original_log = AuthorshipLog::deserialize_from_string(&original_note)
-        .expect("parse original note");
+    let original_log =
+        AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
 
     // Get the new-format session ID from the original note
     let new_hash = if !original_log.metadata.sessions.is_empty() {
-        original_log.metadata.sessions.keys().next().unwrap().clone()
+        original_log
+            .metadata
+            .sessions
+            .keys()
+            .next()
+            .unwrap()
+            .clone()
     } else {
         "s_1234567890abcd".to_string() // fallback
     };
@@ -267,8 +273,7 @@ fn test_rebase_chain_with_old_and_new_format_notes() {
     let note_a_prime = repo
         .read_authorship_note(commit_a_prime_sha)
         .expect("commit A' should have note");
-    let log_a_prime =
-        AuthorshipLog::deserialize_from_string(&note_a_prime).expect("parse note A'");
+    let log_a_prime = AuthorshipLog::deserialize_from_string(&note_a_prime).expect("parse note A'");
     assert!(
         !log_a_prime.metadata.prompts.is_empty(),
         "commit A' should have prompts"
@@ -289,8 +294,7 @@ fn test_rebase_chain_with_old_and_new_format_notes() {
     let note_b_prime = repo
         .read_authorship_note(commit_b_prime_sha)
         .expect("commit B' should have note");
-    let log_b_prime =
-        AuthorshipLog::deserialize_from_string(&note_b_prime).expect("parse note B'");
+    let log_b_prime = AuthorshipLog::deserialize_from_string(&note_b_prime).expect("parse note B'");
     assert!(
         !log_b_prime.metadata.sessions.is_empty(),
         "commit B' should have sessions (new format)"
@@ -393,9 +397,7 @@ fn test_current_system_produces_sessions_not_prompts() {
 
     // Read note
     let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let note = repo
-        .read_authorship_note(&sha)
-        .expect("should have note");
+    let note = repo.read_authorship_note(&sha).expect("should have note");
     let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
 
     // Should have sessions, NOT prompts (this is the new default)
@@ -486,7 +488,11 @@ fn test_old_format_note_roundtrips_without_corruption() {
     assert_eq!(log_v1.metadata.humans.len(), 1);
 
     // Verify stats preserved
-    let prompt_v1 = log_v1.metadata.prompts.get(old_hash).expect("should have old hash");
+    let prompt_v1 = log_v1
+        .metadata
+        .prompts
+        .get(old_hash)
+        .expect("should have old hash");
     assert_eq!(prompt_v1.total_additions, 42);
     assert_eq!(prompt_v1.total_deletions, 7);
     assert_eq!(prompt_v1.accepted_lines, 35);
@@ -502,7 +508,11 @@ fn test_old_format_note_roundtrips_without_corruption() {
     assert_eq!(log_v2.metadata.humans.len(), 1);
 
     // Verify stats still preserved
-    let prompt_v2 = log_v2.metadata.prompts.get(old_hash).expect("should still have old hash");
+    let prompt_v2 = log_v2
+        .metadata
+        .prompts
+        .get(old_hash)
+        .expect("should still have old hash");
     assert_eq!(prompt_v2.total_additions, 42);
     assert_eq!(prompt_v2.total_deletions, 7);
     assert_eq!(prompt_v2.accepted_lines, 35);
@@ -596,9 +606,7 @@ fn test_new_checkpoints_always_produce_sessions() {
 
     // Read note
     let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let note = repo
-        .read_authorship_note(&sha)
-        .expect("should have note");
+    let note = repo.read_authorship_note(&sha).expect("should have note");
     let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
 
     // Should have sessions, NOT prompts
@@ -776,8 +784,7 @@ fn test_mixed_working_log_old_and_new_checkpoints_produce_both_prompts_and_sessi
         if line.trim().is_empty() {
             continue;
         }
-        let mut checkpoint: Value =
-            serde_json::from_str(line).expect("parse checkpoint JSON");
+        let mut checkpoint: Value = serde_json::from_str(line).expect("parse checkpoint JSON");
 
         // Find AI checkpoints and downgrade the first one we find
         let kind = checkpoint
@@ -785,7 +792,12 @@ fn test_mixed_working_log_old_and_new_checkpoints_produce_both_prompts_and_sessi
             .and_then(|k| k.as_str())
             .unwrap_or("");
 
-        if kind == "AiAgent" && checkpoint.get("trace_id").and_then(|t| t.as_str()).is_some() {
+        if kind == "AiAgent"
+            && checkpoint
+                .get("trace_id")
+                .and_then(|t| t.as_str())
+                .is_some()
+        {
             // Compute the correct old-format author_id from agent_id fields
             // (this is what the old system would have stored)
             let agent_tool = checkpoint
@@ -856,10 +868,7 @@ fn test_mixed_working_log_old_and_new_checkpoints_produce_both_prompts_and_sessi
 
     // Step 6: Verify the resulting note
     let commit_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    assert_ne!(
-        commit_sha, base_commit.commit_sha,
-        "should be a new commit"
-    );
+    assert_ne!(commit_sha, base_commit.commit_sha, "should be a new commit");
 
     let note = repo
         .read_authorship_note(&commit_sha)
@@ -1027,7 +1036,10 @@ fn test_reset_soft_old_note_then_new_session_checkpoints() {
         }
     }
     assert!(has_old_att, "should have old-format attestation hash");
-    assert!(has_new_att, "should have new-format (s_::t_) attestation hash");
+    assert!(
+        has_new_att,
+        "should have new-format (s_::t_) attestation hash"
+    );
 
     // Verify blame
     let mut file = repo.filename("reset_test.txt");
@@ -1152,8 +1164,16 @@ fn test_stash_pop_mixed_format_working_log() {
             continue;
         }
         let mut checkpoint: Value = serde_json::from_str(line).expect("parse checkpoint");
-        let kind = checkpoint.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-        if kind == "AiAgent" && checkpoint.get("trace_id").and_then(|t| t.as_str()).is_some() {
+        let kind = checkpoint
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .unwrap_or("");
+        if kind == "AiAgent"
+            && checkpoint
+                .get("trace_id")
+                .and_then(|t| t.as_str())
+                .is_some()
+        {
             let agent_tool = checkpoint
                 .get("agent_id")
                 .and_then(|a| a.get("tool"))
@@ -1293,13 +1313,13 @@ fn test_rebase_conflict_old_note_ai_resolves_with_sessions() {
     );
     let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
         .expect("find repository");
-    notes_add(&git_ai_repo, &feature_commit.commit_sha, &old_note)
-        .expect("attach old-format note");
+    notes_add(&git_ai_repo, &feature_commit.commit_sha, &old_note).expect("attach old-format note");
 
     // Step 3: Go back to main, make conflicting change
     repo.git(&["checkout", &default_branch]).unwrap();
     file.set_contents(crate::lines!["Modified base line"]);
-    repo.stage_all_and_commit("Conflicting commit on main").unwrap();
+    repo.stage_all_and_commit("Conflicting commit on main")
+        .unwrap();
 
     // Step 4: Rebase feature onto main (will conflict)
     repo.git(&["checkout", "feature-conflict"]).unwrap();
@@ -1308,7 +1328,10 @@ fn test_rebase_conflict_old_note_ai_resolves_with_sessions() {
 
     // Step 5: AI resolves the conflict by writing the merged file and checkpointing
     // (using set_contents which calls checkpoint mock_ai + stages the file)
-    file.set_contents(crate::lines!["Modified base line".human(), "AI resolved line".ai()]);
+    file.set_contents(crate::lines![
+        "Modified base line".human(),
+        "AI resolved line".ai()
+    ]);
     repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
         .unwrap();
 
