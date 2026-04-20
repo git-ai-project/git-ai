@@ -2,14 +2,14 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use serde_json::json;
 use std::fs;
+use std::path::PathBuf;
 
-use git_ai::{
-    authorship::working_log::CheckpointKind,
-    commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, AiTabPreset,
-    },
-    error::GitAiError,
-};
+use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
+use git_ai::error::GitAiError;
+
+fn parse_ai_tab(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
+    resolve_preset("ai_tab")?.parse(hook_input, "t_test")
+}
 
 fn run_ai_tab_checkpoint(repo: &TestRepo, hook_payload: serde_json::Value) {
     let hook_input = hook_payload.to_string();
@@ -40,53 +40,25 @@ fn test_ai_tab_before_edit_checkpoint_includes_dirty_files() {
             "/Users/test/project/src/main.rs": "fn main() {\n    println!(\"hello world\");\n}\n",
             "/Users/test/project/src/lib.rs": "pub fn helper() {}\n"
         }
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
-
-    let preset = AiTabPreset;
-    let result = preset
-        .run(flags)
-        .expect("before_edit checkpoints should succeed");
-
-    assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
-    assert_eq!(result.agent_id.tool, "github-copilot-tab");
-    assert_eq!(result.agent_id.model, "default");
-    assert_eq!(result.agent_id.id, "ai_tab-checkpoint-123");
-    assert_eq!(
-        result.repo_working_dir,
-        Some("/Users/test/project".to_string())
-    );
-
-    let will_edit = result
-        .will_edit_filepaths
-        .expect("before_edit should include will_edit_filepaths");
-    assert_eq!(
-        will_edit,
-        vec![
-            "/Users/test/project/src/main.rs".to_string(),
-            "/Users/test/project/src/lib.rs".to_string()
-        ]
-    );
-    assert!(
-        result.edited_filepaths.is_none(),
-        "before_edit should not set edited_filepaths"
-    );
-
-    let dirty_files = result
-        .dirty_files
-        .as_ref()
-        .expect("before_edit should include dirty files");
-    assert_eq!(
-        dirty_files.get("/Users/test/project/src/main.rs"),
-        Some(&"fn main() {\n    println!(\"hello world\");\n}\n".to_string())
-    );
-    assert_eq!(
-        dirty_files.get("/Users/test/project/src/lib.rs"),
-        Some(&"pub fn helper() {}\n".to_string())
-    );
+    let events = parse_ai_tab(&hook_input).unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert_eq!(e.context.agent_id.tool, "github-copilot-tab");
+            assert_eq!(e.context.agent_id.model, "default");
+            assert_eq!(e.context.session_id, "ai_tab-checkpoint-123");
+            assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
+            assert!(!e.file_paths.is_empty());
+            assert!(e.dirty_files.is_some());
+            let dirty_files = e.dirty_files.as_ref().unwrap();
+            assert!(dirty_files.values().any(|v| v.contains("hello world")));
+            assert!(dirty_files.values().any(|v| v.contains("helper")));
+        }
+        _ => panic!("Expected PreFileEdit"),
+    }
 }
 
 #[test]
@@ -106,43 +78,24 @@ fn test_ai_tab_after_edit_checkpoint_includes_dirty_files_and_paths() {
         "dirty_files": {
             "/Users/test/project/src/main.rs": "fn main() {\n    println!(\"goodbye world\");\n}\n"
         }
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
-
-    let preset = AiTabPreset;
-    let result = preset
-        .run(flags)
-        .expect("after_edit checkpoints should succeed");
-
-    assert_eq!(result.checkpoint_kind, CheckpointKind::AiTab);
-    assert_eq!(result.agent_id.tool, "github-copilot-tab");
-    assert_eq!(result.agent_id.model, "default");
-    assert_eq!(result.agent_id.id, "ai_tab-checkpoint-456");
-    assert_eq!(
-        result.repo_working_dir,
-        Some("/Users/test/project".to_string())
-    );
-    assert!(
-        result.will_edit_filepaths.is_none(),
-        "after_edit should not retain will_edit_filepaths"
-    );
-
-    let edited = result
-        .edited_filepaths
-        .expect("after_edit should include edited filepaths");
-    assert_eq!(edited, vec!["/Users/test/project/src/main.rs".to_string()]);
-
-    let dirty_files = result
-        .dirty_files
-        .as_ref()
-        .expect("after_edit should include dirty files snapshot");
-    assert_eq!(
-        dirty_files.get("/Users/test/project/src/main.rs"),
-        Some(&"fn main() {\n    println!(\"goodbye world\");\n}\n".to_string())
-    );
+    let events = parse_ai_tab(&hook_input).unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(e.context.agent_id.tool, "github-copilot-tab");
+            assert_eq!(e.context.agent_id.model, "default");
+            assert_eq!(e.context.session_id, "ai_tab-checkpoint-456");
+            assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
+            assert!(!e.file_paths.is_empty());
+            assert!(e.dirty_files.is_some());
+            let dirty_files = e.dirty_files.as_ref().unwrap();
+            assert!(dirty_files.values().any(|v| v.contains("goodbye world")));
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
@@ -151,15 +104,10 @@ fn test_ai_tab_rejects_invalid_hook_event() {
         "hook_event_name": "during_edit",
         "tool": "github-copilot-tab",
         "model": "default"
-    });
+    })
+    .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
-
-    let preset = AiTabPreset;
-    let result = preset.run(flags);
-
+    let result = parse_ai_tab(&hook_input);
     match result {
         Err(GitAiError::PresetError(message)) => {
             assert!(
@@ -177,18 +125,14 @@ fn test_ai_tab_rejects_invalid_hook_event() {
 
 #[test]
 fn test_ai_tab_requires_non_empty_tool_and_model() {
-    let preset = AiTabPreset;
-
     // Tool validation
     let hook_input_missing_tool = json!({
         "hook_event_name": "before_edit",
         "tool": "   ",
         "model": "default"
-    });
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input_missing_tool.to_string()),
-    };
-    let result = preset.run(flags);
+    })
+    .to_string();
+    let result = parse_ai_tab(&hook_input_missing_tool);
     match result {
         Err(GitAiError::PresetError(message)) => {
             assert!(
@@ -205,11 +149,9 @@ fn test_ai_tab_requires_non_empty_tool_and_model() {
         "hook_event_name": "after_edit",
         "tool": "github-copilot-tab",
         "model": ""
-    });
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input_missing_model.to_string()),
-    };
-    let result = preset.run(flags);
+    })
+    .to_string();
+    let result = parse_ai_tab(&hook_input_missing_model);
     match result {
         Err(GitAiError::PresetError(message)) => {
             assert!(

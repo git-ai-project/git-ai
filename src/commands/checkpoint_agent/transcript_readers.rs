@@ -2691,8 +2691,7 @@ pub fn read_opencode_from_storage(
     }
 
     if let Some(storage_path) = resolve_opencode_legacy_storage_path(opencode_path) {
-        let legacy_json_path = storage_path.join("messages").join(session_id);
-        match read_opencode_legacy_json(&legacy_json_path, session_id) {
+        match read_opencode_legacy_json(&storage_path, session_id) {
             Ok((transcript, model)) => {
                 if !transcript.messages().is_empty() || model.is_some() {
                     return Ok((transcript, model));

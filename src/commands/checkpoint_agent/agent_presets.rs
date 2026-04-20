@@ -1,46 +1,11 @@
-#[cfg(feature = "test-support")]
-use crate::authorship::transcript::AiTranscript;
-#[cfg(feature = "test-support")]
-use crate::authorship::working_log::CheckpointKind;
-#[cfg(feature = "test-support")]
-use crate::{
-    authorship::transcript::Message,
-    commands::checkpoint_agent::bash_tool::{Agent, BashCheckpointAction, HookEvent, ToolClass},
-    git::repository::find_repository_for_file,
-    observability::log_error,
-    utils::normalize_to_posix,
-};
 use crate::{
     authorship::working_log::AgentId,
     commands::checkpoint_agent::bash_tool::{self},
     error::GitAiError,
 };
-#[cfg(feature = "test-support")]
-use chrono::{TimeZone, Utc};
-#[cfg(feature = "test-support")]
-use glob::glob;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-#[cfg(feature = "test-support")]
-use std::env;
-#[cfg(feature = "test-support")]
-use std::path::PathBuf;
 use std::path::{Component, Path};
-
-#[cfg(feature = "test-support")]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgentRunResult {
-    pub agent_id: AgentId,
-    pub agent_metadata: Option<HashMap<String, String>>,
-    pub checkpoint_kind: CheckpointKind,
-    pub transcript: Option<AiTranscript>,
-    pub repo_working_dir: Option<String>,
-    pub edited_filepaths: Option<Vec<String>>,
-    pub will_edit_filepaths: Option<Vec<String>>,
-    pub dirty_files: Option<HashMap<String, String>>,
-    /// Pre-prepared captured checkpoint ID from bash tool (bypasses normal capture flow).
-    pub captured_checkpoint_id: Option<String>,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BashPreHookStrategy {
@@ -273,24 +238,6 @@ mod tests {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Legacy preset types — kept behind test-support for integration tests.
-// These will be removed once integration tests are migrated (Task 12).
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "test-support")]
-pub struct AgentCheckpointFlags {
-    pub hook_input: Option<String>,
-}
-
-#[cfg(feature = "test-support")]
-pub trait AgentCheckpointPreset {
-    fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError>;
-}
-
-#[cfg(feature = "test-support")]
-mod legacy_presets {
     use super::*;
     // Claude Code to checkpoint preset
     pub struct ClaudePreset;
@@ -4723,6 +4670,3 @@ mod legacy_presets {
         }
     }
 }
-
-#[cfg(feature = "test-support")]
-pub use legacy_presets::*;

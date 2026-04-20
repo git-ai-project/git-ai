@@ -57,7 +57,8 @@ impl AgentPreset for CodexPreset {
         let session_id = Self::session_id_from_hook_data(&data)?;
         let hook_event = parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
         let tool_name = parse::optional_str_multi(&data, &["tool_name", "toolName"]);
-        let tool_use_id = parse::str_or_default(&data, "tool_use_id", "bash");
+        let tool_use_id =
+            parse::optional_str_multi(&data, &["tool_use_id", "toolUseId"]).unwrap_or("bash");
 
         let is_bash = tool_name
             .map(|n| bash_tool::classify_tool(Agent::Codex, n) == ToolClass::Bash)
