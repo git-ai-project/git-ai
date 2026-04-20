@@ -315,9 +315,17 @@ fn count_ai_lines_from_initial(
         }
 
         for line_attr in line_attrs {
-            // Check if this author_id corresponds to an AI prompt (not human)
-            if initial.prompts.contains_key(&line_attr.author_id) {
-                // Count lines in this attribution
+            let is_ai = if line_attr.author_id.starts_with("s_") {
+                let session_key = line_attr
+                    .author_id
+                    .split("::")
+                    .next()
+                    .unwrap_or(&line_attr.author_id);
+                initial.sessions.contains_key(session_key)
+            } else {
+                initial.prompts.contains_key(&line_attr.author_id)
+            };
+            if is_ai {
                 let lines_count = line_attr.end_line - line_attr.start_line + 1;
                 ai_lines += lines_count;
             }

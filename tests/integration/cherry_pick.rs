@@ -53,30 +53,14 @@ fn test_single_commit_cherry_pick() {
     )
     .unwrap();
 
-    let prompts = &log.metadata.prompts;
+    let sessions = &log.metadata.sessions;
     assert!(
-        !prompts.is_empty(),
-        "Should have at least one prompt record"
+        !sessions.is_empty(),
+        "Should have at least one session record"
     );
 
-    for (prompt_id, prompt_record) in prompts {
-        assert!(
-            prompt_record.accepted_lines > 0,
-            "Prompt {} should have accepted_lines > 0",
-            prompt_id
-        );
-        assert_eq!(
-            prompt_record.overriden_lines, 0,
-            "Prompt {} should have overridden_lines = 0",
-            prompt_id
-        );
-    }
-
-    let total_accepted: u32 = prompts.values().map(|p| p.accepted_lines).sum();
-    assert_eq!(
-        total_accepted, stats.ai_accepted,
-        "Sum of accepted_lines should match ai_accepted stat"
-    );
+    // Sessions don't have stats fields, so we can't check accepted_lines/overridden_lines
+    // The stats are verified via the repo.stats() call above
 }
 
 #[test]
@@ -101,6 +85,7 @@ fn test_cherry_pick_preserves_human_only_commit_note_metadata() {
     let source_log =
         AuthorshipLog::deserialize_from_string(&source_note).expect("parse source note");
     assert!(source_log.metadata.prompts.is_empty());
+    assert!(source_log.metadata.sessions.is_empty());
 
     repo.git(&["checkout", &main_branch]).unwrap();
     repo.git(&["cherry-pick", &source_commit.commit_sha])
@@ -112,6 +97,7 @@ fn test_cherry_pick_preserves_human_only_commit_note_metadata() {
         .expect("cherry-picked commit should preserve metadata-only note");
     let new_log = AuthorshipLog::deserialize_from_string(&new_note).expect("parse new note");
     assert!(new_log.metadata.prompts.is_empty());
+    assert!(new_log.metadata.sessions.is_empty());
     assert_eq!(new_log.metadata.base_commit_sha, new_commit);
 }
 
@@ -258,7 +244,7 @@ fn test_multiple_commits_cherry_pick() {
     assert_eq!(stats.ai_additions, 1, "At least 1 AI line in this commit");
     assert_eq!(stats.ai_accepted, 1, "1 AI lines accepted in commit");
 
-    // Verify prompt records have correct stats
+    // Verify session records exist
     let head_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
     let log = git_ai::git::refs::get_reference_as_authorship_log_v3(
         &git_ai::git::find_repository_in_path(repo.path().to_str().unwrap()).unwrap(),
@@ -266,19 +252,9 @@ fn test_multiple_commits_cherry_pick() {
     )
     .unwrap();
 
-    let prompts = &log.metadata.prompts;
-    for (prompt_id, prompt_record) in prompts {
-        assert!(
-            prompt_record.accepted_lines > 0,
-            "Prompt {} should have accepted_lines > 0",
-            prompt_id
-        );
-        assert_eq!(
-            prompt_record.overriden_lines, 0,
-            "Prompt {} should have overridden_lines = 0",
-            prompt_id
-        );
-    }
+    let sessions = &log.metadata.sessions;
+    assert!(!sessions.is_empty(), "Should have session records");
+    // Sessions don't have stats fields, verified via repo.stats() above
 }
 
 /// Test cherry-pick with conflicts and --continue
@@ -453,7 +429,7 @@ fn test_cherry_pick_multiple_ai_sessions() {
     assert_eq!(stats.ai_additions, 1, "1 AI line in last commit");
     assert_eq!(stats.ai_accepted, 1, "1 AI lines accepted");
 
-    // Verify prompt records have correct stats
+    // Verify session records exist
     let head_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
     let log = git_ai::git::refs::get_reference_as_authorship_log_v3(
         &git_ai::git::find_repository_in_path(repo.path().to_str().unwrap()).unwrap(),
@@ -461,24 +437,13 @@ fn test_cherry_pick_multiple_ai_sessions() {
     )
     .unwrap();
 
-    let prompts = &log.metadata.prompts;
+    let sessions = &log.metadata.sessions;
     assert!(
-        !prompts.is_empty(),
-        "Should have at least one prompt record"
+        !sessions.is_empty(),
+        "Should have at least one session record"
     );
 
-    for (prompt_id, prompt_record) in prompts {
-        assert!(
-            prompt_record.accepted_lines > 0,
-            "Prompt {} should have accepted_lines > 0",
-            prompt_id
-        );
-        assert_eq!(
-            prompt_record.overriden_lines, 0,
-            "Prompt {} should have overridden_lines = 0",
-            prompt_id
-        );
-    }
+    // Sessions don't have stats fields, verified via repo.stats() above
 }
 
 /// Test that trees-identical fast path works
@@ -595,9 +560,9 @@ fn test_cherry_pick_preserves_custom_attributes_from_config() {
         .expect("original commit should have authorship note");
     let original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
-    for prompt in original_log.metadata.prompts.values() {
+    for session in original_log.metadata.sessions.values() {
         assert_eq!(
-            prompt.custom_attributes.as_ref(),
+            session.custom_attributes.as_ref(),
             Some(&attrs),
             "precondition: original commit should have custom_attributes from config"
         );
@@ -614,12 +579,12 @@ fn test_cherry_pick_preserves_custom_attributes_from_config() {
         .expect("cherry-picked commit should have authorship note");
     let new_log = AuthorshipLog::deserialize_from_string(&new_note).expect("parse new note");
     assert!(
-        !new_log.metadata.prompts.is_empty(),
-        "cherry-picked commit should have prompt records"
+        !new_log.metadata.sessions.is_empty(),
+        "cherry-picked commit should have session records"
     );
-    for prompt in new_log.metadata.prompts.values() {
+    for session in new_log.metadata.sessions.values() {
         assert_eq!(
-            prompt.custom_attributes.as_ref(),
+            session.custom_attributes.as_ref(),
             Some(&attrs),
             "custom_attributes should be preserved through cherry-pick"
         );

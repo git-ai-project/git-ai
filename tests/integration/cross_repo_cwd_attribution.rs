@@ -744,10 +744,10 @@ fn test_claude_preset_cross_repo_cwd_records_prompts_in_target_repo() {
     // Commit in repo B
     let commit = repo_target.stage_all_and_commit("add AI changes").unwrap();
 
-    // The core assertion: prompts must NOT be empty
+    // The core assertion: sessions must NOT be empty
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Issue #871 regression: Prompts should not be empty in repo B's git note \
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Issue #871 regression: Sessions should not be empty in repo B's git note \
          when Claude Code is started in repo A but edits files in repo B."
     );
 
@@ -1139,10 +1139,10 @@ fn test_claude_preset_nested_subrepo_records_prompts() {
     // Commit in subrepo
     let commit = subrepo.stage_all_and_commit("add AI changes").unwrap();
 
-    // Prompts must NOT be empty
+    // Sessions must NOT be empty
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Scenario 8: Prompts should not be empty in nested subrepo's git note \
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Scenario 8: Sessions should not be empty in nested subrepo's git note \
          when Claude Code is started in parent repo but edits files in subrepo."
     );
 
@@ -1408,8 +1408,8 @@ fn test_issue_954_claude_preset_non_git_cwd() {
 
     let commit = repo_target.stage_all_and_commit("AI auth changes").unwrap();
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Issue #954 (claude): Prompts should not be empty in target repo's git note \
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Issue #954 (claude): Sessions should not be empty in target repo's git note \
          when Claude is launched from a non-git CWD."
     );
     assert!(

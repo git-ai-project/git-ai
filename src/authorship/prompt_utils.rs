@@ -33,7 +33,7 @@ pub fn find_prompt(
     }
 }
 
-/// Find a prompt in a specific commit
+/// Find a prompt in a specific commit (searches both prompts and sessions)
 pub fn find_prompt_in_commit(
     repo: &Repository,
     prompt_id: &str,
@@ -51,18 +51,20 @@ pub fn find_prompt_in_commit(
         ))
     })?;
 
-    // Look for the prompt in the log
-    authorship_log
-        .metadata
-        .prompts
-        .get(prompt_id)
-        .map(|prompt| (commit_sha, prompt.clone()))
-        .ok_or_else(|| {
-            GitAiError::Generic(format!(
-                "Prompt '{}' not found in commit {}",
-                prompt_id, commit_rev
-            ))
-        })
+    // Look for the prompt in the prompts map first
+    if let Some(prompt) = authorship_log.metadata.prompts.get(prompt_id) {
+        return Ok((commit_sha, prompt.clone()));
+    }
+
+    // Fall back to sessions map (session IDs start with "s_")
+    if let Some(session) = authorship_log.metadata.sessions.get(prompt_id) {
+        return Ok((commit_sha, session.to_prompt_record()));
+    }
+
+    Err(GitAiError::Generic(format!(
+        "Prompt '{}' not found in commit {}",
+        prompt_id, commit_rev
+    )))
 }
 
 /// Find a prompt in history, skipping `offset` occurrences
@@ -86,13 +88,20 @@ pub fn find_prompt_in_history(
     // Iterate through commits, looking for the prompt and counting occurrences
     let mut found_count = 0;
     for sha in &shas {
-        if let Some(authorship_log) = get_authorship(repo, sha)
-            && let Some(prompt) = authorship_log.metadata.prompts.get(prompt_id)
-        {
-            if found_count == offset {
-                return Ok((sha.clone(), prompt.clone()));
+        if let Some(authorship_log) = get_authorship(repo, sha) {
+            // Check prompts map first
+            if let Some(prompt) = authorship_log.metadata.prompts.get(prompt_id) {
+                if found_count == offset {
+                    return Ok((sha.clone(), prompt.clone()));
+                }
+                found_count += 1;
+            // Then check sessions map
+            } else if let Some(session) = authorship_log.metadata.sessions.get(prompt_id) {
+                if found_count == offset {
+                    return Ok((sha.clone(), session.to_prompt_record()));
+                }
+                found_count += 1;
             }
-            found_count += 1;
         }
     }
 
@@ -944,21 +953,21 @@ mod tests {
             .commit_with_message("Initial commit")
             .expect("Failed to commit");
 
-        // Get the prompt ID from the authorship log
-        let prompt_id = authorship
+        // Get the session ID from the authorship log (AI checkpoints now produce sessions)
+        let session_id = authorship
             .metadata
-            .prompts
+            .sessions
             .keys()
             .next()
-            .expect("No prompt found")
+            .expect("No session found")
             .clone();
 
         // Get HEAD commit SHA
         let head_oid = tmp_repo.gitai_repo().head().unwrap().target().unwrap();
         let head_sha = head_oid.to_string();
 
-        // Test finding the prompt
-        let result = find_prompt_in_commit(tmp_repo.gitai_repo(), &prompt_id, "HEAD");
+        // Test finding the session via find_prompt (searches both maps)
+        let result = find_prompt_in_commit(tmp_repo.gitai_repo(), &session_id, "HEAD");
         assert!(result.is_ok());
 
         let (commit_sha, prompt) = result.unwrap();
@@ -1029,16 +1038,16 @@ mod tests {
             .commit_with_message("First commit")
             .expect("Failed to commit");
 
-        let prompt_id = authorship1
+        let session_id = authorship1
             .metadata
-            .prompts
+            .sessions
             .keys()
             .next()
-            .expect("No prompt found")
+            .expect("No session found")
             .clone();
 
-        // Test finding the prompt with offset 0 (most recent)
-        let result = find_prompt_in_history(tmp_repo.gitai_repo(), &prompt_id, 0);
+        // Test finding the session with offset 0 (most recent)
+        let result = find_prompt_in_history(tmp_repo.gitai_repo(), &session_id, 0);
         assert!(result.is_ok());
 
         let (_sha, prompt) = result.unwrap();
@@ -1061,23 +1070,23 @@ mod tests {
             .commit_with_message("Commit 1")
             .expect("Failed to commit");
 
-        // Get prompt ID from first commit
+        // Get session ID from first commit
         let head_oid = tmp_repo.gitai_repo().head().unwrap().target().unwrap();
         let head_sha = head_oid.to_string();
         let authorship = get_authorship(tmp_repo.gitai_repo(), &head_sha).unwrap();
-        let prompt_id = authorship
+        let session_id = authorship
             .metadata
-            .prompts
+            .sessions
             .keys()
             .next()
-            .expect("No prompt found")
+            .expect("No session found")
             .clone();
 
         // At this point, offset 0 should work, offset 1 should fail
-        let result = find_prompt_in_history(tmp_repo.gitai_repo(), &prompt_id, 0);
+        let result = find_prompt_in_history(tmp_repo.gitai_repo(), &session_id, 0);
         assert!(result.is_ok());
 
-        let result = find_prompt_in_history(tmp_repo.gitai_repo(), &prompt_id, 1);
+        let result = find_prompt_in_history(tmp_repo.gitai_repo(), &session_id, 1);
         assert!(result.is_err());
         assert!(
             result
@@ -1125,16 +1134,16 @@ mod tests {
             .commit_with_message("Test commit")
             .expect("Failed to commit");
 
-        let prompt_id = authorship
+        let session_id = authorship
             .metadata
-            .prompts
+            .sessions
             .keys()
             .next()
-            .expect("No prompt found")
+            .expect("No session found")
             .clone();
 
         // Test with commit specified
-        let result = find_prompt(tmp_repo.gitai_repo(), &prompt_id, Some("HEAD"), 0);
+        let result = find_prompt(tmp_repo.gitai_repo(), &session_id, Some("HEAD"), 0);
         assert!(result.is_ok());
         let (_sha, prompt) = result.unwrap();
         assert_eq!(prompt.agent_id.tool, "test_tool");
@@ -1155,16 +1164,16 @@ mod tests {
             .commit_with_message("Test commit")
             .expect("Failed to commit");
 
-        let prompt_id = authorship
+        let session_id = authorship
             .metadata
-            .prompts
+            .sessions
             .keys()
             .next()
-            .expect("No prompt found")
+            .expect("No session found")
             .clone();
 
         // Test without commit (searches history)
-        let result = find_prompt(tmp_repo.gitai_repo(), &prompt_id, None, 0);
+        let result = find_prompt(tmp_repo.gitai_repo(), &session_id, None, 0);
         assert!(result.is_ok());
         let (_sha, prompt) = result.unwrap();
         assert_eq!(prompt.agent_id.tool, "test_tool");
@@ -1198,16 +1207,16 @@ mod tests {
             .commit_with_message("Test commit")
             .expect("Failed to commit");
 
-        let prompt_id = authorship
+        let session_id = authorship
             .metadata
-            .prompts
+            .sessions
             .keys()
             .next()
-            .expect("No prompt found")
+            .expect("No session found")
             .clone();
 
         // Test fallback to repository
-        let result = find_prompt_with_db_fallback(&prompt_id, Some(tmp_repo.gitai_repo()));
+        let result = find_prompt_with_db_fallback(&session_id, Some(tmp_repo.gitai_repo()));
         assert!(result.is_ok());
         let (commit_sha, prompt) = result.unwrap();
         assert!(commit_sha.is_some());
