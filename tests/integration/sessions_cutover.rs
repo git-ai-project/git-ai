@@ -1313,6 +1313,7 @@ fn test_rebase_conflict_old_note_ai_resolves_with_sessions() {
         .unwrap();
 
     // Step 6: Verify the rebased commit's note
+    repo.sync_daemon_force();
     let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
     let note = repo
         .read_authorship_note(&rebased_sha)
@@ -1332,4 +1333,279 @@ fn test_rebase_conflict_old_note_ai_resolves_with_sessions() {
         "Modified base line".human(),
         "AI resolved line".ai(),
     ]);
+}
+
+// Test 15: show-prompt with an old-format prompt ID finds it in metadata.prompts
+#[test]
+fn test_show_prompt_finds_old_format_prompt_by_id() {
+    let repo = TestRepo::new();
+
+    // Create commit with AI content
+    let mut file = repo.filename("test.txt");
+    file.set_contents(crate::lines!["Human line", "AI line".ai()]);
+    let commit = repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Replace with old-format note
+    let old_hash = "abcd1234efgh5678";
+    let old_note = format!(
+        r#"test.txt
+  {} 2-2
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.0",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "cursor", "id": "show_prompt_session", "model": "gpt-4"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 5,
+      "total_deletions": 2,
+      "accepted_lines": 3,
+      "overriden_lines": 1
+    }}
+  }}
+}}"#,
+        old_hash, commit.commit_sha, old_hash
+    );
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &commit.commit_sha, &old_note).expect("attach old-format note");
+
+    // show-prompt with --commit should find the old-format prompt
+    let output = repo
+        .git_ai(&["show-prompt", old_hash, "--commit", "HEAD"])
+        .expect("show-prompt should find old-format prompt");
+
+    let json: Value = serde_json::from_str(output.trim()).unwrap();
+    assert_eq!(json["prompt_id"].as_str(), Some(old_hash));
+    assert_eq!(json["prompt"]["agent_id"]["tool"].as_str(), Some("cursor"));
+    assert_eq!(json["prompt"]["agent_id"]["model"].as_str(), Some("gpt-4"));
+}
+
+// Test 16: show-prompt searches history for old-format prompt
+#[test]
+fn test_show_prompt_finds_old_format_prompt_in_history() {
+    let repo = TestRepo::new();
+
+    // Create commit with AI content
+    let mut file = repo.filename("test.txt");
+    file.set_contents(crate::lines!["Human line", "AI line".ai()]);
+    let commit = repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Replace with old-format note
+    let old_hash = "1122334455667788";
+    let old_note = format!(
+        r#"test.txt
+  {} 2-2
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.0",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "windsurf", "id": "history_session", "model": "claude-3.5"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 10,
+      "total_deletions": 3,
+      "accepted_lines": 7,
+      "overriden_lines": 2
+    }}
+  }}
+}}"#,
+        old_hash, commit.commit_sha, old_hash
+    );
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &commit.commit_sha, &old_note).expect("attach old-format note");
+
+    // show-prompt without --commit should search history and find it
+    let output = repo
+        .git_ai(&["show-prompt", old_hash])
+        .expect("show-prompt should find old-format prompt in history");
+
+    let json: Value = serde_json::from_str(output.trim()).unwrap();
+    assert_eq!(json["prompt_id"].as_str(), Some(old_hash));
+    assert_eq!(json["prompt"]["agent_id"]["tool"].as_str(), Some("windsurf"));
+}
+
+// Test 17: git-ai stats --json correctly reads old-format prompt stats
+// (total_additions, total_deletions, overriden_lines)
+#[test]
+fn test_stats_json_reads_old_format_prompt_stats() {
+    let repo = TestRepo::new();
+
+    // Create commit with AI content
+    let mut file = repo.filename("test.txt");
+    file.set_contents(crate::lines!["Human line", "AI line".ai()]);
+    let commit = repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Replace with old-format note that has specific stats
+    let old_hash = "aabb11223344ccdd";
+    let old_note = format!(
+        r#"test.txt
+  {} 2-2
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.0",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "cursor", "id": "stats_session", "model": "gpt-4o"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 15,
+      "total_deletions": 5,
+      "accepted_lines": 8,
+      "overriden_lines": 3
+    }}
+  }}
+}}"#,
+        old_hash, commit.commit_sha, old_hash
+    );
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &commit.commit_sha, &old_note).expect("attach old-format note");
+
+    // Run git-ai stats --json
+    let output = repo.git_ai(&["stats", "--json"]).expect("stats should work");
+    let json: Value = serde_json::from_str(output.trim()).unwrap();
+
+    // Stats should reflect the old-format prompt's total_additions/total_deletions
+    let total_ai_additions = json["total_ai_additions"].as_u64().unwrap_or(0);
+    let total_ai_deletions = json["total_ai_deletions"].as_u64().unwrap_or(0);
+
+    assert_eq!(
+        total_ai_additions, 15,
+        "stats should read total_additions from old-format prompt"
+    );
+    assert_eq!(
+        total_ai_deletions, 5,
+        "stats should read total_deletions from old-format prompt"
+    );
+
+    // Verify tool_model_breakdown includes the old-format prompt's agent
+    // and propagates stats correctly
+    let breakdown = &json["tool_model_breakdown"];
+    let tool_stats = breakdown
+        .get("cursor::gpt-4o")
+        .expect("tool_model_breakdown should include old-format prompt's tool::model");
+    assert_eq!(
+        tool_stats["total_ai_additions"].as_u64().unwrap_or(0),
+        15,
+        "tool breakdown should have total_ai_additions from old-format prompt"
+    );
+    assert_eq!(
+        tool_stats["total_ai_deletions"].as_u64().unwrap_or(0),
+        5,
+        "tool breakdown should have total_ai_deletions from old-format prompt"
+    );
+    assert_eq!(
+        tool_stats["mixed_additions"].as_u64().unwrap_or(0),
+        3,
+        "tool breakdown should have overriden_lines from old-format prompt"
+    );
+}
+
+// Test 18: git-ai diff --json --all-prompts with new-format (sessions-only) commit
+// includes non-landing sessions in the output
+#[test]
+fn test_diff_json_all_prompts_includes_sessions() {
+    let repo = TestRepo::new();
+
+    // Create initial commit
+    let mut file = repo.filename("test.txt");
+    file.set_contents(crate::lines!["Line 1"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    // Create second commit with AI content (produces sessions, not prompts)
+    file.set_contents(crate::lines!["Line 1", "AI line".ai()]);
+    let commit = repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Run git-ai diff --json --all-prompts
+    let output = repo
+        .git_ai(&["diff", "--json", "--all-prompts", &commit.commit_sha])
+        .expect("diff --json --all-prompts should work");
+    let json: Value = serde_json::from_str(output.trim()).unwrap();
+
+    // The prompts array in diff output should include the session (converted to prompt format)
+    let prompts = json["prompts"].as_object();
+    assert!(
+        prompts.is_some() && !prompts.unwrap().is_empty(),
+        "diff --json --all-prompts should include sessions as prompts, got: {:?}",
+        json["prompts"]
+    );
+
+    // The prompt should have mock_ai as the tool
+    let first_prompt = prompts.unwrap().values().next().unwrap();
+    assert_eq!(
+        first_prompt["agent_id"]["tool"].as_str(),
+        Some("mock_ai"),
+        "session should be included as prompt with correct agent_id"
+    );
+}
+
+// Test 19: git-ai diff --json --all-prompts with old-format (prompts-only) commit
+// includes old prompts in the output
+#[test]
+fn test_diff_json_all_prompts_includes_old_format_prompts() {
+    let repo = TestRepo::new();
+
+    // Create initial commit
+    let mut file = repo.filename("test.txt");
+    file.set_contents(crate::lines!["Line 1"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    // Create second commit with AI content
+    file.set_contents(crate::lines!["Line 1", "AI line".ai()]);
+    let commit = repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Replace with old-format note
+    let old_hash = "5566778899aabbcc";
+    let old_note = format!(
+        r#"test.txt
+  {} 2-2
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.0",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "copilot", "id": "diff_session", "model": "gpt-4"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 5,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }}
+  }}
+}}"#,
+        old_hash, commit.commit_sha, old_hash
+    );
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &commit.commit_sha, &old_note).expect("attach old-format note");
+
+    // Run git-ai diff --json --all-prompts
+    let output = repo
+        .git_ai(&["diff", "--json", "--all-prompts", &commit.commit_sha])
+        .expect("diff --json --all-prompts should work");
+    let json: Value = serde_json::from_str(output.trim()).unwrap();
+
+    // The prompts should include the old-format prompt
+    let prompts = json["prompts"].as_object();
+    assert!(
+        prompts.is_some() && !prompts.unwrap().is_empty(),
+        "diff --json --all-prompts should include old-format prompts"
+    );
+    assert!(
+        prompts.unwrap().contains_key(old_hash),
+        "old prompt hash should be present in diff --all-prompts output"
+    );
 }
