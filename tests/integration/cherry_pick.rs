@@ -53,14 +53,14 @@ fn test_single_commit_cherry_pick() {
     )
     .unwrap();
 
-    let sessions = &log.metadata.sessions;
     assert!(
-        !sessions.is_empty(),
+        log.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        !log.metadata.sessions.is_empty(),
         "Should have at least one session record"
     );
-
-    // Sessions don't have stats fields, so we can't check accepted_lines/overridden_lines
-    // The stats are verified via the repo.stats() call above
 }
 
 #[test]
@@ -252,9 +252,14 @@ fn test_multiple_commits_cherry_pick() {
     )
     .unwrap();
 
-    let sessions = &log.metadata.sessions;
-    assert!(!sessions.is_empty(), "Should have session records");
-    // Sessions don't have stats fields, verified via repo.stats() above
+    assert!(
+        log.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        !log.metadata.sessions.is_empty(),
+        "Should have session records"
+    );
 }
 
 /// Test cherry-pick with conflicts and --continue
@@ -437,13 +442,14 @@ fn test_cherry_pick_multiple_ai_sessions() {
     )
     .unwrap();
 
-    let sessions = &log.metadata.sessions;
     assert!(
-        !sessions.is_empty(),
+        log.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        !log.metadata.sessions.is_empty(),
         "Should have at least one session record"
     );
-
-    // Sessions don't have stats fields, verified via repo.stats() above
 }
 
 /// Test that trees-identical fast path works
@@ -560,6 +566,14 @@ fn test_cherry_pick_preserves_custom_attributes_from_config() {
         .expect("original commit should have authorship note");
     let original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
+    assert!(
+        original_log.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        !original_log.metadata.sessions.is_empty(),
+        "precondition: original commit should have session records"
+    );
     for session in original_log.metadata.sessions.values() {
         assert_eq!(
             session.custom_attributes.as_ref(),
@@ -578,6 +592,10 @@ fn test_cherry_pick_preserves_custom_attributes_from_config() {
         .read_authorship_note(&new_commit)
         .expect("cherry-picked commit should have authorship note");
     let new_log = AuthorshipLog::deserialize_from_string(&new_note).expect("parse new note");
+    assert!(
+        new_log.metadata.prompts.is_empty(),
+        "cherry-picked commit should not have prompts"
+    );
     assert!(
         !new_log.metadata.sessions.is_empty(),
         "cherry-picked commit should have session records"
