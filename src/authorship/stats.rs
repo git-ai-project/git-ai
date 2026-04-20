@@ -628,9 +628,19 @@ fn accepted_lines_from_attestations(
 
             total_ai_accepted += accepted;
 
-            if let Some(prompt_record) = log.metadata.prompts.get(&entry.hash) {
+            // Session entries (s_ prefix): look up in sessions map
+            if entry.hash.starts_with("s_") {
+                let session_key = entry.hash.split("::").next().unwrap_or(&entry.hash);
+                if let Some(session_record) = log.metadata.sessions.get(session_key) {
+                    let tool_model = format!(
+                        "{}::{}",
+                        session_record.agent_id.tool, session_record.agent_id.model
+                    );
+                    *per_tool_model.entry(tool_model).or_insert(0) += accepted;
+                }
+            } else if let Some(prompt_record) = log.metadata.prompts.get(&entry.hash) {
                 let tool_model = format!(
-                    "{}::{}",
+                        "{}::{}",
                     prompt_record.agent_id.tool, prompt_record.agent_id.model
                 );
                 *per_tool_model.entry(tool_model).or_insert(0) += accepted;

@@ -270,6 +270,37 @@ impl AuthorshipLog {
                     continue;
                 }
 
+                // s_-prefixed hashes are session attestations — route to sessions map
+                if entry.hash.starts_with("s_") {
+                    // Extract session key from "s_<14hex>::t_<14hex>" format
+                    let session_key = entry.hash.split("::").next().unwrap_or(&entry.hash);
+                    if let Some(session_record) = self.metadata.sessions.get(session_key) {
+                        // Create a PromptRecord-like structure from SessionRecord for compatibility
+                        // Note: sessions don't have message transcripts or detailed stats
+                        let prompt_record = PromptRecord {
+                            agent_id: session_record.agent_id.clone(),
+                            human_author: session_record.human_author.clone(),
+                            messages: session_record.messages.clone(),
+                            total_additions: 0, // Sessions don't track detailed stats
+                            total_deletions: 0,
+                            accepted_lines: 0,
+                            overriden_lines: 0,
+                            messages_url: session_record.messages_url.clone(),
+                            custom_attributes: session_record.custom_attributes.clone(),
+                        };
+                        return Some((
+                            Author {
+                                username: session_record.agent_id.tool.clone(),
+                                email: String::new(),
+                            },
+                            Some(entry.hash.clone()), // Return full s_::t_ hash
+                            Some(prompt_record),
+                        ));
+                    }
+                    // Session hash not found locally — skip this entry
+                    continue;
+                }
+
                 // The hash corresponds to a prompt session short hash
                 if let Some(prompt_record) = self.metadata.prompts.get(&entry.hash) {
                     // Create author info from the prompt record
