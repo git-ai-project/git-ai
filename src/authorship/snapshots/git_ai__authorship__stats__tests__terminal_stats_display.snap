@@ -2,4 +2,4 @@
 source: src/authorship/stats.rs
 expression: mixed_output
 ---
-"you  █████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░ ai\n     33%                                  67%\n     \u{1b}[90mwaited 1200m for ai\u{1b}[0m\n"
+"you  █████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░ ai\n     33%                                  67%\n"

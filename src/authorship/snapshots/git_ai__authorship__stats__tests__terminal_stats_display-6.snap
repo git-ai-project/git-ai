@@ -2,4 +2,4 @@
 source: src/authorship/stats.rs
 expression: with_untracked_output
 ---
-"you  ███████········░░░░░░░░░░░░░░░░░░░░░░░░░ ai\n     18%          untracked  22%           60%\n     \u{1b}[90mwaited 1m for ai\u{1b}[0m\n"
+"you  ███████········░░░░░░░░░░░░░░░░░░░░░░░░░ ai\n     18%          untracked  22%           60%\n"

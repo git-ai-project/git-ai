@@ -1,6 +1,5 @@
 use crate::authorship::authorship_log::LineRange;
 use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
-use crate::authorship::transcript::Message;
 use crate::error::GitAiError;
 use crate::git::refs::get_authorship;
 use crate::git::repository::Repository;
@@ -13,8 +12,6 @@ pub struct ToolModelHeadlineStats {
     pub ai_additions: u32, // Number of lines committed with AI attribution
     #[serde(default)]
     pub ai_accepted: u32, // Number of AI-generated lines that were accepted by the user without any human edits
-    #[serde(default)]
-    pub time_waiting_for_ai: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -27,8 +24,6 @@ pub struct CommitStats {
     pub ai_additions: u32, // Number of lines committed with AI attribution
     #[serde(default)]
     pub ai_accepted: u32, // Number of AI-generated lines that were accepted by the user without any human edits
-    #[serde(default)]
-    pub time_waiting_for_ai: u64, // seconds
     #[serde(default)]
     pub git_diff_deleted_lines: u32,
     #[serde(default)]
@@ -227,23 +222,6 @@ pub fn write_stats_to_terminal(stats: &CommitStats, is_interactive: bool) -> Str
         }
     }
 
-    // Only show AI stats if there was actually AI code
-    if stats.ai_additions > 0 && stats.time_waiting_for_ai > 0 {
-        let minutes = stats.time_waiting_for_ai / 60;
-        let seconds = stats.time_waiting_for_ai % 60;
-        let waiting_time_str = if minutes > 0 {
-            format!("waited {}m for ai", minutes)
-        } else {
-            format!("waited {}s for ai", seconds)
-        };
-
-        let ai_acceptance_str = format!("     \x1b[90m{}\x1b[0m", waiting_time_str);
-        output.push_str(&ai_acceptance_str);
-        output.push('\n');
-        if is_interactive {
-            println!("{}", ai_acceptance_str);
-        }
-    }
     output
 }
 
@@ -330,14 +308,6 @@ pub fn write_stats_to_markdown(stats: &CommitStats) -> String {
     output.push_str("\n\n<details>\n");
     output.push_str("<summary>More stats</summary>\n\n");
 
-    let minutes = stats.time_waiting_for_ai / 60;
-    let seconds = stats.time_waiting_for_ai % 60;
-    let time_str = if minutes > 0 {
-        format!("{} minute{}", minutes, if minutes == 1 { "" } else { "s" })
-    } else {
-        format!("{} second{}", seconds, if seconds == 1 { "" } else { "s" })
-    };
-    output.push_str(&format!("- {} waiting for AI \n", time_str));
     // Find top model by accepted lines
     if !stats.tool_model_breakdown.is_empty()
         && let Some((model_name, model_stats)) = stats
@@ -359,7 +329,7 @@ pub fn write_stats_to_markdown(stats: &CommitStats) -> String {
 /// Calculate commit stats from an authorship log
 /// This helper can work with both fetched and in-memory authorship logs
 pub fn stats_from_authorship_log(
-    authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
+    _authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
     git_diff_added_lines: u32,
     git_diff_deleted_lines: u32,
     ai_accepted: u32,
@@ -371,48 +341,10 @@ pub fn stats_from_authorship_log(
         unknown_additions: 0,
         ai_additions: 0,
         ai_accepted,
-        time_waiting_for_ai: 0,
         tool_model_breakdown: BTreeMap::new(),
         git_diff_deleted_lines,
         git_diff_added_lines,
     };
-
-    // Process authorship log if present
-    if let Some(log) = authorship_log {
-        // Process old-format prompts (for waiting time only)
-        for prompt_record in log.metadata.prompts.values() {
-            let key = format!(
-                "{}::{}",
-                prompt_record.agent_id.tool, prompt_record.agent_id.model
-            );
-            let tool_stats = commit_stats.tool_model_breakdown.entry(key).or_default();
-
-            // Calculate time waiting for AI from transcript
-            let transcript = crate::authorship::transcript::AiTranscript {
-                messages: prompt_record.messages.clone(),
-            };
-            let waiting = calculate_waiting_time(&transcript);
-            commit_stats.time_waiting_for_ai += waiting;
-            tool_stats.time_waiting_for_ai += waiting;
-        }
-
-        // Process new-format sessions (for waiting time only)
-        for session_record in log.metadata.sessions.values() {
-            let key = format!(
-                "{}::{}",
-                session_record.agent_id.tool, session_record.agent_id.model
-            );
-            let tool_stats = commit_stats.tool_model_breakdown.entry(key).or_default();
-
-            // Calculate time waiting for AI from transcript
-            let transcript = crate::authorship::transcript::AiTranscript {
-                messages: session_record.messages.clone(),
-            };
-            let waiting = calculate_waiting_time(&transcript);
-            commit_stats.time_waiting_for_ai += waiting;
-            tool_stats.time_waiting_for_ai += waiting;
-        }
-    }
 
     // Update tool-level accepted counts using diff-based attribution.
     for (tool_model, accepted) in ai_accepted_by_tool {
@@ -623,62 +555,6 @@ pub fn get_git_diff_stats(
     Ok((added_lines, deleted_lines))
 }
 
-/// Calculate time waiting for AI from transcript messages
-fn calculate_waiting_time(transcript: &crate::authorship::transcript::AiTranscript) -> u64 {
-    let mut total_waiting_time = 0u64;
-    let messages = transcript.messages();
-
-    if messages.len() <= 1 {
-        return 0;
-    }
-
-    // Check if last message is from human (don't count time if so)
-    let last_message_is_human = matches!(messages.last(), Some(Message::User { .. }));
-    if last_message_is_human {
-        return 0;
-    }
-
-    // Sum time between user and AI messages
-    let mut i = 0;
-    while i < messages.len() - 1 {
-        if let (
-            Message::User {
-                timestamp: Some(user_ts),
-                ..
-            },
-            Message::Assistant {
-                timestamp: Some(ai_ts),
-                ..
-            }
-            | Message::Thinking {
-                timestamp: Some(ai_ts),
-                ..
-            }
-            | Message::Plan {
-                timestamp: Some(ai_ts),
-                ..
-            },
-        ) = (&messages[i], &messages[i + 1])
-        {
-            // Parse timestamps and calculate difference
-            if let (Ok(user_time), Ok(ai_time)) = (
-                chrono::DateTime::parse_from_rfc3339(user_ts),
-                chrono::DateTime::parse_from_rfc3339(ai_ts),
-            ) {
-                let duration = ai_time.signed_duration_since(user_time);
-                if duration.num_seconds() > 0 {
-                    total_waiting_time += duration.num_seconds() as u64;
-                }
-            }
-
-            i += 2; // Skip to next user message
-        } else {
-            i += 1;
-        }
-    }
-
-    total_waiting_time
-}
 
 #[cfg(test)]
 mod tests {
@@ -696,7 +572,7 @@ mod tests {
 
             ai_additions: 100,
             ai_accepted: 25,
-            time_waiting_for_ai: 72009, // 1 minute 30 seconds
+
             git_diff_deleted_lines: 15,
             git_diff_added_lines: 80,
 
@@ -713,7 +589,7 @@ mod tests {
 
             ai_additions: 100,
             ai_accepted: 95,
-            time_waiting_for_ai: 45,
+
             git_diff_deleted_lines: 0,
             git_diff_added_lines: 100,
 
@@ -730,7 +606,7 @@ mod tests {
 
             ai_additions: 0,
             ai_accepted: 0,
-            time_waiting_for_ai: 0,
+
             git_diff_deleted_lines: 10,
             git_diff_added_lines: 75,
 
@@ -747,7 +623,7 @@ mod tests {
 
             ai_additions: 100,
             ai_accepted: 95,
-            time_waiting_for_ai: 30,
+
             git_diff_deleted_lines: 0,
             git_diff_added_lines: 102,
 
@@ -764,7 +640,7 @@ mod tests {
 
             ai_additions: 0,
             ai_accepted: 0,
-            time_waiting_for_ai: 0,
+
             git_diff_deleted_lines: 25,
             git_diff_added_lines: 0,
 
@@ -783,7 +659,7 @@ mod tests {
 
             ai_additions: 600,
             ai_accepted: 462,
-            time_waiting_for_ai: 60,
+
             git_diff_deleted_lines: 0,
             git_diff_added_lines: 1000,
             tool_model_breakdown: BTreeMap::new(),
@@ -798,7 +674,7 @@ mod tests {
 
             ai_additions: 50,
             ai_accepted: 50,
-            time_waiting_for_ai: 0,
+
             git_diff_deleted_lines: 0,
             git_diff_added_lines: 100,
             tool_model_breakdown: BTreeMap::new(),
@@ -813,7 +689,7 @@ mod tests {
 
             ai_additions: 0,
             ai_accepted: 0,
-            time_waiting_for_ai: 0,
+
             git_diff_deleted_lines: 0,
             git_diff_added_lines: 99,
 
@@ -829,7 +705,7 @@ mod tests {
 
             ai_additions: 0,
             ai_accepted: 0,
-            time_waiting_for_ai: 0,
+
             git_diff_deleted_lines: 0,
             git_diff_added_lines: 100,
 
@@ -861,7 +737,7 @@ mod tests {
 
             ai_additions: 100,
             ai_accepted: 25,
-            time_waiting_for_ai: 72009, // 1 minute 30 seconds
+
             git_diff_deleted_lines: 15,
             git_diff_added_lines: 80,
 
@@ -878,7 +754,7 @@ mod tests {
 
             ai_additions: 100,
             ai_accepted: 95,
-            time_waiting_for_ai: 45,
+
             git_diff_deleted_lines: 0,
             git_diff_added_lines: 100,
 
@@ -895,7 +771,7 @@ mod tests {
 
             ai_additions: 0,
             ai_accepted: 0,
-            time_waiting_for_ai: 0,
+
             git_diff_deleted_lines: 10,
             git_diff_added_lines: 75,
 
@@ -912,7 +788,7 @@ mod tests {
 
             ai_additions: 100,
             ai_accepted: 95,
-            time_waiting_for_ai: 30,
+
             git_diff_deleted_lines: 0,
             git_diff_added_lines: 102,
 
@@ -929,7 +805,7 @@ mod tests {
 
             ai_additions: 0,
             ai_accepted: 0,
-            time_waiting_for_ai: 0,
+
             git_diff_deleted_lines: 25,
             git_diff_added_lines: 0,
 
@@ -981,10 +857,6 @@ mod tests {
         assert_eq!(
             stats.git_diff_deleted_lines, 0,
             "Git diff shows 0 deleted lines"
-        );
-        assert_eq!(
-            stats.time_waiting_for_ai, 0,
-            "No waiting time recorded (no timestamps in test)"
         );
     }
 
@@ -1526,150 +1398,6 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_waiting_time_no_messages() {
-        let transcript = crate::authorship::transcript::AiTranscript { messages: vec![] };
-        assert_eq!(calculate_waiting_time(&transcript), 0);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_single_message() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![Message::User {
-                text: "Hello".to_string(),
-                timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-            }],
-        };
-        assert_eq!(calculate_waiting_time(&transcript), 0);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_last_message_is_human() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![
-                Message::User {
-                    text: "Question".to_string(),
-                    timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-                },
-                Message::Assistant {
-                    text: "Answer".to_string(),
-                    timestamp: Some("2024-01-01T12:00:05Z".to_string()),
-                },
-                Message::User {
-                    text: "Follow-up".to_string(),
-                    timestamp: Some("2024-01-01T12:00:10Z".to_string()),
-                },
-            ],
-        };
-        // Last message is from user, so waiting time is 0
-        assert_eq!(calculate_waiting_time(&transcript), 0);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_with_ai_response() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![
-                Message::User {
-                    text: "Question".to_string(),
-                    timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-                },
-                Message::Assistant {
-                    text: "Answer".to_string(),
-                    timestamp: Some("2024-01-01T12:00:05Z".to_string()),
-                },
-            ],
-        };
-        // 5 seconds waiting time
-        assert_eq!(calculate_waiting_time(&transcript), 5);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_multiple_rounds() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![
-                Message::User {
-                    text: "Q1".to_string(),
-                    timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-                },
-                Message::Assistant {
-                    text: "A1".to_string(),
-                    timestamp: Some("2024-01-01T12:00:03Z".to_string()),
-                },
-                Message::User {
-                    text: "Q2".to_string(),
-                    timestamp: Some("2024-01-01T12:00:10Z".to_string()),
-                },
-                Message::Assistant {
-                    text: "A2".to_string(),
-                    timestamp: Some("2024-01-01T12:00:17Z".to_string()),
-                },
-            ],
-        };
-        // 3 seconds + 7 seconds = 10 seconds
-        assert_eq!(calculate_waiting_time(&transcript), 10);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_with_thinking_message() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![
-                Message::User {
-                    text: "Question".to_string(),
-                    timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-                },
-                Message::Thinking {
-                    text: "Analyzing...".to_string(),
-                    timestamp: Some("2024-01-01T12:00:02Z".to_string()),
-                },
-            ],
-        };
-        // Thinking message counts as AI response
-        assert_eq!(calculate_waiting_time(&transcript), 2);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_with_plan_message() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![
-                Message::User {
-                    text: "Request".to_string(),
-                    timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-                },
-                Message::Plan {
-                    text: "Step 1...".to_string(),
-                    timestamp: Some("2024-01-01T12:00:04Z".to_string()),
-                },
-            ],
-        };
-        // Plan message counts as AI response
-        assert_eq!(calculate_waiting_time(&transcript), 4);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_no_timestamps() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![
-                Message::User {
-                    text: "Question".to_string(),
-                    timestamp: None,
-                },
-                Message::Assistant {
-                    text: "Answer".to_string(),
-                    timestamp: None,
-                },
-            ],
-        };
-        // No timestamps means 0 waiting time
-        assert_eq!(calculate_waiting_time(&transcript), 0);
-    }
-
-    #[test]
     fn test_stats_command_nonexistent_commit() {
         let tmp_repo = TmpRepo::new().unwrap();
 
@@ -1758,7 +1486,6 @@ mod tests {
         assert_eq!(stats.ai_additions, 3); // ai_accepted when no mixed
         assert_eq!(stats.human_additions, 0); // no known-human attestations passed
         assert_eq!(stats.unknown_additions, 7); // 10 - 3 (unattested lines)
-        assert_eq!(stats.time_waiting_for_ai, 0);
     }
 
     #[test]
