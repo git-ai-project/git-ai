@@ -85,7 +85,7 @@ That's it — **no per-repo setup required.** Prompt and commit as normal. Git A
 - **"Detecting" AI code is an anti-pattern** — Git AI does not guess whether a hunk is AI-generated. Supported agents report exactly which lines they wrote, giving you the most accurate attribution possible.
 - **Local-first** — Works 100% offline, no login required.
 - **Git native and open standard** — Git AI built the [open standard](https://github.com/git-ai-project/git-ai/blob/main/specs/git_ai_standard_v3.0.0.md) for tracking AI-generated code with Git Notes.
-- **Secure Prompt Storage** — Git AI links each line of AI-code to the prompt that generated it. Since v1.0.0 Agent Sessions are stored outside of Git and can optionaly be synced to your team's [cloud](https://usegitai.com/docs/platform/overview) or [self-hosted](https://usegitai.com/docs/platform/self-hosting) prompt store -- keeping repos lean, enabling fine-grained access control, and preventing PII or secrets from leaking into Git.
+- **Secure Prompt Storage** — Git AI links each line of AI-code to the prompt that generated it. Since v1.0.0 Agent Sessions are stored outside of Git and can optionally be synced to your team's [cloud](https://usegitai.com/docs/platform/overview) or [self-hosted](https://usegitai.com/docs/platform/self-hosting) prompt store -- keeping repos lean, enabling fine-grained access control, and preventing PII or secrets from leaking into Git.
 
 ### How Git AI works
 1. **`Edit|Write|Bash` Hooks** get triggered as Agents make changes to a repository
@@ -149,17 +149,15 @@ Calculates % AI-code, AI-lines generated vs committed, accepted rates, human ove
 
 </details>
 
-For team-wide visibility, [Git AI For Teams](https://usegitai.com/enterprise) aggregates data at the PR, repository, and organization level:
+### For Teams
 
-- **AI code composition** — Track what percentage of code is AI-generated across your org.
-- **Pull Request Stats** - measure % AI, token spend/efficiency and agent autonomy 
-- **Full lifecycle tracking** — See how much AI code is accepted, committed, rewritten during code review, and deployed to production. Measure how durable that code is once it ships and whether it causes alerts or incidents.
-- **Team and Contributor stats** — Identify who uses background agents effectively, who runs agents in parallel, and what teams getting the most lift from AI do differently.
-- **Agent readiness** — Measure the effectiveness of agents in your repos. Track the impact of skills, rules, MCPs, test harnesses, and `AGENTS.md` changes across repos and task types.
-- **Agent and model comparison** — Compare acceptance rates and output quality by agent and model.
+[Git AI For Teams](https://usegitai.com/enterprise) aggregates attribution data at the PR, contributor, team repository, and organization level:
+
+- **Full lifecycle tracking** — See how much AI code is accepted, committed, rewritten in review, and deployed — and whether it causes alerts or incidents once shipped.
+- **Team and contributor stats** — Identify who uses background agents effectively and what high-leverage teams do differently.
+- **Agent readiness** — Measure the impact of skills, rules, MCPs, test harnesses, and `AGENTS.md` changes across repos and task types.
 
 <img  alt="new-graphic-dashboards" src="https://github.com/user-attachments/assets/1e2aec73-4e96-4531-ab5f-fe4deef2bbab" />
-
 
 [Set up your dashboards](https://usegitai.com/docs/platform/overview)
 
@@ -230,7 +228,7 @@ Agents with access to the original intent and source code understand the "why." 
 
 
 <details>
-<summary>Make Your Agents Smarter**</summary>
+<summary>Make Your Agents Smarter</summary>
 
 Agents make fewer mistakes and produce more maintainable code when they understand the requirements and decisions behind the code they build on. The best way to provide this context is to give agents the same `/ask` tool you use yourself. Tell your agents to use `/ask` in plan mode:
 
