@@ -141,21 +141,16 @@ fn test_authorship_log_stats() {
     // Neptune (override) — human-overrides-AI line — gets h_<hash> attestation.
     // Mercury, Venus, Jupiter also get h_<hash> attestation from the KnownHuman checkpoint.
     // All 4 human-written lines now count as human_additions; unknown_additions = 0.
-    // Neptune (override) is now h_<hash> attested, so it counts as human_additions only,
-    // not mixed. mixed_additions = 0.
+    // Neptune (override) is now h_<hash> attested, so it counts as human_additions only.
     assert_eq!(stats.human_additions, 4);
     assert_eq!(stats.unknown_additions, 0);
-    assert_eq!(stats.mixed_additions, 0);
     assert_eq!(stats.ai_additions, 5); // Neptune (override) no longer counted as mixed AI
     assert_eq!(stats.ai_accepted, 5);
-    // With sessions format (no stats fields), total_ai_additions/deletions are 0
-    assert_eq!(stats.total_ai_additions, 0);
-    assert_eq!(stats.total_ai_deletions, 0);
     assert_eq!(stats.git_diff_deleted_lines, 0);
     assert_eq!(stats.git_diff_added_lines, 9);
 
     assert_eq!(stats.tool_model_breakdown.len(), 1);
-    // With sessions format, ai_additions = ai_accepted + mixed_additions = 5 + 0 = 5
+    // ai_additions = ai_accepted = 5
     assert_eq!(
         stats
             .tool_model_breakdown
@@ -171,32 +166,6 @@ fn test_authorship_log_stats() {
             .unwrap()
             .ai_accepted,
         5
-    );
-    // With sessions format, total_ai_additions/deletions are 0
-    assert_eq!(
-        stats
-            .tool_model_breakdown
-            .get("mock_ai::unknown")
-            .unwrap()
-            .total_ai_additions,
-        0
-    );
-    assert_eq!(
-        stats
-            .tool_model_breakdown
-            .get("mock_ai::unknown")
-            .unwrap()
-            .total_ai_deletions,
-        0
-    );
-    // With sessions format, mixed_additions is 0 (not tracked)
-    assert_eq!(
-        stats
-            .tool_model_breakdown
-            .get("mock_ai::unknown")
-            .unwrap()
-            .mixed_additions,
-        0
     );
     assert_eq!(
         stats
@@ -364,11 +333,8 @@ fn test_markdown_stats_deletion_only() {
     let stats = CommitStats {
         human_additions: 0,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 0,
         ai_accepted: 0,
-        total_ai_additions: 0,
-        total_ai_deletions: 5,
         time_waiting_for_ai: 0,
         git_diff_deleted_lines: 5,
         git_diff_added_lines: 0,
@@ -388,11 +354,8 @@ fn test_markdown_stats_all_human() {
     let stats = CommitStats {
         human_additions: 10,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 0,
         ai_accepted: 0,
-        total_ai_additions: 0,
-        total_ai_deletions: 0,
         time_waiting_for_ai: 0,
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 10,
@@ -412,11 +375,8 @@ fn test_markdown_stats_all_ai() {
     let stats = CommitStats {
         human_additions: 0,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 15,
         ai_accepted: 15,
-        total_ai_additions: 15,
-        total_ai_deletions: 0,
         time_waiting_for_ai: 30,
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 15,
@@ -436,11 +396,8 @@ fn test_markdown_stats_mixed() {
     let stats = CommitStats {
         human_additions: 10,
         unknown_additions: 0,
-        mixed_additions: 5,
-        ai_additions: 20,
+        ai_additions: 15,
         ai_accepted: 15,
-        total_ai_additions: 25,
-        total_ai_deletions: 10,
         time_waiting_for_ai: 45,
         git_diff_deleted_lines: 5,
         git_diff_added_lines: 30,
@@ -460,11 +417,8 @@ fn test_markdown_stats_no_mixed() {
     let stats = CommitStats {
         human_additions: 8,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 12,
         ai_accepted: 12,
-        total_ai_additions: 12,
-        total_ai_deletions: 0,
         time_waiting_for_ai: 15,
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 20,
@@ -485,11 +439,8 @@ fn test_markdown_stats_minimal_human() {
     let stats = CommitStats {
         human_additions: 2,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 98,
         ai_accepted: 98,
-        total_ai_additions: 98,
-        total_ai_deletions: 0,
         time_waiting_for_ai: 10,
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 100,
@@ -510,11 +461,8 @@ fn test_markdown_stats_formatting() {
     tool_model_breakdown.insert(
         "cursor::claude-3.5-sonnet".to_string(),
         ToolModelHeadlineStats {
-            ai_additions: 8,
-            mixed_additions: 2,
+            ai_additions: 6,
             ai_accepted: 6,
-            total_ai_additions: 10,
-            total_ai_deletions: 3,
             time_waiting_for_ai: 25,
         },
     );
@@ -522,11 +470,8 @@ fn test_markdown_stats_formatting() {
     let stats = CommitStats {
         human_additions: 5,
         unknown_additions: 0,
-        mixed_additions: 2,
-        ai_additions: 8,
+        ai_additions: 6,
         ai_accepted: 6,
-        total_ai_additions: 10,
-        total_ai_deletions: 3,
         time_waiting_for_ai: 25,
         git_diff_deleted_lines: 2,
         git_diff_added_lines: 13,

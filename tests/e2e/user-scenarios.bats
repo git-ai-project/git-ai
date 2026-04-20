@@ -444,21 +444,15 @@ EOF
 
     expected_json='{
       "human_additions": 2,
-      "mixed_additions": 0,
       "ai_additions": 2,
       "ai_accepted": 2,
-      "total_ai_additions": 2,
-      "total_ai_deletions": 0,
       "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 4,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 2,
-          "mixed_additions": 0,
           "ai_accepted": 2,
-          "total_ai_additions": 2,
-          "total_ai_deletions": 0,
           "time_waiting_for_ai": 0
         }
       }
@@ -500,21 +494,15 @@ EOF
     # Define expected JSON structure
     expected_json='{
       "human_additions": 1,
-      "mixed_additions": 0,
       "ai_additions": 3,
       "ai_accepted": 3,
-      "total_ai_additions": 3,
-      "total_ai_deletions": 0,
       "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 4,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 3,
-          "mixed_additions": 0,
           "ai_accepted": 3,
-          "total_ai_additions": 3,
-          "total_ai_deletions": 0,
           "time_waiting_for_ai": 0
         }
       }
@@ -576,21 +564,15 @@ EOF
     # Define expected JSON structure for deletion scenario
     expected_json='{
       "human_additions": 7,
-      "mixed_additions": 0,
       "ai_additions": 0,
       "ai_accepted": 0,
-      "total_ai_additions": 0,
-      "total_ai_deletions": 4,
       "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 7,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 0,
-          "mixed_additions": 0,
           "ai_accepted": 0,
-          "total_ai_additions": 0,
-          "total_ai_deletions": 4,
           "time_waiting_for_ai": 0
         }
       }
@@ -645,21 +627,15 @@ EOF
     # AI generated 6 lines, human deleted 2 lines 
     expected_json='{
       "human_additions": 0,
-      "mixed_additions": 0,
       "ai_additions": 4,
       "ai_accepted": 4,
-      "total_ai_additions": 6,
-      "total_ai_deletions": 0,
       "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 4,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 4,
-          "mixed_additions": 0,
           "ai_accepted": 4,
-          "total_ai_additions": 6,
-          "total_ai_deletions": 0,
           "time_waiting_for_ai": 0
         }
       }
@@ -724,21 +700,15 @@ EOF
     # git_diff shows 17 additions (from 1 line to 17 lines = +16)
     expected_json='{
       "human_additions": 1,
-      "mixed_additions": 0,
       "ai_additions": 16,
       "ai_accepted": 16,
-      "total_ai_additions": 16,
-      "total_ai_deletions": 0,
       "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 17,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 16,
-          "mixed_additions": 0,
           "ai_accepted": 16,
-          "total_ai_additions": 16,
-          "total_ai_deletions": 0,
           "time_waiting_for_ai": 0
         }
       }
@@ -788,21 +758,15 @@ EOF
     # AI created a file with 8 lines, all should be attributed to AI
     expected_json='{
       "human_additions": 0,
-      "mixed_additions": 0,
       "ai_additions": 8,
       "ai_accepted": 8,
-      "total_ai_additions": 8,
-      "total_ai_deletions": 0,
       "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 8,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 8,
-          "mixed_additions": 0,
           "ai_accepted": 8,
-          "total_ai_additions": 8,
-          "total_ai_deletions": 0,
           "time_waiting_for_ai": 0
         }
       }
@@ -874,21 +838,15 @@ EOF
     # AI deleted: 2 lines
     expected_commit1_json='{
         "human_additions": 2,
-        "mixed_additions": 0,
         "ai_additions": 3,
         "ai_accepted": 3,
-        "total_ai_additions": 3,
-        "total_ai_deletions": 2,
         "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 2,
         "git_diff_added_lines": 5,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 3,
-                "mixed_additions": 0,
                 "ai_accepted": 3,
-                "total_ai_additions": 3,
-                "total_ai_deletions": 2,
                 "time_waiting_for_ai": 0
             }
         }
@@ -939,21 +897,15 @@ EOF
 
     expected_commit2_json='{
         "human_additions": 0,
-        "mixed_additions": 0,
         "ai_additions": 2,
         "ai_accepted": 2,
-        "total_ai_additions": 2,
-        "total_ai_deletions": 3,
         "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 4,
         "git_diff_added_lines": 2,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 2,
-                "mixed_additions": 0,
                 "ai_accepted": 2,
-                "total_ai_additions": 2,
-                "total_ai_deletions": 3,
                 "time_waiting_for_ai": 0
             }
         }
@@ -1025,21 +977,15 @@ EOF
 
     expected_json='{
         "human_additions": 2,
-        "mixed_additions": 0,
         "ai_additions": 4,
         "ai_accepted": 4,
-        "total_ai_additions": 5,
-        "total_ai_deletions": 5,
         "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 0,
         "git_diff_added_lines": 6,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 4,
-                "mixed_additions": 0,
                 "ai_accepted": 4,
-                "total_ai_additions": 5,
-                "total_ai_deletions": 5,
                 "time_waiting_for_ai": 0
             }
         }
@@ -1150,7 +1096,6 @@ EOF
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 6,
-          "mixed_additions": 0,
           "ai_accepted": 6,
           "ai_deletions": 0,
           "time_waiting_for_ai": 0
@@ -1210,21 +1155,15 @@ EOF
     # Expected stats for commit 2 before reset
     expected_commit2_json='{
       "human_additions": 0,
-      "mixed_additions": 0,
       "ai_additions": 5,
       "ai_accepted": 5,
-      "total_ai_additions": 5,
-      "total_ai_deletions": 0,
       "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 5,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 5,
-          "mixed_additions": 0,
           "ai_accepted": 5,
-          "total_ai_additions": 5,
-          "total_ai_deletions": 0,
           "time_waiting_for_ai": 0
         }
       }
@@ -1337,21 +1276,15 @@ EOF
 
     expected_json='{
       "human_additions": 0,
-      "mixed_additions": 0,
       "ai_additions": 8,
       "ai_accepted": 8,
-      "total_ai_additions": 8,
-      "total_ai_deletions": 0,
       "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 0,
       "git_diff_added_lines": 8,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 8,
-          "mixed_additions": 0,
           "ai_accepted": 8,
-          "total_ai_additions": 8,
-          "total_ai_deletions": 0,
           "time_waiting_for_ai": 0
         }
       }
@@ -1458,21 +1391,15 @@ EOF
 
     expected_json='{
         "human_additions": 0,
-        "mixed_additions": 0,
         "ai_additions": 6,
         "ai_accepted": 6,
-        "total_ai_additions": 6,
-        "total_ai_deletions": 1,
         "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 1,
         "git_diff_added_lines": 6,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
             "ai_additions": 6,
-            "mixed_additions": 0,
             "ai_accepted": 6,
-            "total_ai_additions": 6,
-            "total_ai_deletions": 1,
             "time_waiting_for_ai": 0
             }
         }
@@ -1507,11 +1434,8 @@ EOF
 
     expected_json='{
         "human_additions": 5,
-        "mixed_additions": 0,
         "ai_additions": 0,
         "ai_accepted": 0,
-        "total_ai_additions": 0,
-        "total_ai_deletions": 0,
         "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 1,
         "git_diff_added_lines": 5,
@@ -1571,21 +1495,15 @@ EOF
     # Note: The conflict resolution shows deletions from both human and AI sides
     expected_json='{
       "human_additions": 0,
-      "mixed_additions": 0,
       "ai_additions": 6,
       "ai_accepted": 6,
-      "total_ai_additions": 6,
-      "total_ai_deletions": 1,
       "time_waiting_for_ai": 0,
       "git_diff_deleted_lines": 3,
       "git_diff_added_lines": 6,
       "tool_model_breakdown": {
         "mock_ai::unknown": {
           "ai_additions": 6,
-          "mixed_additions": 0,
           "ai_accepted": 6,
-          "total_ai_additions": 6,
-          "total_ai_deletions": 1,
           "time_waiting_for_ai": 0
         }
       }
@@ -1704,21 +1622,15 @@ EOF
       },
       "range_stats": {
         "human_additions": 3,
-        "mixed_additions": 0,
         "ai_additions": 5,
         "ai_accepted": 5,
-        "total_ai_additions": 5,
-        "total_ai_deletions": 0,
         "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 0,
         "git_diff_added_lines": 8,
         "tool_model_breakdown": {
           "mock_ai::unknown": {
             "ai_additions": 5,
-            "mixed_additions": 0,
             "ai_accepted": 5,
-            "total_ai_additions": 5,
-            "total_ai_deletions": 0,
             "time_waiting_for_ai": 0
           }
         }
@@ -1759,21 +1671,15 @@ EOF
       },
       "range_stats": {
         "human_additions": 0,
-        "mixed_additions": 0,
         "ai_additions": 5,
         "ai_accepted": 5,
-        "total_ai_additions": 5,
-        "total_ai_deletions": 0,
         "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 0,
         "git_diff_added_lines": 5,
         "tool_model_breakdown": {
           "mock_ai::unknown": {
             "ai_additions": 5,
-            "mixed_additions": 0,
             "ai_accepted": 5,
-            "total_ai_additions": 5,
-            "total_ai_deletions": 0,
             "time_waiting_for_ai": 0
           }
         }
@@ -1840,21 +1746,15 @@ EOF
     # Verify Commit 1 stats
     expected_commit1_json='{
         "human_additions": 2,
-        "mixed_additions": 0,
         "ai_additions": 3,
         "ai_accepted": 3,
-        "total_ai_additions": 3,
-        "total_ai_deletions": 0,
         "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 0,
         "git_diff_added_lines": 5,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 3,
-                "mixed_additions": 0,
                 "ai_accepted": 3,
-                "total_ai_additions": 3,
-                "total_ai_deletions": 0,
                 "time_waiting_for_ai": 0
             }
         }
@@ -1923,21 +1823,15 @@ EOF
     #  - git_diff_added_lines: 4 (2 human + 2 AI lines added)
     expected_commit2_json='{
         "human_additions": 2,
-        "mixed_additions": 0,
         "ai_additions": 2,
         "ai_accepted": 2,
-        "total_ai_additions": 2,
-        "total_ai_deletions": 1,
         "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 1,
         "git_diff_added_lines": 4,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 2,
-                "mixed_additions": 0,
                 "ai_accepted": 2,
-                "total_ai_additions": 2,
-                "total_ai_deletions": 1,
                 "time_waiting_for_ai": 0
             }
         }
@@ -2010,21 +1904,15 @@ EOF
     
     expected_squashed_json='{
         "human_additions": 4,
-        "mixed_additions": 0,
         "ai_additions": 4,
         "ai_accepted": 4,
-        "total_ai_additions": 5,
-        "total_ai_deletions": 1,
         "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 0,
         "git_diff_added_lines": 8,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 4,
-                "mixed_additions": 0,
                 "ai_accepted": 4,
-                "total_ai_additions": 5,
-                "total_ai_deletions": 1,
                 "time_waiting_for_ai": 0
             }
         }
@@ -2123,21 +2011,15 @@ EOF
     # Verify the feature commit has mixed authorship
     expected_feature_json='{
         "human_additions": 3,
-        "mixed_additions": 0,
         "ai_additions": 4,
         "ai_accepted": 4,
-        "total_ai_additions": 4,
-        "total_ai_deletions": 0,
         "time_waiting_for_ai": 0,
         "git_diff_deleted_lines": 0,
         "git_diff_added_lines": 7,
         "tool_model_breakdown": {
             "mock_ai::unknown": {
                 "ai_additions": 4,
-                "mixed_additions": 0,
                 "ai_accepted": 4,
-                "total_ai_additions": 4,
-                "total_ai_deletions": 0,
                 "time_waiting_for_ai": 0
             }
         }
