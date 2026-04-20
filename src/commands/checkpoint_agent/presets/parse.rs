@@ -59,10 +59,9 @@ pub fn file_paths_from_tool_input(data: &Value, cwd: &str) -> Vec<PathBuf> {
         .or_else(|| tool_input.get("filepath"))
         .or_else(|| tool_input.get("path"))
         .and_then(|v| v.as_str())
+        && !path.is_empty()
     {
-        if !path.is_empty() {
-            return vec![resolve_absolute(path, cwd)];
-        }
+        return vec![resolve_absolute(path, cwd)];
     }
 
     // Try array fields
