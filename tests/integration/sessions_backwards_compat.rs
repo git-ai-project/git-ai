@@ -125,11 +125,14 @@ fn test_old_format_working_log_produces_prompts_not_sessions() {
         .expect("commit should have authorship note");
     let log = AuthorshipLog::deserialize_from_string(&note).expect("should parse note");
 
-    // In the current implementation, set_contents produces sessions, not prompts
-    // This is expected behavior - old format is only for compatibility with existing notes
+    // set_contents produces sessions in the new format, not prompts
     assert!(
-        !log.metadata.prompts.is_empty() || !log.metadata.sessions.is_empty(),
-        "should have either prompts or sessions"
+        log.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        !log.metadata.sessions.is_empty(),
+        "should have session records"
     );
 }
 
