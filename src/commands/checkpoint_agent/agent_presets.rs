@@ -37,8 +37,8 @@ pub struct AgentRunResult {
     pub captured_checkpoint_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BashPreHookStrategy {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BashPreHookStrategy {
     EmitHumanCheckpoint,
     SnapshotOnly,
 }
