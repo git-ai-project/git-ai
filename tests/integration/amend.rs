@@ -541,13 +541,14 @@ fn test_amend_preserves_custom_attributes_from_config() {
         .expect("original commit should have authorship note");
     let original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
-    for prompt in original_log.metadata.prompts.values() {
-        assert_eq!(
-            prompt.custom_attributes.as_ref(),
-            Some(&attrs),
-            "precondition: original commit should have custom_attributes from config (prompts)"
-        );
-    }
+    assert!(
+        original_log.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        !original_log.metadata.sessions.is_empty(),
+        "precondition: original commit should have session records"
+    );
     for session in original_log.metadata.sessions.values() {
         assert_eq!(
             session.custom_attributes.as_ref(),
@@ -570,16 +571,13 @@ fn test_amend_preserves_custom_attributes_from_config() {
     let amended_log =
         AuthorshipLog::deserialize_from_string(&amended_note).expect("parse amended note");
     assert!(
-        !amended_log.metadata.prompts.is_empty() || !amended_log.metadata.sessions.is_empty(),
-        "amended commit should have prompt or session records"
+        amended_log.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
     );
-    for prompt in amended_log.metadata.prompts.values() {
-        assert_eq!(
-            prompt.custom_attributes.as_ref(),
-            Some(&attrs),
-            "custom_attributes should be preserved through amend (prompts)"
-        );
-    }
+    assert!(
+        !amended_log.metadata.sessions.is_empty(),
+        "amended commit should have session records"
+    );
     for session in amended_log.metadata.sessions.values() {
         assert_eq!(
             session.custom_attributes.as_ref(),
@@ -624,8 +622,12 @@ fn test_amend_delete_ai_line_removes_prompt_from_note() {
     let original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("should parse original note");
     assert!(
-        !original_log.metadata.prompts.is_empty() || !original_log.metadata.sessions.is_empty(),
-        "precondition: original commit should have prompt or session records"
+        original_log.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        !original_log.metadata.sessions.is_empty(),
+        "precondition: original commit should have session records"
     );
 
     // Amend: overwrite the file with only human content, deleting the AI line.
@@ -681,12 +683,15 @@ fn test_amend_delete_prior_commit_ai_line_no_foreign_prompt_in_note() {
         .expect("commit A should have a note");
     let commit_a_log =
         AuthorshipLog::deserialize_from_string(&commit_a_note).expect("should parse commit A note");
-    let commit_a_prompt_ids: Vec<String> = commit_a_log.metadata.prompts.keys().cloned().collect();
+    assert!(
+        commit_a_log.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
     let commit_a_session_ids: Vec<String> =
         commit_a_log.metadata.sessions.keys().cloned().collect();
     assert!(
-        !commit_a_prompt_ids.is_empty() || !commit_a_session_ids.is_empty(),
-        "precondition: commit A should have prompt or session records"
+        !commit_a_session_ids.is_empty(),
+        "precondition: commit A should have session records"
     );
 
     // Commit B: a human-only addition on top of A.
@@ -724,17 +729,12 @@ fn test_amend_delete_prior_commit_ai_line_no_foreign_prompt_in_note() {
     let amended_b_log = AuthorshipLog::deserialize_from_string(&amended_b_note)
         .expect("should parse amended B note");
 
-    // The amended B note must NOT contain any of commit A's prompt IDs or session IDs.
+    // The amended B note must NOT contain any of commit A's session IDs.
     // They are foreign to commit B and have no corresponding attestation.
-    for prompt_id in &commit_a_prompt_ids {
-        assert!(
-            !amended_b_log.metadata.prompts.contains_key(prompt_id),
-            "Amended B's note should not contain prompt '{}' from commit A \
-             (foreign-prompt-leak bug): amended_b prompts = {:?}",
-            prompt_id,
-            amended_b_log.metadata.prompts.keys().collect::<Vec<_>>()
-        );
-    }
+    assert!(
+        amended_b_log.metadata.prompts.is_empty(),
+        "amended B should have no prompts"
+    );
     for session_id in &commit_a_session_ids {
         assert!(
             !amended_b_log.metadata.sessions.contains_key(session_id),
