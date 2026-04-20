@@ -455,7 +455,6 @@ fn test_markdown_stats_formatting() {
         ToolModelHeadlineStats {
             ai_additions: 6,
             ai_accepted: 6,
-
         },
     );
 
