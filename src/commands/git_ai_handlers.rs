@@ -6,14 +6,10 @@ use crate::authorship::stats::stats_command;
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands;
 use crate::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult, AiTabPreset, ClaudePreset,
-    CodexPreset, ContinueCliPreset, CursorPreset, DroidPreset, FirebenderPreset, GeminiPreset,
+    AgentRunResult, ClaudePreset, CodexPreset, ContinueCliPreset, CursorPreset, GeminiPreset,
     GithubCopilotPreset, WindsurfPreset,
 };
-use crate::commands::checkpoint_agent::agent_v1_preset::AgentV1Preset;
 use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
-use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
-use crate::commands::checkpoint_agent::pi_preset::PiPreset;
 use crate::config;
 use crate::daemon::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, LiveCheckpointRunRequest,
@@ -412,225 +408,38 @@ fn handle_checkpoint(args: &[String]) {
     let mut agent_run_result = None;
     // Handle preset arguments after parsing all flags
     if !args.is_empty() {
+        // Route recognized presets through the new orchestrator; mock/test presets
+        // are handled by the second match below.
         match args[0].as_str() {
-            "claude" => {
-                match ClaudePreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
+            "mock_ai" | "known_human" | "mock_known_human" => {
+                // These are handled below -- skip the orchestrator path
+            }
+            _ => {
+                if crate::commands::checkpoint_agent::presets::resolve_preset(args[0].as_str())
+                    .is_ok()
+                {
+                    match crate::commands::checkpoint_agent::orchestrator::execute_preset_checkpoint(
+                        args[0].as_str(),
+                        hook_input.as_deref().unwrap_or(""),
+                    ) {
+                        Ok(results) => {
+                            if let Some(first) = results.into_iter().next() {
+                                repository_working_dir =
+                                    first.repo_working_dir.to_string_lossy().to_string();
+                                agent_run_result = Some(first.into_agent_run_result());
+                            }
                         }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Claude preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "codex" => {
-                match CodexPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
+                        Err(e) => {
+                            eprintln!("{} preset error: {}", args[0], e);
+                            std::process::exit(0);
                         }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Codex preset error: {}", e);
-                        std::process::exit(0);
                     }
                 }
             }
-            "gemini" => {
-                match GeminiPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Gemini preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "windsurf" => {
-                match WindsurfPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Windsurf preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "continue-cli" => {
-                match ContinueCliPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Continue CLI preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "cursor" => {
-                match CursorPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Error running Cursor preset: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "github-copilot" => {
-                match GithubCopilotPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Github Copilot preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "amp" => {
-                match AmpPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Amp preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "ai_tab" => {
-                match AiTabPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("ai_tab preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "firebender" => {
-                match FirebenderPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Firebender preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "agent-v1" => {
-                match AgentV1Preset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Agent V1 preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "droid" => {
-                match DroidPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Droid preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "opencode" => {
-                match OpenCodePreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("OpenCode preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "pi" => {
-                match PiPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Pi preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
+        }
+
+        // Second match: mock/test presets that bypass the orchestrator
+        match args[0].as_str() {
             "mock_ai" => {
                 let mock_agent_id = format!(
                     "ai-thread-{}",

@@ -192,11 +192,8 @@ impl AgentPreset for FirebenderPreset {
                 .unwrap_or_else(|_| "0".to_string())
         });
 
-        let dirty = dirty_files.map(|df| {
-            df.into_iter()
-                .map(|(k, v)| (PathBuf::from(k), v))
-                .collect()
-        });
+        let dirty =
+            dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
 
         let context = PresetContext {
             agent_id: AgentId {
@@ -422,14 +419,20 @@ mod tests {
     #[test]
     fn test_firebender_normalize_hook_path() {
         assert_eq!(
-            FirebenderPreset::normalize_hook_path("/home/user/project/src/main.rs", "/home/user/project"),
+            FirebenderPreset::normalize_hook_path(
+                "/home/user/project/src/main.rs",
+                "/home/user/project"
+            ),
             Some("src/main.rs".to_string())
         );
         assert_eq!(
             FirebenderPreset::normalize_hook_path("src/main.rs", "/home/user/project"),
             Some("src/main.rs".to_string())
         );
-        assert_eq!(FirebenderPreset::normalize_hook_path("", "/home/user"), None);
+        assert_eq!(
+            FirebenderPreset::normalize_hook_path("", "/home/user"),
+            None
+        );
     }
 
     #[test]

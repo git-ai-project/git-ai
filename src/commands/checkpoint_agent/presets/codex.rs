@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PreBashCall, PresetContext,
-    TranscriptFormat, TranscriptSource,
+    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
+    PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
@@ -13,13 +13,38 @@ pub struct CodexPreset;
 
 impl CodexPreset {
     fn session_id_from_hook_data(data: &serde_json::Value) -> Result<String, GitAiError> {
+        // Try session_id, thread_id (underscore), and thread-id (hyphen, used by agent-turn-complete)
         parse::optional_str_multi(data, &["session_id", "thread_id"])
+            .or_else(|| data.get("thread-id").and_then(|v| v.as_str()))
+            .or_else(|| {
+                data.get("hook_event")
+                    .and_then(|ev| ev.get("thread_id"))
+                    .and_then(|v| v.as_str())
+            })
             .map(|s| s.to_string())
             .ok_or_else(|| {
                 GitAiError::PresetError(
                     "session_id or thread_id not found in hook_input".to_string(),
                 )
             })
+    }
+
+    fn resolve_transcript_path(data: &serde_json::Value, session_id: &str) -> Option<String> {
+        // 1. Explicit transcript_path in hook input
+        if let Some(tp) = parse::optional_str(data, "transcript_path") {
+            return Some(tp.to_string());
+        }
+
+        // 2. Search for latest rollout file on disk
+        use crate::commands::checkpoint_agent::agent_presets::CodexPreset as OldCodexPreset;
+        match OldCodexPreset::find_latest_rollout_path_for_session(session_id) {
+            Ok(Some(path)) => Some(path.to_string_lossy().to_string()),
+            Ok(None) => None,
+            Err(e) => {
+                eprintln!("[Warning] Failed to locate Codex rollout for session {session_id}: {e}");
+                None
+            }
+        }
     }
 }
 
@@ -38,18 +63,11 @@ impl AgentPreset for CodexPreset {
             .map(|n| bash_tool::classify_tool(Agent::Codex, n) == ToolClass::Bash)
             .unwrap_or(false);
 
-        if !is_bash {
-            return Err(GitAiError::PresetError(format!(
-                "Codex preset only supports bash tools, got: {:?}",
-                tool_name
-            )));
-        }
-
-        let transcript_path = parse::optional_str(&data, "transcript_path");
+        let transcript_path = Self::resolve_transcript_path(&data, &session_id);
 
         let mut metadata = HashMap::new();
-        if let Some(tp) = transcript_path {
-            metadata.insert("transcript_path".to_string(), tp.to_string());
+        if let Some(ref tp) = transcript_path {
+            metadata.insert("transcript_path".to_string(), tp.clone());
         }
 
         let context = PresetContext {
@@ -70,18 +88,40 @@ impl AgentPreset for CodexPreset {
             session_id: None,
         });
 
-        let event = if hook_event == Some("PreToolUse") {
-            ParsedHookEvent::PreBashCall(PreBashCall {
+        let event = match hook_event {
+            Some("PreToolUse") => {
+                if !is_bash {
+                    return Err(GitAiError::PresetError(format!(
+                        "Skipping Codex PreToolUse for unsupported tool {}",
+                        tool_name.unwrap_or("unknown")
+                    )));
+                }
+                ParsedHookEvent::PreBashCall(PreBashCall {
+                    context,
+                    tool_use_id: tool_use_id.to_string(),
+                    strategy: BashPreHookStrategy::SnapshotOnly,
+                })
+            }
+            Some("PostToolUse") => {
+                if !is_bash {
+                    return Err(GitAiError::PresetError(format!(
+                        "Skipping Codex PostToolUse for unsupported tool {}",
+                        tool_name.unwrap_or("unknown")
+                    )));
+                }
+                ParsedHookEvent::PostBashCall(PostBashCall {
+                    context,
+                    tool_use_id: tool_use_id.to_string(),
+                    transcript_source,
+                })
+            }
+            // "Stop", None, or "agent-turn-complete" etc. -- general checkpoint with transcript
+            _ => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
-                tool_use_id: tool_use_id.to_string(),
-                strategy: BashPreHookStrategy::SnapshotOnly,
-            })
-        } else {
-            ParsedHookEvent::PostBashCall(PostBashCall {
-                context,
-                tool_use_id: tool_use_id.to_string(),
+                file_paths: vec![],
+                dirty_files: None,
                 transcript_source,
-            })
+            }),
         };
 
         Ok(vec![event])
