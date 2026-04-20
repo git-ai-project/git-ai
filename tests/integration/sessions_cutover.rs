@@ -1455,10 +1455,13 @@ fn test_show_prompt_finds_old_format_prompt_in_history() {
     assert_eq!(json["prompt"]["agent_id"]["tool"].as_str(), Some("windsurf"));
 }
 
-// Test 17: git-ai stats --json correctly reads old-format prompt stats
-// (total_additions, total_deletions, overriden_lines)
+// Test 17: git-ai stats --json works correctly with old-format notes.
+// After the stats simplification (PR #1154), prompt-era fields like total_additions,
+// total_deletions, and overriden_lines are no longer surfaced. Stats are now purely
+// diff-based. This test verifies that old-format notes don't break stats and that
+// diff-based ai_accepted still works correctly.
 #[test]
-fn test_stats_json_reads_old_format_prompt_stats() {
+fn test_stats_json_works_with_old_format_notes() {
     let repo = TestRepo::new();
 
     // Create commit with AI content
@@ -1494,43 +1497,29 @@ fn test_stats_json_reads_old_format_prompt_stats() {
         .expect("find repository");
     notes_add(&git_ai_repo, &commit.commit_sha, &old_note).expect("attach old-format note");
 
-    // Run git-ai stats --json
-    let output = repo.git_ai(&["stats", "--json"]).expect("stats should work");
+    // Run git-ai stats --json — should not crash on old-format notes
+    let output = repo.git_ai(&["stats", "--json"]).expect("stats should work with old-format notes");
     let json: Value = serde_json::from_str(output.trim()).unwrap();
 
-    // Stats should reflect the old-format prompt's total_additions/total_deletions
-    let total_ai_additions = json["total_ai_additions"].as_u64().unwrap_or(0);
-    let total_ai_deletions = json["total_ai_deletions"].as_u64().unwrap_or(0);
-
+    // Diff-based ai_accepted should still correctly count AI lines from the attestation
+    let ai_accepted = json["ai_accepted"].as_u64().unwrap_or(0);
     assert_eq!(
-        total_ai_additions, 15,
-        "stats should read total_additions from old-format prompt"
-    );
-    assert_eq!(
-        total_ai_deletions, 5,
-        "stats should read total_deletions from old-format prompt"
+        ai_accepted, 1,
+        "ai_accepted should count AI lines from old-format attestation (1 line at line 2)"
     );
 
-    // Verify tool_model_breakdown includes the old-format prompt's agent
-    // and propagates stats correctly
+    // ai_additions should equal ai_accepted (post-PR-1154: no mixed component)
+    let ai_additions = json["ai_additions"].as_u64().unwrap_or(0);
+    assert_eq!(
+        ai_additions, ai_accepted,
+        "ai_additions should equal ai_accepted"
+    );
+
+    // tool_model_breakdown should still include the old-format prompt's tool::model
     let breakdown = &json["tool_model_breakdown"];
-    let tool_stats = breakdown
-        .get("cursor::gpt-4o")
-        .expect("tool_model_breakdown should include old-format prompt's tool::model");
-    assert_eq!(
-        tool_stats["total_ai_additions"].as_u64().unwrap_or(0),
-        15,
-        "tool breakdown should have total_ai_additions from old-format prompt"
-    );
-    assert_eq!(
-        tool_stats["total_ai_deletions"].as_u64().unwrap_or(0),
-        5,
-        "tool breakdown should have total_ai_deletions from old-format prompt"
-    );
-    assert_eq!(
-        tool_stats["mixed_additions"].as_u64().unwrap_or(0),
-        3,
-        "tool breakdown should have overriden_lines from old-format prompt"
+    assert!(
+        breakdown.get("cursor::gpt-4o").is_some(),
+        "tool_model_breakdown should include old-format prompt's tool::model"
     );
 }
 
