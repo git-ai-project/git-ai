@@ -289,13 +289,13 @@ The individual reader functions are unchanged — they just live in a new home a
 
 ## Daemon Integration (First-Class Path)
 
-The daemon is the primary execution path. The wrapper (direct CLI) is legacy and will be deprecated. The architecture reflects this:
+The daemon is the primary execution path. The sync/wrapper mode (where the `git` wrapper runs checkpoints inline without the daemon) is legacy and will be deprecated. The architecture reflects this:
 
 ### Execution Model
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Wrapper Process (git-ai checkpoint <agent>)            │
+│  Checkpoint Process (git-ai checkpoint <agent>)            │
 │                                                         │
 │  1. Generate trace_id                                   │
 │  2. Run preset.parse(hook_input, trace_id)              │
@@ -326,11 +326,11 @@ The daemon is the primary execution path. The wrapper (direct CLI) is legacy and
 
 ### Key Design Decisions
 
-1. **Preset parsing + orchestration happen in the wrapper** — the daemon receives fully-resolved `CheckpointResult`, never raw hook JSON.
+1. **Preset parsing + orchestration happen in the checkpoint process** — the daemon receives fully-resolved `CheckpointResult`, never raw hook JSON.
 2. **`CheckpointResult` is serializable** (Serialize + Deserialize) — it travels over the Unix socket as part of `LiveCheckpointRunRequest`.
 3. **Captured checkpoints remain unchanged** — `prepare_captured_checkpoint` consumes `CheckpointResult` (replacing `AgentRunResult`) to write the manifest to disk. The daemon loads and executes captures without needing the result type.
 4. **Daemon-internal construction** — the daemon's `build_human_replay_agent_result` and bash-in-flight logic construct `CheckpointResult` directly (they're not preset-driven).
-5. **The wrapper's fallback local path** (`checkpoint::run()` without daemon) also consumes `CheckpointResult` — same type regardless of execution path.
+5. **The fallback local path** (`checkpoint::run()` without daemon, used in sync/wrapper mode) also consumes `CheckpointResult` — same type regardless of execution path.
 
 ### Control API Changes
 
@@ -346,7 +346,7 @@ pub struct LiveCheckpointRunRequest {
 }
 ```
 
-### Wrapper Dispatch (git_ai_handlers.rs)
+### Checkpoint Process Dispatch (git_ai_handlers.rs)
 
 The current 220-line match block with 14 nearly identical arms becomes:
 
