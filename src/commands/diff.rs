@@ -104,20 +104,12 @@ pub struct DiffJson {
 pub struct DiffToolModelStats {
     #[serde(default)]
     pub ai_lines_added: u32,
-    #[serde(default)]
-    pub ai_lines_generated: u32,
-    #[serde(default)]
-    pub ai_deletions_generated: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct DiffCommitStats {
     #[serde(default)]
     pub ai_lines_added: u32,
-    #[serde(default)]
-    pub ai_lines_generated: u32,
-    #[serde(default)]
-    pub ai_deletions_generated: u32,
     #[serde(default)]
     pub human_lines_added: u32,
     #[serde(default)]
@@ -380,14 +372,6 @@ pub fn execute_diff(repo: &Repository, parsed: ParsedDiffArgs) -> Result<String,
                         &to_commit,
                         &mut stats_prompts,
                         &mut stats_sessions,
-                    );
-                }
-                if is_single_commit && parsed.options.blame_deletions {
-                    filter_stats_prompts_for_blame_deletions(
-                        repo,
-                        &to_commit,
-                        &artifacts,
-                        &mut stats_prompts,
                     );
                 }
                 Some(calculate_diff_commit_stats(
@@ -1455,43 +1439,6 @@ fn merge_missing_prompts_and_sessions_from_authorship_note(
     }
 }
 
-fn filter_stats_prompts_for_blame_deletions(
-    repo: &Repository,
-    commit_sha: &str,
-    artifacts: &DiffBuildArtifacts,
-    prompts: &mut BTreeMap<String, PromptRecord>,
-) {
-    let mut keep_prompt_ids = prompt_ids_from_added_hunks(artifacts);
-    keep_prompt_ids.extend(prompt_ids_from_authorship_note(repo, commit_sha));
-    prompts.retain(|prompt_id, _| keep_prompt_ids.contains(prompt_id));
-}
-
-fn prompt_ids_from_added_hunks(artifacts: &DiffBuildArtifacts) -> HashSet<String> {
-    artifacts
-        .json_hunks
-        .iter()
-        .filter(|hunk| hunk.hunk_kind == "addition")
-        .filter_map(|hunk| hunk.prompt_id.clone())
-        .collect()
-}
-
-fn prompt_ids_from_authorship_note(repo: &Repository, commit_sha: &str) -> HashSet<String> {
-    get_authorship(repo, commit_sha)
-        .map(|authorship_log| {
-            let mut ids: HashSet<String> = authorship_log.metadata.prompts.into_keys().collect();
-            // Collect full attestation hashes for sessions (s_xxx::t_yyy format)
-            for file_attestation in &authorship_log.attestations {
-                for entry in &file_attestation.entries {
-                    if entry.hash.starts_with("s_") {
-                        ids.insert(entry.hash.clone());
-                    }
-                }
-            }
-            ids
-        })
-        .unwrap_or_default()
-}
-
 fn line_range_len(range: &LineRange) -> u32 {
     match range {
         LineRange::Single(_) => 1,
@@ -1505,24 +1452,19 @@ fn calculate_diff_commit_stats(
     sessions: &BTreeMap<String, SessionRecord>,
 ) -> DiffCommitStats {
     let mut stats = DiffCommitStats::default();
-    let mut ai_lines_added_by_tool_model: BTreeMap<String, u32> = BTreeMap::new();
 
     for annotations in artifacts.annotations_by_file.values() {
         for (prompt_id, ranges) in annotations {
             let landed_lines = ranges.iter().map(line_range_len).sum::<u32>();
             stats.ai_lines_added += landed_lines;
-            if let Some(prompt_record) = prompts.get(prompt_id) {
-                let key = format!(
-                    "{}::{}",
-                    prompt_record.agent_id.tool, prompt_record.agent_id.model
-                );
-                *ai_lines_added_by_tool_model.entry(key).or_default() += landed_lines;
-            } else if let Some(session_record) = sessions.get(prompt_id) {
-                let key = format!(
-                    "{}::{}",
-                    session_record.agent_id.tool, session_record.agent_id.model
-                );
-                *ai_lines_added_by_tool_model.entry(key).or_default() += landed_lines;
+            let key = prompts
+                .get(prompt_id)
+                .map(|r| &r.agent_id)
+                .or_else(|| sessions.get(prompt_id).map(|r| &r.agent_id))
+                .map(|agent_id| format!("{}::{}", agent_id.tool, agent_id.model));
+            if let Some(key) = key {
+                let tool_stats = stats.tool_model_breakdown.entry(key).or_default();
+                tool_stats.ai_lines_added += landed_lines;
             }
         }
     }
@@ -1544,34 +1486,6 @@ fn calculate_diff_commit_stats(
         if hunk.hunk_kind == "deletion" {
             stats.git_lines_deleted += hunk.end_line.saturating_sub(hunk.start_line) + 1;
         }
-    }
-
-    for prompt_record in prompts.values() {
-        stats.ai_lines_generated += prompt_record.total_additions;
-        stats.ai_deletions_generated += prompt_record.total_deletions;
-
-        let key = format!(
-            "{}::{}",
-            prompt_record.agent_id.tool, prompt_record.agent_id.model
-        );
-        let tool_stats = stats.tool_model_breakdown.entry(key).or_default();
-        tool_stats.ai_lines_generated += prompt_record.total_additions;
-        tool_stats.ai_deletions_generated += prompt_record.total_deletions;
-    }
-
-    for (key, ai_lines_added) in ai_lines_added_by_tool_model {
-        let tool_stats = stats.tool_model_breakdown.entry(key).or_default();
-        tool_stats.ai_lines_added += ai_lines_added;
-        // Session-format records don't carry total_additions/total_deletions stats.
-        // Use landed lines as the generated count when no prompts contributed stats.
-        if tool_stats.ai_lines_generated == 0 && ai_lines_added > 0 {
-            tool_stats.ai_lines_generated = ai_lines_added;
-        }
-    }
-
-    // Same fallback at the top level for session-only commits.
-    if stats.ai_lines_generated == 0 && stats.ai_lines_added > 0 {
-        stats.ai_lines_generated = stats.ai_lines_added;
     }
 
     stats
@@ -2714,16 +2628,12 @@ index abc123..def456 100644
         assert_eq!(stats.unknown_lines_added, 1);
         assert_eq!(stats.git_lines_added, 3);
         assert_eq!(stats.git_lines_deleted, 2);
-        assert_eq!(stats.ai_lines_generated, 5);
-        assert_eq!(stats.ai_deletions_generated, 2);
 
         let breakdown = stats
             .tool_model_breakdown
             .get("cursor::gpt-4o")
             .expect("expected cursor::gpt-4o breakdown entry");
         assert_eq!(breakdown.ai_lines_added, 1);
-        assert_eq!(breakdown.ai_lines_generated, 5);
-        assert_eq!(breakdown.ai_deletions_generated, 2);
     }
 
     #[test]
