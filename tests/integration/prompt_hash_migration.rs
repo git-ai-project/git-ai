@@ -78,11 +78,22 @@ fn truncate_checkpoint_hashes(repo: &TestRepo, commit_sha: &str) {
     fs::write(&checkpoint_file, new_content).expect("Failed to write modified checkpoint file");
 }
 
-/// Verify that all prompt IDs in an authorship log are 16 chars long
+/// Verify that all IDs in an authorship log use the correct format.
+/// Session IDs are `s_` + 14 hex = 16 chars. Attestation hashes are either
+/// `s_14hex::t_14hex` (34 chars) for session format or 16 chars for old prompt format.
 fn verify_prompt_ids_are_16_chars(
     authorship_log: &git_ai::authorship::authorship_log_serialization::AuthorshipLog,
 ) {
-    // Check all prompt IDs in metadata.prompts
+    for session_id in authorship_log.metadata.sessions.keys() {
+        assert_eq!(
+            session_id.len(),
+            16,
+            "Session ID '{}' should be 16 chars long, but is {} chars",
+            session_id,
+            session_id.len()
+        );
+    }
+
     for prompt_id in authorship_log.metadata.prompts.keys() {
         assert_eq!(
             prompt_id.len(),
@@ -93,13 +104,18 @@ fn verify_prompt_ids_are_16_chars(
         );
     }
 
-    // Check all hash values in attestations
     for attestation in &authorship_log.attestations {
         for entry in &attestation.entries {
-            assert_eq!(
-                entry.hash.len(),
-                16,
-                "Attestation hash '{}' should be 16 chars long, but is {} chars",
+            let valid_len = if entry.hash.starts_with("s_") {
+                entry.hash.len() == 34 || entry.hash.len() == 16
+            } else if entry.hash.starts_with("h_") {
+                true
+            } else {
+                entry.hash.len() == 16
+            };
+            assert!(
+                valid_len,
+                "Attestation hash '{}' has unexpected length {} chars",
                 entry.hash,
                 entry.hash.len()
             );

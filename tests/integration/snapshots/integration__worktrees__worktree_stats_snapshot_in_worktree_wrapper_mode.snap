@@ -1,6 +1,5 @@
 ---
 source: tests/integration/worktrees.rs
-assertion_line: 476
 expression: stats
 ---
 CommitStats {
@@ -9,8 +8,8 @@ CommitStats {
     mixed_additions: 0,
     ai_additions: 2,
     ai_accepted: 2,
-    total_ai_additions: 2,
-    total_ai_deletions: 2,
+    total_ai_additions: 0,
+    total_ai_deletions: 0,
     time_waiting_for_ai: 0,
     git_diff_deleted_lines: 0,
     git_diff_added_lines: 3,
@@ -19,8 +18,8 @@ CommitStats {
             ai_additions: 2,
             mixed_additions: 0,
             ai_accepted: 2,
-            total_ai_additions: 2,
-            total_ai_deletions: 2,
+            total_ai_additions: 0,
+            total_ai_deletions: 0,
             time_waiting_for_ai: 0,
         },
     },

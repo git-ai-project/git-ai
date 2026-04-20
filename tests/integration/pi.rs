@@ -218,17 +218,17 @@ fn test_pi_post_commit_resyncs_latest_session_transcript() {
         .stage_all_and_commit("Commit with Pi transcript resync")
         .unwrap();
 
-    let prompt_record = commit
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("expected a prompt record");
+        .expect("expected a session record");
 
-    assert_eq!(prompt_record.agent_id.tool, "pi");
-    assert_eq!(prompt_record.agent_id.model, "gpt-5");
-    assert!(prompt_record.messages.iter().any(|message| matches!(
+    assert_eq!(session_record.agent_id.tool, "pi");
+    assert_eq!(session_record.agent_id.model, "gpt-5");
+    assert!(session_record.messages.iter().any(|message| matches!(
         message,
         Message::Assistant { text, .. }
             if text.contains("RESYNC_TEST_MESSAGE")

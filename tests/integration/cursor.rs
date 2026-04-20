@@ -474,37 +474,37 @@ fn test_cursor_e2e_with_attribution() {
         "Should have at least one attestation"
     );
 
-    // Verify the metadata has prompts with transcript data
+    // Verify the metadata has sessions with transcript data
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Should have at least one prompt record in metadata"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Should have at least one session record in metadata"
     );
 
-    // Get the first prompt record
-    let prompt_record = commit
+    // Get the first session record
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Should have at least one prompt record");
+        .expect("Should have at least one session record");
 
-    // Verify that the prompt record has messages (transcript from JSONL)
+    // Verify that the session record has messages (transcript from JSONL)
     assert!(
-        !prompt_record.messages.is_empty(),
-        "Prompt record should contain messages from the JSONL transcript"
+        !session_record.messages.is_empty(),
+        "Session record should contain messages from the JSONL transcript"
     );
 
     // The JSONL fixture has 21 messages (1 user + 10 assistant + 10 tool_use)
     assert_eq!(
-        prompt_record.messages.len(),
+        session_record.messages.len(),
         21,
         "Should have exactly 21 messages from the JSONL fixture"
     );
 
     // Verify the model was extracted from hook input
     assert_eq!(
-        prompt_record.agent_id.model, "model-name-from-hook-test",
+        session_record.agent_id.model, "model-name-from-hook-test",
         "Model should be 'model-name-from-hook-test' from hook input"
     );
 }
@@ -595,24 +595,24 @@ fn test_cursor_e2e_with_resync() {
         "Should have at least one attestation"
     );
 
-    // Verify the metadata has prompts with transcript data
+    // Verify the metadata has sessions with transcript data
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Should have at least one prompt record in metadata"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Should have at least one session record in metadata"
     );
 
-    // Get the first prompt record
-    let prompt_record = commit
+    // Get the first session record
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Should have at least one prompt record");
+        .expect("Should have at least one session record");
 
     // Verify that the resync logic picked up the appended message
     let transcript_json =
-        serde_json::to_string(&prompt_record.messages).expect("Should serialize messages");
+        serde_json::to_string(&session_record.messages).expect("Should serialize messages");
 
     assert!(
         transcript_json.contains("RESYNC_TEST_MESSAGE"),

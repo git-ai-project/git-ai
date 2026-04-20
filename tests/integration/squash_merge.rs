@@ -269,48 +269,20 @@ fn test_prepare_working_log_squash_with_mixed_additions() {
         "1 human addition (the overridden AI line)"
     );
 
-    // Verify prompt records have correct stats
-    let prompts = &squash_commit.authorship_log.metadata.prompts;
+    // Verify session records exist (sessions don't have stats fields)
+    let sessions = &squash_commit.authorship_log.metadata.sessions;
     assert!(
-        !prompts.is_empty(),
-        "Should have at least one prompt record"
+        !sessions.is_empty(),
+        "Should have at least one session record"
     );
 
-    // Check each prompt record has updated stats
-    for (prompt_id, prompt_record) in prompts {
+    // Sessions don't track stats like prompts did - they only have agent_id, human_author, messages, etc.
+    for (session_id, session_record) in sessions {
         println!(
-            "Prompt {}: accepted_lines={}, overridden_lines={}, total_additions={}, total_deletions={}",
-            prompt_id,
-            prompt_record.accepted_lines,
-            prompt_record.overriden_lines,
-            prompt_record.total_additions,
-            prompt_record.total_deletions
+            "Session {}: agent_id={:?}, human_author={:?}",
+            session_id, session_record.agent_id, session_record.human_author
         );
-
-        // accepted_lines should match the number of lines attributed to this prompt in final commit
-        assert!(
-            prompt_record.accepted_lines > 0,
-            "Prompt {} should have accepted_lines > 0",
-            prompt_id
-        );
-
-        // overridden_lines should be 0 for squash merge (we don't track overrides in merge context)
-        assert_eq!(
-            prompt_record.overriden_lines, 0,
-            "Prompt {} should have overridden_lines = 0 in squash merge",
-            prompt_id
-        );
-
-        // Total additions/deletions should be preserved from the newest prompt version
-        // (they may be 0 if not tracked in the original prompt)
     }
-
-    // Verify that the sum of accepted_lines across all prompts matches ai_accepted in stats
-    let total_accepted: u32 = prompts.values().map(|p| p.accepted_lines).sum();
-    assert_eq!(
-        total_accepted, stats.ai_accepted,
-        "Sum of accepted_lines across prompts should match ai_accepted stat"
-    );
 }
 
 /// Test that custom attributes set via config are preserved through a squash merge
@@ -357,7 +329,7 @@ fn test_squash_merge_preserves_custom_attributes_from_config() {
         .expect("feature commit should have authorship note");
     let feature_log =
         AuthorshipLog::deserialize_from_string(&feature_note).expect("parse feature note");
-    for prompt in feature_log.metadata.prompts.values() {
+    for prompt in feature_log.metadata.sessions.values() {
         assert_eq!(
             prompt.custom_attributes.as_ref(),
             Some(&attrs),
@@ -378,10 +350,10 @@ fn test_squash_merge_preserves_custom_attributes_from_config() {
     let squash_log =
         AuthorshipLog::deserialize_from_string(&squash_note).expect("parse squash note");
     assert!(
-        !squash_log.metadata.prompts.is_empty(),
-        "squash commit should have prompt records"
+        !squash_log.metadata.sessions.is_empty(),
+        "squash commit should have session records"
     );
-    for prompt in squash_log.metadata.prompts.values() {
+    for prompt in squash_log.metadata.sessions.values() {
         assert_eq!(
             prompt.custom_attributes.as_ref(),
             Some(&attrs),
