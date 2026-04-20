@@ -1,10 +1,9 @@
 use crate::test_utils::fixture_path;
 use git_ai::authorship::transcript::Message;
-use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset,
+use git_ai::commands::checkpoint_agent::presets::{
+    ParsedHookEvent, TranscriptSource, resolve_preset,
 };
-use git_ai::commands::checkpoint_agent::amp_preset::AmpPreset;
+use git_ai::commands::checkpoint_agent::transcript_readers;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,9 +24,8 @@ fn amp_simple_thread_fixture_path() -> PathBuf {
 fn test_parse_amp_thread_transcript() {
     let thread_path = amp_simple_thread_fixture_path();
 
-    let (transcript, model, thread_id) =
-        AmpPreset::transcript_and_model_from_thread_path(&thread_path)
-            .expect("Failed to parse Amp thread JSON");
+    let (transcript, model, thread_id) = transcript_readers::read_amp_thread_json(&thread_path)
+        .expect("Failed to parse Amp thread JSON");
 
     assert_eq!(thread_id, AMP_SIMPLE_THREAD_ID);
     assert_eq!(model.as_deref(), Some("claude-opus-4-6"));
@@ -55,9 +53,8 @@ fn test_parse_amp_thread_transcript() {
 fn test_parse_amp_thread_with_thinking_blocks() {
     let thread_path = amp_threads_fixture_path().join(format!("{}.json", AMP_THINKING_THREAD_ID));
 
-    let (transcript, model, thread_id) =
-        AmpPreset::transcript_and_model_from_thread_path(&thread_path)
-            .expect("Failed to parse Amp thread JSON");
+    let (transcript, model, thread_id) = transcript_readers::read_amp_thread_json(&thread_path)
+        .expect("Failed to parse Amp thread JSON");
 
     assert_eq!(thread_id, AMP_THINKING_THREAD_ID);
     assert_eq!(model.as_deref(), Some("claude-opus-4-6"));
@@ -87,6 +84,7 @@ fn test_amp_preset_pretooluse_returns_human_checkpoint() {
     let hook_input = json!({
         "hook_event_name": "PreToolUse",
         "tool_use_id": AMP_SIMPLE_EDIT_TOOL_USE_ID,
+        "thread_id": AMP_SIMPLE_THREAD_ID,
         "cwd": "/Users/test/project",
         "edited_filepaths": ["/Users/test/project/jokes.csv"],
         "tool_input": {
@@ -95,29 +93,28 @@ fn test_amp_preset_pretooluse_returns_human_checkpoint() {
     })
     .to_string();
 
-    let result = AmpPreset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = resolve_preset("amp")
+        .unwrap()
+        .parse(&hook_input, "t_test")
         .expect("Amp preset should succeed");
 
     unsafe {
         std::env::remove_var("GIT_AI_AMP_THREADS_PATH");
     }
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
-    assert!(result.transcript.is_none());
-    assert_eq!(result.agent_id.tool, "amp");
-    assert_eq!(result.agent_id.id, AMP_SIMPLE_THREAD_ID);
-    assert_eq!(
-        result.repo_working_dir.as_deref(),
-        Some("/Users/test/project")
-    );
-
-    let will_edit = result
-        .will_edit_filepaths
-        .expect("will_edit_filepaths should be present");
-    assert_eq!(will_edit, vec!["/Users/test/project/jokes.csv"]);
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert_eq!(e.context.agent_id.tool, "amp");
+            assert_eq!(e.context.agent_id.id, AMP_SIMPLE_THREAD_ID);
+            assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
+            assert_eq!(
+                e.file_paths,
+                vec![PathBuf::from("/Users/test/project/jokes.csv")]
+            );
+        }
+        _ => panic!("Expected PreFileEdit for PreToolUse"),
+    }
 }
 
 #[test]
@@ -130,6 +127,7 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
     let hook_input = json!({
         "hook_event_name": "PostToolUse",
         "tool_use_id": AMP_SIMPLE_EDIT_TOOL_USE_ID,
+        "thread_id": AMP_SIMPLE_THREAD_ID,
         "cwd": "/Users/test/project",
         "edited_filepaths": ["/Users/test/project/jokes.csv"],
         "tool_input": {
@@ -138,32 +136,45 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
     })
     .to_string();
 
-    let result = AmpPreset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = resolve_preset("amp")
+        .unwrap()
+        .parse(&hook_input, "t_test")
         .expect("Amp preset should succeed");
 
     unsafe {
         std::env::remove_var("GIT_AI_AMP_THREADS_PATH");
     }
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
-    assert!(result.transcript.is_some());
-    assert_eq!(result.agent_id.tool, "amp");
-    assert_eq!(result.agent_id.id, AMP_SIMPLE_THREAD_ID);
-    assert_eq!(result.agent_id.model, "claude-opus-4-6");
-
-    let metadata = result
-        .agent_metadata
-        .expect("agent metadata should be present for amp checkpoints");
-    let transcript_path = metadata
-        .get("transcript_path")
-        .expect("transcript_path should be present in metadata");
-    assert!(
-        transcript_path.ends_with(&format!("{}.json", AMP_SIMPLE_THREAD_ID)),
-        "transcript_path should point to the matched Amp thread file"
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(e.context.agent_id.tool, "amp");
+            assert_eq!(e.context.agent_id.id, AMP_SIMPLE_THREAD_ID);
+            // Model is lazily resolved from transcript, so at parse time it's "unknown"
+            assert_eq!(e.context.agent_id.model, "unknown");
+            assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
+            assert_eq!(
+                e.file_paths,
+                vec![PathBuf::from("/Users/test/project/jokes.csv")]
+            );
+            // Transcript should be a path reference (lazy loading)
+            assert!(e.transcript_source.is_some());
+            let transcript_path_str = match e.transcript_source.as_ref().unwrap() {
+                TranscriptSource::Path { path, .. } => path.to_string_lossy().to_string(),
+                TranscriptSource::Inline(_) => panic!("Expected Path transcript source"),
+            };
+            assert!(
+                transcript_path_str.ends_with(&format!("{}.json", AMP_SIMPLE_THREAD_ID)),
+                "transcript_path should point to the matched Amp thread file"
+            );
+            // Metadata should contain transcript_path
+            assert!(
+                e.context.metadata.contains_key("transcript_path"),
+                "metadata should contain transcript_path"
+            );
+        }
+        _ => panic!("Expected PostFileEdit for PostToolUse"),
+    }
 }
 
 #[test]
