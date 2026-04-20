@@ -1,0 +1,627 @@
+// Critical regression tests for old-format/new-format coexistence during cutover scenarios
+//
+// These tests verify that git-ai correctly handles:
+// 1. Old-format authorship notes (bare 16-char hex hashes, prompts-only metadata)
+// 2. New-format authorship notes (s_::t_ hashes, sessions metadata)
+// 3. Mixed scenarios where both formats coexist in the same note or across operations
+//
+// Format detection: checkpoint.trace_id.is_some() determines which format is used.
+
+use crate::repos::test_file::ExpectedLineExt;
+use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+use git_ai::git::refs::notes_add;
+use std::fs;
+
+// Test 1: Old format note can be read and deserializes correctly
+#[test]
+fn test_old_format_note_can_be_attached_and_read() {
+    let repo = TestRepo::new();
+
+    // Create initial commit
+    let mut file = repo.filename("test.txt");
+    file.set_contents(crate::lines!["Human line", "AI line".ai()]);
+    let commit = repo.stage_all_and_commit("Initial commit").unwrap();
+
+    // Replace with an old-format note (using "cursor" as tool name)
+    let old_hash = "5a1b2c3d4e5f6789"; // 16-char bare hex
+    let base_sha = &commit.commit_sha;
+    let old_note = format!(
+        r#"test.txt
+  {} 2-2
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.3",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "cursor", "id": "old_session", "model": "gpt-4"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }}
+  }}
+}}"#,
+        old_hash, base_sha, old_hash
+    );
+
+    // Attach old-format note
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, base_sha, &old_note).expect("add old-format note");
+
+    // Verify old format note is present and reads correctly
+    let read_note = repo
+        .read_authorship_note(base_sha)
+        .expect("should have note");
+    let log = AuthorshipLog::deserialize_from_string(&read_note)
+        .expect("should deserialize old note");
+
+    // Verify structure
+    assert_eq!(log.metadata.prompts.len(), 1, "should have 1 prompt");
+    assert_eq!(
+        log.metadata.sessions.len(),
+        0,
+        "should have no sessions (old format)"
+    );
+
+    // Verify old prompt metadata
+    let prompt = log
+        .metadata
+        .prompts
+        .get(old_hash)
+        .expect("old hash should be in prompts");
+    assert_eq!(prompt.agent_id.tool, "cursor");
+    assert_eq!(prompt.total_additions, 1);
+    assert_eq!(prompt.accepted_lines, 1);
+
+    // Verify attestation uses old format
+    assert_eq!(log.attestations.len(), 1);
+    assert_eq!(log.attestations[0].entries.len(), 1);
+    assert_eq!(log.attestations[0].entries[0].hash, old_hash);
+
+    // Verify blame works with old format note
+    file.assert_committed_lines(crate::lines!["Human line".human(), "AI line".ai(),]);
+}
+
+// Test 2: Note with both old and new format attestations deserializes and blame works
+#[test]
+fn test_mixed_format_note_with_both_prompts_and_sessions() {
+    let repo = TestRepo::new();
+
+    // Create initial commit
+    let mut file = repo.filename("test.txt");
+    file.set_contents(crate::lines!["Line 1", "Line 2".ai(), "Line 3".ai()]);
+    let commit = repo.stage_all_and_commit("Initial commit").unwrap();
+
+    // Replace with a mixed-format note that has BOTH prompts and sessions
+    let old_hash = "abcd1234ef567890"; // 16-char hex for old format
+    // The new hash will be extracted from the original note
+    let original_note = repo
+        .read_authorship_note(&commit.commit_sha)
+        .expect("should have original note");
+    let original_log = AuthorshipLog::deserialize_from_string(&original_note)
+        .expect("parse original note");
+
+    // Get the new-format session ID from the original note
+    let new_hash = if !original_log.metadata.sessions.is_empty() {
+        original_log.metadata.sessions.keys().next().unwrap().clone()
+    } else {
+        "s_1234567890abcd".to_string() // fallback
+    };
+
+    let mixed_note = format!(
+        r#"test.txt
+  {} 2-2
+  {}::t_fedcba0987654321 3-3
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.3",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "cursor", "id": "old_session", "model": "gpt-4"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }}
+  }},
+  "sessions": {{
+    "{}": {{
+      "agent_id": {{"tool": "mock_ai", "id": "new_session", "model": "gpt-4"}},
+      "human_author": null,
+      "messages": []
+    }}
+  }}
+}}"#,
+        old_hash, new_hash, commit.commit_sha, old_hash, new_hash
+    );
+
+    // Attach mixed-format note
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &commit.commit_sha, &mixed_note).expect("add mixed-format note");
+
+    // Read and verify the note
+    let read_note = repo
+        .read_authorship_note(&commit.commit_sha)
+        .expect("should have note");
+    let log = AuthorshipLog::deserialize_from_string(&read_note).expect("should parse note");
+
+    // Verify both prompts and sessions are present
+    assert_eq!(log.metadata.prompts.len(), 1, "should have 1 prompt");
+    assert_eq!(log.metadata.sessions.len(), 1, "should have 1 session");
+
+    // Verify attestations have both formats
+    assert_eq!(log.attestations.len(), 1);
+    assert_eq!(
+        log.attestations[0].entries.len(),
+        2,
+        "should have 2 attestation entries"
+    );
+
+    let mut has_old_format = false;
+    let mut has_new_format = false;
+    for entry in &log.attestations[0].entries {
+        if entry.hash.len() == 16 && !entry.hash.contains("::") {
+            has_old_format = true;
+        }
+        if entry.hash.contains("::t_") {
+            has_new_format = true;
+        }
+    }
+    assert!(has_old_format, "should have old-format attestation");
+    assert!(has_new_format, "should have new-format attestation");
+
+    // Verify blame works for both formats
+    file.assert_committed_lines(crate::lines![
+        "Line 1".human(),
+        "Line 2".ai(),
+        "Line 3".ai(),
+    ]);
+}
+
+// Test 3: Rebase chain with old and new format notes
+#[test]
+fn test_rebase_chain_with_old_and_new_format_notes() {
+    let repo = TestRepo::new();
+
+    // Create base commit on main
+    let mut base = repo.filename("base.txt");
+    base.set_contents(crate::lines!["Base line"]);
+    repo.stage_all_and_commit("Base commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Create feature branch
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit A with AI content on feature
+    let mut file_a = repo.filename("file_a.txt");
+    file_a.set_contents(crate::lines!["Human line A", "AI line A".ai()]);
+    let commit_a = repo.stage_all_and_commit("Commit A").unwrap();
+
+    // Replace commit A's note with old-format note (using "claude" as tool name)
+    let old_hash_a = "1111222233334444";
+    let old_note_a = format!(
+        r#"file_a.txt
+  {} 2-2
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.3",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "claude", "id": "old_agent", "model": "claude-3.5"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }}
+  }}
+}}"#,
+        old_hash_a, commit_a.commit_sha, old_hash_a
+    );
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &commit_a.commit_sha, &old_note_a).expect("add old-format note A");
+
+    // Commit B with AI content (will use new format naturally)
+    let mut file_b = repo.filename("file_b.txt");
+    file_b.set_contents(crate::lines!["Human line B", "AI line B".ai()]);
+    repo.stage_all_and_commit("Commit B").unwrap();
+
+    // Go back to main, add unrelated commit
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut other = repo.filename("other.txt");
+    other.set_contents(crate::lines!["Other line"]);
+    repo.stage_all_and_commit("Other commit").unwrap();
+
+    // Rebase feature onto main
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Find the two rebased commits (A' and B')
+    let log_output = repo
+        .git(&["log", "--oneline", "--no-decorate", "-2"])
+        .unwrap();
+    let lines: Vec<&str> = log_output.trim().lines().collect();
+    assert_eq!(lines.len(), 2, "should have 2 commits");
+
+    // Get commit SHAs (most recent first)
+    let commit_b_prime_sha = lines[0].split_whitespace().next().unwrap();
+    let commit_a_prime_sha = lines[1].split_whitespace().next().unwrap();
+
+    // Verify commit A' still has prompts (old format preserved)
+    let note_a_prime = repo
+        .read_authorship_note(commit_a_prime_sha)
+        .expect("commit A' should have note");
+    let log_a_prime =
+        AuthorshipLog::deserialize_from_string(&note_a_prime).expect("parse note A'");
+    assert!(
+        !log_a_prime.metadata.prompts.is_empty(),
+        "commit A' should have prompts"
+    );
+    assert_eq!(
+        log_a_prime.metadata.sessions.len(),
+        0,
+        "commit A' should not have sessions (old format)"
+    );
+
+    // Verify old prompt data preserved
+    assert!(
+        log_a_prime.metadata.prompts.contains_key(old_hash_a),
+        "old hash should be preserved"
+    );
+
+    // Verify commit B' still has sessions (new format preserved)
+    let note_b_prime = repo
+        .read_authorship_note(commit_b_prime_sha)
+        .expect("commit B' should have note");
+    let log_b_prime =
+        AuthorshipLog::deserialize_from_string(&note_b_prime).expect("parse note B'");
+    assert!(
+        !log_b_prime.metadata.sessions.is_empty(),
+        "commit B' should have sessions (new format)"
+    );
+
+    // Verify blame works correctly on both commits
+    repo.git(&["checkout", commit_a_prime_sha]).unwrap();
+    file_a.assert_committed_lines(crate::lines!["Human line A".human(), "AI line A".ai(),]);
+
+    repo.git(&["checkout", commit_b_prime_sha]).unwrap();
+    file_b.assert_committed_lines(crate::lines!["Human line B".human(), "AI line B".ai(),]);
+}
+
+// Test 4: Cherry-pick old format note with AI lines preserved
+#[test]
+fn test_cherry_pick_old_format_note_with_ai_lines_preserved() {
+    let repo = TestRepo::new();
+
+    // Create initial commit on main
+    let mut base = repo.filename("base.txt");
+    base.set_contents(crate::lines!["Base line"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Create source branch
+    repo.git(&["checkout", "-b", "source"]).unwrap();
+
+    // Add AI content and commit
+    let mut file = repo.filename("source.txt");
+    file.set_contents(crate::lines!["Human line", "AI line".ai()]);
+    let source_commit = repo.stage_all_and_commit("Source commit").unwrap();
+
+    // Replace with old-format note INCLUDING attestation (using "copilot" as tool name)
+    let old_hash = "9876543210fedcba";
+    let old_note = format!(
+        r#"source.txt
+  {} 2-2
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.3",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "copilot", "id": "cherry_agent", "model": "gpt-4"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }}
+  }}
+}}"#,
+        old_hash, source_commit.commit_sha, old_hash
+    );
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &source_commit.commit_sha, &old_note).expect("add old-format note");
+
+    // Go back to main and cherry-pick
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.git(&["cherry-pick", &source_commit.commit_sha])
+        .unwrap();
+
+    // Get cherry-picked commit SHA
+    let picked_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Verify cherry-picked commit has prompts (not sessions)
+    let picked_note = repo
+        .read_authorship_note(&picked_sha)
+        .expect("cherry-picked commit should have note");
+    let picked_log =
+        AuthorshipLog::deserialize_from_string(&picked_note).expect("parse cherry-picked note");
+
+    assert!(
+        !picked_log.metadata.prompts.is_empty(),
+        "cherry-picked commit should have prompts"
+    );
+    // Note: cherry-pick may add sessions if there are new changes; we primarily care that prompts are preserved
+    assert!(
+        picked_log.metadata.prompts.contains_key(old_hash),
+        "old hash should be preserved in cherry-pick"
+    );
+
+    // Verify AI lines correctly attributed
+    file.assert_committed_lines(crate::lines!["Human line".human(), "AI line".ai(),]);
+}
+
+// Test 5: Verify that sessions-format is the default for all new operations
+// This test documents that the current system produces sessions, not prompts
+#[test]
+fn test_current_system_produces_sessions_not_prompts() {
+    let repo = TestRepo::new();
+
+    // Create commit with AI content using standard helpers
+    let mut file = repo.filename("test.txt");
+    file.set_contents(crate::lines!["Line 1", "AI line".ai()]);
+    repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Read note
+    let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let note = repo
+        .read_authorship_note(&sha)
+        .expect("should have note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
+
+    // Should have sessions, NOT prompts (this is the new default)
+    assert!(
+        log.metadata.prompts.is_empty(),
+        "new system should not produce prompts"
+    );
+    assert!(
+        !log.metadata.sessions.is_empty(),
+        "new system should produce sessions"
+    );
+
+    // Verify attestations use session format (s_::t_)
+    let mut has_session_format = false;
+    for file_att in &log.attestations {
+        for entry in &file_att.entries {
+            if entry.hash.starts_with("s_") && entry.hash.contains("::t_") {
+                has_session_format = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        has_session_format,
+        "attestations should use session format (s_::t_)"
+    );
+
+    // Verify blame works
+    file.assert_committed_lines(crate::lines!["Line 1".human(), "AI line".ai(),]);
+}
+
+// Test 6: Old format note roundtrips through operations without corruption
+#[test]
+fn test_old_format_note_roundtrips_without_corruption() {
+    let repo = TestRepo::new();
+
+    // Create initial commit
+    let mut file = repo.filename("test.txt");
+    file.set_contents(crate::lines!["Line 1"]);
+    let _initial_commit = repo.stage_all_and_commit("Initial").unwrap();
+
+    // Create commit with AI content
+    file.set_contents(crate::lines!["Line 1", "AI line".ai()]);
+    let ai_commit = repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Replace with genuine old-format note with stats
+    let old_hash = "0123456789abcdef";
+    let old_note = format!(
+        r#"test.txt
+  {} 2-2
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.0",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "roundtrip_tool", "id": "roundtrip_agent", "model": "roundtrip_model"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 42,
+      "total_deletions": 7,
+      "accepted_lines": 35,
+      "overriden_lines": 3
+    }}
+  }},
+  "humans": {{
+    "h_fedcba9876543210": {{
+      "author": "Test User <test@example.com>"
+    }}
+  }}
+}}"#,
+        old_hash, ai_commit.commit_sha, old_hash
+    );
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &ai_commit.commit_sha, &old_note).expect("add old-format note");
+
+    // Read it back
+    let note_v1 = repo
+        .read_authorship_note(&ai_commit.commit_sha)
+        .expect("should have note");
+    let log_v1 = AuthorshipLog::deserialize_from_string(&note_v1).expect("parse note v1");
+
+    // Verify structure
+    assert_eq!(log_v1.metadata.prompts.len(), 1);
+    assert_eq!(log_v1.metadata.sessions.len(), 0);
+    assert_eq!(log_v1.metadata.humans.len(), 1);
+
+    // Verify stats preserved
+    let prompt_v1 = log_v1.metadata.prompts.get(old_hash).expect("should have old hash");
+    assert_eq!(prompt_v1.total_additions, 42);
+    assert_eq!(prompt_v1.total_deletions, 7);
+    assert_eq!(prompt_v1.accepted_lines, 35);
+    assert_eq!(prompt_v1.overriden_lines, 3);
+
+    // Serialize and deserialize again (roundtrip)
+    let serialized = log_v1.serialize_to_string().expect("serialize");
+    let log_v2 = AuthorshipLog::deserialize_from_string(&serialized).expect("parse note v2");
+
+    // Verify structure unchanged
+    assert_eq!(log_v2.metadata.prompts.len(), 1);
+    assert_eq!(log_v2.metadata.sessions.len(), 0);
+    assert_eq!(log_v2.metadata.humans.len(), 1);
+
+    // Verify stats still preserved
+    let prompt_v2 = log_v2.metadata.prompts.get(old_hash).expect("should still have old hash");
+    assert_eq!(prompt_v2.total_additions, 42);
+    assert_eq!(prompt_v2.total_deletions, 7);
+    assert_eq!(prompt_v2.accepted_lines, 35);
+    assert_eq!(prompt_v2.overriden_lines, 3);
+
+    // Verify serialized output doesn't contain "sessions" key
+    assert!(
+        !serialized.contains("\"sessions\""),
+        "should not add sessions key to old-format note"
+    );
+}
+
+// Test 7: Reset with old format notes
+#[test]
+fn test_reset_preserves_old_format_notes_in_working_log() {
+    let repo = TestRepo::new();
+
+    // Create initial commit
+    let mut file = repo.filename("test.txt");
+    file.set_contents(crate::lines!["Line 1"]);
+    repo.stage_all_and_commit("Initial").unwrap();
+
+    // Create commit with AI content
+    file.set_contents(crate::lines!["Line 1", "AI line".ai()]);
+    let commit = repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Replace with old-format note (using "windsurf" as tool name)
+    let old_hash = "aabbccddeeff1122";
+    let old_note = format!(
+        r#"test.txt
+  {} 2-2
+---
+{{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.3",
+  "base_commit_sha": "{}",
+  "prompts": {{
+    "{}": {{
+      "agent_id": {{"tool": "windsurf", "id": "reset_agent", "model": "claude-3.5"}},
+      "human_author": null,
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }}
+  }}
+}}"#,
+        old_hash, commit.commit_sha, old_hash
+    );
+    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
+        .expect("find repository");
+    notes_add(&git_ai_repo, &commit.commit_sha, &old_note).expect("add old-format note");
+
+    // Reset --soft to un-commit but keep changes staged
+    repo.git(&["reset", "--soft", "HEAD~1"]).unwrap();
+
+    // Re-commit
+    repo.commit("Recommit").unwrap();
+
+    // Verify note is preserved with prompts
+    let new_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let new_note = repo
+        .read_authorship_note(&new_sha)
+        .expect("should have note after reset");
+    let new_log = AuthorshipLog::deserialize_from_string(&new_note).expect("parse note");
+
+    // Should have prompts from the old format note
+    assert!(
+        !new_log.metadata.prompts.is_empty(),
+        "should preserve prompts after reset"
+    );
+
+    // Verify AI attribution still works
+    file.assert_committed_lines(crate::lines!["Line 1".human(), "AI line".ai(),]);
+}
+
+// Test 8: Verify that new checkpoints always produce sessions, never prompts
+#[test]
+fn test_new_checkpoints_always_produce_sessions() {
+    let repo = TestRepo::new();
+
+    // Create initial commit
+    let mut file = repo.filename("test.txt");
+    file.set_contents(crate::lines!["Line 1"]);
+    repo.stage_all_and_commit("Initial").unwrap();
+
+    // Use the standard helper which calls mock_ai checkpoint
+    file.set_contents(crate::lines!["Line 1", "AI line".ai()]);
+    repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Read note
+    let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let note = repo
+        .read_authorship_note(&sha)
+        .expect("should have note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
+
+    // Should have sessions, NOT prompts
+    assert!(
+        log.metadata.prompts.is_empty(),
+        "new checkpoints should not produce prompts"
+    );
+    assert!(
+        !log.metadata.sessions.is_empty(),
+        "new checkpoints should produce sessions"
+    );
+
+    // Verify session format in attestations (s_::t_)
+    let mut has_session_format = false;
+    for file_att in &log.attestations {
+        for entry in &file_att.entries {
+            if entry.hash.starts_with("s_") && entry.hash.contains("::t_") {
+                has_session_format = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        has_session_format,
+        "attestations should use session format (s_::t_)"
+    );
+}
