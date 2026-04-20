@@ -229,6 +229,18 @@ pub struct PromptRecord {
 
 impl Eq for PromptRecord {}
 
+/// Session record for lightweight session tracking without stats
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionRecord {
+    pub agent_id: AgentId,
+    pub human_author: Option<String>,
+    pub messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_attributes: Option<HashMap<String, String>>,
+}
+
 impl PartialOrd for PromptRecord {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
