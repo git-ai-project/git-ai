@@ -555,7 +555,6 @@ pub fn get_git_diff_stats(
     Ok((added_lines, deleted_lines))
 }
 
-
 #[cfg(test)]
 mod tests {
     use insta::assert_debug_snapshot;
