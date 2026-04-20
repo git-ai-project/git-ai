@@ -1,10 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::authorship::authorship_log::SessionRecord;
 use crate::authorship::ignore::{build_ignore_matcher, should_ignore_file_with_matcher};
 use crate::commands::blame::GitAiBlameOptions;
 use crate::error::GitAiError;
-use crate::git::refs::get_reference_as_authorship_log_v3;
 use crate::git::repository::Repository;
 
 #[derive(Debug, Default)]
@@ -59,46 +57,20 @@ pub fn diff_ai_accepted_stats(
             Err(_) => continue,
         };
 
-        // Build tool/model map from prompt records
         let mut author_tool_map: HashMap<String, String> = HashMap::new();
         for (hash, record) in &prompt_records {
             let tool_model = format!("{}::{}", record.agent_id.tool, record.agent_id.model);
             author_tool_map.insert(hash.clone(), tool_model);
         }
 
-        // For session hashes, we need to look them up from authorship notes
-        // Build a cache of session records by reading notes
-        let mut session_cache: HashMap<String, SessionRecord> = HashMap::new();
-
-        // Try to read the note for the to_ref commit to get session records
-        if let Ok(note) = get_reference_as_authorship_log_v3(repo, to_ref) {
-            for (key, record) in &note.metadata.sessions {
-                session_cache.insert(key.clone(), record.clone());
-            }
-        }
-
         for line in &lines {
-            if let Some(author_hash) = line_authors.get(line) {
-                // Check if it's a session hash
-                if author_hash.starts_with("s_") {
-                    // Extract session key
-                    let session_key = author_hash.split("::").next().unwrap_or(author_hash);
-
-                    // Look up the tool/model for this session
-                    if let Some(record) = session_cache.get(session_key) {
-                        let tool_model =
-                            format!("{}::{}", record.agent_id.tool, record.agent_id.model);
-                        author_tool_map.insert(author_hash.clone(), tool_model);
-                    }
-                }
-
-                // Count AI-accepted line (prompt or session)
-                if prompt_records.contains_key(author_hash) || author_hash.starts_with("s_") {
-                    stats.total_ai_accepted += 1;
-                    *stats.per_prompt.entry(author_hash.clone()).or_insert(0) += 1;
-                    if let Some(tool_model) = author_tool_map.get(author_hash) {
-                        *stats.per_tool_model.entry(tool_model.clone()).or_insert(0) += 1;
-                    }
+            if let Some(author_hash) = line_authors.get(line)
+                && prompt_records.contains_key(author_hash)
+            {
+                stats.total_ai_accepted += 1;
+                *stats.per_prompt.entry(author_hash.clone()).or_insert(0) += 1;
+                if let Some(tool_model) = author_tool_map.get(author_hash) {
+                    *stats.per_tool_model.entry(tool_model.clone()).or_insert(0) += 1;
                 }
             }
         }

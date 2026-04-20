@@ -1387,13 +1387,25 @@ fn merge_missing_prompts_from_authorship_note(
     prompts: &mut BTreeMap<String, PromptRecord>,
 ) {
     if let Some(authorship_log) = get_authorship(repo, commit_sha) {
-        for (prompt_id, prompt_record) in authorship_log.metadata.prompts {
-            prompts.entry(prompt_id).or_insert(prompt_record);
-        }
-        for (session_id, session_record) in authorship_log.metadata.sessions {
+        for (prompt_id, prompt_record) in &authorship_log.metadata.prompts {
             prompts
-                .entry(session_id)
-                .or_insert_with(|| session_record.to_prompt_record());
+                .entry(prompt_id.clone())
+                .or_insert_with(|| prompt_record.clone());
+        }
+        // Insert session records keyed by their full attestation hashes (s_xxx::t_yyy)
+        // so that hunk prompt_ids (which use the full composite) resolve correctly.
+        for file_attestation in &authorship_log.attestations {
+            for entry in &file_attestation.entries {
+                if entry.hash.starts_with("s_") {
+                    let session_key = entry.hash.split("::").next().unwrap_or(&entry.hash);
+                    if let Some(session_record) = authorship_log.metadata.sessions.get(session_key)
+                    {
+                        prompts
+                            .entry(entry.hash.clone())
+                            .or_insert_with(|| session_record.to_prompt_record());
+                    }
+                }
+            }
         }
     }
 }
@@ -1422,7 +1434,14 @@ fn prompt_ids_from_authorship_note(repo: &Repository, commit_sha: &str) -> HashS
     get_authorship(repo, commit_sha)
         .map(|authorship_log| {
             let mut ids: HashSet<String> = authorship_log.metadata.prompts.into_keys().collect();
-            ids.extend(authorship_log.metadata.sessions.into_keys());
+            // Collect full attestation hashes for sessions (s_xxx::t_yyy format)
+            for file_attestation in &authorship_log.attestations {
+                for entry in &file_attestation.entries {
+                    if entry.hash.starts_with("s_") {
+                        ids.insert(entry.hash.clone());
+                    }
+                }
+            }
             ids
         })
         .unwrap_or_default()
