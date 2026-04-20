@@ -2,8 +2,8 @@
 
 use super::pos_encoded::{
     PosEncoded, PosField, sparse_get_string, sparse_get_u32, sparse_get_u64, sparse_get_vec_string,
-    sparse_get_vec_u32, sparse_set, string_to_json, u32_to_json, u64_to_json,
-    vec_string_to_json, vec_u32_to_json,
+    sparse_get_vec_u32, sparse_set, string_to_json, u32_to_json, u64_to_json, vec_string_to_json,
+    vec_u32_to_json,
 };
 use super::types::{EventValues, MetricEventId, SparseArray};
 
@@ -937,8 +937,7 @@ mod tests {
 
     #[test]
     fn test_committed_values_array_nulls() {
-        let values = CommittedValues::new()
-            .ai_accepted_null();
+        let values = CommittedValues::new().ai_accepted_null();
 
         assert_eq!(values.ai_accepted, Some(None));
     }

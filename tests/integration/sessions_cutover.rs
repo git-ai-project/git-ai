@@ -1452,7 +1452,10 @@ fn test_show_prompt_finds_old_format_prompt_in_history() {
 
     let json: Value = serde_json::from_str(output.trim()).unwrap();
     assert_eq!(json["prompt_id"].as_str(), Some(old_hash));
-    assert_eq!(json["prompt"]["agent_id"]["tool"].as_str(), Some("windsurf"));
+    assert_eq!(
+        json["prompt"]["agent_id"]["tool"].as_str(),
+        Some("windsurf")
+    );
 }
 
 // Test 17: git-ai stats --json works correctly with old-format notes.
@@ -1498,7 +1501,9 @@ fn test_stats_json_works_with_old_format_notes() {
     notes_add(&git_ai_repo, &commit.commit_sha, &old_note).expect("attach old-format note");
 
     // Run git-ai stats --json — should not crash on old-format notes
-    let output = repo.git_ai(&["stats", "--json"]).expect("stats should work with old-format notes");
+    let output = repo
+        .git_ai(&["stats", "--json"])
+        .expect("stats should work with old-format notes");
     let json: Value = serde_json::from_str(output.trim()).unwrap();
 
     // Diff-based ai_accepted should still correctly count AI lines from the attestation
@@ -1673,8 +1678,13 @@ fn test_amend_old_prompts_delete_ai_line_then_add_new_session_line() {
 
     // Step 4: Amend
     repo.git(&["add", "."]).unwrap();
-    repo.git(&["commit", "--amend", "-m", "Amended: deleted old AI, added new"])
-        .unwrap();
+    repo.git(&[
+        "commit",
+        "--amend",
+        "-m",
+        "Amended: deleted old AI, added new",
+    ])
+    .unwrap();
 
     // Step 5: Verify
     let amended_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
@@ -1712,10 +1722,7 @@ fn test_amend_old_prompts_delete_ai_line_then_add_new_session_line() {
         !has_old_att,
         "old attestation hash should be removed when line is deleted"
     );
-    assert!(
-        has_new_att,
-        "new session attestation should be present"
-    );
+    assert!(has_new_att, "new session attestation should be present");
 
     // Verify blame
     let mut file = repo.filename("prune.txt");
@@ -2123,8 +2130,7 @@ fn test_amend_old_prompts_different_file_gets_session_edits() {
             if path == "file_a.txt" && entry.hash == old_hash {
                 file_a_has_old = true;
             }
-            if path == "file_b.txt" && entry.hash.starts_with("s_") && entry.hash.contains("::t_")
-            {
+            if path == "file_b.txt" && entry.hash.starts_with("s_") && entry.hash.contains("::t_") {
                 file_b_has_new = true;
             }
         }
@@ -2134,10 +2140,7 @@ fn test_amend_old_prompts_different_file_gets_session_edits() {
 
     // Verify blame on both files
     let mut fa = repo.filename("file_a.txt");
-    fa.assert_committed_lines(crate::lines![
-        "Human line A".human(),
-        "Old AI line A".ai(),
-    ]);
+    fa.assert_committed_lines(crate::lines!["Human line A".human(), "Old AI line A".ai(),]);
     let mut fb = repo.filename("file_b.txt");
     fb.assert_committed_lines(crate::lines!["New session AI line B".ai(),]);
 }
