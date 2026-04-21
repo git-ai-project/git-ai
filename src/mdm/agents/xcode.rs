@@ -9,6 +9,7 @@ use std::process::Command;
 
 const XCODE_WATCHER_BINARY_NAME: &str = "git-ai-xcode-watcher";
 const XCODE_WATCHER_VERSION_FILE: &str = "git-ai-xcode-watcher.version";
+const XCODE_WATCHER_LABEL: &str = "com.gitai.xcode-watcher";
 const XCODE_WATCHER_MAIN_SWIFT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/agent-support/xcode/Sources/git-ai-xcode-watcher/main.swift"
@@ -40,7 +41,7 @@ impl XcodeInstaller {
         home_dir()
             .join("Library")
             .join("LaunchAgents")
-            .join("com.gitai.xcode-watcher.plist")
+            .join(format!("{}.plist", XCODE_WATCHER_LABEL))
     }
 
     fn build_cache_dir() -> PathBuf {
@@ -179,6 +180,59 @@ impl XcodeInstaller {
         Err(Self::install_warning(
             "Xcode: Unable to compile watcher after retrying",
         ))
+    }
+
+    fn launchctl_domain_target() -> Result<String, String> {
+        let uid = unsafe { libc::geteuid() };
+        if uid == 0 {
+            return Err(
+                "Unable to stop the watcher automatically from a root or non-GUI session"
+                    .to_string(),
+            );
+        }
+        Ok(format!("gui/{}", uid))
+    }
+
+    fn run_launchctl(args: &[String]) -> Result<(), String> {
+        let output = Command::new("launchctl")
+            .args(args)
+            .output()
+            .map_err(|e| format!("Unable to run launchctl: {}", e))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!("exit {}", output.status.code().unwrap_or(-1))
+        };
+        Err(detail)
+    }
+
+    fn bootout_launch_agent(domain: &str) -> Result<(), String> {
+        let args = vec![
+            "bootout".to_string(),
+            domain.to_string(),
+            Self::plist_path().to_string_lossy().to_string(),
+        ];
+        match Self::run_launchctl(&args) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if error.contains("Could not find service")
+                    || error.contains("No such process")
+                    || error.contains("not loaded")
+                    || error.contains("service could not be found") =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn remove_file_if_exists(path: &Path) -> Result<bool, String> {
@@ -410,9 +464,10 @@ impl HookInstaller for XcodeInstaller {
         }
 
         if plist_path.exists() {
-            let _ = Command::new("launchctl")
-                .args(["unload", &plist_path.to_string_lossy()])
-                .output();
+            let launchctl_warning = match Self::launchctl_domain_target() {
+                Ok(domain) => Self::bootout_launch_agent(&domain).err(),
+                Err(warning) => Some(warning),
+            };
 
             match Self::remove_file_if_exists(&plist_path) {
                 Ok(true) => results.push(UninstallResult {
@@ -426,6 +481,17 @@ impl HookInstaller for XcodeInstaller {
                     diff: None,
                     message: format!("Xcode: {}", message),
                 }),
+            }
+
+            if let Some(warning) = launchctl_warning {
+                results.push(UninstallResult {
+                    changed: false,
+                    diff: None,
+                    message: format!(
+                        "Xcode: Unable to stop watcher LaunchAgent automatically: {}",
+                        warning
+                    ),
+                });
             }
         }
 
@@ -480,6 +546,8 @@ mod tests {
     use super::*;
     use crate::mdm::hook_installer::{HookInstaller, HookInstallerParams};
     use serial_test::serial;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     fn test_params() -> HookInstallerParams {
@@ -514,6 +582,43 @@ mod tests {
                 None => std::env::remove_var("USERPROFILE"),
             }
         }
+    }
+
+    fn with_path_override<F: FnOnce(&Path)>(f: F) {
+        let temp = tempdir().unwrap();
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        let prev_path = std::env::var_os("PATH");
+        let new_path = match &prev_path {
+            Some(existing) => format!("{}:{}", bin_dir.display(), existing.to_string_lossy()),
+            None => bin_dir.display().to_string(),
+        };
+
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+
+        f(&bin_dir);
+
+        unsafe {
+            match prev_path {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    fn write_launchctl_stub(bin_dir: &Path, exit_code: i32, log_path: &Path) {
+        let stub_path = bin_dir.join("launchctl");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nexit {}\n",
+            log_path.display(),
+            exit_code
+        );
+        fs::write(&stub_path, script).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&stub_path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
@@ -756,6 +861,36 @@ mod tests {
                     .any(|result| result.message.contains("Watcher version marker removed"))
             );
             assert!(!version_file.exists());
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn test_uninstall_extras_uses_bootout_for_launch_agent() {
+        with_temp_home(|home| {
+            with_path_override(|bin_dir| {
+                let installer = XcodeInstaller;
+                let plist_path = XcodeInstaller::plist_path();
+                let launchctl_log = home.join("launchctl.log");
+
+                fs::create_dir_all(plist_path.parent().unwrap()).unwrap();
+                fs::write(&plist_path, "plist").unwrap();
+                write_launchctl_stub(bin_dir, 0, &launchctl_log);
+
+                let results = installer.uninstall_extras(&test_params(), false).unwrap();
+
+                assert!(
+                    results
+                        .iter()
+                        .any(|result| result.message.contains("launchd service unloaded"))
+                );
+                assert!(!plist_path.exists());
+
+                let log = fs::read_to_string(launchctl_log).unwrap();
+                assert!(log.contains("bootout"));
+                assert!(!log.contains("unload"));
+            });
         });
     }
 

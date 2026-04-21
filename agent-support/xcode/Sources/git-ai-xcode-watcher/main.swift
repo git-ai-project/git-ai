@@ -28,7 +28,7 @@ func findRepoRoot(for filePath: String) -> String? {
     do {
         try proc.run()
     } catch {
-        repoRootCache[dir] = nil
+        repoRootCache.updateValue(nil, forKey: dir)
         return nil
     }
     let data = pipe.fileHandleForReading.readDataToEndOfFile()
@@ -41,7 +41,7 @@ func findRepoRoot(for filePath: String) -> String? {
     } else {
         result = nil
     }
-    repoRootCache[dir] = result
+    repoRootCache.updateValue(result, forKey: dir)
     return result
 }
 
