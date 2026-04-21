@@ -1,6 +1,5 @@
 ---
-source: tests/integration/stats_unit.rs
-assertion_line: 88
+source: src/authorship/stats.rs
 expression: minimal_human_output
 ---
 "you  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ ai\n     2%                                   98%\n"

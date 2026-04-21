@@ -1,6 +1,5 @@
 ---
-source: tests/integration/stats_unit.rs
-assertion_line: 142
+source: src/authorship/stats.rs
 expression: untracked_at_threshold_output
 ---
 "you  ███████████████████░░░░░░░░░░░░░░░░░░░░░ ai\n     49%                                  50%\n"

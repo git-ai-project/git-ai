@@ -693,3 +693,412 @@ pub fn format_transcript(prompt: &PromptRecord) -> String {
     }
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authorship::authorship_log::PromptRecord;
+    use crate::authorship::transcript::Message;
+    use crate::authorship::working_log::AgentId;
+    use std::collections::HashMap;
+
+    // Helper function to create a test PromptRecord
+    fn create_test_prompt_record(tool: &str, id: &str, model: &str) -> PromptRecord {
+        PromptRecord {
+            agent_id: AgentId {
+                tool: tool.to_string(),
+                id: id.to_string(),
+                model: model.to_string(),
+            },
+            human_author: Some("test_user".to_string()),
+            messages: vec![
+                Message::User {
+                    text: "Hello".to_string(),
+                    timestamp: None,
+                },
+                Message::Assistant {
+                    text: "Hi there".to_string(),
+                    timestamp: None,
+                },
+            ],
+            total_additions: 10,
+            total_deletions: 5,
+            accepted_lines: 8,
+            overriden_lines: 2,
+            messages_url: None,
+            custom_attributes: None,
+        }
+    }
+
+    #[test]
+    fn test_format_transcript_basic() {
+        let prompt = create_test_prompt_record("test", "123", "gpt-4");
+        let formatted = format_transcript(&prompt);
+
+        assert!(formatted.contains("User: Hello\n"));
+        assert!(formatted.contains("Assistant: Hi there\n"));
+    }
+
+    #[test]
+    fn test_format_transcript_all_message_types() {
+        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
+        prompt.messages = vec![
+            Message::User {
+                text: "User message".to_string(),
+                timestamp: None,
+            },
+            Message::Assistant {
+                text: "Assistant message".to_string(),
+                timestamp: None,
+            },
+            Message::Thinking {
+                text: "Thinking message".to_string(),
+                timestamp: None,
+            },
+            Message::Plan {
+                text: "Plan message".to_string(),
+                timestamp: None,
+            },
+            Message::ToolUse {
+                name: "test_tool".to_string(),
+                input: serde_json::json!({"param": "value"}),
+                timestamp: None,
+            },
+        ];
+
+        let formatted = format_transcript(&prompt);
+
+        assert!(formatted.contains("User: User message\n"));
+        assert!(formatted.contains("Assistant: Assistant message\n"));
+        assert!(formatted.contains("Thinking: Thinking message\n"));
+        assert!(formatted.contains("Plan: Plan message\n"));
+        // ToolUse should be filtered out
+        assert!(!formatted.contains("test_tool"));
+        assert!(!formatted.contains("ToolUse"));
+    }
+
+    #[test]
+    fn test_format_transcript_empty() {
+        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
+        prompt.messages = vec![];
+
+        let formatted = format_transcript(&prompt);
+        assert_eq!(formatted, "");
+    }
+
+    #[test]
+    fn test_format_transcript_multiline() {
+        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
+        prompt.messages = vec![Message::User {
+            text: "Line 1\nLine 2\nLine 3".to_string(),
+            timestamp: None,
+        }];
+
+        let formatted = format_transcript(&prompt);
+        assert_eq!(formatted, "User: Line 1\nLine 2\nLine 3\n");
+    }
+
+    #[test]
+    fn test_update_prompt_from_tool_unknown() {
+        let result = update_prompt_from_tool("unknown-tool", "thread-123", None, "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_codex_prompt_no_metadata() {
+        let result = update_codex_prompt(None, "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_codex_prompt_no_transcript_path() {
+        let metadata = HashMap::new();
+        let result = update_codex_prompt(Some(&metadata), "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_claude_prompt_no_metadata() {
+        let result = update_claude_prompt(None, "claude-3");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_claude_prompt_no_transcript_path() {
+        let metadata = HashMap::new();
+        let result = update_claude_prompt(Some(&metadata), "claude-3");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_gemini_prompt_no_metadata() {
+        let result = update_gemini_prompt(None, "gemini-pro");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_gemini_prompt_no_transcript_path() {
+        let metadata = HashMap::new();
+        let result = update_gemini_prompt(Some(&metadata), "gemini-pro");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_github_copilot_prompt_no_metadata() {
+        let result = update_github_copilot_prompt(None, "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_github_copilot_prompt_no_session_path() {
+        let metadata = HashMap::new();
+        let result = update_github_copilot_prompt(Some(&metadata), "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_continue_cli_prompt_no_metadata() {
+        let result = update_continue_cli_prompt(None, "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_continue_cli_prompt_no_transcript_path() {
+        let metadata = HashMap::new();
+        let result = update_continue_cli_prompt(Some(&metadata), "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_droid_prompt_no_metadata() {
+        let result = update_droid_prompt(None, "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_droid_prompt_no_transcript_path() {
+        let metadata = HashMap::new();
+        let result = update_droid_prompt(Some(&metadata), "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_find_prompt_with_db_fallback_no_db_no_repo() {
+        // Test when prompt is not in DB and no repo is provided
+        let result = find_prompt_with_db_fallback("nonexistent-prompt", None);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("not found in database and no repository provided")
+        );
+    }
+
+    #[test]
+    fn test_update_prompt_from_tool_dispatch() {
+        // Test that unknown tools return Unchanged
+        let result = update_prompt_from_tool("unknown", "thread-123", None, "model");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+
+        // Test dispatch to cursor (may return Failed if cursor DB doesn't exist, which is expected)
+        let result = update_prompt_from_tool("cursor", "thread-123", None, "model");
+        assert!(matches!(
+            result,
+            PromptUpdateResult::Unchanged | PromptUpdateResult::Failed(_)
+        ));
+
+        // Test dispatch to claude
+        let result = update_prompt_from_tool("claude", "thread-123", None, "model");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+
+        // Test dispatch to codex
+        let result = update_prompt_from_tool("codex", "thread-123", None, "model");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+
+        // Test dispatch to gemini
+        let result = update_prompt_from_tool("gemini", "thread-123", None, "model");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+
+        // Test dispatch to github-copilot
+        let result = update_prompt_from_tool("github-copilot", "thread-123", None, "model");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+
+        // Test dispatch to continue-cli
+        let result = update_prompt_from_tool("continue-cli", "thread-123", None, "model");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+
+        // Test dispatch to droid
+        let result = update_prompt_from_tool("droid", "thread-123", None, "model");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+
+        // Test dispatch to amp (without metadata, returns Unchanged or Failed depending on local state)
+        let result = update_prompt_from_tool("amp", "thread-123", None, "model");
+        assert!(matches!(
+            result,
+            PromptUpdateResult::Unchanged | PromptUpdateResult::Failed(_)
+        ));
+
+        // Test dispatch to opencode (behavior depends on whether default storage exists)
+        let result = update_prompt_from_tool("opencode", "session-123", None, "model");
+        // Can be Unchanged, Failed, or Updated depending on storage availability
+        match result {
+            PromptUpdateResult::Unchanged
+            | PromptUpdateResult::Failed(_)
+            | PromptUpdateResult::Updated(_, _) => {}
+        }
+
+        // Test dispatch to windsurf
+        let result = update_prompt_from_tool("windsurf", "trajectory-123", None, "model");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_format_transcript_with_timestamps() {
+        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
+        prompt.messages = vec![
+            Message::User {
+                text: "Question".to_string(),
+                timestamp: Some("2024-01-01T12:00:00Z".to_string()),
+            },
+            Message::Assistant {
+                text: "Answer".to_string(),
+                timestamp: Some("2024-01-01T12:00:01Z".to_string()),
+            },
+        ];
+
+        let formatted = format_transcript(&prompt);
+        // Timestamps should not appear in formatted output
+        assert!(!formatted.contains("2024-01-01"));
+        assert!(formatted.contains("User: Question\n"));
+        assert!(formatted.contains("Assistant: Answer\n"));
+    }
+
+    #[test]
+    fn test_format_transcript_special_characters() {
+        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
+        prompt.messages = vec![Message::User {
+            text: "Text with \"quotes\" and 'apostrophes' and\ttabs\nand newlines".to_string(),
+            timestamp: None,
+        }];
+
+        let formatted = format_transcript(&prompt);
+        assert!(formatted.contains("\"quotes\""));
+        assert!(formatted.contains("'apostrophes'"));
+        assert!(formatted.contains("\t"));
+    }
+
+    #[test]
+    fn test_format_transcript_unicode() {
+        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
+        prompt.messages = vec![Message::User {
+            text: "Hello \u{4e16}\u{754c} \u{1f30d} \u{0417}\u{0434}\u{0440}\u{0430}\u{0432}\u{0441}\u{0442}\u{0432}\u{0443}\u{0439} \u{0645}\u{0631}\u{062d}\u{0628}\u{0627}".to_string(),
+            timestamp: None,
+        }];
+
+        let formatted = format_transcript(&prompt);
+        assert!(formatted.contains("\u{4e16}\u{754c}"));
+        assert!(formatted.contains("\u{1f30d}"));
+        assert!(formatted.contains(
+            "\u{0417}\u{0434}\u{0440}\u{0430}\u{0432}\u{0441}\u{0442}\u{0432}\u{0443}\u{0439}"
+        ));
+        assert!(formatted.contains("\u{0645}\u{0631}\u{062d}\u{0628}\u{0627}"));
+    }
+
+    #[test]
+    fn test_update_codex_prompt_invalid_path() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "transcript_path".to_string(),
+            "/nonexistent/path.jsonl".to_string(),
+        );
+
+        let result = update_codex_prompt(Some(&metadata), "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Failed(_)));
+    }
+
+    #[test]
+    fn test_update_claude_prompt_invalid_path() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "transcript_path".to_string(),
+            "/nonexistent/path.jsonl".to_string(),
+        );
+
+        let result = update_claude_prompt(Some(&metadata), "claude-3");
+        assert!(matches!(result, PromptUpdateResult::Failed(_)));
+    }
+
+    #[test]
+    fn test_update_gemini_prompt_invalid_path() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "transcript_path".to_string(),
+            "/nonexistent/path.json".to_string(),
+        );
+
+        let result = update_gemini_prompt(Some(&metadata), "gemini-pro");
+        assert!(matches!(result, PromptUpdateResult::Failed(_)));
+    }
+
+    #[test]
+    fn test_update_github_copilot_prompt_invalid_path() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "chat_session_path".to_string(),
+            "/nonexistent/path.json".to_string(),
+        );
+
+        let result = update_github_copilot_prompt(Some(&metadata), "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Failed(_)));
+    }
+
+    #[test]
+    fn test_update_continue_cli_prompt_invalid_path() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "transcript_path".to_string(),
+            "/nonexistent/path.json".to_string(),
+        );
+
+        let result = update_continue_cli_prompt(Some(&metadata), "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Failed(_)));
+    }
+
+    #[test]
+    fn test_update_droid_prompt_invalid_transcript_path() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "transcript_path".to_string(),
+            "/nonexistent/path.jsonl".to_string(),
+        );
+
+        let result = update_droid_prompt(Some(&metadata), "gpt-4");
+        assert!(matches!(result, PromptUpdateResult::Failed(_)));
+    }
+
+    #[test]
+    fn test_update_windsurf_prompt_no_metadata() {
+        let result = update_windsurf_prompt(None, "unknown");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_windsurf_prompt_no_transcript_path() {
+        let metadata = HashMap::new();
+        let result = update_windsurf_prompt(Some(&metadata), "unknown");
+        assert!(matches!(result, PromptUpdateResult::Unchanged));
+    }
+
+    #[test]
+    fn test_update_windsurf_prompt_invalid_path() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "transcript_path".to_string(),
+            "/nonexistent/path.jsonl".to_string(),
+        );
+
+        let result = update_windsurf_prompt(Some(&metadata), "unknown");
+        assert!(matches!(result, PromptUpdateResult::Failed(_)));
+    }
+}

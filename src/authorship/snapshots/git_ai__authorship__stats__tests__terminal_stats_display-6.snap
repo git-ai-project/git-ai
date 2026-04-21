@@ -1,6 +1,5 @@
 ---
-source: tests/integration/stats_unit.rs
-assertion_line: 125
+source: src/authorship/stats.rs
 expression: with_untracked_output
 ---
 "you  ███████········░░░░░░░░░░░░░░░░░░░░░░░░░ ai\n     18%          untracked  22%           60%\n"

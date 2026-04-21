@@ -296,3 +296,39 @@ impl CiContext {
         commits
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ci_event_debug() {
+        let event = CiEvent::Merge {
+            merge_commit_sha: "abc123".to_string(),
+            head_ref: "feature".to_string(),
+            head_sha: "def456".to_string(),
+            base_ref: "main".to_string(),
+            base_sha: "ghi789".to_string(),
+        };
+
+        let debug_str = format!("{:?}", event);
+        assert!(debug_str.contains("Merge"));
+        assert!(debug_str.contains("abc123"));
+        assert!(debug_str.contains("feature"));
+    }
+
+    #[test]
+    fn test_ci_run_result_debug() {
+        let result = CiRunResult::SkippedSimpleMerge;
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("SkippedSimpleMerge"));
+
+        let result2 = CiRunResult::SkippedFastForward;
+        let debug_str2 = format!("{:?}", result2);
+        assert!(debug_str2.contains("SkippedFastForward"));
+
+        let result3 = CiRunResult::NoAuthorshipAvailable;
+        let debug_str3 = format!("{:?}", result3);
+        assert!(debug_str3.contains("NoAuthorshipAvailable"));
+    }
+}

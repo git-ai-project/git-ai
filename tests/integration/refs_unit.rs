@@ -2,112 +2,13 @@ use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::error::GitAiError;
 use git_ai::git::refs::{
-    CommitAuthorship, commits_with_authorship_notes, copy_ref, fanout_note_pathspec_for_commit,
-    flat_note_pathspec_for_commit, get_commits_with_notes_from_list,
+    CommitAuthorship, commits_with_authorship_notes, copy_ref, get_commits_with_notes_from_list,
     get_reference_as_authorship_log_v3, get_reference_as_working_log, grep_ai_notes,
     merge_notes_from_ref, note_blob_oids_for_commits, notes_add, notes_add_batch,
-    notes_add_blob_batch, notes_path_for_object, parse_batch_check_blob_oid, ref_exists,
-    sanitize_remote_name, show_authorship_note, tracking_ref_for_remote,
+    notes_add_blob_batch, ref_exists, show_authorship_note,
 };
 use git_ai::git::repository::{exec_git, find_repository_in_path};
 use std::fs;
-
-// ---------------------------------------------------------------------------
-// Pure unit tests (no repo needed)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn test_parse_batch_check_blob_oid_accepts_sha1_and_sha256() {
-    let sha1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa blob 10";
-    let sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb blob 20";
-    let invalid = "cccccccc blob 10";
-
-    assert_eq!(
-        parse_batch_check_blob_oid(sha1),
-        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string())
-    );
-    assert_eq!(
-        parse_batch_check_blob_oid(sha256),
-        Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string())
-    );
-    assert_eq!(parse_batch_check_blob_oid(invalid), None);
-}
-
-#[test]
-fn test_notes_path_for_object() {
-    // Short SHA (edge case)
-    assert_eq!(notes_path_for_object("a"), "a");
-    assert_eq!(notes_path_for_object("ab"), "ab");
-
-    // Normal SHA (40 chars)
-    assert_eq!(
-        notes_path_for_object("abcdef1234567890abcdef1234567890abcdef12"),
-        "ab/cdef1234567890abcdef1234567890abcdef12"
-    );
-
-    // SHA-256 (64 chars)
-    assert_eq!(
-        notes_path_for_object("abc1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd"),
-        "ab/c1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd"
-    );
-}
-
-#[test]
-fn test_flat_note_pathspec_for_commit() {
-    let sha = "abcdef1234567890abcdef1234567890abcdef12";
-    let pathspec = flat_note_pathspec_for_commit(sha);
-    assert_eq!(
-        pathspec,
-        "refs/notes/ai:abcdef1234567890abcdef1234567890abcdef12"
-    );
-}
-
-#[test]
-fn test_fanout_note_pathspec_for_commit() {
-    let sha = "abcdef1234567890abcdef1234567890abcdef12";
-    let pathspec = fanout_note_pathspec_for_commit(sha);
-    assert_eq!(
-        pathspec,
-        "refs/notes/ai:ab/cdef1234567890abcdef1234567890abcdef12"
-    );
-}
-
-#[test]
-fn test_sanitize_remote_name() {
-    assert_eq!(sanitize_remote_name("origin"), "origin");
-    assert_eq!(sanitize_remote_name("my-remote"), "my-remote");
-    assert_eq!(sanitize_remote_name("remote_123"), "remote_123");
-    assert_eq!(
-        sanitize_remote_name("remote/with/slashes"),
-        "remote_with_slashes"
-    );
-    assert_eq!(
-        sanitize_remote_name("remote@with#special$chars"),
-        "remote_with_special_chars"
-    );
-    assert_eq!(sanitize_remote_name("has spaces"), "has_spaces");
-}
-
-#[test]
-fn test_tracking_ref_for_remote() {
-    assert_eq!(
-        tracking_ref_for_remote("origin"),
-        "refs/notes/ai-remote/origin"
-    );
-    assert_eq!(
-        tracking_ref_for_remote("upstream"),
-        "refs/notes/ai-remote/upstream"
-    );
-    assert_eq!(
-        tracking_ref_for_remote("my-fork"),
-        "refs/notes/ai-remote/my-fork"
-    );
-    // Special characters get sanitized
-    assert_eq!(
-        tracking_ref_for_remote("remote/with/slashes"),
-        "refs/notes/ai-remote/remote_with_slashes"
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Repo-based tests (TestRepo replaces TmpRepo)

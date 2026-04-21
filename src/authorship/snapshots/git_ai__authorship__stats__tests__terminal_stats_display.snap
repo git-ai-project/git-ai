@@ -1,6 +1,5 @@
 ---
-source: tests/integration/stats_unit.rs
-assertion_line: 34
+source: src/authorship/stats.rs
 expression: mixed_output
 ---
 "you  █████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░ ai\n     33%                                  67%\n"

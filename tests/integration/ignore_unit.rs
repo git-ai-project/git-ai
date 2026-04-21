@@ -1,8 +1,7 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::ignore::{
-    build_ignore_matcher, default_ignore_patterns, effective_ignore_patterns,
-    load_git_ai_ignore_patterns, load_linguist_generated_patterns_from_root_gitattributes,
-    should_ignore_file, should_ignore_file_with_matcher,
+    effective_ignore_patterns, load_git_ai_ignore_patterns,
+    load_linguist_generated_patterns_from_root_gitattributes,
 };
 use git_ai::git::repository::from_bare_repository;
 use std::fs;
@@ -102,187 +101,6 @@ fn make_bare_repo_with_ignore(
         temp,
         from_bare_repository(&bare).expect("bare repository should load"),
     )
-}
-
-// Pure pattern matching tests (no repo needed)
-
-#[test]
-fn defaults_include_snapshot_and_lock_patterns() {
-    let defaults = default_ignore_patterns();
-    assert!(defaults.contains(&"**/*.snap".to_string()));
-    assert!(defaults.contains(&"Cargo.lock".to_string()));
-    assert!(defaults.contains(&"*.generated.*".to_string()));
-}
-
-#[test]
-fn defaults_ignore_drizzle_meta_files() {
-    let defaults = default_ignore_patterns();
-    let matcher = build_ignore_matcher(&defaults);
-
-    assert!(should_ignore_file_with_matcher(
-        "web/drizzle/meta/_journal.json",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher(
-        "web/drizzle/meta/0001_snapshot.json",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher(
-        "drizzle/meta/0032_snapshot.json",
-        &matcher
-    ));
-    // Should not ignore non-meta drizzle files
-    assert!(!should_ignore_file_with_matcher(
-        "drizzle/0001_initial.sql",
-        &matcher
-    ));
-}
-
-#[test]
-fn defaults_do_not_ignore_generic_snapshots_directories() {
-    let defaults = default_ignore_patterns();
-    let matcher = build_ignore_matcher(&defaults);
-
-    assert!(!should_ignore_file_with_matcher(
-        "backups/snapshots/state.json",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher(
-        "tests/__snapshots__/feature.snap",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher(
-        "tests/snapshots/feature.snap",
-        &matcher
-    ));
-}
-
-#[test]
-fn defaults_ignore_nested_named_lockfiles() {
-    let defaults = default_ignore_patterns();
-    let matcher = build_ignore_matcher(&defaults);
-
-    assert!(should_ignore_file_with_matcher(
-        "apps/web/Gemfile.lock",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher(
-        "services/api/package-lock.json",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher(
-        "libs/core/Cargo.lock",
-        &matcher
-    ));
-}
-
-#[test]
-fn should_ignore_file_matches_path_and_filename() {
-    let patterns = vec!["*.lock".to_string(), "**/node_modules/**".to_string()];
-    let matcher = build_ignore_matcher(&patterns);
-    assert!(should_ignore_file("Cargo.lock", &patterns));
-    assert!(should_ignore_file("backend/Cargo.lock", &patterns));
-    assert!(should_ignore_file_with_matcher("Cargo.lock", &matcher));
-    assert!(should_ignore_file_with_matcher(
-        "backend/Cargo.lock",
-        &matcher
-    ));
-    assert!(should_ignore_file(
-        "web/node_modules/lodash/index.js",
-        &patterns
-    ));
-    assert!(should_ignore_file_with_matcher(
-        "web/node_modules/lodash/index.js",
-        &matcher
-    ));
-    assert!(!should_ignore_file("src/main.rs", &patterns));
-    assert!(!should_ignore_file_with_matcher("src/main.rs", &matcher));
-}
-
-#[test]
-fn invalid_patterns_fallback_to_exact_path_or_filename() {
-    let patterns = vec!["[".to_string(), "docs/[bad".to_string()];
-    let matcher = build_ignore_matcher(&patterns);
-
-    assert!(should_ignore_file_with_matcher("[", &matcher));
-    assert!(should_ignore_file_with_matcher("docs/[bad", &matcher));
-    assert!(!should_ignore_file_with_matcher("docs/good.rs", &matcher));
-}
-
-#[test]
-fn defaults_include_protobuf_generated_patterns() {
-    let defaults = default_ignore_patterns();
-    // Objective-C protobuf
-    assert!(defaults.contains(&"*.pbobjc.h".to_string()));
-    assert!(defaults.contains(&"*.pbobjc.m".to_string()));
-    // Go protobuf
-    assert!(defaults.contains(&"*.pb.go".to_string()));
-    // C++ protobuf
-    assert!(defaults.contains(&"*.pb.h".to_string()));
-    assert!(defaults.contains(&"*.pb.cc".to_string()));
-    // Python protobuf
-    assert!(defaults.contains(&"*_pb2.py".to_string()));
-    assert!(defaults.contains(&"*_pb2_grpc.py".to_string()));
-    // Swift protobuf
-    assert!(defaults.contains(&"*.pb.swift".to_string()));
-    // Dart protobuf
-    assert!(defaults.contains(&"*.pb.dart".to_string()));
-}
-
-#[test]
-fn defaults_ignore_protobuf_generated_files() {
-    let defaults = default_ignore_patterns();
-    let matcher = build_ignore_matcher(&defaults);
-
-    // Bare filenames
-    assert!(should_ignore_file_with_matcher(
-        "Message.pbobjc.h",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher(
-        "Message.pbobjc.m",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher("service.pb.go", &matcher));
-    assert!(should_ignore_file_with_matcher("message.pb.h", &matcher));
-    assert!(should_ignore_file_with_matcher("message.pb.cc", &matcher));
-    assert!(should_ignore_file_with_matcher("types_pb2.py", &matcher));
-    assert!(should_ignore_file_with_matcher(
-        "service_pb2_grpc.py",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher(
-        "message.pb.swift",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher("message.pb.dart", &matcher));
-
-    // Nested paths
-    assert!(should_ignore_file_with_matcher(
-        "proto/gen/service.pb.go",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher(
-        "ios/Proto/Message.pbobjc.h",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher(
-        "backend/api/types_pb2.py",
-        &matcher
-    ));
-    assert!(should_ignore_file_with_matcher(
-        "cpp/protos/message.pb.cc",
-        &matcher
-    ));
-
-    // Non-protobuf files should NOT be matched
-    assert!(!should_ignore_file_with_matcher("main.go", &matcher));
-    assert!(!should_ignore_file_with_matcher("service.py", &matcher));
-    assert!(!should_ignore_file_with_matcher("header.h", &matcher));
-    assert!(!should_ignore_file_with_matcher("source.cc", &matcher));
-    assert!(!should_ignore_file_with_matcher("app.swift", &matcher));
-    assert!(!should_ignore_file_with_matcher("widget.dart", &matcher));
-    assert!(!should_ignore_file_with_matcher("Objective.m", &matcher));
 }
 
 // TestRepo tests (converted from TmpRepo)
@@ -533,15 +351,6 @@ fn bare_repo_effective_patterns_union_gitattributes_and_git_ai_ignore() {
 }
 
 crate::reuse_tests_in_worktree!(
-    // Pure pattern tests
-    defaults_include_snapshot_and_lock_patterns,
-    defaults_ignore_drizzle_meta_files,
-    defaults_do_not_ignore_generic_snapshots_directories,
-    defaults_ignore_nested_named_lockfiles,
-    should_ignore_file_matches_path_and_filename,
-    invalid_patterns_fallback_to_exact_path_or_filename,
-    defaults_include_protobuf_generated_patterns,
-    defaults_ignore_protobuf_generated_files,
     // TestRepo tests
     loads_positive_linguist_generated_only,
     ignores_gitattributes_macro_definitions,

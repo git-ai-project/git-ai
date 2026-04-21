@@ -1,6 +1,5 @@
 ---
-source: tests/integration/stats_unit.rs
-assertion_line: 106
+source: src/authorship/stats.rs
 expression: deletion_only_output
 ---
 "you  \u{1b}[90m                                        \u{1b}[0m ai\n     \u{1b}[90m             (no additions)             \u{1b}[0m\n"
