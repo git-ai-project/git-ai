@@ -9,7 +9,7 @@ use crate::authorship::ignore::{
 };
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint::prepare_captured_checkpoint;
-use crate::commands::checkpoint_agent::orchestrator::CheckpointResult;
+use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::daemon::control_api::ControlRequest;
 use crate::daemon::{DaemonConfig, send_control_request_with_timeout};
 use crate::error::GitAiError;
@@ -301,8 +301,8 @@ pub struct InflightBashAgentContext {
 }
 
 impl InflightBashAgentContext {
-    pub fn into_checkpoint_result(self, repo_working_dir: PathBuf) -> CheckpointResult {
-        CheckpointResult {
+    pub fn into_checkpoint_request(self, repo_working_dir: PathBuf) -> CheckpointRequest {
+        CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
             agent_id: self.agent_id,
@@ -374,7 +374,7 @@ fn scan_active_bash_snapshots(repo_root: &Path) -> ActiveBashSnapshotScan {
 pub fn checkpoint_context_from_active_bash(
     repo_root: &Path,
     repo_working_dir: &str,
-) -> Option<(CheckpointKind, Option<CheckpointResult>)> {
+) -> Option<(CheckpointKind, Option<CheckpointRequest>)> {
     match scan_active_bash_snapshots(repo_root) {
         ActiveBashSnapshotScan {
             latest_context: Some(active_context),
@@ -388,7 +388,7 @@ pub fn checkpoint_context_from_active_bash(
             );
             Some((
                 CheckpointKind::AiAgent,
-                Some(active_context.into_checkpoint_result(PathBuf::from(repo_working_dir))),
+                Some(active_context.into_checkpoint_request(PathBuf::from(repo_working_dir))),
             ))
         }
         ActiveBashSnapshotScan {
@@ -1183,7 +1183,7 @@ fn attempt_pre_hook_capture(
         }
     };
 
-    let checkpoint_result = CheckpointResult {
+    let checkpoint_request = CheckpointRequest {
         trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::Human,
         agent_id: AgentId {
@@ -1212,7 +1212,7 @@ fn attempt_pre_hook_capture(
         &repo,
         "bash-tool", // author
         CheckpointKind::Human,
-        Some(&checkpoint_result),
+        Some(&checkpoint_request),
         false, // is_pre_commit
         None,  // base_commit_override
     ) {
@@ -1290,7 +1290,7 @@ fn attempt_post_hook_capture(
         }
     };
 
-    let checkpoint_result = CheckpointResult {
+    let checkpoint_request = CheckpointRequest {
         trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::AiAgent,
         agent_id: AgentId {
@@ -1319,7 +1319,7 @@ fn attempt_post_hook_capture(
         &repo,
         "bash-tool", // author
         CheckpointKind::AiAgent,
-        Some(&checkpoint_result),
+        Some(&checkpoint_request),
         false, // is_pre_commit
         None,  // base_commit_override
     ) {

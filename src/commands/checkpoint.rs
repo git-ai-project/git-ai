@@ -14,7 +14,7 @@ use crate::authorship::imara_diff_utils::{
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
-use crate::commands::checkpoint_agent::orchestrator::CheckpointResult;
+use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
@@ -89,7 +89,7 @@ pub struct PreparedCheckpointManifest {
     pub explicit_paths: Vec<String>,
     pub files: Vec<PreparedCheckpointFile>,
     #[serde(default)]
-    pub checkpoint_result: Option<CheckpointResult>,
+    pub checkpoint_request: Option<CheckpointRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,9 +184,9 @@ pub(crate) fn should_emit_agent_usage(_agent_id: &AgentId) -> bool {
 
 pub fn explicit_capture_target_paths(
     _kind: CheckpointKind,
-    checkpoint_result: Option<&CheckpointResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
 ) -> Option<(PreparedPathRole, Vec<String>)> {
-    let result = checkpoint_result?;
+    let result = checkpoint_request?;
     if result.file_paths.is_empty() {
         return None;
     }
@@ -314,7 +314,7 @@ pub fn run(
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
-    checkpoint_result: Option<CheckpointResult>,
+    checkpoint_request: Option<CheckpointRequest>,
     is_pre_commit: bool,
 ) -> Result<(usize, usize, usize), GitAiError> {
     run_with_base_commit_override(
@@ -322,7 +322,7 @@ pub fn run(
         author,
         kind,
         quiet,
-        checkpoint_result,
+        checkpoint_request,
         is_pre_commit,
         None,
     )
@@ -334,7 +334,7 @@ pub fn run_with_base_commit_override(
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
-    checkpoint_result: Option<CheckpointResult>,
+    checkpoint_request: Option<CheckpointRequest>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
 ) -> Result<(usize, usize, usize), GitAiError> {
@@ -343,7 +343,7 @@ pub fn run_with_base_commit_override(
         author,
         kind,
         quiet,
-        checkpoint_result,
+        checkpoint_request,
         is_pre_commit,
         base_commit_override,
         BaseOverrideResolutionPolicy::AllowFallback,
@@ -356,7 +356,7 @@ pub(crate) fn run_with_base_commit_override_with_policy(
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
-    checkpoint_result: Option<CheckpointResult>,
+    checkpoint_request: Option<CheckpointRequest>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
     base_override_resolution_policy: BaseOverrideResolutionPolicy,
@@ -366,7 +366,7 @@ pub(crate) fn run_with_base_commit_override_with_policy(
     let resolved = resolve_live_checkpoint_execution(
         repo,
         kind,
-        checkpoint_result.as_ref(),
+        checkpoint_request.as_ref(),
         is_pre_commit,
         base_commit_override,
         base_override_resolution_policy,
@@ -384,19 +384,19 @@ pub(crate) fn run_with_base_commit_override_with_policy(
         author,
         kind,
         quiet,
-        checkpoint_result,
+        checkpoint_request,
         is_pre_commit,
         resolved,
         checkpoint_start,
     )
 }
 
-fn filtered_pathspecs_for_checkpoint_result(
+fn filtered_pathspecs_for_checkpoint_request(
     repo: &Repository,
     kind: CheckpointKind,
-    checkpoint_result: Option<&CheckpointResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
 ) -> Option<Vec<String>> {
-    let (_, paths) = explicit_capture_target_paths(kind, checkpoint_result)?;
+    let (_, paths) = explicit_capture_target_paths(kind, checkpoint_request)?;
     let repo_workdir = repo.workdir().ok()?;
 
     let filtered = paths
@@ -598,7 +598,7 @@ fn resolve_explicit_path_execution(
 fn resolve_live_checkpoint_execution(
     repo: &Repository,
     kind: CheckpointKind,
-    checkpoint_result: Option<&CheckpointResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
     base_override_resolution_policy: BaseOverrideResolutionPolicy,
@@ -629,7 +629,7 @@ fn resolve_live_checkpoint_execution(
             .map(|files| files.is_empty())
             .unwrap_or(true);
         let has_initial_attributions = !working_log.read_initial_attributions().files.is_empty();
-        let has_explicit_ai_agent_context = kind.is_ai() && checkpoint_result.is_some();
+        let has_explicit_ai_agent_context = kind.is_ai() && checkpoint_request.is_some();
 
         if has_no_ai_edits
             && !has_initial_attributions
@@ -641,7 +641,7 @@ fn resolve_live_checkpoint_execution(
         }
     }
 
-    if let Some(dirty_files) = checkpoint_result.and_then(|result| result.dirty_files.as_ref()) {
+    if let Some(dirty_files) = checkpoint_request.and_then(|result| result.dirty_files.as_ref()) {
         let string_dirty = dirty_files
             .iter()
             .map(|(k, v)| (k.to_string_lossy().to_string(), v.clone()))
@@ -655,9 +655,9 @@ fn resolve_live_checkpoint_execution(
         .as_millis();
 
     let has_explicit_target_paths =
-        explicit_capture_target_paths(kind, checkpoint_result).is_some();
+        explicit_capture_target_paths(kind, checkpoint_request).is_some();
     let pathspec_start = Instant::now();
-    let filtered_pathspec = filtered_pathspecs_for_checkpoint_result(repo, kind, checkpoint_result);
+    let filtered_pathspec = filtered_pathspecs_for_checkpoint_request(repo, kind, checkpoint_request);
     tracing::debug!(
         "[BENCHMARK] Pathspec filtering took {:?}",
         pathspec_start.elapsed()
@@ -667,7 +667,7 @@ fn resolve_live_checkpoint_execution(
     // should be checkpointed. Re-running git status here turns daemon commit replay into a
     // full worktree scan on every commit, which is especially expensive on macOS runners.
     if base_commit_override.is_some() {
-        let dirty_files_for_override = checkpoint_result
+        let dirty_files_for_override = checkpoint_request
             .and_then(|result| result.dirty_files.as_ref())
             .map(|df| {
                 df.iter()
@@ -778,7 +778,7 @@ fn execute_resolved_checkpoint(
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
-    checkpoint_result: Option<CheckpointResult>,
+    checkpoint_request: Option<CheckpointRequest>,
     is_pre_commit: bool,
     resolved: ResolvedCheckpointExecution,
     checkpoint_start: Instant,
@@ -857,7 +857,7 @@ fn execute_resolved_checkpoint(
         &resolved.files,
         &file_content_hashes,
         &checkpoints,
-        checkpoint_result.as_ref(),
+        checkpoint_request.as_ref(),
         resolved.ts,
         is_pre_commit,
         Some(resolved.base_commit.as_str()),
@@ -882,7 +882,7 @@ fn execute_resolved_checkpoint(
         checkpoint.trace_id = Some(trace_id.clone());
 
         if kind.is_ai() {
-            if let Some(cr) = &checkpoint_result {
+            if let Some(cr) = &checkpoint_request {
                 // Read transcript from source if available
                 let (transcript, transcript_model) = cr
                     .transcript_source
@@ -908,7 +908,7 @@ fn execute_resolved_checkpoint(
                 };
             }
         } else if kind == CheckpointKind::KnownHuman
-            && let Some(cr) = &checkpoint_result
+            && let Some(cr) = &checkpoint_request
             && !cr.metadata.is_empty()
         {
             let editor = cr.metadata.get("kh_editor").cloned().unwrap_or_default();
@@ -981,7 +981,7 @@ fn execute_resolved_checkpoint(
     }
 
     let agent_tool = if kind.is_ai()
-        && let Some(cr) = &checkpoint_result
+        && let Some(cr) = &checkpoint_request
     {
         Some(cr.agent_id.tool.as_str())
     } else {
@@ -1032,11 +1032,11 @@ pub fn prepare_captured_checkpoint(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    checkpoint_result: Option<&CheckpointResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
 ) -> Result<Option<PreparedCheckpointCapture>, GitAiError> {
-    let Some((explicit_path_role, _)) = explicit_capture_target_paths(kind, checkpoint_result)
+    let Some((explicit_path_role, _)) = explicit_capture_target_paths(kind, checkpoint_request)
     else {
         return Err(GitAiError::Generic(
             "captured checkpoint requires explicit edited_filepaths or will_edit_filepaths"
@@ -1047,7 +1047,7 @@ pub fn prepare_captured_checkpoint(
     let Some(resolved) = resolve_live_checkpoint_execution(
         repo,
         kind,
-        checkpoint_result,
+        checkpoint_request,
         is_pre_commit,
         base_commit_override,
         BaseOverrideResolutionPolicy::AllowFallback,
@@ -1060,7 +1060,7 @@ pub fn prepare_captured_checkpoint(
         return Ok(None);
     }
 
-    let explicit_paths = filtered_pathspecs_for_checkpoint_result(repo, kind, checkpoint_result)
+    let explicit_paths = filtered_pathspecs_for_checkpoint_request(repo, kind, checkpoint_request)
         .ok_or_else(|| {
             GitAiError::Generic(
                 "captured checkpoint requires explicit in-repository target paths".to_string(),
@@ -1094,8 +1094,8 @@ pub fn prepare_captured_checkpoint(
             });
         }
 
-        let mut stored_checkpoint_result = checkpoint_result.cloned();
-        if let Some(cr) = stored_checkpoint_result.as_mut() {
+        let mut stored_checkpoint_request = checkpoint_request.cloned();
+        if let Some(cr) = stored_checkpoint_request.as_mut() {
             cr.dirty_files = None;
         }
 
@@ -1112,7 +1112,7 @@ pub fn prepare_captured_checkpoint(
             explicit_path_role,
             explicit_paths,
             files,
-            checkpoint_result: stored_checkpoint_result,
+            checkpoint_request: stored_checkpoint_request,
         };
         fs::write(
             async_checkpoint_manifest_path(&capture_id)?,
@@ -1136,13 +1136,13 @@ pub fn prepare_captured_checkpoint(
     }))
 }
 
-/// Patch the `checkpoint_result` stored in a captured checkpoint manifest so that
+/// Patch the `checkpoint_request` stored in a captured checkpoint manifest so that
 /// it carries the real agent identity, transcript, and metadata instead of the
 /// synthetic placeholder written at bash-tool capture time.
 pub(crate) fn update_captured_checkpoint_agent_context(
     capture_id: &str,
     author: &str,
-    checkpoint_result: Option<&CheckpointResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
 ) -> Result<(), GitAiError> {
     let manifest_path = async_checkpoint_manifest_path(capture_id)?;
     let mut manifest: PreparedCheckpointManifest =
@@ -1159,15 +1159,15 @@ pub(crate) fn update_captured_checkpoint_agent_context(
 
     // Merge real agent context while preserving capture-specific fields
     // (file_paths, path_role, dirty_files) from the original.
-    if let Some(real) = checkpoint_result {
+    if let Some(real) = checkpoint_request {
         let mut updated = real.clone();
-        if let Some(existing) = &manifest.checkpoint_result {
+        if let Some(existing) = &manifest.checkpoint_request {
             updated.file_paths = existing.file_paths.clone();
             updated.path_role = existing.path_role;
         }
         updated.dirty_files = None;
         updated.captured_checkpoint_id = None;
-        manifest.checkpoint_result = Some(updated);
+        manifest.checkpoint_request = Some(updated);
     }
 
     fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
@@ -1256,7 +1256,7 @@ pub fn execute_captured_checkpoint(
         &manifest.author,
         manifest.kind,
         true,
-        manifest.checkpoint_result,
+        manifest.checkpoint_request,
         manifest.is_pre_commit,
         resolved,
         checkpoint_start,
@@ -1905,7 +1905,7 @@ async fn get_checkpoint_entries(
     files: &[String],
     file_content_hashes: &HashMap<String, String>,
     previous_checkpoints: &[Checkpoint],
-    checkpoint_result: Option<&CheckpointResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
     ts: u128,
     is_pre_commit: bool,
     head_commit_override: Option<&str>,
@@ -1947,7 +1947,7 @@ async fn get_checkpoint_entries(
         }
         _ => {
             // AI kinds: compose session_id::trace_id
-            checkpoint_result
+            checkpoint_request
                 .map(|result| {
                     let session_id =
                         generate_session_id(&result.agent_id.id, &result.agent_id.tool);
@@ -2308,18 +2308,18 @@ fn upsert_checkpoint_prompt_to_db(
 mod tests {
     use super::*;
     use crate::authorship::working_log::AgentId;
-    use crate::commands::checkpoint_agent::orchestrator::CheckpointResult;
+    use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
     use crate::git::test_utils::TmpRepo;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
-    fn test_checkpoint_result(
+    fn test_checkpoint_request(
         checkpoint_kind: CheckpointKind,
         file_paths: Vec<&str>,
         path_role: PreparedPathRole,
         dirty_files: Option<HashMap<&str, &str>>,
-    ) -> CheckpointResult {
-        CheckpointResult {
+    ) -> CheckpointRequest {
+        CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind,
             agent_id: AgentId {
@@ -2344,7 +2344,7 @@ mod tests {
 
     #[test]
     fn test_explicit_capture_target_paths_accepts_non_empty_edited_filepaths() {
-        let cr = test_checkpoint_result(
+        let cr = test_checkpoint_request(
             CheckpointKind::AiAgent,
             vec!["src/main.rs"],
             PreparedPathRole::Edited,
@@ -2359,7 +2359,7 @@ mod tests {
 
     #[test]
     fn test_explicit_capture_target_paths_accepts_non_empty_will_edit_filepaths() {
-        let cr = test_checkpoint_result(
+        let cr = test_checkpoint_request(
             CheckpointKind::Human,
             vec!["src/lib.rs"],
             PreparedPathRole::WillEdit,
@@ -2374,7 +2374,7 @@ mod tests {
 
     #[test]
     fn test_explicit_capture_target_paths_rejects_dirty_files_without_explicit_paths() {
-        let cr = test_checkpoint_result(
+        let cr = test_checkpoint_request(
             CheckpointKind::AiAgent,
             vec![],
             PreparedPathRole::Edited,
@@ -2390,7 +2390,7 @@ mod tests {
     #[test]
     fn test_explicit_capture_target_paths_known_human_uses_edited_filepaths() {
         // KnownHuman post-save: edit already happened, uses edited (path_role).
-        let cr = test_checkpoint_result(
+        let cr = test_checkpoint_request(
             CheckpointKind::KnownHuman,
             vec!["src/foo.rs"],
             PreparedPathRole::Edited,
@@ -2406,7 +2406,7 @@ mod tests {
     #[test]
     fn test_explicit_capture_target_paths_known_human_uses_will_edit_filepaths() {
         // KnownHuman pre-save: edit hasn't happened yet, uses will_edit (path_role).
-        let cr = test_checkpoint_result(
+        let cr = test_checkpoint_request(
             CheckpointKind::KnownHuman,
             vec!["src/foo.rs"],
             PreparedPathRole::WillEdit,
@@ -2421,13 +2421,13 @@ mod tests {
 
     #[test]
     fn test_explicit_capture_target_paths_rejects_empty_explicit_lists() {
-        let human_result = test_checkpoint_result(
+        let human_result = test_checkpoint_request(
             CheckpointKind::Human,
             vec!["", "   "],
             PreparedPathRole::WillEdit,
             None,
         );
-        let ai_result = test_checkpoint_result(
+        let ai_result = test_checkpoint_request(
             CheckpointKind::AiAgent,
             vec!["", "   "],
             PreparedPathRole::Edited,
@@ -2589,7 +2589,7 @@ mod tests {
     #[test]
     fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
         use crate::authorship::working_log::AgentId;
-        use crate::commands::checkpoint_agent::orchestrator::CheckpointResult;
+        use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
         use std::collections::HashMap;
         use std::fs;
 
@@ -2612,7 +2612,7 @@ mod tests {
             PathBuf::from(filename.clone()),
             "line from commit B\n".to_string(),
         );
-        let cr = CheckpointResult {
+        let cr = CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
             agent_id: AgentId {
@@ -2654,7 +2654,7 @@ mod tests {
     #[test]
     fn test_checkpoint_base_override_strict_rejects_missing_dirty_snapshot() {
         use crate::authorship::working_log::AgentId;
-        use crate::commands::checkpoint_agent::orchestrator::CheckpointResult;
+        use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
         use std::fs;
 
         let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
@@ -2670,7 +2670,7 @@ mod tests {
         // Keep the worktree dirty so the legacy fallback would succeed if it were used.
         fs::write(file.path(), "line from uncommitted edit\n").unwrap();
 
-        let cr = CheckpointResult {
+        let cr = CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
             agent_id: AgentId {
@@ -2711,7 +2711,7 @@ mod tests {
     #[test]
     fn test_checkpoint_base_override_allow_fallback_scans_when_snapshot_missing() {
         use crate::authorship::working_log::AgentId;
-        use crate::commands::checkpoint_agent::orchestrator::CheckpointResult;
+        use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
         use std::fs;
 
         let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
@@ -2727,7 +2727,7 @@ mod tests {
         // Without a dirty snapshot the fallback path must rediscover the dirty file from the repo.
         fs::write(file.path(), "line from uncommitted edit\n").unwrap();
 
-        let cr = CheckpointResult {
+        let cr = CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
             agent_id: AgentId {
@@ -2810,7 +2810,7 @@ mod tests {
     #[test]
     fn test_checkpoint_with_paths_outside_repo() {
         use crate::authorship::working_log::AgentId;
-        use crate::commands::checkpoint_agent::orchestrator::CheckpointResult;
+        use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 
         // Create a repo with an initial commit
         let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
@@ -2819,7 +2819,7 @@ mod tests {
         file.append("New line added\n").unwrap();
 
         // Create checkpoint result with paths outside the repo
-        let cr = CheckpointResult {
+        let cr = CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
             agent_id: AgentId {
@@ -2841,7 +2841,7 @@ mod tests {
         };
 
         // Run checkpoint - should not crash even with paths outside repo
-        let result = tmp_repo.trigger_checkpoint_with_checkpoint_result("test_user", Some(cr));
+        let result = tmp_repo.trigger_checkpoint_with_checkpoint_request("test_user", Some(cr));
 
         // Should succeed without crashing
         assert!(
