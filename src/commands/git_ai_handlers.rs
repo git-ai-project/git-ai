@@ -6,7 +6,7 @@ use crate::authorship::stats::stats_command;
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands;
 use crate::commands::checkpoint::PreparedPathRole;
-use crate::commands::checkpoint_agent::orchestrator::CheckpointResult;
+use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::commands::checkpoint_agent::transcript_readers;
 use crate::config;
 use crate::daemon::{
@@ -403,7 +403,7 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
-    let mut checkpoint_result: Option<CheckpointResult> = None;
+    let mut checkpoint_request: Option<CheckpointRequest> = None;
     // Handle preset arguments after parsing all flags
     if !args.is_empty()
         && crate::commands::checkpoint_agent::presets::resolve_preset(args[0].as_str()).is_ok()
@@ -441,7 +441,7 @@ fn handle_checkpoint(args: &[String]) {
                         .collect();
                 }
                 repository_working_dir = first.repo_working_dir.to_string_lossy().to_string();
-                checkpoint_result = Some(first);
+                checkpoint_request = Some(first);
 
                 // Process any additional results from the same preset invocation
                 for extra in results {
@@ -470,7 +470,7 @@ fn handle_checkpoint(args: &[String]) {
     // Emit agent_usage metric for every AI hook, regardless of whether a
     // file-edit checkpoint is created downstream.  The existing per-prompt
     // throttle (`should_emit_agent_usage`) prevents duplicate events.
-    if let Some(ref result) = checkpoint_result
+    if let Some(ref result) = checkpoint_request
         && result.checkpoint_kind.is_ai()
         && commands::checkpoint::should_emit_agent_usage(&result.agent_id)
     {
@@ -486,7 +486,7 @@ fn handle_checkpoint(args: &[String]) {
         crate::metrics::record(values, attrs);
     }
 
-    let final_working_dir = checkpoint_result
+    let final_working_dir = checkpoint_request
         .as_ref()
         .map(|r| r.repo_working_dir.to_string_lossy().to_string())
         .unwrap_or_else(|| repository_working_dir.clone());
@@ -513,7 +513,7 @@ fn handle_checkpoint(args: &[String]) {
     // which cannot see changes inside the linked worktree's working tree.
     let needs_file_based_repo_detection = repo_result.is_err()
         || if let Ok(ref cwd_repo) = repo_result {
-            checkpoint_result
+            checkpoint_request
                 .as_ref()
                 .filter(|r| !r.file_paths.is_empty())
                 .map(|r| {
@@ -533,7 +533,7 @@ fn handle_checkpoint(args: &[String]) {
 
     if needs_file_based_repo_detection {
         // Workspace root is not a git repo - try to detect repositories from edited files
-        let files_to_check = checkpoint_result.as_ref().map(|r| &r.file_paths);
+        let files_to_check = checkpoint_request.as_ref().map(|r| &r.file_paths);
 
         if let Some(files) = files_to_check
             && !files.is_empty()
@@ -591,12 +591,12 @@ fn handle_checkpoint(args: &[String]) {
                 );
             }
 
-            let checkpoint_kind = checkpoint_result
+            let checkpoint_kind = checkpoint_request
                 .as_ref()
                 .map(|r| r.checkpoint_kind)
                 .unwrap_or(CheckpointKind::Human);
             let allow_captured_async =
-                checkpoint_request_has_explicit_capture_scope(args, checkpoint_result.as_ref());
+                checkpoint_request_has_explicit_capture_scope(args, checkpoint_request.as_ref());
 
             let checkpoint_start = std::time::Instant::now();
             let mut total_files_edited = 0;
@@ -624,8 +624,8 @@ fn handle_checkpoint(args: &[String]) {
                 // Get user name from this repo's config
                 let default_user_name = repo.git_author_identity().name_or_unknown();
 
-                // Create a modified checkpoint_result with only this repo's files
-                let repo_agent_result = checkpoint_result.as_ref().map(|r| {
+                // Create a modified checkpoint_request with only this repo's files
+                let repo_checkpoint_request = checkpoint_request.as_ref().map(|r| {
                     let mut modified = r.clone();
                     modified.repo_working_dir = repo_workdir.clone();
                     modified.file_paths = repo_file_paths
@@ -635,17 +635,17 @@ fn handle_checkpoint(args: &[String]) {
                     modified
                 });
 
-                let checkpoint_result = run_checkpoint_via_daemon_or_local(
+                let checkpoint_outcome = run_checkpoint_via_daemon_or_local(
                     &repo,
                     &default_user_name,
                     checkpoint_kind,
                     false,
-                    repo_agent_result,
+                    repo_checkpoint_request,
                     allow_captured_async,
                     false,
                 );
 
-                match checkpoint_result {
+                match checkpoint_outcome {
                     Ok(outcome) => {
                         total_files_edited += outcome.stats.1;
                         if outcome.queued {
@@ -722,7 +722,7 @@ fn handle_checkpoint(args: &[String]) {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| final_working_dir.clone());
 
-    let mut checkpoint_kind = checkpoint_result
+    let mut checkpoint_kind = checkpoint_request
         .as_ref()
         .map(|r| r.checkpoint_kind)
         .unwrap_or(CheckpointKind::Human);
@@ -732,10 +732,10 @@ fn handle_checkpoint(args: &[String]) {
     // Override to AI when a non-stale pre-snapshot exists, which is the precise signal
     // that a bash invocation is in flight. This uses existing snapshot lifecycle — no new
     // daemon messages or side-channel files needed.
-    if checkpoint_kind == CheckpointKind::Human && checkpoint_result.is_none() {
+    if checkpoint_kind == CheckpointKind::Human && checkpoint_request.is_none() {
         let repo_root = std::path::Path::new(&effective_working_dir);
 
-        if let Some((resolved_kind, resolved_checkpoint_result)) =
+        if let Some((resolved_kind, resolved_checkpoint_request)) =
             crate::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash(
                 repo_root,
                 &effective_working_dir,
@@ -743,14 +743,14 @@ fn handle_checkpoint(args: &[String]) {
         {
             tracing::debug!("Using active bash context for pre-commit AI checkpoint");
             checkpoint_kind = resolved_kind;
-            checkpoint_result = resolved_checkpoint_result;
+            checkpoint_request = resolved_checkpoint_request;
         }
     }
 
     let allow_captured_async =
-        checkpoint_request_has_explicit_capture_scope(args, checkpoint_result.as_ref());
+        checkpoint_request_has_explicit_capture_scope(args, checkpoint_request.as_ref());
 
-    if CheckpointKind::Human == checkpoint_kind && checkpoint_result.is_none() {
+    if CheckpointKind::Human == checkpoint_kind && checkpoint_request.is_none() {
         // Parse pathspecs after `--` for human checkpoints
         let will_edit_filepaths = if let Some(separator_pos) = args.iter().position(|a| a == "--") {
             let paths: Vec<String> = args[separator_pos + 1..]
@@ -763,7 +763,7 @@ fn handle_checkpoint(args: &[String]) {
             Some(get_all_files_for_mock_ai(&effective_working_dir))
         };
 
-        checkpoint_result = Some(CheckpointResult {
+        checkpoint_request = Some(CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::Human,
             agent_id: AgentId {
@@ -795,9 +795,9 @@ fn handle_checkpoint(args: &[String]) {
     let default_user_name = repo.git_author_identity().name_or_unknown();
 
     let checkpoint_start = std::time::Instant::now();
-    let agent_tool = checkpoint_result.as_ref().map(|r| r.agent_id.tool.clone());
+    let agent_tool = checkpoint_request.as_ref().map(|r| r.agent_id.tool.clone());
 
-    let external_files: Vec<String> = checkpoint_result
+    let external_files: Vec<String> = checkpoint_request
         .as_ref()
         .filter(|r| !r.file_paths.is_empty())
         .map(|r| {
@@ -827,22 +827,22 @@ fn handle_checkpoint(args: &[String]) {
         .unwrap_or_default();
 
     let external_agent_base = if !external_files.is_empty() {
-        checkpoint_result.as_ref().cloned()
+        checkpoint_request.as_ref().cloned()
     } else {
         None
     };
 
-    let checkpoint_result = run_checkpoint_via_daemon_or_local(
+    let checkpoint_request = run_checkpoint_via_daemon_or_local(
         &repo,
         &default_user_name,
         checkpoint_kind,
         false,
-        checkpoint_result,
+        checkpoint_request,
         allow_captured_async,
         false,
     );
-    let local_checkpoint_failed = checkpoint_result.is_err();
-    match checkpoint_result {
+    let local_checkpoint_failed = checkpoint_request.is_err();
+    match checkpoint_request {
         Ok(outcome) => {
             let elapsed = checkpoint_start.elapsed();
             log_performance_for_checkpoint(outcome.stats.1, elapsed, checkpoint_kind);
@@ -953,7 +953,7 @@ fn run_checkpoint_via_daemon_or_local(
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
-    checkpoint_result: Option<CheckpointResult>,
+    checkpoint_request: Option<CheckpointRequest>,
     allow_captured_async: bool,
     is_pre_commit: bool,
 ) -> Result<CheckpointDispatchOutcome, crate::error::GitAiError> {
@@ -971,7 +971,7 @@ fn run_checkpoint_via_daemon_or_local(
                 Ok(config) => {
                     // Early path: if the bash tool already captured a checkpoint,
                     // submit it directly to the daemon without re-capturing.
-                    if let Some(capture_id) = checkpoint_result
+                    if let Some(capture_id) = checkpoint_request
                         .as_ref()
                         .and_then(|r| r.captured_checkpoint_id.as_deref())
                     {
@@ -982,7 +982,7 @@ fn run_checkpoint_via_daemon_or_local(
                             crate::commands::checkpoint::update_captured_checkpoint_agent_context(
                                 capture_id,
                                 author,
-                                checkpoint_result.as_ref(),
+                                checkpoint_request.as_ref(),
                             )
                         {
                             tracing::debug!(
@@ -1003,7 +1003,7 @@ fn run_checkpoint_via_daemon_or_local(
                         match send_control_request(&config.control_socket_path, &request) {
                             Ok(response) if response.ok => {
                                 let estimated_files =
-                                    estimate_checkpoint_file_count(kind, &checkpoint_result);
+                                    estimate_checkpoint_file_count(kind, &checkpoint_request);
                                 return Ok(CheckpointDispatchOutcome {
                                     stats: (0, estimated_files, 0),
                                     queued: true,
@@ -1047,7 +1047,7 @@ fn run_checkpoint_via_daemon_or_local(
                     if allow_captured_async
                         && crate::commands::checkpoint::explicit_capture_target_paths(
                             kind,
-                            checkpoint_result.as_ref(),
+                            checkpoint_request.as_ref(),
                         )
                         .is_some()
                     {
@@ -1055,7 +1055,7 @@ fn run_checkpoint_via_daemon_or_local(
                             repo,
                             author,
                             kind,
-                            checkpoint_result.as_ref(),
+                            checkpoint_request.as_ref(),
                             is_pre_commit,
                             None,
                         ) {
@@ -1134,7 +1134,7 @@ fn run_checkpoint_via_daemon_or_local(
                                 author: Some(author.to_string()),
                                 quiet: Some(quiet),
                                 is_pre_commit: Some(is_pre_commit),
-                                checkpoint_result: checkpoint_result.clone(),
+                                checkpoint_request: checkpoint_request.clone(),
                             },
                         ))),
                         wait: Some(true),
@@ -1142,7 +1142,7 @@ fn run_checkpoint_via_daemon_or_local(
                     match send_control_request(&config.control_socket_path, &request) {
                         Ok(response) if response.ok => {
                             let estimated_files =
-                                estimate_checkpoint_file_count(kind, &checkpoint_result);
+                                estimate_checkpoint_file_count(kind, &checkpoint_request);
                             return Ok(CheckpointDispatchOutcome {
                                 stats: (0, estimated_files, 0),
                                 queued: false,
@@ -1181,7 +1181,7 @@ fn run_checkpoint_via_daemon_or_local(
         }
     }
     let stats =
-        commands::checkpoint::run(repo, author, kind, quiet, checkpoint_result, is_pre_commit)?;
+        commands::checkpoint::run(repo, author, kind, quiet, checkpoint_request, is_pre_commit)?;
     Ok(CheckpointDispatchOutcome {
         stats,
         queued: false,
@@ -1190,7 +1190,7 @@ fn run_checkpoint_via_daemon_or_local(
 
 fn checkpoint_request_has_explicit_capture_scope(
     args: &[String],
-    checkpoint_result: Option<&CheckpointResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
 ) -> bool {
     if args.first().map(String::as_str) == Some("mock_ai") {
         return args.iter().skip(1).any(|arg| !arg.starts_with("--"));
@@ -1202,7 +1202,7 @@ fn checkpoint_request_has_explicit_capture_scope(
             .any(|arg| !arg.starts_with("--"));
     }
 
-    checkpoint_result
+    checkpoint_request
         .and_then(|result| {
             crate::commands::checkpoint::explicit_capture_target_paths(
                 result.checkpoint_kind,
@@ -1274,9 +1274,9 @@ fn checkpoint_kind_to_str(kind: CheckpointKind) -> &'static str {
 
 fn estimate_checkpoint_file_count(
     _kind: CheckpointKind,
-    checkpoint_result: &Option<CheckpointResult>,
+    checkpoint_request: &Option<CheckpointRequest>,
 ) -> usize {
-    checkpoint_result
+    checkpoint_request
         .as_ref()
         .map(|r| r.file_paths.len())
         .unwrap_or(0)

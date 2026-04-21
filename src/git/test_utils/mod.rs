@@ -3,7 +3,7 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::post_commit::post_commit;
 use crate::authorship::working_log::{AgentId, Checkpoint, CheckpointKind};
 use crate::commands::checkpoint::PreparedPathRole;
-use crate::commands::checkpoint_agent::orchestrator::CheckpointResult;
+use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::commands::{blame, checkpoint::run as checkpoint};
 use crate::error::GitAiError;
 use crate::git::repository::Repository as GitAiRepository;
@@ -341,7 +341,9 @@ impl TmpRepo {
         }
     }
 
-    fn build_scoped_human_checkpoint_result(&self) -> Result<Option<CheckpointResult>, GitAiError> {
+    fn build_scoped_human_checkpoint_request(
+        &self,
+    ) -> Result<Option<CheckpointRequest>, GitAiError> {
         static TEST_HUMAN_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
         let Some(will_edit_filepaths) = self.current_checkpoint_scope_paths()? else {
@@ -349,7 +351,7 @@ impl TmpRepo {
         };
 
         let session = TEST_HUMAN_SCOPE_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
-        Ok(Some(CheckpointResult {
+        Ok(Some(CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::Human,
             agent_id: AgentId {
@@ -369,14 +371,14 @@ impl TmpRepo {
 
     fn apply_default_checkpoint_scope(
         &self,
-        checkpoint_result: Option<CheckpointResult>,
+        checkpoint_request: Option<CheckpointRequest>,
         checkpoint_kind: CheckpointKind,
-    ) -> Result<Option<CheckpointResult>, GitAiError> {
+    ) -> Result<Option<CheckpointRequest>, GitAiError> {
         let Some(scope_paths) = self.current_checkpoint_scope_paths()? else {
-            return Ok(checkpoint_result);
+            return Ok(checkpoint_request);
         };
 
-        match checkpoint_result {
+        match checkpoint_request {
             Some(mut result) => {
                 let has_explicit_scope = !result.file_paths.is_empty();
 
@@ -388,7 +390,7 @@ impl TmpRepo {
                 Ok(Some(result))
             }
             None if checkpoint_kind == CheckpointKind::Human => {
-                self.build_scoped_human_checkpoint_result()
+                self.build_scoped_human_checkpoint_request()
             }
             None => Ok(None),
         }
@@ -486,13 +488,13 @@ impl TmpRepo {
         &self,
         author: &str,
     ) -> Result<(usize, usize, usize), GitAiError> {
-        let checkpoint_result = self.build_scoped_human_checkpoint_result()?;
+        let checkpoint_request = self.build_scoped_human_checkpoint_request()?;
         checkpoint(
             &self.repo_gitai,
             author,
             CheckpointKind::KnownHuman,
             true,
-            checkpoint_result,
+            checkpoint_request,
             false,
         )
     }
@@ -522,7 +524,7 @@ impl TmpRepo {
         };
 
         // Create checkpoint result
-        let cr = CheckpointResult {
+        let cr = CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
             agent_id,
@@ -551,34 +553,25 @@ impl TmpRepo {
     }
 
     /// Triggers a checkpoint with a custom checkpoint result
-    pub fn trigger_checkpoint_with_checkpoint_result(
+    pub fn trigger_checkpoint_with_checkpoint_request(
         &self,
         author: &str,
-        checkpoint_result: Option<CheckpointResult>,
+        checkpoint_request: Option<CheckpointRequest>,
     ) -> Result<(usize, usize, usize), GitAiError> {
-        let checkpoint_kind = checkpoint_result
+        let checkpoint_kind = checkpoint_request
             .as_ref()
             .map(|r| r.checkpoint_kind)
             .unwrap_or(CheckpointKind::Human);
-        let checkpoint_result =
-            self.apply_default_checkpoint_scope(checkpoint_result, checkpoint_kind)?;
+        let checkpoint_request =
+            self.apply_default_checkpoint_scope(checkpoint_request, checkpoint_kind)?;
         checkpoint(
             &self.repo_gitai,
             author,
             checkpoint_kind,
             true, // quiet
-            checkpoint_result,
+            checkpoint_request,
             false,
         )
-    }
-
-    /// Triggers a checkpoint with a custom agent run result (alias for backwards compat)
-    pub fn trigger_checkpoint_with_agent_result(
-        &self,
-        author: &str,
-        checkpoint_result: Option<CheckpointResult>,
-    ) -> Result<(usize, usize, usize), GitAiError> {
-        self.trigger_checkpoint_with_checkpoint_result(author, checkpoint_result)
     }
 
     /// Commits all changes with the given message and runs post-commit hook
@@ -1578,12 +1571,12 @@ mod tests {
     use super::*;
     use crate::authorship::working_log::CheckpointKind;
 
-    fn scoped_checkpoint_result(
+    fn scoped_checkpoint_request(
         checkpoint_kind: CheckpointKind,
         file_paths: Vec<&str>,
         path_role: PreparedPathRole,
-    ) -> CheckpointResult {
-        CheckpointResult {
+    ) -> CheckpointRequest {
+        CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind,
             agent_id: AgentId {
@@ -1613,7 +1606,7 @@ mod tests {
         file.append("changed\n").expect("file should be changeable");
 
         let scoped = repo
-            .build_scoped_human_checkpoint_result()
+            .build_scoped_human_checkpoint_request()
             .expect("helper should succeed")
             .expect("changed file should produce a scoped result");
 
@@ -1634,7 +1627,7 @@ mod tests {
 
         file.append("changed\n").expect("file should be changeable");
 
-        let original = scoped_checkpoint_result(
+        let original = scoped_checkpoint_request(
             CheckpointKind::Human,
             vec!["custom.txt"],
             PreparedPathRole::WillEdit,
