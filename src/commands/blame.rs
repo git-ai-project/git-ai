@@ -1,7 +1,6 @@
 use crate::auth::CredentialStore;
 use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
-use crate::authorship::prompt_utils::enrich_prompt_messages;
 use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
 use crate::git::refs::get_reference_as_authorship_log_v3;
@@ -1378,12 +1377,8 @@ fn output_json_format(
     // Only include prompts that are actually referenced in lines
     let referenced_prompt_ids: std::collections::HashSet<&String> = lines_map.values().collect();
 
-    // Enrich prompts that have empty messages by falling back through storage layers
-    let mut enriched_prompts = prompt_records.clone();
-    enrich_prompt_messages(&mut enriched_prompts, &referenced_prompt_ids);
-
     // Create read models with other_files and commits populated
-    let filtered_prompts: HashMap<String, PromptRecordWithOtherFiles> = enriched_prompts
+    let filtered_prompts: HashMap<String, PromptRecordWithOtherFiles> = prompt_records
         .iter()
         .filter(|(k, _)| referenced_prompt_ids.contains(k))
         .map(|(k, v)| {
@@ -1868,9 +1863,6 @@ fn output_default_format(
         }
 
         if !referenced_ids.is_empty() {
-            let mut enriched_prompts = prompt_records.clone();
-            enrich_prompt_messages(&mut enriched_prompts, &referenced_ids);
-
             output.push_str("---\n");
 
             let mut sorted_ids: Vec<&String> = referenced_ids.into_iter().collect();
@@ -1879,7 +1871,7 @@ fn output_default_format(
             for id in sorted_ids {
                 let short_hash = &id[..7.min(id.len())];
                 output.push_str(&format!("Prompt [{}]\n", short_hash));
-                if let Some(prompt) = enriched_prompts.get(id) {
+                if let Some(prompt) = prompt_records.get(id) {
                     let json = serde_json::to_string(&prompt.messages)
                         .unwrap_or_else(|_| "[]".to_string());
                     output.push_str(&json);

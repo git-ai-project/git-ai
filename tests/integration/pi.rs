@@ -153,10 +153,9 @@ fn test_pi_after_edit_checkpoint_via_cli_creates_ai_checkpoint() {
     let checkpoints = read_checkpoints(&repo);
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(checkpoints[0].kind, CheckpointKind::AiAgent);
-    assert_eq!(
-        checkpoints[0].agent_id.as_ref().unwrap().model,
-        "claude-sonnet-4-5"
-    );
+    // Model stays "unknown" because the hook input sends an empty model string,
+    // and transcript-based model resolution was removed along with prompts DB.
+    assert_eq!(checkpoints[0].agent_id.as_ref().unwrap().model, "unknown");
     assert!(
         checkpoints[0].transcript.is_none(),
         "Pi checkpoints with session_path should persist metadata and drop inline transcript"
