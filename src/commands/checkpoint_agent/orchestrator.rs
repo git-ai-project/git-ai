@@ -3,7 +3,8 @@ use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint::PreparedPathRole;
 use crate::commands::checkpoint_agent::bash_tool::{self, HookEvent};
 use crate::commands::checkpoint_agent::presets::{
-    ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit, TranscriptSource,
+    KnownHumanEdit, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    TranscriptSource,
 };
 use crate::error::GitAiError;
 use crate::git::repository::find_repository_for_file;
@@ -62,6 +63,7 @@ fn execute_event(
         ParsedHookEvent::PostFileEdit(e) => execute_post_file_edit(e, preset_name).map(Some),
         ParsedHookEvent::PreBashCall(e) => execute_pre_bash_call(e),
         ParsedHookEvent::PostBashCall(e) => execute_post_bash_call(e).map(Some),
+        ParsedHookEvent::KnownHumanEdit(e) => execute_known_human_edit(e).map(Some),
     }
 }
 
@@ -98,7 +100,6 @@ fn execute_post_file_edit(
 
     let checkpoint_kind = match preset_name {
         "ai_tab" => CheckpointKind::AiTab,
-        "known_human" | "mock_known_human" => CheckpointKind::KnownHuman,
         _ => CheckpointKind::AiAgent,
     };
 
@@ -112,6 +113,31 @@ fn execute_post_file_edit(
         dirty_files: e.dirty_files,
         transcript_source: e.transcript_source,
         metadata: e.context.metadata,
+        captured_checkpoint_id: None,
+    })
+}
+
+fn execute_known_human_edit(e: KnownHumanEdit) -> Result<CheckpointRequest, GitAiError> {
+    let repo_working_dir = if !e.file_paths.is_empty() {
+        resolve_repo_working_dir_from_file_paths(&e.file_paths)?
+    } else {
+        resolve_repo_working_dir_from_cwd(&e.cwd)?
+    };
+
+    Ok(CheckpointRequest {
+        trace_id: e.trace_id,
+        checkpoint_kind: CheckpointKind::KnownHuman,
+        agent_id: AgentId {
+            tool: "known_human".to_string(),
+            id: String::new(),
+            model: String::new(),
+        },
+        repo_working_dir,
+        file_paths: e.file_paths,
+        path_role: PreparedPathRole::Edited,
+        dirty_files: e.dirty_files,
+        transcript_source: None,
+        metadata: e.editor_metadata,
         captured_checkpoint_id: None,
     })
 }

@@ -1,5 +1,4 @@
-use super::{AgentPreset, ParsedHookEvent, PostFileEdit, PresetContext};
-use crate::authorship::working_log::AgentId;
+use super::{AgentPreset, KnownHumanEdit, ParsedHookEvent};
 use crate::error::GitAiError;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -36,23 +35,12 @@ impl AgentPreset for MockKnownHumanPreset {
             (paths, cwd)
         };
 
-        let context = PresetContext {
-            agent_id: AgentId {
-                tool: "mock_known_human".to_string(),
-                id: "mock_known_human_session".to_string(),
-                model: "unknown".to_string(),
-            },
-            session_id: "mock_known_human_session".to_string(),
+        Ok(vec![ParsedHookEvent::KnownHumanEdit(KnownHumanEdit {
             trace_id: trace_id.to_string(),
             cwd,
-            metadata: HashMap::new(),
-        };
-
-        Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
-            context,
             file_paths,
             dirty_files: None,
-            transcript_source: None,
+            editor_metadata: HashMap::new(),
         })])
     }
 }
