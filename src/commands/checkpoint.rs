@@ -2262,4 +2262,3 @@ fn is_text_file_in_head(repo: &Repository, path: &str) -> bool {
         Err(_) => false,
     }
 }
-

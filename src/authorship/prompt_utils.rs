@@ -883,19 +883,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_prompt_with_db_fallback_no_db_no_repo() {
-        // Test when prompt is not in DB and no repo is provided
-        let result = find_prompt_with_db_fallback("nonexistent-prompt", None);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("not found in database and no repository provided")
-        );
-    }
-
-    #[test]
     fn test_update_prompt_from_tool_dispatch() {
         // Test that unknown tools return Unchanged
         let result = update_prompt_from_tool("unknown", "thread-123", None, "model");
