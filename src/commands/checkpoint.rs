@@ -895,13 +895,14 @@ fn execute_resolved_checkpoint(
                     .unwrap_or_default();
                 checkpoint.transcript = Some(transcript);
                 // Resolve model from transcript when the preset couldn't determine it
-                let mut agent_id = cr.agent_id.clone();
-                if agent_id.model == "unknown"
-                    && let Some(model) = transcript_model
-                {
-                    agent_id.model = model;
+                if let Some(mut agent_id) = cr.agent_id.clone() {
+                    if agent_id.model == "unknown"
+                        && let Some(model) = transcript_model
+                    {
+                        agent_id.model = model;
+                    }
+                    checkpoint.agent_id = Some(agent_id);
                 }
-                checkpoint.agent_id = Some(agent_id);
                 checkpoint.agent_metadata = if cr.metadata.is_empty() {
                     None
                 } else {
@@ -983,8 +984,9 @@ fn execute_resolved_checkpoint(
 
     let agent_tool = if kind.is_ai()
         && let Some(cr) = &checkpoint_request
+        && let Some(aid) = &cr.agent_id
     {
-        Some(cr.agent_id.tool.as_str())
+        Some(aid.tool.as_str())
     } else {
         None
     };
@@ -1949,9 +1951,9 @@ async fn get_checkpoint_entries(
         _ => {
             // AI kinds: compose session_id::trace_id
             checkpoint_request
-                .map(|result| {
-                    let session_id =
-                        generate_session_id(&result.agent_id.id, &result.agent_id.tool);
+                .and_then(|result| result.agent_id.as_ref())
+                .map(|aid| {
+                    let session_id = generate_session_id(&aid.id, &aid.tool);
                     format!("{}::{}", session_id, trace_id)
                 })
                 .unwrap_or_else(|| kind.to_str())
@@ -2320,14 +2322,19 @@ mod tests {
         path_role: PreparedPathRole,
         dirty_files: Option<HashMap<&str, &str>>,
     ) -> CheckpointRequest {
-        CheckpointRequest {
-            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-            checkpoint_kind,
-            agent_id: AgentId {
+        let agent_id = if checkpoint_kind.is_ai() {
+            Some(AgentId {
                 tool: "test-agent".to_string(),
                 id: "test-capture".to_string(),
                 model: "test-model".to_string(),
-            },
+            })
+        } else {
+            None
+        };
+        CheckpointRequest {
+            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+            checkpoint_kind,
+            agent_id,
             repo_working_dir: PathBuf::new(),
             file_paths: file_paths.into_iter().map(PathBuf::from).collect(),
             path_role,
@@ -2616,11 +2623,11 @@ mod tests {
         let cr = CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
-            agent_id: AgentId {
+            agent_id: Some(AgentId {
                 tool: "mock_ai".to_string(),
                 id: "base-override-regression".to_string(),
                 model: "test".to_string(),
-            },
+            }),
             repo_working_dir: PathBuf::new(),
             file_paths: vec![PathBuf::from(filename)],
             path_role: PreparedPathRole::Edited,
@@ -2674,11 +2681,11 @@ mod tests {
         let cr = CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
-            agent_id: AgentId {
+            agent_id: Some(AgentId {
                 tool: "mock_ai".to_string(),
                 id: "base-override-strict-missing-snapshot".to_string(),
                 model: "test".to_string(),
-            },
+            }),
             repo_working_dir: PathBuf::new(),
             file_paths: vec![PathBuf::from(filename.clone())],
             path_role: PreparedPathRole::Edited,
@@ -2731,11 +2738,11 @@ mod tests {
         let cr = CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
-            agent_id: AgentId {
+            agent_id: Some(AgentId {
                 tool: "mock_ai".to_string(),
                 id: "base-override-allow-fallback".to_string(),
                 model: "test".to_string(),
-            },
+            }),
             repo_working_dir: PathBuf::new(),
             file_paths: vec![PathBuf::from(filename)],
             path_role: PreparedPathRole::Edited,
@@ -2823,11 +2830,11 @@ mod tests {
         let cr = CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
-            agent_id: AgentId {
+            agent_id: Some(AgentId {
                 tool: "test_tool".to_string(),
                 id: "test_session".to_string(),
                 model: "test_model".to_string(),
-            },
+            }),
             repo_working_dir: PathBuf::new(),
             file_paths: vec![
                 PathBuf::from("/tmp/outside_file.txt"),

@@ -16,7 +16,7 @@ use std::path::PathBuf;
 pub struct CheckpointRequest {
     pub trace_id: String,
     pub checkpoint_kind: CheckpointKind,
-    pub agent_id: AgentId,
+    pub agent_id: Option<AgentId>,
     pub repo_working_dir: PathBuf,
     pub file_paths: Vec<PathBuf>,
     pub path_role: PreparedPathRole,
@@ -78,7 +78,7 @@ fn execute_pre_file_edit(e: PreFileEdit) -> Result<CheckpointRequest, GitAiError
     Ok(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind: CheckpointKind::Human,
-        agent_id: e.context.agent_id,
+        agent_id: None,
         repo_working_dir,
         file_paths: e.file_paths,
         path_role: PreparedPathRole::WillEdit,
@@ -107,7 +107,7 @@ fn execute_post_file_edit(
     Ok(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind,
-        agent_id: e.context.agent_id,
+        agent_id: Some(e.context.agent_id),
         repo_working_dir,
         file_paths: e.file_paths,
         path_role: PreparedPathRole::Edited,
@@ -128,11 +128,7 @@ fn execute_known_human_edit(e: KnownHumanEdit) -> Result<CheckpointRequest, GitA
     Ok(CheckpointRequest {
         trace_id: e.trace_id,
         checkpoint_kind: CheckpointKind::KnownHuman,
-        agent_id: AgentId {
-            tool: "known_human".to_string(),
-            id: String::new(),
-            model: String::new(),
-        },
+        agent_id: None,
         repo_working_dir,
         file_paths: e.file_paths,
         path_role: PreparedPathRole::Edited,
@@ -153,11 +149,7 @@ fn execute_untracked_edit(e: UntrackedEdit) -> Result<CheckpointRequest, GitAiEr
     Ok(CheckpointRequest {
         trace_id: e.trace_id,
         checkpoint_kind: CheckpointKind::Human,
-        agent_id: AgentId {
-            tool: String::new(),
-            id: String::new(),
-            model: String::new(),
-        },
+        agent_id: None,
         repo_working_dir,
         file_paths: e.file_paths,
         path_role: PreparedPathRole::WillEdit,
@@ -194,7 +186,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointRequest>, Gi
         BashPreHookStrategy::EmitHumanCheckpoint => Ok(Some(CheckpointRequest {
             trace_id: e.context.trace_id,
             checkpoint_kind: CheckpointKind::Human,
-            agent_id: e.context.agent_id,
+            agent_id: None,
             repo_working_dir,
             file_paths: vec![],
             path_role: PreparedPathRole::WillEdit,
@@ -242,7 +234,7 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<CheckpointRequest, GitAiErr
     Ok(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind: CheckpointKind::AiAgent,
-        agent_id: e.context.agent_id,
+        agent_id: Some(e.context.agent_id),
         repo_working_dir,
         file_paths,
         path_role: PreparedPathRole::Edited,
