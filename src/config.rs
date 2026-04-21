@@ -121,6 +121,8 @@ pub struct FileConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xcode_paths: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude_prompts_in_repositories: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_prompts_in_repositories: Option<Vec<String>>,

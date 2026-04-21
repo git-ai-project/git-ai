@@ -1,9 +1,11 @@
+use crate::config::{FileConfig, load_file_config_public};
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{
     HookCheckResult, HookInstaller, HookInstallerParams, InstallResult, UninstallResult,
 };
 use crate::mdm::utils::home_dir;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -18,26 +20,48 @@ const XCODE_WATCHER_PACKAGE_SWIFT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/agent-support/xcode/Package.swift"
 ));
-const XCODE_MONITORING_GUIDANCE: &str = "Xcode: Unable to auto-configure monitoring scope. To start the watcher, run: git-ai-xcode-watcher --path /path/to/xcode/project";
+const XCODE_ADD_PATH_GUIDANCE: &str =
+    "Xcode: Register a workspace with: git-ai xcode add-path /path/to/workspace";
 
 pub struct XcodeInstaller;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LaunchAgentApplyResult {
+    pub message: String,
+    pub warning: Option<String>,
+}
+
 impl XcodeInstaller {
-    fn watcher_binary_path() -> PathBuf {
+    fn expand_home_path(path: &Path) -> PathBuf {
+        if let Ok(stripped) = path.strip_prefix("~") {
+            home_dir().join(stripped)
+        } else {
+            path.to_path_buf()
+        }
+    }
+
+    pub(crate) fn watcher_binary_path() -> PathBuf {
         home_dir()
             .join(".git-ai")
             .join("bin")
             .join(XCODE_WATCHER_BINARY_NAME)
     }
 
-    fn version_file_path() -> PathBuf {
+    fn launch_log_path() -> PathBuf {
+        home_dir()
+            .join(".git-ai")
+            .join("logs")
+            .join("xcode-watcher.log")
+    }
+
+    pub(crate) fn version_file_path() -> PathBuf {
         home_dir()
             .join(".git-ai")
             .join("bin")
             .join(XCODE_WATCHER_VERSION_FILE)
     }
 
-    fn plist_path() -> PathBuf {
+    pub(crate) fn plist_path() -> PathBuf {
         home_dir()
             .join("Library")
             .join("LaunchAgents")
@@ -182,12 +206,227 @@ impl XcodeInstaller {
         ))
     }
 
+    fn remove_file_if_exists(path: &Path) -> Result<bool, String> {
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        fs::remove_file(path)
+            .map(|_| true)
+            .map_err(|e| format!("Unable to remove {}: {}", path.display(), e))
+    }
+
+    fn remove_dir_if_exists(path: &Path) -> Result<bool, String> {
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        fs::remove_dir_all(path)
+            .map(|_| true)
+            .map_err(|e| format!("Unable to remove {}: {}", path.display(), e))
+    }
+
+    pub(crate) fn configured_paths_from_file_config(
+        file_config: &FileConfig,
+    ) -> Result<Vec<PathBuf>, String> {
+        let mut paths = Vec::new();
+        for raw_path in file_config.xcode_paths.as_deref().unwrap_or(&[]) {
+            let trimmed = raw_path.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let mut path = Self::expand_home_path(Path::new(trimmed));
+            if !path.is_absolute() {
+                return Err(format!(
+                    "Configured xcode_paths entry '{}' must be an absolute path",
+                    trimmed
+                ));
+            }
+            if path.exists()
+                && let Ok(canonical) = fs::canonicalize(&path)
+            {
+                path = canonical;
+            }
+            paths.push(path);
+        }
+
+        Ok(Self::normalize_watch_paths(paths))
+    }
+
+    pub(crate) fn configured_paths_from_disk() -> Result<Vec<PathBuf>, String> {
+        let file_config = load_file_config_public()?;
+        Self::configured_paths_from_file_config(&file_config)
+    }
+
+    pub(crate) fn validate_new_watch_path(path: &Path) -> Result<PathBuf, String> {
+        let path = Self::expand_home_path(path);
+        let metadata = fs::metadata(&path).map_err(|e| {
+            format!(
+                "Path '{}' does not exist or is not accessible: {}",
+                path.display(),
+                e
+            )
+        })?;
+        if !metadata.is_dir() {
+            return Err(format!("Path '{}' must be a directory", path.display()));
+        }
+
+        let canonical = fs::canonicalize(&path)
+            .map_err(|e| format!("Unable to resolve path '{}': {}", path.display(), e))?;
+        let home = fs::canonicalize(home_dir()).unwrap_or_else(|_| home_dir());
+
+        if canonical == Path::new("/") {
+            return Err("Refusing to watch '/'; choose a narrower workspace root".to_string());
+        }
+        if canonical == home {
+            return Err(
+                "Refusing to watch your HOME directory; choose a narrower workspace root"
+                    .to_string(),
+            );
+        }
+        if canonical == Path::new("/Users") {
+            return Err("Refusing to watch '/Users'; choose a narrower workspace root".to_string());
+        }
+
+        Ok(canonical)
+    }
+
+    pub(crate) fn normalize_watch_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let mut sorted_paths = paths;
+        sorted_paths.sort_by(|left, right| {
+            left.components()
+                .count()
+                .cmp(&right.components().count())
+                .then_with(|| left.as_os_str().cmp(right.as_os_str()))
+        });
+
+        let mut normalized = Vec::new();
+        for path in sorted_paths {
+            if normalized
+                .iter()
+                .any(|existing: &PathBuf| path == *existing || path.starts_with(existing))
+            {
+                continue;
+            }
+
+            normalized.retain(|existing| !existing.starts_with(&path));
+            normalized.push(path);
+        }
+
+        normalized.sort_by(|left, right| left.as_os_str().cmp(right.as_os_str()));
+        normalized
+    }
+
+    pub(crate) fn serialize_watch_paths(paths: &[PathBuf]) -> Option<Vec<String>> {
+        if paths.is_empty() {
+            None
+        } else {
+            Some(
+                paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .collect(),
+            )
+        }
+    }
+
+    pub(crate) fn validate_paths_for_launch(paths: &[PathBuf]) -> Result<(), String> {
+        for path in paths {
+            let metadata = fs::metadata(path).map_err(|e| {
+                format!(
+                    "Configured Xcode watch path '{}' is not accessible: {}",
+                    path.display(),
+                    e
+                )
+            })?;
+            if !metadata.is_dir() {
+                return Err(format!(
+                    "Configured Xcode watch path '{}' is not a directory",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn plist_xml(paths: &[PathBuf]) -> String {
+        fn escape_xml(value: &str) -> String {
+            value
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('\"', "&quot;")
+                .replace('\'', "&apos;")
+        }
+
+        let mut args = vec![format!(
+            "    <string>{}</string>",
+            escape_xml(&Self::watcher_binary_path().to_string_lossy())
+        )];
+        for path in paths {
+            args.push("    <string>--path</string>".to_string());
+            args.push(format!(
+                "    <string>{}</string>",
+                escape_xml(&path.to_string_lossy())
+            ));
+        }
+
+        let log_path = escape_xml(&Self::launch_log_path().to_string_lossy());
+
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+{args}
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>{log_path}</string>
+  <key>StandardErrorPath</key>
+  <string>{log_path}</string>
+</dict>
+</plist>
+"#,
+            label = XCODE_WATCHER_LABEL,
+            args = args.join("\n"),
+            log_path = log_path,
+        )
+    }
+
+    fn write_launch_agent_plist(paths: &[PathBuf]) -> Result<(), String> {
+        if let Some(parent) = Self::plist_path().parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!(
+                    "Unable to create LaunchAgents directory {}: {}",
+                    parent.display(),
+                    e
+                )
+            })?;
+        }
+        if let Some(parent) = Self::launch_log_path().parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                format!("Unable to create log directory {}: {}", parent.display(), e)
+            })?;
+        }
+
+        fs::write(Self::plist_path(), Self::plist_xml(paths))
+            .map_err(|e| format!("Unable to write plist: {}", e))
+    }
+
     fn launchctl_domain_target() -> Result<String, String> {
         let uid = unsafe { libc::geteuid() };
         if uid == 0 {
             return Err(
-                "Unable to stop the watcher automatically from a root or non-GUI session"
-                    .to_string(),
+                "Unable to reload watcher automatically from a root or non-GUI session. Run 'git-ai xcode reload' from the target user's login session.".to_string(),
             );
         }
         Ok(format!("gui/{}", uid))
@@ -235,24 +474,97 @@ impl XcodeInstaller {
         }
     }
 
-    fn remove_file_if_exists(path: &Path) -> Result<bool, String> {
-        if !path.exists() {
-            return Ok(false);
+    fn clean_launch_agent() -> Result<LaunchAgentApplyResult, String> {
+        let launchctl_warning = match Self::launchctl_domain_target() {
+            Ok(domain) => Self::bootout_launch_agent(&domain).err(),
+            Err(warning) => Some(warning),
+        };
+
+        match fs::remove_file(Self::plist_path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Unable to remove plist: {}", error)),
         }
 
-        fs::remove_file(path)
-            .map(|_| true)
-            .map_err(|e| format!("Unable to remove {}: {}", path.display(), e))
+        Ok(LaunchAgentApplyResult {
+            message: "Xcode: Watcher LaunchAgent removed; no Xcode paths are configured"
+                .to_string(),
+            warning: launchctl_warning,
+        })
     }
 
-    fn remove_dir_if_exists(path: &Path) -> Result<bool, String> {
-        if !path.exists() {
-            return Ok(false);
+    pub(crate) fn apply_launch_agent(paths: &[PathBuf]) -> Result<LaunchAgentApplyResult, String> {
+        if cfg!(not(target_os = "macos")) {
+            return Err("Xcode watcher configuration is only supported on macOS".to_string());
         }
 
-        fs::remove_dir_all(path)
-            .map(|_| true)
-            .map_err(|e| format!("Unable to remove {}: {}", path.display(), e))
+        if paths.is_empty() {
+            return Self::clean_launch_agent();
+        }
+
+        Self::validate_paths_for_launch(paths)?;
+
+        if !Self::watcher_binary_path().exists() {
+            let _ = fs::remove_file(Self::plist_path());
+            return Ok(LaunchAgentApplyResult {
+                message: format!(
+                    "Xcode: Saved {} watch path(s), but watcher binary is not installed yet",
+                    paths.len()
+                ),
+                warning: Some(
+                    "Run 'git-ai install-hooks' to install git-ai-xcode-watcher, then run 'git-ai xcode reload'.".to_string(),
+                ),
+            });
+        }
+
+        Self::write_launch_agent_plist(paths)?;
+
+        let domain = match Self::launchctl_domain_target() {
+            Ok(domain) => domain,
+            Err(warning) => {
+                return Ok(LaunchAgentApplyResult {
+                    message: format!(
+                        "Xcode: LaunchAgent updated with {} watch path(s)",
+                        paths.len()
+                    ),
+                    warning: Some(warning),
+                });
+            }
+        };
+
+        let service = format!("{}/{}", domain, XCODE_WATCHER_LABEL);
+        let mut launchctl_warning = Self::bootout_launch_agent(&domain).err();
+
+        if launchctl_warning.is_none() {
+            let bootstrap_args = vec![
+                "bootstrap".to_string(),
+                domain.clone(),
+                Self::plist_path().to_string_lossy().to_string(),
+            ];
+            if let Err(error) = Self::run_launchctl(&bootstrap_args) {
+                launchctl_warning = Some(error);
+            }
+        }
+
+        if launchctl_warning.is_none() {
+            let kickstart_args = vec!["kickstart".to_string(), "-k".to_string(), service];
+            if let Err(error) = Self::run_launchctl(&kickstart_args) {
+                launchctl_warning = Some(error);
+            }
+        }
+
+        Ok(LaunchAgentApplyResult {
+            message: format!(
+                "Xcode: LaunchAgent updated with {} watch path(s)",
+                paths.len()
+            ),
+            warning: launchctl_warning.map(|error| {
+                format!(
+                    "Unable to reload watcher automatically: {}. Run 'git-ai xcode reload' manually.",
+                    error
+                )
+            }),
+        })
     }
 }
 
@@ -321,13 +633,60 @@ impl HookInstaller for XcodeInstaller {
             return Ok(results);
         }
 
+        let configured_paths = match Self::configured_paths_from_disk() {
+            Ok(paths) => paths,
+            Err(error) => {
+                results.push(Self::install_warning(format!(
+                    "Xcode: Unable to read configured xcode_paths: {}. Run 'git-ai xcode reload' manually after fixing the config.",
+                    error
+                )));
+                Vec::new()
+            }
+        };
+
         let watcher_bin = Self::watcher_binary_path();
         if watcher_bin.exists() && Self::is_watcher_up_to_date() {
-            results.push(InstallResult {
-                changed: false,
-                diff: None,
-                message: "Xcode: Watcher already installed and up to date. To monitor a project, run: git-ai-xcode-watcher --path /path/to/xcode/project".to_string(),
-            });
+            results.push(Self::install_warning(
+                "Xcode: Watcher already installed and up to date",
+            ));
+            if configured_paths.is_empty() {
+                if Self::plist_path().exists() {
+                    match Self::clean_launch_agent() {
+                        Ok(apply_result) => {
+                            results.push(InstallResult {
+                                changed: false,
+                                diff: None,
+                                message: apply_result.message,
+                            });
+                            if let Some(warning) = apply_result.warning {
+                                results.push(Self::install_warning(format!("Xcode: {}", warning)));
+                            }
+                        }
+                        Err(error) => results.push(Self::install_warning(format!(
+                            "Xcode: Unable to remove stale LaunchAgent automatically: {}. Run 'git-ai xcode reload' manually.",
+                            error
+                        ))),
+                    }
+                }
+                results.push(Self::install_warning(XCODE_ADD_PATH_GUIDANCE));
+            } else {
+                match Self::apply_launch_agent(&configured_paths) {
+                    Ok(apply_result) => {
+                        results.push(InstallResult {
+                            changed: false,
+                            diff: None,
+                            message: apply_result.message,
+                        });
+                        if let Some(warning) = apply_result.warning {
+                            results.push(Self::install_warning(format!("Xcode: {}", warning)));
+                        }
+                    }
+                    Err(error) => results.push(Self::install_warning(format!(
+                        "Xcode: Unable to reload watcher automatically: {}. Run 'git-ai xcode reload' manually.",
+                        error
+                    ))),
+                }
+            }
             return Ok(results);
         }
 
@@ -337,6 +696,18 @@ impl HookInstaller for XcodeInstaller {
                 diff: None,
                 message: "Xcode: Pending watcher compilation and installation".to_string(),
             });
+            if configured_paths.is_empty() {
+                if Self::plist_path().exists() {
+                    results.push(Self::install_warning(
+                        "Xcode: Pending stale LaunchAgent removal because no xcode_paths are configured",
+                    ));
+                }
+                results.push(Self::install_warning(XCODE_ADD_PATH_GUIDANCE));
+            } else {
+                results.push(Self::install_warning(
+                    "Xcode: Pending LaunchAgent reload from configured xcode_paths",
+                ));
+            }
             return Ok(results);
         }
 
@@ -419,7 +790,44 @@ impl HookInstaller for XcodeInstaller {
                 watcher_bin.display()
             ),
         });
-        results.push(Self::install_warning(XCODE_MONITORING_GUIDANCE));
+        if configured_paths.is_empty() {
+            if Self::plist_path().exists() {
+                match Self::clean_launch_agent() {
+                    Ok(apply_result) => {
+                        results.push(InstallResult {
+                            changed: false,
+                            diff: None,
+                            message: apply_result.message,
+                        });
+                        if let Some(warning) = apply_result.warning {
+                            results.push(Self::install_warning(format!("Xcode: {}", warning)));
+                        }
+                    }
+                    Err(error) => results.push(Self::install_warning(format!(
+                        "Xcode: Unable to remove stale LaunchAgent automatically: {}. Run 'git-ai xcode reload' manually.",
+                        error
+                    ))),
+                }
+            }
+            results.push(Self::install_warning(XCODE_ADD_PATH_GUIDANCE));
+        } else {
+            match Self::apply_launch_agent(&configured_paths) {
+                Ok(apply_result) => {
+                    results.push(InstallResult {
+                        changed: false,
+                        diff: None,
+                        message: apply_result.message,
+                    });
+                    if let Some(warning) = apply_result.warning {
+                        results.push(Self::install_warning(format!("Xcode: {}", warning)));
+                    }
+                }
+                Err(error) => results.push(Self::install_warning(format!(
+                    "Xcode: Unable to reload watcher automatically: {}. Run 'git-ai xcode reload' manually.",
+                    error
+                ))),
+            }
+        }
 
         Ok(results)
     }
@@ -669,9 +1077,70 @@ mod tests {
                 home.join("Library/LaunchAgents/com.gitai.xcode-watcher.plist")
             );
             assert_eq!(
+                XcodeInstaller::launch_log_path(),
+                home.join(".git-ai/logs/xcode-watcher.log")
+            );
+            assert_eq!(
                 XcodeInstaller::build_cache_dir(),
                 home.join(".git-ai/cache/xcode-watcher-build")
             );
+        });
+    }
+
+    #[test]
+    fn test_normalize_watch_paths_collapses_descendants() {
+        let parent = PathBuf::from("/tmp/workspace");
+        let child = parent.join("AppA");
+        let grandchild = child.join("Feature");
+
+        let normalized =
+            XcodeInstaller::normalize_watch_paths(vec![grandchild, child, parent.clone()]);
+
+        assert_eq!(normalized, vec![parent]);
+    }
+
+    #[test]
+    #[serial]
+    fn test_validate_new_watch_path_rejects_overly_broad_roots() {
+        with_temp_home(|home| {
+            let home_error = XcodeInstaller::validate_new_watch_path(home).unwrap_err();
+            assert!(home_error.contains("HOME directory"));
+
+            let root_error = XcodeInstaller::validate_new_watch_path(Path::new("/")).unwrap_err();
+            assert!(root_error.contains("Refusing to watch '/'"));
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_configured_paths_from_file_config_canonicalizes_existing_entries() {
+        with_temp_home(|home| {
+            let workspace = home.join("ios").join("AppA");
+            fs::create_dir_all(&workspace).unwrap();
+
+            let file_config = FileConfig {
+                xcode_paths: Some(vec![workspace.to_string_lossy().to_string()]),
+                ..Default::default()
+            };
+
+            let paths = XcodeInstaller::configured_paths_from_file_config(&file_config).unwrap();
+            assert_eq!(paths, vec![fs::canonicalize(workspace).unwrap()]);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_plist_xml_contains_all_paths_and_log_file() {
+        with_temp_home(|home| {
+            let path_a = home.join("ios");
+            let path_b = home.join("mac");
+            let plist = XcodeInstaller::plist_xml(&[path_a.clone(), path_b.clone()]);
+
+            assert!(plist.contains(XCODE_WATCHER_LABEL));
+            assert!(plist.contains(&*XcodeInstaller::watcher_binary_path().to_string_lossy()));
+            assert!(plist.contains(&*path_a.to_string_lossy()));
+            assert!(plist.contains(&*path_b.to_string_lossy()));
+            assert!(plist.contains(&*XcodeInstaller::launch_log_path().to_string_lossy()));
         });
     }
 
@@ -867,6 +1336,167 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     #[serial]
+    fn test_apply_launch_agent_warns_when_binary_missing() {
+        with_temp_home(|home| {
+            let workspace = home.join("ios");
+            fs::create_dir_all(&workspace).unwrap();
+
+            let result = XcodeInstaller::apply_launch_agent(&[workspace]).unwrap();
+            assert!(result.message.contains("watch path"));
+            assert!(
+                result
+                    .warning
+                    .as_deref()
+                    .unwrap()
+                    .contains("git-ai install-hooks")
+            );
+            assert!(!XcodeInstaller::plist_path().exists());
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn test_apply_launch_agent_writes_plist_and_calls_launchctl() {
+        with_temp_home(|home| {
+            with_path_override(|bin_dir| {
+                let workspace = home.join("ios");
+                let launchctl_log = home.join("launchctl.log");
+                fs::create_dir_all(&workspace).unwrap();
+                fs::create_dir_all(XcodeInstaller::watcher_binary_path().parent().unwrap())
+                    .unwrap();
+                fs::write(XcodeInstaller::watcher_binary_path(), "#!/bin/sh\n").unwrap();
+                #[cfg(unix)]
+                fs::set_permissions(
+                    XcodeInstaller::watcher_binary_path(),
+                    fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+                write_launchctl_stub(bin_dir, 0, &launchctl_log);
+
+                let result =
+                    XcodeInstaller::apply_launch_agent(std::slice::from_ref(&workspace)).unwrap();
+                assert!(result.warning.is_none());
+                assert!(XcodeInstaller::plist_path().exists());
+
+                let plist = fs::read_to_string(XcodeInstaller::plist_path()).unwrap();
+                assert!(plist.contains(&*workspace.to_string_lossy()));
+
+                let log = fs::read_to_string(launchctl_log).unwrap();
+                assert!(log.contains("bootout"));
+                assert!(log.contains("bootstrap"));
+                assert!(log.contains("kickstart"));
+            });
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn test_apply_launch_agent_with_no_paths_removes_plist_and_calls_bootout() {
+        with_temp_home(|home| {
+            with_path_override(|bin_dir| {
+                let launchctl_log = home.join("launchctl.log");
+                fs::create_dir_all(XcodeInstaller::plist_path().parent().unwrap()).unwrap();
+                fs::write(XcodeInstaller::plist_path(), "stale plist").unwrap();
+                write_launchctl_stub(bin_dir, 0, &launchctl_log);
+
+                let result = XcodeInstaller::apply_launch_agent(&[]).unwrap();
+                assert!(result.warning.is_none());
+                assert!(!XcodeInstaller::plist_path().exists());
+
+                let log = fs::read_to_string(launchctl_log).unwrap();
+                assert!(log.contains("bootout"));
+            });
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn test_apply_launch_agent_returns_warning_when_launchctl_fails() {
+        with_temp_home(|home| {
+            with_path_override(|bin_dir| {
+                let workspace = home.join("ios");
+                let launchctl_log = home.join("launchctl.log");
+                fs::create_dir_all(&workspace).unwrap();
+                fs::create_dir_all(XcodeInstaller::watcher_binary_path().parent().unwrap())
+                    .unwrap();
+                fs::write(XcodeInstaller::watcher_binary_path(), "#!/bin/sh\n").unwrap();
+                #[cfg(unix)]
+                fs::set_permissions(
+                    XcodeInstaller::watcher_binary_path(),
+                    fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+                write_launchctl_stub(bin_dir, 1, &launchctl_log);
+
+                let result = XcodeInstaller::apply_launch_agent(&[workspace]).unwrap();
+                assert!(
+                    result
+                        .warning
+                        .as_deref()
+                        .unwrap()
+                        .contains("Unable to reload watcher automatically")
+                );
+                assert!(XcodeInstaller::plist_path().exists());
+            });
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn test_install_extras_cleans_stale_launch_agent_when_no_paths_are_configured() {
+        with_temp_home(|home| {
+            if !XcodeInstaller::is_xcode_ide_available() {
+                return;
+            }
+
+            with_path_override(|bin_dir| {
+                let launchctl_log = home.join("launchctl.log");
+                let installer = XcodeInstaller;
+
+                fs::create_dir_all(XcodeInstaller::watcher_binary_path().parent().unwrap())
+                    .unwrap();
+                fs::write(XcodeInstaller::watcher_binary_path(), "#!/bin/sh\n").unwrap();
+                #[cfg(unix)]
+                fs::set_permissions(
+                    XcodeInstaller::watcher_binary_path(),
+                    fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+                fs::write(
+                    XcodeInstaller::version_file_path(),
+                    env!("CARGO_PKG_VERSION"),
+                )
+                .unwrap();
+                fs::create_dir_all(XcodeInstaller::plist_path().parent().unwrap()).unwrap();
+                fs::write(XcodeInstaller::plist_path(), "stale plist").unwrap();
+                write_launchctl_stub(bin_dir, 0, &launchctl_log);
+
+                let results = installer.install_extras(&test_params(), false).unwrap();
+
+                assert!(results.iter().any(|result| {
+                    !result.changed
+                        && result
+                            .message
+                            .contains("Watcher LaunchAgent removed; no Xcode paths are configured")
+                }));
+                assert!(results.iter().any(|result| {
+                    !result.changed && result.message.contains("git-ai xcode add-path")
+                }));
+                assert!(!XcodeInstaller::plist_path().exists());
+
+                let log = fs::read_to_string(launchctl_log).unwrap();
+                assert!(log.contains("bootout"));
+            });
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
     fn test_uninstall_extras_uses_bootout_for_launch_agent() {
         with_temp_home(|home| {
             with_path_override(|bin_dir| {
@@ -913,10 +1543,7 @@ mod tests {
                 result.changed && result.message.contains("Watcher binary installed")
             }));
             assert!(first_results.iter().any(|result| {
-                !result.changed
-                    && result
-                        .message
-                        .contains("Unable to auto-configure monitoring scope")
+                !result.changed && result.message.contains("git-ai xcode add-path")
             }));
 
             let check_result = installer.check_hooks(&test_params()).unwrap();
@@ -925,12 +1552,13 @@ mod tests {
             assert!(check_result.hooks_up_to_date);
 
             let second_results = installer.install_extras(&test_params(), false).unwrap();
-            assert_eq!(second_results.len(), 1);
-            assert!(!second_results[0].changed);
+            assert!(second_results.iter().any(|result| !result.changed
+                && result.message.contains("already installed and up to date")));
             assert!(
-                second_results[0]
-                    .message
-                    .contains("already installed and up to date")
+                second_results
+                    .iter()
+                    .any(|result| !result.changed
+                        && result.message.contains("git-ai xcode add-path"))
             );
 
             let uninstall_results = installer.uninstall_extras(&test_params(), false).unwrap();

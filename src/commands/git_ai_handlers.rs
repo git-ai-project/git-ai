@@ -62,6 +62,7 @@ pub fn handle_git_ai(args: &[String]) {
                 | "install-hooks"
                 | "install"
                 | "uninstall-hooks"
+                | "xcode"
         );
         if needs_daemon {
             use crate::daemon::telemetry_handle::{
@@ -106,6 +107,12 @@ pub fn handle_git_ai(args: &[String]) {
             commands::config::handle_config(&args[1..]);
             if is_interactive_terminal() {
                 log_message("config", "info", None)
+            }
+        }
+        "xcode" => {
+            commands::xcode::handle_xcode(&args[1..]);
+            if is_interactive_terminal() {
+                log_message("xcode", "info", None)
             }
         }
         "debug" => {
@@ -306,6 +313,11 @@ fn print_help() {
     eprintln!("    set <key> <value>     Set a config value (arrays: single value = [value])");
     eprintln!("    --add <key> <value>   Add to array or upsert into object");
     eprintln!("    unset <key>           Remove config value (reverts to default)");
+    eprintln!("  xcode              Manage Xcode watcher paths and launch agent");
+    eprintln!("    add-path <path>       Register a workspace root and reload watcher");
+    eprintln!("    remove-path <path>    Remove a workspace root and reload watcher");
+    eprintln!("    list-paths            Show configured Xcode watcher roots");
+    eprintln!("    reload                Rebuild LaunchAgent from current config");
     eprintln!("  debug              Print support/debug diagnostics");
     eprintln!("  bg                 Run and control git-ai background service");
     eprintln!("  install-hooks      Install git hooks for AI authorship tracking");

@@ -1,8 +1,11 @@
 use dirs;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::git::repository::find_repository_in_path;
+#[cfg(target_os = "macos")]
+use crate::mdm::agents::XcodeInstaller;
 
 /// Determines the type of pattern value provided
 #[derive(Debug, PartialEq)]
@@ -97,6 +100,7 @@ fn print_config_help() {
     eprintln!();
     eprintln!("Configuration Keys:");
     eprintln!("  git_path                     Path to git binary");
+    eprintln!("  xcode_paths                  Xcode watcher workspace roots (array)");
     eprintln!("  exclude_prompts_in_repositories  Repos to exclude prompts from (array)");
     eprintln!("  allow_repositories           Allowed repos (array)");
     eprintln!("  exclude_repositories         Excluded repos (array)");
@@ -126,6 +130,7 @@ fn print_config_help() {
     eprintln!("  git-ai config set exclude_repositories .         # Uses current repo's remotes");
     eprintln!("  git-ai config --add exclude_repositories \"temp/*\"");
     eprintln!("  git-ai config --add allow_repositories ~/projects/my-repo");
+    eprintln!("  git-ai config --add xcode_paths ~/work/ios");
     eprintln!("  git-ai config --add feature_flags.my_flag true");
     eprintln!("  git-ai config --add git_ai_hooks.post_notes_updated \"./my-hook.sh\"");
     eprintln!("  git-ai config unset exclude_repositories");
@@ -225,6 +230,15 @@ fn show_all_config() -> Result<(), String> {
         "git_path".to_string(),
         Value::String(runtime_config.git_cmd().to_string()),
     );
+
+    if let Some(ref paths) = file_config.xcode_paths {
+        effective_config.insert(
+            "xcode_paths".to_string(),
+            serde_json::to_value(paths).unwrap(),
+        );
+    } else {
+        effective_config.insert("xcode_paths".to_string(), Value::Array(vec![]));
+    }
 
     // Arrays
     if let Some(ref repos) = file_config.exclude_prompts_in_repositories {
@@ -341,6 +355,13 @@ fn get_config_value(key: &str) -> Result<(), String> {
     if key_path.len() == 1 {
         let value = match key_path[0].as_str() {
             "git_path" => Value::String(runtime_config.git_cmd().to_string()),
+            "xcode_paths" => {
+                if let Some(ref paths) = file_config.xcode_paths {
+                    serde_json::to_value(paths).unwrap()
+                } else {
+                    Value::Array(vec![])
+                }
+            }
             "exclude_prompts_in_repositories" => {
                 if let Some(ref repos) = file_config.exclude_prompts_in_repositories {
                     serde_json::to_value(repos).unwrap()
@@ -449,6 +470,11 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 file_config.git_path = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
                 eprintln!("[git_path]: {}", value);
+            }
+            "xcode_paths" => {
+                let added = set_xcode_paths_field(&mut file_config.xcode_paths, value, add_mode)?;
+                crate::config::save_file_config(&file_config)?;
+                log_array_changes(&added, add_mode);
             }
             "exclude_prompts_in_repositories" => {
                 let added = set_repository_array_field(
@@ -683,6 +709,13 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                     eprintln!("- [git_path]: {}", v);
                 }
             }
+            "xcode_paths" => {
+                let old_values = file_config.xcode_paths.take();
+                crate::config::save_file_config(&file_config)?;
+                if let Some(items) = old_values {
+                    log_array_removals(&items);
+                }
+            }
             "exclude_prompts_in_repositories" => {
                 let old_values = file_config.exclude_prompts_in_repositories.take();
                 crate::config::save_file_config(&file_config)?;
@@ -883,6 +916,68 @@ fn parse_key_path(key: &str) -> Vec<String> {
     key.split('.').map(|s| s.to_string()).collect()
 }
 
+#[cfg(target_os = "macos")]
+fn set_xcode_paths_field(
+    field: &mut Option<Vec<String>>,
+    value: &str,
+    add_mode: bool,
+) -> Result<Vec<String>, String> {
+    let mut existing_paths = if add_mode {
+        let file_config = crate::config::FileConfig {
+            xcode_paths: field.clone(),
+            ..Default::default()
+        };
+        XcodeInstaller::configured_paths_from_file_config(&file_config)?
+    } else {
+        Vec::new()
+    };
+
+    let values_to_apply = if value.starts_with('[') {
+        let json_value: Value =
+            serde_json::from_str(value).map_err(|e| format!("Invalid JSON array: {}", e))?;
+        let array = json_value
+            .as_array()
+            .ok_or_else(|| "Expected a JSON array".to_string())?;
+
+        let mut paths = Vec::new();
+        for item in array {
+            let raw = item
+                .as_str()
+                .ok_or_else(|| "Array must contain only strings".to_string())?;
+            paths.push(XcodeInstaller::validate_new_watch_path(Path::new(raw))?);
+        }
+        paths
+    } else {
+        vec![XcodeInstaller::validate_new_watch_path(Path::new(value))?]
+    };
+
+    if add_mode {
+        existing_paths.extend(values_to_apply);
+        existing_paths = XcodeInstaller::normalize_watch_paths(existing_paths);
+        *field = XcodeInstaller::serialize_watch_paths(&existing_paths);
+        Ok(existing_paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect())
+    } else {
+        let normalized = XcodeInstaller::normalize_watch_paths(values_to_apply);
+        *field = XcodeInstaller::serialize_watch_paths(&normalized);
+        Ok(normalized
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_xcode_paths_field(
+    _field: &mut Option<Vec<String>>,
+    _value: &str,
+    _add_mode: bool,
+) -> Result<Vec<String>, String> {
+    Err("xcode_paths can only be configured on macOS".to_string())
+}
+
 /// Set array field for repository patterns (exclude_repositories, allow_repositories, exclude_prompts_in_repositories)
 /// This function handles the special logic of detecting if a value is:
 ///  - A global wildcard pattern like "*"
@@ -1080,6 +1175,34 @@ fn validate_prompt_storage_value(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    fn with_temp_home<F: FnOnce(&Path)>(f: F) {
+        let temp = tempdir().unwrap();
+        let home = temp.path().to_path_buf();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_userprofile = std::env::var_os("USERPROFILE");
+
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &home);
+        }
+
+        f(&home);
+
+        unsafe {
+            match prev_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+        }
+    }
 
     #[test]
     fn test_prompt_storage_valid_values() {
@@ -1254,6 +1377,37 @@ mod tests {
     fn test_parse_key_path_empty() {
         let result = parse_key_path("");
         assert_eq!(result, vec![""]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn test_set_xcode_paths_field_canonicalizes_and_collapses() {
+        with_temp_home(|home| {
+            let parent = home.join("ios");
+            let child = parent.join("AppA");
+            std::fs::create_dir_all(&child).unwrap();
+
+            let mut field = Some(vec![child.to_string_lossy().to_string()]);
+            let updated =
+                set_xcode_paths_field(&mut field, parent.to_str().unwrap(), true).unwrap();
+
+            let expected = std::fs::canonicalize(parent).unwrap();
+            assert_eq!(field, Some(vec![expected.to_string_lossy().to_string()]));
+            assert_eq!(updated, vec![expected.to_string_lossy().to_string()]);
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn test_set_xcode_paths_field_rejects_home_directory() {
+        with_temp_home(|home| {
+            let mut field = None;
+            let error =
+                set_xcode_paths_field(&mut field, home.to_str().unwrap(), true).unwrap_err();
+            assert!(error.contains("HOME directory"));
+        });
     }
 
     #[test]
