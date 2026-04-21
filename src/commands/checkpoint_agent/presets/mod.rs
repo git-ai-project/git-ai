@@ -21,7 +21,11 @@ mod windsurf;
 
 use crate::authorship::transcript::AiTranscript;
 use crate::authorship::working_log::AgentId;
-pub use crate::commands::checkpoint_agent::agent_presets::BashPreHookStrategy;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BashPreHookStrategy {
+    EmitHumanCheckpoint,
+    SnapshotOnly,
+}
 use crate::error::GitAiError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

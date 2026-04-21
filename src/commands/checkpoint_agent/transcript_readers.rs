@@ -6,14 +6,13 @@
 //! The top-level [`read_transcript`] function dispatches on `TranscriptSource`.
 
 use crate::authorship::transcript::{AiTranscript, Message};
-use crate::commands::checkpoint_agent::agent_presets::extract_plan_from_tool_use;
 use crate::commands::checkpoint_agent::presets::{TranscriptFormat, TranscriptSource};
 use crate::error::GitAiError;
 use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path};
 
 // ---------------------------------------------------------------------------
 // Public dispatch
@@ -2863,4 +2862,88 @@ pub fn find_codex_rollout_path_for_session_in_home(
 /// Read transcript from a Pi session file path (string form).
 pub fn read_pi_session(session_path: &str) -> Result<(AiTranscript, Option<String>), GitAiError> {
     read_pi_jsonl(Path::new(session_path))
+}
+
+// ---------------------------------------------------------------------------
+// Plan file utilities
+// ---------------------------------------------------------------------------
+
+/// Check if a file path refers to a Claude plan file.
+///
+/// Claude plans are written under `~/.claude/plans/`. We treat a path as a plan
+/// file only when it ends with `.md` and contains the path segment pair `.claude/plans`.
+pub fn is_plan_file_path(file_path: &str) -> bool {
+    let path = Path::new(file_path);
+    let is_markdown = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
+    if !is_markdown {
+        false
+    } else {
+        let components: Vec<String> = path
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(segment) => Some(segment.to_string_lossy().to_ascii_lowercase()),
+                _ => None,
+            })
+            .collect();
+
+        components
+            .windows(2)
+            .any(|window| window[0] == ".claude" && window[1] == "plans")
+    }
+}
+
+/// Extract plan content from a Write or Edit tool_use input if it targets a plan file.
+///
+/// Maintains a running `plan_states` map keyed by file path so that Edit operations
+/// can reconstruct the full plan text. On Write the full content is stored; on Edit
+/// the old_string->new_string replacement is applied to the tracked state.
+pub fn extract_plan_from_tool_use(
+    tool_name: &str,
+    input: &serde_json::Value,
+    plan_states: &mut HashMap<String, String>,
+) -> Option<String> {
+    match tool_name {
+        "Write" => {
+            let file_path = input.get("file_path")?.as_str()?;
+            if !is_plan_file_path(file_path) {
+                return None;
+            }
+            let content = input.get("content")?.as_str()?;
+            if content.trim().is_empty() {
+                return None;
+            }
+            plan_states.insert(file_path.to_string(), content.to_string());
+            Some(content.to_string())
+        }
+        "Edit" => {
+            let file_path = input.get("file_path")?.as_str()?;
+            if !is_plan_file_path(file_path) {
+                return None;
+            }
+            let old_string = input.get("old_string").and_then(|v| v.as_str());
+            let new_string = input.get("new_string").and_then(|v| v.as_str());
+
+            match (old_string, new_string) {
+                (Some(old), Some(new)) if !old.is_empty() || !new.is_empty() => {
+                    if let Some(current) = plan_states.get(file_path) {
+                        let updated = current.replacen(old, new, 1);
+                        plan_states.insert(file_path.to_string(), updated.clone());
+                        Some(updated)
+                    } else {
+                        plan_states.insert(file_path.to_string(), new.to_string());
+                        Some(new.to_string())
+                    }
+                }
+                (None, Some(new)) if !new.is_empty() => {
+                    plan_states.insert(file_path.to_string(), new.to_string());
+                    Some(new.to_string())
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
