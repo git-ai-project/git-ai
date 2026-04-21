@@ -41,6 +41,7 @@ pub enum ParsedHookEvent {
     PostFileEdit(PostFileEdit),
     PreBashCall(PreBashCall),
     PostBashCall(PostBashCall),
+    KnownHumanEdit(KnownHumanEdit),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +57,15 @@ pub struct PostFileEdit {
     pub file_paths: Vec<PathBuf>,
     pub dirty_files: Option<HashMap<PathBuf, String>>,
     pub transcript_source: Option<TranscriptSource>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnownHumanEdit {
+    pub trace_id: String,
+    pub cwd: PathBuf,
+    pub file_paths: Vec<PathBuf>,
+    pub dirty_files: Option<HashMap<PathBuf, String>>,
+    pub editor_metadata: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
