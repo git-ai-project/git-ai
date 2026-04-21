@@ -87,6 +87,7 @@ pub enum TranscriptSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TranscriptFormat {
     ClaudeJsonl,
+    ContinueJson,
     GeminiJson,
     WindsurfJsonl,
     CodexJsonl,
