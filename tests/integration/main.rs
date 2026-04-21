@@ -59,7 +59,6 @@ mod graphite;
 mod ignore_prompts;
 mod initial_attributions;
 mod install_hooks_comprehensive;
-mod internal_db_integration;
 mod internal_machine_commands;
 mod internal_spawn_safety;
 mod jetbrains_download;

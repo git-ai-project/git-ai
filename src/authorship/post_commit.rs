@@ -97,21 +97,6 @@ pub fn post_commit_with_final_state(
         Ok(())
     })?;
 
-    // Batch upsert all prompts to database after refreshing (non-fatal if it fails)
-    if let Err(e) = batch_upsert_prompts_to_db(&parent_working_log, &working_log, &commit_sha) {
-        tracing::debug!(
-            "[Warning] Failed to batch upsert prompts to database: {}",
-            e
-        );
-        crate::observability::log_error(
-            &e,
-            Some(serde_json::json!({
-                "operation": "post_commit_batch_upsert",
-                "commit_sha": commit_sha
-            })),
-        );
-    }
-
     // Create VirtualAttributions from working log (fast path - no blame)
     // We don't need to run blame because we only care about the working log data
     // that was accumulated since the parent commit
@@ -505,61 +490,6 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
             }
         }
     }
-
-    Ok(())
-}
-
-/// Batch upsert all prompts from checkpoints to the internal database.
-/// For each unique agent_id (tool:id), only the LAST checkpoint is inserted.
-/// This mirrors the deduplication logic in update_prompts_to_latest().
-fn batch_upsert_prompts_to_db(
-    checkpoints: &[Checkpoint],
-    working_log: &crate::git::repo_storage::PersistedWorkingLog,
-    commit_sha: &str,
-) -> Result<(), GitAiError> {
-    use crate::authorship::internal_db::{InternalDatabase, PromptDbRecord};
-
-    let workdir = working_log.repo_workdir.to_string_lossy().to_string();
-
-    // Group checkpoints by agent_id, keeping track of the LAST index for each.
-    // This mirrors the logic in update_prompts_to_latest().
-    let mut last_checkpoint_by_agent: HashMap<String, usize> = HashMap::new();
-
-    for (idx, checkpoint) in checkpoints.iter().enumerate() {
-        if checkpoint.kind == CheckpointKind::Human {
-            continue;
-        }
-        if let Some(agent_id) = &checkpoint.agent_id {
-            let key = format!("{}:{}", agent_id.tool, agent_id.id);
-            // Always update to the latest index (overwrites previous)
-            last_checkpoint_by_agent.insert(key, idx);
-        }
-    }
-
-    // Only create records for the LAST checkpoint of each agent_id
-    // Note: from_checkpoint now uses message timestamps for created_at/updated_at
-    let mut records = Vec::new();
-    for (_agent_key, idx) in last_checkpoint_by_agent {
-        let checkpoint = &checkpoints[idx];
-        if let Some(record) = PromptDbRecord::from_checkpoint(
-            checkpoint,
-            Some(workdir.clone()),
-            Some(commit_sha.to_string()),
-        ) {
-            records.push(record);
-        }
-    }
-
-    if records.is_empty() {
-        return Ok(());
-    }
-
-    let db = InternalDatabase::global()?;
-    let mut db_guard = db
-        .lock()
-        .map_err(|e| GitAiError::Generic(format!("Failed to lock database: {}", e)))?;
-
-    db_guard.batch_upsert_prompts(&records)?;
 
     Ok(())
 }
