@@ -154,7 +154,15 @@ def enrich_with_git_ai(commits: list[dict], noted: set[str]) -> None:
             commit["human_additions"] = stats.get("human_additions", 0)
             commit["unknown_additions"] = stats.get("unknown_additions", 0)
             commit["mixed_additions"] = stats.get("mixed_additions", 0)
-            commit["tools"] = stats.get("tool_model_breakdown", {})
+            # tool_model_breakdown values are either ints or nested dicts
+            raw_tools = stats.get("tool_model_breakdown", {})
+            flat_tools: dict[str, int] = {}
+            for tool_name, tool_val in raw_tools.items():
+                if isinstance(tool_val, dict):
+                    flat_tools[tool_name] = tool_val.get("ai_additions", 0) + tool_val.get("mixed_additions", 0)
+                else:
+                    flat_tools[tool_name] = int(tool_val)
+            commit["tools"] = flat_tools
         if i % 50 == 0:
             print(f"    {i}/{total} done ...", file=sys.stderr)
 
