@@ -63,4 +63,4 @@ jobs:
 
       - name: Run E2E tests
         run: |
-          task test:e2e
+          task test:bats

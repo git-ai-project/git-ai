@@ -130,11 +130,15 @@ fn detect_macos_ide(ide: &'static JetBrainsIde, app_path: &Path) -> Option<Detec
         return None;
     }
 
-    // Get build number from Info.plist or product-info.json
-    let (build_number, major_build) = get_macos_build_number(app_path);
+    // Get build number and data directory from Info.plist or product-info.json
+    let (build_number, major_build, data_directory_name) = get_macos_build_metadata(app_path);
 
     // Get plugins directory
-    let plugins_dir = get_plugins_dir(ide.product_code, build_number.as_deref());
+    let plugins_dir = get_plugins_dir(
+        data_directory_name.as_deref(),
+        ide.product_code,
+        build_number.as_deref(),
+    );
 
     Some(DetectedIde {
         ide,
@@ -147,7 +151,7 @@ fn detect_macos_ide(ide: &'static JetBrainsIde, app_path: &Path) -> Option<Detec
 }
 
 #[cfg(target_os = "macos")]
-fn get_macos_build_number(app_path: &Path) -> (Option<String>, Option<u32>) {
+fn get_macos_build_metadata(app_path: &Path) -> (Option<String>, Option<u32>, Option<String>) {
     // Try product-info.json first (newer JetBrains IDEs)
     let product_info_path = app_path.join("Contents/Resources/product-info.json");
     if product_info_path.exists()
@@ -156,7 +160,11 @@ fn get_macos_build_number(app_path: &Path) -> (Option<String>, Option<u32>) {
         && let Some(build) = json.get("buildNumber").and_then(|v| v.as_str())
     {
         let major = parse_major_build(build);
-        return (Some(build.to_string()), major);
+        let data_directory_name = json
+            .get("dataDirectoryName")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
+        return (Some(build.to_string()), major, data_directory_name);
     }
 
     // Fall back to Info.plist
@@ -174,10 +182,10 @@ fn get_macos_build_number(app_path: &Path) -> (Option<String>, Option<u32>) {
     {
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let major = parse_major_build(&version);
-        return (Some(version), major);
+        return (Some(version), major, None);
     }
 
-    (None, None)
+    (None, None, None)
 }
 
 // ===== Windows Detection =====
@@ -271,8 +279,12 @@ fn detect_windows_ide(ide: &'static JetBrainsIde, install_path: &Path) -> Option
         return None;
     }
 
-    let (build_number, major_build) = get_windows_build_number(install_path);
-    let plugins_dir = get_plugins_dir(ide.product_code, build_number.as_deref());
+    let (build_number, major_build, data_directory_name) = get_windows_build_metadata(install_path);
+    let plugins_dir = get_plugins_dir(
+        data_directory_name.as_deref(),
+        ide.product_code,
+        build_number.as_deref(),
+    );
 
     Some(DetectedIde {
         ide,
@@ -285,7 +297,9 @@ fn detect_windows_ide(ide: &'static JetBrainsIde, install_path: &Path) -> Option
 }
 
 #[cfg(windows)]
-fn get_windows_build_number(install_path: &Path) -> (Option<String>, Option<u32>) {
+fn get_windows_build_metadata(
+    install_path: &Path,
+) -> (Option<String>, Option<u32>, Option<String>) {
     let product_info_path = install_path.join("product-info.json");
     if product_info_path.exists()
         && let Ok(content) = std::fs::read_to_string(&product_info_path)
@@ -293,10 +307,14 @@ fn get_windows_build_number(install_path: &Path) -> (Option<String>, Option<u32>
         && let Some(build) = json.get("buildNumber").and_then(|v| v.as_str())
     {
         let major = parse_major_build(build);
-        return (Some(build.to_string()), major);
+        let data_directory_name = json
+            .get("dataDirectoryName")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
+        return (Some(build.to_string()), major, data_directory_name);
     }
 
-    (None, None)
+    (None, None, None)
 }
 
 // ===== Linux Detection =====
@@ -399,8 +417,12 @@ fn detect_linux_ide(ide: &'static JetBrainsIde, install_path: &Path) -> Option<D
         return None;
     }
 
-    let (build_number, major_build) = get_linux_build_number(install_path);
-    let plugins_dir = get_plugins_dir(ide.product_code, build_number.as_deref());
+    let (build_number, major_build, data_directory_name) = get_linux_build_metadata(install_path);
+    let plugins_dir = get_plugins_dir(
+        data_directory_name.as_deref(),
+        ide.product_code,
+        build_number.as_deref(),
+    );
 
     Some(DetectedIde {
         ide,
@@ -413,7 +435,7 @@ fn detect_linux_ide(ide: &'static JetBrainsIde, install_path: &Path) -> Option<D
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn get_linux_build_number(install_path: &Path) -> (Option<String>, Option<u32>) {
+fn get_linux_build_metadata(install_path: &Path) -> (Option<String>, Option<u32>, Option<String>) {
     let product_info_path = install_path.join("product-info.json");
     if product_info_path.exists()
         && let Ok(content) = std::fs::read_to_string(&product_info_path)
@@ -421,10 +443,14 @@ fn get_linux_build_number(install_path: &Path) -> (Option<String>, Option<u32>) 
         && let Some(build) = json.get("buildNumber").and_then(|v| v.as_str())
     {
         let major = parse_major_build(build);
-        return (Some(build.to_string()), major);
+        let data_directory_name = json
+            .get("dataDirectoryName")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
+        return (Some(build.to_string()), major, data_directory_name);
     }
 
-    (None, None)
+    (None, None, None)
 }
 
 // ===== Shared Utilities =====
@@ -435,15 +461,23 @@ fn parse_major_build(build: &str) -> Option<u32> {
 }
 
 /// Get the plugins directory for an IDE
-fn get_plugins_dir(product_code: &str, build_number: Option<&str>) -> PathBuf {
-    // Extract the version year from build number (e.g., "252" -> "2025.2")
-    let version_suffix = build_number
-        .and_then(parse_major_build)
-        .map(|major| {
-            // Build 252 = 2025.2, 251 = 2025.1, 243 = 2024.3, etc.
-            let year = 2000 + (major / 10);
-            let minor = major % 10;
-            format!("{}{}.{}", product_code, year, minor)
+fn get_plugins_dir(
+    data_directory_name: Option<&str>,
+    product_code: &str,
+    build_number: Option<&str>,
+) -> PathBuf {
+    // Prefer the IDE's real dataDirectoryName from product-info.json when available.
+    // This matches the actual config/plugins directory used by modern JetBrains IDEs
+    // (for example "IntelliJIdea2026.1"), avoiding incorrect guesses like "IU2026.1".
+    let version_suffix = data_directory_name
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            build_number.and_then(parse_major_build).map(|major| {
+                // Build 252 = 2025.2, 251 = 2025.1, 243 = 2024.3, etc.
+                let year = 2000 + (major / 10);
+                let minor = major % 10;
+                format!("{}{}.{}", product_code, year, minor)
+            })
         })
         .unwrap_or_else(|| product_code.to_string());
 
@@ -489,4 +523,24 @@ fn get_plugins_dir(product_code: &str, build_number: Option<&str>) -> PathBuf {
 pub fn is_plugin_installed(detected: &DetectedIde) -> bool {
     let plugin_dir = detected.plugins_dir.join("git-ai-intellij");
     plugin_dir.exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::get_plugins_dir;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_get_plugins_dir_prefers_product_info_data_directory_name() {
+        let plugins_dir = get_plugins_dir(Some("IntelliJIdea2026.1"), "IU", Some("261.22158.277"));
+        let expected_suffix = PathBuf::from("IntelliJIdea2026.1").join("plugins");
+        assert!(plugins_dir.ends_with(&expected_suffix));
+    }
+
+    #[test]
+    fn test_get_plugins_dir_falls_back_to_product_code_when_data_directory_name_missing() {
+        let plugins_dir = get_plugins_dir(None, "IU", Some("252.27397.103"));
+        let expected_suffix = PathBuf::from("IU2025.2").join("plugins");
+        assert!(plugins_dir.ends_with(&expected_suffix));
+    }
 }

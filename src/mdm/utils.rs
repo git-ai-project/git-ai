@@ -810,11 +810,7 @@ pub fn update_git_path_setting(
 
 /// Update VS Code chat hook settings in a settings.json/jsonc file.
 ///
-/// Ensures:
-/// - `"chat.hookFilesLocations"` contains `"~/.github/hooks": true`
-/// - `"chat.useHooks"` is set to `true`
-///
-/// Existing hook file locations are preserved.
+/// Ensures `"chat.useHooks"` is set to `true`.
 pub fn update_vscode_chat_hook_settings(
     settings_path: &Path,
     dry_run: bool,
@@ -842,45 +838,6 @@ pub fn update_vscode_chat_hook_settings(
 
     let object = root.object_value_or_set();
     let mut changed = false;
-
-    let hook_locations = match object.get("chat.hookFilesLocations") {
-        Some(prop) => match prop.object_value() {
-            Some(existing) => existing,
-            None => {
-                changed = true;
-                prop.object_value_or_set()
-            }
-        },
-        None => {
-            changed = true;
-            object.object_value_or_set("chat.hookFilesLocations")
-        }
-    };
-
-    // VS Code requires paths that are relative or start with "~/".
-    // This is cross-platform (including Windows) because the setting
-    // does not accept absolute paths or backslash separators.
-    let hook_dir_path = "~/.github/hooks";
-    match hook_locations.get(hook_dir_path) {
-        Some(prop) => {
-            let should_update = match prop.value() {
-                Some(node) => match node.as_boolean_lit() {
-                    Some(bool_node) => !bool_node.value(),
-                    None => true,
-                },
-                None => true,
-            };
-
-            if should_update {
-                prop.set_value(jsonc_parser::json!(true));
-                changed = true;
-            }
-        }
-        None => {
-            hook_locations.append(hook_dir_path, jsonc_parser::json!(true));
-            changed = true;
-        }
-    }
 
     match object.get("chat.useHooks") {
         Some(prop) => {
@@ -1132,15 +1089,11 @@ mod tests {
     }
 
     #[test]
-    fn test_update_vscode_chat_hook_settings_preserves_existing_locations() {
+    fn test_update_vscode_chat_hook_settings_enables_use_hooks() {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join("settings.json");
         let initial = r#"{
     // keep existing entries
-    "chat.hookFilesLocations": {
-        ".github/hooks": true,
-        "~/.github/hooks": true
-    },
     "chat.useHooks": false
 }
 "#;
@@ -1151,8 +1104,6 @@ mod tests {
 
         let final_content = fs::read_to_string(&settings_path).unwrap();
         assert!(final_content.contains("// keep existing entries"));
-        assert!(final_content.contains("\".github/hooks\": true"));
-        assert!(final_content.contains("\"~/.github/hooks\": true"));
         assert!(final_content.contains("\"chat.useHooks\": true"));
     }
 
@@ -1161,10 +1112,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join("settings.json");
         let initial = r#"{
-    "chat.hookFilesLocations": {
-        ".github/hooks": true,
-        "~/.github/hooks": true
-    },
     "chat.useHooks": true
 }
 "#;
@@ -1178,7 +1125,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_vscode_chat_hook_settings_uses_tilde_path_not_absolute() {
+    fn test_update_vscode_chat_hook_settings_adds_use_hooks_to_empty() {
         let temp_dir = TempDir::new().unwrap();
         let settings_path = temp_dir.path().join("settings.json");
         fs::write(&settings_path, "{}\n").unwrap();
@@ -1187,13 +1134,7 @@ mod tests {
         assert!(result.is_some());
 
         let final_content = fs::read_to_string(&settings_path).unwrap();
-        assert!(final_content.contains("\"~/.github/hooks\": true"));
-        let absolute_hook_dir = home_dir()
-            .join(".github")
-            .join("hooks")
-            .to_string_lossy()
-            .replace('\\', "/");
-        assert!(!final_content.contains(&format!("\"{}\": true", absolute_hook_dir)));
+        assert!(final_content.contains("\"chat.useHooks\": true"));
     }
 
     #[test]

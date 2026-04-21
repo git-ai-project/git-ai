@@ -469,6 +469,11 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "bash" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::Windsurf => match tool_name {
+            "code_action" => ToolClass::FileEdit,
+            "run_command" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
     }
 }
 
@@ -484,6 +489,7 @@ pub enum Agent {
     Firebender,
     Codex,
     Pi,
+    Windsurf,
 }
 
 // ---------------------------------------------------------------------------

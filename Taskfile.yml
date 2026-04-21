@@ -1,78 +1,91 @@
 version: "3"
+
+vars:
+  TEST_FILTER: '{{default "" .TEST_FILTER}}'
+  CARGO_TEST_ARGS: '{{default "" .CARGO_TEST_ARGS}}'
+  EXTRA_TEST_BINARY_ARGS: '{{default "" .EXTRA_TEST_BINARY_ARGS}}'
+  NO_CAPTURE: '{{default "false" .NO_CAPTURE}}'
+  TEST_BINARY_ARGS:
+    sh: |
+      args=""
+      if [ "{{.NO_CAPTURE}}" = "true" ]; then
+        args="--nocapture"
+      fi
+      if [ -n "{{.EXTRA_TEST_BINARY_ARGS}}" ]; then
+        args="$args {{.EXTRA_TEST_BINARY_ARGS}}"
+      fi
+      printf '%s' "$args"
+  TEST_THREADS:
+    sh: |
+      n=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)
+      [ "$n" -gt 12 ] && echo 12 || echo "$n"
+
 tasks:
   dev:
-    desc: Setup git-ai debug build for local dev
-    deps: [build-debug]
+    desc: |
+      Install a git-ai debug build for local dev on the system so that all git commands will route through it.
+      Installs to the same location as real release builds, so it overrides system-wide. It also runs `git-ai install`
+      and restarts the daemon to ensure all latest code changes are fully installed and propagated system-wide.
+      Use this for trying out changes locally -- do not use any other approaches for runing git-ai locally. They will
+      not work, interfere, and break things.
     cmds:
       - cmd: powershell -NonInteractive -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1
         platforms: [windows]
       - cmd: ./scripts/dev.sh
         platforms: [linux, darwin]
-  build:
-    desc: Build the project in release mode
-    cmds:
-      - cargo build --release
-    sources:
-      - src/**/*.rs
-      - Cargo.toml
-    generates:
-      - target/release/git-ai
-
-  build-debug:
-    desc: Build the project in debug mode
-    cmds:
-      - cargo build
-    sources:
-      - src/**/*.rs
-      - Cargo.toml
-    generates:
-      - target/debug/git-ai
 
   clean:
     desc: Clean build artifacts
     cmds:
       - cargo clean
 
-  release:local:
-    desc: Build release and install to user bin directory
-    deps: [build]
+  build:
+    desc: Build the project (only use this for checking that the project builds, not for running locally -- use `task dev` instead)
     cmds:
-      - cp target/release/git-ai ~/.local/bin/git-ai
-      - chmod +x ~/.local/bin/git-ai
+      - cargo build
 
-  debug:local:
-    desc: Build release and install to user bin directory
-    deps: [build-debug]
+  test:base:
+    internal: true
     cmds:
-      - cp target/debug/git-ai ~/.local/bin/git-ai
-      - chmod +x ~/.local/bin/git-ai
-
-  test:e2e:
-    desc: Run the end-to-end tests with debug build
-    deps: [build-debug]
-    cmds:
-      - bats tests/e2e/user-scenarios.bats
-
-  test:e2e:release:
-    desc: Run the end-to-end tests with release build
-    deps: [build]
-    cmds:
-      - bats tests/e2e/user-scenarios.bats
+      - cargo test {{.CARGO_TEST_ARGS}} {{.TEST_FILTER}} -- --test-threads {{.TEST_THREADS}} {{.TEST_BINARY_ARGS}}
+    env:
+      GIT_AI_TEST_GIT_MODE: "{{.GIT_AI_TEST_GIT_MODE}}"
+      GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: "{{.TEST_THREADS}}"
 
   test:
-    desc: Run unit tests
+    desc: Run unit tests (daemon mode by default)
     cmds:
-      - cargo test
+      - task: test:base
+        vars:
+          GIT_AI_TEST_GIT_MODE: daemon
+
+  test:wrapper-daemon:
+    desc: |
+      Run unit tests in wrapper-daemon mode. Wrapper-daemon mode is where we simulate `git` pointing to the git-ai-wrapped git, but
+      all git-ai processing is still done in the shared daemon with some extra context from the wrapper that is passed over the control
+      socket. Do not use this test mode unless explicitly requested, use `task test` for normal testing purposes.
+    cmds:
+      - task: test:base
+        vars:
+          GIT_AI_TEST_GIT_MODE: wrapper-daemon
+
+  test:wrapper:
+    desc: Run unit tests in wrapper mode (DEPRECATED - DO NOT USE THIS UNLESS EXPLICITLY REQUESTED BY THE USER FOR TESTING PURPOSES; WILL BE REMOVED SOON)
+    cmds:
+      - task: test:base
+        vars:
+          GIT_AI_TEST_GIT_MODE: wrapper
+
+  test:bats:
+    desc: Run the bats-based tests with debug build (DEPRECATED - DO NOT USE THIS UNLESS EXPLICITLY REQUESTED BY THE USER FOR TESTING PURPOSES; WILL BE REMOVED SOON)
+    deps: [build]
+    cmds:
+      - bats tests/e2e/user-scenarios.bats
 
   lint:
     desc: Run cargo check and clippy with warnings as errors
     cmds:
       - cargo clippy --all-targets -- -D warnings
-
-  bench:
-    desc: Run benchmarks
-    cmds:
-      - cargo bench
 
   doc:
     desc: Build documentation with warnings as errors
@@ -83,6 +96,7 @@ tasks:
 
   format:
     desc: Format code with rustfmt
+    aliases: [fmt]
     cmds:
       - cargo fmt
 
@@ -112,26 +126,3 @@ tasks:
       - cargo llvm-cov test --ignore-filename-regex='tests/.*|benches/.*|examples/.*' --fail-under-lines {{.COVERAGE_THRESHOLD}}
     vars:
       COVERAGE_THRESHOLD: '{{.COVERAGE_THRESHOLD | default "50"}}'
-
-  update:
-    desc: Update dependencies
-    cmds:
-      - cargo update
-
-  all:
-    desc: Build, test, lint, and generate docs
-    deps: [build, test, lint, doc]
-
-  install:
-    desc: Install dependencies using Cargo
-    cmds:
-      - cargo install --path .
-  fuzz:
-    desc: Run fuzz testing (requires nightly)
-    cmds:
-      - cargo +nightly fuzz run fuzz_checkpoint -- -max_total_time=60
-
-  miri:
-    desc: Run miri for undefined behavior detection (requires nightly)
-    cmds:
-      - cargo +nightly miri test --lib

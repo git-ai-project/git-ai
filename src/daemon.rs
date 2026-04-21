@@ -7133,10 +7133,18 @@ impl ActorDaemonCoordinator {
             ));
         }
         let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
-        let ingest_high_watermark = self.trace_ingest_high_watermark();
-        if ingest_high_watermark > 0 {
-            self.wait_for_trace_ingest_processed_through(ingest_high_watermark)
-                .await?;
+
+        // Captured checkpoints carry their own file-state snapshot and do not
+        // depend on trace-ingest ordering, so we skip the potentially expensive
+        // wait.  Live checkpoints still need the daemon's view of the repo to be
+        // current, and wait=true callers explicitly asked to block.
+        let needs_trace_ingest_wait = wait || matches!(request, CheckpointRunRequest::Live(_));
+        if needs_trace_ingest_wait {
+            let ingest_high_watermark = self.trace_ingest_high_watermark();
+            if ingest_high_watermark > 0 {
+                self.wait_for_trace_ingest_processed_through(ingest_high_watermark)
+                    .await?;
+            }
         }
 
         if wait {
@@ -7804,6 +7812,133 @@ fn daemon_max_uptime_ns() -> u128 {
     secs as u128 * 1_000_000_000
 }
 
+const DAEMON_SOCKET_HEALTH_CHECK_SECS: u64 = 30;
+
+fn daemon_socket_health_check_interval() -> u64 {
+    std::env::var("GIT_AI_DAEMON_SOCKET_HEALTH_CHECK_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DAEMON_SOCKET_HEALTH_CHECK_SECS)
+}
+
+/// Spawn a detached `git-ai bg restart --hard` process that will reap the
+/// current (zombie) daemon and start a fresh one.  The child inherits the
+/// daemon env vars (GIT_AI_DAEMON_HOME, etc.) so it targets the same
+/// instance.  Returns Ok if the process was spawned; the caller should
+/// still request_shutdown so the current daemon exits promptly.
+fn spawn_self_restart() -> Result<(), String> {
+    let exe = crate::utils::current_git_ai_exe().map_err(|e| e.to_string())?;
+    tracing::info!(?exe, "spawning detached restart process");
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(["bg", "restart", "--hard"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    for var in GIT_ENV_VARS_TO_SANITIZE {
+        cmd.env_remove(var);
+    }
+    cmd.env_remove("GIT_AI");
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    }
+
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("failed to spawn restart process: {}", e))
+}
+
+const DAEMON_MIN_UPTIME_FOR_SELF_RESTART_SECS: u64 = 60;
+
+fn daemon_min_uptime_for_self_restart() -> u64 {
+    std::env::var("GIT_AI_DAEMON_MIN_UPTIME_FOR_RESTART_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DAEMON_MIN_UPTIME_FOR_SELF_RESTART_SECS)
+}
+
+/// Background loop that verifies the daemon's sockets are reachable by
+/// actually connecting to them.  A successful connect proves the socket file
+/// exists, points to this daemon's listener, and that the listener thread is
+/// alive and calling accept().  If either probe fails (deleted file, stale
+/// socket, hung listener), the daemon spawns a detached restart process and
+/// shuts down.
+///
+/// To prevent restart loops when the underlying issue is systemic (e.g.
+/// filesystem permissions, broken paths), the daemon only self-restarts if
+/// it has been up for at least 60 seconds.  If sockets fail before that,
+/// it shuts down without restart — the next wrapper invocation will attempt
+/// to start a fresh daemon.
+fn daemon_socket_health_check_loop(
+    coordinator: Arc<ActorDaemonCoordinator>,
+    control_socket_path: PathBuf,
+    trace_socket_path: PathBuf,
+) {
+    let started = std::time::Instant::now();
+    let interval = daemon_socket_health_check_interval().max(1);
+    tracing::info!(
+        interval,
+        control = %control_socket_path.display(),
+        trace = %trace_socket_path.display(),
+        "socket health check started"
+    );
+
+    loop {
+        {
+            let guard = coordinator
+                .shutdown_condvar_mutex
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if coordinator.is_shutting_down() {
+                return;
+            }
+            let _ = coordinator
+                .shutdown_condvar
+                .wait_timeout(guard, std::time::Duration::from_secs(interval));
+        }
+
+        if coordinator.is_shutting_down() {
+            return;
+        }
+
+        let control_ok =
+            local_socket_connects_with_timeout(&control_socket_path, DAEMON_SOCKET_PROBE_TIMEOUT);
+        let trace_ok =
+            local_socket_connects_with_timeout(&trace_socket_path, DAEMON_SOCKET_PROBE_TIMEOUT);
+
+        if control_ok.is_err() || trace_ok.is_err() {
+            let uptime = started.elapsed();
+            let min_uptime = std::time::Duration::from_secs(daemon_min_uptime_for_self_restart());
+
+            if uptime >= min_uptime {
+                tracing::warn!(
+                    control = %control_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                    trace = %trace_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                    "socket health check failed, spawning restart and shutting down"
+                );
+                if let Err(e) = spawn_self_restart() {
+                    tracing::error!("failed to spawn self-restart: {}", e);
+                }
+            } else {
+                tracing::warn!(
+                    control = %control_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                    trace = %trace_ok.err().map(|e| e.to_string()).unwrap_or_else(|| "ok".into()),
+                    uptime_secs = uptime.as_secs(),
+                    "socket health check failed within minimum uptime, shutting down without restart"
+                );
+            }
+            coordinator.request_shutdown();
+            return;
+        }
+    }
+}
+
 /// Background loop that periodically checks for available updates.
 ///
 /// Sleeps in short increments so it can exit promptly when the coordinator
@@ -7988,9 +8123,20 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
         daemon_update_check_loop(update_coord, started_at_ns);
     });
 
+    let health_coord = coordinator.clone();
+    let health_control = config.control_socket_path.clone();
+    let health_trace = config.trace_socket_path.clone();
+    let health_thread = std::thread::spawn(move || {
+        daemon_socket_health_check_loop(health_coord, health_control, health_trace);
+    });
+
     coordinator.wait_for_shutdown().await;
 
-    // best effort wake listeners to allow clean process exit
+    // Best-effort wake listeners to allow clean process exit.
+    // Connect to each socket to unblock `accept()`.  If the socket files
+    // were deleted (which is exactly what the health-check detects), the
+    // connection will fail — fall back to a timed join so the process still
+    // exits instead of hanging forever.
     let _ = local_socket_connects_with_timeout(
         &config.control_socket_path,
         DAEMON_SOCKET_PROBE_TIMEOUT,
@@ -7998,9 +8144,35 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     let _ =
         local_socket_connects_with_timeout(&config.trace_socket_path, DAEMON_SOCKET_PROBE_TIMEOUT);
 
-    let _ = control_thread.join();
-    let _ = trace_thread.join();
-    let _ = update_thread.join();
+    let join_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    for (name, thread) in [
+        ("control", control_thread),
+        ("trace", trace_thread),
+        ("update", update_thread),
+        ("health", health_thread),
+    ] {
+        let remaining = join_deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            tracing::debug!("skipping join for {} thread (deadline exceeded)", name);
+            continue;
+        }
+        let handle = std::thread::spawn(move || {
+            let _ = thread.join();
+        });
+        let poll_until =
+            std::time::Instant::now() + remaining.min(std::time::Duration::from_millis(500));
+        loop {
+            if handle.is_finished() {
+                let _ = handle.join();
+                break;
+            }
+            if std::time::Instant::now() >= poll_until {
+                tracing::debug!("{} thread did not join in time, proceeding", name);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
     remove_socket_if_exists(&config.trace_socket_path)?;
     remove_socket_if_exists(&config.control_socket_path)?;

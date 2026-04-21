@@ -13,10 +13,12 @@ use std::path::PathBuf;
 
 const WINDSURF_CHECKPOINT_CMD: &str = "checkpoint windsurf --hook-input stdin";
 
-/// The three Windsurf Cascade hook events we install into.
+/// The Windsurf Cascade hook events we install into.
 const HOOK_EVENTS: &[&str] = &[
     "pre_write_code",
     "post_write_code",
+    "pre_run_command",
+    "post_run_command",
     "post_cascade_response_with_transcript",
 ];
 

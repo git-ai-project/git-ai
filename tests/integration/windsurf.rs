@@ -5,9 +5,12 @@ use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::commands::checkpoint_agent::agent_presets::{
     AgentCheckpointFlags, AgentCheckpointPreset, WindsurfPreset,
 };
+use git_ai::commands::checkpoint_agent::bash_tool;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
+use std::thread;
+use std::time::Duration;
 
 // ============================================================================
 // Preset routing tests
@@ -496,5 +499,199 @@ fn test_windsurf_e2e_human_checkpoint() {
         commit.authorship_log.attestations.len(),
         0,
         "Human checkpoint should not create AI attestations"
+    );
+}
+
+// ============================================================================
+// run_command (bash) hook tests
+// ============================================================================
+
+#[test]
+fn test_windsurf_preset_pre_run_command_captures_bash_snapshot() {
+    let repo = TestRepo::new();
+    let repo_root = repo.canonical_path();
+
+    let hook_input = json!({
+        "trajectory_id": "traj-bash-pre",
+        "execution_id": "exec-bash-1",
+        "agent_action_name": "pre_run_command",
+        "model_name": "GPT 4.1",
+        "tool_info": {
+            "command_line": "git status --short",
+            "cwd": repo_root.to_string_lossy().to_string(),
+        }
+    })
+    .to_string();
+
+    let result = WindsurfPreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .expect("pre_run_command should run");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
+    assert_eq!(result.agent_id.tool, "windsurf");
+    assert_eq!(result.agent_id.id, "traj-bash-pre");
+    assert_eq!(result.agent_id.model, "GPT 4.1");
+    assert!(result.transcript.is_none());
+    assert!(result.edited_filepaths.is_none());
+    assert!(result.will_edit_filepaths.is_none());
+    assert_eq!(
+        result.repo_working_dir.as_deref(),
+        Some(repo_root.to_string_lossy().as_ref())
+    );
+
+    assert!(
+        bash_tool::has_active_bash_inflight(&repo_root),
+        "pre_run_command should capture a bash pre-snapshot"
+    );
+
+    let active_context = bash_tool::latest_inflight_bash_agent_context(&repo_root)
+        .expect("active context should exist");
+    assert_eq!(active_context.agent_id.tool, "windsurf");
+    assert_eq!(active_context.session_id, "traj-bash-pre");
+    assert_eq!(active_context.tool_use_id, "exec-bash-1");
+}
+
+#[test]
+fn test_windsurf_preset_post_run_command_detects_changed_files() {
+    let repo = TestRepo::new();
+    let repo_root = repo.canonical_path();
+    let file_path = repo_root.join("src").join("main.rs");
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(&file_path, "fn main() {}\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let pre_hook_input = json!({
+        "trajectory_id": "traj-bash-post",
+        "execution_id": "exec-bash-2",
+        "agent_action_name": "pre_run_command",
+        "tool_info": {
+            "command_line": "echo changed >> src/main.rs",
+            "cwd": repo_root.to_string_lossy().to_string(),
+        }
+    })
+    .to_string();
+
+    WindsurfPreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(pre_hook_input),
+        })
+        .expect("pre_run_command should run");
+
+    // Ensure mtime resolution registers the change.
+    thread::sleep(Duration::from_millis(50));
+    fs::write(&file_path, "fn main() { println!(\"hi\"); }\n").unwrap();
+
+    let post_hook_input = json!({
+        "trajectory_id": "traj-bash-post",
+        "execution_id": "exec-bash-2",
+        "agent_action_name": "post_run_command",
+        "tool_info": {
+            "command_line": "echo changed >> src/main.rs",
+            "cwd": repo_root.to_string_lossy().to_string(),
+        }
+    })
+    .to_string();
+
+    let result = WindsurfPreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(post_hook_input),
+        })
+        .expect("post_run_command should run");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    assert_eq!(result.agent_id.tool, "windsurf");
+    assert!(
+        result.transcript.is_some(),
+        "post_run_command should attach transcript content"
+    );
+    assert_eq!(
+        result.edited_filepaths,
+        Some(vec!["src/main.rs".to_string()]),
+        "bash post-hook should scope the checkpoint to changed files"
+    );
+}
+
+#[test]
+fn test_windsurf_preset_post_run_command_without_snapshot_falls_back_gracefully() {
+    let repo = TestRepo::new();
+    let repo_root = repo.canonical_path();
+
+    // No pre_run_command hook fired — snapshot is missing.
+    let hook_input = json!({
+        "trajectory_id": "traj-orphan-post",
+        "execution_id": "exec-orphan",
+        "agent_action_name": "post_run_command",
+        "tool_info": {
+            "command_line": "pwd",
+            "cwd": repo_root.to_string_lossy().to_string(),
+        }
+    })
+    .to_string();
+
+    let result = WindsurfPreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .expect("orphan post_run_command should not error");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    assert_eq!(result.agent_id.tool, "windsurf");
+    assert!(
+        result.edited_filepaths.is_none(),
+        "missing pre-snapshot should produce no attributed files"
+    );
+}
+
+#[test]
+fn test_windsurf_e2e_run_command_attribution() {
+    let repo = TestRepo::new();
+    let repo_root = repo.canonical_path();
+
+    // Initial file + commit.
+    let file_path = repo_root.join("index.ts");
+    fs::write(&file_path, "const x = 1;\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    // Pre-run command hook — captures snapshot + emits human checkpoint.
+    let pre_hook = json!({
+        "trajectory_id": "traj-e2e-bash",
+        "execution_id": "exec-e2e-1",
+        "agent_action_name": "pre_run_command",
+        "tool_info": {
+            "command_line": "sed -i '' 's/1;/2;/' index.ts",
+            "cwd": repo_root.to_string_lossy().to_string(),
+        }
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "windsurf", "--hook-input", &pre_hook])
+        .unwrap();
+
+    thread::sleep(Duration::from_millis(50));
+    fs::write(&file_path, "const x = 2;\n").unwrap();
+
+    // Post-run command hook — attributes the change to Windsurf.
+    let post_hook = json!({
+        "trajectory_id": "traj-e2e-bash",
+        "execution_id": "exec-e2e-1",
+        "agent_action_name": "post_run_command",
+        "tool_info": {
+            "command_line": "sed -i '' 's/1;/2;/' index.ts",
+            "cwd": repo_root.to_string_lossy().to_string(),
+        }
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "windsurf", "--hook-input", &post_hook])
+        .unwrap();
+
+    let commit = repo.stage_all_and_commit("Windsurf bash edit").unwrap();
+
+    let mut file = repo.filename("index.ts");
+    file.assert_lines_and_blame(crate::lines!["const x = 2;".ai()]);
+
+    assert!(
+        !commit.authorship_log.attestations.is_empty(),
+        "run_command edits should produce AI attestations"
     );
 }
