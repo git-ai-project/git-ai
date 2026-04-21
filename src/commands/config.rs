@@ -952,11 +952,13 @@ fn set_xcode_paths_field(
     };
 
     if add_mode {
+        let original_existing = existing_paths.clone();
         existing_paths.extend(values_to_apply);
         existing_paths = XcodeInstaller::normalize_watch_paths(existing_paths);
         *field = XcodeInstaller::serialize_watch_paths(&existing_paths);
         Ok(existing_paths
             .iter()
+            .filter(|path| !original_existing.contains(path))
             .map(|path| path.to_string_lossy().to_string())
             .collect())
     } else {
@@ -1395,6 +1397,36 @@ mod tests {
             let expected = std::fs::canonicalize(parent).unwrap();
             assert_eq!(field, Some(vec![expected.to_string_lossy().to_string()]));
             assert_eq!(updated, vec![expected.to_string_lossy().to_string()]);
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn test_set_xcode_paths_field_add_mode_returns_only_new_paths() {
+        with_temp_home(|home| {
+            let parent = home.join("ios");
+            let existing_child = parent.join("AppA");
+            let new_child = parent.join("AppB");
+            std::fs::create_dir_all(&existing_child).unwrap();
+            std::fs::create_dir_all(&new_child).unwrap();
+
+            let mut field = Some(vec![existing_child.to_string_lossy().to_string()]);
+            let added =
+                set_xcode_paths_field(&mut field, new_child.to_str().unwrap(), true).unwrap();
+
+            let expected_added = std::fs::canonicalize(new_child).unwrap();
+            assert_eq!(
+                field,
+                Some(vec![
+                    std::fs::canonicalize(existing_child)
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string(),
+                    expected_added.to_string_lossy().to_string(),
+                ])
+            );
+            assert_eq!(added, vec![expected_added.to_string_lossy().to_string()]);
         });
     }
 
