@@ -556,4 +556,3 @@ pub fn get_git_diff_stats(
 
     Ok((added_lines, deleted_lines))
 }
-
