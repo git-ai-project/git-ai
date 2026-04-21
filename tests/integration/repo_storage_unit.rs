@@ -350,6 +350,7 @@ fn test_write_initial_with_contents_persists_snapshot_blob() {
             HashMap::new(),
             std::collections::BTreeMap::new(),
             contents,
+            std::collections::BTreeMap::new(),
         )
         .expect("write INITIAL with contents");
 

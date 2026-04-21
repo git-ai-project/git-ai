@@ -3688,7 +3688,8 @@ pub struct RecentWorkingLogSnapshot {
     pub prompts: HashMap<String, crate::authorship::authorship_log::PromptRecord>,
     pub file_contents: HashMap<String, String>,
     pub humans: std::collections::BTreeMap<String, crate::authorship::authorship_log::HumanRecord>,
-    pub sessions: std::collections::BTreeMap<String, crate::authorship::authorship_log::SessionRecord>,
+    pub sessions:
+        std::collections::BTreeMap<String, crate::authorship::authorship_log::SessionRecord>,
 }
 
 impl RecentWorkingLogSnapshot {

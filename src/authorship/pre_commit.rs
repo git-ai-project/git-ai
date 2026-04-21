@@ -38,4 +38,3 @@ fn pre_commit_checkpoint_context(repo: &Repository) -> (CheckpointKind, Option<C
     tracing::debug!("pre-commit: no active inflight bash agent context, using human checkpoint");
     (CheckpointKind::Human, None)
 }
-

@@ -19,14 +19,10 @@ fn test_terminal_stats_display() {
     let stats = CommitStats {
         human_additions: 50,
         unknown_additions: 0,
-        mixed_additions: 40,
         ai_additions: 100,
         ai_accepted: 25,
-        time_waiting_for_ai: 72009, // 1 minute 30 seconds
         git_diff_deleted_lines: 15,
         git_diff_added_lines: 80,
-        total_ai_additions: 100,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
 
@@ -37,14 +33,10 @@ fn test_terminal_stats_display() {
     let ai_stats = CommitStats {
         human_additions: 0,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 100,
         ai_accepted: 95,
-        time_waiting_for_ai: 45,
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 100,
-        total_ai_additions: 100,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
 
@@ -55,14 +47,10 @@ fn test_terminal_stats_display() {
     let human_stats = CommitStats {
         human_additions: 75,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 0,
         ai_accepted: 0,
-        time_waiting_for_ai: 0,
         git_diff_deleted_lines: 10,
         git_diff_added_lines: 75,
-        total_ai_additions: 0,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
 
@@ -73,14 +61,10 @@ fn test_terminal_stats_display() {
     let minimal_human_stats = CommitStats {
         human_additions: 2,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 100,
         ai_accepted: 95,
-        time_waiting_for_ai: 30,
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 102,
-        total_ai_additions: 100,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
 
@@ -91,14 +75,10 @@ fn test_terminal_stats_display() {
     let deletion_only_stats = CommitStats {
         human_additions: 0,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 0,
         ai_accepted: 0,
-        time_waiting_for_ai: 0,
         git_diff_deleted_lines: 25,
         git_diff_added_lines: 0,
-        total_ai_additions: 0,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
 
@@ -111,14 +91,10 @@ fn test_terminal_stats_display() {
     let untracked_stats = CommitStats {
         human_additions: 180,
         unknown_additions: 220,
-        mixed_additions: 0,
         ai_additions: 600,
         ai_accepted: 462,
-        time_waiting_for_ai: 60,
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 1000,
-        total_ai_additions: 600,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
     let with_untracked_output = write_stats_to_terminal(&untracked_stats, false);
@@ -128,14 +104,10 @@ fn test_terminal_stats_display() {
     let threshold_stats = CommitStats {
         human_additions: 49,
         unknown_additions: 1,
-        mixed_additions: 0,
         ai_additions: 50,
         ai_accepted: 50,
-        time_waiting_for_ai: 0,
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 100,
-        total_ai_additions: 50,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
     let untracked_at_threshold_output = write_stats_to_terminal(&threshold_stats, false);
@@ -145,14 +117,10 @@ fn test_terminal_stats_display() {
     let above_threshold_stats = CommitStats {
         human_additions: 97,
         unknown_additions: 2,
-        mixed_additions: 0,
         ai_additions: 0,
         ai_accepted: 0,
-        time_waiting_for_ai: 0,
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 99,
-        total_ai_additions: 0,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
     let untracked_just_above_output = write_stats_to_terminal(&above_threshold_stats, false);
@@ -162,14 +130,10 @@ fn test_terminal_stats_display() {
     let all_untracked_stats = CommitStats {
         human_additions: 0,
         unknown_additions: 100,
-        mixed_additions: 0,
         ai_additions: 0,
         ai_accepted: 0,
-        time_waiting_for_ai: 0,
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 100,
-        total_ai_additions: 0,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
     let all_untracked_output = write_stats_to_terminal(&all_untracked_stats, false);
@@ -195,14 +159,10 @@ fn test_markdown_stats_display() {
     let stats = CommitStats {
         human_additions: 50,
         unknown_additions: 0,
-        mixed_additions: 40,
         ai_additions: 100,
         ai_accepted: 25,
-        time_waiting_for_ai: 72009, // 1 minute 30 seconds
         git_diff_deleted_lines: 15,
         git_diff_added_lines: 80,
-        total_ai_additions: 100,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
 
@@ -213,14 +173,10 @@ fn test_markdown_stats_display() {
     let ai_stats = CommitStats {
         human_additions: 0,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 100,
         ai_accepted: 95,
-        time_waiting_for_ai: 45,
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 100,
-        total_ai_additions: 100,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
 
@@ -231,14 +187,10 @@ fn test_markdown_stats_display() {
     let human_stats = CommitStats {
         human_additions: 75,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 0,
         ai_accepted: 0,
-        time_waiting_for_ai: 0,
         git_diff_deleted_lines: 10,
         git_diff_added_lines: 75,
-        total_ai_additions: 0,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
 
@@ -249,14 +201,10 @@ fn test_markdown_stats_display() {
     let minimal_human_stats = CommitStats {
         human_additions: 2,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 100,
         ai_accepted: 95,
-        time_waiting_for_ai: 30,
         git_diff_deleted_lines: 0,
         git_diff_added_lines: 102,
-        total_ai_additions: 100,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
 
@@ -267,14 +215,10 @@ fn test_markdown_stats_display() {
     let deletion_only_stats = CommitStats {
         human_additions: 0,
         unknown_additions: 0,
-        mixed_additions: 0,
         ai_additions: 0,
         ai_accepted: 0,
-        time_waiting_for_ai: 0,
         git_diff_deleted_lines: 25,
         git_diff_added_lines: 0,
-        total_ai_additions: 0,
-        total_ai_deletions: 0,
         tool_model_breakdown: BTreeMap::new(),
     };
 
@@ -328,10 +272,6 @@ fn test_stats_for_simple_ai_commit() {
     assert_eq!(
         stats.git_diff_deleted_lines, 0,
         "Git diff shows 0 deleted lines"
-    );
-    assert_eq!(
-        stats.time_waiting_for_ai, 0,
-        "No waiting time recorded (no timestamps in test)"
     );
 }
 
@@ -868,7 +808,7 @@ fn test_stats_for_merge_commit_skips_ai_acceptance() {
     let stats = stats_for_commit_stats(&gitai_repo, &merge_sha, &[]).unwrap();
 
     assert_eq!(stats.ai_accepted, 0);
-    assert_eq!(stats.ai_additions, stats.mixed_additions);
+    assert_eq!(stats.ai_additions, 0);
 }
 
 #[test]
@@ -1109,10 +1049,6 @@ fn test_stats_from_authorship_log_no_log() {
     assert_eq!(stats.ai_additions, 3); // ai_accepted when no mixed
     assert_eq!(stats.human_additions, 0); // no known-human attestations passed
     assert_eq!(stats.unknown_additions, 7); // 10 - 3 (unattested lines)
-    assert_eq!(stats.mixed_additions, 0);
-    assert_eq!(stats.total_ai_additions, 0);
-    assert_eq!(stats.total_ai_deletions, 0);
-    assert_eq!(stats.time_waiting_for_ai, 0);
 }
 
 #[test]
@@ -1146,10 +1082,8 @@ fn test_stats_from_authorship_log_mixed_cap() {
     // Only 10 lines added, 5 accepted by AI
     let stats = stats_from_authorship_log(Some(&log), 10, 0, 5, 0, &BTreeMap::new());
 
-    // Mixed should be capped to max possible: 10 - 5 = 5
-    assert_eq!(stats.mixed_additions, 5);
-    assert_eq!(stats.ai_additions, 10); // 5 accepted + 5 mixed
-    assert_eq!(stats.human_additions, 0); // 10 - 5 accepted = 5, but mixed takes it
+    assert_eq!(stats.ai_additions, 5); // ai_accepted
+    assert_eq!(stats.human_additions, 0); // no known-human attestations passed
 }
 
 #[test]
