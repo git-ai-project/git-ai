@@ -3,17 +3,11 @@ use crate::authorship::ignore::effective_ignore_patterns;
 use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::range_authorship;
 use crate::authorship::stats::stats_command;
-use crate::authorship::working_log::{AgentId, CheckpointKind};
+use crate::authorship::working_log::CheckpointKind;
 use crate::commands;
-use crate::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, AgentRunResult, AiTabPreset, ClaudePreset,
-    CodexPreset, ContinueCliPreset, CursorPreset, DroidPreset, FirebenderPreset, GeminiPreset,
-    GithubCopilotPreset, WindsurfPreset,
-};
-use crate::commands::checkpoint_agent::agent_v1_preset::AgentV1Preset;
-use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
-use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
-use crate::commands::checkpoint_agent::pi_preset::PiPreset;
+use crate::commands::checkpoint::PreparedPathRole;
+use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
+use crate::commands::checkpoint_agent::transcript_readers;
 use crate::config;
 use crate::daemon::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, LiveCheckpointRunRequest,
@@ -30,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 pub fn handle_git_ai(args: &[String]) {
     if args.is_empty() {
@@ -261,11 +255,12 @@ fn print_help() {
     eprintln!("Commands:");
     eprintln!("  checkpoint         Checkpoint working changes and attribute author");
     eprintln!(
-        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, windsurf, opencode, pi, ai_tab, firebender, mock_ai, mock_known_human, known_human"
+        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, windsurf, opencode, pi, ai_tab, firebender, human, mock_ai, mock_known_human, known_human"
     );
     eprintln!(
         "    --hook-input <json|stdin>   JSON payload required by presets, or 'stdin' to read from stdin"
     );
+    eprintln!("    human [pathspecs...]             Untracked/legacy human checkpoint");
     eprintln!("    mock_ai [pathspecs...]           Test preset accepting optional file pathspecs");
     eprintln!("    mock_known_human [pathspecs...]  Test preset for KnownHuman checkpoints");
     eprintln!("  log [args...]      Show commit log with AI authorship notes");
@@ -409,447 +404,93 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
-    let mut agent_run_result = None;
+    let mut checkpoint_request: Option<CheckpointRequest> = None;
     // Handle preset arguments after parsing all flags
-    if !args.is_empty() {
-        match args[0].as_str() {
-            "claude" => {
-                match ClaudePreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Claude preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "codex" => {
-                match CodexPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Codex preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "gemini" => {
-                match GeminiPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Gemini preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "windsurf" => {
-                match WindsurfPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Windsurf preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "continue-cli" => {
-                match ContinueCliPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Continue CLI preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "cursor" => {
-                match CursorPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Error running Cursor preset: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "github-copilot" => {
-                match GithubCopilotPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Github Copilot preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "amp" => {
-                match AmpPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Amp preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "ai_tab" => {
-                match AiTabPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("ai_tab preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "firebender" => {
-                match FirebenderPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Firebender preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "agent-v1" => {
-                match AgentV1Preset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Agent V1 preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "droid" => {
-                match DroidPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Droid preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "opencode" => {
-                match OpenCodePreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("OpenCode preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "pi" => {
-                match PiPreset.run(AgentCheckpointFlags {
-                    hook_input: hook_input.clone(),
-                }) {
-                    Ok(agent_run) => {
-                        if agent_run.repo_working_dir.is_some() {
-                            repository_working_dir = agent_run.repo_working_dir.clone().unwrap();
-                        }
-                        agent_run_result = Some(agent_run);
-                    }
-                    Err(e) => {
-                        eprintln!("Pi preset error: {}", e);
-                        std::process::exit(0);
-                    }
-                }
-            }
-            "mock_ai" => {
-                let mock_agent_id = format!(
-                    "ai-thread-{}",
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or_else(|_| 0)
-                );
+    if !args.is_empty()
+        && crate::commands::checkpoint_agent::presets::resolve_preset(args[0].as_str()).is_ok()
+    {
+        // For mock/test presets invoked via CLI args (no --hook-input), synthesize
+        // JSON so they can go through the standard orchestrator path.
+        let effective_hook_input = if hook_input.is_some() {
+            hook_input.clone().unwrap_or_default()
+        } else {
+            synthesize_hook_input_from_cli_args(args[0].as_str(), &args[1..])
+        };
 
-                // Collect all remaining args (after mock_ai and flags) as pathspecs
-                let edited_filepaths = if args.len() > 1 {
-                    let mut paths = Vec::new();
-                    for arg in &args[1..] {
-                        // Skip flags
-                        if !arg.starts_with("--") {
-                            paths.push(arg.clone());
-                        }
+        match crate::commands::checkpoint_agent::orchestrator::execute_preset_checkpoint(
+            args[0].as_str(),
+            &effective_hook_input,
+        ) {
+            Ok(mut results) => {
+                if results.is_empty() {
+                    // SnapshotOnly or no-op: orchestrator handled
+                    // the side effect already, nothing to checkpoint.
+                    std::process::exit(0);
+                }
+
+                // Use the first result as the primary checkpoint; any additional
+                // results are extra events from the same preset invocation (e.g. a
+                // preset that emits both a pre and post event in one call).
+                let mut first = results.remove(0);
+
+                // mock_ai with no file paths: fall back to all staged/unstaged files
+                if args[0] == "mock_ai" && first.file_paths.is_empty() {
+                    let working_dir = first.repo_working_dir.to_string_lossy().to_string();
+                    first.file_paths = get_all_files_for_mock_ai(&working_dir)
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                }
+                repository_working_dir = first.repo_working_dir.to_string_lossy().to_string();
+                checkpoint_request = Some(first);
+
+                // Process any additional results from the same preset invocation
+                for extra in results {
+                    let working_dir = extra.repo_working_dir.to_string_lossy().to_string();
+                    if let Ok(extra_repo) = find_repository_in_path(&working_dir) {
+                        let user_name = extra_repo.git_author_identity().name_or_unknown();
+                        let _ = run_checkpoint_via_daemon_or_local(
+                            &extra_repo,
+                            &user_name,
+                            extra.checkpoint_kind,
+                            true,
+                            Some(extra),
+                            false,
+                            false,
+                        );
                     }
-                    if paths.is_empty() { None } else { Some(paths) }
-                } else {
-                    let working_dir = agent_run_result
-                        .as_ref()
-                        .and_then(|r| r.repo_working_dir.clone())
-                        .unwrap_or(repository_working_dir.clone());
-                    // Find the git repository
-                    Some(get_all_files_for_mock_ai(&working_dir))
-                };
-
-                agent_run_result = Some(AgentRunResult {
-                    agent_id: AgentId {
-                        tool: "mock_ai".to_string(),
-                        id: mock_agent_id,
-                        model: "unknown".to_string(),
-                    },
-                    agent_metadata: None,
-                    checkpoint_kind: CheckpointKind::AiAgent,
-                    transcript: None,
-                    repo_working_dir: None,
-                    edited_filepaths,
-                    will_edit_filepaths: None,
-                    dirty_files: None,
-                    captured_checkpoint_id: None,
-                });
+                }
             }
-            "known_human" => {
-                // Production preset: IDE extension attests human-authored lines.
-                // Stdin mode (--hook-input stdin): all data passed as JSON on stdin:
-                //   { "editor": "...", "editor_version": "...", "extension_version": "...",
-                //     "cwd": "/abs/path", "edited_filepaths": [...], "dirty_files": {...} }
-                // CLI mode: git ai checkpoint known_human [--editor <name>]
-                //           [--editor-version <ver>] [--extension-version <ver>] -- file...
-                let (
-                    editor,
-                    editor_version,
-                    extension_version,
-                    repo_working_dir,
-                    edited_filepaths,
-                    dirty_files,
-                ) = if let Some(ref json_str) = hook_input {
-                    let v: serde_json::Value = serde_json::from_str(json_str)
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                    let editor = v["editor"].as_str().unwrap_or("unknown").to_string();
-                    let editor_version = v["editor_version"]
-                        .as_str()
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let extension_version = v["extension_version"]
-                        .as_str()
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let cwd = v["cwd"].as_str().map(str::to_string);
-                    let edited_filepaths = v["edited_filepaths"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|x| x.as_str().map(str::to_string))
-                                .collect::<Vec<_>>()
-                        })
-                        .filter(|v| !v.is_empty());
-                    let dirty_files = v["dirty_files"]
-                        .as_object()
-                        .map(|obj| {
-                            obj.iter()
-                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                                .collect::<std::collections::HashMap<String, String>>()
-                        })
-                        .filter(|m| !m.is_empty());
-                    (
-                        editor,
-                        editor_version,
-                        extension_version,
-                        cwd,
-                        edited_filepaths,
-                        dirty_files,
-                    )
-                } else {
-                    let mut editor = "unknown".to_string();
-                    let mut editor_version = "unknown".to_string();
-                    let mut extension_version = "unknown".to_string();
-                    let mut files: Vec<String> = Vec::new();
-                    let mut i = 1usize; // skip "known_human"
-                    while i < args.len() {
-                        match args[i].as_str() {
-                            "--editor" if i + 1 < args.len() => {
-                                editor = args[i + 1].clone();
-                                i += 2;
-                            }
-                            "--editor-version" if i + 1 < args.len() => {
-                                editor_version = args[i + 1].clone();
-                                i += 2;
-                            }
-                            "--extension-version" if i + 1 < args.len() => {
-                                extension_version = args[i + 1].clone();
-                                i += 2;
-                            }
-                            "--" => {
-                                files.extend(args[i + 1..].iter().cloned());
-                                break;
-                            }
-                            arg if !arg.starts_with("--") => {
-                                files.push(arg.to_string());
-                                i += 1;
-                            }
-                            _ => {
-                                i += 1;
-                            }
-                        }
-                    }
-                    let edited_filepaths = if files.is_empty() { None } else { Some(files) };
-                    (
-                        editor,
-                        editor_version,
-                        extension_version,
-                        None,
-                        edited_filepaths,
-                        None,
-                    )
-                };
-
-                let known_human_agent_metadata = {
-                    let mut m = std::collections::HashMap::new();
-                    m.insert("kh_editor".to_string(), editor);
-                    m.insert("kh_editor_version".to_string(), editor_version);
-                    m.insert("kh_extension_version".to_string(), extension_version);
-                    m
-                };
-
-                agent_run_result = Some(AgentRunResult {
-                    agent_id: AgentId {
-                        tool: "known_human".to_string(),
-                        id: "known_human_session".to_string(),
-                        model: "unknown".to_string(),
-                    },
-                    agent_metadata: Some(known_human_agent_metadata),
-                    checkpoint_kind: CheckpointKind::KnownHuman,
-                    transcript: None,
-                    repo_working_dir,
-                    edited_filepaths,
-                    will_edit_filepaths: None,
-                    dirty_files,
-                    captured_checkpoint_id: None,
-                });
+            Err(e) => {
+                eprintln!("{} preset error: {}", args[0], e);
+                std::process::exit(0);
             }
-            "mock_known_human" => {
-                // Test preset: KnownHuman checkpoint for given paths (mirrors mock_ai behavior)
-                let edited_filepaths = if args.len() > 1 {
-                    let mut paths = Vec::new();
-                    for arg in &args[1..] {
-                        if !arg.starts_with("--") {
-                            paths.push(arg.clone());
-                        }
-                    }
-                    if paths.is_empty() { None } else { Some(paths) }
-                } else {
-                    None
-                };
-
-                agent_run_result = Some(AgentRunResult {
-                    agent_id: AgentId {
-                        tool: "mock_known_human".to_string(),
-                        id: "mock_known_human_session".to_string(),
-                        model: "unknown".to_string(),
-                    },
-                    agent_metadata: None,
-                    checkpoint_kind: CheckpointKind::KnownHuman,
-                    transcript: None,
-                    repo_working_dir: None,
-                    edited_filepaths,
-                    will_edit_filepaths: None,
-                    dirty_files: None,
-                    captured_checkpoint_id: None,
-                });
-            }
-            _ => {}
         }
     }
 
     // Emit agent_usage metric for every AI hook, regardless of whether a
     // file-edit checkpoint is created downstream.  The existing per-prompt
     // throttle (`should_emit_agent_usage`) prevents duplicate events.
-    if let Some(ref result) = agent_run_result
+    if let Some(ref result) = checkpoint_request
         && result.checkpoint_kind.is_ai()
-        && commands::checkpoint::should_emit_agent_usage(&result.agent_id)
+        && let Some(ref agent_id) = result.agent_id
+        && commands::checkpoint::should_emit_agent_usage(agent_id)
     {
-        let prompt_id = generate_short_hash(&result.agent_id.id, &result.agent_id.tool);
+        let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
         let attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
-            .tool(&result.agent_id.tool)
-            .model(&result.agent_id.model)
+            .tool(&agent_id.tool)
+            .model(&agent_id.model)
             .prompt_id(prompt_id)
-            .external_prompt_id(&result.agent_id.id)
+            .external_prompt_id(&agent_id.id)
             .custom_attributes_map(crate::config::Config::fresh().custom_attributes());
 
         let values = crate::metrics::AgentUsageValues::new();
         crate::metrics::record(values, attrs);
     }
 
-    let final_working_dir = agent_run_result
+    let final_working_dir = checkpoint_request
         .as_ref()
-        .and_then(|r| r.repo_working_dir.clone())
+        .map(|r| r.repo_working_dir.to_string_lossy().to_string())
         .unwrap_or_else(|| repository_working_dir.clone());
 
     // Try to find the git repository
@@ -874,18 +515,13 @@ fn handle_checkpoint(args: &[String]) {
     // which cannot see changes inside the linked worktree's working tree.
     let needs_file_based_repo_detection = repo_result.is_err()
         || if let Ok(ref cwd_repo) = repo_result {
-            let edited = agent_run_result.as_ref().and_then(|r| {
-                if r.checkpoint_kind == CheckpointKind::Human {
-                    r.will_edit_filepaths.as_ref()
-                } else {
-                    r.edited_filepaths.as_ref()
-                }
-            });
-            edited
-                .map(|fs| {
-                    fs.iter().any(|f| {
-                        let pb = if std::path::Path::new(f).is_absolute() {
-                            std::path::PathBuf::from(f)
+            checkpoint_request
+                .as_ref()
+                .filter(|r| !r.file_paths.is_empty())
+                .map(|r| {
+                    r.file_paths.iter().any(|f| {
+                        let pb = if f.is_absolute() {
+                            f.clone()
                         } else {
                             std::path::Path::new(&repository_working_dir).join(f)
                         };
@@ -899,13 +535,7 @@ fn handle_checkpoint(args: &[String]) {
 
     if needs_file_based_repo_detection {
         // Workspace root is not a git repo - try to detect repositories from edited files
-        let files_to_check = agent_run_result.as_ref().and_then(|r| {
-            if r.checkpoint_kind == CheckpointKind::Human {
-                r.will_edit_filepaths.as_ref()
-            } else {
-                r.edited_filepaths.as_ref()
-            }
-        });
+        let files_to_check = checkpoint_request.as_ref().map(|r| &r.file_paths);
 
         if let Some(files) = files_to_check
             && !files.is_empty()
@@ -914,9 +544,8 @@ fn handle_checkpoint(args: &[String]) {
             let absolute_files: Vec<String> = files
                 .iter()
                 .map(|f| {
-                    let path = std::path::Path::new(f);
-                    if path.is_absolute() {
-                        f.clone()
+                    if f.is_absolute() {
+                        f.to_string_lossy().to_string()
                     } else {
                         std::path::Path::new(&repository_working_dir)
                             .join(f)
@@ -964,12 +593,12 @@ fn handle_checkpoint(args: &[String]) {
                 );
             }
 
-            let checkpoint_kind = agent_run_result
+            let checkpoint_kind = checkpoint_request
                 .as_ref()
                 .map(|r| r.checkpoint_kind)
                 .unwrap_or(CheckpointKind::Human);
             let allow_captured_async =
-                checkpoint_request_has_explicit_capture_scope(args, agent_run_result.as_ref());
+                checkpoint_request_has_explicit_capture_scope(args, checkpoint_request.as_ref());
 
             let checkpoint_start = std::time::Instant::now();
             let mut total_files_edited = 0;
@@ -997,31 +626,28 @@ fn handle_checkpoint(args: &[String]) {
                 // Get user name from this repo's config
                 let default_user_name = repo.git_author_identity().name_or_unknown();
 
-                // Create a modified agent_run_result with only this repo's files
-                let repo_agent_result = agent_run_result.as_ref().map(|r| {
+                // Create a modified checkpoint_request with only this repo's files
+                let repo_checkpoint_request = checkpoint_request.as_ref().map(|r| {
                     let mut modified = r.clone();
-                    modified.repo_working_dir = Some(repo_workdir.to_string_lossy().to_string());
-                    if r.checkpoint_kind == CheckpointKind::Human {
-                        modified.will_edit_filepaths = Some(repo_file_paths.clone());
-                        modified.edited_filepaths = None;
-                    } else {
-                        modified.edited_filepaths = Some(repo_file_paths.clone());
-                        modified.will_edit_filepaths = None;
-                    }
+                    modified.repo_working_dir = repo_workdir.clone();
+                    modified.file_paths = repo_file_paths
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
                     modified
                 });
 
-                let checkpoint_result = run_checkpoint_via_daemon_or_local(
+                let checkpoint_outcome = run_checkpoint_via_daemon_or_local(
                     &repo,
                     &default_user_name,
                     checkpoint_kind,
                     false,
-                    repo_agent_result,
+                    repo_checkpoint_request,
                     allow_captured_async,
                     false,
                 );
 
-                match checkpoint_result {
+                match checkpoint_outcome {
                     Ok(outcome) => {
                         total_files_edited += outcome.stats.1;
                         if outcome.queued {
@@ -1098,7 +724,7 @@ fn handle_checkpoint(args: &[String]) {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| final_working_dir.clone());
 
-    let mut checkpoint_kind = agent_run_result
+    let mut checkpoint_kind = checkpoint_request
         .as_ref()
         .map(|r| r.checkpoint_kind)
         .unwrap_or(CheckpointKind::Human);
@@ -1108,10 +734,10 @@ fn handle_checkpoint(args: &[String]) {
     // Override to AI when a non-stale pre-snapshot exists, which is the precise signal
     // that a bash invocation is in flight. This uses existing snapshot lifecycle — no new
     // daemon messages or side-channel files needed.
-    if checkpoint_kind == CheckpointKind::Human && agent_run_result.is_none() {
+    if checkpoint_kind == CheckpointKind::Human && checkpoint_request.is_none() {
         let repo_root = std::path::Path::new(&effective_working_dir);
 
-        if let Some((resolved_kind, resolved_agent_run_result)) =
+        if let Some((resolved_kind, resolved_checkpoint_request)) =
             crate::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash(
                 repo_root,
                 &effective_working_dir,
@@ -1119,14 +745,14 @@ fn handle_checkpoint(args: &[String]) {
         {
             tracing::debug!("Using active bash context for pre-commit AI checkpoint");
             checkpoint_kind = resolved_kind;
-            agent_run_result = resolved_agent_run_result;
+            checkpoint_request = resolved_checkpoint_request;
         }
     }
 
     let allow_captured_async =
-        checkpoint_request_has_explicit_capture_scope(args, agent_run_result.as_ref());
+        checkpoint_request_has_explicit_capture_scope(args, checkpoint_request.as_ref());
 
-    if CheckpointKind::Human == checkpoint_kind && agent_run_result.is_none() {
+    if CheckpointKind::Human == checkpoint_kind && checkpoint_request.is_none() {
         // Parse pathspecs after `--` for human checkpoints
         let will_edit_filepaths = if let Some(separator_pos) = args.iter().position(|a| a == "--") {
             let paths: Vec<String> = args[separator_pos + 1..]
@@ -1139,25 +765,20 @@ fn handle_checkpoint(args: &[String]) {
             Some(get_all_files_for_mock_ai(&effective_working_dir))
         };
 
-        agent_run_result = Some(AgentRunResult {
-            agent_id: AgentId {
-                tool: "mock_ai".to_string(),
-                id: format!(
-                    "ai-thread-{}",
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or_else(|_| 0)
-                ),
-                model: "unknown".to_string(),
-            },
-            agent_metadata: None,
+        checkpoint_request = Some(CheckpointRequest {
+            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::Human,
-            transcript: None,
-            will_edit_filepaths: Some(will_edit_filepaths.unwrap_or_default()),
-            edited_filepaths: None,
-            repo_working_dir: Some(effective_working_dir),
+            agent_id: None,
+            repo_working_dir: std::path::PathBuf::from(&effective_working_dir),
+            file_paths: will_edit_filepaths
+                .unwrap_or_default()
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect(),
+            path_role: PreparedPathRole::WillEdit,
             dirty_files: None,
+            transcript_source: None,
+            metadata: std::collections::HashMap::new(),
             captured_checkpoint_id: None,
         });
     }
@@ -1166,59 +787,57 @@ fn handle_checkpoint(args: &[String]) {
     let default_user_name = repo.git_author_identity().name_or_unknown();
 
     let checkpoint_start = std::time::Instant::now();
-    let agent_tool = agent_run_result.as_ref().map(|r| r.agent_id.tool.clone());
-
-    let external_files: Vec<String> = agent_run_result
+    let agent_tool = checkpoint_request
         .as_ref()
-        .and_then(|r| {
-            let paths = if r.checkpoint_kind == CheckpointKind::Human {
-                r.will_edit_filepaths.as_ref()
-            } else {
-                r.edited_filepaths.as_ref()
-            };
-            paths.map(|p| {
-                let repo_workdir = repo.workdir().ok();
-                p.iter()
-                    .filter_map(|path| {
-                        let workdir = repo_workdir.as_ref()?;
-                        let path_buf = if std::path::Path::new(path).is_absolute() {
-                            std::path::PathBuf::from(path)
+        .and_then(|r| r.agent_id.as_ref())
+        .map(|aid| aid.tool.clone());
+
+    let external_files: Vec<String> = checkpoint_request
+        .as_ref()
+        .filter(|r| !r.file_paths.is_empty())
+        .map(|r| {
+            let repo_workdir = repo.workdir().ok();
+            r.file_paths
+                .iter()
+                .filter_map(|path| {
+                    let workdir = repo_workdir.as_ref()?;
+                    let path_buf = if path.is_absolute() {
+                        path.clone()
+                    } else {
+                        workdir.join(path)
+                    };
+                    if repo.path_is_in_workdir(&path_buf) {
+                        None
+                    } else {
+                        let abs = if path.is_absolute() {
+                            path.to_string_lossy().to_string()
                         } else {
-                            workdir.join(path)
+                            workdir.join(path).to_string_lossy().to_string()
                         };
-                        if repo.path_is_in_workdir(&path_buf) {
-                            None
-                        } else {
-                            let abs = if std::path::Path::new(path).is_absolute() {
-                                path.clone()
-                            } else {
-                                workdir.join(path).to_string_lossy().to_string()
-                            };
-                            Some(abs)
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            })
+                        Some(abs)
+                    }
+                })
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
 
     let external_agent_base = if !external_files.is_empty() {
-        agent_run_result.as_ref().cloned()
+        checkpoint_request.as_ref().cloned()
     } else {
         None
     };
 
-    let checkpoint_result = run_checkpoint_via_daemon_or_local(
+    let checkpoint_request = run_checkpoint_via_daemon_or_local(
         &repo,
         &default_user_name,
         checkpoint_kind,
         false,
-        agent_run_result,
+        checkpoint_request,
         allow_captured_async,
         false,
     );
-    let local_checkpoint_failed = checkpoint_result.is_err();
-    match checkpoint_result {
+    let local_checkpoint_failed = checkpoint_request.is_err();
+    match checkpoint_request {
         Ok(outcome) => {
             let elapsed = checkpoint_start.elapsed();
             log_performance_for_checkpoint(outcome.stats.1, elapsed, checkpoint_kind);
@@ -1261,18 +880,15 @@ fn handle_checkpoint(args: &[String]) {
             let ext_user_name = ext_repo.git_author_identity().name_or_unknown();
 
             let mut modified = base_result.clone();
-            modified.repo_working_dir = Some(repo_workdir.to_string_lossy().to_string());
+            modified.repo_working_dir = repo_workdir.clone();
             // Clear stale captured checkpoint ID — the original capture was consumed
             // (or will be consumed) by the primary repo's checkpoint dispatch and
             // the on-disk files may already be deleted by the daemon.
             modified.captured_checkpoint_id = None;
-            if base_result.checkpoint_kind == CheckpointKind::Human {
-                modified.will_edit_filepaths = Some(repo_file_paths);
-                modified.edited_filepaths = None;
-            } else {
-                modified.edited_filepaths = Some(repo_file_paths);
-                modified.will_edit_filepaths = None;
-            }
+            modified.file_paths = repo_file_paths
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect();
 
             match run_checkpoint_via_daemon_or_local(
                 &ext_repo,
@@ -1332,7 +948,7 @@ fn run_checkpoint_via_daemon_or_local(
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
-    agent_run_result: Option<AgentRunResult>,
+    checkpoint_request: Option<CheckpointRequest>,
     allow_captured_async: bool,
     is_pre_commit: bool,
 ) -> Result<CheckpointDispatchOutcome, crate::error::GitAiError> {
@@ -1350,7 +966,7 @@ fn run_checkpoint_via_daemon_or_local(
                 Ok(config) => {
                     // Early path: if the bash tool already captured a checkpoint,
                     // submit it directly to the daemon without re-capturing.
-                    if let Some(capture_id) = agent_run_result
+                    if let Some(capture_id) = checkpoint_request
                         .as_ref()
                         .and_then(|r| r.captured_checkpoint_id.as_deref())
                     {
@@ -1361,7 +977,7 @@ fn run_checkpoint_via_daemon_or_local(
                             crate::commands::checkpoint::update_captured_checkpoint_agent_context(
                                 capture_id,
                                 author,
-                                agent_run_result.as_ref(),
+                                checkpoint_request.as_ref(),
                             )
                         {
                             tracing::debug!(
@@ -1382,7 +998,7 @@ fn run_checkpoint_via_daemon_or_local(
                         match send_control_request(&config.control_socket_path, &request) {
                             Ok(response) if response.ok => {
                                 let estimated_files =
-                                    estimate_checkpoint_file_count(kind, &agent_run_result);
+                                    estimate_checkpoint_file_count(kind, &checkpoint_request);
                                 return Ok(CheckpointDispatchOutcome {
                                     stats: (0, estimated_files, 0),
                                     queued: true,
@@ -1426,7 +1042,7 @@ fn run_checkpoint_via_daemon_or_local(
                     if allow_captured_async
                         && crate::commands::checkpoint::explicit_capture_target_paths(
                             kind,
-                            agent_run_result.as_ref(),
+                            checkpoint_request.as_ref(),
                         )
                         .is_some()
                     {
@@ -1434,7 +1050,7 @@ fn run_checkpoint_via_daemon_or_local(
                             repo,
                             author,
                             kind,
-                            agent_run_result.as_ref(),
+                            checkpoint_request.as_ref(),
                             is_pre_commit,
                             None,
                         ) {
@@ -1513,7 +1129,7 @@ fn run_checkpoint_via_daemon_or_local(
                                 author: Some(author.to_string()),
                                 quiet: Some(quiet),
                                 is_pre_commit: Some(is_pre_commit),
-                                agent_run_result: agent_run_result.clone(),
+                                checkpoint_request: checkpoint_request.clone(),
                             },
                         ))),
                         wait: Some(true),
@@ -1521,7 +1137,7 @@ fn run_checkpoint_via_daemon_or_local(
                     match send_control_request(&config.control_socket_path, &request) {
                         Ok(response) if response.ok => {
                             let estimated_files =
-                                estimate_checkpoint_file_count(kind, &agent_run_result);
+                                estimate_checkpoint_file_count(kind, &checkpoint_request);
                             return Ok(CheckpointDispatchOutcome {
                                 stats: (0, estimated_files, 0),
                                 queued: false,
@@ -1560,7 +1176,7 @@ fn run_checkpoint_via_daemon_or_local(
         }
     }
     let stats =
-        commands::checkpoint::run(repo, author, kind, quiet, agent_run_result, is_pre_commit)?;
+        commands::checkpoint::run(repo, author, kind, quiet, checkpoint_request, is_pre_commit)?;
     Ok(CheckpointDispatchOutcome {
         stats,
         queued: false,
@@ -1569,7 +1185,7 @@ fn run_checkpoint_via_daemon_or_local(
 
 fn checkpoint_request_has_explicit_capture_scope(
     args: &[String],
-    agent_run_result: Option<&AgentRunResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
 ) -> bool {
     if args.first().map(String::as_str) == Some("mock_ai") {
         return args.iter().skip(1).any(|arg| !arg.starts_with("--"));
@@ -1581,7 +1197,7 @@ fn checkpoint_request_has_explicit_capture_scope(
             .any(|arg| !arg.starts_with("--"));
     }
 
-    agent_run_result
+    checkpoint_request
         .and_then(|result| {
             crate::commands::checkpoint::explicit_capture_target_paths(
                 result.checkpoint_kind,
@@ -1652,22 +1268,13 @@ fn checkpoint_kind_to_str(kind: CheckpointKind) -> &'static str {
 }
 
 fn estimate_checkpoint_file_count(
-    kind: CheckpointKind,
-    agent_run_result: &Option<AgentRunResult>,
+    _kind: CheckpointKind,
+    checkpoint_request: &Option<CheckpointRequest>,
 ) -> usize {
-    match (kind, agent_run_result) {
-        (CheckpointKind::Human, Some(result)) => result
-            .will_edit_filepaths
-            .as_ref()
-            .map(|v| v.len())
-            .unwrap_or(0),
-        (_, Some(result)) => result
-            .edited_filepaths
-            .as_ref()
-            .map(|v| v.len())
-            .unwrap_or(0),
-        _ => 0,
-    }
+    checkpoint_request
+        .as_ref()
+        .map(|r| r.file_paths.len())
+        .unwrap_or(0)
 }
 
 fn strip_utf8_bom(input: String) -> String {
@@ -2164,6 +1771,76 @@ fn get_all_files_for_mock_ai(working_dir: &str) -> Vec<String> {
     }
 }
 
+/// Synthesize JSON hook_input from CLI args for mock/test presets that can be
+/// invoked without --hook-input.
+fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[String]) -> String {
+    match preset_name {
+        "human" | "mock_ai" | "mock_known_human" => {
+            let paths: Vec<&str> = remaining_args
+                .iter()
+                .filter(|a| !a.starts_with("--"))
+                .map(|s| s.as_str())
+                .collect();
+            let cwd = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .to_string_lossy()
+                .to_string();
+            serde_json::json!({
+                "file_paths": paths,
+                "cwd": cwd,
+            })
+            .to_string()
+        }
+        "known_human" => {
+            let mut editor = "unknown".to_string();
+            let mut editor_version = "unknown".to_string();
+            let mut extension_version = "unknown".to_string();
+            let mut files: Vec<String> = Vec::new();
+            let mut i = 0usize;
+            while i < remaining_args.len() {
+                match remaining_args[i].as_str() {
+                    "--editor" if i + 1 < remaining_args.len() => {
+                        editor = remaining_args[i + 1].clone();
+                        i += 2;
+                    }
+                    "--editor-version" if i + 1 < remaining_args.len() => {
+                        editor_version = remaining_args[i + 1].clone();
+                        i += 2;
+                    }
+                    "--extension-version" if i + 1 < remaining_args.len() => {
+                        extension_version = remaining_args[i + 1].clone();
+                        i += 2;
+                    }
+                    "--" => {
+                        files.extend(remaining_args[i + 1..].iter().cloned());
+                        break;
+                    }
+                    arg if !arg.starts_with("--") => {
+                        files.push(arg.to_string());
+                        i += 1;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            let cwd = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .to_string_lossy()
+                .to_string();
+            serde_json::json!({
+                "editor": editor,
+                "editor_version": editor_version,
+                "extension_version": extension_version,
+                "cwd": cwd,
+                "edited_filepaths": files,
+            })
+            .to_string()
+        }
+        _ => String::new(),
+    }
+}
+
 #[cfg(debug_assertions)]
 fn handle_show_transcript(args: &[String]) {
     if args.len() < 2 {
@@ -2183,43 +1860,47 @@ fn handle_show_transcript(args: &[String]) {
         (crate::authorship::transcript::AiTranscript, Option<String>),
         crate::error::GitAiError,
     > = match agent_name.as_str() {
-        "claude" => match ClaudePreset::transcript_and_model_from_claude_code_jsonl(path_or_id) {
+        "claude" => match transcript_readers::read_claude_jsonl(std::path::Path::new(path_or_id)) {
             Ok((transcript, model)) => Ok((transcript, model)),
             Err(e) => {
                 eprintln!("Error loading Claude transcript: {}", e);
                 std::process::exit(1);
             }
         },
-        "codex" => match CodexPreset::transcript_and_model_from_codex_rollout_jsonl(path_or_id) {
+        "codex" => match transcript_readers::read_codex_jsonl(std::path::Path::new(path_or_id)) {
             Ok((transcript, model)) => Ok((transcript, model)),
             Err(e) => {
                 eprintln!("Error loading Codex transcript: {}", e);
                 std::process::exit(1);
             }
         },
-        "gemini" => match GeminiPreset::transcript_and_model_from_gemini_json(path_or_id) {
+        "gemini" => match transcript_readers::read_gemini_json(std::path::Path::new(path_or_id)) {
             Ok((transcript, model)) => Ok((transcript, model)),
             Err(e) => {
                 eprintln!("Error loading Gemini transcript: {}", e);
                 std::process::exit(1);
             }
         },
-        "windsurf" => match WindsurfPreset::transcript_and_model_from_windsurf_jsonl(path_or_id) {
-            Ok((transcript, model)) => Ok((transcript, model)),
-            Err(e) => {
-                eprintln!("Error loading Windsurf transcript: {}", e);
-                std::process::exit(1);
+        "windsurf" => {
+            match transcript_readers::read_windsurf_jsonl(std::path::Path::new(path_or_id)) {
+                Ok((transcript, model)) => Ok((transcript, model)),
+                Err(e) => {
+                    eprintln!("Error loading Windsurf transcript: {}", e);
+                    std::process::exit(1);
+                }
             }
-        },
-        "continue-cli" => match ContinueCliPreset::transcript_from_continue_json(path_or_id) {
-            Ok(transcript) => Ok((transcript, None)),
-            Err(e) => {
-                eprintln!("Error loading Continue CLI transcript: {}", e);
-                std::process::exit(1);
+        }
+        "continue-cli" => {
+            match transcript_readers::read_continue_json(std::path::Path::new(path_or_id)) {
+                Ok(transcript) => Ok((transcript, None)),
+                Err(e) => {
+                    eprintln!("Error loading Continue CLI transcript: {}", e);
+                    std::process::exit(1);
+                }
             }
-        },
+        }
         "github-copilot" => {
-            match GithubCopilotPreset::transcript_and_model_from_copilot_session_json(path_or_id) {
+            match transcript_readers::read_copilot_session_json(std::path::Path::new(path_or_id)) {
                 Ok((transcript, model, _file_paths)) => Ok((transcript, model)),
                 Err(e) => {
                     eprintln!("Error loading GitHub Copilot transcript: {}", e);
@@ -2227,7 +1908,7 @@ fn handle_show_transcript(args: &[String]) {
                 }
             }
         }
-        "cursor" => match CursorPreset::transcript_and_model_from_cursor_jsonl(path_or_id) {
+        "cursor" => match transcript_readers::read_cursor_jsonl(std::path::Path::new(path_or_id)) {
             Ok((transcript, model)) => Ok((transcript, model)),
             Err(e) => {
                 eprintln!("Error loading Cursor transcript: {}", e);
@@ -2237,10 +1918,10 @@ fn handle_show_transcript(args: &[String]) {
         "amp" => {
             let path = std::path::Path::new(path_or_id);
             let amp_result = if path.exists() {
-                AmpPreset::transcript_and_model_from_thread_path(path)
+                transcript_readers::read_amp_thread_json(path)
                     .map(|(transcript, model, _thread_id)| (transcript, model))
             } else {
-                AmpPreset::transcript_and_model_from_thread_id(path_or_id)
+                transcript_readers::read_amp_thread_by_id(path_or_id)
             };
 
             match amp_result {

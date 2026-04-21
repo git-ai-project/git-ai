@@ -1,18 +1,13 @@
 use crate::authorship::authorship_log::PromptRecord;
 use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::transcript::AiTranscript;
-use crate::commands::checkpoint_agent::agent_presets::{
-    ClaudePreset, CodexPreset, ContinueCliPreset, CursorPreset, DroidPreset, GeminiPreset,
-    GithubCopilotPreset, WindsurfPreset,
-};
-use crate::commands::checkpoint_agent::amp_preset::AmpPreset;
-use crate::commands::checkpoint_agent::opencode_preset::OpenCodePreset;
-use crate::commands::checkpoint_agent::pi_preset::PiPreset;
+use crate::commands::checkpoint_agent::transcript_readers;
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
 use crate::git::repository::Repository;
 use crate::observability::log_error;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 /// Find a prompt in the repository history
 ///
@@ -217,7 +212,7 @@ fn update_codex_prompt(
 ) -> PromptUpdateResult {
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
-            match CodexPreset::transcript_and_model_from_codex_rollout_jsonl(transcript_path) {
+            match transcript_readers::read_codex_jsonl(Path::new(transcript_path)) {
                 Ok((transcript, model)) => PromptUpdateResult::Updated(
                     transcript,
                     model.unwrap_or_else(|| current_model.to_string()),
@@ -254,7 +249,7 @@ fn update_cursor_prompt(
 ) -> PromptUpdateResult {
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
-            match CursorPreset::transcript_and_model_from_cursor_jsonl(transcript_path) {
+            match transcript_readers::read_cursor_jsonl(Path::new(transcript_path)) {
                 Ok((transcript, _)) => {
                     PromptUpdateResult::Updated(transcript, current_model.to_string())
                 }
@@ -291,7 +286,7 @@ fn update_claude_prompt(
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
             // Try to read and parse the transcript JSONL
-            match ClaudePreset::transcript_and_model_from_claude_code_jsonl(transcript_path) {
+            match transcript_readers::read_claude_jsonl(Path::new(transcript_path)) {
                 Ok((transcript, model)) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
@@ -335,7 +330,7 @@ fn update_gemini_prompt(
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
             // Try to read and parse the transcript JSON
-            match GeminiPreset::transcript_and_model_from_gemini_json(transcript_path) {
+            match transcript_readers::read_gemini_json(Path::new(transcript_path)) {
                 Ok((transcript, model)) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
@@ -379,9 +374,7 @@ fn update_github_copilot_prompt(
     if let Some(metadata) = metadata {
         if let Some(chat_session_path) = metadata.get("chat_session_path") {
             // Try to read and parse the chat session JSON
-            match GithubCopilotPreset::transcript_and_model_from_copilot_session_json(
-                chat_session_path,
-            ) {
+            match transcript_readers::read_copilot_session_json(Path::new(chat_session_path)) {
                 Ok((transcript, model, _)) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
@@ -425,7 +418,7 @@ fn update_continue_cli_prompt(
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
             // Try to read and parse the transcript JSON
-            match ContinueCliPreset::transcript_from_continue_json(transcript_path) {
+            match transcript_readers::read_continue_json(Path::new(transcript_path)) {
                 Ok(transcript) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
@@ -466,29 +459,29 @@ fn update_droid_prompt(
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
             // Re-parse transcript
-            let transcript =
-                match DroidPreset::transcript_and_model_from_droid_jsonl(transcript_path) {
-                    Ok((transcript, _model)) => transcript,
-                    Err(e) => {
-                        tracing::debug!(
-                            "Failed to parse Droid JSONL transcript from {}: {}",
-                            transcript_path,
-                            e
-                        );
-                        log_error(
-                            &e,
-                            Some(serde_json::json!({
-                                "agent_tool": "droid",
-                                "operation": "transcript_and_model_from_droid_jsonl"
-                            })),
-                        );
-                        return PromptUpdateResult::Failed(e);
-                    }
-                };
+            let transcript = match transcript_readers::read_droid_jsonl(Path::new(transcript_path))
+            {
+                Ok((transcript, _model)) => transcript,
+                Err(e) => {
+                    tracing::debug!(
+                        "Failed to parse Droid JSONL transcript from {}: {}",
+                        transcript_path,
+                        e
+                    );
+                    log_error(
+                        &e,
+                        Some(serde_json::json!({
+                            "agent_tool": "droid",
+                            "operation": "transcript_and_model_from_droid_jsonl"
+                        })),
+                    );
+                    return PromptUpdateResult::Failed(e);
+                }
+            };
 
             // Re-parse model from settings.json
             let model = if let Some(settings_path) = metadata.get("settings_path") {
-                match DroidPreset::model_from_droid_settings_json(settings_path) {
+                match transcript_readers::read_droid_model_from_settings(Path::new(settings_path)) {
                     Ok(Some(m)) => m,
                     Ok(None) => current_model.to_string(),
                     Err(e) => {
@@ -525,34 +518,34 @@ fn update_amp_prompt(
         .and_then(|m| m.get("transcript_path"))
         .filter(|p| !p.trim().is_empty())
     {
-        AmpPreset::transcript_and_model_from_thread_path(std::path::Path::new(transcript_path))
+        transcript_readers::read_amp_thread_json(Path::new(transcript_path))
             .map(|(transcript, model, _)| (transcript, model))
     } else if let Some(threads_dir) = metadata
         .and_then(|m| m.get("__test_amp_threads_path"))
         .filter(|p| !p.trim().is_empty())
     {
-        let threads_dir = std::path::Path::new(threads_dir);
+        let threads_dir = Path::new(threads_dir);
         if !thread_id.trim().is_empty() {
-            AmpPreset::transcript_and_model_from_thread_id_in_dir(threads_dir, thread_id)
+            transcript_readers::read_amp_thread_by_id_in_dir(threads_dir, thread_id)
         } else if let Some(tool_use_id) = metadata
             .and_then(|m| m.get("tool_use_id"))
             .filter(|p| !p.trim().is_empty())
         {
-            AmpPreset::transcript_and_model_from_tool_use_id_in_dir(threads_dir, tool_use_id)
+            transcript_readers::read_amp_thread_by_tool_use_id_in_dir(threads_dir, tool_use_id)
         } else {
             return PromptUpdateResult::Unchanged;
         }
     } else if !thread_id.trim().is_empty() {
-        AmpPreset::transcript_and_model_from_thread_id(thread_id)
+        transcript_readers::read_amp_thread_by_id(thread_id)
     } else if let Some(tool_use_id) = metadata
         .and_then(|m| m.get("tool_use_id"))
         .filter(|p| !p.trim().is_empty())
     {
-        let default_threads = match AmpPreset::amp_threads_path() {
+        let default_threads = match transcript_readers::amp_threads_path() {
             Ok(path) => path,
             Err(e) => return PromptUpdateResult::Failed(e),
         };
-        AmpPreset::transcript_and_model_from_tool_use_id_in_dir(&default_threads, tool_use_id)
+        transcript_readers::read_amp_thread_by_tool_use_id_in_dir(&default_threads, tool_use_id)
     } else {
         return PromptUpdateResult::Unchanged;
     };
@@ -596,9 +589,9 @@ fn update_opencode_prompt(
     };
 
     let result = if let Some(path) = storage_path {
-        OpenCodePreset::transcript_and_model_from_storage(&path, session_id)
+        transcript_readers::read_opencode_from_storage(&path, session_id)
     } else {
-        OpenCodePreset::transcript_and_model_from_session(session_id)
+        transcript_readers::read_opencode_from_session(session_id)
     };
 
     match result {
@@ -633,7 +626,7 @@ fn update_pi_prompt(
         .and_then(|m| m.get("session_path"))
         .filter(|path| !path.trim().is_empty())
     {
-        match PiPreset::transcript_and_model_from_pi_session(session_path) {
+        match transcript_readers::read_pi_session(session_path) {
             Ok((transcript, model)) => PromptUpdateResult::Updated(
                 transcript,
                 model.unwrap_or_else(|| current_model.to_string()),
@@ -666,7 +659,7 @@ fn update_windsurf_prompt(
 ) -> PromptUpdateResult {
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
-            match WindsurfPreset::transcript_and_model_from_windsurf_jsonl(transcript_path) {
+            match transcript_readers::read_windsurf_jsonl(Path::new(transcript_path)) {
                 Ok((transcript, model)) => PromptUpdateResult::Updated(
                     transcript,
                     model.unwrap_or_else(|| current_model.to_string()),

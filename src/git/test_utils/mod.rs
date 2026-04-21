@@ -2,7 +2,8 @@ use crate::authorship::attribution_tracker::Attribution;
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::post_commit::post_commit;
 use crate::authorship::working_log::{AgentId, Checkpoint, CheckpointKind};
-use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+use crate::commands::checkpoint::PreparedPathRole;
+use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::commands::{blame, checkpoint::run as checkpoint};
 use crate::error::GitAiError;
 use crate::git::repository::Repository as GitAiRepository;
@@ -340,69 +341,49 @@ impl TmpRepo {
         }
     }
 
-    fn build_scoped_human_agent_run_result(&self) -> Result<Option<AgentRunResult>, GitAiError> {
-        static TEST_HUMAN_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
+    fn build_scoped_human_checkpoint_request(
+        &self,
+    ) -> Result<Option<CheckpointRequest>, GitAiError> {
         let Some(will_edit_filepaths) = self.current_checkpoint_scope_paths()? else {
             return Ok(None);
         };
 
-        let session = TEST_HUMAN_SCOPE_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
-        Ok(Some(AgentRunResult {
-            agent_id: AgentId {
-                tool: "test_harness".to_string(),
-                id: format!("test-human-scope-{}", session),
-                model: "test_model".to_string(),
-            },
-            agent_metadata: None,
+        Ok(Some(CheckpointRequest {
+            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::Human,
-            transcript: None,
-            repo_working_dir: Some(self.path.to_string_lossy().to_string()),
-            edited_filepaths: None,
-            will_edit_filepaths: Some(will_edit_filepaths),
+            agent_id: None,
+            repo_working_dir: self.path.clone(),
+            file_paths: will_edit_filepaths.into_iter().map(PathBuf::from).collect(),
+            path_role: PreparedPathRole::WillEdit,
             dirty_files: None,
+            transcript_source: None,
+            metadata: std::collections::HashMap::new(),
             captured_checkpoint_id: None,
         }))
     }
 
     fn apply_default_checkpoint_scope(
         &self,
-        agent_run_result: Option<AgentRunResult>,
+        checkpoint_request: Option<CheckpointRequest>,
         checkpoint_kind: CheckpointKind,
-    ) -> Result<Option<AgentRunResult>, GitAiError> {
+    ) -> Result<Option<CheckpointRequest>, GitAiError> {
         let Some(scope_paths) = self.current_checkpoint_scope_paths()? else {
-            return Ok(agent_run_result);
+            return Ok(checkpoint_request);
         };
 
-        match agent_run_result {
+        match checkpoint_request {
             Some(mut result) => {
-                let has_explicit_scope = if checkpoint_kind == CheckpointKind::Human {
-                    result
-                        .will_edit_filepaths
-                        .as_ref()
-                        .is_some_and(|paths| !paths.is_empty())
-                } else {
-                    result
-                        .edited_filepaths
-                        .as_ref()
-                        .is_some_and(|paths| !paths.is_empty())
-                };
+                let has_explicit_scope = !result.file_paths.is_empty();
 
                 if !has_explicit_scope {
-                    result.repo_working_dir = Some(self.path.to_string_lossy().to_string());
-                    if checkpoint_kind == CheckpointKind::Human {
-                        result.will_edit_filepaths = Some(scope_paths);
-                        result.edited_filepaths = None;
-                    } else {
-                        result.edited_filepaths = Some(scope_paths);
-                        result.will_edit_filepaths = None;
-                    }
+                    result.repo_working_dir = self.path.clone();
+                    result.file_paths = scope_paths.into_iter().map(PathBuf::from).collect();
                 }
 
                 Ok(Some(result))
             }
             None if checkpoint_kind == CheckpointKind::Human => {
-                self.build_scoped_human_agent_run_result()
+                self.build_scoped_human_checkpoint_request()
             }
             None => Ok(None),
         }
@@ -500,13 +481,13 @@ impl TmpRepo {
         &self,
         author: &str,
     ) -> Result<(usize, usize, usize), GitAiError> {
-        let agent_run_result = self.build_scoped_human_agent_run_result()?;
+        let checkpoint_request = self.build_scoped_human_checkpoint_request()?;
         checkpoint(
             &self.repo_gitai,
             author,
             CheckpointKind::KnownHuman,
             true,
-            agent_run_result,
+            checkpoint_request,
             false,
         )
     }
@@ -518,9 +499,6 @@ impl TmpRepo {
         model: Option<&str>,
         tool: Option<&str>,
     ) -> Result<(usize, usize, usize), GitAiError> {
-        use crate::authorship::transcript::AiTranscript;
-        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
-
         // Use a deterministic but unique session ID based on agent_name
         // For common agent names (Claude, GPT-4), use fixed ID for backwards compat
         // For unique names like "ai_session_1", use the name itself to allow distinct sessions
@@ -538,21 +516,22 @@ impl TmpRepo {
             model: model.unwrap_or("test_model").to_string(),
         };
 
-        // Create a minimal transcript with empty messages (as requested)
-        let transcript = AiTranscript {
-            messages: vec![], // Default to empty as requested
-        };
-
-        // Create agent run result
-        let agent_run_result = AgentRunResult {
-            agent_id,
-            agent_metadata: None,
-            transcript: Some(transcript),
+        // Create checkpoint result
+        let cr = CheckpointRequest {
+            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
-            repo_working_dir: Some(self.path.to_string_lossy().to_string()),
-            edited_filepaths: self.current_checkpoint_scope_paths()?,
-            will_edit_filepaths: None,
+            agent_id: Some(agent_id),
+            repo_working_dir: self.path.clone(),
+            file_paths: self
+                .current_checkpoint_scope_paths()?
+                .unwrap_or_default()
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            path_role: PreparedPathRole::Edited,
             dirty_files: None,
+            transcript_source: None,
+            metadata: std::collections::HashMap::new(),
             captured_checkpoint_id: None,
         };
 
@@ -561,29 +540,29 @@ impl TmpRepo {
             agent_name,
             CheckpointKind::AiAgent,
             true,
-            Some(agent_run_result),
+            Some(cr),
             false,
         )
     }
 
-    /// Triggers a checkpoint with a custom agent run result
-    pub fn trigger_checkpoint_with_agent_result(
+    /// Triggers a checkpoint with a custom checkpoint result
+    pub fn trigger_checkpoint_with_checkpoint_request(
         &self,
         author: &str,
-        agent_run_result: Option<AgentRunResult>,
+        checkpoint_request: Option<CheckpointRequest>,
     ) -> Result<(usize, usize, usize), GitAiError> {
-        let checkpoint_kind = agent_run_result
+        let checkpoint_kind = checkpoint_request
             .as_ref()
             .map(|r| r.checkpoint_kind)
             .unwrap_or(CheckpointKind::Human);
-        let agent_run_result =
-            self.apply_default_checkpoint_scope(agent_run_result, checkpoint_kind)?;
+        let checkpoint_request =
+            self.apply_default_checkpoint_scope(checkpoint_request, checkpoint_kind)?;
         checkpoint(
             &self.repo_gitai,
             author,
             checkpoint_kind,
             true, // quiet
-            agent_run_result,
+            checkpoint_request,
             false,
         )
     }
@@ -1584,36 +1563,31 @@ const LINES: &str = "1
 mod tests {
     use super::*;
     use crate::authorship::working_log::CheckpointKind;
-    use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
 
-    fn scoped_agent_run_result(
+    fn scoped_checkpoint_request(
         checkpoint_kind: CheckpointKind,
-        edited_filepaths: Option<Vec<&str>>,
-        will_edit_filepaths: Option<Vec<&str>>,
-    ) -> AgentRunResult {
-        AgentRunResult {
-            agent_id: AgentId {
+        file_paths: Vec<&str>,
+        path_role: PreparedPathRole,
+    ) -> CheckpointRequest {
+        let agent_id = if checkpoint_kind.is_ai() {
+            Some(AgentId {
                 tool: "test-tool".to_string(),
                 id: "test-session".to_string(),
                 model: "test-model".to_string(),
-            },
-            agent_metadata: None,
+            })
+        } else {
+            None
+        };
+        CheckpointRequest {
+            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind,
-            transcript: None,
-            repo_working_dir: None,
-            edited_filepaths: edited_filepaths.map(|paths| {
-                paths
-                    .into_iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            }),
-            will_edit_filepaths: will_edit_filepaths.map(|paths| {
-                paths
-                    .into_iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            }),
+            agent_id,
+            repo_working_dir: PathBuf::new(),
+            file_paths: file_paths.into_iter().map(PathBuf::from).collect(),
+            path_role,
             dirty_files: None,
+            transcript_source: None,
+            metadata: std::collections::HashMap::new(),
             captured_checkpoint_id: None,
         }
     }
@@ -1630,19 +1604,14 @@ mod tests {
         file.append("changed\n").expect("file should be changeable");
 
         let scoped = repo
-            .build_scoped_human_agent_run_result()
+            .build_scoped_human_checkpoint_request()
             .expect("helper should succeed")
             .expect("changed file should produce a scoped result");
 
         assert_eq!(scoped.checkpoint_kind, CheckpointKind::Human);
-        assert_eq!(
-            scoped.will_edit_filepaths,
-            Some(vec!["tracked.txt".to_string()])
-        );
-        assert_eq!(
-            scoped.repo_working_dir,
-            Some(repo.path().to_string_lossy().to_string())
-        );
+        assert_eq!(scoped.file_paths, vec![PathBuf::from("tracked.txt")]);
+        assert_eq!(scoped.path_role, PreparedPathRole::WillEdit);
+        assert_eq!(scoped.repo_working_dir, repo.path().to_path_buf());
     }
 
     #[test]
@@ -1656,15 +1625,18 @@ mod tests {
 
         file.append("changed\n").expect("file should be changeable");
 
-        let original =
-            scoped_agent_run_result(CheckpointKind::Human, None, Some(vec!["custom.txt"]));
+        let original = scoped_checkpoint_request(
+            CheckpointKind::Human,
+            vec!["custom.txt"],
+            PreparedPathRole::WillEdit,
+        );
 
         let applied = repo
             .apply_default_checkpoint_scope(Some(original.clone()), CheckpointKind::Human)
             .expect("helper should succeed")
             .expect("explicit scope should be preserved");
 
-        assert_eq!(applied.will_edit_filepaths, original.will_edit_filepaths);
+        assert_eq!(applied.file_paths, original.file_paths);
         assert_eq!(applied.repo_working_dir, original.repo_working_dir);
     }
 }

@@ -31,7 +31,8 @@ use crate::{
         rewrite_authorship_if_needed,
     },
     authorship::working_log::CheckpointKind,
-    commands::checkpoint_agent::agent_presets::AgentRunResult,
+    commands::checkpoint::PreparedPathRole,
+    commands::checkpoint_agent::orchestrator::CheckpointRequest,
     commands::hooks::{push_hooks, stash_hooks},
 };
 #[cfg(not(windows))]
@@ -1357,7 +1358,12 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
                 .kind
                 .as_deref()
                 .and_then(parse_checkpoint_kind)
-                .or_else(|| request.agent_run_result.as_ref().map(|r| r.checkpoint_kind))
+                .or_else(|| {
+                    request
+                        .checkpoint_request
+                        .as_ref()
+                        .map(|r| r.checkpoint_kind)
+                })
                 .unwrap_or(CheckpointKind::Human);
             let author = request
                 .author
@@ -1368,7 +1374,7 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
                 &author,
                 kind,
                 request.quiet.unwrap_or(true),
-                request.agent_run_result,
+                request.checkpoint_request,
                 request.is_pre_commit.unwrap_or(false),
             )?;
             Ok(())
@@ -1795,23 +1801,25 @@ fn filter_commit_replay_files(
     (selected_files, selected_dirty_files)
 }
 
-fn build_human_replay_agent_result(
+fn build_human_replay_checkpoint_request(
     files: Vec<String>,
     dirty_files: HashMap<String, String>,
-) -> AgentRunResult {
-    AgentRunResult {
-        agent_id: crate::authorship::working_log::AgentId {
-            tool: "daemon".to_string(),
-            id: "daemon-commit-replay".to_string(),
-            model: "daemon".to_string(),
-        },
-        agent_metadata: None,
-        transcript: Some(crate::authorship::transcript::AiTranscript { messages: vec![] }),
+) -> CheckpointRequest {
+    CheckpointRequest {
+        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::Human,
-        repo_working_dir: None,
-        edited_filepaths: None,
-        will_edit_filepaths: Some(files),
-        dirty_files: Some(dirty_files),
+        agent_id: None,
+        repo_working_dir: std::path::PathBuf::new(), // Will be overridden by caller
+        file_paths: files.into_iter().map(std::path::PathBuf::from).collect(),
+        path_role: PreparedPathRole::WillEdit,
+        dirty_files: Some(
+            dirty_files
+                .into_iter()
+                .map(|(k, v)| (std::path::PathBuf::from(k), v))
+                .collect(),
+        ),
+        transcript_source: None,
+        metadata: std::collections::HashMap::new(),
         captured_checkpoint_id: None,
     }
 }
@@ -2550,36 +2558,45 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     // writing a synthetic Human checkpoint.  Bash snapshot files are written at
     // PreToolUse time and live for 300 s, so they are always present on disk when
     // the daemon processes the trace2 commit event (typically < 1 s later).
-    let (checkpoint_kind, replay_agent_result) =
+    let (checkpoint_kind, replay_checkpoint_request) =
         match crate::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash(
             repo_root,
             &repo_workdir,
         ) {
-            Some((kind, Some(ai_result))) => {
+            Some((kind, Some(mut ai_result))) => {
                 // Bash in flight with full context — attribute committed files to the AI agent.
-                // AiAgent checkpoints use `edited_filepaths` (not `will_edit_filepaths`) for the
-                // explicit path list, matching how `explicit_capture_target_paths` dispatches.
-                let result = AgentRunResult {
-                    edited_filepaths: Some(changed_files),
-                    dirty_files: Some(dirty_files),
-                    will_edit_filepaths: None,
-                    ..ai_result
-                };
-                (kind, result)
+                ai_result.file_paths = changed_files
+                    .into_iter()
+                    .map(std::path::PathBuf::from)
+                    .collect();
+                ai_result.path_role = PreparedPathRole::Edited;
+                ai_result.dirty_files = Some(
+                    dirty_files
+                        .into_iter()
+                        .map(|(k, v)| (std::path::PathBuf::from(k), v))
+                        .collect(),
+                );
+                (kind, ai_result)
             }
             Some((kind, None)) => {
                 // Bash in flight but no context details — use AI kind with daemon agent_id.
-                let result = AgentRunResult {
-                    edited_filepaths: Some(changed_files),
-                    dirty_files: Some(dirty_files),
-                    will_edit_filepaths: None,
-                    checkpoint_kind: kind,
-                    ..build_human_replay_agent_result(vec![], HashMap::new())
-                };
+                let mut result = build_human_replay_checkpoint_request(vec![], HashMap::new());
+                result.checkpoint_kind = kind;
+                result.file_paths = changed_files
+                    .into_iter()
+                    .map(std::path::PathBuf::from)
+                    .collect();
+                result.path_role = PreparedPathRole::Edited;
+                result.dirty_files = Some(
+                    dirty_files
+                        .into_iter()
+                        .map(|(k, v)| (std::path::PathBuf::from(k), v))
+                        .collect(),
+                );
                 (kind, result)
             }
             None => {
-                let result = build_human_replay_agent_result(changed_files, dirty_files);
+                let result = build_human_replay_checkpoint_request(changed_files, dirty_files);
                 (CheckpointKind::Human, result)
             }
         };
@@ -2589,7 +2606,7 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         author,
         checkpoint_kind,
         true,
-        Some(replay_agent_result),
+        Some(replay_checkpoint_request),
         base_commit != "initial",
         Some(base_commit.as_str()),
         crate::commands::checkpoint::BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
@@ -5631,12 +5648,13 @@ impl ActorDaemonCoordinator {
                     let repo_wd = request.repo_working_dir().to_string();
                     let checkpoint_file_paths: Vec<String> = match request.as_ref() {
                         CheckpointRunRequest::Live(req) => req
-                            .agent_run_result
+                            .checkpoint_request
                             .as_ref()
-                            .and_then(|r| {
-                                r.edited_filepaths
-                                    .clone()
-                                    .or_else(|| r.will_edit_filepaths.clone())
+                            .map(|r| {
+                                r.file_paths
+                                    .iter()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .collect()
                             })
                             .unwrap_or_default(),
                         CheckpointRunRequest::Captured(req) => {
@@ -5663,7 +5681,7 @@ impl ActorDaemonCoordinator {
                     tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
                     let checkpoint_start = std::time::Instant::now();
                     // Wrap checkpoint processing in catch_unwind to recover from panics.
-                    let checkpoint_result = {
+                    let checkpoint_request = {
                         let future = async {
                             let ack = self
                                 .coordinator
@@ -5677,7 +5695,7 @@ impl ActorDaemonCoordinator {
                         let caught = std::panic::AssertUnwindSafe(future);
                         futures::FutureExt::catch_unwind(caught).await
                     };
-                    let mut result = match checkpoint_result {
+                    let mut result = match checkpoint_request {
                         Ok(inner) => inner,
                         Err(panic_payload) => {
                             let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>()
@@ -8530,7 +8548,7 @@ mod tests {
                     author: Some("test".to_string()),
                     quiet: Some(true),
                     is_pre_commit: Some(false),
-                    agent_run_result: None,
+                    checkpoint_request: None,
                 },
             ))),
             wait: Some(true),

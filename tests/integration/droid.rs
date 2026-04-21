@@ -1,20 +1,23 @@
 use crate::test_utils::fixture_path;
 use git_ai::authorship::transcript::Message;
-use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset, DroidPreset,
-};
+use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
+use git_ai::commands::checkpoint_agent::transcript_readers;
+use git_ai::error::GitAiError;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
+use std::path::PathBuf;
 use tempfile::NamedTempFile;
+
+fn parse_droid(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
+    resolve_preset("droid")?.parse(hook_input, "t_test")
+}
 
 #[test]
 fn test_parse_droid_jsonl_transcript() {
     let fixture = fixture_path("droid-session.jsonl");
     let (transcript, model) =
-        DroidPreset::transcript_and_model_from_droid_jsonl(fixture.to_str().unwrap())
-            .expect("Failed to parse JSONL");
+        transcript_readers::read_droid_jsonl(fixture.as_path()).expect("Failed to parse JSONL");
 
     // Verify we parsed some messages
     assert!(
@@ -69,7 +72,7 @@ fn test_parse_droid_jsonl_transcript() {
 #[test]
 fn test_parse_droid_settings_model() {
     let fixture = fixture_path("droid-session.settings.json");
-    let model = DroidPreset::model_from_droid_settings_json(fixture.to_str().unwrap())
+    let model = transcript_readers::read_droid_model_from_settings(fixture.as_path())
         .expect("Failed to parse settings.json");
 
     assert!(model.is_some(), "Model should be extracted from settings");
@@ -82,16 +85,12 @@ fn test_parse_droid_settings_model() {
 
 #[test]
 fn test_droid_preset_extracts_edited_filepath() {
-    // Create a temporary JSONL file for the transcript
     let fixture = fixture_path("droid-session.jsonl");
     let settings_fixture = fixture_path("droid-session.settings.json");
 
-    // Build settings path as sibling of transcript
     let transcript_path = fixture.to_str().unwrap();
     let settings_path = settings_fixture.to_str().unwrap();
 
-    // We need the transcript_path to end with .jsonl and settings as sibling
-    // Create temp files to control the naming
     let temp_dir = tempfile::tempdir().unwrap();
     let jsonl_path = temp_dir.path().join("session.jsonl");
     let temp_settings_path = temp_dir.path().join("session.settings.json");
@@ -110,17 +109,21 @@ fn test_droid_preset_extracts_edited_filepath() {
     })
     .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    };
-
-    let preset = DroidPreset;
-    let result = preset.run(flags).expect("Failed to run DroidPreset");
-
-    assert!(result.edited_filepaths.is_some());
-    let edited = result.edited_filepaths.unwrap();
-    assert_eq!(edited.len(), 1);
-    assert_eq!(edited[0], "/Users/testuser/projects/testing-git/index.ts");
+    let events = parse_droid(&hook_input).expect("Failed to parse droid hook input");
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(!e.file_paths.is_empty());
+            assert!(
+                e.file_paths
+                    .iter()
+                    .any(|p| p.to_string_lossy().contains("index.ts")),
+                "Should contain edited filepath, got: {:?}",
+                e.file_paths
+            );
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
@@ -129,7 +132,6 @@ fn test_droid_preset_extracts_applypatch_filepath() {
     let jsonl_path = temp_dir.path().join("session.jsonl");
     let settings_path = temp_dir.path().join("session.settings.json");
 
-    // Create minimal valid JSONL and settings
     fs::write(&jsonl_path, "").unwrap();
     fs::write(&settings_path, r#"{"model":"test-model"}"#).unwrap();
 
@@ -143,20 +145,23 @@ fn test_droid_preset_extracts_applypatch_filepath() {
     })
     .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    };
-
-    let preset = DroidPreset;
-    let result = preset.run(flags).expect("Failed to run DroidPreset");
-
-    assert!(result.edited_filepaths.is_some());
-    let edited = result.edited_filepaths.unwrap();
-    assert!(
-        edited.contains(&"/Users/testuser/projects/testing-git/index.ts".to_string()),
-        "Should extract file path from ApplyPatch text, got: {:?}",
-        edited
-    );
+    let events = parse_droid(&hook_input).expect("Failed to parse droid hook input");
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            let path_strs: Vec<String> = e
+                .file_paths
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            assert!(
+                path_strs.iter().any(|p| p.contains("index.ts")),
+                "Should extract file path from ApplyPatch text, got: {:?}",
+                path_strs
+            );
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
@@ -179,24 +184,25 @@ fn test_droid_preset_stores_metadata_paths() {
     })
     .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    };
-
-    let preset = DroidPreset;
-    let result = preset.run(flags).expect("Failed to run DroidPreset");
-
-    assert!(result.agent_metadata.is_some());
-    let metadata = result.agent_metadata.unwrap();
-    assert!(
-        metadata.contains_key("transcript_path"),
-        "Metadata should contain transcript_path"
-    );
-    assert!(
-        metadata.contains_key("settings_path"),
-        "Metadata should contain settings_path"
-    );
-    assert_eq!(metadata["transcript_path"], jsonl_path.to_str().unwrap());
+    let events = parse_droid(&hook_input).expect("Failed to parse droid hook input");
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert!(
+                e.context.metadata.contains_key("transcript_path"),
+                "Metadata should contain transcript_path"
+            );
+            assert!(
+                e.context.metadata.contains_key("settings_path"),
+                "Metadata should contain settings_path"
+            );
+            assert_eq!(
+                e.context.metadata["transcript_path"],
+                jsonl_path.to_str().unwrap()
+            );
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
@@ -219,18 +225,18 @@ fn test_droid_preset_uses_raw_session_id() {
     })
     .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    };
-
-    let preset = DroidPreset;
-    let result = preset.run(flags).expect("Failed to run DroidPreset");
-
-    assert_eq!(
-        result.agent_id.id, session_uuid,
-        "agent_id.id should be the raw session UUID"
-    );
-    assert_eq!(result.agent_id.tool, "droid");
+    let events = parse_droid(&hook_input).expect("Failed to parse droid hook input");
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(
+                e.context.agent_id.id, session_uuid,
+                "agent_id.id should be the raw session UUID"
+            );
+            assert_eq!(e.context.agent_id.tool, "droid");
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
 }
 
 #[test]
@@ -243,13 +249,10 @@ fn test_droid_jsonl_skips_non_message_entries() {
 
     let mut temp_file = NamedTempFile::new().unwrap();
     temp_file.write_all(jsonl_content.as_bytes()).unwrap();
-    let temp_path = temp_file.path().to_str().unwrap();
 
-    let (transcript, _model) = DroidPreset::transcript_and_model_from_droid_jsonl(temp_path)
-        .expect("Failed to parse JSONL");
+    let (transcript, _model) =
+        transcript_readers::read_droid_jsonl(temp_file.path()).expect("Failed to parse JSONL");
 
-    // Should only have 2 messages (from the two "message" type entries)
-    // session_start and todo_state should be skipped
     assert_eq!(
         transcript.messages().len(),
         2,
@@ -269,20 +272,16 @@ fn test_droid_jsonl_skips_non_message_entries() {
 
 #[test]
 fn test_droid_tool_results_are_not_parsed_as_user_messages() {
-    // User message containing only tool_result items should produce no user messages
     let jsonl_content = r#"{"type":"message","id":"msg1","timestamp":"2026-01-28T16:57:16.179Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_123","content":"File read successfully"}]}}
 {"type":"message","id":"msg2","timestamp":"2026-01-28T16:57:17.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Done!"}]}}
 "#;
 
     let mut temp_file = NamedTempFile::new().unwrap();
     temp_file.write_all(jsonl_content.as_bytes()).unwrap();
-    let temp_path = temp_file.path().to_str().unwrap();
 
-    let (transcript, _model) = DroidPreset::transcript_and_model_from_droid_jsonl(temp_path)
-        .expect("Failed to parse JSONL");
+    let (transcript, _model) =
+        transcript_readers::read_droid_jsonl(temp_file.path()).expect("Failed to parse JSONL");
 
-    // Should only have 1 message (the assistant response)
-    // The tool_result should be skipped entirely
     assert_eq!(
         transcript.messages().len(),
         1,
@@ -310,18 +309,15 @@ fn test_droid_e2e_prefers_latest_checkpoint_for_prompts() {
 
     let repo_root = repo.canonical_path();
 
-    // Create initial file and commit
     let src_dir = repo_root.join("src");
     fs::create_dir_all(&src_dir).unwrap();
     let file_path = src_dir.join("main.ts");
     fs::write(&file_path, "// initial\n").unwrap();
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    // Set up transcript and settings files in the repo dir
     let transcript_path = repo_root.join("droid-session.jsonl");
     let settings_path = repo_root.join("droid-session.settings.json");
 
-    // First checkpoint: empty transcript (simulates race where data isn't ready)
     fs::write(&transcript_path, "").unwrap();
     fs::write(&settings_path, r#"{"model":"custom:BYOK-GPT-5-MINI-0"}"#).unwrap();
 
@@ -337,22 +333,18 @@ fn test_droid_e2e_prefers_latest_checkpoint_for_prompts() {
     })
     .to_string();
 
-    // First AI edit with empty transcript
     fs::write(&file_path, "// initial\n// ai line one\n").unwrap();
     repo.git_ai(&["checkpoint", "droid", "--hook-input", &hook_input])
         .unwrap();
 
-    // Second AI edit with real transcript content
     let fixture = fixture_path("droid-session.jsonl");
     fs::copy(&fixture, &transcript_path).unwrap();
     fs::write(&file_path, "// initial\n// ai line one\n// ai line two\n").unwrap();
     repo.git_ai(&["checkpoint", "droid", "--hook-input", &hook_input])
         .unwrap();
 
-    // Commit
     let commit = repo.stage_all_and_commit("Add AI lines").unwrap();
 
-    // Should have exactly one session record
     assert_eq!(
         commit.authorship_log.metadata.sessions.len(),
         1,
@@ -366,7 +358,6 @@ fn test_droid_e2e_prefers_latest_checkpoint_for_prompts() {
         .next()
         .expect("Session record should exist");
 
-    // The latest checkpoint (with the real transcript) should win
     assert!(
         !session_record.messages.is_empty(),
         "Session record should contain messages from the latest checkpoint"
@@ -398,58 +389,31 @@ fn test_droid_preset_pretooluse_returns_human_checkpoint() {
     })
     .to_string();
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input),
-    };
-
-    let preset = DroidPreset;
-    let result = preset.run(flags).expect("Failed to run DroidPreset");
-
-    assert_eq!(
-        result.checkpoint_kind,
-        CheckpointKind::Human,
-        "PreToolUse should produce a Human checkpoint"
-    );
-
-    assert!(
-        result.will_edit_filepaths.is_some(),
-        "will_edit_filepaths should be populated for PreToolUse"
-    );
-
-    let will_edit = result.will_edit_filepaths.unwrap();
-    assert_eq!(
-        will_edit[0],
-        "/Users/testuser/projects/testing-git/index.ts"
-    );
-
-    assert!(
-        result.transcript.is_none(),
-        "Transcript should be None for Human checkpoint"
-    );
-}
-
-#[test]
-fn test_droid_session_paths_derivation() {
-    let (jsonl, settings) =
-        DroidPreset::droid_session_paths("abc-123", "/Users/testuser/projects/my-app");
-    assert!(
-        jsonl.ends_with("-Users-testuser-projects-my-app/abc-123.jsonl"),
-        "JSONL path should encode cwd with dashes, got: {:?}",
-        jsonl
-    );
-    assert!(
-        settings.ends_with("-Users-testuser-projects-my-app/abc-123.settings.json"),
-        "Settings path should encode cwd with dashes, got: {:?}",
-        settings
-    );
+    let events = parse_droid(&hook_input).expect("Failed to parse droid hook input");
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert_eq!(
+                e.context.cwd,
+                PathBuf::from("/Users/testuser/projects/testing-git")
+            );
+            assert!(
+                e.file_paths
+                    .iter()
+                    .any(|p| p.to_string_lossy().contains("index.ts")),
+                "will_edit_filepaths should contain the target file"
+            );
+        }
+        _ => panic!("Expected PreFileEdit for PreToolUse"),
+    }
 }
 
 #[test]
 fn test_droid_settings_missing_model_field() {
     let mut temp = NamedTempFile::new().unwrap();
     temp.write_all(b"{}").unwrap();
-    let result =
-        DroidPreset::model_from_droid_settings_json(temp.path().to_str().unwrap()).unwrap();
+    let result = transcript_readers::read_droid_model_from_settings(temp.path())
+        .expect("Should not error on missing model");
     assert!(result.is_none(), "Missing model field should return None");
 }
 
@@ -460,13 +424,12 @@ fn test_droid_jsonl_parses_thinking_blocks() {
     let mut temp = NamedTempFile::new().unwrap();
     temp.write_all(jsonl.as_bytes()).unwrap();
     let (transcript, _) =
-        DroidPreset::transcript_and_model_from_droid_jsonl(temp.path().to_str().unwrap()).unwrap();
+        transcript_readers::read_droid_jsonl(temp.path()).expect("Failed to parse JSONL");
     assert_eq!(
         transcript.messages().len(),
         2,
         "Should parse both thinking and text blocks"
     );
-    // First should be thinking (parsed as Assistant)
     if let Message::Assistant { text, .. } = &transcript.messages()[0] {
         assert!(
             text.contains("think"),
@@ -475,7 +438,6 @@ fn test_droid_jsonl_parses_thinking_blocks() {
     } else {
         panic!("Expected Assistant (thinking)");
     }
-    // Second should be text
     assert!(
         matches!(transcript.messages()[1], Message::Assistant { .. }),
         "Second message should be Assistant text"
@@ -493,7 +455,6 @@ crate::reuse_tests_in_worktree!(
     test_droid_tool_results_are_not_parsed_as_user_messages,
     test_droid_e2e_prefers_latest_checkpoint_for_prompts,
     test_droid_preset_pretooluse_returns_human_checkpoint,
-    test_droid_session_paths_derivation,
     test_droid_settings_missing_model_field,
     test_droid_jsonl_parses_thinking_blocks,
 );

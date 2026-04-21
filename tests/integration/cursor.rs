@@ -1,23 +1,25 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::{TestRepo, real_git_executable};
 use crate::test_utils::fixture_path;
+use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
+use git_ai::commands::checkpoint_agent::transcript_readers;
+use git_ai::error::GitAiError;
+use std::path::PathBuf;
 
 const TEST_CONVERSATION_ID: &str = "de751938-f32b-4441-8239-a31d60aa4cf0";
 
+fn parse_cursor(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
+    resolve_preset("cursor")?.parse(hook_input, "t_test")
+}
+
 #[test]
 fn test_cursor_jsonl_basic_parsing() {
-    use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
-
     let fixture = fixture_path("cursor-session-simple.jsonl");
-    let (transcript, model) =
-        CursorPreset::transcript_and_model_from_cursor_jsonl(fixture.to_str().unwrap())
-            .expect("Should parse cursor JSONL");
+    let (transcript, model) = transcript_readers::read_cursor_jsonl(fixture.as_path())
+        .expect("Should parse cursor JSONL");
 
-    // Model should be None (comes from hook input, not JSONL)
     assert_eq!(model, None, "Model should be None for Cursor JSONL");
 
-    // Real Cursor session: HBO shows generation
-    // 1 user message, 10 assistant texts, 10 tool_use
     let messages = transcript.messages();
     assert!(
         !messages.is_empty(),
@@ -47,12 +49,9 @@ fn test_cursor_jsonl_basic_parsing() {
 
 #[test]
 fn test_cursor_jsonl_user_query_tag_stripping() {
-    use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
-
     let fixture = fixture_path("cursor-session-simple.jsonl");
-    let (transcript, _) =
-        CursorPreset::transcript_and_model_from_cursor_jsonl(fixture.to_str().unwrap())
-            .expect("Should parse cursor JSONL");
+    let (transcript, _) = transcript_readers::read_cursor_jsonl(fixture.as_path())
+        .expect("Should parse cursor JSONL");
 
     let messages = transcript.messages();
     let first_user = messages
@@ -79,12 +78,9 @@ fn test_cursor_jsonl_user_query_tag_stripping() {
 
 #[test]
 fn test_cursor_jsonl_tool_normalization() {
-    use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
-
     let fixture = fixture_path("cursor-session-simple.jsonl");
-    let (transcript, _) =
-        CursorPreset::transcript_and_model_from_cursor_jsonl(fixture.to_str().unwrap())
-            .expect("Should parse cursor JSONL");
+    let (transcript, _) = transcript_readers::read_cursor_jsonl(fixture.as_path())
+        .expect("Should parse cursor JSONL");
 
     let messages = transcript.messages();
     let tool_messages: Vec<_> = messages
@@ -97,7 +93,6 @@ fn test_cursor_jsonl_tool_normalization() {
         })
         .collect();
 
-    // Write tool should have file_path, not path, and content should be stripped
     let write_tool = tool_messages
         .iter()
         .find(|(name, _)| *name == "Write")
@@ -115,7 +110,6 @@ fn test_cursor_jsonl_tool_normalization() {
         "Write tool should not have original 'contents' field"
     );
 
-    // Read tool should have file_path normalized from path
     let read_tool = tool_messages
         .iter()
         .find(|(name, _)| *name == "Read")
@@ -132,12 +126,9 @@ fn test_cursor_jsonl_tool_normalization() {
 
 #[test]
 fn test_cursor_jsonl_read_tool_full_args() {
-    use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
-
     let fixture = fixture_path("cursor-session-simple.jsonl");
-    let (transcript, _) =
-        CursorPreset::transcript_and_model_from_cursor_jsonl(fixture.to_str().unwrap())
-            .expect("Should parse cursor JSONL");
+    let (transcript, _) = transcript_readers::read_cursor_jsonl(fixture.as_path())
+        .expect("Should parse cursor JSONL");
 
     let messages = transcript.messages();
     let read_tool = messages
@@ -152,7 +143,6 @@ fn test_cursor_jsonl_read_tool_full_args() {
         })
         .expect("Should have a Read tool_use");
 
-    // Read tool should preserve full args with normalized field name
     assert!(
         read_tool.get("file_path").is_some(),
         "Read tool should have file_path (normalized from path)"
@@ -161,12 +151,9 @@ fn test_cursor_jsonl_read_tool_full_args() {
 
 #[test]
 fn test_cursor_jsonl_preserves_text_content() {
-    use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
-
     let fixture = fixture_path("cursor-session-simple.jsonl");
-    let (transcript, _) =
-        CursorPreset::transcript_and_model_from_cursor_jsonl(fixture.to_str().unwrap())
-            .expect("Should parse cursor JSONL");
+    let (transcript, _) = transcript_readers::read_cursor_jsonl(fixture.as_path())
+        .expect("Should parse cursor JSONL");
 
     let assistant_messages: Vec<_> = transcript
         .messages()
@@ -184,16 +171,13 @@ fn test_cursor_jsonl_preserves_text_content() {
 
 #[test]
 fn test_cursor_jsonl_empty_file() {
-    use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
     use tempfile::NamedTempFile;
 
     let temp_file = NamedTempFile::new().expect("Should create temp file");
-    // Write nothing — empty file
     let _ = temp_file.as_file().sync_all();
 
     let (transcript, model) =
-        CursorPreset::transcript_and_model_from_cursor_jsonl(temp_file.path().to_str().unwrap())
-            .expect("Should handle empty file");
+        transcript_readers::read_cursor_jsonl(temp_file.path()).expect("Should handle empty file");
 
     assert!(
         transcript.messages().is_empty(),
@@ -204,7 +188,6 @@ fn test_cursor_jsonl_empty_file() {
 
 #[test]
 fn test_cursor_jsonl_malformed_lines_skipped() {
-    use git_ai::commands::checkpoint_agent::agent_presets::CursorPreset;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -222,9 +205,8 @@ fn test_cursor_jsonl_malformed_lines_skipped() {
     .unwrap();
     temp_file.flush().unwrap();
 
-    let (transcript, _) =
-        CursorPreset::transcript_and_model_from_cursor_jsonl(temp_file.path().to_str().unwrap())
-            .expect("Should handle malformed lines");
+    let (transcript, _) = transcript_readers::read_cursor_jsonl(temp_file.path())
+        .expect("Should handle malformed lines");
 
     assert_eq!(
         transcript.messages().len(),
@@ -235,11 +217,6 @@ fn test_cursor_jsonl_malformed_lines_skipped() {
 
 #[test]
 fn test_cursor_preset_multi_root_workspace_detection() {
-    use git_ai::authorship::working_log::CheckpointKind;
-    use git_ai::commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, CursorPreset,
-    };
-
     // Helper function to test workspace selection
     let test_workspace_selection =
         |workspace_roots: &[&str], file_path: &str, expected_workspace: &str, description: &str| {
@@ -269,23 +246,21 @@ fn test_cursor_preset_multi_root_workspace_detection() {
                 tool_input_json
             );
 
-            let flags = AgentCheckpointFlags {
-                hook_input: Some(hook_input),
-            };
-
-            let preset = CursorPreset;
-            let result = preset
-                .run(flags)
+            let events = parse_cursor(&hook_input)
                 .unwrap_or_else(|_| panic!("Should succeed for: {}", description));
 
-            assert_eq!(
-                result.repo_working_dir,
-                Some(expected_workspace.to_string()),
-                "{}",
-                description
-            );
-
-            assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
+            assert_eq!(events.len(), 1);
+            match &events[0] {
+                ParsedHookEvent::PreFileEdit(e) => {
+                    assert_eq!(
+                        e.context.cwd,
+                        PathBuf::from(expected_workspace),
+                        "{}",
+                        description
+                    );
+                }
+                _ => panic!("Expected PreFileEdit for: {}", description),
+            }
         };
 
     // Test 1: File in second workspace root
@@ -355,11 +330,6 @@ fn test_cursor_preset_multi_root_workspace_detection() {
 
 #[test]
 fn test_cursor_preset_human_checkpoint_no_filepath() {
-    use git_ai::authorship::working_log::CheckpointKind;
-    use git_ai::commands::checkpoint_agent::agent_presets::{
-        AgentCheckpointFlags, AgentCheckpointPreset, CursorPreset,
-    };
-
     let hook_input = r##"{
         "conversation_id": "test-conversation-id",
         "workspace_roots": ["/Users/test/workspace"],
@@ -369,22 +339,15 @@ fn test_cursor_preset_human_checkpoint_no_filepath() {
         "model": "model-name-from-hook-test"
     }"##;
 
-    let flags = AgentCheckpointFlags {
-        hook_input: Some(hook_input.to_string()),
-    };
+    let events = parse_cursor(hook_input).expect("Should succeed for human checkpoint");
 
-    let preset = CursorPreset;
-    let result = preset
-        .run(flags)
-        .expect("Should succeed for human checkpoint");
-
-    // Verify this is a human checkpoint
-    assert!(
-        result.checkpoint_kind == CheckpointKind::Human,
-        "Should be a human checkpoint"
-    );
-    // Human checkpoints should not have edited_filepaths even if file_path is present
-    assert!(result.edited_filepaths.is_none());
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(_e) => {
+            // PreFileEdit is the human checkpoint equivalent
+        }
+        _ => panic!("Expected PreFileEdit for human checkpoint"),
+    }
 }
 
 #[test]
@@ -422,22 +385,18 @@ fn test_cursor_e2e_with_attribution() {
     let jsonl_fixture = fixture_path("cursor-session-simple.jsonl");
     let jsonl_path_str = jsonl_fixture.to_string_lossy().to_string();
 
-    // Create parent directory for the test file
     let src_dir = repo.path().join("src");
     fs::create_dir_all(&src_dir).unwrap();
 
-    // Create initial file with some base content
     let file_path = repo.path().join("src/main.rs");
     let base_content = "fn main() {\n    println!(\"Hello, World!\");\n}\n";
     fs::write(&file_path, base_content).unwrap();
 
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    // Simulate cursor making edits to the file
     let edited_content = "fn main() {\n    println!(\"Hello, World!\");\n    // This is from Cursor\n    println!(\"Additional line from Cursor\");\n}\n";
     fs::write(&file_path, edited_content).unwrap();
 
-    // Run checkpoint with transcript_path pointing to JSONL fixture
     let hook_input = serde_json::json!({
         "conversation_id": TEST_CONVERSATION_ID,
         "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
@@ -455,10 +414,8 @@ fn test_cursor_e2e_with_attribution() {
 
     println!("Checkpoint output: {}", result);
 
-    // Commit the changes
     let commit = repo.stage_all_and_commit("Add cursor edits").unwrap();
 
-    // Verify attribution using TestFile
     let mut file = repo.filename("src/main.rs");
     file.assert_lines_and_blame(crate::lines![
         "fn main() {".human(),
@@ -468,19 +425,16 @@ fn test_cursor_e2e_with_attribution() {
         "}".human(),
     ]);
 
-    // Verify the authorship log contains attestations and prompts
     assert!(
         !commit.authorship_log.attestations.is_empty(),
         "Should have at least one attestation"
     );
 
-    // Verify the metadata has sessions with transcript data
     assert!(
         !commit.authorship_log.metadata.sessions.is_empty(),
         "Should have at least one session record in metadata"
     );
 
-    // Get the first session record
     let session_record = commit
         .authorship_log
         .metadata
@@ -489,20 +443,17 @@ fn test_cursor_e2e_with_attribution() {
         .next()
         .expect("Should have at least one session record");
 
-    // Verify that the session record has messages (transcript from JSONL)
     assert!(
         !session_record.messages.is_empty(),
         "Session record should contain messages from the JSONL transcript"
     );
 
-    // The JSONL fixture has 21 messages (1 user + 10 assistant + 10 tool_use)
     assert_eq!(
         session_record.messages.len(),
         21,
         "Should have exactly 21 messages from the JSONL fixture"
     );
 
-    // Verify the model was extracted from hook input
     assert_eq!(
         session_record.agent_id.model, "model-name-from-hook-test",
         "Model should be 'model-name-from-hook-test' from hook input"
@@ -517,7 +468,6 @@ fn test_cursor_e2e_with_resync() {
 
     let repo = TestRepo::new();
 
-    // Create a temp JSONL file that we can modify
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let temp_jsonl_path = temp_dir.path().join("cursor-session.jsonl");
     let fixture_content = fs::read_to_string(fixture_path("cursor-session-simple.jsonl"))
@@ -525,22 +475,18 @@ fn test_cursor_e2e_with_resync() {
     fs::write(&temp_jsonl_path, &fixture_content).expect("Should write temp JSONL");
     let temp_jsonl_str = temp_jsonl_path.to_string_lossy().to_string();
 
-    // Create parent directory for the test file
     let src_dir = repo.path().join("src");
     fs::create_dir_all(&src_dir).unwrap();
 
-    // Create initial file with some base content
     let file_path = repo.path().join("src/main.rs");
     let base_content = "fn main() {\n    println!(\"Hello, World!\");\n}\n";
     fs::write(&file_path, base_content).unwrap();
 
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    // Simulate cursor making edits to the file
     let edited_content = "fn main() {\n    println!(\"Hello, World!\");\n    // This is from Cursor\n    println!(\"Additional line from Cursor\");\n}\n";
     fs::write(&file_path, edited_content).unwrap();
 
-    // Run checkpoint with the UNMODIFIED temp JSONL
     let hook_input = serde_json::json!({
         "conversation_id": TEST_CONVERSATION_ID,
         "workspace_roots": [repo.canonical_path().to_string_lossy().to_string()],
@@ -558,15 +504,11 @@ fn test_cursor_e2e_with_resync() {
 
     println!("Checkpoint output: {}", result);
 
-    // Now append a new message to the JSONL file (simulating Cursor adding more data)
     {
-        let mut file = fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&temp_jsonl_path)
             .expect("Should open temp JSONL for appending");
-        // The fixture file may not end with a newline, so write one first to ensure
-        // the appended line starts on its own line (otherwise it merges with the last
-        // line and produces invalid JSON).
         writeln!(file).expect("Should write newline separator");
         writeln!(
             file,
@@ -575,11 +517,9 @@ fn test_cursor_e2e_with_resync() {
         .expect("Should append to JSONL");
     }
 
-    // Commit — post-commit hook will re-read the JSONL via transcript_path in metadata
     repo.git(&["add", "-A"]).expect("add --all should succeed");
     let commit = repo.commit("Add cursor edits").unwrap();
 
-    // Verify attribution still works
     let mut file = repo.filename("src/main.rs");
     file.assert_lines_and_blame(crate::lines![
         "fn main() {".human(),
@@ -589,19 +529,16 @@ fn test_cursor_e2e_with_resync() {
         "}".human(),
     ]);
 
-    // Verify the authorship log contains attestations and prompts
     assert!(
         !commit.authorship_log.attestations.is_empty(),
         "Should have at least one attestation"
     );
 
-    // Verify the metadata has sessions with transcript data
     assert!(
         !commit.authorship_log.metadata.sessions.is_empty(),
         "Should have at least one session record in metadata"
     );
 
-    // Get the first session record
     let session_record = commit
         .authorship_log
         .metadata
@@ -610,7 +547,6 @@ fn test_cursor_e2e_with_resync() {
         .next()
         .expect("Should have at least one session record");
 
-    // Verify that the resync logic picked up the appended message
     let transcript_json =
         serde_json::to_string(&session_record.messages).expect("Should serialize messages");
 
