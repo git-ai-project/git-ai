@@ -1,0 +1,93 @@
+name: git-ai Attribution Collector
+
+# Collects AI attribution data from all developers' git-ai notes,
+# exports it to a central Supabase / Postgres database, and
+# (optionally) regenerates a static dashboard artifact.
+#
+# Required GitHub Actions secrets:
+#   DATABASE_URL  — postgres connection string, e.g.:
+#                   postgresql://user:pass@db.xyz.supabase.co:5432/postgres
+#
+# Optional secrets:
+#   GIT_AI_LICENSE_KEY — if your git-ai plan requires a license key
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Rerun whenever notes or source change
+      - 'refs/notes/**'
+      - 'scripts/export-prompts-to-db.py'
+      - '.github/workflows/git-ai-collector.yml'
+  schedule:
+    # Every day at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Collect prompts since (e.g. 7d, 30d, 2025-01-01)"
+        required: false
+        default: "30d"
+
+jobs:
+  collect-and-export:
+    name: Collect git-ai attribution & export to DB
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SINCE: ${{ github.event.inputs.since || '30d' }}
+
+    steps:
+      - name: Checkout repository (full history + notes)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history required for git log attribution
+          fetch-tags: true
+
+      - name: Fetch git-ai notes from remote
+        run: |
+          # Fetch refs/notes/ai from origin so all developer notes are local
+          git fetch origin '+refs/notes/*:refs/notes/*' --force || true
+          echo "Notes refs present:"
+          git for-each-ref refs/notes/ || echo "  (none)"
+
+      - name: Install git-ai
+        run: |
+          curl -sSL https://usegitai.com/install.sh | bash
+          echo "$HOME/.git-ai/bin" >> "$GITHUB_PATH"
+
+      - name: Verify git-ai installation
+        run: git-ai -v
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: pip install psycopg2-binary
+
+      - name: Build prompts.db from all authors
+        run: |
+          git-ai prompts --all-authors --since "$SINCE"
+          echo "Prompts collected:"
+          sqlite3 prompts.db "SELECT count(*) || ' prompts' FROM prompts;"
+
+      - name: Export prompts.db to Postgres / Supabase
+        run: python3 scripts/export-prompts-to-db.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PROMPTS_DB: prompts.db
+
+      - name: Generate static HTML dashboard
+        run: python3 scripts/git-ai-dashboard.py --all --no-enrich --output dashboard.html
+
+      - name: Upload dashboard as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-ai-dashboard
+          path: dashboard.html
+          retention-days: 30
