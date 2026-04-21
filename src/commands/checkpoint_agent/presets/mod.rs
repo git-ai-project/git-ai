@@ -11,6 +11,9 @@ mod droid;
 mod firebender;
 mod gemini;
 mod github_copilot;
+mod known_human;
+mod mock_ai;
+mod mock_known_human;
 mod opencode;
 mod pi;
 mod windsurf;
@@ -117,6 +120,9 @@ pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
         "droid" => Ok(Box::new(droid::DroidPreset)),
         "opencode" => Ok(Box::new(opencode::OpenCodePreset)),
         "pi" => Ok(Box::new(pi::PiPreset)),
+        "mock_ai" => Ok(Box::new(mock_ai::MockAiPreset)),
+        "known_human" => Ok(Box::new(known_human::KnownHumanPreset)),
+        "mock_known_human" => Ok(Box::new(mock_known_human::MockKnownHumanPreset)),
         _ => Err(GitAiError::PresetError(format!("Unknown preset: {}", name))),
     }
 }
