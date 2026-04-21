@@ -111,7 +111,7 @@ fn test_checkpoint_with_prompt_sharing_enabled() {
         "Expected AI sessions in authorship log when prompt sharing is enabled"
     );
 
-    // Verify the session message is captured
+    // Verify the session message is captured (agent-v1 uses inline transcripts)
     let sessions: Vec<_> = commit.authorship_log.metadata.sessions.values().collect();
     assert_eq!(sessions.len(), 1, "Expected exactly one session");
     let session = sessions[0];
@@ -244,7 +244,7 @@ fn test_multiple_checkpoints_with_messages() {
     let sessions: Vec<_> = commit.authorship_log.metadata.sessions.values().collect();
     assert_eq!(sessions.len(), 2, "Expected exactly 2 sessions");
 
-    // Verify both sessions have messages (order may vary due to BTreeMap)
+    // Verify both sessions have messages (agent-v1 uses inline transcripts, order may vary due to BTreeMap)
     for session in &sessions {
         assert!(
             !session.messages.is_empty(),

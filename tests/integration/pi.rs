@@ -153,10 +153,10 @@ fn test_pi_after_edit_checkpoint_via_cli_creates_ai_checkpoint() {
     let checkpoints = read_checkpoints(&repo);
     assert_eq!(checkpoints.len(), 1);
     assert_eq!(checkpoints[0].kind, CheckpointKind::AiAgent);
-    assert_eq!(
-        checkpoints[0].agent_id.as_ref().unwrap().model,
-        "claude-sonnet-4-5"
-    );
+    // At checkpoint time, model stays "unknown" — file-based transcript reads
+    // are skipped during checkpointing. Model resolution happens at commit time
+    // via update_prompts_to_latest.
+    assert_eq!(checkpoints[0].agent_id.as_ref().unwrap().model, "unknown");
     assert!(
         checkpoints[0].transcript.is_none(),
         "Pi checkpoints with session_path should persist metadata and drop inline transcript"
@@ -168,6 +168,19 @@ fn test_pi_after_edit_checkpoint_via_cli_creates_ai_checkpoint() {
             .and_then(|metadata| metadata.get("tool_name_raw"))
             .map(String::as_str),
         Some("edit")
+    );
+
+    // After commit, post-commit hook reads the transcript file and resolves the model
+    let commit = repo.stage_all_and_commit("pi edit").unwrap();
+    let sessions: Vec<_> = commit.authorship_log.metadata.sessions.values().collect();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(
+        sessions[0].agent_id.model, "claude-sonnet-4-5",
+        "Model should be resolved from transcript at commit time"
+    );
+    assert!(
+        !sessions[0].messages.is_empty(),
+        "Transcript messages should be populated at commit time"
     );
 }
 

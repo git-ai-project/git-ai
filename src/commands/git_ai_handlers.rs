@@ -78,8 +78,7 @@ pub fn handle_git_ai(args: &[String]) {
 
     // Start DB warmup early for commands that need database access
     match args[0].as_str() {
-        "checkpoint" | "show-prompt" | "share" | "sync-prompts" | "flush-cas" | "search"
-        | "continue" => {
+        "show-prompt" | "flush-cas" => {
             InternalDatabase::warmup();
         }
         _ => {}
@@ -206,21 +205,6 @@ pub fn handle_git_ai(args: &[String]) {
         "show-prompt" => {
             commands::show_prompt::handle_show_prompt(&args[1..]);
         }
-        "share" => {
-            commands::share::handle_share(&args[1..]);
-        }
-        "sync-prompts" => {
-            commands::sync_prompts::handle_sync_prompts(&args[1..]);
-        }
-        "prompts" => {
-            commands::prompts_db::handle_prompts(&args[1..]);
-        }
-        "search" => {
-            commands::search::handle_search(&args[1..]);
-        }
-        "continue" => {
-            commands::continue_session::handle_continue(&args[1..]);
-        }
         "fetch-notes" => {
             commands::fetch_notes::handle_fetch_notes(&args[1..]);
         }
@@ -288,14 +272,6 @@ fn print_help() {
     eprintln!(
         "    --offset <n>          Skip n occurrences (0 = most recent, mutually exclusive with --commit)"
     );
-    eprintln!("  share <id>         Share a prompt by creating a bundle");
-    eprintln!("    --title <title>       Custom title for the bundle (default: auto-generated)");
-    eprintln!("  sync-prompts       Update prompts in database to latest versions");
-    eprintln!("    --since <time>        Only sync prompts updated after this time");
-    eprintln!(
-        "                          Formats: '1d', '2h', '1w', Unix timestamp, ISO8601, YYYY-MM-DD"
-    );
-    eprintln!("    --workdir <path>      Only sync prompts from specific repository");
     eprintln!("  config             View and manage git-ai configuration");
     eprintln!("                        Show all config as formatted JSON");
     eprintln!("    <key>                 Show specific config value (supports dot notation)");
@@ -316,37 +292,6 @@ fn print_help() {
     eprintln!("  git-path           Print the path to the underlying git executable");
     eprintln!("  upgrade            Check for updates and install if available");
     eprintln!("    --force               Reinstall latest version even if already up to date");
-    eprintln!("  prompts            Create local SQLite database for prompt analysis");
-    eprintln!("    --since <time>        Only include prompts after this time (default: 30d)");
-    eprintln!("    --author <name>       Filter by human author (default: current git user)");
-    eprintln!("    --all-authors         Include prompts from all authors");
-    eprintln!("    exec \"<SQL>\"          Execute arbitrary SQL on prompts.db");
-    eprintln!("    list                  List prompts as TSV");
-    eprintln!("    next                  Get next prompt as JSON (iterator pattern)");
-    eprintln!("    reset                 Reset iteration pointer to start");
-    eprintln!("  search             Search AI prompt history");
-    eprintln!("    --commit <rev>        Search by commit (SHA, branch, tag, symbolic ref)");
-    eprintln!("    --file <path>         Search by file path");
-    eprintln!("    --lines <start-end>   Limit to line range (requires --file; repeatable)");
-    eprintln!("    --pattern <text>      Full-text search in prompt messages");
-    eprintln!("    --prompt-id <id>      Look up specific prompt");
-    eprintln!("    --tool <name>         Filter by AI tool (claude, cursor, etc.)");
-    eprintln!("    --author <name>       Filter by human author");
-    eprintln!("    --since <time>        Only prompts after this time");
-    eprintln!("    --until <time>        Only prompts before this time");
-    eprintln!("    --json                Output as JSON");
-    eprintln!("    --verbose             Include full transcripts");
-    eprintln!("    --porcelain           Stable machine-parseable format");
-    eprintln!("    --count               Just show result count");
-    eprintln!("  continue           Restore AI session context and launch agent");
-    eprintln!("    --commit <rev>        Continue from a specific commit");
-    eprintln!("    --file <path>         Continue from a specific file");
-    eprintln!("    --lines <start-end>   Limit to line range (requires --file)");
-    eprintln!("    --prompt-id <id>      Continue from a specific prompt");
-    eprintln!("    --agent <name>        Select agent (claude, cursor; default: claude)");
-    eprintln!("    --launch              Launch agent CLI with restored context");
-    eprintln!("    --clipboard           Copy context to system clipboard");
-    eprintln!("    --json                Output context as structured JSON");
     eprintln!("  fetch-notes [remote] Synchronously fetch AI authorship notes");
     eprintln!("    --remote <name>       Explicit remote name (default: upstream or origin)");
     eprintln!("    --json                Output result as JSON");

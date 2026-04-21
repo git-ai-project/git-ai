@@ -35,80 +35,65 @@ pub fn handle_show_prompt(args: &[String]) {
     ) {
         Ok((commit_sha, mut prompt_record)) => {
             // If messages are empty, resolve from the best available source.
-            // Priority: CAS cache → CAS API (if messages_url) → local SQLite
-            if prompt_record.messages.is_empty() {
-                if let Some(url) = &prompt_record.messages_url
-                    && let Some(hash) = url.rsplit('/').next().filter(|h| !h.is_empty())
+            // Priority: CAS cache → CAS API (if messages_url)
+            if prompt_record.messages.is_empty()
+                && let Some(url) = &prompt_record.messages_url
+                && let Some(hash) = url.rsplit('/').next().filter(|h| !h.is_empty())
+            {
+                // 1. Check cas_cache (instant, local)
+                if let Ok(db_mutex) = InternalDatabase::global()
+                    && let Ok(db_guard) = db_mutex.lock()
+                    && let Ok(Some(cached_json)) = db_guard.get_cas_cache(hash)
+                    && let Ok(cas_obj) = serde_json::from_str::<CasMessagesObject>(&cached_json)
                 {
-                    // 1. Check cas_cache (instant, local)
-                    if let Ok(db_mutex) = InternalDatabase::global()
-                        && let Ok(db_guard) = db_mutex.lock()
-                        && let Ok(Some(cached_json)) = db_guard.get_cas_cache(hash)
-                        && let Ok(cas_obj) = serde_json::from_str::<CasMessagesObject>(&cached_json)
-                    {
-                        prompt_record.messages = cas_obj.messages;
-                        tracing::debug!("show-prompt: resolved from cas_cache");
-                    }
+                    prompt_record.messages = cas_obj.messages;
+                    tracing::debug!("show-prompt: resolved from cas_cache");
+                }
 
-                    // 2. If cache miss, fetch from CAS API (network)
-                    if prompt_record.messages.is_empty() {
-                        let context = ApiContext::new(None);
-                        if context.auth_token.is_some() {
-                            tracing::debug!(
-                                "show-prompt: trying CAS API for hash {}",
-                                &hash[..8.min(hash.len())]
-                            );
-                            let client = ApiClient::new(context);
-                            match client.read_ca_prompt_store(&[hash]) {
-                                Ok(response) => {
-                                    for result in &response.results {
-                                        if result.status == "ok"
-                                            && let Some(content) = &result.content
+                // 2. If cache miss, fetch from CAS API (network)
+                if prompt_record.messages.is_empty() {
+                    let context = ApiContext::new(None);
+                    if context.auth_token.is_some() {
+                        tracing::debug!(
+                            "show-prompt: trying CAS API for hash {}",
+                            &hash[..8.min(hash.len())]
+                        );
+                        let client = ApiClient::new(context);
+                        match client.read_ca_prompt_store(&[hash]) {
+                            Ok(response) => {
+                                for result in &response.results {
+                                    if result.status == "ok"
+                                        && let Some(content) = &result.content
+                                    {
+                                        let json_str =
+                                            serde_json::to_string(content).unwrap_or_default();
+                                        if let Ok(cas_obj) =
+                                            serde_json::from_value::<CasMessagesObject>(
+                                                content.clone(),
+                                            )
                                         {
-                                            let json_str =
-                                                serde_json::to_string(content).unwrap_or_default();
-                                            if let Ok(cas_obj) =
-                                                serde_json::from_value::<CasMessagesObject>(
-                                                    content.clone(),
-                                                )
+                                            prompt_record.messages = cas_obj.messages;
+                                            tracing::debug!(
+                                                "show-prompt: resolved {} messages from CAS API",
+                                                prompt_record.messages.len()
+                                            );
+                                            // Cache for next time
+                                            if let Ok(db_mutex) = InternalDatabase::global()
+                                                && let Ok(mut db_guard) = db_mutex.lock()
                                             {
-                                                prompt_record.messages = cas_obj.messages;
-                                                tracing::debug!(
-                                                    "show-prompt: resolved {} messages from CAS API",
-                                                    prompt_record.messages.len()
-                                                );
-                                                // Cache for next time
-                                                if let Ok(db_mutex) = InternalDatabase::global()
-                                                    && let Ok(mut db_guard) = db_mutex.lock()
-                                                {
-                                                    let _ = db_guard.set_cas_cache(hash, &json_str);
-                                                }
+                                                let _ = db_guard.set_cas_cache(hash, &json_str);
                                             }
                                         }
                                     }
                                 }
-                                Err(e) => {
-                                    tracing::debug!("show-prompt: CAS API error: {}", e);
-                                }
                             }
-                        } else {
-                            tracing::debug!("show-prompt: no auth token, skipping CAS API");
+                            Err(e) => {
+                                tracing::debug!("show-prompt: CAS API error: {}", e);
+                            }
                         }
+                    } else {
+                        tracing::debug!("show-prompt: no auth token, skipping CAS API");
                     }
-                }
-
-                // 3. Last resort: local SQLite (for prompts without a CAS URL)
-                if prompt_record.messages.is_empty()
-                    && let Ok(db_mutex) = InternalDatabase::global()
-                    && let Ok(db_guard) = db_mutex.lock()
-                    && let Ok(Some(db_record)) = db_guard.get_prompt(&parsed.prompt_id)
-                    && !db_record.messages.messages.is_empty()
-                {
-                    prompt_record.messages = db_record.messages.messages;
-                    tracing::debug!(
-                        "show-prompt: resolved {} messages from local SQLite",
-                        prompt_record.messages.len()
-                    );
                 }
             }
 

@@ -884,23 +884,15 @@ fn execute_resolved_checkpoint(
 
         if kind.is_ai() {
             if let Some(cr) = &checkpoint_request {
-                // Read transcript from source if available
-                let (transcript, transcript_model) = cr
-                    .transcript_source
-                    .as_ref()
-                    .and_then(|src| {
-                        crate::commands::checkpoint_agent::transcript_readers::read_transcript(src)
-                            .ok()
-                    })
-                    .unwrap_or_default();
-                checkpoint.transcript = Some(transcript);
-                // Resolve model from transcript when the preset couldn't determine it
-                if let Some(mut agent_id) = cr.agent_id.clone() {
-                    if agent_id.model == "unknown"
-                        && let Some(model) = transcript_model
-                    {
-                        agent_id.model = model;
-                    }
+                // Only store inline transcripts (e.g. agent-v1, mock_ai) — skip
+                // file-based transcript reads which are expensive in RAM/time.
+                if let Some(crate::commands::checkpoint_agent::presets::TranscriptSource::Inline(
+                    ref transcript,
+                )) = cr.transcript_source
+                {
+                    checkpoint.transcript = Some(transcript.clone());
+                }
+                if let Some(agent_id) = cr.agent_id.clone() {
                     checkpoint.agent_id = Some(agent_id);
                 }
                 checkpoint.agent_metadata = if cr.metadata.is_empty() {
@@ -937,25 +929,6 @@ fn execute_resolved_checkpoint(
             "[BENCHMARK] Checkpoint creation took {:?}",
             checkpoint_create_start.elapsed()
         );
-
-        if kind.is_ai()
-            && checkpoint.agent_id.is_some()
-            && checkpoint.transcript.is_some()
-            && let Err(e) = upsert_checkpoint_prompt_to_db(
-                &checkpoint,
-                working_log.repo_workdir.to_string_lossy().to_string(),
-                None,
-            )
-        {
-            tracing::debug!("[Warning] Failed to upsert prompt to database: {}", e);
-            crate::observability::log_error(
-                &e,
-                Some(serde_json::json!({
-                    "operation": "checkpoint_prompt_upsert",
-                    "agent_tool": checkpoint.agent_id.as_ref().map(|a| a.tool.as_str())
-                })),
-            );
-        }
 
         let append_start = Instant::now();
         working_log.append_checkpoint(&checkpoint)?;
@@ -2282,29 +2255,6 @@ fn is_text_file_in_head(repo: &Repository, path: &str) -> bool {
         }
         Err(_) => false,
     }
-}
-
-/// Upsert a checkpoint prompt to the internal database
-fn upsert_checkpoint_prompt_to_db(
-    checkpoint: &Checkpoint,
-    workdir: String,
-    commit_sha: Option<String>,
-) -> Result<(), GitAiError> {
-    use crate::authorship::internal_db::{InternalDatabase, PromptDbRecord};
-
-    let record = PromptDbRecord::from_checkpoint(checkpoint, Some(workdir), commit_sha)
-        .ok_or_else(|| {
-            GitAiError::Generic("Failed to create prompt record from checkpoint".to_string())
-        })?;
-
-    let db = InternalDatabase::global()?;
-    let mut db_guard = db
-        .lock()
-        .map_err(|e| GitAiError::Generic(format!("Failed to lock database: {}", e)))?;
-
-    db_guard.upsert_prompt(&record)?;
-
-    Ok(())
 }
 
 #[cfg(test)]
