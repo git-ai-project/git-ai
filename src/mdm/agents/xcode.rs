@@ -533,25 +533,25 @@ impl XcodeInstaller {
         };
 
         let service = format!("{}/{}", domain, XCODE_WATCHER_LABEL);
-        let mut launchctl_warning = Self::bootout_launch_agent(&domain).err();
+        let bootout_warning = Self::bootout_launch_agent(&domain).err();
 
-        if launchctl_warning.is_none() {
-            let bootstrap_args = vec![
-                "bootstrap".to_string(),
-                domain.clone(),
-                Self::plist_path().to_string_lossy().to_string(),
-            ];
-            if let Err(error) = Self::run_launchctl(&bootstrap_args) {
-                launchctl_warning = Some(error);
-            }
-        }
-
-        if launchctl_warning.is_none() {
+        let bootstrap_args = vec![
+            "bootstrap".to_string(),
+            domain.clone(),
+            Self::plist_path().to_string_lossy().to_string(),
+        ];
+        let launchctl_warning = if let Err(error) = Self::run_launchctl(&bootstrap_args) {
+            Some(match bootout_warning {
+                Some(bootout) => format!(
+                    "Bootstrap failed: {} (preceded by bootout warning: {})",
+                    error, bootout
+                ),
+                None => error,
+            })
+        } else {
             let kickstart_args = vec!["kickstart".to_string(), "-k".to_string(), service];
-            if let Err(error) = Self::run_launchctl(&kickstart_args) {
-                launchctl_warning = Some(error);
-            }
-        }
+            Self::run_launchctl(&kickstart_args).err()
+        };
 
         Ok(LaunchAgentApplyResult {
             message: format!(
@@ -1029,6 +1029,17 @@ mod tests {
         fs::set_permissions(&stub_path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    fn write_launchctl_bootout_io_error_stub(bin_dir: &Path, log_path: &Path) {
+        let stub_path = bin_dir.join("launchctl");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\nif [ \"$1\" = \"bootout\" ]; then\n  echo 'Boot-out failed: 5: Input/output error' >&2\n  exit 5\nfi\nexit 0\n",
+            log_path.display(),
+        );
+        fs::write(&stub_path, script).unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&stub_path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
     #[test]
     fn test_xcode_installer_name_and_id() {
         let installer = XcodeInstaller;
@@ -1440,6 +1451,38 @@ mod tests {
                         .contains("Unable to reload watcher automatically")
                 );
                 assert!(XcodeInstaller::plist_path().exists());
+            });
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn test_apply_launch_agent_ignores_bootout_io_error_if_restart_succeeds() {
+        with_temp_home(|home| {
+            with_path_override(|bin_dir| {
+                let workspace = home.join("ios");
+                let launchctl_log = home.join("launchctl.log");
+                fs::create_dir_all(&workspace).unwrap();
+                fs::create_dir_all(XcodeInstaller::watcher_binary_path().parent().unwrap())
+                    .unwrap();
+                fs::write(XcodeInstaller::watcher_binary_path(), "#!/bin/sh\n").unwrap();
+                #[cfg(unix)]
+                fs::set_permissions(
+                    XcodeInstaller::watcher_binary_path(),
+                    fs::Permissions::from_mode(0o755),
+                )
+                .unwrap();
+                write_launchctl_bootout_io_error_stub(bin_dir, &launchctl_log);
+
+                let result = XcodeInstaller::apply_launch_agent(&[workspace]).unwrap();
+                assert!(result.warning.is_none());
+                assert!(XcodeInstaller::plist_path().exists());
+
+                let log = fs::read_to_string(launchctl_log).unwrap();
+                assert!(log.contains("bootout"));
+                assert!(log.contains("bootstrap"));
+                assert!(log.contains("kickstart"));
             });
         });
     }
