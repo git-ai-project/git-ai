@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CheckpointResult {
+pub struct CheckpointRequest {
     pub trace_id: String,
     pub checkpoint_kind: CheckpointKind,
     pub agent_id: AgentId,
@@ -28,7 +28,7 @@ pub struct CheckpointResult {
 pub fn execute_preset_checkpoint(
     preset_name: &str,
     hook_input: &str,
-) -> Result<Vec<CheckpointResult>, GitAiError> {
+) -> Result<Vec<CheckpointRequest>, GitAiError> {
     let trace_id = generate_trace_id();
     let preset = super::presets::resolve_preset(preset_name)?;
     let events = preset.parse(hook_input, &trace_id)?;
@@ -56,7 +56,7 @@ fn resolve_repo_working_dir_from_cwd(cwd: &std::path::Path) -> Result<PathBuf, G
 fn execute_event(
     event: ParsedHookEvent,
     preset_name: &str,
-) -> Result<Option<CheckpointResult>, GitAiError> {
+) -> Result<Option<CheckpointRequest>, GitAiError> {
     match event {
         ParsedHookEvent::PreFileEdit(e) => execute_pre_file_edit(e).map(Some),
         ParsedHookEvent::PostFileEdit(e) => execute_post_file_edit(e, preset_name).map(Some),
@@ -65,14 +65,14 @@ fn execute_event(
     }
 }
 
-fn execute_pre_file_edit(e: PreFileEdit) -> Result<CheckpointResult, GitAiError> {
+fn execute_pre_file_edit(e: PreFileEdit) -> Result<CheckpointRequest, GitAiError> {
     let repo_working_dir = if !e.file_paths.is_empty() {
         resolve_repo_working_dir_from_file_paths(&e.file_paths)?
     } else {
         resolve_repo_working_dir_from_cwd(&e.context.cwd)?
     };
 
-    Ok(CheckpointResult {
+    Ok(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind: CheckpointKind::Human,
         agent_id: e.context.agent_id,
@@ -89,7 +89,7 @@ fn execute_pre_file_edit(e: PreFileEdit) -> Result<CheckpointResult, GitAiError>
 fn execute_post_file_edit(
     e: PostFileEdit,
     preset_name: &str,
-) -> Result<CheckpointResult, GitAiError> {
+) -> Result<CheckpointRequest, GitAiError> {
     let repo_working_dir = if !e.file_paths.is_empty() {
         resolve_repo_working_dir_from_file_paths(&e.file_paths)?
     } else {
@@ -102,7 +102,7 @@ fn execute_post_file_edit(
         _ => CheckpointKind::AiAgent,
     };
 
-    Ok(CheckpointResult {
+    Ok(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind,
         agent_id: e.context.agent_id,
@@ -116,7 +116,7 @@ fn execute_post_file_edit(
     })
 }
 
-fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointResult>, GitAiError> {
+fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointRequest>, GitAiError> {
     let repo_working_dir = resolve_repo_working_dir_from_cwd(&e.context.cwd)?;
 
     let pre_hook_result = super::agent_presets::prepare_agent_bash_pre_hook(
@@ -132,7 +132,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointResult>, Git
     match pre_hook_result {
         super::agent_presets::BashPreHookResult::EmitHumanCheckpoint {
             captured_checkpoint_id,
-        } => Ok(Some(CheckpointResult {
+        } => Ok(Some(CheckpointRequest {
             trace_id: e.context.trace_id,
             checkpoint_kind: CheckpointKind::Human,
             agent_id: e.context.agent_id,
@@ -148,7 +148,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointResult>, Git
     }
 }
 
-fn execute_post_bash_call(e: PostBashCall) -> Result<CheckpointResult, GitAiError> {
+fn execute_post_bash_call(e: PostBashCall) -> Result<CheckpointRequest, GitAiError> {
     let repo_working_dir = resolve_repo_working_dir_from_cwd(&e.context.cwd)?;
 
     let bash_result = bash_tool::handle_bash_tool(
@@ -180,7 +180,7 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<CheckpointResult, GitAiErro
         }
     };
 
-    Ok(CheckpointResult {
+    Ok(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind: CheckpointKind::AiAgent,
         agent_id: e.context.agent_id,

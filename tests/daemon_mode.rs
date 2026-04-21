@@ -8,7 +8,7 @@ use git_ai::commands::checkpoint::{
     PreparedCheckpointFile, PreparedCheckpointFileSource, PreparedCheckpointManifest,
     PreparedPathRole, prepare_captured_checkpoint,
 };
-use git_ai::commands::checkpoint_agent::orchestrator::CheckpointResult;
+use git_ai::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use git_ai::daemon::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, DaemonConfig, DaemonLock,
     local_socket_connects_with_timeout, open_local_socket_stream_with_timeout, read_daemon_pid,
@@ -580,13 +580,13 @@ fn write_base_files(repo: &TestRepo) {
         .expect("initial commit should succeed");
 }
 
-fn ai_checkpoint_result(
+fn ai_checkpoint_request(
     repo: &TestRepo,
     edited_filepaths: Vec<String>,
     dirty_files: Option<HashMap<String, String>>,
-) -> CheckpointResult {
+) -> CheckpointRequest {
     use std::path::PathBuf;
-    CheckpointResult {
+    CheckpointRequest {
         trace_id: git_ai::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::AiAgent,
         agent_id: AgentId {
@@ -642,7 +642,7 @@ fn prepare_captured_checkpoint_only_captures_explicit_files_when_other_ai_touche
         &repo_storage(&repo),
         "Test User",
         CheckpointKind::AiAgent,
-        Some(&ai_checkpoint_result(
+        Some(&ai_checkpoint_request(
             &repo,
             vec!["alphabet.md".to_string()],
             None,
@@ -1427,7 +1427,7 @@ fn daemon_captured_checkpoint_replay_uses_blob_snapshot_after_worktree_changes()
                     blob_name: "captured-race-blob".to_string(),
                 },
             }],
-            checkpoint_result: Some(ai_checkpoint_result(
+            checkpoint_request: Some(ai_checkpoint_request(
                 &repo,
                 vec!["captured-race.txt".to_string()],
                 None,
@@ -1525,7 +1525,7 @@ fn daemon_captured_checkpoint_replay_supports_mixed_dirty_and_blob_sources() {
                     },
                 },
             ],
-            checkpoint_result: Some(ai_checkpoint_result(
+            checkpoint_request: Some(ai_checkpoint_request(
                 &repo,
                 vec![
                     "dirty-source.txt".to_string(),
@@ -1604,7 +1604,7 @@ fn daemon_captured_checkpoint_failure_cleans_up_capture_dir() {
                     blob_name: "missing-blob".to_string(),
                 },
             }],
-            checkpoint_result: Some(ai_checkpoint_result(
+            checkpoint_request: Some(ai_checkpoint_request(
                 &repo,
                 vec!["broken-capture.txt".to_string()],
                 None,
@@ -1668,7 +1668,7 @@ fn daemon_captured_checkpoint_rejects_manifest_for_different_repo() {
                     blob_name: "wrong-repo-blob".to_string(),
                 },
             }],
-            checkpoint_result: Some(ai_checkpoint_result(
+            checkpoint_request: Some(ai_checkpoint_request(
                 &repo,
                 vec!["wrong-repo-capture.txt".to_string()],
                 None,
