@@ -36,7 +36,6 @@ mod codex;
 mod commit_post_stats_benchmark;
 mod config_pattern_detection;
 mod continue_cli;
-mod continue_session;
 mod cross_repo_cwd_attribution;
 mod cursor;
 mod diff;
