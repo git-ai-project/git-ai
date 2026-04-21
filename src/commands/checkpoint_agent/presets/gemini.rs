@@ -21,8 +21,7 @@ impl AgentPreset for GeminiPreset {
         let transcript_path = parse::required_str(&data, "transcript_path")?;
         let tool_name = parse::optional_str_multi(&data, &["tool_name", "toolName"]);
         let hook_event = parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
-        let tool_use_id =
-            parse::str_or_default_multi(&data, &["tool_use_id", "toolUseId"], "bash");
+        let tool_use_id = parse::str_or_default_multi(&data, &["tool_use_id", "toolUseId"], "bash");
 
         let is_bash = tool_name
             .map(|n| bash_tool::classify_tool(Agent::Gemini, n) == ToolClass::Bash)

@@ -1197,7 +1197,10 @@ fn attempt_pre_hook_capture(
             model: String::new(),
         },
         repo_working_dir: PathBuf::from(repo_working_dir.clone()),
-        file_paths: stale_files.to_vec(),
+        file_paths: stale_files
+            .iter()
+            .map(|p| PathBuf::from(crate::utils::normalize_to_posix(&p.to_string_lossy())))
+            .collect(),
         path_role: crate::commands::checkpoint::PreparedPathRole::WillEdit,
         dirty_files: Some(
             contents

@@ -25,6 +25,7 @@ impl AgentPreset for WindsurfPreset {
             .or_else(|| parse::optional_str(&data, "cwd"));
 
         let model = parse::optional_str(&data, "model_name")
+            .filter(|s| !s.is_empty() && *s != "Unknown")
             .unwrap_or("unknown")
             .to_string();
 
