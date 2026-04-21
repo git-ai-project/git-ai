@@ -40,6 +40,9 @@ fn read_from_path(
 ) -> Result<(AiTranscript, Option<String>), GitAiError> {
     match format {
         TranscriptFormat::ClaudeJsonl => read_claude_jsonl(path),
+        TranscriptFormat::ContinueJson => {
+            read_continue_json(path).map(|transcript| (transcript, None))
+        }
         TranscriptFormat::GeminiJson => read_gemini_json(path),
         TranscriptFormat::WindsurfJsonl => read_windsurf_jsonl(path),
         TranscriptFormat::CodexJsonl => read_codex_jsonl(path),
