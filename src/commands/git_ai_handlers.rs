@@ -405,257 +405,43 @@ fn handle_checkpoint(args: &[String]) {
 
     let mut checkpoint_result: Option<CheckpointResult> = None;
     // Handle preset arguments after parsing all flags
-    if !args.is_empty() {
-        // Route recognized presets through the new orchestrator; mock/test presets
-        // are handled by the second match below.
-        match args[0].as_str() {
-            "mock_ai" | "known_human" | "mock_known_human" => {
-                // These are handled below -- skip the orchestrator path
-            }
-            _ => {
-                if crate::commands::checkpoint_agent::presets::resolve_preset(args[0].as_str())
-                    .is_ok()
-                {
-                    match crate::commands::checkpoint_agent::orchestrator::execute_preset_checkpoint(
-                        args[0].as_str(),
-                        hook_input.as_deref().unwrap_or(""),
-                    ) {
-                        Ok(results) => {
-                            if let Some(first) = results.into_iter().next() {
-                                repository_working_dir =
-                                    first.repo_working_dir.to_string_lossy().to_string();
-                                checkpoint_result = Some(first);
-                            } else {
-                                // SnapshotOnly or no-op: orchestrator handled
-                                // the side effect already, nothing to checkpoint.
-                                std::process::exit(0);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("{} preset error: {}", args[0], e);
-                            std::process::exit(0);
-                        }
+    if !args.is_empty()
+        && crate::commands::checkpoint_agent::presets::resolve_preset(args[0].as_str()).is_ok()
+    {
+        // For mock/test presets invoked via CLI args (no --hook-input), synthesize
+        // JSON so they can go through the standard orchestrator path.
+        let effective_hook_input = if hook_input.is_some() {
+            hook_input.clone().unwrap_or_default()
+        } else {
+            synthesize_hook_input_from_cli_args(args[0].as_str(), &args[1..])
+        };
+
+        match crate::commands::checkpoint_agent::orchestrator::execute_preset_checkpoint(
+            args[0].as_str(),
+            &effective_hook_input,
+        ) {
+            Ok(results) => {
+                if let Some(mut first) = results.into_iter().next() {
+                    // mock_ai with no file paths: fall back to all staged/unstaged files
+                    if args[0] == "mock_ai" && first.file_paths.is_empty() {
+                        let working_dir = first.repo_working_dir.to_string_lossy().to_string();
+                        first.file_paths = get_all_files_for_mock_ai(&working_dir)
+                            .into_iter()
+                            .map(std::path::PathBuf::from)
+                            .collect();
                     }
+                    repository_working_dir = first.repo_working_dir.to_string_lossy().to_string();
+                    checkpoint_result = Some(first);
+                } else {
+                    // SnapshotOnly or no-op: orchestrator handled
+                    // the side effect already, nothing to checkpoint.
+                    std::process::exit(0);
                 }
             }
-        }
-
-        // Second match: mock/test presets that bypass the orchestrator
-        match args[0].as_str() {
-            "mock_ai" => {
-                let mock_agent_id = format!(
-                    "ai-thread-{}",
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or_else(|_| 0)
-                );
-
-                // Collect all remaining args (after mock_ai and flags) as pathspecs
-                let edited_filepaths: Vec<std::path::PathBuf> = if args.len() > 1 {
-                    let mut paths = Vec::new();
-                    for arg in &args[1..] {
-                        // Skip flags
-                        if !arg.starts_with("--") {
-                            paths.push(std::path::PathBuf::from(arg));
-                        }
-                    }
-                    paths
-                } else {
-                    let working_dir = checkpoint_result
-                        .as_ref()
-                        .map(|r| r.repo_working_dir.to_string_lossy().to_string())
-                        .unwrap_or(repository_working_dir.clone());
-                    // Find the git repository
-                    get_all_files_for_mock_ai(&working_dir)
-                        .into_iter()
-                        .map(std::path::PathBuf::from)
-                        .collect()
-                };
-
-                checkpoint_result = Some(CheckpointResult {
-                    trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-                    checkpoint_kind: CheckpointKind::AiAgent,
-                    agent_id: AgentId {
-                        tool: "mock_ai".to_string(),
-                        id: mock_agent_id,
-                        model: "unknown".to_string(),
-                    },
-                    repo_working_dir: std::path::PathBuf::from(&repository_working_dir),
-                    file_paths: edited_filepaths,
-                    path_role: PreparedPathRole::Edited,
-                    dirty_files: None,
-                    transcript_source: None,
-                    metadata: std::collections::HashMap::new(),
-                    captured_checkpoint_id: None,
-                });
+            Err(e) => {
+                eprintln!("{} preset error: {}", args[0], e);
+                std::process::exit(0);
             }
-            "known_human" => {
-                // Production preset: IDE extension attests human-authored lines.
-                // Stdin mode (--hook-input stdin): all data passed as JSON on stdin:
-                //   { "editor": "...", "editor_version": "...", "extension_version": "...",
-                //     "cwd": "/abs/path", "edited_filepaths": [...], "dirty_files": {...} }
-                // CLI mode: git ai checkpoint known_human [--editor <name>]
-                //           [--editor-version <ver>] [--extension-version <ver>] -- file...
-                let (
-                    editor,
-                    editor_version,
-                    extension_version,
-                    repo_working_dir,
-                    edited_filepaths,
-                    dirty_files,
-                ) = if let Some(ref json_str) = hook_input {
-                    let v: serde_json::Value = serde_json::from_str(json_str)
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                    let editor = v["editor"].as_str().unwrap_or("unknown").to_string();
-                    let editor_version = v["editor_version"]
-                        .as_str()
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let extension_version = v["extension_version"]
-                        .as_str()
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let cwd = v["cwd"].as_str().map(str::to_string);
-                    let edited_filepaths = v["edited_filepaths"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|x| x.as_str().map(str::to_string))
-                                .collect::<Vec<_>>()
-                        })
-                        .filter(|v| !v.is_empty());
-                    let dirty_files = v["dirty_files"]
-                        .as_object()
-                        .map(|obj| {
-                            obj.iter()
-                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                                .collect::<std::collections::HashMap<String, String>>()
-                        })
-                        .filter(|m| !m.is_empty());
-                    (
-                        editor,
-                        editor_version,
-                        extension_version,
-                        cwd,
-                        edited_filepaths,
-                        dirty_files,
-                    )
-                } else {
-                    let mut editor = "unknown".to_string();
-                    let mut editor_version = "unknown".to_string();
-                    let mut extension_version = "unknown".to_string();
-                    let mut files: Vec<String> = Vec::new();
-                    let mut i = 1usize; // skip "known_human"
-                    while i < args.len() {
-                        match args[i].as_str() {
-                            "--editor" if i + 1 < args.len() => {
-                                editor = args[i + 1].clone();
-                                i += 2;
-                            }
-                            "--editor-version" if i + 1 < args.len() => {
-                                editor_version = args[i + 1].clone();
-                                i += 2;
-                            }
-                            "--extension-version" if i + 1 < args.len() => {
-                                extension_version = args[i + 1].clone();
-                                i += 2;
-                            }
-                            "--" => {
-                                files.extend(args[i + 1..].iter().cloned());
-                                break;
-                            }
-                            arg if !arg.starts_with("--") => {
-                                files.push(arg.to_string());
-                                i += 1;
-                            }
-                            _ => {
-                                i += 1;
-                            }
-                        }
-                    }
-                    let edited_filepaths = if files.is_empty() { None } else { Some(files) };
-                    (
-                        editor,
-                        editor_version,
-                        extension_version,
-                        None,
-                        edited_filepaths,
-                        None,
-                    )
-                };
-
-                let known_human_agent_metadata = {
-                    let mut m = std::collections::HashMap::new();
-                    m.insert("kh_editor".to_string(), editor);
-                    m.insert("kh_editor_version".to_string(), editor_version);
-                    m.insert("kh_extension_version".to_string(), extension_version);
-                    m
-                };
-
-                checkpoint_result = Some(CheckpointResult {
-                    trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-                    checkpoint_kind: CheckpointKind::KnownHuman,
-                    agent_id: AgentId {
-                        tool: "known_human".to_string(),
-                        id: "known_human_session".to_string(),
-                        model: "unknown".to_string(),
-                    },
-                    repo_working_dir: std::path::PathBuf::from(
-                        repo_working_dir.unwrap_or(repository_working_dir.clone()),
-                    ),
-                    file_paths: edited_filepaths
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(std::path::PathBuf::from)
-                        .collect(),
-                    path_role: PreparedPathRole::Edited,
-                    dirty_files: dirty_files.map(|df| {
-                        df.into_iter()
-                            .map(|(k, v)| (std::path::PathBuf::from(k), v))
-                            .collect()
-                    }),
-                    transcript_source: None,
-                    metadata: known_human_agent_metadata,
-                    captured_checkpoint_id: None,
-                });
-            }
-            "mock_known_human" => {
-                // Test preset: KnownHuman checkpoint for given paths (mirrors mock_ai behavior)
-                let edited_filepaths = if args.len() > 1 {
-                    let mut paths = Vec::new();
-                    for arg in &args[1..] {
-                        if !arg.starts_with("--") {
-                            paths.push(arg.clone());
-                        }
-                    }
-                    if paths.is_empty() { None } else { Some(paths) }
-                } else {
-                    None
-                };
-
-                checkpoint_result = Some(CheckpointResult {
-                    trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-                    checkpoint_kind: CheckpointKind::KnownHuman,
-                    agent_id: AgentId {
-                        tool: "mock_known_human".to_string(),
-                        id: "mock_known_human_session".to_string(),
-                        model: "unknown".to_string(),
-                    },
-                    repo_working_dir: std::path::PathBuf::from(&repository_working_dir),
-                    file_paths: edited_filepaths
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(std::path::PathBuf::from)
-                        .collect(),
-                    path_role: PreparedPathRole::Edited,
-                    dirty_files: None,
-                    transcript_source: None,
-                    metadata: std::collections::HashMap::new(),
-                    captured_checkpoint_id: None,
-                });
-            }
-            _ => {}
         }
     }
 
@@ -1965,6 +1751,76 @@ fn get_all_files_for_mock_ai(working_dir: &str) -> Vec<String> {
     match repo.get_staged_and_unstaged_filenames() {
         Ok(filenames) => filenames.into_iter().collect(),
         Err(_) => Vec::new(),
+    }
+}
+
+/// Synthesize JSON hook_input from CLI args for mock/test presets that can be
+/// invoked without --hook-input.
+fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[String]) -> String {
+    match preset_name {
+        "mock_ai" | "mock_known_human" => {
+            let paths: Vec<&str> = remaining_args
+                .iter()
+                .filter(|a| !a.starts_with("--"))
+                .map(|s| s.as_str())
+                .collect();
+            let cwd = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .to_string_lossy()
+                .to_string();
+            serde_json::json!({
+                "file_paths": paths,
+                "cwd": cwd,
+            })
+            .to_string()
+        }
+        "known_human" => {
+            let mut editor = "unknown".to_string();
+            let mut editor_version = "unknown".to_string();
+            let mut extension_version = "unknown".to_string();
+            let mut files: Vec<String> = Vec::new();
+            let mut i = 0usize;
+            while i < remaining_args.len() {
+                match remaining_args[i].as_str() {
+                    "--editor" if i + 1 < remaining_args.len() => {
+                        editor = remaining_args[i + 1].clone();
+                        i += 2;
+                    }
+                    "--editor-version" if i + 1 < remaining_args.len() => {
+                        editor_version = remaining_args[i + 1].clone();
+                        i += 2;
+                    }
+                    "--extension-version" if i + 1 < remaining_args.len() => {
+                        extension_version = remaining_args[i + 1].clone();
+                        i += 2;
+                    }
+                    "--" => {
+                        files.extend(remaining_args[i + 1..].iter().cloned());
+                        break;
+                    }
+                    arg if !arg.starts_with("--") => {
+                        files.push(arg.to_string());
+                        i += 1;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            let cwd = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .to_string_lossy()
+                .to_string();
+            serde_json::json!({
+                "editor": editor,
+                "editor_version": editor_version,
+                "extension_version": extension_version,
+                "cwd": cwd,
+                "edited_filepaths": files,
+            })
+            .to_string()
+        }
+        _ => String::new(),
     }
 }
 

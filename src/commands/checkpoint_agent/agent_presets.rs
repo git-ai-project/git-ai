@@ -13,28 +13,11 @@ pub enum BashPreHookStrategy {
     SnapshotOnly,
 }
 
-#[allow(dead_code)]
 pub(crate) enum BashPreHookResult {
     EmitHumanCheckpoint {
         captured_checkpoint_id: Option<String>,
     },
-    SkipCheckpoint {
-        captured_checkpoint_id: Option<String>,
-    },
-}
-
-impl BashPreHookResult {
-    #[allow(dead_code)]
-    pub(crate) fn captured_checkpoint_id(self) -> Option<String> {
-        match self {
-            Self::EmitHumanCheckpoint {
-                captured_checkpoint_id,
-            }
-            | Self::SkipCheckpoint {
-                captured_checkpoint_id,
-            } => captured_checkpoint_id,
-        }
-    }
+    SkipCheckpoint,
 }
 
 pub(crate) fn prepare_agent_bash_pre_hook(
@@ -77,9 +60,7 @@ pub(crate) fn prepare_agent_bash_pre_hook(
         BashPreHookStrategy::EmitHumanCheckpoint => BashPreHookResult::EmitHumanCheckpoint {
             captured_checkpoint_id,
         },
-        BashPreHookStrategy::SnapshotOnly => BashPreHookResult::SkipCheckpoint {
-            captured_checkpoint_id,
-        },
+        BashPreHookStrategy::SnapshotOnly => BashPreHookResult::SkipCheckpoint,
     })
 }
 
@@ -232,7 +213,7 @@ mod tests {
                     "failed pre-hook snapshot should not produce a captured checkpoint"
                 );
             }
-            BashPreHookResult::SkipCheckpoint { .. } => {
+            BashPreHookResult::SkipCheckpoint => {
                 panic!("expected EmitHumanCheckpoint result");
             }
         }

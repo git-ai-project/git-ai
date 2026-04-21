@@ -96,10 +96,10 @@ fn execute_post_file_edit(
         resolve_repo_working_dir_from_cwd(&e.context.cwd)?
     };
 
-    let checkpoint_kind = if preset_name == "ai_tab" {
-        CheckpointKind::AiTab
-    } else {
-        CheckpointKind::AiAgent
+    let checkpoint_kind = match preset_name {
+        "ai_tab" => CheckpointKind::AiTab,
+        "known_human" | "mock_known_human" => CheckpointKind::KnownHuman,
+        _ => CheckpointKind::AiAgent,
     };
 
     Ok(CheckpointResult {
@@ -144,7 +144,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointResult>, Git
             metadata: e.context.metadata,
             captured_checkpoint_id,
         })),
-        super::agent_presets::BashPreHookResult::SkipCheckpoint { .. } => Ok(None),
+        super::agent_presets::BashPreHookResult::SkipCheckpoint => Ok(None),
     }
 }
 
