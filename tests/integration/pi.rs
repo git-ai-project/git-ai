@@ -175,8 +175,7 @@ fn test_pi_after_edit_checkpoint_via_cli_creates_ai_checkpoint() {
     let sessions: Vec<_> = commit.authorship_log.metadata.sessions.values().collect();
     assert_eq!(sessions.len(), 1);
     assert_eq!(
-        sessions[0].agent_id.model,
-        "claude-sonnet-4-5",
+        sessions[0].agent_id.model, "claude-sonnet-4-5",
         "Model should be resolved from transcript at commit time"
     );
     assert!(
