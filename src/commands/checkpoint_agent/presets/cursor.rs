@@ -1,5 +1,8 @@
 use super::parse;
-use super::{AgentPreset, ParsedHookEvent, PostFileEdit, PreFileEdit, PresetContext};
+use super::{
+    AgentPreset, ParsedHookEvent, PostFileEdit, PreFileEdit, PresetContext, TranscriptFormat,
+    TranscriptSource,
+};
 use crate::authorship::working_log::AgentId;
 use crate::error::GitAiError;
 use std::collections::HashMap;
@@ -96,9 +99,12 @@ impl AgentPreset for CursorPreset {
             metadata,
         };
 
-        // Transcript is NOT loaded on hook invocations — too expensive to read on every
-        // preToolUse/postToolUse. The transcript_path is stored in metadata so the
-        // post-commit flow can read it when needed.
+        let transcript_source = transcript_path.map(|tp| TranscriptSource::Path {
+            path: PathBuf::from(tp),
+            format: TranscriptFormat::CursorJsonl,
+            session_id: None,
+        });
+
         let event = if hook_event_name == "preToolUse" {
             ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -110,7 +116,7 @@ impl AgentPreset for CursorPreset {
                 context,
                 file_paths,
                 dirty_files: None,
-                transcript_source: None,
+                transcript_source,
             })
         };
 
@@ -219,16 +225,13 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                // Transcript is NOT loaded on hooks (too expensive) — only via post-commit flow.
-                // The path is stored in metadata instead.
-                assert!(e.transcript_source.is_none());
-                assert_eq!(
-                    e.context
-                        .metadata
-                        .get("transcript_path")
-                        .map(String::as_str),
-                    Some("/home/user/.cursor/transcripts/conv-123.jsonl")
-                );
+                assert!(matches!(
+                    e.transcript_source,
+                    Some(TranscriptSource::Path {
+                        format: TranscriptFormat::CursorJsonl,
+                        ..
+                    })
+                ));
             }
             _ => panic!("Expected PostFileEdit"),
         }
