@@ -1,12 +1,11 @@
 use crate::authorship::authorship_log::PromptRecord;
-use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::transcript::AiTranscript;
 use crate::commands::checkpoint_agent::transcript_readers;
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
 use crate::git::repository::Repository;
 use crate::observability::log_error;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Find a prompt in the repository history
@@ -647,35 +646,6 @@ fn update_windsurf_prompt(
         }
     } else {
         PromptUpdateResult::Unchanged
-    }
-}
-
-/// Enrich prompts that have empty messages by falling back to the InternalDatabase (SQLite).
-///
-/// For each prompt in `prompts` whose ID is in `referenced_ids` and whose `messages` field
-/// is empty, attempts to load the messages from the database.
-pub fn enrich_prompt_messages(
-    prompts: &mut HashMap<String, PromptRecord>,
-    referenced_ids: &HashSet<&String>,
-) {
-    let ids_needing_messages: Vec<String> = prompts
-        .iter()
-        .filter(|(k, prompt)| referenced_ids.contains(k) && prompt.messages.is_empty())
-        .map(|(id, _)| id.clone())
-        .collect();
-
-    if !ids_needing_messages.is_empty()
-        && let Ok(db) = InternalDatabase::global()
-        && let Ok(db_guard) = db.lock()
-    {
-        for id in &ids_needing_messages {
-            if let Ok(Some(db_record)) = db_guard.get_prompt(id)
-                && !db_record.messages.messages.is_empty()
-                && let Some(prompt) = prompts.get_mut(id)
-            {
-                prompt.messages = db_record.messages.messages;
-            }
-        }
     }
 }
 
