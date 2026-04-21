@@ -1808,11 +1808,7 @@ fn build_human_replay_checkpoint_request(
     CheckpointRequest {
         trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::Human,
-        agent_id: crate::authorship::working_log::AgentId {
-            tool: "daemon".to_string(),
-            id: "daemon-commit-replay".to_string(),
-            model: "daemon".to_string(),
-        },
+        agent_id: None,
         repo_working_dir: std::path::PathBuf::new(), // Will be overridden by caller
         file_paths: files.into_iter().map(std::path::PathBuf::from).collect(),
         path_role: PreparedPathRole::WillEdit,

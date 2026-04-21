@@ -1,10 +1,10 @@
 use crate::test_utils::fixture_path;
 use git_ai::authorship::transcript::Message;
+use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
+use git_ai::commands::checkpoint_agent::transcript_readers;
 use git_ai::commands::checkpoint_agent::transcript_readers::{
     extract_plan_from_tool_use, is_plan_file_path,
 };
-use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
-use git_ai::commands::checkpoint_agent::transcript_readers;
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;

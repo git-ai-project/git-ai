@@ -148,8 +148,9 @@ mod tests {
         let (checkpoint_kind, checkpoint_request) = pre_commit_checkpoint_context(repo);
         assert_eq!(checkpoint_kind, CheckpointKind::AiAgent);
         let checkpoint_request = checkpoint_request.expect("expected codex agent result");
-        assert_eq!(checkpoint_request.agent_id.tool, "codex");
-        assert_eq!(checkpoint_request.agent_id.id, "session-1");
+        let agent_id = checkpoint_request.agent_id.as_ref().expect("AI checkpoint should have agent_id");
+        assert_eq!(agent_id.tool, "codex");
+        assert_eq!(agent_id.id, "session-1");
         assert_eq!(
             checkpoint_request
                 .metadata

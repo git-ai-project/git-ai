@@ -3,7 +3,7 @@ use crate::authorship::ignore::effective_ignore_patterns;
 use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::range_authorship;
 use crate::authorship::stats::stats_command;
-use crate::authorship::working_log::{AgentId, CheckpointKind};
+use crate::authorship::working_log::CheckpointKind;
 use crate::commands;
 use crate::commands::checkpoint::PreparedPathRole;
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 pub fn handle_git_ai(args: &[String]) {
     if args.is_empty() {
@@ -473,14 +473,15 @@ fn handle_checkpoint(args: &[String]) {
     // throttle (`should_emit_agent_usage`) prevents duplicate events.
     if let Some(ref result) = checkpoint_request
         && result.checkpoint_kind.is_ai()
-        && commands::checkpoint::should_emit_agent_usage(&result.agent_id)
+        && let Some(ref agent_id) = result.agent_id
+        && commands::checkpoint::should_emit_agent_usage(agent_id)
     {
-        let prompt_id = generate_short_hash(&result.agent_id.id, &result.agent_id.tool);
+        let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
         let attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
-            .tool(&result.agent_id.tool)
-            .model(&result.agent_id.model)
+            .tool(&agent_id.tool)
+            .model(&agent_id.model)
             .prompt_id(prompt_id)
-            .external_prompt_id(&result.agent_id.id)
+            .external_prompt_id(&agent_id.id)
             .custom_attributes_map(crate::config::Config::fresh().custom_attributes());
 
         let values = crate::metrics::AgentUsageValues::new();
@@ -767,17 +768,7 @@ fn handle_checkpoint(args: &[String]) {
         checkpoint_request = Some(CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::Human,
-            agent_id: AgentId {
-                tool: "mock_ai".to_string(),
-                id: format!(
-                    "ai-thread-{}",
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or_else(|_| 0)
-                ),
-                model: "unknown".to_string(),
-            },
+            agent_id: None,
             repo_working_dir: std::path::PathBuf::from(&effective_working_dir),
             file_paths: will_edit_filepaths
                 .unwrap_or_default()
@@ -796,7 +787,10 @@ fn handle_checkpoint(args: &[String]) {
     let default_user_name = repo.git_author_identity().name_or_unknown();
 
     let checkpoint_start = std::time::Instant::now();
-    let agent_tool = checkpoint_request.as_ref().map(|r| r.agent_id.tool.clone());
+    let agent_tool = checkpoint_request
+        .as_ref()
+        .and_then(|r| r.agent_id.as_ref())
+        .map(|aid| aid.tool.clone());
 
     let external_files: Vec<String> = checkpoint_request
         .as_ref()
