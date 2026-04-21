@@ -115,8 +115,9 @@ fn test_windsurf_preset_ignores_unknown_model_name() {
     let events = parse_windsurf(&hook_input).expect("Failed to run WindsurfPreset");
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
-            // The new parse API passes model_name through as-is; "Unknown" is preserved
-            assert_eq!(e.context.agent_id.model, "Unknown");
+            // "Unknown" (capital U) is filtered to "unknown" so transcript-based model
+            // resolution can override it downstream in checkpoint.rs
+            assert_eq!(e.context.agent_id.model, "unknown");
         }
         _ => panic!("Expected PostFileEdit"),
     }

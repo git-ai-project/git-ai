@@ -420,22 +420,44 @@ fn handle_checkpoint(args: &[String]) {
             args[0].as_str(),
             &effective_hook_input,
         ) {
-            Ok(results) => {
-                if let Some(mut first) = results.into_iter().next() {
-                    // mock_ai with no file paths: fall back to all staged/unstaged files
-                    if args[0] == "mock_ai" && first.file_paths.is_empty() {
-                        let working_dir = first.repo_working_dir.to_string_lossy().to_string();
-                        first.file_paths = get_all_files_for_mock_ai(&working_dir)
-                            .into_iter()
-                            .map(std::path::PathBuf::from)
-                            .collect();
-                    }
-                    repository_working_dir = first.repo_working_dir.to_string_lossy().to_string();
-                    checkpoint_result = Some(first);
-                } else {
+            Ok(mut results) => {
+                if results.is_empty() {
                     // SnapshotOnly or no-op: orchestrator handled
                     // the side effect already, nothing to checkpoint.
                     std::process::exit(0);
+                }
+
+                // Use the first result as the primary checkpoint; any additional
+                // results are extra events from the same preset invocation (e.g. a
+                // preset that emits both a pre and post event in one call).
+                let mut first = results.remove(0);
+
+                // mock_ai with no file paths: fall back to all staged/unstaged files
+                if args[0] == "mock_ai" && first.file_paths.is_empty() {
+                    let working_dir = first.repo_working_dir.to_string_lossy().to_string();
+                    first.file_paths = get_all_files_for_mock_ai(&working_dir)
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                }
+                repository_working_dir = first.repo_working_dir.to_string_lossy().to_string();
+                checkpoint_result = Some(first);
+
+                // Process any additional results from the same preset invocation
+                for extra in results {
+                    let working_dir = extra.repo_working_dir.to_string_lossy().to_string();
+                    if let Ok(extra_repo) = find_repository_in_path(&working_dir) {
+                        let user_name = extra_repo.git_author_identity().name_or_unknown();
+                        let _ = run_checkpoint_via_daemon_or_local(
+                            &extra_repo,
+                            &user_name,
+                            extra.checkpoint_kind,
+                            true,
+                            Some(extra),
+                            false,
+                            false,
+                        );
+                    }
                 }
             }
             Err(e) => {
