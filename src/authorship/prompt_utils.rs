@@ -131,44 +131,6 @@ pub fn find_prompt_in_history(
     }
 }
 
-/// Find a prompt, trying the database first, then falling back to repository if provided
-///
-/// Returns `(Option<commit_sha>, PromptRecord)` where commit_sha is None if found in DB
-/// and Some(sha) if found in repository.
-pub fn find_prompt_with_db_fallback(
-    prompt_id: &str,
-    repo: Option<&Repository>,
-) -> Result<(Option<String>, PromptRecord), GitAiError> {
-    // First, try to get from database
-    let db = InternalDatabase::global()?;
-    let db_guard = db
-        .lock()
-        .map_err(|e| GitAiError::Generic(format!("Failed to lock database: {}", e)))?;
-
-    if let Some(db_record) = db_guard.get_prompt(prompt_id)? {
-        // Convert PromptDbRecord to PromptRecord
-        let prompt_record = db_record.to_prompt_record();
-        return Ok((db_record.commit_sha, prompt_record));
-    }
-
-    // Not found in DB, try repository if provided
-    if let Some(repo) = repo {
-        // Try to find in history (most recent occurrence)
-        match find_prompt_in_history(repo, prompt_id, 0) {
-            Ok((commit_sha, prompt)) => Ok((Some(commit_sha), prompt)),
-            Err(_) => Err(GitAiError::Generic(format!(
-                "Prompt '{}' not found in database or repository",
-                prompt_id
-            ))),
-        }
-    } else {
-        Err(GitAiError::Generic(format!(
-            "Prompt '{}' not found in database and no repository provided",
-            prompt_id
-        )))
-    }
-}
-
 /// Result of attempting to update a prompt from a tool
 pub enum PromptUpdateResult {
     Updated(AiTranscript, String), // (new_transcript, new_model)
@@ -1185,74 +1147,6 @@ mod tests {
         let (_sha, prompt) = result.unwrap();
         assert_eq!(prompt.agent_id.tool, "test_tool");
         assert_eq!(prompt.agent_id.id, "ai_agent");
-    }
-
-    #[test]
-    fn test_find_prompt_with_db_fallback_no_db_no_repo() {
-        // Test when prompt is not in DB and no repo is provided
-        let result = find_prompt_with_db_fallback("nonexistent-prompt", None);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("not found in database and no repository provided")
-        );
-    }
-
-    #[test]
-    fn test_find_prompt_with_db_fallback_no_db_with_repo() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create test repo");
-
-        tmp_repo
-            .write_file("test.txt", "content\n", true)
-            .expect("Failed to write file");
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent", Some("gpt-4"), Some("test_tool"))
-            .expect("Failed to trigger checkpoint");
-        let authorship = tmp_repo
-            .commit_with_message("Test commit")
-            .expect("Failed to commit");
-
-        let session_id = authorship
-            .metadata
-            .sessions
-            .keys()
-            .next()
-            .expect("No session found")
-            .clone();
-
-        // Test fallback to repository
-        let result = find_prompt_with_db_fallback(&session_id, Some(tmp_repo.gitai_repo()));
-        assert!(result.is_ok());
-        let (commit_sha, prompt) = result.unwrap();
-        assert!(commit_sha.is_some());
-        assert_eq!(prompt.agent_id.tool, "test_tool");
-    }
-
-    #[test]
-    fn test_find_prompt_with_db_fallback_not_in_repo() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create test repo");
-
-        tmp_repo
-            .write_file("test.txt", "content\n", true)
-            .expect("Failed to write file");
-        tmp_repo
-            .trigger_checkpoint_with_author("human_user")
-            .expect("Failed to trigger checkpoint");
-        tmp_repo
-            .commit_with_message("Test commit")
-            .expect("Failed to commit");
-
-        let result =
-            find_prompt_with_db_fallback("nonexistent-prompt", Some(tmp_repo.gitai_repo()));
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("not found in database or repository")
-        );
     }
 
     #[test]
