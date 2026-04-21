@@ -344,21 +344,14 @@ impl TmpRepo {
     fn build_scoped_human_checkpoint_request(
         &self,
     ) -> Result<Option<CheckpointRequest>, GitAiError> {
-        static TEST_HUMAN_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
         let Some(will_edit_filepaths) = self.current_checkpoint_scope_paths()? else {
             return Ok(None);
         };
 
-        let session = TEST_HUMAN_SCOPE_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
         Ok(Some(CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::Human,
-            agent_id: AgentId {
-                tool: "test_harness".to_string(),
-                id: format!("test-human-scope-{}", session),
-                model: "test_model".to_string(),
-            },
+            agent_id: None,
             repo_working_dir: self.path.clone(),
             file_paths: will_edit_filepaths.into_iter().map(PathBuf::from).collect(),
             path_role: PreparedPathRole::WillEdit,
@@ -527,7 +520,7 @@ impl TmpRepo {
         let cr = CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
-            agent_id,
+            agent_id: Some(agent_id),
             repo_working_dir: self.path.clone(),
             file_paths: self
                 .current_checkpoint_scope_paths()?
@@ -1576,14 +1569,19 @@ mod tests {
         file_paths: Vec<&str>,
         path_role: PreparedPathRole,
     ) -> CheckpointRequest {
-        CheckpointRequest {
-            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-            checkpoint_kind,
-            agent_id: AgentId {
+        let agent_id = if checkpoint_kind.is_ai() {
+            Some(AgentId {
                 tool: "test-tool".to_string(),
                 id: "test-session".to_string(),
                 model: "test-model".to_string(),
-            },
+            })
+        } else {
+            None
+        };
+        CheckpointRequest {
+            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+            checkpoint_kind,
+            agent_id,
             repo_working_dir: PathBuf::new(),
             file_paths: file_paths.into_iter().map(PathBuf::from).collect(),
             path_role,

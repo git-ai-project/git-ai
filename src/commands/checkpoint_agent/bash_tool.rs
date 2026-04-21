@@ -304,7 +304,7 @@ impl InflightBashAgentContext {
         CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
-            agent_id: self.agent_id,
+            agent_id: Some(self.agent_id),
             repo_working_dir,
             file_paths: vec![],
             path_role: crate::commands::checkpoint::PreparedPathRole::Edited,
@@ -1191,11 +1191,7 @@ fn attempt_pre_hook_capture(
     let checkpoint_request = CheckpointRequest {
         trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::Human,
-        agent_id: AgentId {
-            tool: "bash-tool".to_string(),
-            id: "pre-hook".to_string(),
-            model: String::new(),
-        },
+        agent_id: None,
         repo_working_dir: PathBuf::from(repo_working_dir.clone()),
         file_paths: stale_files
             .iter()
@@ -1298,11 +1294,11 @@ fn attempt_post_hook_capture(
     let checkpoint_request = CheckpointRequest {
         trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::AiAgent,
-        agent_id: AgentId {
+        agent_id: Some(AgentId {
             tool: "bash-tool".to_string(),
             id: "post-hook".to_string(),
             model: String::new(),
-        },
+        }),
         repo_working_dir: PathBuf::from(repo_working_dir.clone()),
         file_paths: existing_paths
             .iter()
