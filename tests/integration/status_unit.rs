@@ -122,8 +122,7 @@ fn test_working_dir_diff_stats_all_files_checkpointed() {
 /// Migrated from src/commands/status.rs test_get_working_dir_diff_stats_empty_pathspecs_returns_zero
 ///
 /// When there are no working directory modifications, the status command should
-/// report zero diff stats. This is the integration-level equivalent of passing
-/// empty pathspecs to the underlying function.
+/// report zero diff stats.
 #[test]
 fn test_working_dir_diff_stats_no_changes_returns_zero() {
     let repo = TestRepo::new();

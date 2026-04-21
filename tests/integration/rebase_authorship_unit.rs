@@ -1098,8 +1098,7 @@ fn regression_initial_preserved_through_checkpoint_commit_rebase() {
     .expect("write AI utils.py");
     repo.git_og(&["add", "utils.py"]).expect("add");
 
-    // Trigger checkpoint directly
-    repo.git_ai(&["checkpoint", "--ai", "cursor", "--", "app.py", "utils.py"])
+    repo.git_ai(&["checkpoint", "mock_ai", "app.py", "utils.py"])
         .expect("AI checkpoint for both files");
 
     repo.git_og(&["commit", "-m", "AI feature work"])
@@ -1375,9 +1374,6 @@ fn regression_initial_survives_amend_then_rebase() {
     assert_eq!(attrs[0].author_id, "ai-cursor");
     assert!(final_initial.prompts.contains_key("ai-cursor"));
 }
-
-// Tests 20-22 (multi-tool initial + benchmarks) are skipped for now due to complexity
-// They are integration-level or benchmark tests that may not be needed for basic migration
 
 #[test]
 fn diff_based_transfer_equal_content() {

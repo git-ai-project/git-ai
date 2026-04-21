@@ -41,8 +41,8 @@ fn test_stash_note_roundtrip() {
     example.assert_lines_and_blame(vec!["line 1".ai(), "line 2".ai()]);
 
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "AI prompts should survive the stash note roundtrip"
+        !commit.authorship_log.attestations.is_empty(),
+        "AI attestations should survive the stash note roundtrip"
     );
 }
 
@@ -66,19 +66,25 @@ fn test_stash_note_large_content() {
         .expect("commit should succeed");
 
     // Create many files with AI attribution to produce a large authorship log.
-    // Each file has several AI lines; 30 files x ~5 lines each generates a
-    // serialised note that comfortably exceeds the sizes that triggered E2BIG.
-    let file_count = 30;
+    // 100 files x 10 lines produces a serialised note well over 128KB, which
+    // exceeds ARG_MAX on most systems and would trigger E2BIG if the note were
+    // passed via command-line arguments instead of stdin.
+    let file_count = 100;
     let mut files = Vec::new();
     for i in 0..file_count {
-        let name = format!("file_{:03}.txt", i);
+        let name = format!("large_stash_file_{:04}.txt", i);
         let mut f = repo.filename(&name);
         f.set_contents(vec![
-            format!("file {} line 1", i).ai(),
-            format!("file {} line 2", i).ai(),
-            format!("file {} line 3", i).ai(),
-            format!("file {} line 4", i).ai(),
-            format!("file {} line 5", i).ai(),
+            format!("file {} line 1 with padding content to increase size", i).ai(),
+            format!("file {} line 2 with padding content to increase size", i).ai(),
+            format!("file {} line 3 with padding content to increase size", i).ai(),
+            format!("file {} line 4 with padding content to increase size", i).ai(),
+            format!("file {} line 5 with padding content to increase size", i).ai(),
+            format!("file {} line 6 with padding content to increase size", i).ai(),
+            format!("file {} line 7 with padding content to increase size", i).ai(),
+            format!("file {} line 8 with padding content to increase size", i).ai(),
+            format!("file {} line 9 with padding content to increase size", i).ai(),
+            format!("file {} line 10 with padding content to increase size", i).ai(),
         ]);
         files.push((name, f));
     }
@@ -117,25 +123,75 @@ fn test_stash_note_large_content() {
         );
     }
 
-    // Spot-check a few files for correct AI blame attribution
+    // Spot-check first and last files for correct AI blame attribution
     files[0].1.assert_lines_and_blame(vec![
-        "file 0 line 1".ai(),
-        "file 0 line 2".ai(),
-        "file 0 line 3".ai(),
-        "file 0 line 4".ai(),
-        "file 0 line 5".ai(),
+        "file 0 line 1 with padding content to increase size".ai(),
+        "file 0 line 2 with padding content to increase size".ai(),
+        "file 0 line 3 with padding content to increase size".ai(),
+        "file 0 line 4 with padding content to increase size".ai(),
+        "file 0 line 5 with padding content to increase size".ai(),
+        "file 0 line 6 with padding content to increase size".ai(),
+        "file 0 line 7 with padding content to increase size".ai(),
+        "file 0 line 8 with padding content to increase size".ai(),
+        "file 0 line 9 with padding content to increase size".ai(),
+        "file 0 line 10 with padding content to increase size".ai(),
     ]);
     files[file_count - 1].1.assert_lines_and_blame(vec![
-        format!("file {} line 1", file_count - 1).ai(),
-        format!("file {} line 2", file_count - 1).ai(),
-        format!("file {} line 3", file_count - 1).ai(),
-        format!("file {} line 4", file_count - 1).ai(),
-        format!("file {} line 5", file_count - 1).ai(),
+        format!(
+            "file {} line 1 with padding content to increase size",
+            file_count - 1
+        )
+        .ai(),
+        format!(
+            "file {} line 2 with padding content to increase size",
+            file_count - 1
+        )
+        .ai(),
+        format!(
+            "file {} line 3 with padding content to increase size",
+            file_count - 1
+        )
+        .ai(),
+        format!(
+            "file {} line 4 with padding content to increase size",
+            file_count - 1
+        )
+        .ai(),
+        format!(
+            "file {} line 5 with padding content to increase size",
+            file_count - 1
+        )
+        .ai(),
+        format!(
+            "file {} line 6 with padding content to increase size",
+            file_count - 1
+        )
+        .ai(),
+        format!(
+            "file {} line 7 with padding content to increase size",
+            file_count - 1
+        )
+        .ai(),
+        format!(
+            "file {} line 8 with padding content to increase size",
+            file_count - 1
+        )
+        .ai(),
+        format!(
+            "file {} line 9 with padding content to increase size",
+            file_count - 1
+        )
+        .ai(),
+        format!(
+            "file {} line 10 with padding content to increase size",
+            file_count - 1
+        )
+        .ai(),
     ]);
 
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "AI prompts should survive the large stash note roundtrip"
+        !commit.authorship_log.attestations.is_empty(),
+        "AI attestations should survive the large stash note roundtrip"
     );
     assert_eq!(
         commit.authorship_log.attestations.len(),

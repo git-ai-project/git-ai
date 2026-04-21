@@ -369,15 +369,10 @@ assets/images/**
 #[test]
 fn git_ai_ignore_skips_comments_and_blank_lines() {
     let repo = TestRepo::new();
+    // Use explicit \n to preserve trailing whitespace on the "  *.log  " line
     std::fs::write(
         repo.path().join(".git-ai-ignore"),
-        "\
-# comment line
-   # indented comment
-
-  *.log
-build/**
-",
+        "# comment line\n   # indented comment\n\n  *.log  \nbuild/**\n",
     )
     .unwrap();
     repo.git(&["add", ".git-ai-ignore"]).unwrap();

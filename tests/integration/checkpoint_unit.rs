@@ -601,8 +601,8 @@ fn test_checkpoint_skips_conflicted_files() {
     repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
         .unwrap();
 
-    // Checkpoint should skip conflicted files - check that either no new checkpoint was created
-    // or the new checkpoint has 0 entries
+    // Checkpoint should skip conflicted files — either no new checkpoint is created,
+    // or the new checkpoint has 0 entries. Both outcomes mean conflicted files were skipped.
     let checkpoints_after = working_log.read_all_checkpoints().unwrap();
     if checkpoints_after.len() > count_before {
         let latest = checkpoints_after.last().unwrap();
@@ -610,6 +610,12 @@ fn test_checkpoint_skips_conflicted_files() {
             latest.entries.len(),
             0,
             "Should have 0 entries (conflicted file should be skipped)"
+        );
+    } else {
+        assert_eq!(
+            checkpoints_after.len(),
+            count_before,
+            "No new checkpoint should be created for conflicted files"
         );
     }
 }
@@ -803,8 +809,8 @@ fn test_checkpoint_works_after_conflict_resolution_maintains_authorship() {
     repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
         .unwrap();
 
-    // Checkpoint should skip conflicted files - check that either no new checkpoint was created
-    // or the new checkpoint has 0 entries
+    // Checkpoint should skip conflicted files — either no new checkpoint is created,
+    // or the new checkpoint has 0 entries.
     let checkpoints_after_conflict_checkpoint = working_log.read_all_checkpoints().unwrap();
     if checkpoints_after_conflict_checkpoint.len() > count_before {
         let checkpoint_during_conflict = checkpoints_after_conflict_checkpoint.last().unwrap();
@@ -812,6 +818,12 @@ fn test_checkpoint_works_after_conflict_resolution_maintains_authorship() {
             checkpoint_during_conflict.entries.len(),
             0,
             "Should skip conflicted files during conflict"
+        );
+    } else {
+        assert_eq!(
+            checkpoints_after_conflict_checkpoint.len(),
+            count_before,
+            "No new checkpoint should be created for conflicted files"
         );
     }
 
