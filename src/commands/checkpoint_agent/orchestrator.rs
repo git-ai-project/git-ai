@@ -4,7 +4,7 @@ use crate::commands::checkpoint::PreparedPathRole;
 use crate::commands::checkpoint_agent::bash_tool::{self, HookEvent};
 use crate::commands::checkpoint_agent::presets::{
     KnownHumanEdit, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
-    TranscriptSource,
+    TranscriptSource, UntrackedEdit,
 };
 use crate::error::GitAiError;
 use crate::git::repository::find_repository_for_file;
@@ -64,6 +64,7 @@ fn execute_event(
         ParsedHookEvent::PreBashCall(e) => execute_pre_bash_call(e),
         ParsedHookEvent::PostBashCall(e) => execute_post_bash_call(e).map(Some),
         ParsedHookEvent::KnownHumanEdit(e) => execute_known_human_edit(e).map(Some),
+        ParsedHookEvent::UntrackedEdit(e) => execute_untracked_edit(e).map(Some),
     }
 }
 
@@ -138,6 +139,31 @@ fn execute_known_human_edit(e: KnownHumanEdit) -> Result<CheckpointRequest, GitA
         dirty_files: e.dirty_files,
         transcript_source: None,
         metadata: e.editor_metadata,
+        captured_checkpoint_id: None,
+    })
+}
+
+fn execute_untracked_edit(e: UntrackedEdit) -> Result<CheckpointRequest, GitAiError> {
+    let repo_working_dir = if !e.file_paths.is_empty() {
+        resolve_repo_working_dir_from_file_paths(&e.file_paths)?
+    } else {
+        resolve_repo_working_dir_from_cwd(&e.cwd)?
+    };
+
+    Ok(CheckpointRequest {
+        trace_id: e.trace_id,
+        checkpoint_kind: CheckpointKind::Human,
+        agent_id: AgentId {
+            tool: String::new(),
+            id: String::new(),
+            model: String::new(),
+        },
+        repo_working_dir,
+        file_paths: e.file_paths,
+        path_role: PreparedPathRole::WillEdit,
+        dirty_files: None,
+        transcript_source: None,
+        metadata: HashMap::new(),
         captured_checkpoint_id: None,
     })
 }
