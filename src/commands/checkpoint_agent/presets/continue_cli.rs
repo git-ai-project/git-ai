@@ -43,7 +43,7 @@ impl AgentPreset for ContinueCliPreset {
 
         let transcript_source = Some(TranscriptSource::Path {
             path: PathBuf::from(transcript_path),
-            format: TranscriptFormat::ClaudeJsonl,
+            format: TranscriptFormat::ContinueJson,
             session_id: None,
         });
 
@@ -127,7 +127,7 @@ mod tests {
                 assert!(matches!(
                     e.transcript_source,
                     Some(TranscriptSource::Path {
-                        format: TranscriptFormat::ClaudeJsonl,
+                        format: TranscriptFormat::ContinueJson,
                         ..
                     })
                 ));

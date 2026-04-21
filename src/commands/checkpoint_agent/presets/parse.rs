@@ -22,6 +22,12 @@ pub fn str_or_default<'a>(data: &'a Value, key: &str, default: &'a str) -> &'a s
     data.get(key).and_then(|v| v.as_str()).unwrap_or(default)
 }
 
+pub fn str_or_default_multi<'a>(data: &'a Value, keys: &[&str], default: &'a str) -> &'a str {
+    keys.iter()
+        .find_map(|key| data.get(*key).and_then(|v| v.as_str()))
+        .unwrap_or(default)
+}
+
 pub fn required_file_stem(data: &Value, path_key: &str) -> Result<String, GitAiError> {
     let path_str = required_str(data, path_key)?;
     Path::new(path_str)
