@@ -1732,9 +1732,10 @@ exit 0
         "checkpoint kind should be AiAgent"
     );
     let agent_run = agent_run.expect("should have agent run result with context");
-    assert_eq!(agent_run.agent_id.tool, "claude");
-    assert_eq!(agent_run.agent_id.id, "test-session-1");
-    assert_eq!(agent_run.agent_id.model, "opus-4");
+    let agent_id = agent_run.agent_id.as_ref().expect("AI checkpoint should have agent_id");
+    assert_eq!(agent_id.tool, "claude");
+    assert_eq!(agent_id.id, "test-session-1");
+    assert_eq!(agent_id.model, "opus-4");
 
     // Now run the actual commit with hooks
     write_file(&repo, "module.py", "import os\n");

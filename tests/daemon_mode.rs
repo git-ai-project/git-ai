@@ -589,7 +589,7 @@ fn ai_checkpoint_request(
     CheckpointRequest {
         trace_id: git_ai::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::AiAgent,
-        agent_id: AgentId {
+        agent_id: Some(AgentId {
             tool: "test-agent".to_string(),
             id: format!(
                 "capture-{}",
@@ -599,7 +599,7 @@ fn ai_checkpoint_request(
                     .as_nanos()
             ),
             model: "test-model".to_string(),
-        },
+        }),
         repo_working_dir: repo.path().to_path_buf(),
         file_paths: edited_filepaths.into_iter().map(PathBuf::from).collect(),
         path_role: PreparedPathRole::Edited,
