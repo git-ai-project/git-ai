@@ -71,11 +71,15 @@ impl AgentPreset for CodexPreset {
             metadata.insert("transcript_path".to_string(), tp.clone());
         }
 
+        let model = parse::optional_str(&data, "model")
+            .unwrap_or("unknown")
+            .to_string();
+
         let context = PresetContext {
             agent_id: AgentId {
                 tool: "codex".to_string(),
                 id: session_id.clone(),
-                model: "unknown".to_string(),
+                model,
             },
             session_id,
             trace_id: trace_id.to_string(),
@@ -116,13 +120,20 @@ impl AgentPreset for CodexPreset {
                     transcript_source,
                 })
             }
-            // "Stop", None, or "agent-turn-complete" etc. -- general checkpoint with transcript
-            _ => ParsedHookEvent::PostFileEdit(PostFileEdit {
-                context,
-                file_paths: vec![],
-                dirty_files: None,
-                transcript_source,
-            }),
+            Some("Stop") | Some("agent-turn-complete") | None => {
+                ParsedHookEvent::PostFileEdit(PostFileEdit {
+                    context,
+                    file_paths: vec![],
+                    dirty_files: None,
+                    transcript_source,
+                })
+            }
+            Some(other) => {
+                return Err(GitAiError::PresetError(format!(
+                    "Unsupported Codex hook_event_name: {}",
+                    other
+                )));
+            }
         };
 
         Ok(vec![event])
@@ -143,6 +154,7 @@ mod tests {
             "tool_name": "Bash",
             "session_id": "codex-sess-1",
             "tool_use_id": "tu-1",
+            "model": "o3",
             "transcript_path": "/home/user/.codex/sessions/test.jsonl"
         })
         .to_string();
@@ -152,6 +164,7 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "codex");
                 assert_eq!(e.context.session_id, "codex-sess-1");
+                assert_eq!(e.context.agent_id.model, "o3");
                 assert_eq!(e.tool_use_id, "tu-1");
                 assert_eq!(e.strategy, BashPreHookStrategy::SnapshotOnly);
             }
@@ -230,5 +243,71 @@ mod tests {
         .to_string();
         let result = CodexPreset.parse(&input, "t_test123456789a");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_codex_agent_turn_complete() {
+        let input = json!({
+            "cwd": "/home/user/project",
+            "hook_event_name": "agent-turn-complete",
+            "thread-id": "thread-xyz",
+            "model": "o3-mini",
+            "transcript_path": "/home/user/.codex/sessions/test.jsonl"
+        })
+        .to_string();
+        let events = CodexPreset.parse(&input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.context.session_id, "thread-xyz");
+                assert_eq!(e.context.agent_id.model, "o3-mini");
+                assert!(e.transcript_source.is_some());
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_codex_stop_event() {
+        let input = json!({
+            "cwd": "/home/user/project",
+            "hook_event_name": "Stop",
+            "session_id": "codex-sess-1",
+            "transcript_path": "/home/user/.codex/sessions/test.jsonl"
+        })
+        .to_string();
+        let events = CodexPreset.parse(&input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], ParsedHookEvent::PostFileEdit(_)));
+    }
+
+    #[test]
+    fn test_codex_rejects_unknown_event() {
+        let input = json!({
+            "cwd": "/home/user/project",
+            "hook_event_name": "SomeFutureEvent",
+            "session_id": "codex-sess-1"
+        })
+        .to_string();
+        let result = CodexPreset.parse(&input, "t_test123456789a");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unsupported"));
+    }
+
+    #[test]
+    fn test_codex_model_defaults_to_unknown() {
+        let input = json!({
+            "cwd": "/home/user/project",
+            "hook_event_name": "Stop",
+            "session_id": "codex-sess-1"
+        })
+        .to_string();
+        let events = CodexPreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.context.agent_id.model, "unknown");
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
     }
 }
