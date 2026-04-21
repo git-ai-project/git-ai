@@ -78,7 +78,7 @@ pub fn handle_git_ai(args: &[String]) {
 
     // Start DB warmup early for commands that need database access
     match args[0].as_str() {
-        "checkpoint" | "show-prompt" | "flush-cas" | "continue" => {
+        "checkpoint" | "show-prompt" | "flush-cas" => {
             InternalDatabase::warmup();
         }
         _ => {}
@@ -205,9 +205,6 @@ pub fn handle_git_ai(args: &[String]) {
         "show-prompt" => {
             commands::show_prompt::handle_show_prompt(&args[1..]);
         }
-        "continue" => {
-            commands::continue_session::handle_continue(&args[1..]);
-        }
         "fetch-notes" => {
             commands::fetch_notes::handle_fetch_notes(&args[1..]);
         }
@@ -295,15 +292,6 @@ fn print_help() {
     eprintln!("  git-path           Print the path to the underlying git executable");
     eprintln!("  upgrade            Check for updates and install if available");
     eprintln!("    --force               Reinstall latest version even if already up to date");
-    eprintln!("  continue           Restore AI session context and launch agent");
-    eprintln!("    --commit <rev>        Continue from a specific commit");
-    eprintln!("    --file <path>         Continue from a specific file");
-    eprintln!("    --lines <start-end>   Limit to line range (requires --file)");
-    eprintln!("    --prompt-id <id>      Continue from a specific prompt");
-    eprintln!("    --agent <name>        Select agent (claude, cursor; default: claude)");
-    eprintln!("    --launch              Launch agent CLI with restored context");
-    eprintln!("    --clipboard           Copy context to system clipboard");
-    eprintln!("    --json                Output context as structured JSON");
     eprintln!("  fetch-notes [remote] Synchronously fetch AI authorship notes");
     eprintln!("    --remote <name>       Explicit remote name (default: upstream or origin)");
     eprintln!("    --json                Output result as JSON");
