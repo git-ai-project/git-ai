@@ -657,7 +657,8 @@ fn resolve_live_checkpoint_execution(
     let has_explicit_target_paths =
         explicit_capture_target_paths(kind, checkpoint_request).is_some();
     let pathspec_start = Instant::now();
-    let filtered_pathspec = filtered_pathspecs_for_checkpoint_request(repo, kind, checkpoint_request);
+    let filtered_pathspec =
+        filtered_pathspecs_for_checkpoint_request(repo, kind, checkpoint_request);
     tracing::debug!(
         "[BENCHMARK] Pathspec filtering took {:?}",
         pathspec_start.elapsed()

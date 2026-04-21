@@ -3,8 +3,8 @@ use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint::PreparedPathRole;
 use crate::commands::checkpoint_agent::bash_tool::{self, HookEvent};
 use crate::commands::checkpoint_agent::presets::{
-    KnownHumanEdit, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
-    TranscriptSource, UntrackedEdit,
+    BashPreHookStrategy, KnownHumanEdit, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
+    PreFileEdit, TranscriptSource, UntrackedEdit,
 };
 use crate::error::GitAiError;
 use crate::git::repository::find_repository_for_file;
@@ -171,20 +171,27 @@ fn execute_untracked_edit(e: UntrackedEdit) -> Result<CheckpointRequest, GitAiEr
 fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointRequest>, GitAiError> {
     let repo_working_dir = resolve_repo_working_dir_from_cwd(&e.context.cwd)?;
 
-    let pre_hook_result = super::agent_presets::prepare_agent_bash_pre_hook(
-        true,
-        Some(&repo_working_dir.to_string_lossy()),
+    let captured_checkpoint_id = match bash_tool::handle_bash_pre_tool_use_with_context(
+        &repo_working_dir,
         &e.context.session_id,
         &e.tool_use_id,
         &e.context.agent_id,
         Some(&e.context.metadata),
-        e.strategy,
-    )?;
+    ) {
+        Ok(result) => result.captured_checkpoint.map(|info| info.capture_id),
+        Err(error) => {
+            tracing::debug!(
+                "Bash pre-hook snapshot failed for {} session {}: {}",
+                e.context.agent_id.tool,
+                e.context.session_id,
+                error
+            );
+            None
+        }
+    };
 
-    match pre_hook_result {
-        super::agent_presets::BashPreHookResult::EmitHumanCheckpoint {
-            captured_checkpoint_id,
-        } => Ok(Some(CheckpointRequest {
+    match e.strategy {
+        BashPreHookStrategy::EmitHumanCheckpoint => Ok(Some(CheckpointRequest {
             trace_id: e.context.trace_id,
             checkpoint_kind: CheckpointKind::Human,
             agent_id: e.context.agent_id,
@@ -196,7 +203,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointRequest>, Gi
             metadata: e.context.metadata,
             captured_checkpoint_id,
         })),
-        super::agent_presets::BashPreHookResult::SkipCheckpoint => Ok(None),
+        BashPreHookStrategy::SnapshotOnly => Ok(None),
     }
 }
 
