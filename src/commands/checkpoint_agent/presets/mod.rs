@@ -11,6 +11,7 @@ mod droid;
 mod firebender;
 mod gemini;
 mod github_copilot;
+mod human;
 mod known_human;
 mod mock_ai;
 mod mock_known_human;
@@ -42,6 +43,7 @@ pub enum ParsedHookEvent {
     PreBashCall(PreBashCall),
     PostBashCall(PostBashCall),
     KnownHumanEdit(KnownHumanEdit),
+    UntrackedEdit(UntrackedEdit),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +68,13 @@ pub struct KnownHumanEdit {
     pub file_paths: Vec<PathBuf>,
     pub dirty_files: Option<HashMap<PathBuf, String>>,
     pub editor_metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UntrackedEdit {
+    pub trace_id: String,
+    pub cwd: PathBuf,
+    pub file_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +140,7 @@ pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
         "droid" => Ok(Box::new(droid::DroidPreset)),
         "opencode" => Ok(Box::new(opencode::OpenCodePreset)),
         "pi" => Ok(Box::new(pi::PiPreset)),
+        "human" => Ok(Box::new(human::HumanPreset)),
         "mock_ai" => Ok(Box::new(mock_ai::MockAiPreset)),
         "known_human" => Ok(Box::new(known_human::KnownHumanPreset)),
         "mock_known_human" => Ok(Box::new(mock_known_human::MockKnownHumanPreset)),
