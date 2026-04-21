@@ -553,39 +553,39 @@ fn get_plugins_dir(
 
     #[cfg(target_os = "macos")]
     {
-        return plugins_dir_for_platform(
+        plugins_dir_for_platform(
             JetBrainsPlatform::Macos,
             &home,
             None,
             data_directory_name,
             product_code,
             build_number,
-        );
+        )
     }
 
     #[cfg(windows)]
     {
         let appdata = std::env::var("APPDATA").ok();
-        return plugins_dir_for_platform(
+        plugins_dir_for_platform(
             JetBrainsPlatform::Windows,
             &home,
             appdata.as_deref().map(Path::new),
             data_directory_name,
             product_code,
             build_number,
-        );
+        )
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        return plugins_dir_for_platform(
+        plugins_dir_for_platform(
             JetBrainsPlatform::Linux,
             &home,
             None,
             data_directory_name,
             product_code,
             build_number,
-        );
+        )
     }
 }
 
