@@ -255,11 +255,12 @@ fn print_help() {
     eprintln!("Commands:");
     eprintln!("  checkpoint         Checkpoint working changes and attribute author");
     eprintln!(
-        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, windsurf, opencode, pi, ai_tab, firebender, mock_ai, mock_known_human, known_human"
+        "    Presets: claude, codex, continue-cli, cursor, gemini, github-copilot, amp, windsurf, opencode, pi, ai_tab, firebender, human, mock_ai, mock_known_human, known_human"
     );
     eprintln!(
         "    --hook-input <json|stdin>   JSON payload required by presets, or 'stdin' to read from stdin"
     );
+    eprintln!("    human [pathspecs...]             Untracked/legacy human checkpoint");
     eprintln!("    mock_ai [pathspecs...]           Test preset accepting optional file pathspecs");
     eprintln!("    mock_known_human [pathspecs...]  Test preset for KnownHuman checkpoints");
     eprintln!("  log [args...]      Show commit log with AI authorship notes");
@@ -1780,7 +1781,7 @@ fn get_all_files_for_mock_ai(working_dir: &str) -> Vec<String> {
 /// invoked without --hook-input.
 fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[String]) -> String {
     match preset_name {
-        "mock_ai" | "mock_known_human" => {
+        "human" | "mock_ai" | "mock_known_human" => {
             let paths: Vec<&str> = remaining_args
                 .iter()
                 .filter(|a| !a.starts_with("--"))
