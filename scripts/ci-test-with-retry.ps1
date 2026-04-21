@@ -9,24 +9,26 @@ param(
 $ErrorActionPreference = "Continue"
 $TestMode = $env:GIT_AI_TEST_GIT_MODE
 
-# Run the full test suite, capturing output
-$output = cargo test -- --test-threads=$TestThreads 2>&1 | Out-String
+# Run the full test suite, streaming output to console and capturing to a temp file
+$tempFile = [System.IO.Path]::GetTempFileName()
+& cargo test -- --test-threads=$TestThreads 2>&1 | Tee-Object -FilePath $tempFile
 $firstExit = $LASTEXITCODE
 
-Write-Host $output
-
 if ($firstExit -eq 0) {
+    Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
     exit 0
 }
 
 # Only retry for daemon and wrapper-daemon modes
 if ($TestMode -ne "daemon" -and $TestMode -ne "wrapper-daemon") {
     Write-Host "::error::Tests failed in '$TestMode' mode (retry not enabled for this mode)"
+    Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
     exit 1
 }
 
 # Parse failed test names from cargo test output
-$lines = $output -split "`r?`n"
+$lines = Get-Content -Path $tempFile
+Remove-Item -Path $tempFile -Force
 $inFailures = $false
 $failedTests = @()
 
@@ -54,6 +56,12 @@ if ($failedTests.Count -eq 0) {
 }
 
 $failedCount = $failedTests.Count
+
+if ($failedCount -gt 5) {
+    Write-Host "::error::$failedCount tests failed on first run — too many failures to retry as flaky"
+    exit 1
+}
+
 Write-Host ""
 Write-Host "::warning::$failedCount test(s) failed on first run in '$TestMode' mode. Retrying individually..."
 Write-Host ""

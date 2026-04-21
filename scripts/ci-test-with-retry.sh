@@ -55,6 +55,12 @@ if [ -z "$FAILED_TESTS" ]; then
 fi
 
 FAILED_COUNT=$(echo "$FAILED_TESTS" | wc -l | tr -d ' ')
+
+if [ "$FAILED_COUNT" -gt 5 ]; then
+  echo "::error::$FAILED_COUNT tests failed on first run — too many failures to retry as flaky"
+  exit 1
+fi
+
 echo ""
 echo "::warning::$FAILED_COUNT test(s) failed on first run in '$TEST_MODE' mode. Retrying individually..."
 echo ""
