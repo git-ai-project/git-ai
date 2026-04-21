@@ -78,7 +78,7 @@ pub fn handle_git_ai(args: &[String]) {
 
     // Start DB warmup early for commands that need database access
     match args[0].as_str() {
-        "checkpoint" | "show-prompt" | "flush-cas" => {
+        "show-prompt" | "flush-cas" => {
             InternalDatabase::warmup();
         }
         _ => {}
