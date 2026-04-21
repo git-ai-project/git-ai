@@ -35,7 +35,7 @@ pub fn handle_show_prompt(args: &[String]) {
     ) {
         Ok((commit_sha, mut prompt_record)) => {
             // If messages are empty, resolve from the best available source.
-            // Priority: CAS cache → CAS API (if messages_url) → local SQLite
+            // Priority: CAS cache → CAS API (if messages_url)
             if prompt_record.messages.is_empty() {
                 if let Some(url) = &prompt_record.messages_url
                     && let Some(hash) = url.rsplit('/').next().filter(|h| !h.is_empty())
@@ -95,20 +95,6 @@ pub fn handle_show_prompt(args: &[String]) {
                             tracing::debug!("show-prompt: no auth token, skipping CAS API");
                         }
                     }
-                }
-
-                // 3. Last resort: local SQLite (for prompts without a CAS URL)
-                if prompt_record.messages.is_empty()
-                    && let Ok(db_mutex) = InternalDatabase::global()
-                    && let Ok(db_guard) = db_mutex.lock()
-                    && let Ok(Some(db_record)) = db_guard.get_prompt(&parsed.prompt_id)
-                    && !db_record.messages.messages.is_empty()
-                {
-                    prompt_record.messages = db_record.messages.messages;
-                    tracing::debug!(
-                        "show-prompt: resolved {} messages from local SQLite",
-                        prompt_record.messages.len()
-                    );
                 }
             }
 
