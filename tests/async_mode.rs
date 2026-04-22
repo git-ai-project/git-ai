@@ -228,7 +228,7 @@ fn wait_for_child_exit(child: &mut Child) {
 #[test]
 fn install_hooks_async_mode_sets_daemon_trace2_global_config() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     let output = git_ai_with_daemon_env(&repo, &["install-hooks", "--dry-run=false"])
         .expect("install-hooks should succeed");
@@ -251,7 +251,7 @@ fn install_hooks_async_mode_sets_daemon_trace2_global_config() {
 #[test]
 fn install_hooks_async_mode_dry_run_does_not_write_trace2_global_config() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     git_ai_with_daemon_env(&repo, &["install-hooks", "--dry-run=true"])
         .expect("install-hooks dry-run should succeed");
@@ -272,7 +272,7 @@ fn install_hooks_async_mode_dry_run_does_not_write_trace2_global_config() {
 #[test]
 fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     git_ai_with_daemon_env(&repo, &["install-hooks", "--dry-run=false"])
         .expect("install-hooks should succeed");
@@ -311,7 +311,7 @@ fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
 #[test]
 fn async_mode_checkpoint_starts_daemon_when_down() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     write_daemon_config(&repo);
 
     let control = daemon_control_socket_path(&repo);
@@ -343,7 +343,7 @@ fn async_mode_checkpoint_starts_daemon_when_down() {
 #[test]
 fn daemon_status_does_not_self_emit_trace2_events() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     fs::create_dir_all(repo.test_home_path()).expect("failed to create test HOME directory");
     let trace_target = DaemonConfig::trace2_event_target_for_path(&daemon_trace_socket_path(&repo));
 
@@ -424,9 +424,9 @@ fn daemon_status_does_not_self_emit_trace2_events() {
 #[test]
 fn daemon_run_survives_deleted_launch_repo_cwd() {
     let launch_repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let target_repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     let mut daemon_cmd = Command::new(get_binary_path());
     daemon_cmd
@@ -451,9 +451,9 @@ fn daemon_run_survives_deleted_launch_repo_cwd() {
 #[test]
 fn daemon_start_survives_deleted_launch_repo_cwd() {
     let launch_repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let target_repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     let output = daemon_command_output(&launch_repo, &["bg", "start"], launch_repo.path());
     assert!(
@@ -501,7 +501,7 @@ fn send_on_persistent_conn<R: Read + Write>(
 #[test]
 fn daemon_telemetry_and_cas_over_persistent_connection() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     // Start the daemon
     let start_output = daemon_command_output(&repo, &["bg", "start"], repo.path());
