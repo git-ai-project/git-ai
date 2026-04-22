@@ -203,6 +203,20 @@ fn assert_daemon_status_ok_after_launch_repo_removed(home_repo: &TestRepo, targe
     );
 }
 
+#[allow(clippy::zombie_processes)]
+fn start_daemon(repo: &TestRepo) {
+    let mut daemon_cmd = Command::new(repos::test_repo::get_binary_path());
+    daemon_cmd
+        .arg("bg")
+        .arg("run")
+        .current_dir(repo.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_test_home_env(&mut daemon_cmd, repo);
+    configure_test_daemon_env(&mut daemon_cmd, repo);
+    daemon_cmd.spawn().expect("failed to start daemon");
+}
+
 fn shutdown_daemon(home_repo: &TestRepo) {
     let output = daemon_command_output(home_repo, &["bg", "shutdown"], home_repo.test_home_path());
     assert!(
@@ -310,6 +324,10 @@ fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
 
 #[test]
 fn async_mode_checkpoint_starts_daemon_when_down() {
+    // Test builds disable auto-spawning daemons from ensure_daemon_running
+    // to prevent process storms under parallel test load. This test verifies
+    // production-only auto-start behavior, so we manually start the daemon
+    // and then verify the checkpoint delegates to it.
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     write_daemon_config(&repo);
@@ -318,6 +336,10 @@ fn async_mode_checkpoint_starts_daemon_when_down() {
     let trace = daemon_trace_socket_path(&repo);
     let _ = fs::remove_file(&control);
     let _ = fs::remove_file(&trace);
+
+    // Manually start the daemon (production auto-start is disabled in test builds)
+    start_daemon(&repo);
+    wait_for_daemon_sockets(&repo);
 
     fs::write(
         repo.path().join("async-checkpoint.txt"),
@@ -335,7 +357,6 @@ fn async_mode_checkpoint_starts_daemon_when_down() {
         output
     );
 
-    wait_for_daemon_sockets(&repo);
     assert_daemon_status_ok_after_launch_repo_removed(&repo, &repo);
     shutdown_daemon(&repo);
 }

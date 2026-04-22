@@ -87,6 +87,51 @@ fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
     DaemonConfig::from_home(&repo.daemon_home_path()).lock_path
 }
 
+#[allow(clippy::zombie_processes)]
+fn start_daemon_for_repo(repo: &TestRepo) {
+    let daemon_home = repo.daemon_home_path();
+    let control_socket_path = daemon_control_socket_path(repo);
+    let trace_socket_path = daemon_trace_socket_path(repo);
+    let mut command = Command::new(get_binary_path());
+    command
+        .arg("bg")
+        .arg("run")
+        .current_dir(repo.path())
+        .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
+        .env("GITAI_TEST_DB_PATH", repo.test_db_path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    configure_test_home_env(&mut command, repo.test_home_path());
+    configure_test_daemon_env(
+        &mut command,
+        &daemon_home,
+        &control_socket_path,
+        &trace_socket_path,
+    );
+    command.spawn().expect("failed to spawn daemon for repo");
+
+    let repo_workdir = repo_workdir_string(repo);
+    for _ in 0..200 {
+        if send_control_request(
+            &control_socket_path,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir.clone(),
+            },
+        )
+        .is_ok()
+            && local_socket_connects_with_timeout(&trace_socket_path, DAEMON_TEST_PROBE_TIMEOUT)
+                .is_ok()
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "daemon did not become ready at {}",
+        control_socket_path.display()
+    );
+}
+
 fn get_rss_kb(pid: u32) -> Option<u64> {
     let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
     for line in status.lines() {
@@ -1060,6 +1105,9 @@ fn daemon_start_spawns_detached_run_process() {
 #[test]
 #[serial]
 fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
+    // Test builds disable daemon auto-spawning from ensure_daemon_running to
+    // prevent process storms. We verify that checkpoint delegation works by
+    // restarting the daemon manually before the checkpoint call.
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
 
@@ -1075,23 +1123,21 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
     )
     .expect("failed to write updated file");
 
-    // Shut down any stale daemon that may have been spawned by a
-    // previous wrapper invocation (e.g., the Nix-installed release
-    // binary triggered via PATH during the `git add` / `git commit`
-    // wrapper steps).  The test must start with no daemon so that the
-    // checkpoint delegation path actually auto-starts a fresh one.
+    // Shut down any stale daemon, then restart it manually.
     let _ = send_control_request(
         &daemon_control_socket_path(&repo),
         &ControlRequest::Shutdown,
     );
-    // Wait briefly for the daemon to release the sockets.
     std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Manually restart the daemon (production auto-start is disabled in test builds)
+    start_daemon_for_repo(&repo);
 
     repo.git_ai_with_env(
         &["checkpoint", "mock_ai", "delegate-fallback.txt"],
         &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
     )
-    .expect("checkpoint should auto-start daemon and succeed");
+    .expect("checkpoint should delegate to daemon and succeed");
 
     let status = send_control_request(
         &daemon_control_socket_path(&repo),
@@ -1099,10 +1145,10 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
             repo_working_dir: repo_workdir_string(&repo),
         },
     )
-    .expect("daemon status request should succeed after auto-start");
+    .expect("daemon status request should succeed");
     assert!(
         status.ok,
-        "daemon should be running after delegated checkpoint auto-start; ok={}, error={:?}, data={:?}, socket={}, workdir={}",
+        "daemon should be running after delegated checkpoint; ok={}, error={:?}, data={:?}, socket={}, workdir={}",
         status.ok,
         status.error,
         status.data,
@@ -1122,7 +1168,7 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
         checkpoints
             .iter()
             .any(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent),
-        "delegated checkpoint should write ai_agent checkpoint after daemon auto-start"
+        "delegated checkpoint should write ai_agent checkpoint via daemon"
     );
 }
 
