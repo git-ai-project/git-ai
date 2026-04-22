@@ -387,7 +387,6 @@ GITOGEOF
             feature_flags =
               let
                 knownFlags = filterAttrs (n: v: v != null) {
-                  async_mode = cfg.settings.featureFlags.asyncMode;
                   rewrite_stash = cfg.settings.featureFlags.rewriteStash;
                   checkpoint_inter_commit_move = cfg.settings.featureFlags.interCommitMove;
                   auth_keyring = cfg.settings.featureFlags.authKeyring;
@@ -561,18 +560,6 @@ GITOGEOF
               };
 
               featureFlags = {
-                asyncMode = mkOption {
-                  type = types.nullOr types.bool;
-                  default = null;
-                  description = ''
-                    Enable async daemon mode for background processing.
-                    When enabled, git operations are processed asynchronously
-                    through a background daemon, improving performance for IDE
-                    and agent workflows.
-                    Equivalent to: git ai config set feature_flags.async_mode true
-                  '';
-                };
-
                 rewriteStash = mkOption {
                   type = types.nullOr types.bool;
                   default = null;
@@ -695,7 +682,6 @@ GITOGEOF
             feature_flags =
               let
                 knownFlags = filterAttrs (n: v: v != null) {
-                  async_mode = cfg.settings.featureFlags.asyncMode;
                   rewrite_stash = cfg.settings.featureFlags.rewriteStash;
                   checkpoint_inter_commit_move = cfg.settings.featureFlags.interCommitMove;
                   auth_keyring = cfg.settings.featureFlags.authKeyring;
@@ -856,18 +842,6 @@ GITOGEOF
               };
 
               featureFlags = {
-                asyncMode = mkOption {
-                  type = types.nullOr types.bool;
-                  default = null;
-                  description = ''
-                    Enable async daemon mode for background processing.
-                    When enabled, git operations are processed asynchronously
-                    through a background daemon, improving performance for IDE
-                    and agent workflows.
-                    Equivalent to: git ai config set feature_flags.async_mode true
-                  '';
-                };
-
                 rewriteStash = mkOption {
                   type = types.nullOr types.bool;
                   default = null;
