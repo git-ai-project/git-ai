@@ -75,6 +75,7 @@ mod pi;
 mod prompt_across_commit;
 mod prompt_hash_migration;
 mod prompt_picker_test;
+mod prompt_storage_rewrite_paths;
 mod prompts_db_test;
 mod pull_rebase_ff;
 mod push_upstream_authorship;

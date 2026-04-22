@@ -10,6 +10,7 @@ pub mod internal_db;
 pub mod move_detection;
 pub mod post_commit;
 pub mod pre_commit;
+pub mod prompt_storage_policy;
 pub mod prompt_utils;
 pub mod range_authorship;
 pub mod rebase_authorship;

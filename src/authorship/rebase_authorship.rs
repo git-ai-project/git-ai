@@ -620,11 +620,15 @@ pub fn rewrite_authorship_after_squash_or_rebase(
             tracing::debug!(
                 "No AI-touched files in merge, but notes exist in source commits; writing empty authorship log",
             );
-            if let Some(authorship_log) = build_metadata_only_authorship_log_from_source_notes(
+            if let Some(mut authorship_log) = build_metadata_only_authorship_log_from_source_notes(
                 repo,
                 &source_commits,
                 merge_commit_sha,
             )? {
+                crate::authorship::prompt_storage_policy::apply_prompt_storage_policy(
+                    repo,
+                    &mut authorship_log,
+                )?;
                 let authorship_json = authorship_log.serialize_to_string().map_err(|_| {
                     GitAiError::Generic("Failed to serialize authorship log".to_string())
                 })?;
@@ -711,6 +715,10 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     );
 
     // Step 7: Save authorship log to git notes
+    crate::authorship::prompt_storage_policy::apply_prompt_storage_policy(
+        repo,
+        &mut authorship_log,
+    )?;
     let authorship_json = authorship_log
         .serialize_to_string()
         .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
@@ -1867,6 +1875,11 @@ pub fn rewrite_authorship_after_rebase_v2(
 
     let phase_start = std::time::Instant::now();
     if !pending_note_entries.is_empty() {
+        for (_sha, note) in pending_note_entries.iter_mut() {
+            *note = crate::authorship::prompt_storage_policy::apply_prompt_storage_policy_to_note(
+                repo, note,
+            )?;
+        }
         crate::git::refs::notes_add_batch(repo, &pending_note_entries)?;
     }
     timing_phases.push((
@@ -2086,6 +2099,10 @@ pub fn rewrite_authorship_after_cherry_pick(
         let computed_note_has_payload =
             !authorship_log.attestations.is_empty() || !authorship_log.metadata.prompts.is_empty();
         let authorship_json = if computed_note_has_payload {
+            crate::authorship::prompt_storage_policy::apply_prompt_storage_policy(
+                repo,
+                &mut authorship_log,
+            )?;
             authorship_log.serialize_to_string().map_err(|_| {
                 GitAiError::Generic("Failed to serialize authorship log".to_string())
             })?
@@ -2096,8 +2113,15 @@ pub fn rewrite_authorship_after_cherry_pick(
                 source_note_content_loaded = true;
             }
             if let Some(raw_note) = source_note_content_by_new_commit.get(new_commit) {
-                remap_note_content_for_target_commit(raw_note, new_commit)
+                let remapped = remap_note_content_for_target_commit(raw_note, new_commit);
+                crate::authorship::prompt_storage_policy::apply_prompt_storage_policy_to_note(
+                    repo, &remapped,
+                )?
             } else {
+                crate::authorship::prompt_storage_policy::apply_prompt_storage_policy(
+                    repo,
+                    &mut authorship_log,
+                )?;
                 authorship_log.serialize_to_string().map_err(|_| {
                     GitAiError::Generic("Failed to serialize authorship log".to_string())
                 })?
@@ -2939,15 +2963,12 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
         }
     }
 
-    // Inject custom attributes into all PromptRecords (same behavior as post_commit).
-    // Always use Config::fresh() to support runtime config updates
-    // (especially important for daemon mode, but also good for consistency)
-    let custom_attrs = crate::config::Config::fresh().custom_attributes().clone();
-    if !custom_attrs.is_empty() {
-        for pr in authorship_log.metadata.prompts.values_mut() {
-            pr.custom_attributes = Some(custom_attrs.clone());
-        }
-    }
+    // Apply prompt_storage policy (custom_attributes + strip/redact/CAS) so the
+    // amended note honors the same mode as post_commit.rs does on regular commits.
+    crate::authorship::prompt_storage_policy::apply_prompt_storage_policy(
+        repo,
+        &mut authorship_log,
+    )?;
 
     // Save authorship log
     let authorship_json = authorship_log
@@ -3413,10 +3434,12 @@ fn remap_notes_for_commit_pairs(
     let mut entries = Vec::new();
     for (original_commit, new_commit) in commit_pairs {
         if let Some(raw_note) = original_note_contents.get(original_commit) {
-            entries.push((
-                new_commit.clone(),
-                remap_note_content_for_target_commit(raw_note, new_commit),
-            ));
+            let remapped = remap_note_content_for_target_commit(raw_note, new_commit);
+            let policy_applied =
+                crate::authorship::prompt_storage_policy::apply_prompt_storage_policy_to_note(
+                    repo, &remapped,
+                )?;
+            entries.push((new_commit.clone(), policy_applied));
         }
     }
 
@@ -3553,10 +3576,12 @@ fn try_fast_path_rebase_note_remap_cached(
         let Some(raw_note) = note_cache.original_note_contents.get(original_commit) else {
             return Ok(false);
         };
-        remapped_note_entries.push((
-            new_commit.clone(),
-            remap_note_content_for_target_commit(raw_note, new_commit),
-        ));
+        let remapped = remap_note_content_for_target_commit(raw_note, new_commit);
+        let policy_applied =
+            crate::authorship::prompt_storage_policy::apply_prompt_storage_policy_to_note(
+                repo, &remapped,
+            )?;
+        remapped_note_entries.push((new_commit.clone(), policy_applied));
     }
 
     let remapped_count = remapped_note_entries.len();
@@ -3643,10 +3668,12 @@ fn try_fast_path_cherry_pick_note_remap(
         let Some(raw_note) = blob_contents.get(&blob_oid) else {
             return Ok(false);
         };
-        remapped_note_entries.push((
-            new_commit.clone(),
-            remap_note_content_for_target_commit(raw_note, &new_commit),
-        ));
+        let remapped = remap_note_content_for_target_commit(raw_note, &new_commit);
+        let policy_applied =
+            crate::authorship::prompt_storage_policy::apply_prompt_storage_policy_to_note(
+                repo, &remapped,
+            )?;
+        remapped_note_entries.push((new_commit.clone(), policy_applied));
     }
 
     let remapped_count = remapped_note_entries.len();
