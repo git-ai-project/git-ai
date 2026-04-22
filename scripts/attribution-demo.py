@@ -52,3 +52,37 @@ def flatten(nested: list) -> list:
         else:
             result.append(item)
     return result
+
+# --- NEW HUMAN CODE ---
+def subtract(a: int, b: int) -> int:
+    return a - b
+
+def divide(a: float, b: float) -> float:
+    if b == 0:
+        raise ValueError("Cannot divide by zero")
+    return a / b
+
+# --- NEW AI GENERATED ---
+def binary_search(arr: list, target: int) -> int:
+    """Binary search: returns index of target or -1."""
+    lo, hi = 0, len(arr) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if arr[mid] == target:
+            return mid
+        elif arr[mid] < target:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return -1
+
+def caesar_cipher(text: str, shift: int) -> str:
+    """Encrypt text using Caesar cipher."""
+    result = []
+    for ch in text:
+        if ch.isalpha():
+            base = ord('A') if ch.isupper() else ord('a')
+            result.append(chr((ord(ch) - base + shift) % 26 + base))
+        else:
+            result.append(ch)
+    return ''.join(result)
