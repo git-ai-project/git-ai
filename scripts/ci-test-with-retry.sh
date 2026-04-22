@@ -27,13 +27,6 @@ if [ "$FIRST_EXIT" -eq 0 ]; then
   exit 0
 fi
 
-# Only retry for daemon and wrapper-daemon modes
-if [ "$TEST_MODE" != "daemon" ] && [ "$TEST_MODE" != "wrapper-daemon" ]; then
-  echo "::error::Tests failed in '$TEST_MODE' mode (retry not enabled for this mode)"
-  rm -f "$OUTPUT_FILE"
-  exit 1
-fi
-
 # Parse failed test names from the output.
 # cargo test prints a failures section like:
 #   failures:

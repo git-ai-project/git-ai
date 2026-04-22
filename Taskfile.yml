@@ -69,19 +69,6 @@ tasks:
         vars:
           GIT_AI_TEST_GIT_MODE: wrapper-daemon
 
-  test:wrapper:
-    desc: Run unit tests in wrapper mode (DEPRECATED - DO NOT USE THIS UNLESS EXPLICITLY REQUESTED BY THE USER FOR TESTING PURPOSES; WILL BE REMOVED SOON)
-    cmds:
-      - task: test:base
-        vars:
-          GIT_AI_TEST_GIT_MODE: wrapper
-
-  test:bats:
-    desc: Run the bats-based tests with debug build (DEPRECATED - DO NOT USE THIS UNLESS EXPLICITLY REQUESTED BY THE USER FOR TESTING PURPOSES; WILL BE REMOVED SOON)
-    deps: [build]
-    cmds:
-      - bats tests/e2e/user-scenarios.bats
-
   lint:
     desc: Run cargo check and clippy with warnings as errors
     cmds:
