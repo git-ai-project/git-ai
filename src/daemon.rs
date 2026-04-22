@@ -6712,7 +6712,15 @@ impl ActorDaemonCoordinator {
         let primary = cmd.primary_command.as_deref().unwrap_or("unknown");
         let is_write_op = matches!(
             primary,
-            "commit" | "rebase" | "merge" | "cherry-pick" | "am" | "stash" | "reset" | "push"
+            "commit"
+                | "rebase"
+                | "merge"
+                | "cherry-pick"
+                | "am"
+                | "stash"
+                | "reset"
+                | "push"
+                | "update-ref"
         );
         if is_write_op && cmd.exit_code == 0 {
             let repo_path = cmd
@@ -7039,6 +7047,45 @@ impl ActorDaemonCoordinator {
                 )?;
             }
         }
+
+        // Handle fast-forward update-ref: rename working log when the ref update
+        // is a fast-forward that affects the currently checked-out branch.
+        // Non-ancestor (rewrite) cases are already handled by
+        // rewrite_events_from_semantic_events() above.
+        if primary == "update-ref"
+            && let Some(worktree) = cmd.worktree.as_ref()
+        {
+            let current_branch = cmd.pre_repo.as_ref().and_then(|r| r.branch.clone());
+            for event in events {
+                if let crate::daemon::domain::SemanticEvent::RefUpdated {
+                    reference,
+                    old,
+                    new,
+                } = event
+                {
+                    if !reference.starts_with("refs/heads/")
+                        || !is_valid_oid(old)
+                        || is_zero_oid(old)
+                        || !is_valid_oid(new)
+                        || is_zero_oid(new)
+                        || old == new
+                    {
+                        continue;
+                    }
+                    let affects_checked_out_branch =
+                        current_branch.as_deref().is_some_and(|branch| {
+                            reference == &format!("refs/heads/{}", branch) || reference == branch
+                        });
+                    if affects_checked_out_branch
+                        && let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy())
+                        && repo_is_ancestor(&repo, old, new)
+                    {
+                        let _ = repo.storage.rename_working_log(old, new);
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
