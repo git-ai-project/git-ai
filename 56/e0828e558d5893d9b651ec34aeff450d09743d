@@ -1,7 +1,7 @@
-src/commands/hooks/push_hooks.rs
-  s_8d9d36585aec71::t_5be69d286f5f19 3
 src/commands/hooks/rebase_hooks.rs
   s_8d9d36585aec71::t_a5f2851c9bc432 2
+src/commands/hooks/push_hooks.rs
+  s_8d9d36585aec71::t_5be69d286f5f19 3
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -15,7 +15,7 @@ src/commands/hooks/rebase_hooks.rs
         "id": "33d20787-e26d-4a7f-9364-7a48fad08505",
         "model": "claude-opus-4-6"
       },
-      "human_author": "Sasha Varlamov <sasha@sashavarlamov.com>",
+      "human_author": "Sasha Varlamov",
       "messages": []
     }
   }
