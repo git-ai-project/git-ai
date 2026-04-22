@@ -1564,11 +1564,11 @@ fn test_diff_json_all_prompts_includes_sessions() {
         "new-format commit should not have entries in 'prompts'"
     );
 
-    // Session keys should use s_xxx::t_yyy format
+    // Session keys should use s_xxx format (session ID only, not combined with trace ID)
     let first_key = sessions.unwrap().keys().next().unwrap();
     assert!(
-        first_key.starts_with("s_") && first_key.contains("::t_"),
-        "session key should use s_xxx::t_yyy format, got: {}",
+        first_key.starts_with("s_") && !first_key.contains("::"),
+        "session key should be session ID only (s_xxx), not combined ID (s_xxx::t_yyy), got: {}",
         first_key
     );
 
@@ -2319,8 +2319,8 @@ fn test_diff_json_mixed_format_commit_separates_prompts_and_sessions() {
     );
     let session_key = sessions.keys().next().unwrap();
     assert!(
-        session_key.starts_with("s_") && session_key.contains("::t_"),
-        "session key should be s_xxx::t_yyy format, got: {}",
+        session_key.starts_with("s_") && !session_key.contains("::"),
+        "session key should be session ID only (s_xxx), not combined ID (s_xxx::t_yyy), got: {}",
         session_key
     );
     let session = &sessions[session_key];
@@ -2443,8 +2443,8 @@ fn test_diff_json_history_with_mixed_old_and_new_format_commits() {
     );
     let session_key = new_sessions.keys().next().unwrap();
     assert!(
-        session_key.starts_with("s_") && session_key.contains("::t_"),
-        "session key should be s_xxx::t_yyy, got: {}",
+        session_key.starts_with("s_") && !session_key.contains("::"),
+        "session key should be session ID only (s_xxx), not combined ID (s_xxx::t_yyy), got: {}",
         session_key
     );
     assert!(
