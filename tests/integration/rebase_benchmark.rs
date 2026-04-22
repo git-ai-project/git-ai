@@ -1919,13 +1919,6 @@ fn benchmark_monorepo_rebase() {
 #[test]
 #[ignore]
 fn benchmark_monorepo_graphite_rebase() {
-    // Skip in hooks mode — commit-tree/update-ref detection requires wrapper mode
-    let mode = std::env::var("GIT_AI_TEST_GIT_MODE").unwrap_or_else(|_| "wrapper".to_string());
-    if mode == "hooks" {
-        eprintln!("SKIP: graphite-style benchmark only runs in wrapper mode");
-        return;
-    }
-
     // Simple deterministic PRNG (xorshift64)
     struct Rng(u64);
     impl Rng {
