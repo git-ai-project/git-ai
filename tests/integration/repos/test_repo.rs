@@ -85,6 +85,9 @@ impl GitTestMode {
 pub enum DaemonTestScope {
     Shared,
     Dedicated,
+    /// Create a repo configured for daemon mode but do NOT auto-start a daemon.
+    /// Use this for tests that manually manage their own daemon lifecycle.
+    NoDaemon,
 }
 
 #[derive(Debug, Clone)]
@@ -1429,6 +1432,7 @@ impl TestRepo {
                 &self.test_home,
                 &self.test_db_path,
             )),
+            DaemonTestScope::NoDaemon => return,
         };
         self.test_db_path = daemon.test_db_path.clone();
         self.daemon_process = Some(daemon);
@@ -1697,7 +1701,7 @@ impl TestRepo {
     }
 
     pub(crate) fn record_daemon_family_expected_completion_session(&self, session: &str) {
-        if !self.git_mode.uses_daemon() {
+        if !self.has_active_daemon() {
             return;
         }
 
@@ -1713,7 +1717,7 @@ impl TestRepo {
         args: &mut Vec<String>,
         session: &str,
     ) {
-        if !self.git_mode.uses_daemon() {
+        if !self.has_active_daemon() {
             return;
         }
 
@@ -1766,7 +1770,7 @@ impl TestRepo {
     }
 
     pub(crate) fn sync_daemon_force(&self) {
-        if !self.git_mode.uses_daemon() {
+        if !self.has_active_daemon() {
             return;
         }
 
@@ -1775,7 +1779,7 @@ impl TestRepo {
     }
 
     pub(crate) fn sync_daemon_external_completion_sessions(&self, sessions: &[String]) {
-        if !self.git_mode.uses_daemon() || sessions.is_empty() {
+        if !self.has_active_daemon() || sessions.is_empty() {
             return;
         }
 
@@ -1786,7 +1790,7 @@ impl TestRepo {
     }
 
     fn sync_daemon_clone_target(&self, target_repo_path: &Path) {
-        if !self.git_mode.uses_daemon() {
+        if !self.has_active_daemon() {
             return;
         }
 
@@ -1861,7 +1865,7 @@ impl TestRepo {
         // Isolate all git + git-ai config reads from developer machine settings.
         configure_test_home_env(command, &self.test_home);
 
-        if self.git_mode.uses_daemon() {
+        if self.has_active_daemon() {
             command.env(
                 "GIT_TRACE2_EVENT",
                 DaemonConfig::trace2_event_target_for_path(&self.daemon_trace_socket_path()),
@@ -1905,7 +1909,7 @@ impl TestRepo {
             self.daemon_trace_socket_path(),
         );
 
-        if self.git_mode.uses_daemon() {
+        if self.has_active_daemon() {
             command.env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true");
         }
 
@@ -1956,6 +1960,10 @@ impl TestRepo {
 
     pub fn mode(&self) -> GitTestMode {
         self.git_mode
+    }
+
+    fn has_active_daemon(&self) -> bool {
+        self.git_mode.uses_daemon() && self.daemon_process.is_some()
     }
 
     pub fn sync_daemon(&self) {
@@ -2186,13 +2194,12 @@ impl TestRepo {
 
         let retry_limit = 8usize;
         let retry_delay = Duration::from_millis(50);
-        let command_affects_daemon = self.git_mode.uses_daemon()
+        let command_affects_daemon = self.has_active_daemon()
             && git_ai::daemon::test_sync::tracks_parsed_git_invocation_for_test_sync(
                 &tracked_invocation,
             );
         for attempt in 0..=retry_limit {
-            let daemon_command_pending = self.git_mode.uses_daemon()
-                && command_affects_daemon
+            let daemon_command_pending = command_affects_daemon
                 && !git_invocation_routes_to_clone_target(&tracked_invocation);
             let daemon_test_sync_session =
                 daemon_command_pending.then(new_daemon_test_sync_session_id);
@@ -2255,8 +2262,7 @@ impl TestRepo {
                     format!("{}{}", stdout, stderr)
                 };
                 if command_affects_daemon {
-                    if self.git_mode.uses_daemon()
-                        && git_invocation_routes_to_clone_target(&tracked_invocation)
+                    if git_invocation_routes_to_clone_target(&tracked_invocation)
                     {
                         let clone_cwd = canonical_working_dir
                             .as_deref()

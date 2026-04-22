@@ -1008,7 +1008,7 @@ fn wrapper_daemon_mode_post_commit_uploads_prompt_cas() {
 #[serial]
 fn daemon_start_spawns_detached_run_process() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     let mut command = Command::new(get_binary_path());
     command
@@ -1198,7 +1198,6 @@ fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
 fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
-    let _daemon = DaemonGuard::start(&repo);
     let completion_baseline = repo.daemon_total_completion_count();
 
     fs::write(repo.path().join("delegate-write.txt"), "base\n").expect("failed to write base");
@@ -1714,7 +1713,7 @@ fn daemon_captured_checkpoint_rejects_manifest_for_different_repo() {
 #[serial]
 fn daemon_pure_trace_socket_commit_after_ai_checkpoint_preserves_ai_replacement_attribution() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -1775,7 +1774,7 @@ fn daemon_pure_trace_socket_commit_after_ai_checkpoint_preserves_ai_replacement_
 #[serial]
 fn daemon_trace_ingest_treats_atexit_as_terminal_for_reflog_capture() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let sid = "atexit-commit";
@@ -1815,7 +1814,7 @@ fn daemon_trace_ingest_treats_atexit_as_terminal_for_reflog_capture() {
 #[serial]
 fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_lines() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -1918,7 +1917,7 @@ fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_two_commits_preserve_ai_
 #[serial]
 fn daemon_pure_trace_socket_checkpoint_stage_checkpoint_non_adjacent_hunks_survive_split_commits() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -2056,7 +2055,7 @@ omega body
 #[serial]
 fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -2114,7 +2113,7 @@ fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
 #[serial]
 fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -2238,7 +2237,7 @@ fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -2360,7 +2359,7 @@ fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
 #[serial]
 fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -2522,7 +2521,7 @@ fn daemon_commit_replay_recovers_stash_restore_when_working_log_is_missing() {
 #[serial]
 fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -2831,7 +2830,7 @@ fn daemon_commit_replay_recovers_squash_prep_when_working_log_is_missing() {
 #[serial]
 fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -2945,7 +2944,7 @@ fn daemon_commit_replay_recovers_switch_migration_when_working_log_is_missing() 
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -3016,7 +3015,7 @@ fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
 #[serial]
 fn daemon_pure_trace_socket_rebase_with_short_sha_emits_complete_event() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -3138,7 +3137,7 @@ fn daemon_pure_trace_socket_rebase_with_short_sha_emits_complete_event() {
 #[serial]
 fn daemon_pure_trace_socket_cherry_pick_with_short_sha_emits_complete_event() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -3254,7 +3253,7 @@ fn daemon_pure_trace_socket_cherry_pick_with_short_sha_emits_complete_event() {
 #[serial]
 fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -3308,7 +3307,7 @@ fn daemon_pure_trace_socket_switch_tracks_success_and_conflict_failure() {
 #[serial]
 fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -3367,7 +3366,7 @@ fn daemon_pure_trace_socket_checkout_tracks_success_failure_and_new_branch() {
 #[serial]
 fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -3480,7 +3479,7 @@ fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command() {
 #[serial]
 fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -3602,7 +3601,7 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
 #[serial]
 fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_command() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -3736,7 +3735,7 @@ fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_co
 #[serial]
 fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blame() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -3779,7 +3778,7 @@ fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blam
 #[serial]
 fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attribution() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -3856,7 +3855,7 @@ fn daemon_pure_trace_socket_concurrent_worktree_burst_preserves_exact_line_attri
 #[serial]
 fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_attribution() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -3912,7 +3911,7 @@ fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_a
 #[serial]
 fn daemon_pure_trace_socket_parallel_worktree_streams_preserve_exact_line_attribution() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let _daemon = DaemonGuard::start(&repo);
     let trace_socket = daemon_trace_socket_path(&repo);
     let env = git_trace_env(&trace_socket);
@@ -4091,7 +4090,7 @@ fn update_enabled_config_patch() -> String {
 #[serial]
 fn daemon_update_check_loop_detects_cached_update_and_shuts_down() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     // Seed update cache with a pending update before starting the daemon.
     seed_update_cache_for_test(repo.test_home_path(), true);
@@ -4151,7 +4150,7 @@ fn daemon_update_check_loop_detects_cached_update_and_shuts_down() {
 #[serial]
 fn daemon_update_check_loop_respects_disabled_auto_updates() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     // Seed update cache with a pending update.
     seed_update_cache_for_test(repo.test_home_path(), true);
@@ -4196,7 +4195,7 @@ fn daemon_update_check_loop_respects_disabled_auto_updates() {
 #[serial]
 fn daemon_update_check_loop_no_update_stays_alive() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     // Seed update cache with NO pending update.
     seed_update_cache_for_test(repo.test_home_path(), false);
@@ -4339,7 +4338,7 @@ use std::process::Output;
 #[serial]
 fn daemon_shutdown_hard_kills_process() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let mut guard = DaemonGuard::start(&repo);
     guard.wait_until_ready();
 
@@ -4381,7 +4380,7 @@ fn daemon_shutdown_hard_kills_process() {
 #[serial]
 fn daemon_restart_brings_up_new_process() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let mut guard = DaemonGuard::start(&repo);
     guard.wait_until_ready();
 
@@ -4426,7 +4425,7 @@ fn daemon_restart_brings_up_new_process() {
 #[serial]
 fn daemon_restart_hard_kills_and_restarts() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let mut guard = DaemonGuard::start(&repo);
     guard.wait_until_ready();
 
@@ -4462,7 +4461,7 @@ fn daemon_restart_hard_kills_and_restarts() {
 #[serial]
 fn daemon_shutdown_hard_when_not_running_fails_gracefully() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     // Don't start any daemon — just run shutdown --hard on a cold config.
     // It should not panic / crash.
@@ -4487,7 +4486,7 @@ fn daemon_shutdown_hard_when_not_running_fails_gracefully() {
 #[serial]
 fn daemon_restart_when_not_running_starts_fresh() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     // No daemon running — restart should just start a new one.
     let output = bg_command(&repo, "restart", &[]);
@@ -4545,7 +4544,7 @@ fn process_exists(pid: u32) -> bool {
 #[serial]
 fn daemon_recovers_from_panic_in_side_effect_pipeline() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     // Create a flag file that will trigger a panic in the side-effect pipeline.
     let panic_flag_path = repo.path().join(".panic_flag");
@@ -4674,7 +4673,7 @@ fn daemon_recovers_from_panic_in_side_effect_pipeline() {
 #[cfg(unix)]
 fn daemon_shuts_down_when_socket_files_are_deleted() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let control_socket_path = daemon_control_socket_path(&repo);
     let trace_socket_path = daemon_trace_socket_path(&repo);
 
@@ -4764,7 +4763,7 @@ fn daemon_shuts_down_when_socket_files_are_deleted() {
 #[cfg(unix)]
 fn daemon_self_heals_after_socket_deletion() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
     let control_socket_path = daemon_control_socket_path(&repo);
     let trace_socket_path = daemon_trace_socket_path(&repo);
 

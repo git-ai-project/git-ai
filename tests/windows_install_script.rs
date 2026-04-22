@@ -329,7 +329,7 @@ fn wait_for_child_exit(repo: &TestRepo, child: &mut Child, timeout: Duration) {
 #[serial]
 fn windows_install_script_reinstall_stops_running_daemon() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -374,7 +374,7 @@ fn windows_install_script_reinstall_stops_running_daemon() {
 #[serial]
 fn windows_daemon_creates_log_file() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -398,7 +398,7 @@ fn windows_daemon_creates_log_file() {
 #[serial]
 fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
     let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
