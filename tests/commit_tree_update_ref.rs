@@ -9,7 +9,7 @@ use git_ai::git::find_repository_in_path;
 use git_ai::git::refs::show_authorship_note;
 use git_ai::git::repository::Repository as GitAiRepository;
 use repos::test_file::ExpectedLineExt;
-use repos::test_repo::{GitTestMode, TestRepo};
+use repos::test_repo::TestRepo;
 
 fn setup_initial_commit(repo: &TestRepo) {
     let mut readme = repo.filename("README.md");
@@ -125,22 +125,9 @@ fn graphite_style_restack_child_branch(
     new_head
 }
 
-fn should_skip_for_hooks_mode() -> bool {
-    let mode = std::env::var("GIT_AI_TEST_GIT_MODE").unwrap_or_else(|_| "wrapper".to_string());
-    if matches!(GitTestMode::from_mode_name(&mode), GitTestMode::Hooks) {
-        eprintln!("SKIP: commit-tree/update-ref regression only runs in wrapper mode");
-        return true;
-    }
-    false
-}
-
 #[test]
 fn test_commit_tree_update_ref_preserves_authorship_notes_on_reparent() {
-    if should_skip_for_hooks_mode() {
-        return;
-    }
-
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new();
     setup_initial_commit(&repo);
 
     repo.git(&["checkout", "-b", "feature"])
@@ -175,6 +162,8 @@ fn test_commit_tree_update_ref_preserves_authorship_notes_on_reparent() {
         "feature commit",
     );
 
+    repo.sync_daemon();
+
     let git_ai_repo = open_repo(&repo);
     assert!(
         show_authorship_note(&git_ai_repo, &new_head).is_some(),
@@ -189,11 +178,7 @@ fn test_commit_tree_update_ref_preserves_authorship_notes_on_reparent() {
 
 #[test]
 fn test_commit_tree_update_ref_moves_working_log_to_rewritten_head() {
-    if should_skip_for_hooks_mode() {
-        return;
-    }
-
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new();
     setup_initial_commit(&repo);
 
     repo.git(&["checkout", "-b", "feature"])
@@ -234,6 +219,8 @@ fn test_commit_tree_update_ref_moves_working_log_to_rewritten_head() {
         "feature commit",
     );
 
+    repo.sync_daemon();
+
     let git_ai_repo = open_repo(&repo);
     assert!(
         git_ai_repo.storage.has_working_log(&new_head),
@@ -261,11 +248,7 @@ fn test_commit_tree_update_ref_moves_working_log_to_rewritten_head() {
 
 #[test]
 fn test_reset_keep_rewrite_preserves_authorship_notes_on_current_branch() {
-    if should_skip_for_hooks_mode() {
-        return;
-    }
-
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new();
     setup_initial_commit(&repo);
 
     repo.git(&["checkout", "-b", "feature"])
@@ -300,6 +283,8 @@ fn test_reset_keep_rewrite_preserves_authorship_notes_on_current_branch() {
     repo.git(&["reset", "--keep", &new_head])
         .expect("git reset --keep should succeed");
 
+    repo.sync_daemon();
+
     let git_ai_repo = open_repo(&repo);
     assert!(
         show_authorship_note(&git_ai_repo, &new_head).is_some(),
@@ -314,11 +299,7 @@ fn test_reset_keep_rewrite_preserves_authorship_notes_on_current_branch() {
 
 #[test]
 fn test_update_ref_restack_after_parent_amend_preserves_child_attribution() {
-    if should_skip_for_hooks_mode() {
-        return;
-    }
-
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new();
     setup_initial_commit(&repo);
 
     repo.git(&["checkout", "-b", "parent"])
@@ -365,6 +346,8 @@ fn test_update_ref_restack_after_parent_amend_preserves_child_attribution() {
         "child",
     );
 
+    repo.sync_daemon();
+
     let git_ai_repo = open_repo(&repo);
     assert!(
         show_authorship_note(&git_ai_repo, &new_child_head).is_some(),
@@ -387,11 +370,7 @@ fn test_update_ref_restack_after_parent_amend_preserves_child_attribution() {
 /// git-ai must detect the N-commit rewrite and remap all N authorship notes.
 #[test]
 fn test_graphite_style_multi_commit_single_update_ref() {
-    if should_skip_for_hooks_mode() {
-        return;
-    }
-
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new();
     setup_initial_commit(&repo);
     let default_branch = repo.current_branch();
 
@@ -506,6 +485,8 @@ fn test_graphite_style_multi_commit_single_update_ref() {
     repo.git(&["update-ref", "refs/heads/feature", &new_tip, &old_tip])
         .expect("update-ref");
     repo.git(&["reset", "--hard", &new_tip]).expect("reset");
+
+    repo.sync_daemon();
 
     // Verify all 3 rebased commits have authorship notes
     let rebased_commits_str = repo
