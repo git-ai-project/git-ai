@@ -23,7 +23,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 interprocess = "2.4"
 rusqlite = { version = "0.31", features = ["bundled"] }
 libc = "0.2"
-git2 = { version = "0.20.4", optional = true }
 jsonc-parser = { version = "0.32", features = ["cst"] }
 dirs = "5.0"
 ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
@@ -52,7 +51,7 @@ named_pipe = "0.4.1"
 winreg = "0.55"
 
 [features]
-test-support = ["git2"]
+test-support = []
 keyring = ["dep:keyring"]
 
 [dev-dependencies]
