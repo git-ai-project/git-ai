@@ -211,11 +211,11 @@ pub(crate) fn ensure_daemon_running(
 
     #[cfg(not(any(test, feature = "test-support")))]
     {
-        if std::env::var("GIT_AI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN")
+        if std::env::var("_GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN")
             .is_ok_and(|v| v == "1" || v == "true")
         {
             return Err(
-                "daemon auto-spawn disabled (GIT_AI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN)"
+                "daemon auto-spawn disabled (_GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN)"
                     .to_string(),
             );
         }
