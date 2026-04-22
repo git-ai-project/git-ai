@@ -1,5 +1,4 @@
 use crate::authorship::rebase_authorship::walk_commits_to_base;
-use crate::git::cli_parser::{ParsedGitInvocation, RebaseArgsSummary};
 use crate::git::repository::Repository;
 use crate::git::rewrite_log::RewriteLogEvent;
 

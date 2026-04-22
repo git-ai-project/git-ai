@@ -228,27 +228,6 @@ fn read_stash_note(repo: &Repository, stash_sha: &str) -> Result<String, GitAiEr
     Ok(content.to_string())
 }
 
-/// Resolve a stash reference to its commit SHA
-fn resolve_stash_to_sha(repo: &Repository, stash_ref: &str) -> Result<String, GitAiError> {
-    let mut args = repo.global_args_for_exec();
-    args.push("rev-parse".to_string());
-    args.push(stash_ref.to_string());
-
-    let output = exec_git(&args)?;
-
-    if !output.status.success() {
-        return Err(GitAiError::Generic(format!(
-            "Failed to resolve stash reference '{}': git rev-parse exited with status {}",
-            stash_ref, output.status
-        )));
-    }
-
-    let stdout = std::str::from_utf8(&output.stdout)?;
-    let sha = stdout.trim().to_string();
-
-    Ok(sha)
-}
-
 /// Extract pathspecs from stash push/save command
 /// Format: git stash push [options] [--] [<pathspec>...]
 pub(crate) fn extract_stash_pathspecs(parsed_args: &ParsedGitInvocation) -> Vec<String> {
