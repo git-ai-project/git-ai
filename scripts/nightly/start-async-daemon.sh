@@ -4,7 +4,7 @@
 # Usage:  source scripts/nightly/start-async-daemon.sh <git-ai-binary> [real-git-path]
 #
 # The script:
-#   1. Creates/updates ~/.git-ai/config.json with async_mode enabled
+#   1. Creates ~/.git-ai/config.json for the daemon
 #   2. Picks socket paths under RUNNER_TEMP (or /tmp)
 #   3. Starts the daemon in the background
 #   4. Waits for sockets to appear (up to 10 s)
@@ -12,7 +12,7 @@
 #
 # After sourcing, the following env vars are set in the current shell AND
 # appended to GITHUB_ENV (if it exists):
-#   GIT_AI_ASYNC_MODE, GIT_AI_TEST_FORCE_TTY, GIT_AI_POST_COMMIT_TIMEOUT_MS,
+#   GIT_AI_TEST_FORCE_TTY, GIT_AI_POST_COMMIT_TIMEOUT_MS,
 #   GIT_AI_DAEMON_HOME, GIT_AI_DAEMON_CONTROL_SOCKET, GIT_AI_DAEMON_TRACE_SOCKET,
 #   ASYNC_DAEMON_PID
 set -euo pipefail
@@ -46,37 +46,18 @@ cat > "$DAEMON_HOME/.git-ai/config.json" <<CONF
     "git_path": "$REAL_GIT",
     "disable_auto_updates": true,
     "feature_flags": {
-        "async_mode": true,
         "git_hooks_enabled": false
     },
     "quiet": false
 }
 CONF
 
-# Also ensure the actual HOME's config has async_mode (some steps read from HOME)
-if [ -d "$HOME/.git-ai" ]; then
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -c "
-import json, os, sys
-cfg_path = os.path.join(os.environ['HOME'], '.git-ai', 'config.json')
-if not os.path.exists(cfg_path):
-    sys.exit(0)
-with open(cfg_path) as f:
-    cfg = json.load(f)
-ff = cfg.setdefault('feature_flags', {})
-ff['async_mode'] = True
-with open(cfg_path, 'w') as f:
-    json.dump(cfg, f, indent=2)
-" 2>/dev/null || true
-    fi
-fi
 
 # ── Socket paths ─────────────────────────────────────────────────────────────
 CTRL_SOCK="$DAEMON_HOME/control.sock"
 TRACE_SOCK="$DAEMON_HOME/trace.sock"
 
 # ── Export env vars ──────────────────────────────────────────────────────────
-export GIT_AI_ASYNC_MODE=true
 export GIT_AI_TEST_FORCE_TTY=1
 export GIT_AI_POST_COMMIT_TIMEOUT_MS=30000
 export GIT_AI_DAEMON_HOME="$DAEMON_HOME"
@@ -86,7 +67,6 @@ export GIT_AI_DAEMON_TRACE_SOCKET="$TRACE_SOCK"
 # Persist to GITHUB_ENV so subsequent workflow steps inherit them.
 if [ -n "${GITHUB_ENV:-}" ]; then
     {
-        echo "GIT_AI_ASYNC_MODE=true"
         echo "GIT_AI_TEST_FORCE_TTY=1"
         echo "GIT_AI_POST_COMMIT_TIMEOUT_MS=30000"
         echo "GIT_AI_DAEMON_HOME=$DAEMON_HOME"
