@@ -18,6 +18,8 @@ def multiply(a: int, b: int) -> int:
 
 print("Hello Sujay")
 
+print("Hello World")
+
 
 # --- AI GENERATED ---
 
