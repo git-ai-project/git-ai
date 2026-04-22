@@ -8,8 +8,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::repos::test_repo::TestRepo;
-use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
+use crate::repos::test_repo::{BenchmarkResult, TestRepo};
 
 fn setup() {
     git_ai::config::Config::clear_test_feature_flags();
@@ -30,9 +29,11 @@ fn setup() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use git_ai::observability::wrapper_performance_targets::PERFORMANCE_FLOOR_MS;
     use rand::seq::IndexedRandom;
     use rstest::rstest;
+
+    // Performance floor constant (270ms) - used to determine if overhead is acceptable
+    const PERFORMANCE_FLOOR_MS: Duration = Duration::from_millis(270);
 
     #[rstest]
     #[case("chromium")]

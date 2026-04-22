@@ -17,7 +17,7 @@ use crate::git::find_repository;
 use crate::git::find_repository_in_path;
 use crate::git::repository::{CommitRange, Repository, group_files_by_repository};
 use crate::git::sync_authorship::{NotesExistence, fetch_authorship_notes, push_authorship_notes};
-use crate::observability::wrapper_performance_targets::log_performance_for_checkpoint;
+use crate::observability::performance_targets::log_performance_for_checkpoint;
 use crate::observability::{self, log_message};
 use crate::utils::is_interactive_terminal;
 use serde::{Deserialize, Serialize};
