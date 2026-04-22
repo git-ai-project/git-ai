@@ -700,7 +700,6 @@ fn test_stats_from_authorship_log_no_log() {
 }
 
 #[test]
-#[ignore] // Implementation-specific capping behavior differs from test expectations
 fn test_stats_from_authorship_log_mixed_cap() {
     // Test that mixed_additions is capped to remaining added lines
     let mut log = AuthorshipLog::new();
