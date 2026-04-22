@@ -32,46 +32,44 @@ pub fn handle_git_ai(args: &[String]) {
         return;
     }
 
-    // In async mode, initialize the global telemetry handle so that
-    // observability and CAS events are routed over the control socket instead
-    // of being written to per-PID log files.
+    // Initialize the global telemetry handle so that observability and CAS
+    // events are routed over the control socket instead of being written to
+    // per-PID log files.
     //
     // Skip for commands that must work without a running background service
     // (help, version, config, d management, debug, upgrade) so users can
     // always diagnose and recover from a broken state.
-    if config::Config::get().feature_flags().async_mode {
-        let needs_daemon = !matches!(
-            args[0].as_str(),
-            "help"
-                | "--help"
-                | "-h"
-                | "version"
-                | "--version"
-                | "-v"
-                | "config"
-                | "bg"
-                | "d"
-                | "daemon"
-                | "debug"
-                | "upgrade"
-                | "install-hooks"
-                | "install"
-                | "uninstall-hooks"
-        );
-        if needs_daemon {
-            use crate::daemon::telemetry_handle::{
-                DaemonTelemetryInitResult, init_daemon_telemetry_handle,
-            };
-            match init_daemon_telemetry_handle() {
-                DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
-                DaemonTelemetryInitResult::Failed(err) => {
-                    // Hard error for git-ai commands: the background service must be reachable.
-                    eprintln!(
-                        "error: failed to connect to git-ai background service: {}",
-                        err
-                    );
-                    std::process::exit(1);
-                }
+    let needs_daemon = !matches!(
+        args[0].as_str(),
+        "help"
+            | "--help"
+            | "-h"
+            | "version"
+            | "--version"
+            | "-v"
+            | "config"
+            | "bg"
+            | "d"
+            | "daemon"
+            | "debug"
+            | "upgrade"
+            | "install-hooks"
+            | "install"
+            | "uninstall-hooks"
+    );
+    if needs_daemon {
+        use crate::daemon::telemetry_handle::{
+            DaemonTelemetryInitResult, init_daemon_telemetry_handle,
+        };
+        match init_daemon_telemetry_handle() {
+            DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
+            DaemonTelemetryInitResult::Failed(err) => {
+                // Hard error for git-ai commands: the background service must be reachable.
+                eprintln!(
+                    "error: failed to connect to git-ai background service: {}",
+                    err
+                );
+                std::process::exit(1);
             }
         }
     }
