@@ -48,9 +48,6 @@ const DAEMON_TEST_TRACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitTestMode {
-    Wrapper,
-    Hooks,
-    Both,
     Daemon,
     WrapperDaemon,
 }
@@ -58,33 +55,29 @@ pub enum GitTestMode {
 impl GitTestMode {
     pub fn from_env() -> Self {
         let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
-            .unwrap_or_else(|_| "wrapper".to_string())
+            .unwrap_or_else(|_| "daemon".to_string())
             .to_lowercase();
         Self::from_mode_name(&mode)
     }
 
     pub fn from_mode_name(mode: &str) -> Self {
         match mode.to_lowercase().as_str() {
-            // Git core hooks have been sunset — "hooks" and "both" now
-            // fall through to Wrapper mode.
-            "hooks" | "both" | "wrapper+hooks" | "hooks+wrapper" => Self::Wrapper,
             "daemon" | "trace-daemon" | "pure-daemon" => Self::Daemon,
             "wrapper-daemon" => Self::WrapperDaemon,
-            _ => Self::Wrapper,
+            _ => Self::Daemon,
         }
     }
 
     pub fn uses_wrapper(self) -> bool {
-        matches!(self, Self::Wrapper | Self::Both | Self::WrapperDaemon)
+        matches!(self, Self::WrapperDaemon)
     }
 
     pub fn uses_hooks(self) -> bool {
-        // Git core hooks have been sunset.
         false
     }
 
     pub fn uses_daemon(self) -> bool {
-        matches!(self, Self::Daemon | Self::WrapperDaemon)
+        true
     }
 }
 
@@ -384,8 +377,8 @@ fn configure_test_home_env(command: &mut Command, test_home: &Path) {
     command.env("GIT_CONFIG_NOSYSTEM", "1");
     // Sanitize PATH: remove any directories that contain a git-ai wrapper.
     // Without this, git internals (which call `git` sub-processes via PATH) will
-    // hit the installed release git-ai binary, which has async_mode=true and
-    // spawns a background daemon for every invocation — causing a process storm.
+    // hit the installed release git-ai binary, which spawns a background daemon
+    // for every invocation — causing a process storm.
     #[cfg(not(windows))]
     if let Ok(path) = std::env::var("PATH") {
         let sanitized: Vec<&str> = path
@@ -914,15 +907,9 @@ impl TestRepo {
     }
 
     fn apply_default_config_patch(&mut self) {
-        let git_mode = self.git_mode;
         self.patch_git_ai_config(|patch| {
             patch.exclude_prompts_in_repositories = Some(vec![]); // No exclusions = share everywhere
             patch.prompt_storage = Some("notes".to_string()); // Use notes mode for tests
-            if git_mode == GitTestMode::WrapperDaemon {
-                patch.feature_flags = Some(serde_json::json!({
-                    "async_mode": true
-                }));
-            }
         });
     }
 
@@ -2857,8 +2844,8 @@ fn find_real_git_by_probe() -> String {
 /// The `OnceLock` guarantees the init runs exactly once even under parallel tests.
 ///
 /// After this call:
-/// - `~/.git-ai/config.json` in the isolated HOME has `git_path` → real git and
-///   `async_mode: false`, so no daemon auto-spawn from in-process Config::get() calls.
+/// - `~/.git-ai/config.json` in the isolated HOME has `git_path` → real git,
+///   so no daemon auto-spawn from in-process Config::get() calls.
 /// - `~/.gitconfig` is a minimal stub so plain git subprocesses don't fail.
 /// - Developer's real `~/.git-ai/`, `~/.claude/`, `~/.gitconfig` are unreachable.
 fn ensure_isolated_process_home() {
@@ -2878,14 +2865,14 @@ fn ensure_isolated_process_home() {
         // Probe for real git before we overwrite HOME
         let real_git = find_real_git_by_probe();
 
-        // Minimal ~/.git-ai/config.json: real git_path + async_mode=false
+        // Minimal ~/.git-ai/config.json: real git_path
         let git_ai_dir = home.join(".git-ai");
         fs::create_dir_all(&git_ai_dir).expect("create .git-ai dir");
         // Escape backslashes for JSON (relevant on Windows)
         let real_git_json = real_git.replace('\\', "\\\\");
         fs::write(
             git_ai_dir.join("config.json"),
-            format!(r#"{{"git_path":"{real_git_json}","feature_flags":{{"async_mode":false}}}}"#),
+            format!(r#"{{"git_path":"{real_git_json}"}}"#),
         )
         .expect("write test git-ai config");
 
@@ -2898,7 +2885,7 @@ fn ensure_isolated_process_home() {
             // This covers subprocess calls that don't go through configure_test_home_env
             // (e.g., template repo init, bare repo init, worktree setup), preventing
             // git internals from resolving `git` via PATH to the installed git-ai
-            // release binary (which has async_mode=true and would spawn daemons).
+            // release binary (which would spawn daemons).
             #[cfg(not(windows))]
             if let Ok(path) = std::env::var("PATH") {
                 let sanitized = path

@@ -43,7 +43,7 @@ impl DurationStats {
 }
 
 fn benchmark_checkpoint_wrapper(iterations: usize) -> DurationStats {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
     let repo_path = repo.canonical_path();
 
     fs::write(repo_path.join("base.txt"), "initial\n").unwrap();
@@ -159,8 +159,8 @@ fn bench_checkpoint_single_file_wrapper_daemon() {
 #[test]
 #[ignore]
 fn bench_checkpoint_multi_file_wrapper() {
-    println!("\n=== Checkpoint Multi-File Benchmark (Wrapper Mode) ===");
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    println!("\n=== Checkpoint Multi-File Benchmark (Daemon Mode) ===");
+    let repo = TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
     let repo_path = repo.canonical_path();
     fs::write(repo_path.join("base.txt"), "initial\n").unwrap();
     repo.stage_all_and_commit("init").unwrap();
