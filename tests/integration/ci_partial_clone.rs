@@ -7,6 +7,11 @@ fn direct_test_repo() -> TestRepo {
     TestRepo::new()
 }
 
+fn parent_count(repo: &TestRepo, sha: &str) -> usize {
+    let output = repo.git_og(&["cat-file", "-p", sha]).unwrap();
+    output.lines().filter(|l| l.starts_with("parent ")).count()
+}
+
 /// Test that single-parent squash merges work even when the parent is not reachable
 /// from the base ref (partial clone scenario). This is the core fix from PR #918.
 #[test]
@@ -23,24 +28,20 @@ fn test_squash_merge_single_parent_not_on_base_ref() {
     // Create a feature commit (dangling, not on any branch)
     fs::write(&file_path, "feature work").unwrap();
     repo.git_og(&["add", "file.txt"]).unwrap();
-    let tree_id = {
-        let git_repo = git2::Repository::open(repo.path()).unwrap();
-        let mut index = git_repo.index().unwrap();
-        index.write_tree().unwrap()
-    };
+    let tree_id = repo.git_og(&["write-tree"]).unwrap().trim().to_string();
 
-    let feature_oid = {
-        let git_repo = git2::Repository::open(repo.path()).unwrap();
-        let sig = git_repo.signature().unwrap();
-        let tree = git_repo.find_tree(tree_id).unwrap();
-        let init_commit = git_repo
-            .find_commit(git2::Oid::from_str(&init_sha).unwrap())
-            .unwrap();
-        git_repo
-            .commit(None, &sig, &sig, "feature commit", &tree, &[&init_commit])
-            .unwrap()
-    };
-    let feature_sha = feature_oid.to_string();
+    let feature_sha = repo
+        .git_og(&[
+            "commit-tree",
+            &tree_id,
+            "-p",
+            &init_sha,
+            "-m",
+            "feature commit",
+        ])
+        .unwrap()
+        .trim()
+        .to_string();
 
     // Advance main branch
     fs::write(&file_path, "main advance").unwrap();
@@ -194,12 +195,8 @@ fn test_multi_commit_squash_merge_single_parent() {
         .commit_sha;
 
     // Verify it's actually a single-parent commit
-    let git_repo = git2::Repository::open(repo.path()).unwrap();
-    let merge_commit = git_repo
-        .find_commit(git2::Oid::from_str(&merge_sha).unwrap())
-        .unwrap();
     assert_eq!(
-        merge_commit.parent_count(),
+        parent_count(&repo, &merge_sha),
         1,
         "Squash merge should have exactly 1 parent"
     );
@@ -246,26 +243,22 @@ fn test_regular_two_parent_merge_skipped() {
     repo.git_og(&["commit", "-m", "init"]).unwrap();
     let init_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
-    // Create feature commit (diverges from init)
-    let feature_oid = {
-        let git_repo = git2::Repository::open(repo.path()).unwrap();
-        let sig = git_repo.signature().unwrap();
-
-        fs::write(&file_path, "feature work").unwrap();
-        let mut index = git_repo.index().unwrap();
-        index.add_path(std::path::Path::new("file.txt")).unwrap();
-        index.write().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = git_repo.find_tree(tree_id).unwrap();
-        let init_commit = git_repo
-            .find_commit(git2::Oid::from_str(&init_sha).unwrap())
-            .unwrap();
-
-        git_repo
-            .commit(None, &sig, &sig, "feature commit", &tree, &[&init_commit])
-            .unwrap()
-    };
-    let feature_sha = feature_oid.to_string();
+    // Create feature commit (diverges from init) as a dangling commit
+    fs::write(&file_path, "feature work").unwrap();
+    repo.git_og(&["add", "file.txt"]).unwrap();
+    let feature_tree = repo.git_og(&["write-tree"]).unwrap().trim().to_string();
+    let feature_sha = repo
+        .git_og(&[
+            "commit-tree",
+            &feature_tree,
+            "-p",
+            &init_sha,
+            "-m",
+            "feature commit",
+        ])
+        .unwrap()
+        .trim()
+        .to_string();
 
     // Advance default branch
     fs::write(&file_path, "main advance").unwrap();
@@ -273,43 +266,29 @@ fn test_regular_two_parent_merge_skipped() {
     repo.git_og(&["commit", "-m", "advance main"]).unwrap();
     let adv_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
-    // Create true merge commit (2 parents) using low-level API
-    let merge_sha = {
-        let git_repo = git2::Repository::open(repo.path()).unwrap();
-        let sig = git_repo.signature().unwrap();
-
-        fs::write(&file_path, "merged").unwrap();
-        let mut index = git_repo.index().unwrap();
-        index.add_path(std::path::Path::new("file.txt")).unwrap();
-        index.write().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = git_repo.find_tree(tree_id).unwrap();
-
-        let adv_commit = git_repo
-            .find_commit(git2::Oid::from_str(&adv_sha).unwrap())
-            .unwrap();
-        let feature_commit = git_repo.find_commit(feature_oid).unwrap();
-
-        let merge_oid = git_repo
-            .commit(
-                Some("HEAD"),
-                &sig,
-                &sig,
-                "Merge feature",
-                &tree,
-                &[&adv_commit, &feature_commit],
-            )
-            .unwrap();
-        merge_oid.to_string()
-    };
+    // Create true merge commit (2 parents) using commit-tree
+    fs::write(&file_path, "merged").unwrap();
+    repo.git_og(&["add", "file.txt"]).unwrap();
+    let merge_tree = repo.git_og(&["write-tree"]).unwrap().trim().to_string();
+    let merge_sha = repo
+        .git_og(&[
+            "commit-tree",
+            &merge_tree,
+            "-p",
+            &adv_sha,
+            "-p",
+            &feature_sha,
+            "-m",
+            "Merge feature",
+        ])
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git_og(&["update-ref", "HEAD", &merge_sha]).unwrap();
 
     // Verify it's a 2-parent commit
-    let git_repo = git2::Repository::open(repo.path()).unwrap();
-    let merge_commit = git_repo
-        .find_commit(git2::Oid::from_str(&merge_sha).unwrap())
-        .unwrap();
     assert_eq!(
-        merge_commit.parent_count(),
+        parent_count(&repo, &merge_sha),
         2,
         "Regular merge should have 2 parents"
     );

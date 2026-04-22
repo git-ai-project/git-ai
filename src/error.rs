@@ -2,8 +2,6 @@ use std::fmt;
 
 #[derive(Debug)]
 pub enum GitAiError {
-    #[cfg(feature = "test-support")]
-    GitError(git2::Error),
     IoError(std::io::Error),
     /// Errors from invoking the git CLI that exited with a non-zero status
     GitCliError {
@@ -24,8 +22,6 @@ pub enum GitAiError {
 impl fmt::Display for GitAiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            #[cfg(feature = "test-support")]
-            GitAiError::GitError(e) => write!(f, "Git error: {}", e),
             GitAiError::IoError(e) => write!(f, "IO error: {}", e),
             GitAiError::GitCliError { code, stderr, args } => match code {
                 Some(c) => write!(
@@ -49,13 +45,6 @@ impl fmt::Display for GitAiError {
 }
 
 impl std::error::Error for GitAiError {}
-
-#[cfg(feature = "test-support")]
-impl From<git2::Error> for GitAiError {
-    fn from(err: git2::Error) -> Self {
-        GitAiError::GitError(err)
-    }
-}
 
 impl From<std::io::Error> for GitAiError {
     fn from(err: std::io::Error) -> Self {
@@ -90,8 +79,6 @@ impl From<rusqlite::Error> for GitAiError {
 impl Clone for GitAiError {
     fn clone(&self) -> Self {
         match self {
-            #[cfg(feature = "test-support")]
-            GitAiError::GitError(e) => GitAiError::Generic(format!("Git error: {}", e)),
             GitAiError::IoError(e) => {
                 GitAiError::IoError(std::io::Error::new(e.kind(), e.to_string()))
             }
