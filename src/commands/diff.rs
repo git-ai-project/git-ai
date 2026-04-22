@@ -1989,10 +1989,8 @@ pub fn get_diff_json_filtered(
             .retain(|key, _| prompt_id_set.contains(key));
         // Session keys are session IDs only, but prompt_ids may contain combined IDs
         // Extract session IDs from prompt_ids for session filtering
-        let session_id_set: HashSet<&str> = prompt_ids
-            .iter()
-            .map(|id| extract_session_id(id))
-            .collect();
+        let session_id_set: HashSet<&str> =
+            prompt_ids.iter().map(|id| extract_session_id(id)).collect();
         diff_json
             .sessions
             .retain(|key, _| session_id_set.contains(key.as_str()));
