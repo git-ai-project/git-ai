@@ -4,16 +4,16 @@ use crate::daemon::{
     send_control_request,
 };
 use crate::utils::LockFile;
-#[cfg(windows)]
+#[cfg(all(windows, not(any(test, feature = "test-support"))))]
 use crate::utils::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-#[cfg(windows)]
+#[cfg(all(windows, not(any(test, feature = "test-support"))))]
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-#[cfg(windows)]
+#[cfg(all(windows, not(any(test, feature = "test-support"))))]
 use std::{ffi::OsStr, path::Path};
 
 pub fn handle_daemon(args: &[String]) {
@@ -279,7 +279,7 @@ fn daemon_runtime_dir(config: &DaemonConfig) -> Result<PathBuf, String> {
         .ok_or_else(|| "daemon lock path has no parent".to_string())
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(any(test, feature = "test-support"))))]
 fn powershell_single_quote_literal(value: &OsStr) -> String {
     format!("'{}'", value.to_string_lossy().replace('\'', "''"))
 }
