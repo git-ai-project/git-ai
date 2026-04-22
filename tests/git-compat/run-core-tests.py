@@ -45,7 +45,7 @@ def make_isolated_env(isolated_home: str) -> dict:
     Build an environment dict with HOME redirected to an isolated temp directory
     and a git-ai config optimised for compatibility testing:
 
-    - GIT_AI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN=1 : disables daemon auto-spawn entirely
+    - _GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN=1 : disables daemon auto-spawn entirely
     - git_path           : hardcoded real-git path so git-ai never probes on
                            every invocation
     - allow_repositories : non-empty sentinel so no compat-test repo (which has
@@ -103,8 +103,8 @@ def make_isolated_env(isolated_home: str) -> dict:
     # change HOME inside subshells (e.g. HOME=$(pwd)/alias-config).  Any git-ai
     # process launched inside such a subshell finds no config at the new HOME
     # and would try to spawn a daemon, blocking for 2 seconds per git call.
-    # GIT_AI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN is checked in ensure_daemon_running() before spawning.
-    env["GIT_AI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN"] = "1"
+    # _GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN is checked in ensure_daemon_running() before spawning.
+    env["_GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN"] = "1"
 
     return env
 
@@ -328,7 +328,7 @@ def main() -> int:
     # Wrap the entire test run (including git clone/build) in an isolated HOME so
     # that the release git-ai binary cannot read or write the developer's real
     # ~/.git-ai/config.json, ~/.claude/settings.json, etc.  The isolated env
-    # sets GIT_AI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN=1 to prevent daemon
+    # sets _GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN=1 to prevent daemon
     # auto-spawn and the resulting 2-second-per-git-command timeout.
     with tempfile.TemporaryDirectory(prefix="git-ai-compat-home-") as isolated_home:
         env = make_isolated_env(isolated_home)
@@ -342,18 +342,16 @@ def main() -> int:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             wrapper_dir = Path(tmpdir)
-            # Use a shell wrapper (not a symlink) for the "git" entry so we can
-            # re-inject GIT_AI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN=1 before every invocation.
-            # Git's test-lib.sh unsets all GIT_* environment variables when it
-            # initialises (to isolate tests from the developer environment), so
-            # any GIT_AI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN we set in the outer Python env is stripped
-            # before the first git call.  The wrapper runs *after* test-lib.sh's
-            # unset block, so it re-establishes the override every time.
+            # Use a shell wrapper (not a symlink) so argv[0] is "git" (via
+            # exec -a) and we can ensure _GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN
+            # is set on every invocation.  The _GITAI prefix (not GIT_) is intentional:
+            # git's test-lib.sh unsets all GIT_* vars, and t0001-init test 6 checks
+            # that no extra GIT_* vars leak into alias scripts.
             git_wrapper = wrapper_dir / "git"
             git_wrapper.write_text(
                 f"#!/bin/bash\n"
-                f"GIT_AI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN=1\n"
-                f"export GIT_AI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN\n"
+                f"_GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN=1\n"
+                f"export _GITAI_INTERNAL_DISABLE_WRAPPER_DAEMON_AUTOSPAWN\n"
                 # exec -a git sets argv[0] to "git" so git-ai's binary-name check
                 # routes to handle_git() instead of handle_git_ai() (help text).
                 # bash is required for exec -a; /bin/sh (dash) does not support it.
