@@ -167,7 +167,8 @@ pub fn update_prompt_from_tool(
 }
 
 /// Update Codex prompt from rollout transcript file
-fn update_codex_prompt(
+#[doc(hidden)]
+pub fn update_codex_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
 ) -> PromptUpdateResult {
@@ -239,7 +240,8 @@ fn update_cursor_prompt(
 }
 
 /// Update Claude prompt from transcript file
-fn update_claude_prompt(
+#[doc(hidden)]
+pub fn update_claude_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
 ) -> PromptUpdateResult {
@@ -283,7 +285,8 @@ fn update_claude_prompt(
 }
 
 /// Update Gemini prompt from transcript file
-fn update_gemini_prompt(
+#[doc(hidden)]
+pub fn update_gemini_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
 ) -> PromptUpdateResult {
@@ -327,7 +330,8 @@ fn update_gemini_prompt(
 }
 
 /// Update GitHub Copilot prompt from chat session file
-fn update_github_copilot_prompt(
+#[doc(hidden)]
+pub fn update_github_copilot_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
 ) -> PromptUpdateResult {
@@ -371,7 +375,8 @@ fn update_github_copilot_prompt(
 }
 
 /// Update Continue CLI prompt from transcript file
-fn update_continue_cli_prompt(
+#[doc(hidden)]
+pub fn update_continue_cli_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
 ) -> PromptUpdateResult {
@@ -413,7 +418,8 @@ fn update_continue_cli_prompt(
 }
 
 /// Update Droid prompt from transcript and settings files
-fn update_droid_prompt(
+#[doc(hidden)]
+pub fn update_droid_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
 ) -> PromptUpdateResult {
@@ -614,7 +620,8 @@ fn update_pi_prompt(
 }
 
 /// Update Windsurf prompt from transcript JSONL file
-fn update_windsurf_prompt(
+#[doc(hidden)]
+pub fn update_windsurf_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
 ) -> PromptUpdateResult {
@@ -690,9 +697,9 @@ pub fn format_transcript(prompt: &PromptRecord) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authorship::authorship_log::PromptRecord;
     use crate::authorship::transcript::Message;
     use crate::authorship::working_log::AgentId;
-    use crate::git::test_utils::TmpRepo;
     use std::collections::HashMap;
 
     // Helper function to create a test PromptRecord
@@ -876,250 +883,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_prompt_in_commit_integration() {
-        // Create a test repository
-        let tmp_repo = TmpRepo::new().expect("Failed to create test repo");
-
-        // Create initial commit
-        tmp_repo
-            .write_file("test.txt", "initial content\n", true)
-            .expect("Failed to write file");
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent", Some("gpt-4"), Some("test_tool"))
-            .expect("Failed to trigger checkpoint");
-
-        let authorship = tmp_repo
-            .commit_with_message("Initial commit")
-            .expect("Failed to commit");
-
-        // Get the session ID from the authorship log (AI checkpoints now produce sessions)
-        let session_id = authorship
-            .metadata
-            .sessions
-            .keys()
-            .next()
-            .expect("No session found")
-            .clone();
-
-        // Get HEAD commit SHA
-        let head_oid = tmp_repo.gitai_repo().head().unwrap().target().unwrap();
-        let head_sha = head_oid.to_string();
-
-        // Test finding the session via find_prompt (searches both maps)
-        let result = find_prompt_in_commit(tmp_repo.gitai_repo(), &session_id, "HEAD");
-        assert!(result.is_ok());
-
-        let (commit_sha, prompt) = result.unwrap();
-        assert_eq!(commit_sha, head_sha);
-        assert_eq!(prompt.agent_id.tool, "test_tool");
-        assert_eq!(prompt.agent_id.id, "ai_agent");
-        assert_eq!(prompt.agent_id.model, "gpt-4");
-    }
-
-    #[test]
-    fn test_find_prompt_in_commit_not_found() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create test repo");
-
-        // Create commit without AI checkpoint
-        tmp_repo
-            .write_file("test.txt", "initial content\n", true)
-            .expect("Failed to write file");
-        tmp_repo
-            .trigger_checkpoint_with_author("human_user")
-            .expect("Failed to trigger checkpoint");
-        tmp_repo
-            .commit_with_message("Initial commit")
-            .expect("Failed to commit");
-
-        // Try to find a non-existent prompt
-        // Human checkpoints have authorship data but no prompts
-        let result = find_prompt_in_commit(tmp_repo.gitai_repo(), "nonexistent-prompt", "HEAD");
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        // Should get "Prompt not found" error since authorship exists but prompt doesn't
-        assert!(
-            err_msg.contains("Prompt") && err_msg.contains("not found"),
-            "Unexpected error: {}",
-            err_msg
-        );
-    }
-
-    #[test]
-    fn test_find_prompt_in_commit_invalid_revision() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create test repo");
-
-        tmp_repo
-            .write_file("test.txt", "initial content\n", true)
-            .expect("Failed to write file");
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .expect("Failed to trigger checkpoint");
-        tmp_repo
-            .commit_with_message("Initial commit")
-            .expect("Failed to commit");
-
-        let result = find_prompt_in_commit(tmp_repo.gitai_repo(), "any-prompt", "invalid-revision");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_find_prompt_in_history_basic() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create test repo");
-
-        // Create first commit with AI checkpoint
-        tmp_repo
-            .write_file("test.txt", "v1\n", true)
-            .expect("Failed to write file");
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent", Some("gpt-4"), Some("test_tool"))
-            .expect("Failed to trigger checkpoint");
-        let authorship1 = tmp_repo
-            .commit_with_message("First commit")
-            .expect("Failed to commit");
-
-        let session_id = authorship1
-            .metadata
-            .sessions
-            .keys()
-            .next()
-            .expect("No session found")
-            .clone();
-
-        // Test finding the session with offset 0 (most recent)
-        let result = find_prompt_in_history(tmp_repo.gitai_repo(), &session_id, 0);
-        assert!(result.is_ok());
-
-        let (_sha, prompt) = result.unwrap();
-        assert_eq!(prompt.agent_id.tool, "test_tool");
-        assert_eq!(prompt.agent_id.id, "ai_agent");
-    }
-
-    #[test]
-    fn test_find_prompt_in_history_with_offset() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create test repo");
-
-        // Create first commit
-        tmp_repo
-            .write_file("test.txt", "v1\n", true)
-            .expect("Failed to write file");
-        tmp_repo
-            .trigger_checkpoint_with_ai("Claude", Some("model-v1"), Some("test_tool"))
-            .expect("Failed to trigger checkpoint");
-        tmp_repo
-            .commit_with_message("Commit 1")
-            .expect("Failed to commit");
-
-        // Get session ID from first commit
-        let head_oid = tmp_repo.gitai_repo().head().unwrap().target().unwrap();
-        let head_sha = head_oid.to_string();
-        let authorship = get_authorship(tmp_repo.gitai_repo(), &head_sha).unwrap();
-        let session_id = authorship
-            .metadata
-            .sessions
-            .keys()
-            .next()
-            .expect("No session found")
-            .clone();
-
-        // At this point, offset 0 should work, offset 1 should fail
-        let result = find_prompt_in_history(tmp_repo.gitai_repo(), &session_id, 0);
-        assert!(result.is_ok());
-
-        let result = find_prompt_in_history(tmp_repo.gitai_repo(), &session_id, 1);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("found 1 time(s), but offset 1 requested")
-        );
-    }
-
-    #[test]
-    fn test_find_prompt_in_history_not_found() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create test repo");
-
-        tmp_repo
-            .write_file("test.txt", "content\n", true)
-            .expect("Failed to write file");
-        tmp_repo
-            .trigger_checkpoint_with_author("human_user")
-            .expect("Failed to trigger checkpoint");
-        tmp_repo
-            .commit_with_message("Commit")
-            .expect("Failed to commit");
-
-        let result = find_prompt_in_history(tmp_repo.gitai_repo(), "nonexistent-prompt", 0);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Prompt not found in history")
-        );
-    }
-
-    #[test]
-    fn test_find_prompt_delegates_to_commit() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create test repo");
-
-        tmp_repo
-            .write_file("test.txt", "content\n", true)
-            .expect("Failed to write file");
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent", Some("gpt-4"), Some("test_tool"))
-            .expect("Failed to trigger checkpoint");
-        let authorship = tmp_repo
-            .commit_with_message("Test commit")
-            .expect("Failed to commit");
-
-        let session_id = authorship
-            .metadata
-            .sessions
-            .keys()
-            .next()
-            .expect("No session found")
-            .clone();
-
-        // Test with commit specified
-        let result = find_prompt(tmp_repo.gitai_repo(), &session_id, Some("HEAD"), 0);
-        assert!(result.is_ok());
-        let (_sha, prompt) = result.unwrap();
-        assert_eq!(prompt.agent_id.tool, "test_tool");
-        assert_eq!(prompt.agent_id.id, "ai_agent");
-    }
-
-    #[test]
-    fn test_find_prompt_delegates_to_history() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create test repo");
-
-        tmp_repo
-            .write_file("test.txt", "content\n", true)
-            .expect("Failed to write file");
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent", Some("gpt-4"), Some("test_tool"))
-            .expect("Failed to trigger checkpoint");
-        let authorship = tmp_repo
-            .commit_with_message("Test commit")
-            .expect("Failed to commit");
-
-        let session_id = authorship
-            .metadata
-            .sessions
-            .keys()
-            .next()
-            .expect("No session found")
-            .clone();
-
-        // Test without commit (searches history)
-        let result = find_prompt(tmp_repo.gitai_repo(), &session_id, None, 0);
-        assert!(result.is_ok());
-        let (_sha, prompt) = result.unwrap();
-        assert_eq!(prompt.agent_id.tool, "test_tool");
-        assert_eq!(prompt.agent_id.id, "ai_agent");
-    }
-
-    #[test]
     fn test_update_prompt_from_tool_dispatch() {
         // Test that unknown tools return Unchanged
         let result = update_prompt_from_tool("unknown", "thread-123", None, "model");
@@ -1216,15 +979,17 @@ mod tests {
     fn test_format_transcript_unicode() {
         let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
         prompt.messages = vec![Message::User {
-            text: "Hello 世界 🌍 Здравствуй مرحبا".to_string(),
+            text: "Hello \u{4e16}\u{754c} \u{1f30d} \u{0417}\u{0434}\u{0440}\u{0430}\u{0432}\u{0441}\u{0442}\u{0432}\u{0443}\u{0439} \u{0645}\u{0631}\u{062d}\u{0628}\u{0627}".to_string(),
             timestamp: None,
         }];
 
         let formatted = format_transcript(&prompt);
-        assert!(formatted.contains("世界"));
-        assert!(formatted.contains("🌍"));
-        assert!(formatted.contains("Здравствуй"));
-        assert!(formatted.contains("مرحبا"));
+        assert!(formatted.contains("\u{4e16}\u{754c}"));
+        assert!(formatted.contains("\u{1f30d}"));
+        assert!(formatted.contains(
+            "\u{0417}\u{0434}\u{0440}\u{0430}\u{0432}\u{0441}\u{0442}\u{0432}\u{0443}\u{0439}"
+        ));
+        assert!(formatted.contains("\u{0645}\u{0631}\u{062d}\u{0628}\u{0627}"));
     }
 
     #[test]
@@ -1322,45 +1087,5 @@ mod tests {
 
         let result = update_windsurf_prompt(Some(&metadata), "unknown");
         assert!(matches!(result, PromptUpdateResult::Failed(_)));
-    }
-
-    #[test]
-    fn test_find_prompt_in_history_empty_repo() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create test repo");
-
-        let result = find_prompt_in_history(tmp_repo.gitai_repo(), "any-prompt", 0);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Prompt not found in history")
-        );
-    }
-
-    #[test]
-    fn test_find_prompt_prompt_not_in_commit() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create test repo");
-
-        // Create commit with AI checkpoint
-        tmp_repo
-            .write_file("test.txt", "content\n", true)
-            .expect("Failed to write file");
-        tmp_repo
-            .trigger_checkpoint_with_ai("ai_agent", Some("gpt-4"), Some("test_tool"))
-            .expect("Failed to trigger checkpoint");
-        tmp_repo
-            .commit_with_message("Test commit")
-            .expect("Failed to commit");
-
-        // Try to find a different prompt ID
-        let result = find_prompt_in_commit(tmp_repo.gitai_repo(), "wrong-prompt-id", "HEAD");
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Prompt 'wrong-prompt-id' not found in commit")
-        );
     }
 }
