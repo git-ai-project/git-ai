@@ -101,11 +101,17 @@ pub fn handle_git(args: &[String]) {
         exit_with_status(exit_status);
     }
 
-    // Initialize the daemon telemetry handle so we can send wrapper state
-    if let crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Failed(e) =
-        crate::daemon::telemetry_handle::init_daemon_telemetry_handle()
-    {
-        tracing::debug!("wrapper: daemon telemetry init failed: {}", e);
+    // Initialize the daemon telemetry handle so we can send wrapper state.
+    // If the daemon isn't available, fall back to a plain passthrough proxy
+    // (no invocation_id, no wrapper state, no extra GIT_* env vars).
+    let daemon_connected = matches!(
+        crate::daemon::telemetry_handle::init_daemon_telemetry_handle(),
+        crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Connected
+    );
+
+    if !daemon_connected {
+        let exit_status = proxy_to_git(args, false, None);
+        exit_with_status(exit_status);
     }
 
     let repository = find_repository(&parsed.global_args).ok();
