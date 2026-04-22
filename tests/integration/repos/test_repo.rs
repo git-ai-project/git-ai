@@ -11,7 +11,14 @@ use git_ai::feature_flags::FeatureFlags;
 use git_ai::git::cli_parser::{ParsedGitInvocation, extract_clone_target_directory};
 use git_ai::git::repo_storage::PersistedWorkingLog;
 use git_ai::git::repository as GitAiRepository;
-use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
+// BenchmarkResult for performance testing
+#[derive(Debug, Clone)]
+pub struct BenchmarkResult {
+    pub total_duration: Duration,
+    pub git_duration: Duration,
+    pub post_command_duration: Duration,
+    pub pre_command_duration: Duration,
+}
 use insta::{Settings, assert_debug_snapshot};
 use rand::RngExt;
 use std::cell::Cell;
