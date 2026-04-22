@@ -1,10 +1,10 @@
-use crate::repos::test_repo::{GitTestMode, TestRepo};
+use crate::repos::test_repo::TestRepo;
 use git_ai::ci::ci_context::{CiContext, CiEvent, CiRunOptions, CiRunResult};
 use git_ai::git::repository as GitAiRepository;
 use std::fs;
 
 fn direct_test_repo() -> TestRepo {
-    TestRepo::new_with_mode(GitTestMode::Wrapper)
+    TestRepo::new()
 }
 
 /// Test that single-parent squash merges work even when the parent is not reachable
