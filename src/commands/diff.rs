@@ -950,15 +950,15 @@ fn apply_blame_for_side(
     for (prompt_id, prompt_record) in &analysis.prompt_records {
         if prompt_id.starts_with("s_") {
             // Session-format attestation: look up the SessionRecord from blame analysis
-            let session_key = prompt_id.split("::").next().unwrap_or(prompt_id);
+            let session_key = extract_session_id(prompt_id);
             if let Some(session_record) = analysis.session_records.get(session_key) {
                 sessions
-                    .entry(prompt_id.clone())
+                    .entry(session_key.to_string())
                     .or_insert_with(|| session_record.clone());
             } else {
                 // Fallback: convert PromptRecord back to SessionRecord
                 sessions
-                    .entry(prompt_id.clone())
+                    .entry(session_key.to_string())
                     .or_insert_with(|| SessionRecord {
                         agent_id: prompt_record.agent_id.clone(),
                         human_author: prompt_record.human_author.clone(),
@@ -1422,20 +1422,31 @@ fn merge_missing_prompts_and_sessions_from_authorship_note(
                 .entry(prompt_id.clone())
                 .or_insert_with(|| prompt_record.clone());
         }
-        // Insert session records keyed by their full attestation hashes (s_xxx::t_yyy)
+        // Insert session records keyed by session ID only (s_xxx)
         for file_attestation in &authorship_log.attestations {
             for entry in &file_attestation.entries {
                 if entry.hash.starts_with("s_") {
-                    let session_key = entry.hash.split("::").next().unwrap_or(&entry.hash);
+                    let session_key = extract_session_id(&entry.hash);
                     if let Some(session_record) = authorship_log.metadata.sessions.get(session_key)
                     {
                         sessions
-                            .entry(entry.hash.clone())
+                            .entry(session_key.to_string())
                             .or_insert_with(|| session_record.clone());
                     }
                 }
             }
         }
+    }
+}
+
+/// Extract session ID from a combined session::trace ID
+/// For session-format IDs like "s_xxx::t_yyy", returns "s_xxx"
+/// For other IDs, returns the original ID unchanged
+fn extract_session_id(id: &str) -> &str {
+    if id.starts_with("s_") {
+        id.split("::").next().unwrap_or(id)
+    } else {
+        id
     }
 }
 
@@ -1457,10 +1468,11 @@ fn calculate_diff_commit_stats(
         for (prompt_id, ranges) in annotations {
             let landed_lines = ranges.iter().map(line_range_len).sum::<u32>();
             stats.ai_lines_added += landed_lines;
+            let session_key = extract_session_id(prompt_id);
             let key = prompts
                 .get(prompt_id)
                 .map(|r| &r.agent_id)
-                .or_else(|| sessions.get(prompt_id).map(|r| &r.agent_id))
+                .or_else(|| sessions.get(session_key).map(|r| &r.agent_id))
                 .map(|agent_id| format!("{}::{}", agent_id.tool, agent_id.model));
             if let Some(key) = key {
                 let tool_stats = stats.tool_model_breakdown.entry(key).or_default();
