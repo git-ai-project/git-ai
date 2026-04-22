@@ -1,93 +1,132 @@
 name: git-ai Attribution Collector
 
-# Collects AI attribution data from all developers' git-ai notes,
-# exports it to a central Supabase / Postgres database, and
-# (optionally) regenerates a static dashboard artifact.
+# ── Overview ──────────────────────────────────────────────────────────────────
+# Fully automated pipeline. Developers only need to commit and push —
+# this workflow handles everything else automatically:
 #
-# Required GitHub Actions secrets:
-#   DATABASE_URL  — postgres connection string, e.g.:
-#                   postgresql://user:pass@db.xyz.supabase.co:5432/postgres
+#   Dev commits → git push  →  workflow triggers  →  DB updated  →  Dashboard refreshed
 #
-# Optional secrets:
-#   GIT_AI_LICENSE_KEY — if your git-ai plan requires a license key
+# ── Required GitHub secrets ───────────────────────────────────────────────────
+#   DATABASE_URL   — Postgres connection string
+#                    postgresql://user:pass@host:5432/dbname
+#
+# ── Developer one-time setup (per machine) ────────────────────────────────────
+#   Run:  bash scripts/setup-notes-push.sh
+#   This configures git to automatically push git-ai attribution notes
+#   alongside every normal `git push`. Nothing else needed.
+#
+# ── Dashboard access ─────────────────────────────────────────────────────────
+#   • Artifact:     Actions tab → latest run → git-ai-dashboard artifact
+#   • GitHub Pages: Enable in repo Settings → Pages → Source = "GitHub Actions"
+#                   Then the dashboard auto-deploys to https://<org>.github.io/<repo>/
 
 on:
   push:
-    branches: [main]
-    paths:
-      # Rerun whenever notes or source change
-      - 'refs/notes/**'
-      - 'scripts/export-prompts-to-db.py'
-      - '.github/workflows/git-ai-collector.yml'
+    branches: [main]           # triggers on every developer push
   schedule:
-    # Every day at 02:00 UTC
-    - cron: '0 2 * * *'
+    - cron: '0 2 * * *'        # daily at 02:00 UTC as a safety net
   workflow_dispatch:
     inputs:
-      since:
-        description: "Collect prompts since (e.g. 7d, 30d, 2025-01-01)"
+      since_days:
+        description: "Collect prompts since N days ago (integer, e.g. 30)"
         required: false
-        default: "30d"
+        default: "30"
+
+# Cancel in-progress runs on the same branch to avoid DB write conflicts.
+concurrency:
+  group: git-ai-collector-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write        # needed for GitHub Pages deployment job
+  id-token: write     # needed for GitHub Pages OIDC auth
 
 jobs:
+  # ── Job 1: Collect attribution data, export to DB, build dashboard ──────────
   collect-and-export:
-    name: Collect git-ai attribution & export to DB
+    name: Collect attribution & export to DB
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
 
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      SINCE: ${{ github.event.inputs.since || '30d' }}
+      # since_days must be a plain integer (number of days) for git-ai prompts --since
+      SINCE_DAYS: ${{ github.event.inputs.since_days || '30' }}
 
     steps:
-      - name: Checkout repository (full history + notes)
+      - name: Checkout repository (full history)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0        # full history required for git log attribution
+          fetch-depth: 0        # full history required for git-ai attribution
           fetch-tags: true
 
-      - name: Fetch git-ai notes from remote
+      - name: Fetch git-ai notes from all developers
         run: |
-          # Fetch refs/notes/ai from origin so all developer notes are local
+          # Pull attribution notes pushed by every developer's machine.
+          # Notes are pushed automatically when developers run setup-notes-push.sh.
           git fetch origin '+refs/notes/*:refs/notes/*' --force || true
-          echo "Notes refs present:"
-          git for-each-ref refs/notes/ || echo "  (none)"
+          echo "Notes refs found:"
+          git for-each-ref refs/notes/ || echo "  (none yet — developers may need to run setup-notes-push.sh)"
 
       - name: Install git-ai
         run: |
           curl -sSL https://usegitai.com/install.sh | bash
           echo "$HOME/.git-ai/bin" >> "$GITHUB_PATH"
 
-      - name: Verify git-ai installation
+      - name: Verify git-ai
         run: git-ai -v
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
 
       - name: Install Python dependencies
         run: pip install psycopg2-binary
 
-      - name: Build prompts.db from all authors
+      - name: Collect prompts from all authors (last ${{ env.SINCE_DAYS }} days)
         run: |
-          git-ai prompts --all-authors --since "$SINCE"
-          echo "Prompts collected:"
-          sqlite3 prompts.db "SELECT count(*) || ' prompts' FROM prompts;"
+          git-ai prompts --all-authors --since "$SINCE_DAYS"
+          ROW_COUNT=$(sqlite3 prompts.db "SELECT count(*) FROM prompts;" 2>/dev/null || echo "unknown")
+          echo "Collected ${ROW_COUNT} prompt row(s) into prompts.db"
 
-      - name: Export prompts.db to Postgres / Supabase
+      - name: Export prompts.db → Postgres
         run: python3 scripts/export-prompts-to-db.py
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           PROMPTS_DB: prompts.db
 
-      - name: Generate static HTML dashboard
-        run: python3 scripts/git-ai-dashboard.py --all --no-enrich --output dashboard.html
+      - name: Generate dashboard from DB (all developers)
+        run: python3 scripts/git-ai-dashboard.py --db --output dashboard.html
 
       - name: Upload dashboard as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: git-ai-dashboard
+          name: git-ai-dashboard-${{ github.run_number }}
           path: dashboard.html
           retention-days: 30
+
+      - name: Prepare for GitHub Pages
+        run: |
+          mkdir -p _site
+          cp dashboard.html _site/index.html
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  # ── Job 2: Deploy dashboard to GitHub Pages ─────────────────────────────────
+  # Enable by going to: Settings → Pages → Source → "GitHub Actions"
+  # Dashboard will be available at: https://<org>.github.io/<repo>/
+  deploy-dashboard:
+    name: Deploy dashboard to GitHub Pages
+    needs: collect-and-export
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
