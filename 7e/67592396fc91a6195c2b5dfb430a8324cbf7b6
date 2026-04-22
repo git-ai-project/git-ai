@@ -13,7 +13,7 @@ docs/superpowers/plans/2026-04-22-drop-legacy-wrapper.md
         "id": "33d20787-e26d-4a7f-9364-7a48fad08505",
         "model": "claude-opus-4-6"
       },
-      "human_author": "Sasha Varlamov <sasha@sashavarlamov.com>",
+      "human_author": "Sasha Varlamov",
       "messages": []
     }
   }
