@@ -164,7 +164,3 @@ fn is_ancestor(repository: &Repository, ancestor: &str, descendant: &str) -> boo
     args.push(descendant.to_string());
     crate::git::repository::exec_git(&args).is_ok()
 }
-
-fn summarize_rebase_args(parsed_args: &ParsedGitInvocation) -> RebaseArgsSummary {
-    crate::git::cli_parser::summarize_rebase_args(&parsed_args.command_args)
-}
