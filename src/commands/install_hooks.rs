@@ -238,16 +238,8 @@ fn remove_global_git_config_section(git_cmd: &str, section: &str) -> Result<(), 
     }
 }
 
-fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiError> {
+fn configure_daemon_trace2(dry_run: bool) -> Result<(), GitAiError> {
     let runtime_config = config::Config::fresh();
-
-    if !runtime_config.feature_flags().async_mode {
-        if !dry_run {
-            // Async mode is off — clean up any trace2 config we previously wrote.
-            let _ = remove_global_git_config_section(runtime_config.git_cmd(), "trace2");
-        }
-        return Ok(());
-    }
 
     ensure_global_git_config_dirs()?;
 
@@ -276,38 +268,8 @@ fn maybe_configure_async_mode_daemon_trace2(dry_run: bool) -> Result<(), GitAiEr
     Ok(())
 }
 
-fn maybe_teardown_async_mode(dry_run: bool) {
+fn ensure_daemon(dry_run: bool) {
     if dry_run {
-        return;
-    }
-
-    let runtime_config = config::Config::fresh();
-    if runtime_config.feature_flags().async_mode {
-        return;
-    }
-
-    // Don't touch daemon inside test harnesses
-    if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
-        || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
-    {
-        return;
-    }
-
-    // Shut down any leftover daemon from when async_mode was enabled.
-    // Uses stop_daemon which tries soft shutdown then escalates to hard kill.
-    if let Ok(daemon_config) = DaemonConfig::from_env_or_default_paths() {
-        let _ =
-            crate::commands::daemon::stop_daemon(&daemon_config, std::time::Duration::from_secs(5));
-    }
-}
-
-fn maybe_ensure_daemon(dry_run: bool) {
-    if dry_run {
-        return;
-    }
-
-    let runtime_config = config::Config::fresh();
-    if !runtime_config.feature_flags().async_mode {
         return;
     }
 
@@ -346,18 +308,16 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
         }
     }
 
-    // In async mode, daemon trace2 config must be in place before any install work starts.
-    // If async mode was disabled, tear down any leftover daemon and trace2 config.
+    // Daemon trace2 config must be in place before any install work starts.
     // Non-fatal: the global git config may be read-only (e.g. Nix store symlink).
-    if let Err(e) = maybe_configure_async_mode_daemon_trace2(dry_run) {
+    if let Err(e) = configure_daemon_trace2(dry_run) {
         eprintln!("Warning: could not configure trace2 (non-fatal): {e}");
     }
-    maybe_teardown_async_mode(dry_run);
-    maybe_ensure_daemon(dry_run);
+    ensure_daemon(dry_run);
 
     // Now that the daemon is (re)started, initialize the telemetry handle so
     // that install-hooks metrics and observability events route through it.
-    if config::Config::get().feature_flags().async_mode && !dry_run {
+    if !dry_run {
         let _ = crate::daemon::telemetry_handle::init_daemon_telemetry_handle();
     }
 
