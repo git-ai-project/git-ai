@@ -18,7 +18,6 @@ fn setup() {
         rewrite_stash: true,
         inter_commit_move: true,
         auth_keyring: false,
-        async_mode: false,
         git_hooks_enabled: false,
         git_hooks_externally_managed: false,
     };

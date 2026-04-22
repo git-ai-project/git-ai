@@ -4,7 +4,7 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
-use repos::test_repo::{GitTestMode, TestRepo, get_binary_path, real_git_executable};
+use repos::test_repo::{DaemonTestScope, GitTestMode, TestRepo, get_binary_path, real_git_executable};
 use serde_json::Value;
 use serial_test::serial;
 use std::fs::{self, OpenOptions};
@@ -326,7 +326,7 @@ fn wait_for_child_exit(repo: &TestRepo, child: &mut Child, timeout: Duration) {
 #[test]
 #[serial]
 fn windows_install_script_reinstall_stops_running_daemon() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -370,7 +370,7 @@ fn windows_install_script_reinstall_stops_running_daemon() {
 #[test]
 #[serial]
 fn windows_daemon_creates_log_file() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
@@ -393,7 +393,7 @@ fn windows_daemon_creates_log_file() {
 #[test]
 #[serial]
 fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+    let repo = TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
 
     let initial_install = run_install_script(&repo, Duration::from_secs(90));
     assert!(
