@@ -2262,8 +2262,7 @@ impl TestRepo {
                     format!("{}{}", stdout, stderr)
                 };
                 if command_affects_daemon {
-                    if git_invocation_routes_to_clone_target(&tracked_invocation)
-                    {
+                    if git_invocation_routes_to_clone_target(&tracked_invocation) {
                         let clone_cwd = canonical_working_dir
                             .as_deref()
                             .unwrap_or(self.path.as_path());

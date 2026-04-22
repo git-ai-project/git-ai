@@ -190,30 +190,44 @@ fn handle_run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn ensure_daemon_running(timeout: Duration) -> Result<DaemonConfig, String> {
+pub(crate) fn ensure_daemon_running(
+    #[cfg_attr(any(test, feature = "test-support"), allow(unused))] timeout: Duration,
+) -> Result<DaemonConfig, String> {
     let config = daemon_config_from_env_or_default_paths()?;
     if daemon_is_up(&config) {
         return Ok(config);
     }
 
-    if daemon_startup_is_blocked(&config) {
-        return Err(format!(
-            "daemon startup blocked: lock held at {}",
-            config.lock_path.display()
-        ));
+    // In test builds, never auto-spawn a daemon. The test harness manages
+    // daemon lifecycle via DaemonProcess::start / shared daemon pool.
+    // Without this guard, parallel test threads that see a briefly-unavailable
+    // daemon each call spawn_daemon_run_detached, creating a process storm.
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        Err("daemon not running (test build: auto-spawn disabled)".to_string())
     }
 
-    spawn_daemon_run_detached(&config)?;
-    if wait_for_daemon_up(&config, timeout) {
-        return Ok(config);
-    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        if daemon_startup_is_blocked(&config) {
+            return Err(format!(
+                "daemon startup blocked: lock held at {}",
+                config.lock_path.display()
+            ));
+        }
 
-    Err(format!(
-        "timed out after {:?} waiting for daemon sockets {} and {}",
-        timeout,
-        config.control_socket_path.display(),
-        config.trace_socket_path.display()
-    ))
+        spawn_daemon_run_detached(&config)?;
+        if wait_for_daemon_up(&config, timeout) {
+            return Ok(config);
+        }
+
+        Err(format!(
+            "timed out after {:?} waiting for daemon sockets {} and {}",
+            timeout,
+            config.control_socket_path.display(),
+            config.trace_socket_path.display()
+        ))
+    }
 }
 
 fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
@@ -242,6 +256,7 @@ pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {
             .is_ok()
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
 fn wait_for_daemon_up(config: &DaemonConfig, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -269,6 +284,7 @@ fn powershell_single_quote_literal(value: &OsStr) -> String {
     format!("'{}'", value.to_string_lossy().replace('\'', "''"))
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
 fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     // Use current_git_ai_exe() instead of current_exe() to resolve through
     // symlinks. When the current exe is the git shim (e.g. ~/.local/bin/git),
