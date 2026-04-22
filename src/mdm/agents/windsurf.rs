@@ -211,7 +211,8 @@ impl HookInstaller for WindsurfInstaller {
 
     fn check_hooks(&self, _params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
         let has_cli = resolve_editor_cli("windsurf").is_some();
-        let has_dotfiles = home_dir().join(".codeium").join("windsurf").exists();
+        let has_dotfiles =
+            home_dir().join(".codeium").exists() || home_dir().join(".windsurf").exists();
 
         if !has_cli && !has_dotfiles {
             return Ok(HookCheckResult {
