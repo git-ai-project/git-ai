@@ -10,7 +10,9 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 #[cfg(all(windows, not(any(test, feature = "test-support"))))]
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(not(all(windows, any(test, feature = "test-support"))))]
+use std::process::Stdio;
 use std::thread;
 use std::time::{Duration, Instant};
 #[cfg(all(windows, not(any(test, feature = "test-support"))))]
