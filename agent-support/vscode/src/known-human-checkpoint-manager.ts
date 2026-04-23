@@ -61,19 +61,9 @@ export class KnownHumanCheckpointManager {
     if (event.reason !== undefined) {
       return false;
     }
-    const changes = event.contentChanges;
-    if (changes.length === 0 || changes.length > 2) {
-      return false;
-    }
-    for (const c of changes) {
-      if (c.range.end.line - c.range.start.line > 1) {
-        return false;
-      }
-      if (c.text.length > 256) {
-        return false;
-      }
-    }
-    return true;
+    return event.contentChanges.some(
+      (c) => c.range.end.line - c.range.start.line <= 1,
+    );
   }
 
   public handleSaveEvent(doc: vscode.TextDocument): void {
