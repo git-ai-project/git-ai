@@ -1108,8 +1108,8 @@ impl TestRepo {
     }
 
     pub fn new_worktree() -> Self {
-    Self::new_worktree_with_mode(GitTestMode::from_env())
-}
+        Self::new_worktree_with_mode(GitTestMode::from_env())
+    }
 
     pub fn new_worktree_with_mode(git_mode: GitTestMode) -> Self {
         Self::new_worktree_with_mode_and_daemon_scope(git_mode, DaemonTestScope::Shared)
@@ -1235,23 +1235,23 @@ impl TestRepo {
     }
 
     /// Create a pair of test repos: a local mirror and its upstream remote.
-/// The mirror is cloned from the upstream, so "origin" is automatically configured.
-/// Returns (mirror, upstream) tuple.
-///
-/// # Example
-/// ```ignore
-/// let (mirror, upstream) = TestRepo::new_with_remote();
-///
-/// // Make changes in mirror
-/// mirror.filename("test.txt").write("hello").stage();
-/// mirror.commit("initial commit");
-///
-/// // Push to upstream
-/// mirror.git(&["push", "origin", "main"]);
-/// ```
-pub fn new_with_remote() -> (Self, Self) {
-    Self::new_with_remote_with_mode(GitTestMode::from_env())
-}
+    /// The mirror is cloned from the upstream, so "origin" is automatically configured.
+    /// Returns (mirror, upstream) tuple.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let (mirror, upstream) = TestRepo::new_with_remote();
+    ///
+    /// // Make changes in mirror
+    /// mirror.filename("test.txt").write("hello").stage();
+    /// mirror.commit("initial commit");
+    ///
+    /// // Push to upstream
+    /// mirror.git(&["push", "origin", "main"]);
+    /// ```
+    pub fn new_with_remote() -> (Self, Self) {
+        Self::new_with_remote_with_mode(GitTestMode::from_env())
+    }
 
     pub fn new_with_remote_with_mode(git_mode: GitTestMode) -> (Self, Self) {
         Self::new_with_remote_with_mode_and_daemon_scope(git_mode, DaemonTestScope::Shared)

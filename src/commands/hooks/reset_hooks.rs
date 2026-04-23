@@ -165,10 +165,7 @@ fn handle_reset_hard(repository: &Repository, old_head_sha: &str, _target_commit
         .storage
         .delete_working_log_for_base_commit(old_head_sha)
     {
-        tracing::debug!(
-            "Failed to delete working log for {}: {}",
-            old_head_sha, e
-        );
+        tracing::debug!("Failed to delete working log for {}: {}", old_head_sha, e);
     }
 
     tracing::debug!("Reset --hard: deleted working log for {}", old_head_sha);
@@ -223,7 +220,9 @@ fn handle_reset_preserve_working_dir(
         {
             tracing::debug!(
                 "Failed to rename working log {} -> {}: {}",
-                old_head_sha, target_commit_sha, e
+                old_head_sha,
+                target_commit_sha,
+                e
             );
         }
         return;
@@ -383,7 +382,8 @@ fn handle_reset_pathspec_preserve_working_dir(
     {
         tracing::debug!(
             "Failed to delete working log for {}: {}",
-            target_commit_sha, e
+            target_commit_sha,
+            e
         );
     }
 

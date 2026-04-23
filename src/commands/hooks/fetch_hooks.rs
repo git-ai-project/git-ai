@@ -246,7 +246,9 @@ pub fn pull_post_command_hook(
         if let Err(e) = repository.storage.rename_working_log(&old_head, &new_head) {
             tracing::debug!(
                 "Failed to rename working log {} -> {}: {}",
-                old_head, new_head, e
+                old_head,
+                new_head,
+                e
             );
         }
         return;

@@ -76,7 +76,9 @@ pub fn post_update_ref_hook(
         {
             tracing::debug!(
                 "Failed to rename working log {} -> {}: {}",
-                &old_target, &new_target, e
+                &old_target,
+                &new_target,
+                e
             );
         }
         return;

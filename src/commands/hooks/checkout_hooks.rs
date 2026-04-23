@@ -142,10 +142,7 @@ pub fn post_checkout_hook(
             .storage
             .delete_working_log_for_base_commit(&old_head)
         {
-            tracing::debug!(
-                "Failed to delete working log for {}: {}",
-                &old_head, e
-            );
+            tracing::debug!("Failed to delete working log for {}: {}", &old_head, e);
         }
         return;
     }
@@ -184,10 +181,7 @@ pub fn post_checkout_hook(
                 .storage
                 .delete_working_log_for_base_commit(&old_head)
             {
-                tracing::debug!(
-                    "Failed to delete working log for {}: {}",
-                    &old_head, e
-                );
+                tracing::debug!("Failed to delete working log for {}: {}", &old_head, e);
             }
             restore_stashed_va(repository, &old_head, &new_head, stashed_va);
             return;
@@ -203,7 +197,9 @@ pub fn post_checkout_hook(
     if let Err(e) = repository.storage.rename_working_log(&old_head, &new_head) {
         tracing::debug!(
             "Failed to rename working log {} -> {}: {}",
-            &old_head, &new_head, e
+            &old_head,
+            &new_head,
+            e
         );
     }
 }
