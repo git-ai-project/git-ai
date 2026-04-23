@@ -8,7 +8,7 @@ src/daemon/family_actor.rs
 ---
 {
   "schema_version": "authorship/3.0.0",
-  "git_ai_version": "1.3.2",
+  "git_ai_version": "1.3.3",
   "base_commit_sha": "6ba559cb97174c643d2cf4861e56e317d0aff8cf",
   "prompts": {
     "1dbc0609c31414ab": {
