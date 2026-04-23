@@ -3,7 +3,7 @@ src/git/repo_storage.rs
 ---
 {
   "schema_version": "authorship/3.0.0",
-  "git_ai_version": "1.3.2",
+  "git_ai_version": "1.3.3",
   "base_commit_sha": "24f93a426fa073ab5eb8178a2791d6b93309563d",
   "prompts": {
     "a065c2579295dcd3": {
