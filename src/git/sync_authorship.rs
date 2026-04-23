@@ -4,8 +4,35 @@ use crate::git::refs::{
 };
 use crate::{
     error::GitAiError,
-    git::{cli_parser::ParsedGitInvocation, repository::exec_git},
+    git::{
+        cli_parser::ParsedGitInvocation,
+        repository::{exec_git, exec_git_with_env_and_timeout},
+    },
 };
+use std::time::Duration;
+
+/// Wall-clock timeout for `git fetch refs/notes/ai`. Authorship notes are tiny; a
+/// healthy fetch completes in well under a second. Anything past this point is
+/// almost certainly a hung SSH connection or dead remote.
+const AUTHORSHIP_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Environment hardening applied to internal `git fetch` of authorship notes so
+/// a stalled remote cannot block the caller indefinitely:
+/// - `GIT_TERMINAL_PROMPT=0` disables any interactive credential prompt.
+/// - `GIT_SSH_COMMAND` (only when unset) forces non-interactive SSH with short
+///   connect/keepalive timeouts so a dead TCP connection fails fast.
+fn authorship_fetch_env() -> Vec<(String, String)> {
+    let mut env = vec![("GIT_TERMINAL_PROMPT".to_string(), "0".to_string())];
+    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
+        env.push((
+            "GIT_SSH_COMMAND".to_string(),
+            "ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 \
+             -o ServerAliveCountMax=3"
+                .to_string(),
+        ));
+    }
+    env
+}
 
 use super::repository::Repository;
 
@@ -155,7 +182,8 @@ pub fn fetch_authorship_notes(
 
     tracing::debug!("fetch command: {:?}", fetch_authorship);
 
-    match exec_git(&fetch_authorship) {
+    let fetch_env = authorship_fetch_env();
+    match exec_git_with_env_and_timeout(&fetch_authorship, &fetch_env, AUTHORSHIP_FETCH_TIMEOUT) {
         Ok(output) => {
             tracing::debug!(
                 "fetch stdout: '{}'",

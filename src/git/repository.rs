@@ -3195,6 +3195,107 @@ pub fn exec_git_with_profile(
     Ok(output)
 }
 
+/// Execute git with extra environment variables and a wall-clock timeout.
+///
+/// If the child has not exited within `timeout`, it is killed and a `GitCliError`
+/// with `code: None` is returned whose stderr contains `git-ai: command timed out
+/// after ...`. Callers that need to soft-fail on timeout should match on that
+/// marker.
+///
+/// Entries in `env` are applied on top of the inherited environment; passing
+/// `("GIT_SSH_COMMAND", "")` would clobber any user-provided value, so callers
+/// should check and only set when unset.
+pub fn exec_git_with_env_and_timeout(
+    args: &[String],
+    env: &[(String, String)],
+    timeout: std::time::Duration,
+) -> Result<Output, GitAiError> {
+    let profile = InternalGitProfile::General;
+    let effective_args =
+        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
+    let mut cmd = Command::new(config::Config::get().git_cmd());
+    cmd.args(&effective_args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (k, v) in env.iter() {
+        cmd.env(k, v);
+    }
+    cmd.env_remove("GIT_EXTERNAL_DIFF");
+    cmd.env_remove("GIT_DIFF_OPTS");
+
+    #[cfg(windows)]
+    {
+        if !is_interactive_terminal() {
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+    }
+
+    let mut child = cmd.spawn().map_err(GitAiError::IoError)?;
+
+    // Drain stdout/stderr in background threads so the child never blocks on a
+    // full pipe buffer while we poll try_wait below.
+    let stdout_reader = child.stdout.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
+            buf
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut s, &mut buf);
+            buf
+        })
+    });
+
+    let start = std::time::Instant::now();
+    let poll_interval = std::time::Duration::from_millis(100);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(GitAiError::GitCliError {
+                        code: None,
+                        stderr: format!(
+                            "git-ai: command timed out after {:?} and was killed",
+                            timeout
+                        ),
+                        args: effective_args,
+                    });
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(e) => return Err(GitAiError::IoError(e)),
+        }
+    };
+
+    let stdout = stdout_reader
+        .map(|t| t.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .map(|t| t.join().unwrap_or_default())
+        .unwrap_or_default();
+
+    if !status.success() {
+        return Err(GitAiError::GitCliError {
+            code: status.code(),
+            stderr: String::from_utf8_lossy(&stderr).to_string(),
+            args: effective_args,
+        });
+    }
+
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 /// Helper to execute a git command with data provided on stdin
 pub fn exec_git_stdin(args: &[String], stdin_data: &[u8]) -> Result<Output, GitAiError> {
     exec_git_stdin_with_profile(args, stdin_data, InternalGitProfile::General)
