@@ -19,13 +19,6 @@ if ($firstExit -eq 0) {
     exit 0
 }
 
-# Only retry for daemon and wrapper-daemon modes
-if ($TestMode -ne "daemon" -and $TestMode -ne "wrapper-daemon") {
-    Write-Host "::error::Tests failed in '$TestMode' mode (retry not enabled for this mode)"
-    Remove-Item -Path $tempFile -Force -ErrorAction SilentlyContinue
-    exit 1
-}
-
 # Parse failed test names from cargo test output
 $lines = Get-Content -Path $tempFile
 Remove-Item -Path $tempFile -Force
