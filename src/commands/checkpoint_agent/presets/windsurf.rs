@@ -182,7 +182,8 @@ mod tests {
 
     #[test]
     fn test_escape_control_chars_in_json_strings_fixes_raw_newlines() {
-        let raw = "{\n  \"tool_info\": {\"command\": \"echo hi\nbye\tend\"},\n  \"other\": \"ok\"\n}";
+        let raw =
+            "{\n  \"tool_info\": {\"command\": \"echo hi\nbye\tend\"},\n  \"other\": \"ok\"\n}";
         let sanitized = escape_control_chars_in_json_strings(raw);
         // Strict parse must now succeed.
         let v: serde_json::Value = serde_json::from_str(&sanitized).unwrap();
