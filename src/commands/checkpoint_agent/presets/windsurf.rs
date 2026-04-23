@@ -10,9 +10,57 @@ use std::path::PathBuf;
 
 pub struct WindsurfPreset;
 
+/// Escape raw ASCII control characters (0x00..=0x1F) that appear inside JSON
+/// string literals so the input parses under strict serde_json. Bytes outside
+/// string literals, already-escaped sequences, and non-control bytes are left
+/// untouched. This is a byte-level pass; it does not validate the rest of the
+/// JSON grammar.
+fn escape_control_chars_in_json_strings(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for &b in bytes {
+        if in_string {
+            if escaped {
+                out.push(b);
+                escaped = false;
+            } else if b == b'\\' {
+                out.push(b);
+                escaped = true;
+            } else if b == b'"' {
+                out.push(b);
+                in_string = false;
+            } else if b < 0x20 {
+                match b {
+                    b'\n' => out.extend_from_slice(b"\\n"),
+                    b'\r' => out.extend_from_slice(b"\\r"),
+                    b'\t' => out.extend_from_slice(b"\\t"),
+                    0x08 => out.extend_from_slice(b"\\b"),
+                    0x0C => out.extend_from_slice(b"\\f"),
+                    _ => out.extend_from_slice(format!("\\u{:04x}", b).as_bytes()),
+                }
+            } else {
+                out.push(b);
+            }
+        } else {
+            if b == b'"' {
+                in_string = true;
+            }
+            out.push(b);
+        }
+    }
+    // Safe: input was valid UTF-8, and we only inserted ASCII escape sequences.
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
 impl AgentPreset for WindsurfPreset {
     fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
-        let data: serde_json::Value = serde_json::from_str(hook_input)
+        // Windsurf sometimes emits raw control characters (unescaped newlines, tabs, etc.)
+        // inside JSON string values (e.g. captured command output in `tool_info`). Strict
+        // serde_json rejects those, so escape them inside string literals before parsing.
+        let sanitized = escape_control_chars_in_json_strings(hook_input);
+        let data: serde_json::Value = serde_json::from_str(&sanitized)
             .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
 
         let trajectory_id = parse::required_str(&data, "trajectory_id")?.to_string();
@@ -131,6 +179,33 @@ mod tests {
     use super::*;
     use crate::commands::checkpoint_agent::presets::*;
     use serde_json::json;
+
+    #[test]
+    fn test_escape_control_chars_in_json_strings_fixes_raw_newlines() {
+        let raw = "{\n  \"tool_info\": {\"command\": \"echo hi\nbye\tend\"},\n  \"other\": \"ok\"\n}";
+        let sanitized = escape_control_chars_in_json_strings(raw);
+        // Strict parse must now succeed.
+        let v: serde_json::Value = serde_json::from_str(&sanitized).unwrap();
+        assert_eq!(
+            v.get("tool_info")
+                .and_then(|t| t.get("command"))
+                .and_then(|c| c.as_str())
+                .unwrap(),
+            "echo hi\nbye\tend"
+        );
+        assert_eq!(v.get("other").and_then(|v| v.as_str()).unwrap(), "ok");
+    }
+
+    #[test]
+    fn test_escape_control_chars_preserves_escaped_quotes_and_utf8() {
+        let raw = "{\"msg\": \"line1\nquote:\\\"x\\\" — 你好\"}";
+        let sanitized = escape_control_chars_in_json_strings(raw);
+        let v: serde_json::Value = serde_json::from_str(&sanitized).unwrap();
+        assert_eq!(
+            v.get("msg").and_then(|v| v.as_str()).unwrap(),
+            "line1\nquote:\"x\" — 你好"
+        );
+    }
 
     #[test]
     fn test_windsurf_post_file_edit() {
