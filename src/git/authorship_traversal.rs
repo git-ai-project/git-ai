@@ -192,7 +192,17 @@ mod tests {
     use crate::git::{find_repository_in_path, sync_authorship::fetch_authorship_notes};
     use std::time::Instant;
 
+    // DISABLED: This is a smoke/integration test, not a unit test. It runs against the
+    // developer's live CWD and performs a real `git fetch origin refs/notes/ai` over the
+    // network. It caused a ~5-hour hang in CI when the SSH handshake to github.com stalled
+    // with no timeout (see fetch_authorship_notes hardening with GIT_TERMINAL_PROMPT=0,
+    // GIT_SSH_COMMAND BatchMode, and a 60s wall-clock timeout — those guard the production
+    // path but this test still depends on network, SSH credentials, and the remote having
+    // at least 3 authorship notes, none of which are guaranteed in CI or on a developer
+    // machine. Re-enable only after porting to a hermetic TestRepo + local file:// remote
+    // seeded with notes (see tests/integration/repos/test_repo.rs for the framework).
     #[test]
+    #[ignore]
     fn test_load_ai_touched_files_for_specific_commits() {
         smol::block_on(async {
             let repo = find_repository_in_path(".").unwrap();
