@@ -53,6 +53,12 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidSaveTextDocument((doc) => {
       knownHumanManager.handleSaveEvent(doc);
     }),
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      knownHumanManager.handleContentChangeEvent(event);
+    }),
+    vscode.workspace.onDidCloseTextDocument((doc) => {
+      knownHumanManager.handleCloseEvent(doc);
+    }),
     { dispose: () => knownHumanManager.dispose() },
   );
 

@@ -20,10 +20,61 @@ export class KnownHumanCheckpointManager {
   // per repo root: set of absolute file paths queued in current debounce window
   private pendingPaths = new Map<string, Set<string>>();
 
+  // Files that have received a genuine human keystroke since their last save.
+  // Cleared on every save of that file, regardless of whether we checkpoint.
+  private keystrokeDirty = new Set<string>();
+
   constructor(
     private readonly editorVersion: string,
     private readonly extensionVersion: string,
   ) {}
+
+  public handleContentChangeEvent(event: vscode.TextDocumentChangeEvent): void {
+    const doc = event.document;
+    if (doc.uri.scheme !== "file") {
+      return;
+    }
+    const filePath = doc.uri.fsPath;
+    if (this.isInternalVSCodePath(filePath)) {
+      return;
+    }
+    if (!this.isHumanKeystroke(event)) {
+      return;
+    }
+    this.keystrokeDirty.add(filePath);
+  }
+
+  public handleCloseEvent(doc: vscode.TextDocument): void {
+    if (doc.uri.scheme !== "file") {
+      return;
+    }
+    this.keystrokeDirty.delete(doc.uri.fsPath);
+  }
+
+  private isHumanKeystroke(event: vscode.TextDocumentChangeEvent): boolean {
+    // Human typing requires the doc to be the active editor. AI WorkspaceEdit
+    // writes typically target non-active documents.
+    if (vscode.window.activeTextEditor?.document !== event.document) {
+      return false;
+    }
+    // Exclude undo/redo.
+    if (event.reason !== undefined) {
+      return false;
+    }
+    const changes = event.contentChanges;
+    if (changes.length === 0 || changes.length > 2) {
+      return false;
+    }
+    for (const c of changes) {
+      if (c.range.end.line - c.range.start.line > 1) {
+        return false;
+      }
+      if (c.text.length > 256) {
+        return false;
+      }
+    }
+    return true;
+  }
 
   public handleSaveEvent(doc: vscode.TextDocument): void {
     if (doc.uri.scheme !== "file") {
@@ -34,6 +85,23 @@ export class KnownHumanCheckpointManager {
 
     if (this.isInternalVSCodePath(filePath)) {
       console.log("[git-ai] KnownHumanCheckpointManager: Ignoring internal VSCode file:", filePath);
+      return;
+    }
+
+    // Save resets the keystroke-evidence window for this file regardless of
+    // whether we end up checkpointing.
+    const hadKeystroke = this.keystrokeDirty.delete(filePath);
+
+    const visible = vscode.window.visibleTextEditors.some(
+      (e) => e.document.uri.scheme === "file" && e.document.uri.fsPath === filePath,
+    );
+    if (!visible) {
+      console.log("[git-ai] KnownHumanCheckpointManager: File not visible in any editor, skipping:", filePath);
+      return;
+    }
+
+    if (!hadKeystroke) {
+      console.log("[git-ai] KnownHumanCheckpointManager: No human keystroke since last save, skipping:", filePath);
       return;
     }
 
@@ -157,5 +225,6 @@ export class KnownHumanCheckpointManager {
     }
     this.pendingTimers.clear();
     this.pendingPaths.clear();
+    this.keystrokeDirty.clear();
   }
 }
