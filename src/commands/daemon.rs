@@ -4,18 +4,17 @@ use crate::daemon::{
     send_control_request,
 };
 use crate::utils::LockFile;
-#[cfg(all(windows, not(any(test, feature = "test-support"))))]
+#[cfg(windows)]
 use crate::utils::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-#[cfg(all(windows, not(any(test, feature = "test-support"))))]
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
-#[cfg(not(all(windows, any(test, feature = "test-support"))))]
 use std::process::Stdio;
 use std::thread;
 use std::time::{Duration, Instant};
-#[cfg(all(windows, not(any(test, feature = "test-support"))))]
+#[cfg(windows)]
 use std::{ffi::OsStr, path::Path};
 
 pub fn handle_daemon(args: &[String]) {
@@ -76,7 +75,7 @@ fn handle_start(args: &[String]) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        ensure_daemon_running(daemon_startup_timeout()).map(|_| ())
+        spawn_and_wait_for_daemon(daemon_startup_timeout())
     }
 
     #[cfg(not(windows))]
@@ -241,6 +240,33 @@ pub(crate) fn ensure_daemon_running(
     }
 }
 
+#[cfg(windows)]
+fn spawn_and_wait_for_daemon(timeout: Duration) -> Result<(), String> {
+    let config = daemon_config_from_env_or_default_paths()?;
+    if daemon_is_up(&config) {
+        return Ok(());
+    }
+
+    if daemon_startup_is_blocked(&config) {
+        return Err(format!(
+            "daemon startup blocked: lock held at {}",
+            config.lock_path.display()
+        ));
+    }
+
+    spawn_daemon_run_detached(&config)?;
+    if wait_for_daemon_up(&config, timeout) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "timed out after {:?} waiting for daemon sockets {} and {}",
+        timeout,
+        config.control_socket_path.display(),
+        config.trace_socket_path.display()
+    ))
+}
+
 fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
     if let Some(parent) = config.lock_path.parent()
         && std::fs::create_dir_all(parent).is_err()
@@ -267,7 +293,10 @@ pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {
             .is_ok()
 }
 
-#[cfg(not(any(test, feature = "test-support")))]
+#[cfg_attr(
+    all(not(windows), any(test, feature = "test-support")),
+    allow(dead_code)
+)]
 fn wait_for_daemon_up(config: &DaemonConfig, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -290,12 +319,15 @@ fn daemon_runtime_dir(config: &DaemonConfig) -> Result<PathBuf, String> {
         .ok_or_else(|| "daemon lock path has no parent".to_string())
 }
 
-#[cfg(all(windows, not(any(test, feature = "test-support"))))]
+#[cfg(windows)]
 fn powershell_single_quote_literal(value: &OsStr) -> String {
     format!("'{}'", value.to_string_lossy().replace('\'', "''"))
 }
 
-#[cfg(not(any(test, feature = "test-support")))]
+#[cfg_attr(
+    all(not(windows), any(test, feature = "test-support")),
+    allow(dead_code)
+)]
 fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     // Use current_git_ai_exe() instead of current_exe() to resolve through
     // symlinks. When the current exe is the git shim (e.g. ~/.local/bin/git),
@@ -579,7 +611,7 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
     // Start a fresh daemon.
     #[cfg(windows)]
     {
-        ensure_daemon_running(daemon_startup_timeout()).map(|_| ())
+        spawn_and_wait_for_daemon(daemon_startup_timeout())
     }
     #[cfg(not(windows))]
     {

@@ -291,13 +291,7 @@ fn install_hooks_async_mode_trace2_target_routes_real_git_trace_to_daemon() {
     git_ai_with_daemon_env(&repo, &["install-hooks", "--dry-run=false"])
         .expect("install-hooks should succeed");
 
-    let start_output = daemon_command_output(&repo, &["bg", "start"], repo.path());
-    assert!(
-        start_output.status.success(),
-        "daemon start should succeed: stdout={} stderr={}",
-        String::from_utf8_lossy(&start_output.stdout),
-        String::from_utf8_lossy(&start_output.stderr)
-    );
+    start_daemon(&repo);
     wait_for_daemon_sockets(&repo);
 
     // Use a mutating git command so the trace2 events flow through the full
@@ -476,14 +470,7 @@ fn daemon_start_survives_deleted_launch_repo_cwd() {
     let target_repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
-    let output = daemon_command_output(&launch_repo, &["bg", "start"], launch_repo.path());
-    assert!(
-        output.status.success(),
-        "daemon start should succeed: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
+    start_daemon(&launch_repo);
     wait_for_daemon_sockets(&launch_repo);
     fs::remove_dir_all(launch_repo.path()).expect("failed to remove launch repo");
 
@@ -525,13 +512,7 @@ fn daemon_telemetry_and_cas_over_persistent_connection() {
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
     // Start the daemon
-    let start_output = daemon_command_output(&repo, &["bg", "start"], repo.path());
-    assert!(
-        start_output.status.success(),
-        "daemon start should succeed: stdout={} stderr={}",
-        String::from_utf8_lossy(&start_output.stdout),
-        String::from_utf8_lossy(&start_output.stderr)
-    );
+    start_daemon(&repo);
     wait_for_daemon_sockets(&repo);
 
     // Open a single persistent connection (mirrors the shared handle in telemetry_handle.rs)
