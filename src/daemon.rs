@@ -3939,6 +3939,9 @@ impl ActorDaemonCoordinator {
         if let Ok(mut map) = self.queued_trace_payloads_by_root.lock() {
             map.retain(|_, count| *count > 0);
         }
+        if let Ok(mut map) = self.recent_checkpoint_times.lock() {
+            map.retain(|_, t| t.elapsed().as_secs() < 10);
+        }
     }
 
     fn trace_command_participates_in_family_sequencer(primary_command: Option<&str>) -> bool {
@@ -5753,6 +5756,20 @@ impl ActorDaemonCoordinator {
                                 let _ = crate::commands::checkpoint::delete_captured_checkpoint(
                                     &capture_id,
                                 );
+                            }
+                            if should_log_completion {
+                                let log_entry = TestCompletionLogEntry {
+                                    seq: 0,
+                                    family_key: family.to_string(),
+                                    kind: "checkpoint".to_string(),
+                                    primary_command: Some("checkpoint".to_string()),
+                                    test_sync_session: None,
+                                    exit_code: None,
+                                    sync_tracked: true,
+                                    status: "ok".to_string(),
+                                    error: None,
+                                };
+                                let _ = self.maybe_append_test_completion_log(family, &log_entry);
                             }
                             continue;
                         }

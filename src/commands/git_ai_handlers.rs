@@ -1489,9 +1489,10 @@ fn run_checkpoint_via_daemon_or_local(
                                 }
                             }
                             Ok(None) => {
-                                // Fall through to the live daemon request so the
-                                // daemon still sees this checkpoint (e.g. to record
-                                // recent file timestamps for known_human suppression).
+                                return Ok(CheckpointDispatchOutcome {
+                                    stats: (0, 0, 0),
+                                    queued: false,
+                                });
                             }
                             Err(e) => {
                                 log_daemon_checkpoint_delegate_failure(

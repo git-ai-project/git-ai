@@ -804,41 +804,14 @@ impl AgentCheckpointPreset for WindsurfPreset {
                     .to_string()
             });
 
-        // Extract model_name from hook payload (Windsurf provides this on every hook event)
-        let hook_model = hook_data
+        // Extract model_name from hook payload (Windsurf provides this on every hook event).
+        // Transcript is loaded lazily at commit time via update_windsurf_prompt.
+        let model = hook_data
             .get("model_name")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty() && *s != "Unknown")
-            .map(|s| s.to_string());
-
-        // Parse transcript (best-effort)
-        let (transcript, transcript_model) =
-            match WindsurfPreset::transcript_and_model_from_windsurf_jsonl(&transcript_path) {
-                Ok((transcript, model)) => (transcript, model),
-                Err(GitAiError::IoError(ref io_err))
-                    if io_err.kind() == std::io::ErrorKind::NotFound =>
-                {
-                    // JSONL may not exist yet on the first hook event of a session; treat
-                    // as empty transcript without warning/logging.
-                    (crate::authorship::transcript::AiTranscript::new(), None)
-                }
-                Err(e) => {
-                    eprintln!("[Warning] Failed to parse Windsurf JSONL: {e}");
-                    log_error(
-                        &e,
-                        Some(serde_json::json!({
-                            "agent_tool": "windsurf",
-                            "operation": "transcript_and_model_from_windsurf_jsonl"
-                        })),
-                    );
-                    (crate::authorship::transcript::AiTranscript::new(), None)
-                }
-            };
-
-        // Prefer hook-level model_name, fall back to transcript, then "unknown"
-        let model = hook_model
-            .or(transcript_model)
-            .unwrap_or_else(|| "unknown".to_string());
+            .unwrap_or("unknown")
+            .to_string();
 
         let agent_id = AgentId {
             tool: "windsurf".to_string(),
@@ -936,7 +909,7 @@ impl AgentCheckpointPreset for WindsurfPreset {
                 agent_id,
                 agent_metadata: Some(agent_metadata),
                 checkpoint_kind: CheckpointKind::AiAgent,
-                transcript: Some(transcript),
+                transcript: None,
                 repo_working_dir: bash_cwd,
                 edited_filepaths,
                 will_edit_filepaths: None,
@@ -961,11 +934,10 @@ impl AgentCheckpointPreset for WindsurfPreset {
         }
 
         // post_write_code is the AI checkpoint (after AI edit).
-        // Reject other actions (e.g. post_cascade_response_with_transcript) that
-        // carry no file path — they would create unscoped duplicate checkpoints.
+        // Silently ignore any other actions we don't handle.
         if agent_action_name != "post_write_code" {
             return Err(GitAiError::PresetError(format!(
-                "Skipping Windsurf action '{}' (no scoped file path).",
+                "Ignoring unhandled Windsurf action '{}'.",
                 agent_action_name
             )));
         }
@@ -974,7 +946,7 @@ impl AgentCheckpointPreset for WindsurfPreset {
             agent_id,
             agent_metadata: Some(agent_metadata),
             checkpoint_kind: CheckpointKind::AiAgent,
-            transcript: Some(transcript),
+            transcript: None,
             repo_working_dir: cwd,
             edited_filepaths: file_path_as_vec,
             will_edit_filepaths: None,
