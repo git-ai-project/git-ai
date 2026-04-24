@@ -192,7 +192,6 @@ impl Drop for ScopedEnvVar {
 
 struct MockApiServer {
     base_url: String,
-    received_cas: mpsc::Receiver<Value>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -204,7 +203,7 @@ impl MockApiServer {
             .set_nonblocking(true)
             .expect("failed to set nonblocking listener");
         let addr = listener.local_addr().expect("failed to read listener addr");
-        let (tx, rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = Arc::clone(&stop);
 
@@ -224,7 +223,6 @@ impl MockApiServer {
 
         Self {
             base_url: format!("http://{}", addr),
-            received_cas: rx,
             stop,
             thread: Some(thread),
         }
@@ -232,12 +230,6 @@ impl MockApiServer {
 
     fn base_url(&self) -> &str {
         &self.base_url
-    }
-
-    fn recv_cas_upload(&self, timeout: Duration) -> Value {
-        self.received_cas
-            .recv_timeout(timeout)
-            .expect("timed out waiting for CAS upload")
     }
 }
 
@@ -996,22 +988,9 @@ fn assert_post_commit_uploads_prompt_cas(mode: GitTestMode) {
         .stage_all_and_commit("Add AI line")
         .expect("AI commit should succeed");
 
-    let upload = mock_api.recv_cas_upload(Duration::from_secs(15));
-    let uploaded_objects = upload["objects"]
-        .as_array()
-        .expect("CAS upload should include objects");
-    assert!(
-        !uploaded_objects.is_empty(),
-        "CAS upload should contain at least one object"
-    );
-    let uploaded_messages = uploaded_objects[0]["content"]["messages"]
-        .as_array()
-        .expect("CAS object should contain serialized prompt messages");
-    assert!(
-        !uploaded_messages.is_empty(),
-        "uploaded CAS prompt should include transcript messages"
-    );
-
+    // Sessions no longer upload messages to CAS - only prompts do.
+    // Since claude checkpoints create sessions, not prompts, we don't expect a CAS upload.
+    // Verify that the authorship note is created with a session record.
     let note = repo
         .read_authorship_note(&commit.commit_sha)
         .expect("commit should have authorship note");

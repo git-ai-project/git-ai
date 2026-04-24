@@ -244,12 +244,12 @@ impl SessionRecord {
         PromptRecord {
             agent_id: self.agent_id.clone(),
             human_author: self.human_author.clone(),
-            messages: vec![],  // Sessions no longer store messages
+            messages: vec![], // Sessions no longer store messages
             total_additions: 0,
             total_deletions: 0,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: None,  // Sessions no longer use CAS
+            messages_url: None, // Sessions no longer use CAS
             custom_attributes: self.custom_attributes.clone(),
         }
     }
