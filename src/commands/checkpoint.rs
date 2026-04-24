@@ -1015,22 +1015,6 @@ pub fn prepare_captured_checkpoint(
         ));
     };
 
-    let Some(resolved) = resolve_live_checkpoint_execution(
-        repo,
-        kind,
-        agent_run_result,
-        is_pre_commit,
-        base_commit_override,
-        BaseOverrideResolutionPolicy::AllowFallback,
-    )?
-    else {
-        return Ok(None);
-    };
-
-    if resolved.files.is_empty() {
-        return Ok(None);
-    }
-
     let explicit_paths = filtered_pathspecs_for_agent_run_result(repo, kind, agent_run_result)
         .ok_or_else(|| {
             GitAiError::Generic(
@@ -1038,21 +1022,36 @@ pub fn prepare_captured_checkpoint(
             )
         })?;
 
+    let base_commit = resolve_base_commit(repo, base_commit_override);
+    let repo_workdir = repo
+        .workdir()
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    let dirty_files = agent_run_result.and_then(|r| r.dirty_files.as_ref());
+
     let capture_id = new_async_checkpoint_capture_id();
     let capture_dir = async_checkpoint_capture_dir(&capture_id)?;
     let manifest_result = (|| -> Result<PreparedCheckpointManifest, GitAiError> {
         fs::create_dir_all(&capture_dir)?;
         fs::create_dir_all(capture_dir.join("blobs"))?;
 
-        let live_working_log = repo
-            .storage
-            .working_log_for_base_commit(&resolved.base_commit)?;
-        let mut files = Vec::with_capacity(resolved.files.len());
-        for file_path in &resolved.files {
-            let source = if let Some(content) = resolved.dirty_files.get(file_path).cloned() {
+        let repo_workdir_path = std::path::Path::new(&repo_workdir);
+        let mut files = Vec::with_capacity(explicit_paths.len());
+        for file_path in &explicit_paths {
+            let source = if let Some(content) = dirty_files.and_then(|d| d.get(file_path)).cloned()
+            {
                 PreparedCheckpointFileSource::DirtyFileContent { content }
             } else {
-                let content = live_working_log.read_current_file_content(file_path)?;
+                let abs_path = repo_workdir_path.join(file_path);
+                let content = match fs::read(&abs_path) {
+                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                    Err(_) => String::new(),
+                };
                 let mut hasher = Sha256::new();
                 hasher.update(content.as_bytes());
                 let blob_name = format!("{:x}", hasher.finalize());
@@ -1071,12 +1070,9 @@ pub fn prepare_captured_checkpoint(
         }
 
         let manifest = PreparedCheckpointManifest {
-            repo_working_dir: repo
-                .workdir()
-                .map(|path| path.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            base_commit: resolved.base_commit.clone(),
-            captured_at_ms: resolved.ts,
+            repo_working_dir: repo_workdir.clone(),
+            base_commit,
+            captured_at_ms: ts,
             kind,
             author: author.to_string(),
             is_pre_commit,

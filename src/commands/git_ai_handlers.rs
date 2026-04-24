@@ -1488,7 +1488,11 @@ fn run_checkpoint_via_daemon_or_local(
                                     }
                                 }
                             }
-                            Ok(None) => {}
+                            Ok(None) => {
+                                tracing::warn!(
+                                    "prepare_captured_checkpoint returned None unexpectedly"
+                                );
+                            }
                             Err(e) => {
                                 log_daemon_checkpoint_delegate_failure(
                                     "capture_prepare_failed",
