@@ -3777,7 +3777,6 @@ pub struct ActorDaemonCoordinator {
     trace_ingress_state: Mutex<TraceIngressState>,
     wrapper_states: Mutex<HashMap<String, WrapperStateEntry>>,
     wrapper_state_notify: Notify,
-    recent_checkpoint_times: Mutex<HashMap<(String, String), std::time::Instant>>,
     shutting_down: AtomicBool,
     shutdown_notify: Notify,
     shutdown_condvar: std::sync::Condvar,
@@ -3839,7 +3838,6 @@ impl ActorDaemonCoordinator {
             trace_ingress_state: Mutex::new(TraceIngressState::default()),
             wrapper_states: Mutex::new(HashMap::new()),
             wrapper_state_notify: Notify::new(),
-            recent_checkpoint_times: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             shutdown_notify: Notify::new(),
             shutdown_condvar: std::sync::Condvar::new(),
@@ -3938,9 +3936,6 @@ impl ActorDaemonCoordinator {
         }
         if let Ok(mut map) = self.queued_trace_payloads_by_root.lock() {
             map.retain(|_, count| *count > 0);
-        }
-        if let Ok(mut map) = self.recent_checkpoint_times.lock() {
-            map.retain(|_, t| t.elapsed().as_secs() < 10);
         }
     }
 
@@ -5630,15 +5625,6 @@ impl ActorDaemonCoordinator {
                     };
                     // Compute before the future consumes `request`.
                     let repo_wd = request.repo_working_dir().to_string();
-                    let captured_manifest = match request.as_ref() {
-                        CheckpointRunRequest::Captured(req) => {
-                            crate::commands::checkpoint::load_captured_checkpoint_manifest(
-                                &req.capture_id,
-                            )
-                            .ok()
-                        }
-                        CheckpointRunRequest::Live(_) => None,
-                    };
                     let checkpoint_file_paths: Vec<String> = match request.as_ref() {
                         CheckpointRunRequest::Live(req) => req
                             .agent_run_result
@@ -5649,10 +5635,14 @@ impl ActorDaemonCoordinator {
                                     .or_else(|| r.will_edit_filepaths.clone())
                             })
                             .unwrap_or_default(),
-                        CheckpointRunRequest::Captured(_) => captured_manifest
-                            .as_ref()
+                        CheckpointRunRequest::Captured(req) => {
+                            crate::commands::checkpoint::load_captured_checkpoint_manifest(
+                                &req.capture_id,
+                            )
+                            .ok()
                             .map(|m| m.files.iter().map(|f| f.path.clone()).collect())
-                            .unwrap_or_default(),
+                            .unwrap_or_default()
+                        }
                     };
                     // Extract kind before request is consumed by apply_checkpoint_side_effect.
                     let is_live_human_checkpoint = matches!(
@@ -5661,121 +5651,12 @@ impl ActorDaemonCoordinator {
                     );
                     let should_log_completion =
                         crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync(&request);
-                    let (
-                        checkpoint_kind_str,
-                        checkpoint_agent_str,
-                        checkpoint_mode_str,
-                        checkpoint_files_str,
-                    ) = match request.as_ref() {
-                        CheckpointRunRequest::Live(req) => {
-                            let kind = req.kind.as_deref().unwrap_or("human").to_string();
-                            let agent = req
-                                .agent_run_result
-                                .as_ref()
-                                .map(|r| r.agent_id.tool.as_str())
-                                .unwrap_or("unknown")
-                                .to_string();
-                            let files = req
-                                .agent_run_result
-                                .as_ref()
-                                .and_then(|r| {
-                                    r.edited_filepaths
-                                        .as_ref()
-                                        .or(r.will_edit_filepaths.as_ref())
-                                })
-                                .map(|paths| paths.join(", "))
-                                .unwrap_or_else(|| "(unscoped)".to_string());
-                            (kind, agent, "live".to_string(), files)
-                        }
-                        CheckpointRunRequest::Captured(_) => {
-                            let (kind, agent, files) = captured_manifest
-                                .as_ref()
-                                .map(|m| {
-                                    let k = m.kind.to_str();
-                                    let a = m
-                                        .agent_run_result
-                                        .as_ref()
-                                        .map(|r| r.agent_id.tool.clone())
-                                        .unwrap_or_else(|| "unknown".to_string());
-                                    let f = m
-                                        .files
-                                        .iter()
-                                        .map(|f| f.path.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(", ");
-                                    (k, a, f)
-                                })
-                                .unwrap_or_else(|| {
-                                    (
-                                        "unknown".to_string(),
-                                        "unknown".to_string(),
-                                        "unknown".to_string(),
-                                    )
-                                });
-                            (kind, agent, "captured".to_string(), files)
-                        }
+                    let checkpoint_kind_str: &str = match request.as_ref() {
+                        CheckpointRunRequest::Live(req) => req.kind.as_deref().unwrap_or("human"),
+                        CheckpointRunRequest::Captured(_) => "captured",
                     };
-
-                    // Suppress KnownHuman checkpoints that arrive shortly after
-                    // a non-KnownHuman checkpoint touched the same file in the
-                    // same repo. This catches spurious IDE save events that fire
-                    // when an AI agent writes a file.
-                    let normalize_file_path = |repo: &str, path: &str| -> String {
-                        let path = path.trim_start_matches('/');
-                        let repo_prefix = repo.trim_start_matches('/');
-                        if let Some(rel) = path.strip_prefix(repo_prefix) {
-                            rel.trim_start_matches('/').to_string()
-                        } else {
-                            path.to_string()
-                        }
-                    };
-                    if checkpoint_kind_str == "known_human" && !checkpoint_file_paths.is_empty() {
-                        let dominated = {
-                            let recent = self
-                                .recent_checkpoint_times
-                                .lock()
-                                .unwrap_or_else(|e| e.into_inner());
-                            checkpoint_file_paths.iter().any(|f| {
-                                let key = (repo_wd.clone(), normalize_file_path(&repo_wd, f));
-                                recent.get(&key).is_some_and(|t| t.elapsed().as_secs() < 2)
-                            })
-                        };
-                        if dominated {
-                            tracing::info!(
-                                kind = %checkpoint_kind_str,
-                                agent = %checkpoint_agent_str,
-                                mode = %checkpoint_mode_str,
-                                files = %checkpoint_files_str,
-                                repo = %repo_wd,
-                                "checkpoint skipped (recent agent checkpoint on same file)"
-                            );
-                            if let Some(tx) = respond_to {
-                                let _ = tx.send(Ok(0));
-                            }
-                            if let Some(capture_id) = captured_checkpoint_id {
-                                let _ = crate::commands::checkpoint::delete_captured_checkpoint(
-                                    &capture_id,
-                                );
-                            }
-                            if should_log_completion {
-                                let log_entry = TestCompletionLogEntry {
-                                    seq: 0,
-                                    family_key: family.to_string(),
-                                    kind: "checkpoint".to_string(),
-                                    primary_command: Some("checkpoint".to_string()),
-                                    test_sync_session: None,
-                                    exit_code: None,
-                                    sync_tracked: true,
-                                    status: "ok".to_string(),
-                                    error: None,
-                                };
-                                let _ = self.maybe_append_test_completion_log(family, &log_entry);
-                            }
-                            continue;
-                        }
-                    }
-
-                    tracing::info!(kind = %checkpoint_kind_str, agent = %checkpoint_agent_str, mode = %checkpoint_mode_str, files = %checkpoint_files_str, repo = %repo_wd, "checkpoint start");
+                    let checkpoint_kind_str = checkpoint_kind_str.to_string();
+                    tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
                     let checkpoint_start = std::time::Instant::now();
                     // Wrap checkpoint processing in catch_unwind to recover from panics.
                     let checkpoint_result = {
@@ -5822,9 +5703,6 @@ impl ActorDaemonCoordinator {
                     if result.is_ok() {
                         tracing::info!(
                             kind = %checkpoint_kind_str,
-                            agent = %checkpoint_agent_str,
-                            mode = %checkpoint_mode_str,
-                            files = %checkpoint_files_str,
                             repo = %repo_wd,
                             duration_ms = checkpoint_duration_ms as u64,
                             "checkpoint done"
@@ -5832,28 +5710,10 @@ impl ActorDaemonCoordinator {
                     } else {
                         tracing::warn!(
                             kind = %checkpoint_kind_str,
-                            agent = %checkpoint_agent_str,
-                            mode = %checkpoint_mode_str,
-                            files = %checkpoint_files_str,
                             repo = %repo_wd,
                             duration_ms = checkpoint_duration_ms as u64,
                             "checkpoint failed"
                         );
-                    }
-                    // Record recent non-KnownHuman checkpoint times for suppression
-                    if result.is_ok()
-                        && checkpoint_kind_str != "known_human"
-                        && !checkpoint_file_paths.is_empty()
-                    {
-                        let now = std::time::Instant::now();
-                        let mut recent = self
-                            .recent_checkpoint_times
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        for f in &checkpoint_file_paths {
-                            recent.insert((repo_wd.clone(), normalize_file_path(&repo_wd, f)), now);
-                        }
-                        recent.retain(|_, t| t.elapsed().as_secs() < 10);
                     }
                     if result.is_ok() {
                         let per_file = if !checkpoint_file_paths.is_empty() {
@@ -8201,11 +8061,6 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
         version = env!("CARGO_PKG_VERSION"),
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
-        profile = if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        },
         "daemon started"
     );
 
