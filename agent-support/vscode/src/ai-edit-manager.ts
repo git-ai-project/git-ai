@@ -33,9 +33,12 @@ export class AIEditManager {
   private readonly STABLE_CONTENT_DEBOUNCE_MS = 2000;
 
   constructor(context: vscode.ExtensionContext) {
-    this.legacyCopilotHooksEnabled = !shouldSkipLegacyCopilotHooks(vscode.version);
+    this.legacyCopilotHooksEnabled = !shouldSkipLegacyCopilotHooks(vscode.version, vscode.env.remoteName);
     if (!this.legacyCopilotHooksEnabled) {
       console.log(`[git-ai] AIEditManager: VS Code ${vscode.version} has native hooks; skipping legacy extension checkpoints`);
+    }
+    if (vscode.env.remoteName) {
+      console.log(`[git-ai] AIEditManager: Remote context detected (${vscode.env.remoteName}); keeping legacy hooks active`);
     }
 
     if (context.storageUri?.fsPath) {
