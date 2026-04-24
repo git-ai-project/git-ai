@@ -3777,7 +3777,7 @@ pub struct ActorDaemonCoordinator {
     trace_ingress_state: Mutex<TraceIngressState>,
     wrapper_states: Mutex<HashMap<String, WrapperStateEntry>>,
     wrapper_state_notify: Notify,
-    recent_agent_checkpoint_times: Mutex<HashMap<(String, String), std::time::Instant>>,
+    recent_agent_checkpoint_times: Mutex<HashMap<String, std::time::Instant>>,
     shutting_down: AtomicBool,
     shutdown_notify: Notify,
     shutdown_condvar: std::sync::Condvar,
@@ -5650,27 +5650,25 @@ impl ActorDaemonCoordinator {
                         }
                     };
 
-                    // Normalize a file path to a repo-relative POSIX form for
-                    // consistent HashMap keys, since live requests use absolute
-                    // paths while captured manifests use relative paths.
-                    // On macOS, /var is a symlink to /private/var, so we
-                    // canonicalize both sides before stripping.
+                    // Normalize a file path to a canonical absolute POSIX form
+                    // for consistent HashMap keys. Live requests may use
+                    // absolute paths while captured manifests use relative
+                    // paths; canonicalizing resolves macOS /var → /private/var
+                    // symlinks and ensures both forms produce the same key.
                     let canonical_repo_wd = std::path::Path::new(&repo_wd)
                         .canonicalize()
                         .unwrap_or_else(|_| std::path::PathBuf::from(&repo_wd));
                     let normalize_file_path = |path: &str| -> String {
                         let p = std::path::Path::new(path);
-                        let rel = if p.is_absolute() {
-                            let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-                            canonical
-                                .strip_prefix(&canonical_repo_wd)
-                                .unwrap_or(&canonical)
-                                .to_string_lossy()
-                                .to_string()
+                        let abs = if p.is_absolute() {
+                            p.to_path_buf()
                         } else {
-                            path.to_string()
+                            canonical_repo_wd.join(p)
                         };
-                        rel.replace('\\', "/")
+                        abs.canonicalize()
+                            .unwrap_or(abs)
+                            .to_string_lossy()
+                            .replace('\\', "/")
                     };
 
                     // Extract kind before request is consumed by apply_checkpoint_side_effect.
@@ -5733,12 +5731,10 @@ impl ActorDaemonCoordinator {
                     // an agent-fired Human checkpoint on overlapping files. These
                     // are spurious IDE save events triggered by the AI edit.
                     const KNOWN_HUMAN_SUPPRESS_WINDOW_SECS: u64 = 2;
-                    let canonical_repo_wd_str = canonical_repo_wd.to_string_lossy().to_string();
                     let suppress_known_human = if checkpoint_kind_str == "known_human" {
                         if let Ok(map) = self.recent_agent_checkpoint_times.lock() {
                             checkpoint_file_paths.iter().any(|path| {
-                                let key =
-                                    (canonical_repo_wd_str.clone(), normalize_file_path(path));
+                                let key = normalize_file_path(path);
                                 map.get(&key).is_some_and(|t| {
                                     t.elapsed().as_secs() < KNOWN_HUMAN_SUPPRESS_WINDOW_SECS
                                 })
@@ -5757,10 +5753,7 @@ impl ActorDaemonCoordinator {
                     {
                         let now = std::time::Instant::now();
                         for path in &checkpoint_file_paths {
-                            map.insert(
-                                (canonical_repo_wd_str.clone(), normalize_file_path(path)),
-                                now,
-                            );
+                            map.insert(normalize_file_path(path), now);
                         }
                     }
 

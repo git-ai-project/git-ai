@@ -74,8 +74,7 @@ fn test_windsurf_preset_ai_checkpoint_post_write_code() {
         vec!["/home/user/project/main.rs"]
     );
     assert!(result.will_edit_filepaths.is_none());
-    // Transcript parsing will fail since the derived path doesn't exist, but preset handles it gracefully
-    assert!(result.transcript.is_some());
+    assert!(result.transcript.is_none());
     assert!(result.agent_metadata.is_some());
     assert_eq!(result.agent_id.tool, "windsurf");
     // No model_name in hook input → falls back to "unknown"
@@ -582,8 +581,8 @@ fn test_windsurf_preset_post_run_command_detects_changed_files() {
     assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
     assert_eq!(result.agent_id.tool, "windsurf");
     assert!(
-        result.transcript.is_some(),
-        "post_run_command should attach transcript content"
+        result.transcript.is_none(),
+        "post_run_command should defer transcript loading to commit time"
     );
     assert_eq!(
         result.edited_filepaths,
