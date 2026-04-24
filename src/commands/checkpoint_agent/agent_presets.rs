@@ -783,6 +783,16 @@ impl AgentCheckpointPreset for WindsurfPreset {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
+        if !matches!(
+            agent_action_name,
+            "pre_write_code" | "post_write_code" | "pre_run_command" | "post_run_command"
+        ) {
+            return Err(GitAiError::PresetError(format!(
+                "Ignoring unhandled Windsurf action '{}'.",
+                agent_action_name
+            )));
+        }
+
         // Extract cwd if present (Windsurf may or may not provide it)
         let cwd = hook_data
             .get("cwd")
@@ -934,14 +944,6 @@ impl AgentCheckpointPreset for WindsurfPreset {
         }
 
         // post_write_code is the AI checkpoint (after AI edit).
-        // Silently ignore any other actions we don't handle.
-        if agent_action_name != "post_write_code" {
-            return Err(GitAiError::PresetError(format!(
-                "Ignoring unhandled Windsurf action '{}'.",
-                agent_action_name
-            )));
-        }
-
         Ok(AgentRunResult {
             agent_id,
             agent_metadata: Some(agent_metadata),
