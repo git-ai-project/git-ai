@@ -1055,46 +1055,18 @@ fn daemon_start_spawns_detached_run_process() {
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
 
-    let mut command = Command::new(get_binary_path());
-    command
-        .arg("bg")
-        .arg("start")
-        .current_dir(repo.path())
-        .env("GIT_AI_TEST_DB_PATH", repo.test_db_path())
-        .env("GITAI_TEST_DB_PATH", repo.test_db_path());
-    configure_test_home_env(&mut command, repo.test_home_path());
-    configure_test_daemon_env(
-        &mut command,
-        &repo.daemon_home_path(),
-        &daemon_control_socket_path(&repo),
-        &daemon_trace_socket_path(&repo),
-    );
-    let output = command.output().expect("failed to invoke daemon start");
-    assert!(
-        output.status.success(),
-        "daemon start should return success: stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    start_daemon_for_repo(&repo);
 
-    let mut status_ok = false;
-    for _ in 0..80 {
-        match send_control_request(
-            &daemon_control_socket_path(&repo),
-            &ControlRequest::StatusFamily {
-                repo_working_dir: repo_workdir_string(&repo),
-            },
-        ) {
-            Ok(response) if response.ok => {
-                status_ok = true;
-                break;
-            }
-            _ => {
-                thread::sleep(Duration::from_millis(25));
-            }
-        }
-    }
-    assert!(status_ok, "daemon should be reachable after `daemon start`");
+    let status_response = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::StatusFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+    );
+    assert!(
+        status_response.is_ok_and(|r| r.ok),
+        "daemon should be reachable after start"
+    );
 
     let _ = send_control_request(
         &daemon_control_socket_path(&repo),
