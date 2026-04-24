@@ -213,13 +213,6 @@ pub fn post_commit_with_final_state(
                     tracing::debug!("[Warning] Failed to enqueue prompt messages to CAS: {}", e);
                     strip_prompt_messages(&mut authorship_log.metadata.prompts);
                 }
-
-                if let Err(e) =
-                    enqueue_session_messages_to_cas(repo, &mut authorship_log.metadata.sessions)
-                {
-                    tracing::debug!("[Warning] Failed to enqueue session messages to CAS: {}", e);
-                    strip_session_messages(&mut authorship_log.metadata.sessions);
-                }
             } else {
                 // Not enqueueing - strip messages (never keep in notes for "default")
                 strip_prompt_messages(&mut authorship_log.metadata.prompts);
@@ -588,80 +581,6 @@ fn enqueue_prompt_messages_to_cas(
 
     Ok(())
 }
-
-fn enqueue_session_messages_to_cas(
-    repo: &Repository,
-    sessions: &mut std::collections::BTreeMap<
-        String,
-        crate::authorship::authorship_log::SessionRecord,
-    >,
-) -> Result<(), GitAiError> {
-    use crate::authorship::internal_db::InternalDatabase;
-
-    let db = InternalDatabase::global()?;
-    let mut db_lock = db
-        .lock()
-        .map_err(|e| GitAiError::Generic(format!("Failed to lock database: {}", e)))?;
-
-    let mut metadata = HashMap::new();
-    metadata.insert("api_version".to_string(), "v1".to_string());
-    metadata.insert("kind".to_string(), "session".to_string());
-
-    let repo_url = repo
-        .get_default_remote()
-        .ok()
-        .flatten()
-        .and_then(|remote_name| {
-            repo.remotes_with_urls().ok().and_then(|remotes| {
-                remotes
-                    .into_iter()
-                    .find(|(name, _)| name == &remote_name)
-                    .map(|(_, url)| url)
-            })
-        });
-
-    if let Some(url) = repo_url
-        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
-    {
-        metadata.insert("repo_url".to_string(), normalized);
-    }
-
-    let api_base_url = Config::fresh().api_base_url().to_string();
-
-    for (_key, session) in sessions.iter_mut() {
-        if !session.messages.is_empty() {
-            let messages_obj = crate::api::types::CasMessagesObject {
-                messages: session.messages.clone(),
-            };
-            let messages_json = serde_json::to_value(&messages_obj)
-                .map_err(|e| GitAiError::Generic(format!("Failed to serialize messages: {}", e)))?;
-
-            let hash = db_lock.enqueue_cas_object(&messages_json, Some(&metadata))?;
-
-            let metadata_json = serde_json::to_string(&metadata).ok();
-            let canonical = serde_json_canonicalizer::to_string(&messages_json)
-                .unwrap_or_else(|_| messages_json.to_string());
-            let cas_payload = crate::daemon::control_api::CasSyncPayload {
-                hash: hash.clone(),
-                data: canonical,
-                metadata: metadata_json,
-            };
-
-            if crate::daemon::daemon_process_active() {
-                let _ =
-                    crate::daemon::telemetry_worker::submit_daemon_internal_cas(vec![cas_payload]);
-            } else if crate::daemon::telemetry_handle::daemon_telemetry_available() {
-                crate::daemon::telemetry_handle::submit_cas(vec![cas_payload]);
-            }
-
-            session.messages_url = Some(format!("{}/cas/{}", api_base_url, hash));
-            session.messages.clear();
-        }
-    }
-
-    Ok(())
-}
-
 /// Record metrics for a committed change.
 /// This is a best-effort operation - failures are silently ignored.
 fn record_commit_metrics(
