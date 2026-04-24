@@ -5712,7 +5712,6 @@ impl ActorDaemonCoordinator {
                     };
                     let checkpoint_mode_str = match request.as_ref() {
                         CheckpointRunRequest::Captured(_) => "captured",
-                        CheckpointRunRequest::Live(req) if req.record_only => "record_only",
                         _ => "live",
                     };
                     let checkpoint_files_str = if checkpoint_file_paths.is_empty() {
@@ -5722,12 +5721,6 @@ impl ActorDaemonCoordinator {
                     } else {
                         format!("{} files", checkpoint_file_paths.len())
                     };
-
-                    // Extract record_only flag from live requests.
-                    let record_only = matches!(
-                        request.as_ref(),
-                        CheckpointRunRequest::Live(req) if req.record_only
-                    );
 
                     // Detect agent-preset checkpoints (both pre-edit Human and
                     // post-edit AI). These have agent_run_result with
@@ -5826,45 +5819,6 @@ impl ActorDaemonCoordinator {
                                     %family,
                                     order,
                                     "suppressed checkpoint completion log write failed"
-                                );
-                            }
-                        }
-                        if let Some(respond_to) = respond_to {
-                            let _ = respond_to.send(result);
-                        }
-                        continue;
-                    }
-
-                    if record_only {
-                        tracing::info!(
-                            kind = %checkpoint_kind_str,
-                            agent = %checkpoint_agent_str,
-                            mode = checkpoint_mode_str,
-                            files = %checkpoint_files_str,
-                            repo = %repo_wd,
-                            "checkpoint record_only (no-op)"
-                        );
-                        let result: Result<u64, GitAiError> = Ok(0);
-                        if should_log_completion {
-                            let log_entry = TestCompletionLogEntry {
-                                seq: 0,
-                                family_key: family.to_string(),
-                                kind: "checkpoint".to_string(),
-                                primary_command: Some("checkpoint".to_string()),
-                                test_sync_session: None,
-                                exit_code: None,
-                                sync_tracked: true,
-                                status: "ok".to_string(),
-                                error: None,
-                            };
-                            if let Err(error) =
-                                self.maybe_append_test_completion_log(family, &log_entry)
-                            {
-                                tracing::error!(
-                                    %error,
-                                    %family,
-                                    order,
-                                    "record_only checkpoint completion log write failed"
                                 );
                             }
                         }
@@ -8763,7 +8717,6 @@ mod tests {
                     quiet: Some(true),
                     is_pre_commit: Some(false),
                     agent_run_result: None,
-                    record_only: false,
                 },
             ))),
             wait: Some(true),

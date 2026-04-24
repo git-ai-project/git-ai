@@ -1423,7 +1423,6 @@ fn run_checkpoint_via_daemon_or_local(
                         // Fall through to normal path on failure
                     }
 
-                    let mut record_only = false;
                     if allow_captured_async
                         && crate::commands::checkpoint::explicit_capture_target_paths(
                             kind,
@@ -1489,9 +1488,7 @@ fn run_checkpoint_via_daemon_or_local(
                                     }
                                 }
                             }
-                            Ok(None) => {
-                                record_only = true;
-                            }
+                            Ok(None) => {}
                             Err(e) => {
                                 log_daemon_checkpoint_delegate_failure(
                                     "capture_prepare_failed",
@@ -1512,7 +1509,6 @@ fn run_checkpoint_via_daemon_or_local(
                                 quiet: Some(quiet),
                                 is_pre_commit: Some(is_pre_commit),
                                 agent_run_result: agent_run_result.clone(),
-                                record_only,
                             },
                         ))),
                         wait: Some(true),
