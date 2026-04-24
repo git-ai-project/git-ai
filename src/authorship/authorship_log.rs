@@ -234,9 +234,6 @@ impl Eq for PromptRecord {}
 pub struct SessionRecord {
     pub agent_id: AgentId,
     pub human_author: Option<String>,
-    pub messages: Vec<Message>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub messages_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
 }
@@ -247,12 +244,12 @@ impl SessionRecord {
         PromptRecord {
             agent_id: self.agent_id.clone(),
             human_author: self.human_author.clone(),
-            messages: self.messages.clone(),
+            messages: vec![],  // Sessions no longer store messages
             total_additions: 0,
             total_deletions: 0,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: self.messages_url.clone(),
+            messages_url: None,  // Sessions no longer use CAS
             custom_attributes: self.custom_attributes.clone(),
         }
     }
