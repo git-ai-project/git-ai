@@ -809,7 +809,7 @@ impl AgentCheckpointPreset for WindsurfPreset {
         let model = hook_data
             .get("model_name")
             .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty() && *s != "Unknown")
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("unknown"))
             .unwrap_or("unknown")
             .to_string();
 
