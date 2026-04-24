@@ -4837,6 +4837,24 @@ fn daemon_known_human_suppressed_after_agent_fired_human_checkpoint() {
         .unwrap();
     repo.wait_for_next_daemon_checkpoint_completion(baseline);
 
+    // Simulate the AI making an edit.
+    fs::write(&file_path, "initial content\nai added line\n").unwrap();
+
+    // AI checkpoint (post_write_code) to attribute the new line.
+    let post_hook = json!({
+        "trajectory_id": "traj-suppress-test",
+        "agent_action_name": "post_write_code",
+        "model_name": "GPT 4.1",
+        "tool_info": {
+            "file_path": file_path.to_string_lossy().to_string()
+        }
+    })
+    .to_string();
+    let baseline = repo.daemon_total_completion_count();
+    repo.git_ai(&["checkpoint", "windsurf", "--hook-input", &post_hook])
+        .unwrap();
+    repo.wait_for_next_daemon_checkpoint_completion(baseline);
+
     // Immediately fire a known_human checkpoint on the same file.
     // This simulates the IDE save event that fires right after an AI edit.
     // It should be suppressed by the daemon.
@@ -4847,26 +4865,24 @@ fn daemon_known_human_suppressed_after_agent_fired_human_checkpoint() {
 
     // The known_human should be suppressed.
     let entries = repo.daemon_completion_entries();
-    let suppressed = entries.iter().any(|e| e.status == "suppressed");
+    let checkpoint_entries: Vec<_> = entries
+        .iter()
+        .filter(|e| e.primary_command.as_deref() == Some("checkpoint"))
+        .collect();
+    let suppressed = checkpoint_entries.iter().any(|e| e.status == "suppressed");
     assert!(
         suppressed,
-        "known_human checkpoint should be suppressed after agent-fired human checkpoint, entries: {:?}",
-        entries.iter().map(|e| &e.status).collect::<Vec<_>>()
+        "known_human checkpoint should be suppressed after agent-fired human checkpoint, checkpoint entries: {:?}",
+        checkpoint_entries
+            .iter()
+            .map(|e| &e.status)
+            .collect::<Vec<_>>()
     );
 
-    // No KnownHuman checkpoint in the working log.
-    let checkpoints = repo
-        .current_working_logs()
-        .read_all_checkpoints()
-        .expect("checkpoints should be readable");
-    let known_human_count = checkpoints
-        .iter()
-        .filter(|c| c.kind == CheckpointKind::KnownHuman)
-        .count();
-    assert_eq!(
-        known_human_count, 0,
-        "known_human checkpoint should not appear in working log when suppressed"
-    );
+    // Commit and verify AI attribution is preserved (not overwritten by known_human).
+    repo.stage_all_and_commit("AI edit").unwrap();
+    let mut file = repo.filename("target.txt");
+    file.assert_committed_lines(lines!["initial content".human(), "ai added line".ai(),]);
 }
 
 #[test]
@@ -4890,26 +4906,24 @@ fn daemon_known_human_not_suppressed_without_prior_agent_human() {
 
     // Should NOT be suppressed.
     let entries = repo.daemon_completion_entries();
-    let suppressed = entries.iter().any(|e| e.status == "suppressed");
+    let checkpoint_entries: Vec<_> = entries
+        .iter()
+        .filter(|e| e.primary_command.as_deref() == Some("checkpoint"))
+        .collect();
+    let suppressed = checkpoint_entries.iter().any(|e| e.status == "suppressed");
     assert!(
         !suppressed,
-        "known_human checkpoint should NOT be suppressed without a prior agent human checkpoint, entries: {:?}",
-        entries.iter().map(|e| &e.status).collect::<Vec<_>>()
+        "known_human checkpoint should NOT be suppressed without a prior agent human checkpoint, checkpoint entries: {:?}",
+        checkpoint_entries
+            .iter()
+            .map(|e| &e.status)
+            .collect::<Vec<_>>()
     );
 
-    // A KnownHuman checkpoint should exist in the working log.
-    let checkpoints = repo
-        .current_working_logs()
-        .read_all_checkpoints()
-        .expect("checkpoints should be readable");
-    let known_human_count = checkpoints
-        .iter()
-        .filter(|c| c.kind == CheckpointKind::KnownHuman)
-        .count();
-    assert!(
-        known_human_count > 0,
-        "known_human checkpoint should appear in working log when not suppressed"
-    );
+    // Commit and verify both lines are attributed to human.
+    repo.stage_all_and_commit("Human edit").unwrap();
+    let mut file = repo.filename("standalone.txt");
+    file.assert_committed_lines(lines!["initial content".human(), "human edit".human(),]);
 }
 
 #[test]

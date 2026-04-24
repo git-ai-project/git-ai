@@ -5630,6 +5630,17 @@ impl ActorDaemonCoordinator {
                     };
                     // Compute before the future consumes `request`.
                     let repo_wd = request.repo_working_dir().to_string();
+                    // Load captured manifest early so we can extract both file
+                    // paths and checkpoint kind from it.
+                    let captured_manifest = match request.as_ref() {
+                        CheckpointRunRequest::Captured(req) => {
+                            crate::commands::checkpoint::load_captured_checkpoint_manifest(
+                                &req.capture_id,
+                            )
+                            .ok()
+                        }
+                        _ => None,
+                    };
                     let checkpoint_file_paths: Vec<String> = match request.as_ref() {
                         CheckpointRunRequest::Live(req) => req
                             .agent_run_result
@@ -5640,14 +5651,10 @@ impl ActorDaemonCoordinator {
                                     .or_else(|| r.will_edit_filepaths.clone())
                             })
                             .unwrap_or_default(),
-                        CheckpointRunRequest::Captured(req) => {
-                            crate::commands::checkpoint::load_captured_checkpoint_manifest(
-                                &req.capture_id,
-                            )
-                            .ok()
+                        CheckpointRunRequest::Captured(_) => captured_manifest
+                            .as_ref()
                             .map(|m| m.files.iter().map(|f| f.path.clone()).collect())
-                            .unwrap_or_default()
-                        }
+                            .unwrap_or_default(),
                     };
 
                     // Normalize a file path to a canonical absolute POSIX form
@@ -5684,7 +5691,10 @@ impl ActorDaemonCoordinator {
                         CheckpointRunRequest::Live(req) => {
                             req.kind.as_deref().unwrap_or("human").to_string()
                         }
-                        CheckpointRunRequest::Captured(_) => "captured".to_string(),
+                        CheckpointRunRequest::Captured(_) => captured_manifest
+                            .as_ref()
+                            .map(|m| m.kind.to_str().to_string())
+                            .unwrap_or_else(|| "captured".to_string()),
                     };
                     let checkpoint_agent_str = match request.as_ref() {
                         CheckpointRunRequest::Live(req) => req
@@ -5693,7 +5703,12 @@ impl ActorDaemonCoordinator {
                             .map(|r| r.agent_id.tool.as_str())
                             .unwrap_or("-")
                             .to_string(),
-                        CheckpointRunRequest::Captured(_) => "-".to_string(),
+                        CheckpointRunRequest::Captured(_) => captured_manifest
+                            .as_ref()
+                            .and_then(|m| m.agent_run_result.as_ref())
+                            .map(|r| r.agent_id.tool.as_str())
+                            .unwrap_or("-")
+                            .to_string(),
                     };
                     let checkpoint_mode_str = match request.as_ref() {
                         CheckpointRunRequest::Captured(_) => "captured",
@@ -5714,22 +5729,36 @@ impl ActorDaemonCoordinator {
                         CheckpointRunRequest::Live(req) if req.record_only
                     );
 
-                    // Detect agent-fired Human checkpoints: kind="human" AND
-                    // agent_run_result is present with checkpoint_kind == Human.
-                    // These come from AI agent presets (e.g., Windsurf pre_write_code),
-                    // NOT from mock_known_human test helpers.
-                    let is_agent_fired_human = matches!(
-                        request.as_ref(),
-                        CheckpointRunRequest::Live(req)
-                            if req.kind.as_deref() == Some("human")
-                                && req.agent_run_result.as_ref().is_some_and(|r|
-                                    r.checkpoint_kind == crate::authorship::working_log::CheckpointKind::Human
+                    // Detect agent-preset checkpoints (both pre-edit Human and
+                    // post-edit AI). These have agent_run_result with
+                    // checkpoint_kind == Human or AiAgent, distinguishing them
+                    // from mock_known_human (checkpoint_kind == KnownHuman) and
+                    // bare `git-ai checkpoint human` (no agent_run_result).
+                    let is_agent_preset_checkpoint = match request.as_ref() {
+                        CheckpointRunRequest::Live(req) => {
+                            req.agent_run_result.as_ref().is_some_and(|r| {
+                                matches!(
+                                    r.checkpoint_kind,
+                                    crate::authorship::working_log::CheckpointKind::Human
+                                        | crate::authorship::working_log::CheckpointKind::AiAgent
                                 )
-                    );
+                            })
+                        }
+                        CheckpointRunRequest::Captured(_) => captured_manifest
+                            .as_ref()
+                            .and_then(|m| m.agent_run_result.as_ref())
+                            .is_some_and(|r| {
+                                matches!(
+                                    r.checkpoint_kind,
+                                    crate::authorship::working_log::CheckpointKind::Human
+                                        | crate::authorship::working_log::CheckpointKind::AiAgent
+                                )
+                            }),
+                    };
 
                     // Suppress known_human checkpoints that arrive shortly after
-                    // an agent-fired Human checkpoint on overlapping files. These
-                    // are spurious IDE save events triggered by the AI edit.
+                    // an agent-preset checkpoint on overlapping files. These are
+                    // spurious IDE save events triggered by the AI edit.
                     const KNOWN_HUMAN_SUPPRESS_WINDOW_SECS: u64 = 2;
                     let suppress_known_human = if checkpoint_kind_str == "known_human" {
                         if let Ok(map) = self.recent_agent_checkpoint_times.lock() {
@@ -5746,9 +5775,9 @@ impl ActorDaemonCoordinator {
                         false
                     };
 
-                    // Record timestamps for agent-fired Human checkpoints so we
-                    // can suppress subsequent spurious known_human events.
-                    if is_agent_fired_human
+                    // Record timestamps for agent-preset checkpoints so we can
+                    // suppress subsequent spurious known_human events.
+                    if is_agent_preset_checkpoint
                         && let Ok(mut map) = self.recent_agent_checkpoint_times.lock()
                     {
                         let now = std::time::Instant::now();
