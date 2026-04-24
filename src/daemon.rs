@@ -5759,13 +5759,24 @@ impl ActorDaemonCoordinator {
                     // Suppress known_human checkpoints that arrive shortly after
                     // an agent-preset checkpoint on overlapping files. These are
                     // spurious IDE save events triggered by the AI edit.
-                    const KNOWN_HUMAN_SUPPRESS_WINDOW_SECS: u64 = 2;
+                    // In test mode the window defaults to 0 (disabled) so that
+                    // mock_known_human from `set_contents` is never suppressed.
+                    // Set GIT_AI_SUPPRESS_WINDOW_SECS to override in tests that
+                    // exercise the real suppression path.
+                    let suppress_window_secs: u64 =
+                        if let Ok(val) = std::env::var("GIT_AI_SUPPRESS_WINDOW_SECS") {
+                            val.parse().unwrap_or(2)
+                        } else if daemon_is_test_mode() {
+                            0
+                        } else {
+                            2
+                        };
                     let suppress_known_human = if checkpoint_kind_str == "known_human" {
                         if let Ok(map) = self.recent_agent_checkpoint_times.lock() {
                             checkpoint_file_paths.iter().any(|path| {
                                 let key = normalize_file_path(path);
                                 map.get(&key).is_some_and(|t| {
-                                    t.elapsed().as_secs() < KNOWN_HUMAN_SUPPRESS_WINDOW_SECS
+                                    t.elapsed().as_secs() < suppress_window_secs
                                 })
                             })
                         } else {

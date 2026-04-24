@@ -4812,6 +4812,8 @@ fn daemon_self_heals_after_socket_deletion() {
 #[test]
 #[serial]
 fn daemon_known_human_suppressed_after_agent_fired_human_checkpoint() {
+    // Enable real suppression window for this test (default is 0 in test mode).
+    let _suppress_env = ScopedEnvVar::set("GIT_AI_SUPPRESS_WINDOW_SECS", "2");
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
 
@@ -4888,6 +4890,8 @@ fn daemon_known_human_suppressed_after_agent_fired_human_checkpoint() {
 #[test]
 #[serial]
 fn daemon_known_human_not_suppressed_without_prior_agent_human() {
+    // Enable real suppression window for this test (default is 0 in test mode).
+    let _suppress_env = ScopedEnvVar::set("GIT_AI_SUPPRESS_WINDOW_SECS", "2");
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
 
