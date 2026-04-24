@@ -56,6 +56,9 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeTextDocument((event) => {
       knownHumanManager.handleContentChangeEvent(event);
     }),
+    vscode.window.onDidChangeTextEditorSelection((event) => {
+      knownHumanManager.handleSelectionChangeEvent(event);
+    }),
     vscode.workspace.onDidCloseTextDocument((doc) => {
       knownHumanManager.handleCloseEvent(doc);
     }),

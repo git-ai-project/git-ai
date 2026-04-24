@@ -20,14 +20,31 @@ export class KnownHumanCheckpointManager {
   // per repo root: set of absolute file paths queued in current debounce window
   private pendingPaths = new Map<string, Set<string>>();
 
-  // Files that have received a genuine human keystroke since their last save.
-  // Cleared on every save of that file, regardless of whether we checkpoint.
-  private keystrokeDirty = new Set<string>();
+  // Per-file timestamps. Comparing at save time is order-independent — typing
+  // fires contentChange before selectionChange, so checking at change time
+  // would miss the first keystroke after a save.
+  private lastContentChange = new Map<string, number>();      // any contentChange
+  private lastKeyboardSelection = new Map<string, number>();  // Keyboard-kind only
+  private lastSave = new Map<string, number>();
 
   constructor(
     private readonly editorVersion: string,
     private readonly extensionVersion: string,
-  ) {}
+  ) {
+    console.log("[git-ai][KHC] v5 constructed");
+  }
+
+  public handleSelectionChangeEvent(event: vscode.TextEditorSelectionChangeEvent): void {
+    if (event.kind !== vscode.TextEditorSelectionChangeKind.Keyboard) {
+      return;
+    }
+    const doc = event.textEditor.document;
+    if (doc.uri.scheme !== "file") {
+      return;
+    }
+    this.lastKeyboardSelection.set(doc.uri.fsPath, Date.now());
+    console.log("[git-ai][KHC] keyboard-selection", doc.uri.fsPath);
+  }
 
   public handleContentChangeEvent(event: vscode.TextDocumentChangeEvent): void {
     const doc = event.document;
@@ -38,60 +55,63 @@ export class KnownHumanCheckpointManager {
     if (this.isInternalVSCodePath(filePath)) {
       return;
     }
-    if (!this.isHumanKeystroke(event)) {
+    if (event.contentChanges.length === 0) {
       return;
     }
-    this.keystrokeDirty.add(filePath);
+    this.lastContentChange.set(filePath, Date.now());
+    console.log("[git-ai][KHC] edit recorded", filePath, "changes=" + event.contentChanges.length);
   }
 
   public handleCloseEvent(doc: vscode.TextDocument): void {
     if (doc.uri.scheme !== "file") {
       return;
     }
-    this.keystrokeDirty.delete(doc.uri.fsPath);
-  }
-
-  private isHumanKeystroke(event: vscode.TextDocumentChangeEvent): boolean {
-    // Human typing requires the doc to be the active editor. AI WorkspaceEdit
-    // writes typically target non-active documents.
-    if (vscode.window.activeTextEditor?.document !== event.document) {
-      return false;
-    }
-    // Exclude undo/redo.
-    if (event.reason !== undefined) {
-      return false;
-    }
-    return event.contentChanges.some(
-      (c) => c.range.end.line - c.range.start.line <= 1,
-    );
+    const fsPath = doc.uri.fsPath;
+    this.lastContentChange.delete(fsPath);
+    this.lastKeyboardSelection.delete(fsPath);
+    this.lastSave.delete(fsPath);
   }
 
   public handleSaveEvent(doc: vscode.TextDocument): void {
+    const filePath = doc.uri.fsPath;
+    console.log("[git-ai][KHC] save event scheme=" + doc.uri.scheme, "path=" + filePath);
     if (doc.uri.scheme !== "file") {
       return;
     }
 
-    const filePath = doc.uri.fsPath;
-
     if (this.isInternalVSCodePath(filePath)) {
-      console.log("[git-ai] KnownHumanCheckpointManager: Ignoring internal VSCode file:", filePath);
+      console.log("[git-ai][KHC] Ignoring internal VSCode file:", filePath);
       return;
     }
 
-    // Save resets the keystroke-evidence window for this file regardless of
-    // whether we end up checkpointing.
-    const hadKeystroke = this.keystrokeDirty.delete(filePath);
+    const prevSave = this.lastSave.get(filePath) ?? 0;
+    const lastChange = this.lastContentChange.get(filePath) ?? 0;
+    const lastKbd = this.lastKeyboardSelection.get(filePath) ?? 0;
+    this.lastSave.set(filePath, Date.now());
 
     const visible = vscode.window.visibleTextEditors.some(
       (e) => e.document.uri.scheme === "file" && e.document.uri.fsPath === filePath,
     );
+    const changedSinceSave = lastChange > prevSave;
+    const kbdSinceSave = lastKbd > prevSave;
+    console.log(
+      "[git-ai][KHC] save gates visible=" + visible,
+      "changedSinceSave=" + changedSinceSave,
+      "kbdSinceSave=" + kbdSinceSave,
+      "(prevSave=" + prevSave + " lastChange=" + lastChange + " lastKbd=" + lastKbd + ")",
+      "path=" + filePath,
+    );
+
     if (!visible) {
-      console.log("[git-ai] KnownHumanCheckpointManager: File not visible in any editor, skipping:", filePath);
+      console.log("[git-ai][KHC] SKIP: not visible —", filePath);
       return;
     }
-
-    if (!hadKeystroke) {
-      console.log("[git-ai] KnownHumanCheckpointManager: No human keystroke since last save, skipping:", filePath);
+    if (!changedSinceSave) {
+      console.log("[git-ai][KHC] SKIP: no edit since last save —", filePath);
+      return;
+    }
+    if (!kbdSinceSave) {
+      console.log("[git-ai][KHC] SKIP: no keyboard activity since last save —", filePath);
       return;
     }
 
@@ -215,6 +235,8 @@ export class KnownHumanCheckpointManager {
     }
     this.pendingTimers.clear();
     this.pendingPaths.clear();
-    this.keystrokeDirty.clear();
+    this.lastContentChange.clear();
+    this.lastKeyboardSelection.clear();
+    this.lastSave.clear();
   }
 }
