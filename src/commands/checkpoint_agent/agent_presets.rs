@@ -960,7 +960,16 @@ impl AgentCheckpointPreset for WindsurfPreset {
             });
         }
 
-        // post_write_code and post_cascade_response_with_transcript are AI checkpoints
+        // post_write_code is the AI checkpoint (after AI edit).
+        // Reject other actions (e.g. post_cascade_response_with_transcript) that
+        // carry no file path — they would create unscoped duplicate checkpoints.
+        if agent_action_name != "post_write_code" {
+            return Err(GitAiError::PresetError(format!(
+                "Skipping Windsurf action '{}' (no scoped file path).",
+                agent_action_name
+            )));
+        }
+
         Ok(AgentRunResult {
             agent_id,
             agent_metadata: Some(agent_metadata),
