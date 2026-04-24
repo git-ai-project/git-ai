@@ -962,8 +962,6 @@ fn apply_blame_for_side(
                     .or_insert_with(|| SessionRecord {
                         agent_id: prompt_record.agent_id.clone(),
                         human_author: prompt_record.human_author.clone(),
-                        messages: prompt_record.messages.clone(),
-                        messages_url: prompt_record.messages_url.clone(),
                         custom_attributes: prompt_record.custom_attributes.clone(),
                     });
             }

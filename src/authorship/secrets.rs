@@ -500,31 +500,15 @@ pub fn strip_prompt_messages(prompts: &mut BTreeMap<String, PromptRecord>) {
 }
 
 /// Redact secrets from all session messages using entropy-based detection.
-pub fn redact_secrets_from_sessions(sessions: &mut BTreeMap<String, SessionRecord>) -> usize {
-    let mut total_redactions = 0;
-    for record in sessions.values_mut() {
-        for message in &mut record.messages {
-            match message {
-                Message::User { text, .. }
-                | Message::Assistant { text, .. }
-                | Message::Thinking { text, .. }
-                | Message::Plan { text, .. } => {
-                    let (redacted, count) = redact_secrets_in_text(text);
-                    *text = redacted;
-                    total_redactions += count;
-                }
-                Message::ToolUse { .. } => {}
-            }
-        }
-    }
-    total_redactions
+/// Note: SessionRecord no longer stores messages, so this is a no-op for compatibility.
+pub fn redact_secrets_from_sessions(_sessions: &mut BTreeMap<String, SessionRecord>) -> usize {
+    0 // Sessions don't have messages anymore
 }
 
 /// Strip all messages from sessions (used when sharing is disabled).
-pub fn strip_session_messages(sessions: &mut BTreeMap<String, SessionRecord>) {
-    for record in sessions.values_mut() {
-        record.messages.clear();
-    }
+/// Note: SessionRecord no longer stores messages, so this is a no-op for compatibility.
+pub fn strip_session_messages(_sessions: &mut BTreeMap<String, SessionRecord>) {
+    // Sessions don't have messages anymore - nothing to strip
 }
 
 #[cfg(test)]
