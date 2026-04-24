@@ -443,17 +443,6 @@ fn test_cursor_e2e_with_attribution() {
         .next()
         .expect("Should have at least one session record");
 
-    assert!(
-        !session_record.messages.is_empty(),
-        "Session record should contain messages from the JSONL transcript"
-    );
-
-    assert_eq!(
-        session_record.messages.len(),
-        21,
-        "Should have exactly 21 messages from the JSONL fixture"
-    );
-
     assert_eq!(
         session_record.agent_id.model, "model-name-from-hook-test",
         "Model should be 'model-name-from-hook-test' from hook input"
@@ -539,7 +528,7 @@ fn test_cursor_e2e_with_resync() {
         "Should have at least one session record in metadata"
     );
 
-    let session_record = commit
+    let _session_record = commit
         .authorship_log
         .metadata
         .sessions
@@ -547,13 +536,7 @@ fn test_cursor_e2e_with_resync() {
         .next()
         .expect("Should have at least one session record");
 
-    let transcript_json =
-        serde_json::to_string(&session_record.messages).expect("Should serialize messages");
-
-    assert!(
-        transcript_json.contains("RESYNC_TEST_MESSAGE"),
-        "Resync logic should have picked up the appended message from the modified JSONL file"
-    );
+    // Note: Messages field has been removed from SessionRecord
 }
 
 #[test]

@@ -303,15 +303,7 @@ fn test_codex_e2e_commit_resync_uses_latest_rollout() {
         session.agent_id.model, "gpt-5.1-codex",
         "Commit-time resync should update the model from latest rollout"
     );
-    assert!(
-        session.messages.iter().any(|m| {
-            matches!(
-                m,
-                Message::Assistant { text, .. } if text.contains("Implemented the refactor")
-            )
-        }),
-        "Session transcript should be refreshed from latest rollout"
-    );
+    // Note: Messages field has been removed from SessionRecord
 }
 
 #[test]

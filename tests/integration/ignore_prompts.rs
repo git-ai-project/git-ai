@@ -114,18 +114,7 @@ fn test_checkpoint_with_prompt_sharing_enabled() {
     // Verify the session message is captured (agent-v1 uses inline transcripts)
     let sessions: Vec<_> = commit.authorship_log.metadata.sessions.values().collect();
     assert_eq!(sessions.len(), 1, "Expected exactly one session");
-    let session = sessions[0];
-    assert!(
-        !session.messages.is_empty(),
-        "Expected messages in session when sharing is enabled"
-    );
-
-    // First message should be the user message
-    if let Some(Message::User { text, .. }) = session.messages.first() {
-        assert_eq!(text, "Add example file");
-    } else {
-        panic!("Expected first message to be a user message");
-    }
+    // Note: Messages field has been removed from SessionRecord
 }
 
 #[test]
@@ -182,12 +171,7 @@ fn test_checkpoint_with_prompt_sharing_disabled_strips_messages() {
     let sessions: Vec<_> = commit.authorship_log.metadata.sessions.values().collect();
     assert_eq!(sessions.len(), 1, "Expected exactly one session record");
 
-    // The messages should be EMPTY because prompt sharing is disabled
-    assert!(
-        sessions[0].messages.is_empty(),
-        "Expected messages to be stripped (empty) when prompt sharing is disabled, but found: {:?}",
-        sessions[0].messages
-    );
+    // Note: Messages field has been removed from SessionRecord
 }
 
 #[test]
@@ -244,35 +228,7 @@ fn test_multiple_checkpoints_with_messages() {
     let sessions: Vec<_> = commit.authorship_log.metadata.sessions.values().collect();
     assert_eq!(sessions.len(), 2, "Expected exactly 2 sessions");
 
-    // Verify both sessions have messages (agent-v1 uses inline transcripts, order may vary due to BTreeMap)
-    for session in &sessions {
-        assert!(
-            !session.messages.is_empty(),
-            "Expected messages in session, but found empty messages for agent_id: {:?}",
-            session.agent_id
-        );
-    }
-
-    // Verify we have the expected user messages (content may be in either order)
-    let user_messages: Vec<&str> = sessions
-        .iter()
-        .filter_map(|s| {
-            if let Some(Message::User { text, .. }) = s.messages.first() {
-                Some(text.as_str())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    assert!(
-        user_messages.contains(&"Create file1 with initial content"),
-        "Expected to find 'Create file1 with initial content' in prompts"
-    );
-    assert!(
-        user_messages.contains(&"Create file2 with different content"),
-        "Expected to find 'Create file2 with different content' in prompts"
-    );
+    // Note: Messages field has been removed from SessionRecord
 }
 
 #[test]

@@ -172,8 +172,7 @@ new_file.txt
         "id": "new_agent",
         "model": "new_model"
       },
-      "human_author": null,
-      "messages": []
+      "human_author": null
     }
   }
 }"#;
@@ -231,8 +230,7 @@ fn test_mixed_format_both_count_as_ai_in_blame() {
         "id": "new_agent",
         "model": "new_model"
       },
-      "human_author": null,
-      "messages": []
+      "human_author": null
     }
   }
 }"#;
@@ -267,6 +265,55 @@ fn test_mixed_format_both_count_as_ai_in_blame() {
     assert_eq!(
         entry2.hash, "s_1234567890abcd::t_fedcba0987654321",
         "second entry should be new format"
+    );
+}
+
+// Task 5: Backward compatibility deserialization test
+
+#[test]
+fn test_old_session_with_messages_deserializes_without_them() {
+    // Construct a note with old-format session containing messages and messages_url
+    let note = r#"test.txt
+  s_1234567890abcd::t_fedcba0987654321 1-5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.0.0",
+  "base_commit_sha": "abc123",
+  "prompts": {},
+  "sessions": {
+    "s_1234567890abcd": {
+      "agent_id": {
+        "tool": "test_tool",
+        "id": "test_agent",
+        "model": "test_model"
+      },
+      "human_author": null,
+      "messages": [{"role": "user", "content": "test message"}],
+      "messages_url": "https://api.example.com/cas/abc123"
+    }
+  }
+}"#;
+
+    let log = AuthorshipLog::deserialize_from_string(note)
+        .expect("should deserialize old format session with messages");
+
+    assert_eq!(log.metadata.sessions.len(), 1, "should have 1 session");
+
+    // The old messages/messages_url fields should be silently ignored (backward compat)
+    let session = log.metadata.sessions.values().next().unwrap();
+    assert_eq!(session.agent_id.tool, "test_tool");
+    assert_eq!(session.agent_id.id, "test_agent");
+
+    // Verify serialization does NOT include messages or messages_url
+    let serialized = log.serialize_to_string().expect("should serialize");
+    assert!(
+        !serialized.contains("\"messages\""),
+        "re-serialized note should not contain messages field"
+    );
+    assert!(
+        !serialized.contains("\"messages_url\""),
+        "re-serialized note should not contain messages_url field"
     );
 }
 
