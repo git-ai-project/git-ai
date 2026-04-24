@@ -3,13 +3,14 @@
 # Exits 0 with a warning if flaky tests pass on retry.
 
 param(
-    [int]$TestThreads = 4
+    [int]$TestThreads = 4,
+    [int]$RetryTimeoutSeconds = 600
 )
 
 $ErrorActionPreference = "Continue"
 $TestMode = $env:GIT_AI_TEST_GIT_MODE
 
-# Run the full test suite, streaming output to console and capturing to a temp file
+# Run the full test suite, streaming output to console and capturing to a temp file.
 $tempFile = [System.IO.Path]::GetTempFileName()
 & cargo test -- --test-threads=$TestThreads 2>&1 | Tee-Object -FilePath $tempFile
 $firstExit = $LASTEXITCODE
@@ -19,7 +20,7 @@ if ($firstExit -eq 0) {
     exit 0
 }
 
-# Parse failed test names from cargo test output
+# Parse failed test names from the cargo test failures section.
 $lines = Get-Content -Path $tempFile
 Remove-Item -Path $tempFile -Force
 $inFailures = $false
@@ -51,22 +52,40 @@ if ($failedTests.Count -eq 0) {
 $failedCount = $failedTests.Count
 
 if ($failedCount -gt 5) {
-    Write-Host "::error::$failedCount tests failed on first run — too many failures to retry as flaky"
+    Write-Host ("::error::{0} tests failed on first run - too many failures to retry as flaky" -f $failedCount)
     exit 1
 }
 
 Write-Host ""
-Write-Host "::warning::$failedCount test(s) failed on first run in '$TestMode' mode. Retrying individually..."
+Write-Host ("::warning::{0} test(s) failed on first run in '{1}' mode. Retrying individually..." -f $failedCount, $TestMode)
 Write-Host ""
 
-# Retry each failed test individually
 $stillFailing = @()
 $passedOnRetry = @()
 
 foreach ($testName in $failedTests) {
     Write-Host "--- Retrying: $testName ---"
-    cargo test $testName -- --test-threads=1 --exact
-    if ($LASTEXITCODE -eq 0) {
+    $cargo = Start-Process -FilePath "cargo" `
+        -ArgumentList @("test", $testName, "--", "--test-threads=1", "--exact") `
+        -NoNewWindow `
+        -PassThru
+
+    $timedOut = $false
+    try {
+        Wait-Process -Id $cargo.Id -Timeout $RetryTimeoutSeconds -ErrorAction Stop
+    } catch {
+        $timedOut = $true
+    }
+
+    if ($timedOut) {
+        Write-Host "::error::Retry timed out after ${RetryTimeoutSeconds}s: ${testName}"
+        & taskkill /F /T /PID $cargo.Id 2>$null | Out-Null
+        $stillFailing += $testName
+        continue
+    }
+
+    $cargo.Refresh()
+    if ($cargo.ExitCode -eq 0) {
         $passedOnRetry += $testName
     } else {
         $stillFailing += $testName
@@ -83,7 +102,7 @@ if ($stillFailing.Count -gt 0) {
     exit 1
 }
 
-Write-Host "::warning::All $failedCount previously-failed test(s) passed on retry (flaky in '$TestMode' mode):"
+Write-Host ("::warning::All {0} previously-failed test(s) passed on retry (flaky in '{1}' mode):" -f $failedCount, $TestMode)
 foreach ($t in $passedOnRetry) {
     Write-Host "  - $t"
 }

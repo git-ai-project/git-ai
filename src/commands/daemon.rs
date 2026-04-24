@@ -10,8 +10,7 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Command;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 #[cfg(windows)]
@@ -75,7 +74,7 @@ fn handle_start(args: &[String]) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        spawn_and_wait_for_daemon(daemon_startup_timeout())
+        start_daemon_detached(daemon_startup_timeout()).map(|_| ())
     }
 
     #[cfg(not(windows))]
@@ -219,52 +218,8 @@ pub(crate) fn ensure_daemon_running(
             );
         }
 
-        if daemon_startup_is_blocked(&config) {
-            return Err(format!(
-                "daemon startup blocked: lock held at {}",
-                config.lock_path.display()
-            ));
-        }
-
-        spawn_daemon_run_detached(&config)?;
-        if wait_for_daemon_up(&config, timeout) {
-            return Ok(config);
-        }
-
-        Err(format!(
-            "timed out after {:?} waiting for daemon sockets {} and {}",
-            timeout,
-            config.control_socket_path.display(),
-            config.trace_socket_path.display()
-        ))
+        start_daemon_detached_with_config(config, timeout)
     }
-}
-
-#[cfg(windows)]
-fn spawn_and_wait_for_daemon(timeout: Duration) -> Result<(), String> {
-    let config = daemon_config_from_env_or_default_paths()?;
-    if daemon_is_up(&config) {
-        return Ok(());
-    }
-
-    if daemon_startup_is_blocked(&config) {
-        return Err(format!(
-            "daemon startup blocked: lock held at {}",
-            config.lock_path.display()
-        ));
-    }
-
-    spawn_daemon_run_detached(&config)?;
-    if wait_for_daemon_up(&config, timeout) {
-        return Ok(());
-    }
-
-    Err(format!(
-        "timed out after {:?} waiting for daemon sockets {} and {}",
-        timeout,
-        config.control_socket_path.display(),
-        config.trace_socket_path.display()
-    ))
 }
 
 fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
@@ -293,10 +248,7 @@ pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {
             .is_ok()
 }
 
-#[cfg_attr(
-    all(not(windows), any(test, feature = "test-support")),
-    allow(dead_code)
-)]
+#[cfg(any(windows, not(any(test, feature = "test-support"))))]
 fn wait_for_daemon_up(config: &DaemonConfig, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -308,6 +260,45 @@ fn wait_for_daemon_up(config: &DaemonConfig, timeout: Duration) -> bool {
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[cfg(windows)]
+// Explicit daemon lifecycle command path. Unlike ensure_daemon_running(),
+// this remains available in test builds because it is only reached from
+// user/test-initiated `bg start` / `bg restart`, not hot implicit paths like
+// checkpoint delegation or telemetry initialization.
+fn start_daemon_detached(timeout: Duration) -> Result<DaemonConfig, String> {
+    let config = daemon_config_from_env_or_default_paths()?;
+    start_daemon_detached_with_config(config, timeout)
+}
+
+#[cfg(any(windows, not(any(test, feature = "test-support"))))]
+fn start_daemon_detached_with_config(
+    config: DaemonConfig,
+    timeout: Duration,
+) -> Result<DaemonConfig, String> {
+    if daemon_is_up(&config) {
+        return Ok(config);
+    }
+
+    if daemon_startup_is_blocked(&config) {
+        return Err(format!(
+            "daemon startup blocked: lock held at {}",
+            config.lock_path.display()
+        ));
+    }
+
+    spawn_daemon_run_detached(&config)?;
+    if wait_for_daemon_up(&config, timeout) {
+        return Ok(config);
+    }
+
+    Err(format!(
+        "timed out after {:?} waiting for daemon sockets {} and {}",
+        timeout,
+        config.control_socket_path.display(),
+        config.trace_socket_path.display()
+    ))
 }
 
 fn daemon_runtime_dir(config: &DaemonConfig) -> Result<PathBuf, String> {
@@ -324,10 +315,7 @@ fn powershell_single_quote_literal(value: &OsStr) -> String {
     format!("'{}'", value.to_string_lossy().replace('\'', "''"))
 }
 
-#[cfg_attr(
-    all(not(windows), any(test, feature = "test-support")),
-    allow(dead_code)
-)]
+#[cfg(any(windows, not(any(test, feature = "test-support"))))]
 fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     // Use current_git_ai_exe() instead of current_exe() to resolve through
     // symlinks. When the current exe is the git shim (e.g. ~/.local/bin/git),
@@ -611,7 +599,7 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
     // Start a fresh daemon.
     #[cfg(windows)]
     {
-        spawn_and_wait_for_daemon(daemon_startup_timeout())
+        start_daemon_detached(daemon_startup_timeout()).map(|_| ())
     }
     #[cfg(not(windows))]
     {
