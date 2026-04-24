@@ -464,12 +464,6 @@ impl VirtualAttributions {
                     let session_record = SessionRecord {
                         agent_id: agent_id.clone(),
                         human_author: human_author.clone(),
-                        messages: checkpoint
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.messages().to_vec())
-                            .unwrap_or_default(),
-                        messages_url: None,
                         custom_attributes: None,
                     };
 
@@ -673,12 +667,6 @@ impl VirtualAttributions {
                     let session_record = SessionRecord {
                         agent_id: agent_id.clone(),
                         human_author: human_author.clone(),
-                        messages: checkpoint
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.messages().to_vec())
-                            .unwrap_or_default(),
-                        messages_url: None,
                         custom_attributes: None,
                     };
 
@@ -868,12 +856,6 @@ impl VirtualAttributions {
                     let session_record = SessionRecord {
                         agent_id: agent_id.clone(),
                         human_author: human_author.clone(),
-                        messages: checkpoint
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.messages().to_vec())
-                            .unwrap_or_default(),
-                        messages_url: None,
                         custom_attributes: None,
                     };
 
