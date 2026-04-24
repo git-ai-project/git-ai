@@ -3777,6 +3777,7 @@ pub struct ActorDaemonCoordinator {
     trace_ingress_state: Mutex<TraceIngressState>,
     wrapper_states: Mutex<HashMap<String, WrapperStateEntry>>,
     wrapper_state_notify: Notify,
+    recent_agent_checkpoint_times: Mutex<HashMap<(String, String), std::time::Instant>>,
     shutting_down: AtomicBool,
     shutdown_notify: Notify,
     shutdown_condvar: std::sync::Condvar,
@@ -3838,6 +3839,7 @@ impl ActorDaemonCoordinator {
             trace_ingress_state: Mutex::new(TraceIngressState::default()),
             wrapper_states: Mutex::new(HashMap::new()),
             wrapper_state_notify: Notify::new(),
+            recent_agent_checkpoint_times: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             shutdown_notify: Notify::new(),
             shutdown_condvar: std::sync::Condvar::new(),
@@ -3936,6 +3938,9 @@ impl ActorDaemonCoordinator {
         }
         if let Ok(mut map) = self.queued_trace_payloads_by_root.lock() {
             map.retain(|_, count| *count > 0);
+        }
+        if let Ok(mut map) = self.recent_agent_checkpoint_times.lock() {
+            map.retain(|_, t| t.elapsed().as_secs() < 10);
         }
     }
 
@@ -5644,6 +5649,30 @@ impl ActorDaemonCoordinator {
                             .unwrap_or_default()
                         }
                     };
+
+                    // Normalize a file path to a repo-relative POSIX form for
+                    // consistent HashMap keys, since live requests use absolute
+                    // paths while captured manifests use relative paths.
+                    // On macOS, /var is a symlink to /private/var, so we
+                    // canonicalize both sides before stripping.
+                    let canonical_repo_wd = std::path::Path::new(&repo_wd)
+                        .canonicalize()
+                        .unwrap_or_else(|_| std::path::PathBuf::from(&repo_wd));
+                    let normalize_file_path = |path: &str| -> String {
+                        let p = std::path::Path::new(path);
+                        let rel = if p.is_absolute() {
+                            let canonical = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+                            canonical
+                                .strip_prefix(&canonical_repo_wd)
+                                .unwrap_or(&canonical)
+                                .to_string_lossy()
+                                .to_string()
+                        } else {
+                            path.to_string()
+                        };
+                        rel.replace('\\', "/")
+                    };
+
                     // Extract kind before request is consumed by apply_checkpoint_side_effect.
                     let is_live_human_checkpoint = matches!(
                         request.as_ref(),
@@ -5651,12 +5680,176 @@ impl ActorDaemonCoordinator {
                     );
                     let should_log_completion =
                         crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync(&request);
-                    let checkpoint_kind_str: &str = match request.as_ref() {
-                        CheckpointRunRequest::Live(req) => req.kind.as_deref().unwrap_or("human"),
-                        CheckpointRunRequest::Captured(_) => "captured",
+
+                    // Enhanced logging info extraction.
+                    let checkpoint_kind_str = match request.as_ref() {
+                        CheckpointRunRequest::Live(req) => {
+                            req.kind.as_deref().unwrap_or("human").to_string()
+                        }
+                        CheckpointRunRequest::Captured(_) => "captured".to_string(),
                     };
-                    let checkpoint_kind_str = checkpoint_kind_str.to_string();
-                    tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
+                    let checkpoint_agent_str = match request.as_ref() {
+                        CheckpointRunRequest::Live(req) => req
+                            .agent_run_result
+                            .as_ref()
+                            .map(|r| r.agent_id.tool.as_str())
+                            .unwrap_or("-")
+                            .to_string(),
+                        CheckpointRunRequest::Captured(_) => "-".to_string(),
+                    };
+                    let checkpoint_mode_str = match request.as_ref() {
+                        CheckpointRunRequest::Captured(_) => "captured",
+                        CheckpointRunRequest::Live(req) if req.record_only => "record_only",
+                        _ => "live",
+                    };
+                    let checkpoint_files_str = if checkpoint_file_paths.is_empty() {
+                        "unscoped".to_string()
+                    } else if checkpoint_file_paths.len() <= 3 {
+                        checkpoint_file_paths.join(", ")
+                    } else {
+                        format!("{} files", checkpoint_file_paths.len())
+                    };
+
+                    // Extract record_only flag from live requests.
+                    let record_only = matches!(
+                        request.as_ref(),
+                        CheckpointRunRequest::Live(req) if req.record_only
+                    );
+
+                    // Detect agent-fired Human checkpoints: kind="human" AND
+                    // agent_run_result is present with checkpoint_kind == Human.
+                    // These come from AI agent presets (e.g., Windsurf pre_write_code),
+                    // NOT from mock_known_human test helpers.
+                    let is_agent_fired_human = matches!(
+                        request.as_ref(),
+                        CheckpointRunRequest::Live(req)
+                            if req.kind.as_deref() == Some("human")
+                                && req.agent_run_result.as_ref().is_some_and(|r|
+                                    r.checkpoint_kind == crate::authorship::working_log::CheckpointKind::Human
+                                )
+                    );
+
+                    // Suppress known_human checkpoints that arrive shortly after
+                    // an agent-fired Human checkpoint on overlapping files. These
+                    // are spurious IDE save events triggered by the AI edit.
+                    const KNOWN_HUMAN_SUPPRESS_WINDOW_SECS: u64 = 2;
+                    let canonical_repo_wd_str = canonical_repo_wd.to_string_lossy().to_string();
+                    let suppress_known_human = if checkpoint_kind_str == "known_human" {
+                        if let Ok(map) = self.recent_agent_checkpoint_times.lock() {
+                            checkpoint_file_paths.iter().any(|path| {
+                                let key =
+                                    (canonical_repo_wd_str.clone(), normalize_file_path(path));
+                                map.get(&key).is_some_and(|t| {
+                                    t.elapsed().as_secs() < KNOWN_HUMAN_SUPPRESS_WINDOW_SECS
+                                })
+                            })
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    // Record timestamps for agent-fired Human checkpoints so we
+                    // can suppress subsequent spurious known_human events.
+                    if is_agent_fired_human
+                        && let Ok(mut map) = self.recent_agent_checkpoint_times.lock()
+                    {
+                        let now = std::time::Instant::now();
+                        for path in &checkpoint_file_paths {
+                            map.insert(
+                                (canonical_repo_wd_str.clone(), normalize_file_path(path)),
+                                now,
+                            );
+                        }
+                    }
+
+                    if suppress_known_human {
+                        tracing::info!(
+                            kind = %checkpoint_kind_str,
+                            agent = %checkpoint_agent_str,
+                            mode = checkpoint_mode_str,
+                            files = %checkpoint_files_str,
+                            repo = %repo_wd,
+                            "checkpoint suppressed (recent agent human)"
+                        );
+                        let result: Result<u64, GitAiError> = Ok(0);
+                        if should_log_completion {
+                            let log_entry = TestCompletionLogEntry {
+                                seq: 0,
+                                family_key: family.to_string(),
+                                kind: "checkpoint".to_string(),
+                                primary_command: Some("checkpoint".to_string()),
+                                test_sync_session: None,
+                                exit_code: None,
+                                sync_tracked: true,
+                                status: "suppressed".to_string(),
+                                error: None,
+                            };
+                            if let Err(error) =
+                                self.maybe_append_test_completion_log(family, &log_entry)
+                            {
+                                tracing::error!(
+                                    %error,
+                                    %family,
+                                    order,
+                                    "suppressed checkpoint completion log write failed"
+                                );
+                            }
+                        }
+                        if let Some(respond_to) = respond_to {
+                            let _ = respond_to.send(result);
+                        }
+                        continue;
+                    }
+
+                    if record_only {
+                        tracing::info!(
+                            kind = %checkpoint_kind_str,
+                            agent = %checkpoint_agent_str,
+                            mode = checkpoint_mode_str,
+                            files = %checkpoint_files_str,
+                            repo = %repo_wd,
+                            "checkpoint record_only (no-op)"
+                        );
+                        let result: Result<u64, GitAiError> = Ok(0);
+                        if should_log_completion {
+                            let log_entry = TestCompletionLogEntry {
+                                seq: 0,
+                                family_key: family.to_string(),
+                                kind: "checkpoint".to_string(),
+                                primary_command: Some("checkpoint".to_string()),
+                                test_sync_session: None,
+                                exit_code: None,
+                                sync_tracked: true,
+                                status: "ok".to_string(),
+                                error: None,
+                            };
+                            if let Err(error) =
+                                self.maybe_append_test_completion_log(family, &log_entry)
+                            {
+                                tracing::error!(
+                                    %error,
+                                    %family,
+                                    order,
+                                    "record_only checkpoint completion log write failed"
+                                );
+                            }
+                        }
+                        if let Some(respond_to) = respond_to {
+                            let _ = respond_to.send(result);
+                        }
+                        continue;
+                    }
+
+                    tracing::info!(
+                        kind = %checkpoint_kind_str,
+                        agent = %checkpoint_agent_str,
+                        mode = checkpoint_mode_str,
+                        files = %checkpoint_files_str,
+                        repo = %repo_wd,
+                        "checkpoint start"
+                    );
                     let checkpoint_start = std::time::Instant::now();
                     // Wrap checkpoint processing in catch_unwind to recover from panics.
                     let checkpoint_result = {
@@ -5703,6 +5896,9 @@ impl ActorDaemonCoordinator {
                     if result.is_ok() {
                         tracing::info!(
                             kind = %checkpoint_kind_str,
+                            agent = %checkpoint_agent_str,
+                            mode = checkpoint_mode_str,
+                            files = %checkpoint_files_str,
                             repo = %repo_wd,
                             duration_ms = checkpoint_duration_ms as u64,
                             "checkpoint done"
@@ -5710,6 +5906,9 @@ impl ActorDaemonCoordinator {
                     } else {
                         tracing::warn!(
                             kind = %checkpoint_kind_str,
+                            agent = %checkpoint_agent_str,
+                            mode = checkpoint_mode_str,
+                            files = %checkpoint_files_str,
                             repo = %repo_wd,
                             duration_ms = checkpoint_duration_ms as u64,
                             "checkpoint failed"
@@ -8061,6 +8260,11 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
         version = env!("CARGO_PKG_VERSION"),
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
+        profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
         "daemon started"
     );
 
@@ -8527,6 +8731,7 @@ mod tests {
                     quiet: Some(true),
                     is_pre_commit: Some(false),
                     agent_run_result: None,
+                    record_only: false,
                 },
             ))),
             wait: Some(true),

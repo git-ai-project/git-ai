@@ -4804,3 +4804,124 @@ fn daemon_self_heals_after_socket_deletion() {
         thread::sleep(Duration::from_millis(50));
     }
 }
+
+// ============================================================================
+// known_human suppression tests
+// ============================================================================
+
+#[test]
+#[serial]
+fn daemon_known_human_suppressed_after_agent_fired_human_checkpoint() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+
+    let file_path = repo.path().join("target.txt");
+    fs::write(&file_path, "initial content\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    // Simulate an agent preset's pre-edit Human checkpoint by calling
+    // `git-ai checkpoint windsurf --hook-input ...` with pre_write_code.
+    // This records the file in the daemon's recent_agent_checkpoint_times map.
+    let pre_hook = json!({
+        "trajectory_id": "traj-suppress-test",
+        "agent_action_name": "pre_write_code",
+        "model_name": "GPT 4.1",
+        "tool_info": {
+            "file_path": file_path.to_string_lossy().to_string()
+        }
+    })
+    .to_string();
+
+    let baseline = repo.daemon_total_completion_count();
+    repo.git_ai(&["checkpoint", "windsurf", "--hook-input", &pre_hook])
+        .unwrap();
+    repo.wait_for_next_daemon_checkpoint_completion(baseline);
+
+    // Immediately fire a known_human checkpoint on the same file.
+    // This simulates the IDE save event that fires right after an AI edit.
+    // It should be suppressed by the daemon.
+    let baseline = repo.daemon_total_completion_count();
+    repo.git_ai(&["checkpoint", "mock_known_human", "target.txt"])
+        .unwrap();
+    repo.wait_for_next_daemon_checkpoint_completion(baseline);
+
+    // The known_human should be suppressed.
+    let entries = repo.daemon_completion_entries();
+    let suppressed = entries.iter().any(|e| e.status == "suppressed");
+    assert!(
+        suppressed,
+        "known_human checkpoint should be suppressed after agent-fired human checkpoint, entries: {:?}",
+        entries.iter().map(|e| &e.status).collect::<Vec<_>>()
+    );
+
+    // No KnownHuman checkpoint in the working log.
+    let checkpoints = repo
+        .current_working_logs()
+        .read_all_checkpoints()
+        .expect("checkpoints should be readable");
+    let known_human_count = checkpoints
+        .iter()
+        .filter(|c| c.kind == CheckpointKind::KnownHuman)
+        .count();
+    assert_eq!(
+        known_human_count, 0,
+        "known_human checkpoint should not appear in working log when suppressed"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_known_human_not_suppressed_without_prior_agent_human() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+
+    let file_path = repo.path().join("standalone.txt");
+    fs::write(&file_path, "initial content\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    // Make a change so the known_human checkpoint has something to capture.
+    fs::write(&file_path, "initial content\nhuman edit\n").unwrap();
+
+    // Fire mock_known_human WITHOUT any prior agent-fired Human checkpoint.
+    let baseline = repo.daemon_total_completion_count();
+    repo.git_ai(&["checkpoint", "mock_known_human", "standalone.txt"])
+        .unwrap();
+    repo.wait_for_next_daemon_checkpoint_completion(baseline);
+
+    // Should NOT be suppressed.
+    let entries = repo.daemon_completion_entries();
+    let suppressed = entries.iter().any(|e| e.status == "suppressed");
+    assert!(
+        !suppressed,
+        "known_human checkpoint should NOT be suppressed without a prior agent human checkpoint, entries: {:?}",
+        entries.iter().map(|e| &e.status).collect::<Vec<_>>()
+    );
+
+    // A KnownHuman checkpoint should exist in the working log.
+    let checkpoints = repo
+        .current_working_logs()
+        .read_all_checkpoints()
+        .expect("checkpoints should be readable");
+    let known_human_count = checkpoints
+        .iter()
+        .filter(|c| c.kind == CheckpointKind::KnownHuman)
+        .count();
+    assert!(
+        known_human_count > 0,
+        "known_human checkpoint should appear in working log when not suppressed"
+    );
+}
+
+#[test]
+#[serial]
+fn daemon_set_contents_mock_known_human_not_suppressed_by_mock_ai() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+
+    let mut file = repo.filename("mixed.txt");
+    file.set_contents(lines!["Human line", "AI line".ai(),]);
+    repo.stage_all_and_commit("Commit with mixed authorship")
+        .unwrap();
+
+    file.assert_lines_and_blame(lines!["Human line".human(), "AI line".ai(),]);
+}

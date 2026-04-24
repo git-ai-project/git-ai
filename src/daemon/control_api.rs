@@ -73,6 +73,8 @@ pub struct LiveCheckpointRunRequest {
     pub is_pre_commit: Option<bool>,
     #[serde(default)]
     pub agent_run_result: Option<AgentRunResult>,
+    #[serde(default)]
+    pub record_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
