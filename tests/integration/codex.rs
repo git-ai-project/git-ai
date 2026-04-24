@@ -312,6 +312,226 @@ fn test_codex_preset_bash_post_tool_use_detects_changed_files() {
 }
 
 #[test]
+fn test_codex_apply_patch_pre_tool_use_records_will_edit_paths_from_command() {
+    let hook_input = json!({
+        "session_id": "session-apply-patch-pre",
+        "cwd": "/Users/test/projects/git-ai",
+        "hook_event_name": "PreToolUse",
+        "model": "gpt-5.4",
+        "tool_name": "apply_patch",
+        "tool_use_id": "apply-patch-call-1",
+        "tool_input": {
+            "command": "*** Begin Patch\n*** Add File: src/new.rs\n+pub fn new() {}\n*** Update File: README.md\n@@\n-old\n+new\n*** Move to: docs/README.md\n*** Delete File: obsolete.txt\n*** End Patch"
+        }
+    })
+    .to_string();
+
+    let result = CodexPreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .expect("Codex apply_patch pre-hook should produce a scoped human checkpoint");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
+    assert_eq!(result.agent_id.tool, "codex");
+    assert_eq!(result.agent_id.model, "gpt-5.4");
+    assert!(result.transcript.is_none());
+    assert_eq!(
+        result.will_edit_filepaths,
+        Some(vec![
+            "src/new.rs".to_string(),
+            "README.md".to_string(),
+            "docs/README.md".to_string(),
+            "obsolete.txt".to_string(),
+        ])
+    );
+    assert!(result.edited_filepaths.is_none());
+}
+
+#[test]
+fn test_codex_apply_patch_post_tool_use_records_edited_paths_from_command() {
+    let hook_input = json!({
+        "session_id": "session-apply-patch-post",
+        "turn_id": "turn-apply-patch-post",
+        "cwd": "/Users/test/projects/git-ai",
+        "hook_event_name": "PostToolUse",
+        "model": "gpt-5.4",
+        "tool_name": "apply_patch",
+        "tool_use_id": "apply-patch-call-2",
+        "tool_input": {
+            "command": "*** Begin Patch\n*** Add File: src/lib.rs\n+pub mod lib {}\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch"
+        },
+        "tool_response": "{\"output\":\"Success. Updated the following files:\\nA src/lib.rs\\nM README.md\\n\",\"metadata\":{\"exit_code\":0}}"
+    })
+    .to_string();
+
+    let result = CodexPreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .expect("Codex apply_patch post-hook should produce a scoped AI checkpoint");
+
+    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
+    assert_eq!(result.agent_id.model, "gpt-5.4");
+    assert!(result.transcript.is_some());
+    assert_eq!(
+        result.edited_filepaths,
+        Some(vec!["src/lib.rs".to_string(), "README.md".to_string()])
+    );
+    let metadata = result
+        .agent_metadata
+        .as_ref()
+        .expect("scoped apply_patch checkpoints should persist turn metadata");
+    assert_eq!(
+        metadata.get("codex_scoped_file_edit_checkpoint"),
+        Some(&"true".to_string())
+    );
+    assert_eq!(
+        metadata.get("codex_turn_id"),
+        Some(&"turn-apply-patch-post".to_string())
+    );
+    assert!(result.will_edit_filepaths.is_none());
+}
+
+#[test]
+fn test_codex_apply_patch_post_tool_use_falls_back_to_tool_response_paths() {
+    let hook_input = json!({
+        "session_id": "session-apply-patch-response",
+        "cwd": "/Users/test/projects/git-ai",
+        "hook_event_name": "PostToolUse",
+        "model": "gpt-5.4",
+        "tool_name": "apply_patch",
+        "tool_use_id": "apply-patch-call-3",
+        "tool_input": {
+            "command": "apply_patch"
+        },
+        "tool_response": {
+            "output": "Success. Updated the following files:\nA src/from-response.rs\nM Cargo.toml\n",
+            "metadata": {"exit_code": 0}
+        }
+    })
+    .to_string();
+
+    let result = CodexPreset
+        .run(AgentCheckpointFlags {
+            hook_input: Some(hook_input),
+        })
+        .expect("Codex apply_patch post-hook should parse response paths");
+
+    assert_eq!(
+        result.edited_filepaths,
+        Some(vec![
+            "src/from-response.rs".to_string(),
+            "Cargo.toml".to_string()
+        ])
+    );
+}
+
+#[test]
+fn test_codex_stop_hook_skips_after_scoped_apply_patch_checkpoint() {
+    use crate::repos::test_repo::TestRepo;
+
+    let repo = TestRepo::new();
+    let repo_root = repo.canonical_path();
+    let readme_path = repo_root.join("README.md");
+    fs::write(&readme_path, "old\n").unwrap();
+    repo.stage_all_and_commit("Initial README").unwrap();
+
+    let fixture = fixture_path("codex-session-simple.jsonl");
+    let transcript_path = repo_root.join("codex-apply-patch-rollout.jsonl");
+    fs::copy(&fixture, &transcript_path).unwrap();
+
+    let session_id = "session-apply-patch-stop-skip";
+    let turn_id = "turn-apply-patch-stop-skip";
+    let pre_hook_input = json!({
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "model": "gpt-5.4",
+        "tool_name": "apply_patch",
+        "tool_use_id": "apply-patch-stop-call",
+        "tool_input": {
+            "command": "*** Begin Patch\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
+        .expect("pre-hook checkpoint should succeed");
+
+    fs::write(&readme_path, "new\n").unwrap();
+
+    let post_hook_input = json!({
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "model": "gpt-5.4",
+        "tool_name": "apply_patch",
+        "tool_use_id": "apply-patch-stop-call",
+        "tool_input": {
+            "command": "*** Begin Patch\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch"
+        },
+        "tool_response": "{\"output\":\"Success. Updated the following files:\\nM README.md\\n\",\"metadata\":{\"exit_code\":0}}",
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("post-hook checkpoint should succeed");
+
+    let stop_hook_input = json!({
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "Stop",
+        "model": "gpt-5.4",
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    let stop_output = repo
+        .git_ai(&["checkpoint", "codex", "--hook-input", &stop_hook_input])
+        .expect("stop hook should exit successfully after skipping");
+
+    assert!(
+        stop_output.contains("Skipping Codex Stop checkpoint"),
+        "Stop hook should skip instead of running a broad checkpoint: {stop_output}"
+    );
+
+    let checkpoints = repo
+        .current_working_logs()
+        .read_all_checkpoints()
+        .expect("working log should be readable");
+    let codex_checkpoints = checkpoints
+        .iter()
+        .filter(|checkpoint| {
+            checkpoint.kind == CheckpointKind::AiAgent
+                && checkpoint
+                    .agent_id
+                    .as_ref()
+                    .is_some_and(|agent_id| agent_id.tool == "codex" && agent_id.id == session_id)
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        codex_checkpoints.len(),
+        1,
+        "Stop hook should not append a duplicate Codex checkpoint"
+    );
+    assert_eq!(
+        codex_checkpoints[0]
+            .agent_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("codex_turn_id"))
+            .map(String::as_str),
+        Some(turn_id)
+    );
+}
+
+#[test]
 fn test_find_rollout_path_for_session_in_home() {
     let fixture = fixture_path("codex-session-simple.jsonl");
     let temp = tempfile::tempdir().unwrap();
@@ -834,6 +1054,10 @@ crate::reuse_tests_in_worktree!(
     test_codex_preset_bash_pre_tool_use_skips_checkpoint_after_capturing_snapshot,
     test_codex_preset_bash_pre_tool_use_supports_camel_case_hook_event_name,
     test_codex_preset_bash_post_tool_use_detects_changed_files,
+    test_codex_apply_patch_pre_tool_use_records_will_edit_paths_from_command,
+    test_codex_apply_patch_post_tool_use_records_edited_paths_from_command,
+    test_codex_apply_patch_post_tool_use_falls_back_to_tool_response_paths,
+    test_codex_stop_hook_skips_after_scoped_apply_patch_checkpoint,
     test_find_rollout_path_for_session_in_home,
     test_codex_e2e_commit_resync_uses_latest_rollout,
     test_codex_commit_inside_bash_inflight_is_attributed_to_codex,
