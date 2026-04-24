@@ -282,12 +282,12 @@ impl AuthorshipLog {
                         let prompt_record = PromptRecord {
                             agent_id: session_record.agent_id.clone(),
                             human_author: session_record.human_author.clone(),
-                            messages: session_record.messages.clone(),
+                            messages: Vec::new(), // Sessions don't store messages
                             total_additions: 0, // Sessions don't track detailed stats
                             total_deletions: 0,
                             accepted_lines: 0,
                             overriden_lines: 0,
-                            messages_url: session_record.messages_url.clone(),
+                            messages_url: None, // Sessions don't have messages URLs
                             custom_attributes: session_record.custom_attributes.clone(),
                         };
                         return Some((
