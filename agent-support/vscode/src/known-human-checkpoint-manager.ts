@@ -17,21 +17,27 @@ export class KnownHumanCheckpointManager {
   // per repo root: pending debounce timer
   private pendingTimers = new Map<string, NodeJS.Timeout>();
 
-  // per repo root: set of absolute file paths queued in current debounce window
-  private pendingPaths = new Map<string, Set<string>>();
+  // per repo root: absolute file path -> content captured at the time of the
+  // save event. We capture eagerly because Cascade can overwrite the buffer
+  // during the debounce window and re-reading at fire time would send the
+  // wrong content.
+  private pendingPaths = new Map<string, Map<string, string>>();
 
-  // Per-file timestamps. Comparing at save time is order-independent — typing
-  // fires contentChange before selectionChange, so checking at change time
-  // would miss the first keystroke after a save.
-  private lastContentChange = new Map<string, number>();      // any contentChange
-  private lastKeyboardSelection = new Map<string, number>();  // Keyboard-kind only
-  private lastSave = new Map<string, number>();
+  // Per-file: buffer content at the moment of the most recent Keyboard-kind
+  // selection change. Typing produces such selections (cursor moves with each
+  // character); AI WorkspaceEdits do not. At save time we require the buffer
+  // to still equal this snapshot — if Cascade overwrote the buffer in between,
+  // the snapshot won't match and we skip.
+  private humanSnapshot = new Map<string, string>();
+  // Records that we've seen a Keyboard selection on this file since last save —
+  // used purely for noisy logging.
+  private sawKbdSinceSave = new Set<string>();
 
   constructor(
     private readonly editorVersion: string,
     private readonly extensionVersion: string,
   ) {
-    console.log("[git-ai][KHC] v5 constructed");
+    console.log("[git-ai][KHC] v6 (snapshot-anchored) constructed");
   }
 
   public handleSelectionChangeEvent(event: vscode.TextEditorSelectionChangeEvent): void {
@@ -42,8 +48,13 @@ export class KnownHumanCheckpointManager {
     if (doc.uri.scheme !== "file") {
       return;
     }
-    this.lastKeyboardSelection.set(doc.uri.fsPath, Date.now());
-    console.log("[git-ai][KHC] keyboard-selection", doc.uri.fsPath);
+    const filePath = doc.uri.fsPath;
+    if (this.isInternalVSCodePath(filePath)) {
+      return;
+    }
+    this.humanSnapshot.set(filePath, doc.getText());
+    this.sawKbdSinceSave.add(filePath);
+    console.log("[git-ai][KHC] keyboard-selection — snapshot updated", filePath, "len=" + doc.getText().length);
   }
 
   public handleContentChangeEvent(event: vscode.TextDocumentChangeEvent): void {
@@ -58,8 +69,7 @@ export class KnownHumanCheckpointManager {
     if (event.contentChanges.length === 0) {
       return;
     }
-    this.lastContentChange.set(filePath, Date.now());
-    console.log("[git-ai][KHC] edit recorded", filePath, "changes=" + event.contentChanges.length);
+    console.log("[git-ai][KHC] edit observed", filePath, "changes=" + event.contentChanges.length, "newLen=" + doc.getText().length);
   }
 
   public handleCloseEvent(doc: vscode.TextDocument): void {
@@ -67,9 +77,8 @@ export class KnownHumanCheckpointManager {
       return;
     }
     const fsPath = doc.uri.fsPath;
-    this.lastContentChange.delete(fsPath);
-    this.lastKeyboardSelection.delete(fsPath);
-    this.lastSave.delete(fsPath);
+    this.humanSnapshot.delete(fsPath);
+    this.sawKbdSinceSave.delete(fsPath);
   }
 
   public handleSaveEvent(doc: vscode.TextDocument): void {
@@ -84,21 +93,19 @@ export class KnownHumanCheckpointManager {
       return;
     }
 
-    const prevSave = this.lastSave.get(filePath) ?? 0;
-    const lastChange = this.lastContentChange.get(filePath) ?? 0;
-    const lastKbd = this.lastKeyboardSelection.get(filePath) ?? 0;
-    this.lastSave.set(filePath, Date.now());
-
     const visible = vscode.window.visibleTextEditors.some(
       (e) => e.document.uri.scheme === "file" && e.document.uri.fsPath === filePath,
     );
-    const changedSinceSave = lastChange > prevSave;
-    const kbdSinceSave = lastKbd > prevSave;
+    const snapshot = this.humanSnapshot.get(filePath);
+    const currentText = doc.getText();
+    const snapshotMatches = snapshot !== undefined && snapshot === currentText;
+    const sawKbd = this.sawKbdSinceSave.delete(filePath);
+
     console.log(
       "[git-ai][KHC] save gates visible=" + visible,
-      "changedSinceSave=" + changedSinceSave,
-      "kbdSinceSave=" + kbdSinceSave,
-      "(prevSave=" + prevSave + " lastChange=" + lastChange + " lastKbd=" + lastKbd + ")",
+      "sawKbdSinceSave=" + sawKbd,
+      "snapshotMatches=" + snapshotMatches,
+      "(snapshotLen=" + (snapshot?.length ?? "none") + " currentLen=" + currentText.length + ")",
       "path=" + filePath,
     );
 
@@ -106,12 +113,13 @@ export class KnownHumanCheckpointManager {
       console.log("[git-ai][KHC] SKIP: not visible —", filePath);
       return;
     }
-    if (!changedSinceSave) {
-      console.log("[git-ai][KHC] SKIP: no edit since last save —", filePath);
-      return;
-    }
-    if (!kbdSinceSave) {
-      console.log("[git-ai][KHC] SKIP: no keyboard activity since last save —", filePath);
+    if (!snapshotMatches) {
+      // Either no snapshot ever taken (no human keyboard activity on this file)
+      // or buffer changed since the last keyboard selection (Cascade overwrite).
+      // Reset snapshot to the current buffer state so subsequent typing rebuilds
+      // a clean baseline.
+      this.humanSnapshot.delete(filePath);
+      console.log("[git-ai][KHC] SKIP: snapshot mismatch —", filePath);
       return;
     }
 
@@ -121,13 +129,16 @@ export class KnownHumanCheckpointManager {
       return;
     }
 
-    // Accumulate file into pending set for this repo root
+    // Capture content NOW (matches the snapshot we just verified). If Cascade
+    // overwrites during the debounce window, that overwrite triggers a separate
+    // save event which fails the snapshot gate, but our captured content here
+    // remains the human-typed buffer.
     let pending = this.pendingPaths.get(repoRoot);
     if (!pending) {
-      pending = new Set();
+      pending = new Map();
       this.pendingPaths.set(repoRoot, pending);
     }
-    pending.add(filePath);
+    pending.set(filePath, currentText);
 
     // Reset debounce timer
     const existing = this.pendingTimers.get(repoRoot);
@@ -152,38 +163,14 @@ export class KnownHumanCheckpointManager {
     if (!paths || paths.size === 0) {
       return;
     }
-    const snapshot = [...paths];
-    paths.clear();
-
-    // Build dirty_files as absolute path → current content
+    // Use the content captured at save time, not what's currently in the
+    // buffer or on disk — Cascade may have overwritten either during the
+    // debounce window.
     const dirtyFiles: Record<string, string> = {};
-    for (const absolutePath of snapshot) {
-      const doc = vscode.workspace.textDocuments.find(
-        (d) => d.uri.fsPath === absolutePath && d.uri.scheme === "file"
-      );
-
-      let content: string | null = null;
-      if (doc) {
-        // Use open document buffer if available (handles codespaces/remote lag)
-        content = doc.getText();
-      } else {
-        // Fall back to reading from disk if document was closed within debounce window
-        try {
-          const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(absolutePath));
-          content = Buffer.from(bytes).toString("utf-8");
-        } catch (err) {
-          console.error("[git-ai] KnownHumanCheckpointManager: Failed to read file", absolutePath, err);
-        }
-      }
-
-      if (content !== null) {
-        dirtyFiles[absolutePath] = content;
-      }
+    for (const [absolutePath, capturedContent] of paths) {
+      dirtyFiles[absolutePath] = capturedContent;
     }
-
-    if (Object.keys(dirtyFiles).length === 0) {
-      return;
-    }
+    paths.clear();
 
     const editedFilepaths = Object.keys(dirtyFiles);
 
@@ -235,8 +222,7 @@ export class KnownHumanCheckpointManager {
     }
     this.pendingTimers.clear();
     this.pendingPaths.clear();
-    this.lastContentChange.clear();
-    this.lastKeyboardSelection.clear();
-    this.lastSave.clear();
+    this.humanSnapshot.clear();
+    this.sawKbdSinceSave.clear();
   }
 }
