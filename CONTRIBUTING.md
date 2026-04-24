@@ -21,40 +21,23 @@ Thank you for your interest in contributing to `git-ai`. This is a cool moment f
 
 3. **Build the project**:
    ```bash
-   cargo build
+   task build
    ```
 
 4. **Run the tests**:
    ```bash
-   cargo test
+   task test
    ```
 
-5. **Check code coverage** (optional but recommended):
-   ```bash
-   task coverage
-   ```
-
-   The project maintains a minimum code coverage threshold of **50%** (enforced in CI). This threshold is based on the current coverage rounded down to the nearest 5%. Pull requests that reduce coverage below this threshold will fail CI checks.
-
-### (Option 1) Putting a development build on your path
+### Using a development build locally
 
 It's often helpful to point your `git-ai` to a development build. The dev script builds the binary and installs it to `~/.git-ai/bin/git-ai`, replacing the production binary so you can test changes with real git repositories.
 
 ```bash
-sh scripts/dev.sh          # debug build (default)
-sh scripts/dev.sh --release  # release build
+task dev
 ```
 
 If `~/.git-ai` isn't set up yet, the script will run the installer automatically first.
-
-### (Option 2) Running with Cargo
-
-You can run specific `git-ai` commands directly with cargo. Because you're not addressing `git` or `git-ai` you need to tell `cargo` which codepath it should hit:
-
-```bash
-GIT_AI=git cargo run -- status
-GIT_AI=git-ai cargo run -- checkpoint
-```
 
 ## Contributing Changes
 
@@ -85,7 +68,7 @@ GIT_AI=git-ai cargo run -- checkpoint
 
 ## Code Style
 
-The project uses standard Rust formatting. Please run `cargo fmt` before committing your changes.
+The project uses standard Rust formatting. Please run `task fmt` and `task lint` before committing your changes.
 
 
 ## Getting Help
