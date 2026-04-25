@@ -207,12 +207,8 @@ pub fn post_commit_with_final_state(
                     );
                 }
 
-                if let Err(e) =
-                    enqueue_prompt_messages_to_cas(repo, &mut authorship_log.metadata.prompts)
-                {
-                    tracing::debug!("[Warning] Failed to enqueue prompt messages to CAS: {}", e);
-                    strip_prompt_messages(&mut authorship_log.metadata.prompts);
-                }
+                // No longer uploading to CAS - just strip messages
+                strip_prompt_messages_no_cas(&mut authorship_log.metadata.prompts);
             } else {
                 // Not enqueueing - strip messages (never keep in notes for "default")
                 strip_prompt_messages(&mut authorship_log.metadata.prompts);
@@ -494,92 +490,16 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
     Ok(())
 }
 
-/// Enqueue prompt messages to CAS for external storage.
-/// For each prompt with non-empty messages:
-/// - Serialize messages to JSON
-/// - Enqueue to CAS (returns hash)
-/// - Set messages_url (format: {api_base_url}/cas/{hash}) and clear messages
-fn enqueue_prompt_messages_to_cas(
-    repo: &Repository,
+/// Strip prompt messages (no longer uploaded to CAS)
+fn strip_prompt_messages_no_cas(
     prompts: &mut std::collections::BTreeMap<
         String,
         crate::authorship::authorship_log::PromptRecord,
     >,
-) -> Result<(), GitAiError> {
-    use crate::authorship::internal_db::InternalDatabase;
-
-    let db = InternalDatabase::global()?;
-    let mut db_lock = db
-        .lock()
-        .map_err(|e| GitAiError::Generic(format!("Failed to lock database: {}", e)))?;
-
-    // CAS metadata for prompt messages
-    let mut metadata = HashMap::new();
-    metadata.insert("api_version".to_string(), "v1".to_string());
-    metadata.insert("kind".to_string(), "prompt".to_string());
-
-    // Get repo URL from default remote
-    let repo_url = repo
-        .get_default_remote()
-        .ok()
-        .flatten()
-        .and_then(|remote_name| {
-            repo.remotes_with_urls().ok().and_then(|remotes| {
-                remotes
-                    .into_iter()
-                    .find(|(name, _)| name == &remote_name)
-                    .map(|(_, url)| url)
-            })
-        });
-
-    if let Some(url) = repo_url
-        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
-    {
-        metadata.insert("repo_url".to_string(), normalized);
-    }
-
-    // Get API base URL for constructing messages_url
-    // Always use Config::fresh() to support runtime config updates
-    let api_base_url = Config::fresh().api_base_url().to_string();
-
+) {
     for (_key, prompt) in prompts.iter_mut() {
-        if !prompt.messages.is_empty() {
-            // Wrap messages in CasMessagesObject and serialize to JSON
-            let messages_obj = crate::api::types::CasMessagesObject {
-                messages: prompt.messages.clone(),
-            };
-            let messages_json = serde_json::to_value(&messages_obj)
-                .map_err(|e| GitAiError::Generic(format!("Failed to serialize messages: {}", e)))?;
-
-            // Enqueue to CAS (returns hash)
-            let hash = db_lock.enqueue_cas_object(&messages_json, Some(&metadata))?;
-
-            let metadata_json = serde_json::to_string(&metadata).ok();
-            let canonical = serde_json_canonicalizer::to_string(&messages_json)
-                .unwrap_or_else(|_| messages_json.to_string());
-            let cas_payload = crate::daemon::control_api::CasSyncPayload {
-                hash: hash.clone(),
-                data: canonical,
-                metadata: metadata_json,
-            };
-
-            // In daemon mode, submit directly to the in-process telemetry worker.
-            // In wrapper-daemon mode, forward over the control socket so the
-            // background daemon can upload it immediately.
-            if crate::daemon::daemon_process_active() {
-                let _ =
-                    crate::daemon::telemetry_worker::submit_daemon_internal_cas(vec![cas_payload]);
-            } else if crate::daemon::telemetry_handle::daemon_telemetry_available() {
-                crate::daemon::telemetry_handle::submit_cas(vec![cas_payload]);
-            }
-
-            // Set full URL and clear messages
-            prompt.messages_url = Some(format!("{}/cas/{}", api_base_url, hash));
-            prompt.messages.clear();
-        }
+        prompt.messages.clear();
     }
-
-    Ok(())
 }
 /// Record metrics for a committed change.
 /// This is a best-effort operation - failures are silently ignored.

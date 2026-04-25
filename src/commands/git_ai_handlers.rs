@@ -76,7 +76,7 @@ pub fn handle_git_ai(args: &[String]) {
 
     // Start DB warmup early for commands that need database access
     match args[0].as_str() {
-        "show-prompt" | "flush-cas" => {
+        "show-prompt" => {
             InternalDatabase::warmup();
         }
         _ => {}
@@ -178,9 +178,6 @@ pub fn handle_git_ai(args: &[String]) {
         }
         "upgrade" => {
             commands::upgrade::run_with_args(&args[1..]);
-        }
-        "flush-cas" => {
-            commands::flush_cas::handle_flush_cas(&args[1..]);
         }
         "flush-metrics-db" => {
             commands::flush_metrics_db::handle_flush_metrics_db(&args[1..]);
