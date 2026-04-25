@@ -1,19 +1,7 @@
-use crate::authorship::transcript::Message;
 use crate::authorship::working_log::AgentId;
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-
-fn serialize_messages_release_empty<S: Serializer>(
-    messages: &Vec<Message>,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    if cfg!(debug_assertions) {
-        messages.serialize(serializer)
-    } else {
-        Vec::<Message>::new().serialize(serializer)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Author {
@@ -210,8 +198,8 @@ pub struct HumanRecord {
 pub struct PromptRecord {
     pub agent_id: AgentId,
     pub human_author: Option<String>,
-    #[serde(serialize_with = "serialize_messages_release_empty")]
-    pub messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages_url: Option<String>,
     #[serde(default)]
     pub total_additions: u32,
     #[serde(default)]
@@ -220,9 +208,6 @@ pub struct PromptRecord {
     pub accepted_lines: u32,
     #[serde(default)]
     pub overriden_lines: u32,
-    /// Full URL to CAS-stored messages (format: {api_base_url}/cas/{hash})
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub messages_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
 }
@@ -244,12 +229,11 @@ impl SessionRecord {
         PromptRecord {
             agent_id: self.agent_id.clone(),
             human_author: self.human_author.clone(),
-            messages: vec![], // Sessions no longer store messages
+            messages_url: None,
             total_additions: 0,
             total_deletions: 0,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: None, // Sessions no longer use CAS
             custom_attributes: self.custom_attributes.clone(),
         }
     }
@@ -263,12 +247,10 @@ impl PartialOrd for PromptRecord {
 
 impl Ord for PromptRecord {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Sort oldest to newest based on messages, additions, or deletions.
+        // Sort oldest to newest based on additions or deletions.
         // Uses lexicographic comparison to ensure a valid total ordering.
-        self.messages
-            .len()
-            .cmp(&other.messages.len())
-            .then_with(|| self.total_additions.cmp(&other.total_additions))
+        self.total_additions
+            .cmp(&other.total_additions)
             .then_with(|| self.total_deletions.cmp(&other.total_deletions))
     }
 }
@@ -277,35 +259,30 @@ impl Ord for PromptRecord {
 mod tests {
     use super::*;
 
-    fn create_prompt_record(messages: usize, additions: u32, deletions: u32) -> PromptRecord {
+    fn create_prompt_record(_messages: usize, additions: u32, deletions: u32) -> PromptRecord {
         let agent_id = AgentId {
             tool: "test".to_string(),
             id: "test-id".to_string(),
             model: "test-model".to_string(),
         };
 
-        let message_list = (0..messages)
-            .map(|_| Message::user("test message".to_string(), None))
-            .collect();
-
         PromptRecord {
             agent_id,
             human_author: None,
-            messages: message_list,
+            messages_url: None,
             total_additions: additions,
             total_deletions: deletions,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
         }
     }
 
     #[test]
     fn test_prompt_record_ord_equality() {
-        // Two records with identical messages.len(), total_additions, and
-        // total_deletions should compare as Equal even when other fields differ.
-        let mut a = create_prompt_record(3, 10, 5);
+        // Two records with identical total_additions and total_deletions
+        // should compare as Equal even when other fields differ.
+        let mut a = create_prompt_record(0, 10, 5);
         a.agent_id.tool = "tool_a".to_string();
         a.agent_id.id = "id_a".to_string();
         a.human_author = Some("alice".to_string());
@@ -318,7 +295,7 @@ mod tests {
         assert_eq!(
             a.cmp(&b),
             std::cmp::Ordering::Equal,
-            "Records with same messages.len(), total_additions, and total_deletions \
+            "Records with same total_additions and total_deletions \
              should compare as Equal regardless of other fields"
         );
     }
@@ -336,16 +313,11 @@ mod tests {
         records.sort();
 
         // After sorting, oldest (empty) should be first
-        assert_eq!(records[0].messages.len(), 0);
         assert_eq!(records[0].total_additions, 0);
         assert_eq!(records[0].total_deletions, 0);
 
         // Records with activity should come after
-        assert!(
-            !records[1].messages.is_empty()
-                || records[1].total_additions > 0
-                || records[1].total_deletions > 0
-        );
+        assert!(records[1].total_additions > 0 || records[1].total_deletions > 0);
     }
 
     // --- LineRange::shift regression tests ---

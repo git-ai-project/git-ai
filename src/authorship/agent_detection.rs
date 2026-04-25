@@ -124,12 +124,10 @@ pub fn simulate_agent_authorship(
     let prompt_record = PromptRecord {
         agent_id,
         human_author: None,
-        messages: vec![],
         total_additions: total_lines,
         total_deletions: 0,
         accepted_lines: total_lines,
         overriden_lines: 0,
-        messages_url: None,
         custom_attributes: None,
     };
 

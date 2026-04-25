@@ -492,14 +492,12 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
 
 /// Strip prompt messages (no longer uploaded to CAS)
 fn strip_prompt_messages_no_cas(
-    prompts: &mut std::collections::BTreeMap<
+    _prompts: &mut std::collections::BTreeMap<
         String,
         crate::authorship::authorship_log::PromptRecord,
     >,
 ) {
-    for (_key, prompt) in prompts.iter_mut() {
-        prompt.messages.clear();
-    }
+    // No-op: PromptRecord no longer has messages field
 }
 /// Record metrics for a committed change.
 /// This is a best-effort operation - failures are silently ignored.

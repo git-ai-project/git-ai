@@ -1871,10 +1871,9 @@ fn output_default_format(
             for id in sorted_ids {
                 let short_hash = &id[..7.min(id.len())];
                 output.push_str(&format!("Prompt [{}]\n", short_hash));
-                if let Some(prompt) = prompt_records.get(id) {
-                    let json = serde_json::to_string(&prompt.messages)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    output.push_str(&json);
+                if let Some(_prompt) = prompt_records.get(id) {
+                    // PromptRecord no longer contains messages
+                    output.push_str("[]");
                     output.push('\n');
                 }
                 output.push('\n');
