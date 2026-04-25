@@ -487,11 +487,7 @@ impl VirtualAttributions {
                     let prompt_record = crate::authorship::authorship_log::PromptRecord {
                         agent_id: agent_id.clone(),
                         human_author: human_author.clone(),
-                        messages: checkpoint
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.messages().to_vec())
-                            .unwrap_or_default(),
+                        messages: vec![], // Messages no longer stored
                         total_additions: 0,
                         total_deletions: 0,
                         accepted_lines: 0,
@@ -687,11 +683,7 @@ impl VirtualAttributions {
                     let prompt_record = crate::authorship::authorship_log::PromptRecord {
                         agent_id: agent_id.clone(),
                         human_author: human_author.clone(),
-                        messages: checkpoint
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.messages().to_vec())
-                            .unwrap_or_default(),
+                        messages: vec![], // Messages no longer stored
                         total_additions: 0,
                         total_deletions: 0,
                         accepted_lines: 0,
@@ -876,11 +868,7 @@ impl VirtualAttributions {
                     let prompt_record = crate::authorship::authorship_log::PromptRecord {
                         agent_id: agent_id.clone(),
                         human_author: human_author.clone(),
-                        messages: checkpoint
-                            .transcript
-                            .as_ref()
-                            .map(|t| t.messages().to_vec())
-                            .unwrap_or_default(),
+                        messages: vec![], // Messages no longer stored
                         total_additions: 0,
                         total_deletions: 0,
                         accepted_lines: 0,

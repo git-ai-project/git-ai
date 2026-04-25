@@ -1,7 +1,6 @@
 use super::{
     AgentPreset, ParsedHookEvent, PostFileEdit, PreFileEdit, PresetContext, TranscriptSource,
 };
-use crate::authorship::transcript::AiTranscript;
 use crate::authorship::working_log::AgentId;
 use crate::error::GitAiError;
 use serde::Deserialize;
@@ -22,7 +21,6 @@ enum AgentV1Payload {
     AiAgent {
         repo_working_dir: String,
         edited_filepaths: Option<Vec<String>>,
-        transcript: AiTranscript,
         agent_name: String,
         model: String,
         conversation_id: String,
@@ -73,7 +71,6 @@ impl AgentPreset for AgentV1Preset {
             AgentV1Payload::AiAgent {
                 repo_working_dir,
                 edited_filepaths,
-                transcript,
                 agent_name,
                 model,
                 conversation_id,
@@ -101,7 +98,7 @@ impl AgentPreset for AgentV1Preset {
                     },
                     file_paths,
                     dirty_files: dirty,
-                    transcript_source: Some(TranscriptSource::Inline(transcript)),
+                    transcript_source: None,
                 })
             }
         };
@@ -167,10 +164,7 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/lib.rs")]
                 );
-                assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource::Inline(_))
-                ));
+                assert!(e.transcript_source.is_none());
             }
             _ => panic!("Expected PostFileEdit"),
         }

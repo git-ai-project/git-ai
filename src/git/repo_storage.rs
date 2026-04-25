@@ -442,9 +442,7 @@ impl PersistedWorkingLog {
             _ => true,
         };
 
-        if !cannot_refetch {
-            storage_checkpoint.transcript = None;
-        }
+        // Transcript field removed - no longer stored
 
         // Add the new checkpoint
         checkpoints.push(storage_checkpoint);

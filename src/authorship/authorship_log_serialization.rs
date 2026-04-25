@@ -502,12 +502,7 @@ impl AuthorshipLog {
                 // TODO Fill in the LineStats
 
                 // Reconstruct transcript from messages
-                let mut transcript = crate::authorship::transcript::AiTranscript::new();
-                for message in &prompt_record.messages {
-                    transcript.add_message(message.clone());
-                }
-                ai_checkpoint.transcript = Some(transcript);
-
+                // Transcript no longer stored in checkpoints
                 checkpoints.push(ai_checkpoint);
             }
         }

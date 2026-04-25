@@ -19,7 +19,6 @@ mod opencode;
 mod pi;
 mod windsurf;
 
-use crate::authorship::transcript::AiTranscript;
 use crate::authorship::working_log::AgentId;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BashPreHookStrategy {
@@ -104,7 +103,6 @@ pub enum TranscriptSource {
         #[serde(default)]
         session_id: Option<String>,
     },
-    Inline(AiTranscript),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
