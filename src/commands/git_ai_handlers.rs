@@ -905,7 +905,15 @@ fn run_checkpoint_via_daemon_or_local(
             } else {
                 Duration::from_secs(5)
             };
-            match crate::commands::daemon::ensure_daemon_running(checkpoint_daemon_timeout) {
+            let daemon_config = if is_test
+                && (std::env::var_os("GIT_AI_DAEMON_HOME").is_some()
+                    || std::env::var_os("GIT_AI_DAEMON_CONTROL_SOCKET").is_some())
+            {
+                crate::daemon::DaemonConfig::from_env_or_default_paths().map_err(|e| e.to_string())
+            } else {
+                crate::commands::daemon::ensure_daemon_running(checkpoint_daemon_timeout)
+            };
+            match daemon_config {
                 Ok(config) => {
                     // Early path: if the bash tool already captured a checkpoint,
                     // submit it directly to the daemon without re-capturing.
@@ -1130,6 +1138,12 @@ fn checkpoint_request_has_explicit_capture_scope(
     args: &[String],
     checkpoint_request: Option<&CheckpointRequest>,
 ) -> bool {
+    let args = if args.first().map(String::as_str) == Some("checkpoint") {
+        &args[1..]
+    } else {
+        args
+    };
+
     if args.first().map(String::as_str) == Some("mock_ai") {
         return args.iter().skip(1).any(|arg| !arg.starts_with("--"));
     }
