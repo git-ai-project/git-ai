@@ -1023,15 +1023,14 @@ pub fn prepare_captured_checkpoint(
         })?;
 
     let base_commit = resolve_base_commit(repo, base_commit_override);
-    let repo_workdir = repo
-        .workdir()
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_default();
+    let repo_workdir = repo.workdir()?;
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
 
+    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+    let ignore_matcher = build_ignore_matcher(&ignore_patterns);
     let dirty_files = agent_run_result.and_then(|r| r.dirty_files.as_ref());
 
     let capture_id = new_async_checkpoint_capture_id();
@@ -1040,26 +1039,43 @@ pub fn prepare_captured_checkpoint(
         fs::create_dir_all(&capture_dir)?;
         fs::create_dir_all(capture_dir.join("blobs"))?;
 
-        let repo_workdir_path = std::path::Path::new(&repo_workdir);
         let mut files = Vec::with_capacity(explicit_paths.len());
+        let mut seen = HashSet::new();
         for file_path in &explicit_paths {
-            let source = if let Some(content) = dirty_files.and_then(|d| d.get(file_path)).cloned()
-            {
-                PreparedCheckpointFileSource::DirtyFileContent { content }
-            } else {
-                let abs_path = repo_workdir_path.join(file_path);
-                let content = match fs::read(&abs_path) {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                    Err(_) => String::new(),
+            let normalized = normalize_to_posix(file_path);
+            if !seen.insert(normalized.clone()) {
+                continue;
+            }
+            if should_ignore_file_with_matcher(&normalized, &ignore_matcher) {
+                continue;
+            }
+            let abs_path = repo_workdir.join(&normalized);
+            if !repo.path_is_in_workdir(&abs_path) {
+                continue;
+            }
+
+            let source =
+                if let Some(content) = dirty_files.and_then(|d| d.get(&normalized)).cloned() {
+                    if content.contains('\0') {
+                        continue;
+                    }
+                    PreparedCheckpointFileSource::DirtyFileContent { content }
+                } else {
+                    let content = match fs::read(&abs_path) {
+                        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                        Err(_) => continue,
+                    };
+                    if !abs_path.is_file() || content.contains('\0') {
+                        continue;
+                    }
+                    let mut hasher = Sha256::new();
+                    hasher.update(content.as_bytes());
+                    let blob_name = format!("{:x}", hasher.finalize());
+                    fs::write(capture_dir.join("blobs").join(&blob_name), content)?;
+                    PreparedCheckpointFileSource::BlobRef { blob_name }
                 };
-                let mut hasher = Sha256::new();
-                hasher.update(content.as_bytes());
-                let blob_name = format!("{:x}", hasher.finalize());
-                fs::write(capture_dir.join("blobs").join(&blob_name), content)?;
-                PreparedCheckpointFileSource::BlobRef { blob_name }
-            };
             files.push(PreparedCheckpointFile {
-                path: file_path.clone(),
+                path: normalized,
                 source,
             });
         }
@@ -1070,7 +1086,7 @@ pub fn prepare_captured_checkpoint(
         }
 
         let manifest = PreparedCheckpointManifest {
-            repo_working_dir: repo_workdir.clone(),
+            repo_working_dir: repo_workdir.to_string_lossy().to_string(),
             base_commit,
             captured_at_ms: ts,
             kind,
