@@ -469,9 +469,9 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
 
             // Apply the update to the last checkpoint only
             match result {
-                PromptUpdateResult::Updated(latest_transcript, latest_model) => {
+                PromptUpdateResult::Updated(_latest_transcript, latest_model) => {
                     let checkpoint = &mut checkpoints[last_idx];
-                    checkpoint.transcript = Some(latest_transcript);
+                    // Transcript no longer stored
                     if let Some(agent_id) = &mut checkpoint.agent_id {
                         agent_id.model = latest_model;
                     }

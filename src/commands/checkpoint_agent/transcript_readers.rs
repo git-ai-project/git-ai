@@ -28,7 +28,6 @@ pub fn read_transcript(
             format,
             session_id,
         } => read_from_path(path, *format, session_id.as_deref()),
-        TranscriptSource::Inline(transcript) => Ok((transcript.clone(), None)),
     }
 }
 
