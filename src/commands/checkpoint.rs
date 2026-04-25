@@ -1015,6 +1015,33 @@ pub fn prepare_captured_checkpoint(
         ));
     };
 
+    let resolved = resolve_live_checkpoint_execution(
+        repo,
+        kind,
+        agent_run_result,
+        is_pre_commit,
+        base_commit_override,
+        BaseOverrideResolutionPolicy::AllowFallback,
+    )?;
+
+    let base_commit = resolved
+        .as_ref()
+        .map(|r| r.base_commit.clone())
+        .unwrap_or_else(|| resolve_base_commit(repo, base_commit_override));
+    let ts = resolved.as_ref().map(|r| r.ts).unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    });
+    let empty_files = Vec::new();
+    let resolved_files = resolved.as_ref().map(|r| &r.files);
+    let empty_dirty = HashMap::new();
+    let resolved_dirty = resolved
+        .as_ref()
+        .map(|r| &r.dirty_files)
+        .unwrap_or(&empty_dirty);
+
     let explicit_paths = filtered_pathspecs_for_agent_run_result(repo, kind, agent_run_result)
         .ok_or_else(|| {
             GitAiError::Generic(
@@ -1022,60 +1049,29 @@ pub fn prepare_captured_checkpoint(
             )
         })?;
 
-    let base_commit = resolve_base_commit(repo, base_commit_override);
-    let repo_workdir = repo.workdir()?;
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-
-    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
-    let ignore_matcher = build_ignore_matcher(&ignore_patterns);
-    let dirty_files = agent_run_result.and_then(|r| r.dirty_files.as_ref());
-
     let capture_id = new_async_checkpoint_capture_id();
     let capture_dir = async_checkpoint_capture_dir(&capture_id)?;
     let manifest_result = (|| -> Result<PreparedCheckpointManifest, GitAiError> {
         fs::create_dir_all(&capture_dir)?;
         fs::create_dir_all(capture_dir.join("blobs"))?;
 
-        let mut files = Vec::with_capacity(explicit_paths.len());
-        let mut seen = HashSet::new();
-        for file_path in &explicit_paths {
-            let normalized = normalize_to_posix(file_path);
-            if !seen.insert(normalized.clone()) {
-                continue;
-            }
-            if should_ignore_file_with_matcher(&normalized, &ignore_matcher) {
-                continue;
-            }
-            let abs_path = repo_workdir.join(&normalized);
-            if !repo.path_is_in_workdir(&abs_path) {
-                continue;
-            }
+        let file_list = resolved_files.map(|f| f.as_slice()).unwrap_or(&empty_files);
 
-            let source =
-                if let Some(content) = dirty_files.and_then(|d| d.get(&normalized)).cloned() {
-                    if content.contains('\0') {
-                        continue;
-                    }
-                    PreparedCheckpointFileSource::DirtyFileContent { content }
-                } else {
-                    let content = match fs::read(&abs_path) {
-                        Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-                        Err(_) => continue,
-                    };
-                    if !abs_path.is_file() || content.contains('\0') {
-                        continue;
-                    }
-                    let mut hasher = Sha256::new();
-                    hasher.update(content.as_bytes());
-                    let blob_name = format!("{:x}", hasher.finalize());
-                    fs::write(capture_dir.join("blobs").join(&blob_name), content)?;
-                    PreparedCheckpointFileSource::BlobRef { blob_name }
-                };
+        let live_working_log = repo.storage.working_log_for_base_commit(&base_commit)?;
+        let mut files = Vec::with_capacity(file_list.len());
+        for file_path in file_list {
+            let source = if let Some(content) = resolved_dirty.get(file_path).cloned() {
+                PreparedCheckpointFileSource::DirtyFileContent { content }
+            } else {
+                let content = live_working_log.read_current_file_content(file_path)?;
+                let mut hasher = Sha256::new();
+                hasher.update(content.as_bytes());
+                let blob_name = format!("{:x}", hasher.finalize());
+                fs::write(capture_dir.join("blobs").join(&blob_name), content)?;
+                PreparedCheckpointFileSource::BlobRef { blob_name }
+            };
             files.push(PreparedCheckpointFile {
-                path: normalized,
+                path: file_path.clone(),
                 source,
             });
         }
@@ -1086,7 +1082,10 @@ pub fn prepare_captured_checkpoint(
         }
 
         let manifest = PreparedCheckpointManifest {
-            repo_working_dir: repo_workdir.to_string_lossy().to_string(),
+            repo_working_dir: repo
+                .workdir()
+                .map(|path| path.to_string_lossy().to_string())
+                .unwrap_or_default(),
             base_commit,
             captured_at_ms: ts,
             kind,
