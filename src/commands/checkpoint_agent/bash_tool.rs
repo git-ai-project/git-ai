@@ -98,6 +98,14 @@ pub fn reset_timeout_overrides_for_test() {
 /// Grace window in nanoseconds for low-resolution filesystem mtime comparison.
 const MTIME_GRACE_WINDOW_NS: u128 = (MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000;
 
+/// Snapshot filtering is on the hot path for bash pre/post diffing. Windows
+/// filesystems have sub-second mtimes, so adding the low-resolution grace here
+/// hides legitimate fast tool edits that happen immediately after pre-hook.
+#[cfg(windows)]
+const SNAPSHOT_WM_GRACE_WINDOW_NS: u128 = 0;
+#[cfg(not(windows))]
+const SNAPSHOT_WM_GRACE_WINDOW_NS: u128 = MTIME_GRACE_WINDOW_NS;
+
 /// Maximum number of stale files before skipping content capture.
 const MAX_STALE_FILES_FOR_CAPTURE: usize = 1000;
 
@@ -561,9 +569,9 @@ fn is_wm_covered(
     posix_key: &str,
 ) -> bool {
     if let Some(&file_wm) = per_file_wm.get(posix_key) {
-        return mtime_ns <= file_wm + MTIME_GRACE_WINDOW_NS;
+        return mtime_ns <= file_wm + SNAPSHOT_WM_GRACE_WINDOW_NS;
     }
-    effective_wm.is_some_and(|ewm| mtime_ns <= ewm + MTIME_GRACE_WINDOW_NS)
+    effective_wm.is_some_and(|ewm| mtime_ns <= ewm + SNAPSHOT_WM_GRACE_WINDOW_NS)
 }
 
 // ---------------------------------------------------------------------------
@@ -1782,6 +1790,32 @@ mod tests {
 
         let result = diff(&pre, &post);
         assert!(result.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_snapshot_watermark_filter_has_no_extra_grace_on_windows() {
+        let per_file_wm = HashMap::new();
+
+        assert!(
+            is_wm_covered(100, Some(100), &per_file_wm, "created.txt"),
+            "an mtime equal to the watermark is covered"
+        );
+        assert!(
+            !is_wm_covered(101, Some(100), &per_file_wm, "created.txt"),
+            "Windows mtimes are precise enough that fast post-hook writes must remain visible"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_snapshot_watermark_filter_keeps_grace_on_low_resolution_platforms() {
+        let per_file_wm = HashMap::new();
+
+        assert!(
+            is_wm_covered(101, Some(100), &per_file_wm, "created.txt"),
+            "non-Windows snapshot filtering keeps the low-resolution mtime grace"
+        );
     }
 
     #[test]
