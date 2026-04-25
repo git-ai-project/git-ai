@@ -20,15 +20,13 @@ fn test_create_file_pre_tool_use_empty_dirty_files() {
     // Create initial file for first commit
     let mut initial_file = repo.filename("README.md");
     initial_file.set_contents(crate::lines!["# Test repo"]);
-
-    // Initial commit
     repo.stage_all_and_commit("Initial commit").unwrap();
 
-    // Create the file first (simulating VS Code creating it)
+    // Create the file (simulating VS Code creating it)
     let mut file = repo.filename("new_file.py");
     file.set_contents(crate::lines!["print(\"hello world\")"]);
 
-    // Simulate create_file PreToolUse hook (based on real captured data)
+    // Simulate create_file PreToolUse hook
     let file_path = repo.path().join("new_file.py");
     let pre_hook_input = json!({
         "timestamp": "2026-04-09T17:36:05.881Z",
@@ -44,7 +42,6 @@ fn test_create_file_pre_tool_use_empty_dirty_files() {
         "cwd": repo.path().to_str().unwrap()
     });
 
-    // Run PreToolUse checkpoint
     repo.git_ai(&[
         "checkpoint",
         "github-copilot",
@@ -77,10 +74,7 @@ fn test_create_file_pre_tool_use_empty_dirty_files() {
     ])
     .unwrap();
 
-    // Sync daemon to ensure checkpoint is processed before commit
     repo.sync_daemon();
-
-    // Commit
     repo.stage_all_and_commit("Create new file").unwrap();
 
     // File should be attributed to AI (not human Pre checkpoint)
