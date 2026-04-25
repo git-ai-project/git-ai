@@ -888,17 +888,7 @@ fn execute_resolved_checkpoint(
 
         if kind.is_ai() {
             if let Some(cr) = &checkpoint_request {
-                // Only store inline transcripts (e.g. agent-v1, mock_ai) — skip
-                // file-based transcript reads which are expensive in RAM/time.
-                if let Some(crate::commands::checkpoint_agent::presets::TranscriptSource::Inline(
-                    ref transcript,
-                )) = cr.transcript_source
-                {
-                    checkpoint.transcript = Some(transcript.clone());
-                }
-                if let Some(agent_id) = cr.agent_id.clone() {
-                    checkpoint.agent_id = Some(agent_id);
-                }
+                checkpoint.agent_id = cr.agent_id.clone();
                 checkpoint.agent_metadata = if cr.metadata.is_empty() {
                     None
                 } else {

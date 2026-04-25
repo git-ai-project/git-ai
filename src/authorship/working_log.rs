@@ -124,7 +124,6 @@ pub struct Checkpoint {
     pub author: String,
     pub entries: Vec<WorkingLogEntry>,
     pub timestamp: u64,
-    pub transcript: Option<AiTranscript>,
     pub agent_id: Option<AgentId>,
     #[serde(default)]
     pub agent_metadata: Option<HashMap<String, String>>,
@@ -158,7 +157,6 @@ impl Checkpoint {
             author,
             entries,
             timestamp,
-            transcript: None,
             agent_id: None,
             agent_metadata: None,
             line_stats: CheckpointLineStats::default(),
