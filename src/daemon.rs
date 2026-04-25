@@ -5759,7 +5759,9 @@ impl ActorDaemonCoordinator {
                     let suppress_window_secs: u64 =
                         if let Ok(val) = std::env::var("GIT_AI_SUPPRESS_WINDOW_SECS") {
                             val.parse().unwrap_or(2)
-                        } else if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some() {
+                        } else if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+                            || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
+                        {
                             0
                         } else {
                             2
