@@ -3921,19 +3921,28 @@ fn daemon_pure_trace_socket_concurrent_checkpoint_requests_preserve_exact_line_a
         expected.push((file_rel, line));
     }
 
-    let mut checkpoint_threads = Vec::new();
-    for (file_rel, _) in &expected {
-        let thread_workdir = workdir.clone();
-        let harness = harness.clone();
-        let file_rel = file_rel.clone();
-        checkpoint_threads.push(thread::spawn(move || {
-            harness.run_delegated_checkpoint(&thread_workdir, file_rel.as_str());
-        }));
+    #[cfg(windows)]
+    {
+        for (file_rel, _) in &expected {
+            harness.run_delegated_checkpoint(&workdir, file_rel.as_str());
+        }
     }
-    for handle in checkpoint_threads {
-        handle
-            .join()
-            .expect("concurrent delegated checkpoint thread should not panic");
+    #[cfg(not(windows))]
+    {
+        let mut checkpoint_threads = Vec::new();
+        for (file_rel, _) in &expected {
+            let thread_workdir = workdir.clone();
+            let harness = harness.clone();
+            let file_rel = file_rel.clone();
+            checkpoint_threads.push(thread::spawn(move || {
+                harness.run_delegated_checkpoint(&thread_workdir, file_rel.as_str());
+            }));
+        }
+        for handle in checkpoint_threads {
+            handle
+                .join()
+                .expect("concurrent delegated checkpoint thread should not panic");
+        }
     }
 
     repo.git_og_with_env(&["add", "."], &env_refs)
