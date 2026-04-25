@@ -4273,12 +4273,10 @@ fn build_note_from_conflict_wl(
                 .or_insert_with(|| crate::authorship::authorship_log::PromptRecord {
                     agent_id: agent_id.clone(),
                     human_author: None,
-                    messages: Vec::new(),
                     total_additions: checkpoint.line_stats.additions,
                     total_deletions: checkpoint.line_stats.deletions,
                     accepted_lines: 0,
                     overriden_lines: 0,
-                    messages_url: None,
                     custom_attributes: None,
                 });
         }

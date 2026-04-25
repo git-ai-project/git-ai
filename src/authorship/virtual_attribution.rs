@@ -487,12 +487,10 @@ impl VirtualAttributions {
                     let prompt_record = crate::authorship::authorship_log::PromptRecord {
                         agent_id: agent_id.clone(),
                         human_author: human_author.clone(),
-                        messages: vec![], // Messages no longer stored
                         total_additions: 0,
                         total_deletions: 0,
                         accepted_lines: 0,
                         overriden_lines: 0,
-                        messages_url: None,
                         custom_attributes: None,
                     };
 
@@ -683,12 +681,12 @@ impl VirtualAttributions {
                     let prompt_record = crate::authorship::authorship_log::PromptRecord {
                         agent_id: agent_id.clone(),
                         human_author: human_author.clone(),
-                        messages: vec![], // Messages no longer stored
+                        
                         total_additions: 0,
                         total_deletions: 0,
                         accepted_lines: 0,
                         overriden_lines: 0,
-                        messages_url: None,
+                        
                         custom_attributes: None,
                     };
 
@@ -868,12 +866,12 @@ impl VirtualAttributions {
                     let prompt_record = crate::authorship::authorship_log::PromptRecord {
                         agent_id: agent_id.clone(),
                         human_author: human_author.clone(),
-                        messages: vec![], // Messages no longer stored
+                        
                         total_additions: 0,
                         total_deletions: 0,
                         accepted_lines: 0,
                         overriden_lines: 0,
-                        messages_url: None,
+                        
                         custom_attributes: None,
                     };
 

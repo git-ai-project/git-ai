@@ -660,38 +660,9 @@ pub fn update_windsurf_prompt(
 ///
 /// Filters out ToolUse messages; keeps User, Assistant, Thinking, and Plan.
 /// Each message is prefixed with its role label.
-pub fn format_transcript(prompt: &PromptRecord) -> String {
-    use crate::authorship::transcript::Message;
-
-    let mut output = String::new();
-    for message in &prompt.messages {
-        match message {
-            Message::User { text, .. } => {
-                output.push_str("User: ");
-                output.push_str(text);
-                output.push('\n');
-            }
-            Message::Assistant { text, .. } => {
-                output.push_str("Assistant: ");
-                output.push_str(text);
-                output.push('\n');
-            }
-            Message::Thinking { text, .. } => {
-                output.push_str("Thinking: ");
-                output.push_str(text);
-                output.push('\n');
-            }
-            Message::Plan { text, .. } => {
-                output.push_str("Plan: ");
-                output.push_str(text);
-                output.push('\n');
-            }
-            Message::ToolUse { .. } => {
-                // Skip tool use messages in formatted transcript
-            }
-        }
-    }
-    output
+pub fn format_transcript(_prompt: &PromptRecord) -> String {
+    // PromptRecord no longer contains messages
+    String::new()
 }
 
 #[cfg(test)]
