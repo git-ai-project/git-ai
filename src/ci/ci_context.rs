@@ -46,6 +46,7 @@ pub enum CiRunResult {
 pub struct CiRunOptions {
     pub skip_fetch_notes: bool,
     pub skip_fetch_base: bool,
+    pub skip_push: bool,
 }
 
 #[derive(Debug)]
@@ -234,9 +235,13 @@ impl CiContext {
                 // Check if authorship was created for THIS specific commit
                 match get_reference_as_authorship_log_v3(&self.repo, merge_commit_sha) {
                     Ok(authorship_log) => {
-                        println!("Pushing authorship...");
-                        self.repo.push_authorship("origin")?;
-                        println!("Pushed authorship. Done.");
+                        if options.skip_push {
+                            println!("Skipping authorship push (--skip-push). Done.");
+                        } else {
+                            println!("Pushing authorship...");
+                            self.repo.push_authorship("origin")?;
+                            println!("Pushed authorship. Done.");
+                        }
                         Ok(CiRunResult::AuthorshipRewritten { authorship_log })
                     }
                     Err(e) => {

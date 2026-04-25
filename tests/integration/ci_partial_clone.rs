@@ -74,6 +74,7 @@ fn test_squash_merge_single_parent_not_on_base_ref() {
     let result = ctx.run_with_options(CiRunOptions {
         skip_fetch_notes: true,
         skip_fetch_base: true,
+        skip_push: false,
     });
 
     // Should not fail with "No parent of commit" error
@@ -140,6 +141,7 @@ fn test_single_commit_rebase_parent_on_base_ref() {
     let result = ctx.run_with_options(CiRunOptions {
         skip_fetch_notes: true,
         skip_fetch_base: true,
+        skip_push: false,
     });
 
     assert!(
@@ -221,6 +223,7 @@ fn test_multi_commit_squash_merge_single_parent() {
     let result = ctx.run_with_options(CiRunOptions {
         skip_fetch_notes: true,
         skip_fetch_base: true,
+        skip_push: false,
     });
 
     assert!(
@@ -326,6 +329,7 @@ fn test_regular_two_parent_merge_skipped() {
     let result = ctx.run_with_options(CiRunOptions {
         skip_fetch_notes: true,
         skip_fetch_base: true,
+        skip_push: false,
     });
 
     assert!(

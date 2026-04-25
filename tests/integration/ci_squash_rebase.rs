@@ -599,6 +599,7 @@ fn test_ci_rebase_merge_commit_order_pairing() {
     let result = ctx.run_with_options(CiRunOptions {
         skip_fetch_notes: true,
         skip_fetch_base: true,
+        skip_push: false,
     });
     assert!(
         result.is_ok(),

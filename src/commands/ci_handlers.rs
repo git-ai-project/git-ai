@@ -203,6 +203,7 @@ fn handle_ci_local(args: &[String]) {
             let skip_fetch_all = has_bool_flag("--skip-fetch");
             let skip_fetch_notes = skip_fetch_all || has_bool_flag("--skip-fetch-notes");
             let skip_fetch_base = skip_fetch_all || has_bool_flag("--skip-fetch-base");
+            let skip_push = has_bool_flag("--skip-push");
 
             // Required inputs for merge
             let merge_commit_sha = match flag("--merge-commit-sha") {
@@ -263,6 +264,7 @@ fn handle_ci_local(args: &[String]) {
             match ctx.run_with_options(CiRunOptions {
                 skip_fetch_notes,
                 skip_fetch_base,
+                skip_push,
             }) {
                 Ok(result) => {
                     tracing::debug!("Local CI result: {:?}", result);
@@ -301,7 +303,7 @@ fn print_ci_help_and_exit() -> ! {
         "                     merge  --merge-commit-sha <sha> --base-ref <ref> --head-ref <ref> --head-sha <sha> --base-sha <sha>"
     );
     eprintln!(
-        "                            [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch]"
+        "                            [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch] [--skip-push]"
     );
     std::process::exit(1);
 }
@@ -315,7 +317,7 @@ fn print_ci_local_help_and_exit() -> ! {
     eprintln!(
         "  merge  --merge-commit-sha <sha> --base-ref <ref> --head-ref <ref> --head-sha <sha> --base-sha <sha>"
     );
-    eprintln!("         [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch]");
+    eprintln!("         [--skip-fetch-notes] [--skip-fetch-base] [--skip-fetch] [--skip-push]");
     std::process::exit(1);
 }
 
