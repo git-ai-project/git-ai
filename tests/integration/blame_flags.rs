@@ -1405,7 +1405,6 @@ fn test_blame_ai_human_author() {
         PromptRecord {
             agent_id: agent_id_1,
             human_author: Some("First <first@example.com>".to_string()),
-            messages: vec![Message::user("Add first line".to_string(), None)],
             total_additions: 1,
             total_deletions: 0,
             accepted_lines: 1,
@@ -1426,7 +1425,6 @@ fn test_blame_ai_human_author() {
         PromptRecord {
             agent_id: agent_id_2,
             human_author: Some("Second <second@example.com>".to_string()),
-            messages: vec![Message::user("Add second line".to_string(), None)],
             total_additions: 1,
             total_deletions: 0,
             accepted_lines: 1,

@@ -81,10 +81,8 @@ fn test_agent_v1_ai_agent_checkpoint_with_dirty_files() {
                     .unwrap(),
                 "console.log('hello');"
             );
-            assert!(matches!(
-                e.transcript_source,
-                Some(TranscriptSource::Inline(_))
-            ));
+            // Inline transcripts removed - should now be None
+            assert!(e.transcript_source.is_none());
         }
         _ => panic!("Expected PostFileEdit for ai_agent checkpoint"),
     }
