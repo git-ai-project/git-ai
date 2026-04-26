@@ -655,7 +655,6 @@ fn test_blame_ai_authorship_hunk_splitting() {
             total_deletions: 0,
             accepted_lines: 1,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
         },
     );
@@ -676,7 +675,6 @@ fn test_blame_ai_authorship_hunk_splitting() {
             total_deletions: 0,
             accepted_lines: 1,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
         },
     );
@@ -739,7 +737,6 @@ fn test_blame_ai_authorship_no_splitting() {
             total_deletions: 0,
             accepted_lines: 2,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
         },
     );
