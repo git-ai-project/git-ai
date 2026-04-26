@@ -442,12 +442,12 @@ mod tests {
     #[test]
     fn test_internal_git_ai_command_sets_skip_all_hooks_env() {
         let exe = PathBuf::from("/tmp/git-ai-test");
-        let cmd = internal_git_ai_command_with_exe(exe.clone(), "flush-cas");
+        let cmd = internal_git_ai_command_with_exe(exe.clone(), "status");
 
         assert_eq!(cmd.get_program(), exe.as_os_str());
         assert_eq!(
             cmd.get_args().collect::<Vec<_>>(),
-            vec![std::ffi::OsStr::new("flush-cas")]
+            vec![std::ffi::OsStr::new("status")]
         );
         assert!(
             cmd.get_envs().any(|(k, v)| {
@@ -464,7 +464,7 @@ mod tests {
         unsafe {
             std::env::set_var(key, "1");
         }
-        let spawned = spawn_internal_git_ai_subcommand("flush-cas", &[], key, &[]);
+        let spawned = spawn_internal_git_ai_subcommand("status", &[], key, &[]);
         unsafe {
             std::env::remove_var(key);
         }
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn test_spawn_internal_git_ai_subcommand_requires_non_empty_guard_env() {
-        let spawned = spawn_internal_git_ai_subcommand("flush-cas", &[], "", &[]);
+        let spawned = spawn_internal_git_ai_subcommand("status", &[], "", &[]);
         assert!(!spawned, "spawn should be skipped when guard env is empty");
     }
 

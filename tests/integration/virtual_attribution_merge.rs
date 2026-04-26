@@ -23,24 +23,20 @@ fn test_merge_prompts_picking_newest_sums_totals_on_collision() {
     let record1 = PromptRecord {
         agent_id: agent_id1.clone(),
         human_author: Some("Author 1".to_string()),
-        messages: vec![],
         total_additions: 2,
         total_deletions: 1,
         accepted_lines: 0,
         overriden_lines: 3,
-        messages_url: None,
         custom_attributes: None,
     };
 
     let record2 = PromptRecord {
         agent_id: agent_id2.clone(),
         human_author: Some("Author 2".to_string()),
-        messages: vec![],
         total_additions: 5,
         total_deletions: 4,
         accepted_lines: 0,
         overriden_lines: 7,
-        messages_url: None,
         custom_attributes: None,
     };
 

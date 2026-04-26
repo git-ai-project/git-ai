@@ -1,13 +1,9 @@
-use crate::api::{ApiClient, ApiContext};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
 use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
-use crate::authorship::secrets::{
-    redact_secrets_from_prompts, redact_secrets_from_sessions, strip_prompt_messages,
-    strip_session_messages,
-};
+use crate::authorship::secrets::{strip_prompt_messages, strip_session_messages};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
@@ -171,49 +167,12 @@ pub fn post_commit_with_final_state(
         }
     }
 
+    // Messages fields have been removed from PromptRecord and SessionRecord
+    // Strip functions are now no-ops but called for compatibility
     match effective_storage {
-        PromptStorageMode::Local => {
-            // Local only: strip all messages from notes (they stay in sqlite only)
+        PromptStorageMode::Local | PromptStorageMode::Notes | PromptStorageMode::Default => {
             strip_prompt_messages(&mut authorship_log.metadata.prompts);
             strip_session_messages(&mut authorship_log.metadata.sessions);
-        }
-        PromptStorageMode::Notes => {
-            // Store in notes: redact secrets but keep messages in notes
-            let count = redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
-            let count2 = redact_secrets_from_sessions(&mut authorship_log.metadata.sessions);
-            if count + count2 > 0 {
-                tracing::debug!("Redacted {} secrets from prompts/sessions", count + count2);
-            }
-        }
-        PromptStorageMode::Default => {
-            // "default" - attempt CAS upload, NEVER keep messages in notes
-            // Check conditions for CAS upload:
-            // - user is logged in OR has API key OR using custom API URL
-            let context = ApiContext::new(None);
-            let client = ApiClient::new(context);
-            let should_enqueue_cas =
-                client.is_logged_in() || client.has_api_key() || using_custom_api;
-
-            if should_enqueue_cas {
-                // Redact secrets before uploading to CAS
-                let redaction_count =
-                    redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
-                let redaction_count2 =
-                    redact_secrets_from_sessions(&mut authorship_log.metadata.sessions);
-                if redaction_count + redaction_count2 > 0 {
-                    tracing::debug!(
-                        "Redacted {} secrets from prompts/sessions before CAS upload",
-                        redaction_count + redaction_count2
-                    );
-                }
-
-                // No longer uploading to CAS - just strip messages
-                strip_prompt_messages_no_cas(&mut authorship_log.metadata.prompts);
-            } else {
-                // Not enqueueing - strip messages (never keep in notes for "default")
-                strip_prompt_messages(&mut authorship_log.metadata.prompts);
-                strip_session_messages(&mut authorship_log.metadata.sessions);
-            }
         }
     }
 
@@ -490,15 +449,6 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
     Ok(())
 }
 
-/// Strip prompt messages (no longer uploaded to CAS)
-fn strip_prompt_messages_no_cas(
-    _prompts: &mut std::collections::BTreeMap<
-        String,
-        crate::authorship::authorship_log::PromptRecord,
-    >,
-) {
-    // No-op: PromptRecord no longer has messages field
-}
 /// Record metrics for a committed change.
 /// This is a best-effort operation - failures are silently ignored.
 fn record_commit_metrics(

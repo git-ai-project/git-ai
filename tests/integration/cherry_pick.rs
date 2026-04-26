@@ -153,12 +153,10 @@ fn test_cherry_pick_preserves_prompt_only_commit_note_metadata() {
                 model: "test-model".to_string(),
             },
             human_author: Some("Test User <test@example.com>".to_string()),
-            messages: vec![],
             total_additions: 11,
             total_deletions: 2,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: Some(test_attrs.clone()),
         },
     );
