@@ -1,9 +1,10 @@
 use super::parse;
 use super::{
-    AgentPreset, ParsedHookEvent, PostFileEdit, PreFileEdit, PresetContext, TranscriptFormat,
-    TranscriptSource,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
+use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -52,16 +53,17 @@ impl AgentPreset for CursorPreset {
             )));
         }
 
-        // Only checkpoint on file-mutating tools (Write, Delete, StrReplace)
+        // Classify the tool: file-edit (Write/Delete/StrReplace), bash (Shell), or skip.
         let tool_name = parse::optional_str(&data, "tool_name").unwrap_or("");
-        if !matches!(tool_name, "Write" | "Delete" | "StrReplace") {
+        let tool_class = bash_tool::classify_tool(Agent::Cursor, tool_name);
+        if tool_class == ToolClass::Skip {
             return Err(GitAiError::PresetError(format!(
-                "Skipping Cursor hook for non-edit tool_name '{}'.",
+                "Skipping Cursor hook for unsupported tool_name '{}'.",
                 tool_name
             )));
         }
 
-        // Extract file_path from tool_input
+        // Extract file_path from tool_input (file-edit tools only).
         let file_path = data
             .get("tool_input")
             .and_then(|ti| ti.get("file_path"))
@@ -69,7 +71,8 @@ impl AgentPreset for CursorPreset {
             .map(normalize_cursor_path)
             .unwrap_or_default();
 
-        // Resolve cwd: match file_path to workspace root, or fall back to first root
+        // Resolve cwd: match file_path to workspace root, or fall back to first root.
+        // For Shell tools `file_path` is empty, so this returns workspace_roots[0].
         let cwd = resolve_repo_cwd(&file_path, &workspace_roots).ok_or_else(|| {
             GitAiError::PresetError("No workspace root found in hook_input".to_string())
         })?;
@@ -106,19 +109,40 @@ impl AgentPreset for CursorPreset {
             external_thread_id: Some(conversation_id.clone()),
         });
 
-        let event = if hook_event_name == "preToolUse" {
-            ParsedHookEvent::PreFileEdit(PreFileEdit {
+        let is_pre = hook_event_name == "preToolUse";
+
+        let event = match (tool_class, is_pre) {
+            (ToolClass::Bash, true) => {
+                let tool_use_id = parse::optional_str(&data, "tool_use_id")
+                    .unwrap_or("bash")
+                    .to_string();
+                ParsedHookEvent::PreBashCall(PreBashCall {
+                    context,
+                    tool_use_id,
+                })
+            }
+            (ToolClass::Bash, false) => {
+                let tool_use_id = parse::optional_str(&data, "tool_use_id")
+                    .unwrap_or("bash")
+                    .to_string();
+                ParsedHookEvent::PostBashCall(PostBashCall {
+                    context,
+                    tool_use_id,
+                    transcript_source,
+                })
+            }
+            (ToolClass::FileEdit, true) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
                 dirty_files: None,
-            })
-        } else {
-            ParsedHookEvent::PostFileEdit(PostFileEdit {
+            }),
+            (ToolClass::FileEdit, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
                 dirty_files: None,
                 transcript_source,
-            })
+            }),
+            (ToolClass::Skip, _) => unreachable!("Skip handled above"),
         };
 
         Ok(vec![event])
@@ -341,6 +365,87 @@ mod tests {
         let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], ParsedHookEvent::PostFileEdit(_)));
+    }
+
+    #[test]
+    fn test_cursor_pre_shell_tool() {
+        let input = json!({
+            "conversation_id": "conv-shell",
+            "session_id": "conv-shell",
+            "workspace_roots": ["/Users/aidan/Desktop/test-repo"],
+            "hook_event_name": "preToolUse",
+            "tool_name": "Shell",
+            "tool_use_id": "tu-shell-1",
+            "model": "composer-2",
+            "cursor_version": "3.1.17",
+            "tool_input": {
+                "command": "date > current_time.txt",
+                "cwd": "",
+                "timeout": 30000
+            }
+        })
+        .to_string();
+        let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PreBashCall(e) => {
+                assert_eq!(e.context.agent_id.tool, "cursor");
+                assert_eq!(e.context.session_id, "conv-shell");
+                assert_eq!(e.context.agent_id.model, "composer-2");
+                assert_eq!(
+                    e.context.cwd,
+                    PathBuf::from("/Users/aidan/Desktop/test-repo")
+                );
+                assert_eq!(e.tool_use_id, "tu-shell-1");
+            }
+            _ => panic!("Expected PreBashCall, got {:?}", events[0]),
+        }
+    }
+
+    #[test]
+    fn test_cursor_post_shell_tool() {
+        let input = json!({
+            "conversation_id": "conv-shell",
+            "session_id": "conv-shell",
+            "workspace_roots": ["/Users/aidan/Desktop/test-repo"],
+            "hook_event_name": "postToolUse",
+            "tool_name": "Shell",
+            "tool_use_id": "tu-shell-2",
+            "model": "composer-2",
+            "tool_input": {
+                "command": "date > current_time.txt",
+                "cwd": ""
+            }
+        })
+        .to_string();
+        let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PostBashCall(e) => {
+                assert_eq!(e.context.agent_id.tool, "cursor");
+                assert_eq!(e.tool_use_id, "tu-shell-2");
+            }
+            _ => panic!("Expected PostBashCall, got {:?}", events[0]),
+        }
+    }
+
+    #[test]
+    fn test_cursor_shell_falls_back_to_default_tool_use_id() {
+        let input = json!({
+            "conversation_id": "conv-shell",
+            "workspace_roots": ["/Users/aidan/Desktop/test-repo"],
+            "hook_event_name": "preToolUse",
+            "tool_name": "Shell",
+            "tool_input": {"command": "ls"}
+        })
+        .to_string();
+        let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PreBashCall(e) => {
+                assert_eq!(e.tool_use_id, "bash");
+            }
+            _ => panic!("Expected PreBashCall"),
+        }
     }
 
     #[test]
