@@ -156,10 +156,7 @@ fn test_pi_after_edit_checkpoint_via_cli_creates_ai_checkpoint() {
     // are skipped during checkpointing. Model resolution happens at commit time
     // via update_prompts_to_latest.
     assert_eq!(checkpoints[0].agent_id.as_ref().unwrap().model, "unknown");
-    assert!(
-        checkpoints[0].transcript.is_none(),
-        "Pi checkpoints with session_path should persist metadata and drop inline transcript"
-    );
+    // Transcript field removed from Checkpoint struct
     assert_eq!(
         checkpoints[0]
             .agent_metadata
