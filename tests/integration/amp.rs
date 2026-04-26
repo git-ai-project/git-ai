@@ -161,7 +161,6 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
             assert!(e.transcript_source.is_some());
             let transcript_path_str = match e.transcript_source.as_ref().unwrap() {
                 TranscriptSource::Path { path, .. } => path.to_string_lossy().to_string(),
-                TranscriptSource::Inline(_) => panic!("Expected Path transcript source"),
             };
             assert!(
                 transcript_path_str.ends_with(&format!("{}.json", AMP_SIMPLE_THREAD_ID)),

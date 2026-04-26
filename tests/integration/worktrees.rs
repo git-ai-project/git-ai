@@ -367,7 +367,6 @@ crate::worktree_test_wrappers! {
                     model: "test-model".to_string(),
                 },
                 human_author: None,
-                messages: vec![Message::assistant("initial".to_string(), None)],
                 total_additions: 0,
                 total_deletions: 0,
                 accepted_lines: 0,
