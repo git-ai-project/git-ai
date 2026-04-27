@@ -24,7 +24,7 @@ struct OpenCodeHookInput {
 }
 
 impl OpenCodePreset {
-    fn extract_filepaths_from_tool_input(
+    pub(crate) fn extract_filepaths_from_tool_input(
         tool_input: Option<&serde_json::Value>,
         cwd: &str,
     ) -> Vec<PathBuf> {
