@@ -251,6 +251,9 @@ mod tests {
         assert_eq!(deserialized[1].author, "user");
     }
 
+    #[test]
+    fn test_checkpoint_kind_known_human_roundtrip() {
+        let kind = CheckpointKind::KnownHuman;
         assert_eq!(kind.to_str(), "known_human");
         assert_eq!(
             CheckpointKind::from_str("known_human"),
