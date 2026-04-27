@@ -681,12 +681,12 @@ impl VirtualAttributions {
                     let prompt_record = crate::authorship::authorship_log::PromptRecord {
                         agent_id: agent_id.clone(),
                         human_author: human_author.clone(),
-                        
+
                         total_additions: 0,
                         total_deletions: 0,
                         accepted_lines: 0,
                         overriden_lines: 0,
-                        
+
                         custom_attributes: None,
                     };
 
@@ -866,12 +866,12 @@ impl VirtualAttributions {
                     let prompt_record = crate::authorship::authorship_log::PromptRecord {
                         agent_id: agent_id.clone(),
                         human_author: human_author.clone(),
-                        
+
                         total_additions: 0,
                         total_deletions: 0,
                         accepted_lines: 0,
                         overriden_lines: 0,
-                        
+
                         custom_attributes: None,
                     };
 

@@ -75,11 +75,8 @@ pub fn handle_git_ai(args: &[String]) {
     }
 
     // Start DB warmup early for commands that need database access
-    match args[0].as_str() {
-        "show-prompt" => {
-            InternalDatabase::warmup();
-        }
-        _ => {}
+    if args[0].as_str() == "show-prompt" {
+        InternalDatabase::warmup();
     }
 
     match args[0].as_str() {
