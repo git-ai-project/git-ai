@@ -1,6 +1,4 @@
-use super::{
-    AgentPreset, ParsedHookEvent, PostFileEdit, PreFileEdit, PresetContext, TranscriptSource,
-};
+use super::{AgentPreset, ParsedHookEvent, PostFileEdit, PreFileEdit, PresetContext};
 use crate::authorship::working_log::AgentId;
 use crate::error::GitAiError;
 use serde::Deserialize;

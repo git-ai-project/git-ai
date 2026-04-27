@@ -1,6 +1,5 @@
 use crate::authorship::attribution_tracker::{Attribution, LineAttribution};
 use crate::authorship::authorship_log_serialization::GIT_AI_VERSION;
-use crate::authorship::transcript::AiTranscript;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -252,83 +251,6 @@ mod tests {
         assert_eq!(deserialized[1].author, "user");
     }
 
-    #[test]
-    fn test_checkpoint_with_transcript() {
-        let entry = WorkingLogEntry::new(
-            "src/xyz.rs".to_string(),
-            "test_sha".to_string(),
-            Vec::new(),
-            Vec::new(),
-        );
-
-        let user_message = Message::user(
-            "Please add error handling to this function".to_string(),
-            None,
-        );
-        let assistant_message =
-            Message::assistant("I'll add error handling to the function.".to_string(), None);
-
-        let mut transcript = AiTranscript::new();
-        transcript.add_message(user_message);
-        transcript.add_message(assistant_message);
-
-        let agent_id = AgentId {
-            tool: "cursor".to_string(),
-            model: "gpt-4o".to_string(),
-            id: "session-abc123".to_string(),
-        };
-
-        let mut checkpoint = Checkpoint::new(
-            CheckpointKind::AiAgent,
-            "".to_string(),
-            "claude".to_string(),
-            vec![entry],
-        );
-        checkpoint.transcript = Some(transcript);
-        checkpoint.agent_id = Some(agent_id);
-
-        assert!(checkpoint.transcript.is_some());
-        assert!(checkpoint.agent_id.is_some());
-
-        let transcript_data = checkpoint.transcript.as_ref().unwrap();
-        assert_eq!(transcript_data.messages().len(), 2);
-
-        // Check first message (user)
-        match &transcript_data.messages()[0] {
-            Message::User { text, .. } => {
-                assert_eq!(text, "Please add error handling to this function");
-            }
-            _ => panic!("Expected user message"),
-        }
-
-        // Check second message (assistant)
-        match &transcript_data.messages()[1] {
-            Message::Assistant { text, .. } => {
-                assert_eq!(text, "I'll add error handling to the function.");
-            }
-            _ => panic!("Expected assistant message"),
-        }
-
-        let agent_data = checkpoint.agent_id.as_ref().unwrap();
-        assert_eq!(agent_data.tool, "cursor");
-        assert_eq!(agent_data.id, "session-abc123");
-
-        let json = serde_json::to_string_pretty(&checkpoint).unwrap();
-        let deserialized: Checkpoint = serde_json::from_str(&json).unwrap();
-        assert!(deserialized.transcript.is_some());
-        assert!(deserialized.agent_id.is_some());
-
-        let deserialized_transcript = deserialized.transcript.as_ref().unwrap();
-        assert_eq!(deserialized_transcript.messages().len(), 2);
-
-        let deserialized_agent = deserialized.agent_id.as_ref().unwrap();
-        assert_eq!(deserialized_agent.tool, "cursor");
-        assert_eq!(deserialized_agent.id, "session-abc123");
-    }
-
-    #[test]
-    fn test_checkpoint_kind_known_human_roundtrip() {
-        let kind = CheckpointKind::KnownHuman;
         assert_eq!(kind.to_str(), "known_human");
         assert_eq!(
             CheckpointKind::from_str("known_human"),

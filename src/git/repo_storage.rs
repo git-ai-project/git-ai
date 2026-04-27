@@ -403,7 +403,7 @@ impl PersistedWorkingLog {
         // Tools that DON'T support refetch (transcript must be kept):
         // - "mock_ai" - test preset, transcript not stored externally
         // - Any other agent-v1 custom tools (detected by lack of tool-specific metadata)
-        let mut storage_checkpoint = checkpoint.clone();
+        let storage_checkpoint = checkpoint.clone();
         let tool = checkpoint
             .agent_id
             .as_ref()
@@ -412,7 +412,7 @@ impl PersistedWorkingLog {
         let metadata = &checkpoint.agent_metadata;
 
         // Blacklist: tools that cannot refetch transcripts
-        let cannot_refetch = match tool {
+        let _cannot_refetch = match tool {
             "mock_ai" => true,
             // human checkpoints have no transcript anyway
             "human" => false,
