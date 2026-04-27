@@ -3,6 +3,7 @@ use super::{
     AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
     PresetContext, TranscriptFormat, TranscriptSource,
 };
+use super::opencode::OpenCodePreset;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
@@ -46,6 +47,45 @@ impl CodexPreset {
             }
         }
     }
+
+    fn extract_filepaths_from_tool_response(hook_data: &serde_json::Value) -> Vec<PathBuf> {
+        let Some(tool_response) = hook_data.get("tool_response") else { return vec![]; };
+        let output = if let Some(raw) = tool_response.as_str() {
+            serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("output")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| raw.to_string())
+        } else {
+            tool_response
+                .get("output")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        };
+
+        let mut paths = Vec::new();
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.len() > 2
+                && trimmed.as_bytes()[1] == b' '
+                && matches!(trimmed.as_bytes()[0], b'A' | b'M' | b'D' | b'R' | b'U')
+            {
+                let path = trimmed[2..].trim();
+                if !path.is_empty() {
+                    let pb = PathBuf::from(path);
+                    if !paths.contains(&pb) {
+                        paths.push(pb);
+                    }
+                }
+            }
+        }
+        paths
+    }
 }
 
 impl AgentPreset for CodexPreset {
@@ -57,12 +97,15 @@ impl AgentPreset for CodexPreset {
         let session_id = Self::session_id_from_hook_data(&data)?;
         let hook_event = parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
         let tool_name = parse::optional_str_multi(&data, &["tool_name", "toolName"]);
-        let tool_use_id =
-            parse::optional_str_multi(&data, &["tool_use_id", "toolUseId"]).unwrap_or("bash");
+        let tool_use_id = parse::optional_str_multi(&data, &["tool_use_id", "toolUseId"])
+            .unwrap_or("bash");
 
-        let is_bash = tool_name
-            .map(|n| bash_tool::classify_tool(Agent::Codex, n) == ToolClass::Bash)
-            .unwrap_or(false);
+        let tool_class = tool_name
+            .map(|n| bash_tool::classify_tool(Agent::Codex, n))
+            .unwrap_or(ToolClass::Skip);
+
+        let is_bash = tool_class == ToolClass::Bash;
+        let is_file_edit = tool_class == ToolClass::FileEdit;
 
         let transcript_path = Self::resolve_transcript_path(&data, &session_id);
 
@@ -95,30 +138,46 @@ impl AgentPreset for CodexPreset {
 
         let event = match hook_event {
             Some("PreToolUse") => {
-                if !is_bash {
+                if is_bash || is_file_edit {
+                    ParsedHookEvent::PreBashCall(PreBashCall {
+                        context,
+                        tool_use_id: tool_use_id.to_string(),
+                        strategy: BashPreHookStrategy::SnapshotOnly,
+                    })
+                } else {
                     return Err(GitAiError::PresetError(format!(
                         "Skipping Codex PreToolUse for unsupported tool {}",
                         tool_name.unwrap_or("unknown")
                     )));
                 }
-                ParsedHookEvent::PreBashCall(PreBashCall {
-                    context,
-                    tool_use_id: tool_use_id.to_string(),
-                    strategy: BashPreHookStrategy::SnapshotOnly,
-                })
             }
             Some("PostToolUse") => {
-                if !is_bash {
+                if is_bash {
+                    ParsedHookEvent::PostBashCall(PostBashCall {
+                        context,
+                        tool_use_id: tool_use_id.to_string(),
+                        transcript_source,
+                    })
+                } else if is_file_edit {
+                    let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
+                    let mut file_paths = OpenCodePreset::extract_filepaths_from_tool_input(tool_input, &cwd);
+
+                    if file_paths.is_empty() {
+                        file_paths = Self::extract_filepaths_from_tool_response(&data);
+                    }
+
+                    ParsedHookEvent::PostFileEdit(PostFileEdit {
+                        context,
+                        file_paths,
+                        dirty_files: None,
+                        transcript_source,
+                    })
+                } else {
                     return Err(GitAiError::PresetError(format!(
                         "Skipping Codex PostToolUse for unsupported tool {}",
                         tool_name.unwrap_or("unknown")
                     )));
                 }
-                ParsedHookEvent::PostBashCall(PostBashCall {
-                    context,
-                    tool_use_id: tool_use_id.to_string(),
-                    transcript_source,
-                })
             }
             Some("Stop") | Some("agent-turn-complete") | None => {
                 ParsedHookEvent::PostFileEdit(PostFileEdit {
@@ -277,6 +336,7 @@ mod tests {
         })
         .to_string();
         let events = CodexPreset.parse(&input, "t_test123456789a").unwrap();
+
         assert_eq!(events.len(), 1);
         assert!(matches!(events[0], ParsedHookEvent::PostFileEdit(_)));
     }
@@ -298,11 +358,12 @@ mod tests {
     fn test_codex_model_defaults_to_unknown() {
         let input = json!({
             "cwd": "/home/user/project",
-            "hook_event_name": "Stop",
+            "hook_event_name": "agent-turn-complete",
             "session_id": "codex-sess-1"
         })
         .to_string();
         let events = CodexPreset.parse(&input, "t_test123456789a").unwrap();
+
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert_eq!(e.context.agent_id.model, "unknown");
