@@ -194,7 +194,7 @@ mod tests {
             .as_secs();
         assert!(checkpoint.timestamp > 0);
         assert!(checkpoint.timestamp <= current_time);
-        assert!(checkpoint.transcript.is_none());
+        // Transcript field removed from Checkpoint
         assert!(checkpoint.agent_id.is_none());
 
         let json = serde_json::to_string_pretty(&checkpoint).unwrap();
@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(deserialized.entries[0].file, "src/xyz.rs");
         assert_eq!(deserialized.entries[0].blob_sha, "abc123def456");
         assert_eq!(deserialized.timestamp, checkpoint.timestamp);
-        assert!(deserialized.transcript.is_none());
+        // Transcript field removed from Checkpoint
         assert!(deserialized.agent_id.is_none());
     }
 
