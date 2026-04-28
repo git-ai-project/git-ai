@@ -2980,6 +2980,12 @@ fn ensure_isolated_process_home() {
         // HOME or PATH. The OnceLock ensures no concurrent env var writes.
         unsafe {
             std::env::set_var("HOME", &home);
+            #[cfg(windows)]
+            {
+                std::env::set_var("USERPROFILE", &home);
+                std::env::set_var("HOMEDRIVE", "");
+                std::env::set_var("HOMEPATH", "");
+            }
 
             // Sanitize the process-level PATH to remove git-ai wrapper directories.
             // This covers subprocess calls that don't go through configure_test_home_env
@@ -3235,6 +3241,38 @@ mod tests {
                 "src/lib.rs",
                 "src/main.rs",
             ]
+        );
+    }
+
+    #[test]
+    fn test_isolated_process_home_controls_git_ai_internal_dir() {
+        ensure_isolated_process_home();
+
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME should be isolated"));
+
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                std::env::var_os("USERPROFILE").map(PathBuf::from),
+                Some(home.clone()),
+                "Windows home lookup prefers USERPROFILE, so the test harness must isolate it"
+            );
+            assert_eq!(
+                std::env::var("HOMEDRIVE").unwrap_or_default(),
+                "",
+                "HOMEDRIVE should not point git-ai back at the real user profile"
+            );
+            assert_eq!(
+                std::env::var("HOMEPATH").unwrap_or_default(),
+                "",
+                "HOMEPATH should not point git-ai back at the real user profile"
+            );
+        }
+
+        assert_eq!(
+            git_ai::config::internal_dir_path().expect("internal dir should resolve"),
+            home.join(".git-ai").join("internal"),
+            "in-process git-ai config lookup must use the isolated test home"
         );
     }
 }
