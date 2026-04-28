@@ -378,9 +378,9 @@ mod tests {
 
     #[test]
     fn test_prompt_record_ord_transitivity() {
-        let a = create_prompt_record(1, 0, 0); // 1 message
-        let b = create_prompt_record(2, 0, 0); // 2 messages
-        let c = create_prompt_record(3, 0, 0); // 3 messages
+        let a = create_prompt_record(0, 1, 0); // 1 addition
+        let b = create_prompt_record(0, 2, 0); // 2 additions
+        let c = create_prompt_record(0, 3, 0); // 3 additions
 
         assert!(a < b, "a should be less than b");
         assert!(b < c, "b should be less than c");

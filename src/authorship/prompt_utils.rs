@@ -682,92 +682,21 @@ mod tests {
                 model: model.to_string(),
             },
             human_author: Some("test_user".to_string()),
-            messages: vec![
-                Message::User {
-                    text: "Hello".to_string(),
-                    timestamp: None,
-                },
-                Message::Assistant {
-                    text: "Hi there".to_string(),
-                    timestamp: None,
-                },
-            ],
             total_additions: 10,
             total_deletions: 5,
             accepted_lines: 8,
             overriden_lines: 2,
-            messages_url: None,
             custom_attributes: None,
         }
     }
 
     #[test]
-    fn test_format_transcript_basic() {
-        let prompt = create_test_prompt_record("test", "123", "gpt-4");
-        let formatted = format_transcript(&prompt);
-
-        assert!(formatted.contains("User: Hello\n"));
-        assert!(formatted.contains("Assistant: Hi there\n"));
-    }
 
     #[test]
-    fn test_format_transcript_all_message_types() {
-        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
-        prompt.messages = vec![
-            Message::User {
-                text: "User message".to_string(),
-                timestamp: None,
-            },
-            Message::Assistant {
-                text: "Assistant message".to_string(),
-                timestamp: None,
-            },
-            Message::Thinking {
-                text: "Thinking message".to_string(),
-                timestamp: None,
-            },
-            Message::Plan {
-                text: "Plan message".to_string(),
-                timestamp: None,
-            },
-            Message::ToolUse {
-                name: "test_tool".to_string(),
-                input: serde_json::json!({"param": "value"}),
-                timestamp: None,
-            },
-        ];
-
-        let formatted = format_transcript(&prompt);
-
-        assert!(formatted.contains("User: User message\n"));
-        assert!(formatted.contains("Assistant: Assistant message\n"));
-        assert!(formatted.contains("Thinking: Thinking message\n"));
-        assert!(formatted.contains("Plan: Plan message\n"));
-        // ToolUse should be filtered out
-        assert!(!formatted.contains("test_tool"));
-        assert!(!formatted.contains("ToolUse"));
-    }
 
     #[test]
-    fn test_format_transcript_empty() {
-        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
-        prompt.messages = vec![];
-
-        let formatted = format_transcript(&prompt);
-        assert_eq!(formatted, "");
-    }
 
     #[test]
-    fn test_format_transcript_multiline() {
-        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
-        prompt.messages = vec![Message::User {
-            text: "Line 1\nLine 2\nLine 3".to_string(),
-            timestamp: None,
-        }];
-
-        let formatted = format_transcript(&prompt);
-        assert_eq!(formatted, "User: Line 1\nLine 2\nLine 3\n");
-    }
 
     #[test]
     fn test_update_prompt_from_tool_unknown() {
@@ -912,56 +841,10 @@ mod tests {
     }
 
     #[test]
-    fn test_format_transcript_with_timestamps() {
-        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
-        prompt.messages = vec![
-            Message::User {
-                text: "Question".to_string(),
-                timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-            },
-            Message::Assistant {
-                text: "Answer".to_string(),
-                timestamp: Some("2024-01-01T12:00:01Z".to_string()),
-            },
-        ];
-
-        let formatted = format_transcript(&prompt);
-        // Timestamps should not appear in formatted output
-        assert!(!formatted.contains("2024-01-01"));
-        assert!(formatted.contains("User: Question\n"));
-        assert!(formatted.contains("Assistant: Answer\n"));
-    }
 
     #[test]
-    fn test_format_transcript_special_characters() {
-        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
-        prompt.messages = vec![Message::User {
-            text: "Text with \"quotes\" and 'apostrophes' and\ttabs\nand newlines".to_string(),
-            timestamp: None,
-        }];
-
-        let formatted = format_transcript(&prompt);
-        assert!(formatted.contains("\"quotes\""));
-        assert!(formatted.contains("'apostrophes'"));
-        assert!(formatted.contains("\t"));
-    }
 
     #[test]
-    fn test_format_transcript_unicode() {
-        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
-        prompt.messages = vec![Message::User {
-            text: "Hello \u{4e16}\u{754c} \u{1f30d} \u{0417}\u{0434}\u{0440}\u{0430}\u{0432}\u{0441}\u{0442}\u{0432}\u{0443}\u{0439} \u{0645}\u{0631}\u{062d}\u{0628}\u{0627}".to_string(),
-            timestamp: None,
-        }];
-
-        let formatted = format_transcript(&prompt);
-        assert!(formatted.contains("\u{4e16}\u{754c}"));
-        assert!(formatted.contains("\u{1f30d}"));
-        assert!(formatted.contains(
-            "\u{0417}\u{0434}\u{0440}\u{0430}\u{0432}\u{0441}\u{0442}\u{0432}\u{0443}\u{0439}"
-        ));
-        assert!(formatted.contains("\u{0645}\u{0631}\u{062d}\u{0628}\u{0627}"));
-    }
 
     #[test]
     fn test_update_codex_prompt_invalid_path() {

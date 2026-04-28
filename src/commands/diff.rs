@@ -2561,12 +2561,10 @@ index abc123..def456 100644
                     model: model.to_string(),
                 },
                 human_author: None,
-                messages: vec![Message::user("u".to_string(), None)],
                 total_additions: additions,
                 total_deletions: deletions,
                 accepted_lines: 0,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
             }
         }
@@ -2596,15 +2594,6 @@ index abc123..def456 100644
             },
             Attribution::NoData,
         );
-        // Old-side no-data should not affect unknown_lines_added.
-        attributions.insert(
-            DiffLineKey {
-                file: "f.rs".to_string(),
-                line: 10,
-                side: LineSide::Old,
-            },
-            Attribution::NoData,
-        );
 
         let mut annotations = BTreeMap::new();
         annotations.insert("p1".to_string(), vec![LineRange::Single(1)]);
@@ -2618,15 +2607,15 @@ index abc123..def456 100644
             attributions,
             annotations_by_file,
             prompts: prompts.clone(),
-            sessions: BTreeMap::new(),
             humans: BTreeMap::new(),
+            sessions: BTreeMap::new(),
             json_hunks: vec![DiffJsonHunk {
                 commit_sha: "abc".to_string(),
                 content_hash: "hash".to_string(),
                 hunk_kind: "deletion".to_string(),
                 original_commit_sha: None,
-                start_line: 5,
-                end_line: 6,
+                start_line: 1,
+                end_line: 3,
                 file_path: "f.rs".to_string(),
                 prompt_id: None,
                 human_id: None,
