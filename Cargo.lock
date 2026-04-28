@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "git-ai"
-version = "1.3.5"
+version = "1.3.3"
 dependencies = [
  "chrono",
  "clap",
@@ -1144,7 +1144,7 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
- "winreg",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
@@ -4159,16 +4159,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
 dependencies = [
  "memchr",
-]
-
-[[package]]
-name = "winreg"
-version = "0.55.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb5a765337c50e9ec252c2069be9bf91c7df47afb103b642ba3a53bf8101be97"
-dependencies = [
- "cfg-if",
- "windows-sys 0.59.0",
 ]
 
 [[package]]
