@@ -992,14 +992,6 @@ pub fn git_status_fallback(repo_root: &Path) -> Result<Vec<String>, GitAiError> 
     Ok(changed_files)
 }
 
-fn git_status_existing_path_fallback(repo_root: &Path) -> Option<Vec<String>> {
-    let mut paths = git_status_fallback(repo_root).ok()?;
-    paths.retain(|path| repo_root.join(Path::new(path)).exists());
-    paths.sort();
-    paths.dedup();
-    if paths.is_empty() { None } else { Some(paths) }
-}
-
 // ---------------------------------------------------------------------------
 // Captured-checkpoint helpers
 // ---------------------------------------------------------------------------
@@ -1658,28 +1650,14 @@ pub fn handle_bash_tool(
                             let diff_result = diff(&pre, &post);
 
                             if diff_result.is_empty() {
-                                if let Some(paths) = git_status_existing_path_fallback(repo_root) {
-                                    tracing::debug!(
-                                        "Bash tool {}: stat-diff empty; git status found {} changed existing paths",
-                                        invocation_key,
-                                        paths.len(),
-                                    );
-                                    let captured_checkpoint =
-                                        attempt_post_hook_capture(repo_root, &paths);
-                                    Ok(BashToolResult {
-                                        action: BashCheckpointAction::Checkpoint(paths),
-                                        captured_checkpoint,
-                                    })
-                                } else {
-                                    tracing::debug!(
-                                        "Bash tool {}: no changes detected",
-                                        invocation_key
-                                    );
-                                    Ok(BashToolResult {
-                                        action: BashCheckpointAction::NoChanges,
-                                        captured_checkpoint: None,
-                                    })
-                                }
+                                tracing::debug!(
+                                    "Bash tool {}: no changes detected",
+                                    invocation_key
+                                );
+                                Ok(BashToolResult {
+                                    action: BashCheckpointAction::NoChanges,
+                                    captured_checkpoint: None,
+                                })
                             } else {
                                 let paths = diff_result.all_changed_paths();
                                 tracing::debug!(
