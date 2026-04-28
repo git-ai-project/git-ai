@@ -10,6 +10,19 @@ use std::path::PathBuf;
 
 pub struct CursorPreset;
 
+pub struct CursorBackgroundPreset;
+
+impl AgentPreset for CursorBackgroundPreset {
+    fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
+        if std::env::var("HOSTNAME").ok().as_deref() != Some("cursor") {
+            return Err(GitAiError::PresetError(
+                "Skipping cursor-background hook outside cursor agent environment.".to_string(),
+            ));
+        }
+        CursorPreset.parse(hook_input, trace_id)
+    }
+}
+
 impl AgentPreset for CursorPreset {
     fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
         let data: serde_json::Value = serde_json::from_str(hook_input)

@@ -149,6 +149,7 @@ pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
         "windsurf" => Ok(Box::new(windsurf::WindsurfPreset)),
         "continue-cli" => Ok(Box::new(continue_cli::ContinueCliPreset)),
         "cursor" => Ok(Box::new(cursor::CursorPreset)),
+        "cursor-background" => Ok(Box::new(cursor::CursorBackgroundPreset)),
         "github-copilot" => Ok(Box::new(github_copilot::GithubCopilotPreset)),
         "amp" => Ok(Box::new(amp::AmpPreset)),
         "ai_tab" => Ok(Box::new(ai_tab::AiTabPreset)),
