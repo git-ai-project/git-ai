@@ -3,7 +3,7 @@ src/synopsis/conversation.rs
 ---
 {
   "schema_version": "authorship/3.0.0",
-  "git_ai_version": "1.3.2",
+  "git_ai_version": "1.3.5",
   "base_commit_sha": "4673f800d5bf0fa69f9b4c2ddbea118825f912c0",
   "prompts": {}
 }
