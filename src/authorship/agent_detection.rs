@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(prompt.total_deletions, 0);
         assert_eq!(prompt.overriden_lines, 0);
         assert!(prompt.human_author.is_none());
-        assert!(prompt.messages.is_empty());
+        // Messages field removed from PromptRecord
     }
 
     #[test]
