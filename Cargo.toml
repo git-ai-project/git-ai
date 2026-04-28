@@ -64,6 +64,9 @@ serial_test = "3.4"
 rstest = "0.26"
 paste = "1.0"
 
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
 [profile.dev]
 debug = 1                          # Line tables only -- smaller binaries, faster linking
 split-debuginfo = "unpacked"       # macOS: dramatically faster linking

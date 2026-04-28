@@ -17,7 +17,15 @@ vars:
       printf '%s' "$args"
   TEST_THREADS:
     sh: |
-      n=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)
+      if [ -n "$NUMBER_OF_PROCESSORS" ]; then
+        n=$(powershell -NoProfile -NonInteractive -Command "[Environment]::ProcessorCount")
+      elif command -v nproc >/dev/null 2>&1; then
+        n=$(nproc)
+      elif command -v getconf >/dev/null 2>&1; then
+        n=$(getconf _NPROCESSORS_ONLN)
+      else
+        n=$(sysctl -n hw.ncpu)
+      fi
       [ "$n" -gt 12 ] && echo 12 || echo "$n"
 
 tasks:
