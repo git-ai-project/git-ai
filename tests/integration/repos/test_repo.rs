@@ -32,6 +32,17 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
+
 use super::test_file::TestFile;
 
 const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
@@ -100,6 +111,89 @@ struct DaemonProcess {
     stderr_log_path: PathBuf,
 }
 
+#[cfg(windows)]
+struct TestDaemonJob {
+    handle: HANDLE,
+}
+
+#[cfg(windows)]
+impl TestDaemonJob {
+    fn new() -> Self {
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        assert!(
+            !handle.is_null(),
+            "failed to create Windows test daemon job object"
+        );
+
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &mut limits as *mut _ as *const _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            unsafe {
+                CloseHandle(handle);
+            }
+            panic!("failed to configure Windows test daemon job object");
+        }
+
+        Self { handle }
+    }
+
+    fn assign_pid(&self, pid: u32) {
+        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+        assert!(
+            !process.is_null(),
+            "failed to open daemon process {} for job assignment",
+            pid
+        );
+
+        let ok = unsafe { AssignProcessToJobObject(self.handle, process) };
+        unsafe {
+            CloseHandle(process);
+        }
+        assert_ne!(
+            ok, 0,
+            "failed to assign daemon process {} to Windows test daemon job",
+            pid
+        );
+    }
+}
+
+// Windows job handles are kernel object handles. We only share the stable handle
+// value and close it once from the OnceLock-owned wrapper at process teardown.
+#[cfg(windows)]
+unsafe impl Send for TestDaemonJob {}
+#[cfg(windows)]
+unsafe impl Sync for TestDaemonJob {}
+
+#[cfg(windows)]
+impl Drop for TestDaemonJob {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+static TEST_DAEMON_JOB: OnceLock<TestDaemonJob> = OnceLock::new();
+
+#[cfg(windows)]
+fn assign_daemon_to_test_job(pid: u32) {
+    TEST_DAEMON_JOB
+        .get_or_init(TestDaemonJob::new)
+        .assign_pid(pid);
+}
+
+#[cfg(not(windows))]
+fn assign_daemon_to_test_job(_pid: u32) {}
+
 impl DaemonProcess {
     fn control_socket_path_for_home(test_home: &Path) -> PathBuf {
         DaemonConfig::from_home(test_home).control_socket_path
@@ -152,6 +246,7 @@ impl DaemonProcess {
             .spawn()
             .expect("failed to spawn git-ai subprocess for test mode");
         let pid = child.id();
+        assign_daemon_to_test_job(pid);
 
         let daemon = Self {
             pid,
