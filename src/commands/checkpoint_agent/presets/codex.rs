@@ -87,10 +87,13 @@ impl AgentPreset for CodexPreset {
             metadata,
         };
 
-        let transcript_source = transcript_path.map(|tp| TranscriptSource::Path {
+        let transcript_source = transcript_path.map(|tp| TranscriptSource {
             path: PathBuf::from(tp),
             format: TranscriptFormat::CodexJsonl,
-            session_id: None,
+            session_id: String::new(),
+            model: None,
+            tool: None,
+            external_thread_id: None,
         });
 
         let event = match hook_event {
@@ -190,7 +193,7 @@ mod tests {
                 assert_eq!(e.context.agent_id.tool, "codex");
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
+                    Some(TranscriptSource {
                         format: TranscriptFormat::CodexJsonl,
                         ..
                     })

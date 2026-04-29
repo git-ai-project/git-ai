@@ -15,6 +15,7 @@ use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
+use crate::commands::checkpoint_agent::presets::TranscriptSource;
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
@@ -115,6 +116,36 @@ pub enum BaseOverrideResolutionPolicy {
     RequireExplicitSnapshot,
 }
 
+/// Notify the daemon about a recorded checkpoint so it can process transcripts.
+/// This sends a CheckpointRecorded message to trigger the TranscriptWorker.
+/// Errors are silently ignored (fire-and-forget notification).
+fn send_checkpoint_notification(
+    transcript_source: &Option<TranscriptSource>,
+    session_id: &str,
+    trace_id: &str,
+) {
+    let Some(ts) = transcript_source.as_ref() else {
+        return;
+    };
+
+    // Only notify if we have a real session_id (not empty/default)
+    if session_id.is_empty() {
+        return;
+    }
+
+    let transcript_path = ts.path.to_string_lossy().to_string();
+    crate::daemon::telemetry_handle::notify_checkpoint_recorded(
+        session_id.to_string(),
+        trace_id.to_string(),
+        transcript_path,
+    );
+    tracing::debug!(
+        "Sent CheckpointRecorded notification for session {} trace {}",
+        session_id,
+        trace_id
+    );
+}
+
 /// Build EventAttributes with repo metadata.
 /// Reused for both AgentUsage and Checkpoint events.
 fn build_checkpoint_attrs(
@@ -122,8 +153,14 @@ fn build_checkpoint_attrs(
     base_commit: &str,
     agent_id: Option<&AgentId>,
 ) -> crate::metrics::EventAttributes {
+    // Extract session_id from agent_id if available
+    let session_id = agent_id
+        .as_ref()
+        .map(|aid| generate_session_id(&aid.id, &aid.tool))
+        .unwrap_or_default();
+
     let mut attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
-        .session_id("") // TODO: add real session tracking in later phase
+        .session_id(session_id)
         .base_commit_sha(base_commit);
 
     // Add AI-specific attributes
@@ -933,11 +970,22 @@ fn execute_resolved_checkpoint(
         );
         checkpoints.push(checkpoint.clone());
 
-        let attrs =
+        let mut attrs =
             build_checkpoint_attrs(repo, &resolved.base_commit, checkpoint.agent_id.as_ref());
 
+        // Add trace_id to attributes
+        if let Some(ref tid) = checkpoint.trace_id {
+            attrs = attrs.trace_id(tid);
+        }
+
+        // Extract tool_use_id from metadata if available (used by bash tool hooks)
+        let tool_use_id = checkpoint_request
+            .as_ref()
+            .and_then(|cr| cr.metadata.get("tool_use_id"))
+            .map(|s| s.as_str());
+
         for (entry, file_stat) in entries.iter().zip(file_stats.iter()) {
-            let values = crate::metrics::CheckpointValues::new()
+            let mut values = crate::metrics::CheckpointValues::new()
                 .checkpoint_ts(checkpoint.timestamp)
                 .kind(checkpoint.kind.to_str().to_string())
                 .file_path(entry.file.clone())
@@ -945,8 +993,26 @@ fn execute_resolved_checkpoint(
                 .lines_deleted(file_stat.deletions)
                 .lines_added_sloc(file_stat.additions_sloc)
                 .lines_deleted_sloc(file_stat.deletions_sloc);
+
+            // Add tool_use_id if available
+            if let Some(tuid) = tool_use_id {
+                values = values.tool_use_id(tuid);
+            }
+
             let file_attrs = attrs.clone().author(&checkpoint.author);
             crate::metrics::record(values, file_attrs);
+        }
+
+        // Notify daemon about checkpoint for transcript processing
+        if let Some(ref cr) = checkpoint_request {
+            if let Some(ref ts) = cr.transcript_source {
+                let session_id = checkpoint.agent_id
+                    .as_ref()
+                    .map(|aid| generate_session_id(&aid.id, &aid.tool))
+                    .unwrap_or_default();
+                let trace_id_str = checkpoint.trace_id.as_deref().unwrap_or("");
+                send_checkpoint_notification(&Some(ts.clone()), &session_id, trace_id_str);
+            }
         }
     }
 

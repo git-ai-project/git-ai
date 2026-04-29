@@ -146,10 +146,13 @@ impl AgentPreset for DroidPreset {
             metadata,
         };
 
-        let transcript_source = Some(TranscriptSource::Path {
+        let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(&resolved_transcript_path),
             format: TranscriptFormat::DroidJsonl,
-            session_id: None,
+            session_id: context.session_id.clone(),
+            model: None, // Model will be extracted from transcript during processing
+            tool: Some("droid".to_string()),
+            external_thread_id: Some(context.session_id.clone()),
         });
 
         // PreToolUse
@@ -253,13 +256,11 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource::Path {
-                        format: TranscriptFormat::DroidJsonl,
-                        ..
-                    })
-                ));
+                assert!(e.transcript_source.is_some());
+                if let Some(ts) = &e.transcript_source {
+                    assert_eq!(ts.format, TranscriptFormat::DroidJsonl);
+                    assert_eq!(ts.tool, Some("droid".to_string()));
+                }
             }
             _ => panic!("Expected PostFileEdit"),
         }
@@ -289,13 +290,11 @@ mod tests {
             ParsedHookEvent::PostBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "droid");
                 assert_eq!(e.tool_use_id, "tu-1");
-                assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource::Path {
-                        format: TranscriptFormat::DroidJsonl,
-                        ..
-                    })
-                ));
+                assert!(e.transcript_source.is_some());
+                if let Some(ts) = &e.transcript_source {
+                    assert_eq!(ts.format, TranscriptFormat::DroidJsonl);
+                    assert_eq!(ts.tool, Some("droid".to_string()));
+                }
             }
             _ => panic!("Expected PostBashCall"),
         }

@@ -154,10 +154,13 @@ impl OpenCodePreset {
         let db_path = Self::resolve_sqlite_db_path(&opencode_path);
         if let Some(db_path) = db_path {
             return Some((
-                TranscriptSource::Path {
+                TranscriptSource {
                     path: db_path,
                     format: TranscriptFormat::OpenCodeSqlite,
-                    session_id: Some(session_id.to_string()),
+                    session_id: session_id.to_string(),
+                    model: None,
+                    tool: Some("opencode".to_string()),
+                    external_thread_id: Some(session_id.to_string()),
                 },
                 opencode_path,
             ));
@@ -169,10 +172,13 @@ impl OpenCodePreset {
             let session_dir = storage_path.join("message").join(session_id);
             if session_dir.exists() {
                 return Some((
-                    TranscriptSource::Path {
+                    TranscriptSource {
                         path: storage_path,
                         format: TranscriptFormat::OpenCodeLegacyJson,
-                        session_id: Some(session_id.to_string()),
+                        session_id: session_id.to_string(),
+                        model: None,
+                        tool: Some("opencode".to_string()),
+                        external_thread_id: Some(session_id.to_string()),
                     },
                     opencode_path,
                 ));

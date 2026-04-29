@@ -95,14 +95,22 @@ pub struct PostBashCall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TranscriptSource {
-    Path {
-        path: PathBuf,
-        format: TranscriptFormat,
-        /// Extra context needed by some formats (e.g., session_id for OpenCode).
-        #[serde(default)]
-        session_id: Option<String>,
-    },
+pub struct TranscriptSource {
+    pub path: PathBuf,
+    pub format: TranscriptFormat,
+    /// Session ID for this transcript (used to query/create session in DB).
+    /// Defaults to empty string for backward compatibility.
+    #[serde(default)]
+    pub session_id: String,
+    /// Model name (e.g., "claude-3-5-sonnet-20241022").
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Tool name (e.g., "claude", "cursor").
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// External thread/conversation ID (agent-specific identifier).
+    #[serde(default)]
+    pub external_thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -136,10 +136,13 @@ fn parse_legacy_extension_hooks(
         metadata,
     };
 
-    let transcript_source = Some(TranscriptSource::Path {
+    let transcript_source = Some(TranscriptSource {
         path: PathBuf::from(chat_session_path),
         format: TranscriptFormat::CopilotSessionJson,
-        session_id: None,
+        session_id: String::new(),
+            model: None,
+            tool: None,
+            external_thread_id: None,
     });
 
     Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
@@ -239,10 +242,13 @@ fn parse_vscode_native_hooks(
         metadata,
     };
 
-    let transcript_source = transcript_path.map(|tp| TranscriptSource::Path {
+    let transcript_source = transcript_path.map(|tp| TranscriptSource {
         path: PathBuf::from(tp),
         format: transcript_format,
-        session_id: None,
+        session_id: String::new(),
+            model: None,
+            tool: None,
+            external_thread_id: None,
     });
 
     if hook_event_name == "PreToolUse" {
@@ -633,7 +639,7 @@ mod tests {
                 );
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
+                    Some(TranscriptSource {
                         format: TranscriptFormat::CopilotSessionJson,
                         ..
                     })
@@ -714,7 +720,7 @@ mod tests {
                 );
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
+                    Some(TranscriptSource {
                         format: TranscriptFormat::CopilotSessionJson,
                         ..
                     })
@@ -1056,7 +1062,7 @@ mod tests {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
+                    Some(TranscriptSource {
                         format: TranscriptFormat::CopilotEventStreamJsonl,
                         ..
                     })

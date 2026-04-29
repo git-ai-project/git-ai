@@ -22,13 +22,12 @@ use std::path::{Component, Path};
 pub fn read_transcript(
     source: &TranscriptSource,
 ) -> Result<(AiTranscript, Option<String>), GitAiError> {
-    match source {
-        TranscriptSource::Path {
-            path,
-            format,
-            session_id,
-        } => read_from_path(path, *format, session_id.as_deref()),
-    }
+    let session_id = if source.session_id.is_empty() {
+        None
+    } else {
+        Some(source.session_id.as_str())
+    };
+    read_from_path(&source.path, source.format, session_id)
 }
 
 fn read_from_path(

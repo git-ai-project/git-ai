@@ -157,10 +157,13 @@ impl AgentPreset for PiPreset {
 
         let transcript_source = {
             let path = PathBuf::from(&session_path);
-            Some(TranscriptSource::Path {
+            Some(TranscriptSource {
                 path,
                 format: TranscriptFormat::PiJsonl,
-                session_id: None,
+                session_id: String::new(),
+            model: None,
+            tool: None,
+            external_thread_id: None,
             })
         };
 
@@ -283,7 +286,7 @@ mod tests {
                 );
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
+                    Some(TranscriptSource {
                         format: TranscriptFormat::PiJsonl,
                         ..
                     })
@@ -338,7 +341,7 @@ mod tests {
                 assert_eq!(e.tool_use_id, "tu-def456");
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
+                    Some(TranscriptSource {
                         format: TranscriptFormat::PiJsonl,
                         ..
                     })
