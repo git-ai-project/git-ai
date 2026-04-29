@@ -118,6 +118,7 @@ mod sync_authorship_types;
 mod test_utils_unit;
 mod tls_native_certs;
 mod transcripts_claude_reader;
+mod transcripts_e2e;
 mod utf8_filenames;
 mod virtual_attribution_unit;
 mod windsurf;

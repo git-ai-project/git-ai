@@ -161,9 +161,9 @@ impl AgentPreset for PiPreset {
                 path,
                 format: TranscriptFormat::PiJsonl,
                 session_id: String::new(),
-            model: None,
-            tool: None,
-            external_thread_id: None,
+                model: None,
+                tool: None,
+                external_thread_id: None,
             })
         };
 

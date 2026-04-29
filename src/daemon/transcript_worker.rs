@@ -5,13 +5,13 @@
 //! 2. **Polling detection** (High priority, <1s) - periodic file stat checks find modified transcripts
 //! 3. **Historical backfill** (Low priority) - process old transcripts we haven't seen before
 
+use crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle;
+use crate::metrics::{EventAttributes, record};
 use crate::transcripts::db::{SessionRecord, TranscriptsDatabase};
 use crate::transcripts::processor::{TranscriptFormat, process_transcript};
 use crate::transcripts::types::TranscriptError;
 use crate::transcripts::watermark::WatermarkType;
-use crate::metrics::{record, EventAttributes};
-use crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle;
-use chrono::{Utc, TimeZone};
+use chrono::{TimeZone, Utc};
 use std::collections::{BinaryHeap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -199,7 +199,12 @@ impl TranscriptWorker {
                 let transcript_path = PathBuf::from(path_str);
 
                 // Check if session already exists
-                if self.transcripts_db.get_session(&id).map_err(|e| e.to_string())?.is_some() {
+                if self
+                    .transcripts_db
+                    .get_session(&id)
+                    .map_err(|e| e.to_string())?
+                    .is_some()
+                {
                     continue;
                 }
 
@@ -385,11 +390,11 @@ impl TranscriptWorker {
         _telemetry: &DaemonTelemetryWorkerHandle,
         task: &ProcessingTask,
     ) -> Result<(), TranscriptError> {
-        let session = db.get_session(&task.session_id)?.ok_or_else(|| {
-            TranscriptError::Fatal {
+        let session = db
+            .get_session(&task.session_id)?
+            .ok_or_else(|| TranscriptError::Fatal {
                 message: format!("session not found: {}", task.session_id),
-            }
-        })?;
+            })?;
 
         // Parse format
         let format = match session.transcript_format.as_str() {
@@ -402,7 +407,7 @@ impl TranscriptWorker {
                 return Err(TranscriptError::Parse {
                     line: 0,
                     message: format!("unknown transcript format: {}", session.transcript_format),
-                })
+                });
             }
         };
 
@@ -414,7 +419,7 @@ impl TranscriptWorker {
                 return Err(TranscriptError::Parse {
                     line: 0,
                     message: format!("unknown watermark type: {}", session.watermark_type),
-                })
+                });
             }
         };
 
@@ -511,9 +516,10 @@ impl TranscriptWorker {
                     error = %message,
                     "parse error, skipping session"
                 );
-                let _ = self
-                    .transcripts_db
-                    .record_error(&task.session_id, &format!("parse line {}: {}", line, message));
+                let _ = self.transcripts_db.record_error(
+                    &task.session_id,
+                    &format!("parse line {}: {}", line, message),
+                );
             }
             TranscriptError::Fatal { message } => {
                 // Fatal errors are not retried
