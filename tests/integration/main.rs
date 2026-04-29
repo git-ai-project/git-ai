@@ -117,6 +117,7 @@ mod sublime_merge_installer;
 mod sync_authorship_types;
 mod test_utils_unit;
 mod tls_native_certs;
+mod transcripts_claude_reader;
 mod utf8_filenames;
 mod virtual_attribution_unit;
 mod windsurf;

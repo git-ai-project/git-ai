@@ -1,0 +1,3 @@
+{"type":"user","message":{"content":"Write a hello world function"},"timestamp":"2025-01-01T12:00:00Z"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"I'll create a hello world function for you."}],"model":"claude-sonnet-4"},"timestamp":"2025-01-01T12:00:01Z"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Write","id":"toolu_abc123","input":{"file_path":"hello.py","content":"def hello():\n    print('Hello, World!')\n"}}],"model":"claude-sonnet-4"},"timestamp":"2025-01-01T12:00:02Z"}

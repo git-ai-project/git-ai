@@ -276,11 +276,7 @@ impl PosEncoded for EventAttributes {
             attr_pos::SESSION_ID,
             string_to_json(&self.session_id),
         );
-        sparse_set(
-            &mut map,
-            attr_pos::TRACE_ID,
-            string_to_json(&self.trace_id),
-        );
+        sparse_set(&mut map, attr_pos::TRACE_ID, string_to_json(&self.trace_id));
         sparse_set(
             &mut map,
             attr_pos::CUSTOM_ATTRIBUTES,

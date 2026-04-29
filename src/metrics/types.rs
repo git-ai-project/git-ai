@@ -20,6 +20,7 @@ pub enum MetricEventId {
     AgentUsage = 2,
     InstallHooks = 3,
     Checkpoint = 4,
+    AgentTrace = 5,
 }
 
 /// Trait for event-specific values.
