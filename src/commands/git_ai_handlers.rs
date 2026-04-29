@@ -415,6 +415,7 @@ fn handle_checkpoint(args: &[String]) {
     {
         let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
         let attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+            .session_id("") // TODO: add real session tracking in later phase
             .tool(&agent_id.tool)
             .model(&agent_id.model)
             .prompt_id(prompt_id)

@@ -123,6 +123,7 @@ fn build_checkpoint_attrs(
     agent_id: Option<&AgentId>,
 ) -> crate::metrics::EventAttributes {
     let mut attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+        .session_id("") // TODO: add real session tracking in later phase
         .base_commit_sha(base_commit);
 
     // Add AI-specific attributes
