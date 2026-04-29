@@ -1781,99 +1781,63 @@ mod tests {
         ));
     }
 
-    fn seed_test_update_cache(dir: &tempfile::TempDir, available: bool) {
-        let cache_path = dir.path().join("update_check");
-        let now = current_timestamp();
-        let cache = if available {
-            serde_json::json!({
-                "last_checked_at": now,
-                "available_tag": "v99.99.99",
-                "available_semver": "99.99.99",
-                "channel": "latest"
-            })
-        } else {
-            serde_json::json!({
-                "last_checked_at": now,
-                "available_tag": null,
-                "available_semver": null,
-                "channel": "latest"
-            })
-        };
-        fs::write(cache_path, serde_json::to_vec(&cache).unwrap()).unwrap();
-    }
+    fn with_update_check_env(
+        cache_has_update: bool,
+        auto_updates_disabled: bool,
+        f: impl FnOnce(),
+    ) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        set_test_cache_dir(&temp_dir);
 
-    fn set_config_patch(json: &str) {
-        unsafe {
-            std::env::set_var("GIT_AI_TEST_CONFIG_PATCH", json);
+        let mut cache = UpdateCache::new(UpdateChannel::Latest);
+        cache.last_checked_at = current_timestamp();
+        if cache_has_update {
+            cache.available_tag = Some("v99.99.99".to_string());
+            cache.available_semver = Some("99.99.99".to_string());
         }
-    }
+        write_update_cache(&cache);
 
-    fn clear_config_patch() {
-        unsafe {
-            std::env::remove_var("GIT_AI_TEST_CONFIG_PATCH");
+        let patch = serde_json::json!({
+            "disable_version_checks": false,
+            "disable_auto_updates": auto_updates_disabled
+        })
+        .to_string();
+        unsafe { std::env::set_var("GIT_AI_TEST_CONFIG_PATCH", &patch) };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+
+        unsafe { std::env::remove_var("GIT_AI_TEST_CONFIG_PATCH") };
+        clear_test_cache_dir();
+
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
         }
     }
 
     #[test]
     #[serial]
     fn check_for_update_available_returns_update_ready_when_cache_has_pending_update() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        set_test_cache_dir(&temp_dir);
-        seed_test_update_cache(&temp_dir, true);
-        set_config_patch(
-            &serde_json::json!({
-                "disable_version_checks": false,
-                "disable_auto_updates": false
-            })
-            .to_string(),
-        );
-
-        let result = check_for_update_available().unwrap();
-        assert_eq!(result, DaemonUpdateCheckResult::UpdateReady);
-
-        clear_config_patch();
-        clear_test_cache_dir();
+        with_update_check_env(true, false, || {
+            let result = check_for_update_available().unwrap();
+            assert_eq!(result, DaemonUpdateCheckResult::UpdateReady);
+        });
     }
 
     #[test]
     #[serial]
     fn check_for_update_available_returns_no_update_when_auto_updates_disabled() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        set_test_cache_dir(&temp_dir);
-        seed_test_update_cache(&temp_dir, true);
-        set_config_patch(
-            &serde_json::json!({
-                "disable_version_checks": false,
-                "disable_auto_updates": true
-            })
-            .to_string(),
-        );
-
-        let result = check_for_update_available().unwrap();
-        assert_eq!(result, DaemonUpdateCheckResult::NoUpdate);
-
-        clear_config_patch();
-        clear_test_cache_dir();
+        with_update_check_env(true, true, || {
+            let result = check_for_update_available().unwrap();
+            assert_eq!(result, DaemonUpdateCheckResult::NoUpdate);
+        });
     }
 
     #[test]
     #[serial]
     fn check_for_update_available_returns_no_update_when_cache_has_no_pending_update() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        set_test_cache_dir(&temp_dir);
-        seed_test_update_cache(&temp_dir, false);
-        set_config_patch(
-            &serde_json::json!({
-                "disable_version_checks": false,
-                "disable_auto_updates": false
-            })
-            .to_string(),
-        );
-
-        let result = check_for_update_available().unwrap();
-        assert_eq!(result, DaemonUpdateCheckResult::NoUpdate);
-
-        clear_config_patch();
-        clear_test_cache_dir();
+        with_update_check_env(false, false, || {
+            let result = check_for_update_available().unwrap();
+            assert_eq!(result, DaemonUpdateCheckResult::NoUpdate);
+        });
     }
 }
