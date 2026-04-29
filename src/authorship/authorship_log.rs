@@ -247,11 +247,17 @@ impl PartialOrd for PromptRecord {
 
 impl Ord for PromptRecord {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Sort by session ID (generated from agent_id)
+        // Sort oldest to newest based on additions or deletions,
+        // with session ID as tiebreaker for deterministic ordering.
         use crate::authorship::authorship_log_serialization::generate_short_hash;
-        let self_id = generate_short_hash(&self.agent_id.id, &self.agent_id.tool);
-        let other_id = generate_short_hash(&other.agent_id.id, &other.agent_id.tool);
-        self_id.cmp(&other_id)
+        self.total_additions
+            .cmp(&other.total_additions)
+            .then_with(|| self.total_deletions.cmp(&other.total_deletions))
+            .then_with(|| {
+                let self_id = generate_short_hash(&self.agent_id.id, &self.agent_id.tool);
+                let other_id = generate_short_hash(&other.agent_id.id, &other.agent_id.tool);
+                self_id.cmp(&other_id)
+            })
     }
 }
 

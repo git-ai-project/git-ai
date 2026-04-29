@@ -462,8 +462,6 @@ pub fn redact_secrets_in_text(text: &str) -> (String, usize) {
     (result, count)
 }
 
-/// Redact secrets from all prompt messages using entropy-based detection.
-/// Scans user and assistant message text for high-entropy strings (API keys,
 #[cfg(test)]
 mod tests {
     use insta::assert_debug_snapshot;
