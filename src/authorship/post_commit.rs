@@ -1,17 +1,12 @@
-use crate::api::{ApiClient, ApiContext};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
 use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
-use crate::authorship::secrets::{
-    redact_secrets_from_prompts, redact_secrets_from_sessions, strip_prompt_messages,
-    strip_session_messages,
-};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
-use crate::config::{Config, PromptStorageMode};
+use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::refs::notes_add;
 use crate::git::repository::Repository;
@@ -155,11 +150,7 @@ pub fn post_commit_with_final_state(
     // Always use Config::fresh() to support runtime config updates
     // (especially important for daemon mode, but also good for consistency)
     let config = Config::fresh();
-    let (effective_storage, using_custom_api, custom_attrs) = (
-        config.effective_prompt_storage(&Some(repo.clone())),
-        config.api_base_url() != crate::config::DEFAULT_API_BASE_URL,
-        config.custom_attributes().clone(),
-    );
+    let custom_attrs = config.custom_attributes().clone();
 
     // Inject custom attributes into all PromptRecords and SessionRecords.
     if !custom_attrs.is_empty() {
@@ -168,63 +159,6 @@ pub fn post_commit_with_final_state(
         }
         for sr in authorship_log.metadata.sessions.values_mut() {
             sr.custom_attributes = Some(custom_attrs.clone());
-        }
-    }
-
-    match effective_storage {
-        PromptStorageMode::Local => {
-            // Local only: strip all messages from notes (they stay in sqlite only)
-            strip_prompt_messages(&mut authorship_log.metadata.prompts);
-            strip_session_messages(&mut authorship_log.metadata.sessions);
-        }
-        PromptStorageMode::Notes => {
-            // Store in notes: redact secrets but keep messages in notes
-            let count = redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
-            let count2 = redact_secrets_from_sessions(&mut authorship_log.metadata.sessions);
-            if count + count2 > 0 {
-                tracing::debug!("Redacted {} secrets from prompts/sessions", count + count2);
-            }
-        }
-        PromptStorageMode::Default => {
-            // "default" - attempt CAS upload, NEVER keep messages in notes
-            // Check conditions for CAS upload:
-            // - user is logged in OR has API key OR using custom API URL
-            let context = ApiContext::new(None);
-            let client = ApiClient::new(context);
-            let should_enqueue_cas =
-                client.is_logged_in() || client.has_api_key() || using_custom_api;
-
-            if should_enqueue_cas {
-                // Redact secrets before uploading to CAS
-                let redaction_count =
-                    redact_secrets_from_prompts(&mut authorship_log.metadata.prompts);
-                let redaction_count2 =
-                    redact_secrets_from_sessions(&mut authorship_log.metadata.sessions);
-                if redaction_count + redaction_count2 > 0 {
-                    tracing::debug!(
-                        "Redacted {} secrets from prompts/sessions before CAS upload",
-                        redaction_count + redaction_count2
-                    );
-                }
-
-                if let Err(e) =
-                    enqueue_prompt_messages_to_cas(repo, &mut authorship_log.metadata.prompts)
-                {
-                    tracing::debug!("[Warning] Failed to enqueue prompt messages to CAS: {}", e);
-                    strip_prompt_messages(&mut authorship_log.metadata.prompts);
-                }
-
-                if let Err(e) =
-                    enqueue_session_messages_to_cas(repo, &mut authorship_log.metadata.sessions)
-                {
-                    tracing::debug!("[Warning] Failed to enqueue session messages to CAS: {}", e);
-                    strip_session_messages(&mut authorship_log.metadata.sessions);
-                }
-            } else {
-                // Not enqueueing - strip messages (never keep in notes for "default")
-                strip_prompt_messages(&mut authorship_log.metadata.prompts);
-                strip_session_messages(&mut authorship_log.metadata.sessions);
-            }
         }
     }
 
@@ -480,9 +414,9 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
 
             // Apply the update to the last checkpoint only
             match result {
-                PromptUpdateResult::Updated(latest_transcript, latest_model) => {
+                PromptUpdateResult::Updated(latest_model) => {
                     let checkpoint = &mut checkpoints[last_idx];
-                    checkpoint.transcript = Some(latest_transcript);
+                    // Transcript no longer stored
                     if let Some(agent_id) = &mut checkpoint.agent_id {
                         agent_id.model = latest_model;
                     }
@@ -495,167 +429,6 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
                     // Continue processing other checkpoints
                 }
             }
-        }
-    }
-
-    Ok(())
-}
-
-/// Enqueue prompt messages to CAS for external storage.
-/// For each prompt with non-empty messages:
-/// - Serialize messages to JSON
-/// - Enqueue to CAS (returns hash)
-/// - Set messages_url (format: {api_base_url}/cas/{hash}) and clear messages
-fn enqueue_prompt_messages_to_cas(
-    repo: &Repository,
-    prompts: &mut std::collections::BTreeMap<
-        String,
-        crate::authorship::authorship_log::PromptRecord,
-    >,
-) -> Result<(), GitAiError> {
-    use crate::authorship::internal_db::InternalDatabase;
-
-    let db = InternalDatabase::global()?;
-    let mut db_lock = db
-        .lock()
-        .map_err(|e| GitAiError::Generic(format!("Failed to lock database: {}", e)))?;
-
-    // CAS metadata for prompt messages
-    let mut metadata = HashMap::new();
-    metadata.insert("api_version".to_string(), "v1".to_string());
-    metadata.insert("kind".to_string(), "prompt".to_string());
-
-    // Get repo URL from default remote
-    let repo_url = repo
-        .get_default_remote()
-        .ok()
-        .flatten()
-        .and_then(|remote_name| {
-            repo.remotes_with_urls().ok().and_then(|remotes| {
-                remotes
-                    .into_iter()
-                    .find(|(name, _)| name == &remote_name)
-                    .map(|(_, url)| url)
-            })
-        });
-
-    if let Some(url) = repo_url
-        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
-    {
-        metadata.insert("repo_url".to_string(), normalized);
-    }
-
-    // Get API base URL for constructing messages_url
-    // Always use Config::fresh() to support runtime config updates
-    let api_base_url = Config::fresh().api_base_url().to_string();
-
-    for (_key, prompt) in prompts.iter_mut() {
-        if !prompt.messages.is_empty() {
-            // Wrap messages in CasMessagesObject and serialize to JSON
-            let messages_obj = crate::api::types::CasMessagesObject {
-                messages: prompt.messages.clone(),
-            };
-            let messages_json = serde_json::to_value(&messages_obj)
-                .map_err(|e| GitAiError::Generic(format!("Failed to serialize messages: {}", e)))?;
-
-            // Enqueue to CAS (returns hash)
-            let hash = db_lock.enqueue_cas_object(&messages_json, Some(&metadata))?;
-
-            let metadata_json = serde_json::to_string(&metadata).ok();
-            let canonical = serde_json_canonicalizer::to_string(&messages_json)
-                .unwrap_or_else(|_| messages_json.to_string());
-            let cas_payload = crate::daemon::control_api::CasSyncPayload {
-                hash: hash.clone(),
-                data: canonical,
-                metadata: metadata_json,
-            };
-
-            // In daemon mode, submit directly to the in-process telemetry worker.
-            // In wrapper-daemon mode, forward over the control socket so the
-            // background daemon can upload it immediately.
-            if crate::daemon::daemon_process_active() {
-                let _ =
-                    crate::daemon::telemetry_worker::submit_daemon_internal_cas(vec![cas_payload]);
-            } else if crate::daemon::telemetry_handle::daemon_telemetry_available() {
-                crate::daemon::telemetry_handle::submit_cas(vec![cas_payload]);
-            }
-
-            // Set full URL and clear messages
-            prompt.messages_url = Some(format!("{}/cas/{}", api_base_url, hash));
-            prompt.messages.clear();
-        }
-    }
-
-    Ok(())
-}
-
-fn enqueue_session_messages_to_cas(
-    repo: &Repository,
-    sessions: &mut std::collections::BTreeMap<
-        String,
-        crate::authorship::authorship_log::SessionRecord,
-    >,
-) -> Result<(), GitAiError> {
-    use crate::authorship::internal_db::InternalDatabase;
-
-    let db = InternalDatabase::global()?;
-    let mut db_lock = db
-        .lock()
-        .map_err(|e| GitAiError::Generic(format!("Failed to lock database: {}", e)))?;
-
-    let mut metadata = HashMap::new();
-    metadata.insert("api_version".to_string(), "v1".to_string());
-    metadata.insert("kind".to_string(), "session".to_string());
-
-    let repo_url = repo
-        .get_default_remote()
-        .ok()
-        .flatten()
-        .and_then(|remote_name| {
-            repo.remotes_with_urls().ok().and_then(|remotes| {
-                remotes
-                    .into_iter()
-                    .find(|(name, _)| name == &remote_name)
-                    .map(|(_, url)| url)
-            })
-        });
-
-    if let Some(url) = repo_url
-        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
-    {
-        metadata.insert("repo_url".to_string(), normalized);
-    }
-
-    let api_base_url = Config::fresh().api_base_url().to_string();
-
-    for (_key, session) in sessions.iter_mut() {
-        if !session.messages.is_empty() {
-            let messages_obj = crate::api::types::CasMessagesObject {
-                messages: session.messages.clone(),
-            };
-            let messages_json = serde_json::to_value(&messages_obj)
-                .map_err(|e| GitAiError::Generic(format!("Failed to serialize messages: {}", e)))?;
-
-            let hash = db_lock.enqueue_cas_object(&messages_json, Some(&metadata))?;
-
-            let metadata_json = serde_json::to_string(&metadata).ok();
-            let canonical = serde_json_canonicalizer::to_string(&messages_json)
-                .unwrap_or_else(|_| messages_json.to_string());
-            let cas_payload = crate::daemon::control_api::CasSyncPayload {
-                hash: hash.clone(),
-                data: canonical,
-                metadata: metadata_json,
-            };
-
-            if crate::daemon::daemon_process_active() {
-                let _ =
-                    crate::daemon::telemetry_worker::submit_daemon_internal_cas(vec![cas_payload]);
-            } else if crate::daemon::telemetry_handle::daemon_telemetry_available() {
-                crate::daemon::telemetry_handle::submit_cas(vec![cas_payload]);
-            }
-
-            session.messages_url = Some(format!("{}/cas/{}", api_base_url, hash));
-            session.messages.clear();
         }
     }
 

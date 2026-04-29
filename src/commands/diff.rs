@@ -962,8 +962,6 @@ fn apply_blame_for_side(
                     .or_insert_with(|| SessionRecord {
                         agent_id: prompt_record.agent_id.clone(),
                         human_author: prompt_record.human_author.clone(),
-                        messages: prompt_record.messages.clone(),
-                        messages_url: prompt_record.messages_url.clone(),
                         custom_attributes: prompt_record.custom_attributes.clone(),
                     });
             }
@@ -2017,7 +2015,6 @@ pub fn get_diff_json_filtered(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authorship::transcript::Message;
     use crate::authorship::working_log::AgentId;
     use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -2563,13 +2560,12 @@ index abc123..def456 100644
                     model: model.to_string(),
                 },
                 human_author: None,
-                messages: vec![Message::user("u".to_string(), None)],
                 total_additions: additions,
                 total_deletions: deletions,
                 accepted_lines: 0,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             }
         }
 
@@ -2620,8 +2616,8 @@ index abc123..def456 100644
             attributions,
             annotations_by_file,
             prompts: prompts.clone(),
-            sessions: BTreeMap::new(),
             humans: BTreeMap::new(),
+            sessions: BTreeMap::new(),
             json_hunks: vec![DiffJsonHunk {
                 commit_sha: "abc".to_string(),
                 content_hash: "hash".to_string(),

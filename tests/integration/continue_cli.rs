@@ -527,11 +527,6 @@ fn test_continue_cli_e2e_with_attribution() {
         .next()
         .expect("Should have at least one session record");
 
-    assert!(
-        !session_record.messages.is_empty(),
-        "Session record should contain messages from the continue-cli session"
-    );
-
     assert_eq!(
         session_record.agent_id.model, "claude-3.5-sonnet",
         "Model should be 'claude-3.5-sonnet'"

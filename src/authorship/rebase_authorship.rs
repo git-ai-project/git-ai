@@ -4261,8 +4261,6 @@ fn build_note_from_conflict_wl(
                 .or_insert_with(|| crate::authorship::authorship_log::SessionRecord {
                     agent_id: agent_id.clone(),
                     human_author: None,
-                    messages: Vec::new(),
-                    messages_url: None,
                     custom_attributes: None,
                 });
         } else {
@@ -4275,13 +4273,12 @@ fn build_note_from_conflict_wl(
                 .or_insert_with(|| crate::authorship::authorship_log::PromptRecord {
                     agent_id: agent_id.clone(),
                     human_author: None,
-                    messages: Vec::new(),
                     total_additions: checkpoint.line_stats.additions,
                     total_deletions: checkpoint.line_stats.deletions,
                     accepted_lines: 0,
                     overriden_lines: 0,
-                    messages_url: None,
                     custom_attributes: None,
+                    messages_url: None,
                 });
         }
 
@@ -4708,11 +4705,13 @@ pub fn transform_attributions_to_final_state(
         file_contents.insert(file_path, final_content);
     }
 
-    // Merge prompts from source VA and original_head_state, picking the newest version of each
+    // Merge prompts from source VA and original_head_state (source wins on conflict)
     let mut prompts = if let Some(original_state) = original_head_state {
-        crate::authorship::virtual_attribution::VirtualAttributions::merge_prompts_picking_newest(
-            &[source_va.prompts(), original_state.prompts()],
-        )
+        let mut merged = original_state.prompts().clone();
+        for (id, commits) in source_va.prompts() {
+            merged.insert(id.clone(), commits.clone());
+        }
+        merged
     } else {
         source_va.prompts().clone()
     };

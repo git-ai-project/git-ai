@@ -1,7 +1,6 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use crate::test_utils::fixture_path;
-use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::{Checkpoint, CheckpointKind};
 use serde_json::json;
 use std::fs;
@@ -157,10 +156,7 @@ fn test_pi_after_edit_checkpoint_via_cli_creates_ai_checkpoint() {
     // are skipped during checkpointing. Model resolution happens at commit time
     // via update_prompts_to_latest.
     assert_eq!(checkpoints[0].agent_id.as_ref().unwrap().model, "unknown");
-    assert!(
-        checkpoints[0].transcript.is_none(),
-        "Pi checkpoints with session_path should persist metadata and drop inline transcript"
-    );
+    // Transcript field removed from Checkpoint struct
     assert_eq!(
         checkpoints[0]
             .agent_metadata
@@ -177,10 +173,6 @@ fn test_pi_after_edit_checkpoint_via_cli_creates_ai_checkpoint() {
     assert_eq!(
         sessions[0].agent_id.model, "claude-sonnet-4-5",
         "Model should be resolved from transcript at commit time"
-    );
-    assert!(
-        !sessions[0].messages.is_empty(),
-        "Transcript messages should be populated at commit time"
     );
 }
 
@@ -241,9 +233,5 @@ fn test_pi_post_commit_resyncs_latest_session_transcript() {
 
     assert_eq!(session_record.agent_id.tool, "pi");
     assert_eq!(session_record.agent_id.model, "gpt-5");
-    assert!(session_record.messages.iter().any(|message| matches!(
-        message,
-        Message::Assistant { text, .. }
-            if text.contains("RESYNC_TEST_MESSAGE")
-    )));
+    // Note: Messages field has been removed from SessionRecord
 }

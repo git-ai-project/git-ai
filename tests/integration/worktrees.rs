@@ -4,7 +4,6 @@ use crate::test_utils::fixture_path;
 use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::stats::CommitStats;
-use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::{AgentId, CheckpointKind};
 use git_ai::git::repository as GitAiRepository;
 use insta::assert_debug_snapshot;
@@ -367,13 +366,12 @@ crate::worktree_test_wrappers! {
                     model: "test-model".to_string(),
                 },
                 human_author: None,
-                messages: vec![Message::assistant("initial".to_string(), None)],
                 total_additions: 0,
                 total_deletions: 0,
                 accepted_lines: 0,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+            messages_url: None,
             },
         );
         working_log

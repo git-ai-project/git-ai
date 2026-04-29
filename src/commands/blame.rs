@@ -1852,36 +1852,6 @@ fn output_default_format(
         output.push_str(stats);
     }
 
-    // Append prompt dump for --show-prompt in non-interactive (piped) mode
-    if options.show_prompt && !io::stdout().is_terminal() {
-        let mut referenced_ids: std::collections::HashSet<&String> =
-            std::collections::HashSet::new();
-        for author in line_authors.values() {
-            if prompt_records.contains_key(author) {
-                referenced_ids.insert(author);
-            }
-        }
-
-        if !referenced_ids.is_empty() {
-            output.push_str("---\n");
-
-            let mut sorted_ids: Vec<&String> = referenced_ids.into_iter().collect();
-            sorted_ids.sort();
-
-            for id in sorted_ids {
-                let short_hash = &id[..7.min(id.len())];
-                output.push_str(&format!("Prompt [{}]\n", short_hash));
-                if let Some(prompt) = prompt_records.get(id) {
-                    let json = serde_json::to_string(&prompt.messages)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    output.push_str(&json);
-                    output.push('\n');
-                }
-                output.push('\n');
-            }
-        }
-    }
-
     // Output handling - respect pager environment variables
     let pager = std::env::var("GIT_PAGER")
         .or_else(|_| std::env::var("PAGER"))

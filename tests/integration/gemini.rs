@@ -495,7 +495,6 @@ fn test_gemini_e2e_with_attribution() {
         .next()
         .expect("Should have at least one session record");
 
-    assert!(!session_record.messages.is_empty());
     assert_eq!(session_record.agent_id.model, "gemini-2.5-flash");
 }
 
@@ -654,15 +653,13 @@ fn test_gemini_e2e_with_resync() {
 
     assert!(!commit.authorship_log.metadata.sessions.is_empty());
 
-    let session_record = commit
+    let _session_record = commit
         .authorship_log
         .metadata
         .sessions
         .values()
         .next()
         .expect("Should have at least one session record");
-
-    assert!(!session_record.messages.is_empty());
 }
 
 #[test]

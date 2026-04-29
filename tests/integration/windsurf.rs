@@ -404,7 +404,6 @@ fn test_windsurf_e2e_with_attribution() {
         .next()
         .expect("Should have a session record");
 
-    assert!(!session_record.messages.is_empty());
     assert_eq!(session_record.agent_id.tool, "windsurf");
 }
 

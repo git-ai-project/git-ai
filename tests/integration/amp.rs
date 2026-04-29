@@ -161,7 +161,6 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
             assert!(e.transcript_source.is_some());
             let transcript_path_str = match e.transcript_source.as_ref().unwrap() {
                 TranscriptSource::Path { path, .. } => path.to_string_lossy().to_string(),
-                TranscriptSource::Inline(_) => panic!("Expected Path transcript source"),
             };
             assert!(
                 transcript_path_str.ends_with(&format!("{}.json", AMP_SIMPLE_THREAD_ID)),
@@ -249,10 +248,6 @@ fn test_amp_e2e_checkpoint_and_commit() {
 
     assert_eq!(session_record.agent_id.tool, "amp");
     assert_eq!(session_record.agent_id.model, "claude-opus-4-6");
-    assert!(
-        !session_record.messages.is_empty(),
-        "Session record should include transcript messages"
-    );
 }
 
 #[test]
@@ -316,7 +311,7 @@ fn test_amp_post_commit_resyncs_latest_thread_transcript() {
         .stage_all_and_commit("Commit with amp transcript resync")
         .unwrap();
 
-    let session_record = commit
+    let _session_record = commit
         .authorship_log
         .metadata
         .sessions
@@ -324,15 +319,7 @@ fn test_amp_post_commit_resyncs_latest_thread_transcript() {
         .next()
         .expect("Expected a session record");
 
-    let has_resync_message = session_record.messages.iter().any(|msg| match msg {
-        Message::Assistant { text, .. } => text.contains("RESYNC_TEST_MESSAGE"),
-        _ => false,
-    });
-
-    assert!(
-        has_resync_message,
-        "Post-commit should refresh amp transcript to include latest thread message"
-    );
+    // Note: Messages field has been removed from SessionRecord
 }
 
 fn append_assistant_message(thread_path: &Path, text: &str) {

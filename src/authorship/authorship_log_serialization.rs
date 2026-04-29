@@ -282,13 +282,12 @@ impl AuthorshipLog {
                         let prompt_record = PromptRecord {
                             agent_id: session_record.agent_id.clone(),
                             human_author: session_record.human_author.clone(),
-                            messages: session_record.messages.clone(),
                             total_additions: 0, // Sessions don't track detailed stats
                             total_deletions: 0,
                             accepted_lines: 0,
                             overriden_lines: 0,
-                            messages_url: session_record.messages_url.clone(),
                             custom_attributes: session_record.custom_attributes.clone(),
+                            messages_url: None,
                         };
                         return Some((
                             Author {
@@ -502,12 +501,7 @@ impl AuthorshipLog {
                 // TODO Fill in the LineStats
 
                 // Reconstruct transcript from messages
-                let mut transcript = crate::authorship::transcript::AiTranscript::new();
-                for message in &prompt_record.messages {
-                    transcript.add_message(message.clone());
-                }
-                ai_checkpoint.transcript = Some(transcript);
-
+                // Transcript no longer stored in checkpoints
                 checkpoints.push(ai_checkpoint);
             }
         }
@@ -868,13 +862,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
                 total_additions: 0,
                 total_deletions: 0,
                 accepted_lines: 0,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -936,13 +929,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
                 total_additions: 0,
                 total_deletions: 0,
                 accepted_lines: 0,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -989,13 +981,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
                 total_additions: 0,
                 total_deletions: 0,
                 accepted_lines: 0,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1169,13 +1160,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id: agent_id.clone(),
                 human_author: Some("alice@example.com".to_string()),
-                messages: transcript.messages().to_vec(),
                 total_additions: 15,
                 total_deletions: 3,
                 accepted_lines: 11,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1207,7 +1197,7 @@ mod tests {
         assert_eq!(ai_checkpoint.author, "ai");
         assert!(ai_checkpoint.agent_id.is_some());
         assert_eq!(ai_checkpoint.agent_id.as_ref().unwrap().tool, "cursor");
-        assert!(ai_checkpoint.transcript.is_some());
+        // Transcript field removed from Checkpoint
         assert_eq!(ai_checkpoint.entries.len(), 1);
         let ai_entry = &ai_checkpoint.entries[0];
         assert_eq!(ai_entry.file, "src/main.rs");
@@ -1341,13 +1331,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id: agent1,
                 human_author: Some("bob@example.com".to_string()),
-                messages: transcript1.messages().to_vec(),
                 total_additions: 10,
                 total_deletions: 0,
                 accepted_lines: 10,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1366,13 +1355,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id: agent2,
                 human_author: Some("bob@example.com".to_string()),
-                messages: transcript2.messages().to_vec(),
                 total_additions: 20,
                 total_deletions: 0,
                 accepted_lines: 20,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1498,13 +1486,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: transcript.messages().to_vec(),
                 total_additions: 5,
                 total_deletions: 0,
                 accepted_lines: 5,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 

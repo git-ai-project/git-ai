@@ -258,10 +258,6 @@ fn test_claude_e2e_prefers_latest_checkpoint_for_prompts() {
         .expect("Session record should exist");
 
     // The latest checkpoint (with the real transcript) should win
-    assert!(
-        !session_record.messages.is_empty(),
-        "Session record should contain messages from the latest checkpoint"
-    );
     assert_eq!(
         session_record.agent_id.model, "claude-sonnet-4-20250514",
         "Session record should use the model from the latest checkpoint transcript"

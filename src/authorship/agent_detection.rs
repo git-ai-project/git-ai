@@ -124,13 +124,12 @@ pub fn simulate_agent_authorship(
     let prompt_record = PromptRecord {
         agent_id,
         human_author: None,
-        messages: vec![],
         total_additions: total_lines,
         total_deletions: 0,
         accepted_lines: total_lines,
         overriden_lines: 0,
-        messages_url: None,
         custom_attributes: None,
+        messages_url: None,
     };
 
     let line_range = if line_start == line_end {
@@ -300,7 +299,7 @@ mod tests {
         assert_eq!(prompt.total_deletions, 0);
         assert_eq!(prompt.overriden_lines, 0);
         assert!(prompt.human_author.is_none());
-        assert!(prompt.messages.is_empty());
+        // Messages field removed from PromptRecord
     }
 
     #[test]

@@ -358,10 +358,6 @@ fn test_droid_e2e_prefers_latest_checkpoint_for_prompts() {
         .next()
         .expect("Session record should exist");
 
-    assert!(
-        !session_record.messages.is_empty(),
-        "Session record should contain messages from the latest checkpoint"
-    );
     assert_eq!(
         session_record.agent_id.model, "custom:BYOK-GPT-5-MINI-0",
         "Session record should use the model from settings.json"

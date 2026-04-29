@@ -1,5 +1,4 @@
 use crate::authorship::authorship_log::PromptRecord;
-use crate::authorship::transcript::AiTranscript;
 use crate::commands::checkpoint_agent::transcript_readers;
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
@@ -132,9 +131,9 @@ pub fn find_prompt_in_history(
 
 /// Result of attempting to update a prompt from a tool
 pub enum PromptUpdateResult {
-    Updated(AiTranscript, String), // (new_transcript, new_model)
-    Unchanged,                     // No update available or needed
-    Failed(GitAiError),            // Error occurred but not fatal
+    Updated(String),    // new_model
+    Unchanged,          // No update available or needed
+    Failed(GitAiError), // Error occurred but not fatal
 }
 
 /// Update a prompt by fetching latest transcript from the tool
@@ -175,10 +174,9 @@ pub fn update_codex_prompt(
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
             match transcript_readers::read_codex_jsonl(Path::new(transcript_path)) {
-                Ok((transcript, model)) => PromptUpdateResult::Updated(
-                    transcript,
-                    model.unwrap_or_else(|| current_model.to_string()),
-                ),
+                Ok((_, model)) => {
+                    PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
+                }
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse Codex rollout JSONL transcript from {}: {}",
@@ -212,9 +210,7 @@ fn update_cursor_prompt(
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
             match transcript_readers::read_cursor_jsonl(Path::new(transcript_path)) {
-                Ok((transcript, _)) => {
-                    PromptUpdateResult::Updated(transcript, current_model.to_string())
-                }
+                Ok((_, _)) => PromptUpdateResult::Updated(current_model.to_string()),
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse Cursor JSONL transcript from {}: {}",
@@ -250,13 +246,10 @@ pub fn update_claude_prompt(
         if let Some(transcript_path) = metadata.get("transcript_path") {
             // Try to read and parse the transcript JSONL
             match transcript_readers::read_claude_jsonl(Path::new(transcript_path)) {
-                Ok((transcript, model)) => {
+                Ok((_, model)) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
-                    PromptUpdateResult::Updated(
-                        transcript,
-                        model.unwrap_or_else(|| current_model.to_string()),
-                    )
+                    PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -295,13 +288,10 @@ pub fn update_gemini_prompt(
         if let Some(transcript_path) = metadata.get("transcript_path") {
             // Try to read and parse the transcript JSON
             match transcript_readers::read_gemini_json(Path::new(transcript_path)) {
-                Ok((transcript, model)) => {
+                Ok((_, model)) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
-                    PromptUpdateResult::Updated(
-                        transcript,
-                        model.unwrap_or_else(|| current_model.to_string()),
-                    )
+                    PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -340,13 +330,10 @@ pub fn update_github_copilot_prompt(
         if let Some(chat_session_path) = metadata.get("chat_session_path") {
             // Try to read and parse the chat session JSON
             match transcript_readers::read_copilot_session_json(Path::new(chat_session_path)) {
-                Ok((transcript, model, _)) => {
+                Ok((_, model, _)) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
-                    PromptUpdateResult::Updated(
-                        transcript,
-                        model.unwrap_or_else(|| current_model.to_string()),
-                    )
+                    PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -385,11 +372,11 @@ pub fn update_continue_cli_prompt(
         if let Some(transcript_path) = metadata.get("transcript_path") {
             // Try to read and parse the transcript JSON
             match transcript_readers::read_continue_json(Path::new(transcript_path)) {
-                Ok(transcript) => {
+                Ok(_) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
                     // IMPORTANT: Always preserve the original model from agent_id (don't overwrite)
-                    PromptUpdateResult::Updated(transcript, current_model.to_string())
+                    PromptUpdateResult::Updated(current_model.to_string())
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -425,26 +412,22 @@ pub fn update_droid_prompt(
 ) -> PromptUpdateResult {
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
-            // Re-parse transcript
-            let transcript = match transcript_readers::read_droid_jsonl(Path::new(transcript_path))
-            {
-                Ok((transcript, _model)) => transcript,
-                Err(e) => {
-                    tracing::debug!(
-                        "Failed to parse Droid JSONL transcript from {}: {}",
-                        transcript_path,
-                        e
-                    );
-                    log_error(
-                        &e,
-                        Some(serde_json::json!({
-                            "agent_tool": "droid",
-                            "operation": "transcript_and_model_from_droid_jsonl"
-                        })),
-                    );
-                    return PromptUpdateResult::Failed(e);
-                }
-            };
+            // Validate transcript can be parsed
+            if let Err(e) = transcript_readers::read_droid_jsonl(Path::new(transcript_path)) {
+                tracing::debug!(
+                    "Failed to parse Droid JSONL transcript from {}: {}",
+                    transcript_path,
+                    e
+                );
+                log_error(
+                    &e,
+                    Some(serde_json::json!({
+                        "agent_tool": "droid",
+                        "operation": "transcript_and_model_from_droid_jsonl"
+                    })),
+                );
+                return PromptUpdateResult::Failed(e);
+            }
 
             // Re-parse model from settings.json
             let model = if let Some(settings_path) = metadata.get("settings_path") {
@@ -464,7 +447,7 @@ pub fn update_droid_prompt(
                 current_model.to_string()
             };
 
-            PromptUpdateResult::Updated(transcript, model)
+            PromptUpdateResult::Updated(model)
         } else {
             // No transcript_path in metadata
             PromptUpdateResult::Unchanged
@@ -518,10 +501,9 @@ fn update_amp_prompt(
     };
 
     match result {
-        Ok((transcript, model)) => PromptUpdateResult::Updated(
-            transcript,
-            model.unwrap_or_else(|| current_model.to_string()),
-        ),
+        Ok((_, model)) => {
+            PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
+        }
         Err(e) => {
             tracing::debug!(
                 "Failed to fetch Amp transcript for thread {}: {}",
@@ -562,10 +544,9 @@ fn update_opencode_prompt(
     };
 
     match result {
-        Ok((transcript, model)) => PromptUpdateResult::Updated(
-            transcript,
-            model.unwrap_or_else(|| current_model.to_string()),
-        ),
+        Ok((_, model)) => {
+            PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
+        }
         Err(e) => {
             tracing::debug!(
                 "Failed to fetch OpenCode transcript for session {}: {}",
@@ -594,10 +575,9 @@ fn update_pi_prompt(
         .filter(|path| !path.trim().is_empty())
     {
         match transcript_readers::read_pi_session(session_path) {
-            Ok((transcript, model)) => PromptUpdateResult::Updated(
-                transcript,
-                model.unwrap_or_else(|| current_model.to_string()),
-            ),
+            Ok((_, model)) => {
+                PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
+            }
             Err(e) => {
                 tracing::debug!(
                     "Failed to parse Pi session JSONL from {}: {}",
@@ -628,10 +608,9 @@ pub fn update_windsurf_prompt(
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
             match transcript_readers::read_windsurf_jsonl(Path::new(transcript_path)) {
-                Ok((transcript, model)) => PromptUpdateResult::Updated(
-                    transcript,
-                    model.unwrap_or_else(|| current_model.to_string()),
-                ),
+                Ok((_, model)) => {
+                    PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
+                }
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse Windsurf JSONL transcript from {}: {}",
@@ -658,145 +637,10 @@ pub fn update_windsurf_prompt(
 
 /// Format a PromptRecord's messages into a human-readable transcript.
 ///
-/// Filters out ToolUse messages; keeps User, Assistant, Thinking, and Plan.
-/// Each message is prefixed with its role label.
-pub fn format_transcript(prompt: &PromptRecord) -> String {
-    use crate::authorship::transcript::Message;
-
-    let mut output = String::new();
-    for message in &prompt.messages {
-        match message {
-            Message::User { text, .. } => {
-                output.push_str("User: ");
-                output.push_str(text);
-                output.push('\n');
-            }
-            Message::Assistant { text, .. } => {
-                output.push_str("Assistant: ");
-                output.push_str(text);
-                output.push('\n');
-            }
-            Message::Thinking { text, .. } => {
-                output.push_str("Thinking: ");
-                output.push_str(text);
-                output.push('\n');
-            }
-            Message::Plan { text, .. } => {
-                output.push_str("Plan: ");
-                output.push_str(text);
-                output.push('\n');
-            }
-            Message::ToolUse { .. } => {
-                // Skip tool use messages in formatted transcript
-            }
-        }
-    }
-    output
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authorship::authorship_log::PromptRecord;
-    use crate::authorship::transcript::Message;
-    use crate::authorship::working_log::AgentId;
     use std::collections::HashMap;
-
-    // Helper function to create a test PromptRecord
-    fn create_test_prompt_record(tool: &str, id: &str, model: &str) -> PromptRecord {
-        PromptRecord {
-            agent_id: AgentId {
-                tool: tool.to_string(),
-                id: id.to_string(),
-                model: model.to_string(),
-            },
-            human_author: Some("test_user".to_string()),
-            messages: vec![
-                Message::User {
-                    text: "Hello".to_string(),
-                    timestamp: None,
-                },
-                Message::Assistant {
-                    text: "Hi there".to_string(),
-                    timestamp: None,
-                },
-            ],
-            total_additions: 10,
-            total_deletions: 5,
-            accepted_lines: 8,
-            overriden_lines: 2,
-            messages_url: None,
-            custom_attributes: None,
-        }
-    }
-
-    #[test]
-    fn test_format_transcript_basic() {
-        let prompt = create_test_prompt_record("test", "123", "gpt-4");
-        let formatted = format_transcript(&prompt);
-
-        assert!(formatted.contains("User: Hello\n"));
-        assert!(formatted.contains("Assistant: Hi there\n"));
-    }
-
-    #[test]
-    fn test_format_transcript_all_message_types() {
-        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
-        prompt.messages = vec![
-            Message::User {
-                text: "User message".to_string(),
-                timestamp: None,
-            },
-            Message::Assistant {
-                text: "Assistant message".to_string(),
-                timestamp: None,
-            },
-            Message::Thinking {
-                text: "Thinking message".to_string(),
-                timestamp: None,
-            },
-            Message::Plan {
-                text: "Plan message".to_string(),
-                timestamp: None,
-            },
-            Message::ToolUse {
-                name: "test_tool".to_string(),
-                input: serde_json::json!({"param": "value"}),
-                timestamp: None,
-            },
-        ];
-
-        let formatted = format_transcript(&prompt);
-
-        assert!(formatted.contains("User: User message\n"));
-        assert!(formatted.contains("Assistant: Assistant message\n"));
-        assert!(formatted.contains("Thinking: Thinking message\n"));
-        assert!(formatted.contains("Plan: Plan message\n"));
-        // ToolUse should be filtered out
-        assert!(!formatted.contains("test_tool"));
-        assert!(!formatted.contains("ToolUse"));
-    }
-
-    #[test]
-    fn test_format_transcript_empty() {
-        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
-        prompt.messages = vec![];
-
-        let formatted = format_transcript(&prompt);
-        assert_eq!(formatted, "");
-    }
-
-    #[test]
-    fn test_format_transcript_multiline() {
-        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
-        prompt.messages = vec![Message::User {
-            text: "Line 1\nLine 2\nLine 3".to_string(),
-            timestamp: None,
-        }];
-
-        let formatted = format_transcript(&prompt);
-        assert_eq!(formatted, "User: Line 1\nLine 2\nLine 3\n");
-    }
 
     #[test]
     fn test_update_prompt_from_tool_unknown() {
@@ -932,64 +776,12 @@ mod tests {
         match result {
             PromptUpdateResult::Unchanged
             | PromptUpdateResult::Failed(_)
-            | PromptUpdateResult::Updated(_, _) => {}
+            | PromptUpdateResult::Updated(_) => {}
         }
 
         // Test dispatch to windsurf
         let result = update_prompt_from_tool("windsurf", "trajectory-123", None, "model");
         assert!(matches!(result, PromptUpdateResult::Unchanged));
-    }
-
-    #[test]
-    fn test_format_transcript_with_timestamps() {
-        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
-        prompt.messages = vec![
-            Message::User {
-                text: "Question".to_string(),
-                timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-            },
-            Message::Assistant {
-                text: "Answer".to_string(),
-                timestamp: Some("2024-01-01T12:00:01Z".to_string()),
-            },
-        ];
-
-        let formatted = format_transcript(&prompt);
-        // Timestamps should not appear in formatted output
-        assert!(!formatted.contains("2024-01-01"));
-        assert!(formatted.contains("User: Question\n"));
-        assert!(formatted.contains("Assistant: Answer\n"));
-    }
-
-    #[test]
-    fn test_format_transcript_special_characters() {
-        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
-        prompt.messages = vec![Message::User {
-            text: "Text with \"quotes\" and 'apostrophes' and\ttabs\nand newlines".to_string(),
-            timestamp: None,
-        }];
-
-        let formatted = format_transcript(&prompt);
-        assert!(formatted.contains("\"quotes\""));
-        assert!(formatted.contains("'apostrophes'"));
-        assert!(formatted.contains("\t"));
-    }
-
-    #[test]
-    fn test_format_transcript_unicode() {
-        let mut prompt = create_test_prompt_record("test", "123", "gpt-4");
-        prompt.messages = vec![Message::User {
-            text: "Hello \u{4e16}\u{754c} \u{1f30d} \u{0417}\u{0434}\u{0440}\u{0430}\u{0432}\u{0441}\u{0442}\u{0432}\u{0443}\u{0439} \u{0645}\u{0631}\u{062d}\u{0628}\u{0627}".to_string(),
-            timestamp: None,
-        }];
-
-        let formatted = format_transcript(&prompt);
-        assert!(formatted.contains("\u{4e16}\u{754c}"));
-        assert!(formatted.contains("\u{1f30d}"));
-        assert!(formatted.contains(
-            "\u{0417}\u{0434}\u{0440}\u{0430}\u{0432}\u{0441}\u{0442}\u{0432}\u{0443}\u{0439}"
-        ));
-        assert!(formatted.contains("\u{0645}\u{0631}\u{062d}\u{0628}\u{0627}"));
     }
 
     #[test]
