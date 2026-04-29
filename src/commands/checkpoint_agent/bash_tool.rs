@@ -21,7 +21,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -515,11 +514,13 @@ pub fn normalize_path(p: &Path) -> PathBuf {
 
 /// Resolve the `.git` directory path for a repo (handles worktrees).
 fn get_git_dir(repo_root: &Path) -> Result<PathBuf, GitAiError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(repo_root)
-        .output()
-        .map_err(GitAiError::IoError)?;
+    let args = vec![
+        "-C".to_string(),
+        repo_root.to_string_lossy().into_owned(),
+        "rev-parse".to_string(),
+        "--git-dir".to_string(),
+    ];
+    let output = crate::git::repository::exec_git_allow_nonzero(&args)?;
     if !output.status.success() {
         return Err(GitAiError::Generic(
             "git rev-parse --git-dir failed".to_string(),
@@ -922,11 +923,15 @@ fn sanitize_key(key: &str) -> String {
 /// Fall back to `git status --porcelain=v2` to detect changed files.
 /// Used when the pre-snapshot is lost (process restart) or on very large repos.
 pub fn git_status_fallback(repo_root: &Path) -> Result<Vec<String>, GitAiError> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v2", "-z", "--untracked-files=all"])
-        .current_dir(repo_root)
-        .output()
-        .map_err(GitAiError::IoError)?;
+    let args = vec![
+        "-C".to_string(),
+        repo_root.to_string_lossy().into_owned(),
+        "status".to_string(),
+        "--porcelain=v2".to_string(),
+        "-z".to_string(),
+        "--untracked-files=all".to_string(),
+    ];
+    let output = crate::git::repository::exec_git_allow_nonzero(&args)?;
 
     if !output.status.success() {
         return Err(GitAiError::Generic(format!(
@@ -1687,6 +1692,7 @@ pub fn handle_bash_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use std::time::Duration;
 
     #[test]

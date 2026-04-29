@@ -30,6 +30,7 @@ mod chinese_text_edits;
 mod ci_context_unit;
 mod ci_handlers_comprehensive;
 mod ci_local_skip_fetch;
+mod ci_local_skip_push;
 mod ci_partial_clone;
 mod ci_squash_rebase;
 mod claude_code;
