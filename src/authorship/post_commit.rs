@@ -515,8 +515,21 @@ fn record_commit_metrics(
         values.commit_subject_null().commit_body_null()
     };
 
-    // Build attributes - start with version
-    let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION")).session_id(""); // TODO: add real session tracking in later phase
+    // Build attributes - start with version and extract session_id from first AI checkpoint
+    // session_id links this commit to the AI agent conversation that produced it
+    // If no AI checkpoints exist (human-only commit), session_id will be empty
+    let session_id = checkpoints
+        .iter()
+        .find_map(|cp| {
+            cp.agent_id.as_ref().map(|aid| {
+                crate::authorship::authorship_log_serialization::generate_session_id(
+                    &aid.id, &aid.tool,
+                )
+            })
+        })
+        .unwrap_or_default();
+
+    let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION")).session_id(session_id);
 
     attrs = attrs
         .author(human_author)

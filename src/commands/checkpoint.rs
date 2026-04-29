@@ -889,6 +889,8 @@ fn execute_resolved_checkpoint(
         hash_compute_start.elapsed()
     );
 
+    // Generate trace_id for this checkpoint - links all metrics events from this checkpoint together
+    // This allows server-side analysis of multi-file edits, tool invocations, and checkpoint chains
     let trace_id = generate_trace_id();
 
     let entries_start = Instant::now();
@@ -973,12 +975,14 @@ fn execute_resolved_checkpoint(
         let mut attrs =
             build_checkpoint_attrs(repo, &resolved.base_commit, checkpoint.agent_id.as_ref());
 
-        // Add trace_id to attributes
+        // Add trace_id to attributes - links all checkpoint events together
         if let Some(ref tid) = checkpoint.trace_id {
             attrs = attrs.trace_id(tid);
         }
 
-        // Extract tool_use_id from metadata if available (used by bash tool hooks)
+        // Extract tool_use_id from metadata if available
+        // tool_use_id tracks specific tool invocations (e.g., bash tool calls from AI agents)
+        // Allows linking checkpoint events to the exact tool use that triggered them
         let tool_use_id = checkpoint_request
             .as_ref()
             .and_then(|cr| cr.metadata.get("tool_use_id"))
@@ -1004,8 +1008,12 @@ fn execute_resolved_checkpoint(
         }
 
         // Notify daemon about checkpoint for transcript processing
+        // session_id uniquely identifies the AI agent conversation (derived from agent_id + tool)
+        // trace_id links this checkpoint to related operations (same as in metrics events)
+        // Daemon uses these IDs to prioritize transcript processing and emit AgentTrace events
         if let Some(ref cr) = checkpoint_request
-            && let Some(ref ts) = cr.transcript_source {
+            && let Some(ref ts) = cr.transcript_source
+        {
             let session_id = checkpoint
                 .agent_id
                 .as_ref()

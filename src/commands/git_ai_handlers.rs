@@ -407,6 +407,8 @@ fn handle_checkpoint(args: &[String]) {
 
     // Emit agent_usage metric for every AI hook, regardless of whether a
     // file-edit checkpoint is created downstream.  The existing per-prompt
+    // Emit AgentUsage metrics for AI checkpoints
+    // session_id links this usage event to the AI agent conversation
     // throttle (`should_emit_agent_usage`) prevents duplicate events.
     if let Some(ref result) = checkpoint_request
         && result.checkpoint_kind.is_ai()
@@ -414,8 +416,13 @@ fn handle_checkpoint(args: &[String]) {
         && commands::checkpoint::should_emit_agent_usage(agent_id)
     {
         let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
+        // Generate session_id from agent_id + tool - uniquely identifies the conversation
+        let session_id = crate::authorship::authorship_log_serialization::generate_session_id(
+            &agent_id.id,
+            &agent_id.tool,
+        );
         let attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
-            .session_id("") // TODO: add real session tracking in later phase
+            .session_id(session_id)
             .tool(&agent_id.tool)
             .model(&agent_id.model)
             .prompt_id(prompt_id)
