@@ -1347,3 +1347,173 @@ impl EventValues for AgentTraceValues {
         PosEncoded::from_sparse(arr)
     }
 }
+
+/// Value positions for "agent_trace" event.
+pub mod agent_trace_pos {
+    pub const EVENT_TYPE: usize = 0; // String - "user_message", "assistant_message", "tool_use"
+    pub const EVENT_TS: usize = 1; // u64 - event timestamp (nullable)
+    pub const TOOL_USE_ID: usize = 2; // String - trace_id for this event (nullable)
+    pub const TOOL_NAME: usize = 3; // String - for tool_use events (nullable)
+    pub const PROMPT_TEXT: usize = 4; // String - user message text (nullable)
+    pub const RESPONSE_TEXT: usize = 5; // String - assistant message text (nullable)
+}
+
+/// Values for Event ID 5: agent_trace
+///
+/// Recorded for each event extracted from an AI agent transcript.
+/// Uses EventAttributes for session_id, trace_id, tool, model metadata.
+///
+/// **Fields:**
+/// | Position | Name | Type |
+/// |----------|------|------|
+/// | 0 | event_type | String |
+/// | 1 | event_ts | u64 (nullable) |
+/// | 2 | tool_use_id | String (nullable) |
+/// | 3 | tool_name | String (nullable) |
+/// | 4 | prompt_text | String (nullable) |
+/// | 5 | response_text | String (nullable) |
+#[derive(Debug, Clone, Default)]
+pub struct AgentTraceValues {
+    pub event_type: PosField<String>,
+    pub event_ts: PosField<u64>,
+    pub tool_use_id: PosField<String>,
+    pub tool_name: PosField<String>,
+    pub prompt_text: PosField<String>,
+    pub response_text: PosField<String>,
+}
+
+impl AgentTraceValues {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn event_type(mut self, value: impl Into<String>) -> Self {
+        self.event_type = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn event_type_null(mut self) -> Self {
+        self.event_type = Some(None);
+        self
+    }
+
+    pub fn event_ts(mut self, value: u64) -> Self {
+        self.event_ts = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn event_ts_null(mut self) -> Self {
+        self.event_ts = Some(None);
+        self
+    }
+
+    pub fn tool_use_id(mut self, value: impl Into<String>) -> Self {
+        self.tool_use_id = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn tool_use_id_null(mut self) -> Self {
+        self.tool_use_id = Some(None);
+        self
+    }
+
+    pub fn tool_name(mut self, value: impl Into<String>) -> Self {
+        self.tool_name = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn tool_name_null(mut self) -> Self {
+        self.tool_name = Some(None);
+        self
+    }
+
+    pub fn prompt_text(mut self, value: impl Into<String>) -> Self {
+        self.prompt_text = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn prompt_text_null(mut self) -> Self {
+        self.prompt_text = Some(None);
+        self
+    }
+
+    pub fn response_text(mut self, value: impl Into<String>) -> Self {
+        self.response_text = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn response_text_null(mut self) -> Self {
+        self.response_text = Some(None);
+        self
+    }
+}
+
+impl PosEncoded for AgentTraceValues {
+    fn to_sparse(&self) -> SparseArray {
+        let mut map = SparseArray::new();
+
+        sparse_set(
+            &mut map,
+            agent_trace_pos::EVENT_TYPE,
+            string_to_json(&self.event_type),
+        );
+        sparse_set(
+            &mut map,
+            agent_trace_pos::EVENT_TS,
+            u64_to_json(&self.event_ts),
+        );
+        sparse_set(
+            &mut map,
+            agent_trace_pos::TOOL_USE_ID,
+            string_to_json(&self.tool_use_id),
+        );
+        sparse_set(
+            &mut map,
+            agent_trace_pos::TOOL_NAME,
+            string_to_json(&self.tool_name),
+        );
+        sparse_set(
+            &mut map,
+            agent_trace_pos::PROMPT_TEXT,
+            string_to_json(&self.prompt_text),
+        );
+        sparse_set(
+            &mut map,
+            agent_trace_pos::RESPONSE_TEXT,
+            string_to_json(&self.response_text),
+        );
+
+        map
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        Self {
+            event_type: sparse_get_string(arr, agent_trace_pos::EVENT_TYPE),
+            event_ts: sparse_get_u64(arr, agent_trace_pos::EVENT_TS),
+            tool_use_id: sparse_get_string(arr, agent_trace_pos::TOOL_USE_ID),
+            tool_name: sparse_get_string(arr, agent_trace_pos::TOOL_NAME),
+            prompt_text: sparse_get_string(arr, agent_trace_pos::PROMPT_TEXT),
+            response_text: sparse_get_string(arr, agent_trace_pos::RESPONSE_TEXT),
+        }
+    }
+}
+
+impl EventValues for AgentTraceValues {
+    fn event_id() -> MetricEventId {
+        MetricEventId::AgentTrace
+    }
+
+    fn to_sparse(&self) -> SparseArray {
+        PosEncoded::to_sparse(self)
+    }
+
+    fn from_sparse(arr: &SparseArray) -> Self {
+        PosEncoded::from_sparse(arr)
+    }
+}
