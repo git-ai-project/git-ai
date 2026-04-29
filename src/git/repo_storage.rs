@@ -404,46 +404,6 @@ impl PersistedWorkingLog {
         // - "mock_ai" - test preset, transcript not stored externally
         // - Any other agent-v1 custom tools (detected by lack of tool-specific metadata)
         let storage_checkpoint = checkpoint.clone();
-        let tool = checkpoint
-            .agent_id
-            .as_ref()
-            .map(|a| a.tool.as_str())
-            .unwrap_or("");
-        let metadata = &checkpoint.agent_metadata;
-
-        // Blacklist: tools that cannot refetch transcripts
-        let _cannot_refetch = match tool {
-            "mock_ai" => true,
-            // human checkpoints have no transcript anyway
-            "human" => false,
-            // For other tools, check if they have the necessary metadata for refetching
-            // cursor can always refetch from its database
-            "cursor" => false,
-            // claude, codex, gemini, continue-cli, amp, windsurf, droid need transcript_path
-            "claude" | "codex" | "gemini" | "continue-cli" | "amp" | "windsurf" | "droid" => {
-                metadata
-                    .as_ref()
-                    .and_then(|m| m.get("transcript_path"))
-                    .is_none()
-            }
-            // opencode can always refetch from its session storage
-            "opencode" => false,
-            // pi needs session_path metadata for prompt refresh
-            "pi" => metadata
-                .as_ref()
-                .and_then(|m| m.get("session_path"))
-                .is_none(),
-            // github-copilot needs chat_session_path
-            "github-copilot" => metadata
-                .as_ref()
-                .and_then(|m| m.get("chat_session_path"))
-                .is_none(),
-            // Unknown tools (like custom agent-v1 tools) can't refetch
-            _ => true,
-        };
-
-        // Transcript field removed - no longer stored
-
         // Add the new checkpoint
         checkpoints.push(storage_checkpoint);
 
