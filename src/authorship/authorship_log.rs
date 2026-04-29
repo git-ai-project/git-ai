@@ -237,7 +237,6 @@ impl SessionRecord {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
