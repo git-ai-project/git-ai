@@ -287,6 +287,7 @@ impl AuthorshipLog {
                             accepted_lines: 0,
                             overriden_lines: 0,
                             custom_attributes: session_record.custom_attributes.clone(),
+                            messages_url: None,
                         };
                         return Some((
                             Author {
@@ -866,6 +867,7 @@ mod tests {
                 accepted_lines: 0,
                 overriden_lines: 0,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -932,6 +934,7 @@ mod tests {
                 accepted_lines: 0,
                 overriden_lines: 0,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -983,6 +986,7 @@ mod tests {
                 accepted_lines: 0,
                 overriden_lines: 0,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1161,6 +1165,7 @@ mod tests {
                 accepted_lines: 11,
                 overriden_lines: 0,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1331,6 +1336,7 @@ mod tests {
                 accepted_lines: 10,
                 overriden_lines: 0,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1354,6 +1360,7 @@ mod tests {
                 accepted_lines: 20,
                 overriden_lines: 0,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1484,6 +1491,7 @@ mod tests {
                 accepted_lines: 5,
                 overriden_lines: 0,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 

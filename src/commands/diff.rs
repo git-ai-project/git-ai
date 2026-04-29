@@ -2565,6 +2565,7 @@ index abc123..def456 100644
                 accepted_lines: 0,
                 overriden_lines: 0,
                 custom_attributes: None,
+                messages_url: None,
             }
         }
 

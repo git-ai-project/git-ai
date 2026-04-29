@@ -1,6 +1,6 @@
 ---
 source: src/authorship/authorship_log_serialization.rs
-assertion_line: 904
+assertion_line: 906
 expression: log
 ---
 AuthorshipLogV3 {
@@ -66,6 +66,7 @@ AuthorshipLogV3 {
                 accepted_lines: 0,
                 overriden_lines: 0,
                 custom_attributes: None,
+                messages_url: None,
             },
         },
         humans: {},
