@@ -415,6 +415,7 @@ fn test_accepted_lines_merge_commit() {
             accepted_lines: 5,
             overriden_lines: 0,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -451,6 +452,7 @@ fn test_accepted_lines_no_matching_files() {
             accepted_lines: 3,
             overriden_lines: 0,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -488,6 +490,7 @@ fn test_accepted_lines_basic_match() {
             accepted_lines: 3,
             overriden_lines: 0,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -715,6 +718,7 @@ fn test_stats_from_authorship_log_mixed_cap() {
             accepted_lines: 0,
             overriden_lines: 100, // Unrealistically high
             custom_attributes: None,
+            messages_url: None,
         },
     );
 

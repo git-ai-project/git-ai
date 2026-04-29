@@ -28,6 +28,7 @@ fn test_merge_prompts_picking_newest_sums_totals_on_collision() {
         accepted_lines: 0,
         overriden_lines: 3,
         custom_attributes: None,
+        messages_url: None,
     };
 
     let record2 = PromptRecord {
@@ -38,6 +39,7 @@ fn test_merge_prompts_picking_newest_sums_totals_on_collision() {
         accepted_lines: 0,
         overriden_lines: 7,
         custom_attributes: None,
+        messages_url: None,
     };
 
     let mut source1 = BTreeMap::new();
