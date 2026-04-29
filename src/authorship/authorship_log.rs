@@ -247,18 +247,11 @@ impl PartialOrd for PromptRecord {
 
 impl Ord for PromptRecord {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Sort oldest to newest based on additions, then deletions, then session ID.
-        // Uses lexicographic comparison to ensure a valid total ordering.
-        // The session ID (generated from agent_id) ensures deterministic ordering when stats match.
-        self.total_additions
-            .cmp(&other.total_additions)
-            .then_with(|| self.total_deletions.cmp(&other.total_deletions))
-            .then_with(|| {
-                use crate::authorship::authorship_log_serialization::generate_short_hash;
-                let self_id = generate_short_hash(&self.agent_id.id, &self.agent_id.tool);
-                let other_id = generate_short_hash(&other.agent_id.id, &other.agent_id.tool);
-                self_id.cmp(&other_id)
-            })
+        // Sort by session ID (generated from agent_id)
+        use crate::authorship::authorship_log_serialization::generate_short_hash;
+        let self_id = generate_short_hash(&self.agent_id.id, &self.agent_id.tool);
+        let other_id = generate_short_hash(&other.agent_id.id, &other.agent_id.tool);
+        self_id.cmp(&other_id)
     }
 }
 
@@ -311,26 +304,6 @@ mod tests {
         let a_id = generate_short_hash(&a.agent_id.id, &a.agent_id.tool);
         let b_id = generate_short_hash(&b.agent_id.id, &b.agent_id.tool);
         assert_eq!(a.cmp(&b), a_id.cmp(&b_id));
-    }
-
-    #[test]
-    fn test_prompt_record_sorting() {
-        let mut records = [
-            create_prompt_record(10, 5), // newest - has messages, additions, deletions
-            create_prompt_record(0, 0),  // oldest - empty
-            create_prompt_record(5, 3),  // middle
-            create_prompt_record(10, 0), // has additions
-            create_prompt_record(0, 5),  // has deletions
-        ];
-
-        records.sort();
-
-        // After sorting, oldest (empty) should be first
-        assert_eq!(records[0].total_additions, 0);
-        assert_eq!(records[0].total_deletions, 0);
-
-        // Records with activity should come after
-        assert!(records[1].total_additions > 0 || records[1].total_deletions > 0);
     }
 
     // --- LineRange::shift regression tests ---
@@ -387,16 +360,4 @@ mod tests {
         );
     }
 
-    // --- PromptRecord::Ord transitivity test ---
-
-    #[test]
-    fn test_prompt_record_ord_transitivity() {
-        let a = create_prompt_record(1, 0); // 1 addition
-        let b = create_prompt_record(2, 0); // 2 additions
-        let c = create_prompt_record(3, 0); // 3 additions
-
-        assert!(a < b, "a should be less than b");
-        assert!(b < c, "b should be less than c");
-        assert!(a < c, "transitivity: a should be less than c");
-    }
 }
