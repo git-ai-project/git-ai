@@ -6,7 +6,7 @@ use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_too
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
-use crate::config::{Config, PromptStorageMode};
+use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::refs::notes_add;
 use crate::git::repository::Repository;

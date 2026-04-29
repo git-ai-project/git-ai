@@ -462,9 +462,6 @@ pub fn redact_secrets_in_text(text: &str) -> (String, usize) {
     (result, count)
 }
 
-use crate::authorship::authorship_log::{PromptRecord, SessionRecord};
-use std::collections::BTreeMap;
-
 /// Redact secrets from all prompt messages using entropy-based detection.
 /// Scans user and assistant message text for high-entropy strings (API keys,
 #[cfg(test)]

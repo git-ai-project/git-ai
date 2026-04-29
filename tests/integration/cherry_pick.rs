@@ -158,6 +158,7 @@ fn test_cherry_pick_preserves_prompt_only_commit_note_metadata() {
             accepted_lines: 0,
             overriden_lines: 0,
             custom_attributes: Some(test_attrs.clone()),
+            messages_url: None,
         },
     );
 

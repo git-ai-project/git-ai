@@ -621,6 +621,7 @@ fn rebase_complete_migrates_initial_to_new_head() {
                 ("employee_id".to_string(), "E100".to_string()),
                 ("team".to_string(), "test".to_string()),
             ])),
+            messages_url: None,
         },
     );
 
@@ -835,6 +836,7 @@ fn rebase_complete_migrates_multi_file_initial() {
                 ("employee_id".to_string(), "E200".to_string()),
                 ("team".to_string(), "platform".to_string()),
             ])),
+            messages_url: None,
         },
     );
     prompts.insert(
@@ -854,6 +856,7 @@ fn rebase_complete_migrates_multi_file_initial() {
                 ("employee_id".to_string(), "E200".to_string()),
                 ("team".to_string(), "platform".to_string()),
             ])),
+            messages_url: None,
         },
     );
 
@@ -972,6 +975,7 @@ fn rebase_complete_merges_initial_when_both_working_logs_exist() {
                 ("employee_id".to_string(), "E300".to_string()),
                 ("team".to_string(), "infra".to_string()),
             ])),
+            messages_url: None,
         },
     );
 
@@ -1129,6 +1133,7 @@ fn regression_initial_preserved_through_checkpoint_commit_rebase() {
                 ("employee_id".to_string(), "E400".to_string()),
                 ("team".to_string(), "backend".to_string()),
             ])),
+            messages_url: None,
         },
     );
     let old_wl = gitai_repo
@@ -1264,6 +1269,7 @@ fn regression_initial_survives_amend_then_rebase() {
                 ("employee_id".to_string(), "E400".to_string()),
                 ("team".to_string(), "backend".to_string()),
             ])),
+            messages_url: None,
         },
     );
     let v1_wl = gitai_repo
@@ -1633,6 +1639,7 @@ fn regression_multi_tool_initial_with_disjoint_files_survives_rebase() {
                 ("employee_id".to_string(), "E500".to_string()),
                 ("team".to_string(), "security".to_string()),
             ])),
+            messages_url: None,
         },
     );
     prompts.insert(
@@ -1652,6 +1659,7 @@ fn regression_multi_tool_initial_with_disjoint_files_survives_rebase() {
                 ("employee_id".to_string(), "E500".to_string()),
                 ("team".to_string(), "security".to_string()),
             ])),
+            messages_url: None,
         },
     );
 
@@ -1802,6 +1810,7 @@ fn flatten_prompts_picks_per_commit_record_for_same_session_multi_commit() {
                 accepted_lines: 5,
                 overriden_lines: 0,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
         let mut file = FileAttestation::new("feature.txt".to_string());
@@ -1828,6 +1837,7 @@ fn flatten_prompts_picks_per_commit_record_for_same_session_multi_commit() {
                 accepted_lines: 10,
                 overriden_lines: 0,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
         let mut file = FileAttestation::new("other.txt".to_string());
