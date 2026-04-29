@@ -259,7 +259,7 @@ impl Ord for PromptRecord {
 mod tests {
     use super::*;
 
-    fn create_prompt_record(_messages: usize, additions: u32, deletions: u32) -> PromptRecord {
+    fn create_prompt_record(additions: u32, deletions: u32) -> PromptRecord {
         let agent_id = AgentId {
             tool: "test".to_string(),
             id: "test-id".to_string(),
@@ -282,12 +282,12 @@ mod tests {
     fn test_prompt_record_ord_equality() {
         // Two records with identical total_additions and total_deletions
         // should compare as Equal even when other fields differ.
-        let mut a = create_prompt_record(0, 10, 5);
+        let mut a = create_prompt_record(10, 5);
         a.agent_id.tool = "tool_a".to_string();
         a.agent_id.id = "id_a".to_string();
         a.human_author = Some("alice".to_string());
 
-        let mut b = create_prompt_record(3, 10, 5);
+        let mut b = create_prompt_record(10, 5);
         b.agent_id.tool = "tool_b".to_string();
         b.agent_id.id = "id_b".to_string();
         b.human_author = Some("bob".to_string());
@@ -303,11 +303,11 @@ mod tests {
     #[test]
     fn test_prompt_record_sorting() {
         let mut records = [
-            create_prompt_record(5, 10, 5), // newest - has messages, additions, deletions
-            create_prompt_record(0, 0, 0),  // oldest - empty
-            create_prompt_record(2, 5, 3),  // middle
-            create_prompt_record(0, 10, 0), // has additions
-            create_prompt_record(0, 0, 5),  // has deletions
+            create_prompt_record(10, 5), // newest - has messages, additions, deletions
+            create_prompt_record(0, 0),  // oldest - empty
+            create_prompt_record(5, 3),  // middle
+            create_prompt_record(10, 0), // has additions
+            create_prompt_record(0, 5),  // has deletions
         ];
 
         records.sort();
@@ -378,9 +378,9 @@ mod tests {
 
     #[test]
     fn test_prompt_record_ord_transitivity() {
-        let a = create_prompt_record(0, 1, 0); // 1 addition
-        let b = create_prompt_record(0, 2, 0); // 2 additions
-        let c = create_prompt_record(0, 3, 0); // 3 additions
+        let a = create_prompt_record(1, 0); // 1 addition
+        let b = create_prompt_record(2, 0); // 2 additions
+        let c = create_prompt_record(3, 0); // 3 additions
 
         assert!(a < b, "a should be less than b");
         assert!(b < c, "b should be less than c");
