@@ -1,6 +1,4 @@
-use git_ai::commands::checkpoint_agent::presets::{
-    ParsedHookEvent, TranscriptSource, resolve_preset,
-};
+use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
 use serde_json::json;
 use std::path::PathBuf;
 

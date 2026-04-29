@@ -2015,7 +2015,6 @@ pub fn get_diff_json_filtered(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authorship::transcript::Message;
     use crate::authorship::working_log::AgentId;
     use std::collections::{BTreeMap, HashMap, HashSet};
 
