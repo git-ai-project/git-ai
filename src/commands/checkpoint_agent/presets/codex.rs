@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
     AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PresetContext, TranscriptFormat, TranscriptSource,
+    PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
 };
 use super::opencode::OpenCodePreset;
 use crate::authorship::working_log::AgentId;
@@ -138,11 +138,17 @@ impl AgentPreset for CodexPreset {
 
         let event = match hook_event {
             Some("PreToolUse") => {
-                if is_bash || is_file_edit {
+                if is_bash {
                     ParsedHookEvent::PreBashCall(PreBashCall {
                         context,
                         tool_use_id: tool_use_id.to_string(),
                         strategy: BashPreHookStrategy::SnapshotOnly,
+                    })
+                } else if is_file_edit {
+                    ParsedHookEvent::PreFileEdit(PreFileEdit {
+                        context,
+                        file_paths: vec![],
+                        dirty_files: None,
                     })
                 } else {
                     return Err(GitAiError::PresetError(format!(
