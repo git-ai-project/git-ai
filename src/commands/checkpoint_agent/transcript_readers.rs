@@ -2173,13 +2173,12 @@ fn pi_push_user_message(
     timestamp: Option<String>,
 ) {
     match content {
-        Some(serde_json::Value::String(text)) => {
-            if !text.trim().is_empty() {
-                transcript.add_message(Message::User {
-                    text: text.to_string(),
-                    timestamp,
-                });
-            }
+        Some(serde_json::Value::String(text))
+            if !text.trim().is_empty() => {
+            transcript.add_message(Message::User {
+                text: text.to_string(),
+                timestamp,
+            });
         }
         Some(serde_json::Value::Array(blocks)) => {
             for block in blocks {

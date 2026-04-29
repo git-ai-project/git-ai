@@ -2961,10 +2961,7 @@ fn has_intervening_git_dir(file_path: &Path, workdir: &Path) -> bool {
     //   workdir/subrepo/src/.git
     //   workdir/subrepo/.git
     let mut current = relative;
-    loop {
-        let Some(parent) = current.parent() else {
-            break;
-        };
+    while let Some(parent) = current.parent() {
         if parent.as_os_str().is_empty() {
             break;
         }
