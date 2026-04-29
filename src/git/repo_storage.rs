@@ -403,9 +403,7 @@ impl PersistedWorkingLog {
         // Tools that DON'T support refetch (transcript must be kept):
         // - "mock_ai" - test preset, transcript not stored externally
         // - Any other agent-v1 custom tools (detected by lack of tool-specific metadata)
-        let storage_checkpoint = checkpoint.clone();
-        // Add the new checkpoint
-        checkpoints.push(storage_checkpoint);
+        checkpoints.push(checkpoint.clone());
 
         // Prune char-level attributions from older checkpoints for the same files
         // Only the most recent checkpoint per file needs char-level precision
