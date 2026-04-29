@@ -3,7 +3,6 @@ use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
 use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
-use crate::authorship::secrets::{strip_prompt_messages, strip_session_messages};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
@@ -163,15 +162,6 @@ pub fn post_commit_with_final_state(
         }
         for sr in authorship_log.metadata.sessions.values_mut() {
             sr.custom_attributes = Some(custom_attrs.clone());
-        }
-    }
-
-    // Messages fields have been removed from PromptRecord and SessionRecord
-    // Strip functions are now no-ops but called for compatibility
-    match effective_storage {
-        PromptStorageMode::Local | PromptStorageMode::Notes | PromptStorageMode::Default => {
-            strip_prompt_messages(&mut authorship_log.metadata.prompts);
-            strip_session_messages(&mut authorship_log.metadata.sessions);
         }
     }
 
