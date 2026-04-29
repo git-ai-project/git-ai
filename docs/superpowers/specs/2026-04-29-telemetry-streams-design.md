@@ -156,6 +156,8 @@ CREATE TABLE sessions (
     external_thread_id TEXT,
     first_seen_at INTEGER NOT NULL,
     last_processed_at INTEGER NOT NULL,
+    last_known_size INTEGER NOT NULL DEFAULT 0,
+    last_modified INTEGER,
     processing_errors INTEGER DEFAULT 0,
     last_error TEXT
 );
@@ -175,11 +177,14 @@ CREATE TABLE processing_stats (
 
 **Why separate stats table**: Keeps hot session metadata small for fast queries. Stats updated frequently during processing but rarely read (debugging/monitoring only). Separation allows sessions table to remain compact for worker's priority queue lookups.
 
-**Why transcript_path index**: File watcher events provide a path but not a session_id. Worker must look up `session_by_path(path) -> Option<SessionInfo>` to determine which session changed. Index on transcript_path makes this O(log n) instead of full table scan.
+**Why transcript_path index**: Checkpoint notifications provide path but not session_id. Worker must look up `session_by_path(path) -> Option<SessionInfo>` for deduplication. Index on transcript_path makes this O(log n) instead of full table scan.
+
+**Why last_known_size and last_modified fields**: Modification detection compares current file metadata against last known state. Size changes indicate new content (most common). mtime changes catch modifications without size change (rare but possible). Both stored as integers for fast comparison.
 
 **How to apply**: 
-- Worker queries sessions table for watermarks and paths
-- File watcher events trigger `session_by_path()` lookup via index
+- Worker queries sessions table for watermarks, paths, and file metadata
+- Every 1 second, poll all sessions and compare file size/mtime against database
+- After processing, update last_known_size and last_modified
 - Checkpoint notifications include transcript_path for deduplication key
 - Stats table updated after each batch
 - Dashboard queries stats for aggregate metrics (events processed per agent, etc.)
@@ -251,8 +256,6 @@ Migration runs once per installation. Failed migrations logged but don't block d
 struct TranscriptWorker {
     transcripts_db: Arc<Mutex<TranscriptsDatabase>>,
     priority_queue: Arc<Mutex<PriorityQueue<ProcessingTask>>>,
-    file_watcher: notify::RecommendedWatcher,
-    watcher_rx: tokio::sync::mpsc::Receiver<notify::Event>,
     in_flight: HashSet<String>,  // Canonical paths currently being processed
     telemetry_handle: DaemonTelemetryWorkerHandle,
     shutdown_signal: Arc<AtomicBool>,
@@ -267,7 +270,7 @@ struct ProcessingTask {
 
 enum Priority {
     Immediate,    // Checkpoint-triggered (tool_use_id linking)
-    High,         // File-change-triggered (trailing messages)
+    High,         // Modification-detected (trailing messages)
     Low,          // Historical backfill
 }
 ```
@@ -277,11 +280,11 @@ enum Priority {
 **Startup**:
 1. Migrate internal_db if exists
 2. Collect transcript directories from all AgentPresets (via transcript_dirs() method)
-3. Initialize file system watcher on all transcript directories
-4. Scan directories for existing transcript files matching known formats
-5. Cross-reference with transcripts.db sessions table
-6. Queue any untracked sessions at Low priority
-7. Start processing loop
+3. Scan directories for existing transcript files matching known formats
+4. Cross-reference with transcripts.db sessions table
+5. Queue any untracked sessions at Low priority
+6. Initialize last_known_size and last_modified for all sessions from current file metadata
+7. Start processing loop (polling + checkpoint notifications)
 
 **Processing Loop**:
 ```rust
@@ -289,9 +292,14 @@ loop {
     select! {
         _ = shutdown_signal.wait() => break,
         _ = interval(100ms).tick() => {
+            // Process one task from queue
             if let Some(task) = queue.pop_highest_priority() {
                 process_session(task).await;
             }
+        }
+        _ = interval(1s).tick() => {
+            // Detect modifications by checking file metadata
+            detect_transcript_modifications().await;
         }
         Some(checkpoint_event) = checkpoint_rx.recv() => {
             let key = canonical_path(&checkpoint_event.transcript_path);
@@ -305,18 +313,34 @@ loop {
                 in_flight.insert(key);
             }
         }
-        Ok(file_event) = watcher_rx.recv() => {
-            let key = canonical_path(&file_event.path);
-            if !in_flight.contains(&key) {
-                // Look up session_id from path
-                if let Some(session) = db.session_by_path(&file_event.path) {
-                    queue.push(ProcessingTask {
+    }
+}
+
+async fn detect_transcript_modifications(&mut self) {
+    // Query all sessions from database
+    let sessions = self.db.all_sessions();
+    
+    for session in sessions {
+        let path = Path::new(&session.transcript_path);
+        
+        // Get current file metadata (size, mtime)
+        if let Ok(metadata) = tokio::fs::metadata(path).await {
+            let file_size = metadata.len();
+            let modified = metadata.modified().ok();
+            
+            // Compare with last known state in database
+            if file_size > session.last_known_size 
+                || modified.map(|m| m > session.last_modified).unwrap_or(false) 
+            {
+                let key = canonical_path(path);
+                if !self.in_flight.contains(&key) {
+                    self.queue.push(ProcessingTask {
                         key: key.clone(),
-                        session_id: session.session_id,
+                        session_id: session.session_id.clone(),
                         priority: High,
                         retry_count: 0,
                     });
-                    in_flight.insert(key);
+                    self.in_flight.insert(key);
                 }
             }
         }
@@ -324,27 +348,39 @@ loop {
 }
 
 // After processing completes
-fn on_process_complete(&mut self, key: &str) {
+fn on_process_complete(&mut self, key: &str, session_id: &str) {
     self.in_flight.remove(key);
+    
+    // Update last known size/mtime in database
+    if let Ok(metadata) = std::fs::metadata(&session.transcript_path) {
+        self.db.update_file_metadata(
+            session_id,
+            metadata.len(),
+            metadata.modified().ok(),
+        );
+    }
 }
 ```
 
-**Why file watchers**: Event-driven detection of transcript changes eliminates polling overhead and catches trailing messages (assistant responses after tool calls) immediately as they're written to disk. Checkpoint notifications provide immediate processing for tool_use_id linking, file watchers ensure no messages are missed.
+**Why polling over platform file watchers**: Simple, predictable, and cross-platform. Platform file watchers (inotify, FSEvents, ReadDirectoryChangesW) have different behaviors, edge cases, and resource limits. For our use case (checking ~100s of files every second), polling is negligible overhead and eliminates platform-specific complexity.
 
-**Why deduplication**: A single edit can trigger both a checkpoint notification (from the hook) and a file change event (from the file system watcher). Without deduplication, we'd process the same transcript twice. The canonical file path serves as a unique key, and the in_flight set prevents concurrent/duplicate processing.
+**Why 1-second poll interval**: Strikes balance between responsiveness and overhead. Checking 1000 sessions = 1000 stat() calls/sec = ~10ms I/O on SSD. Trailing messages appear within 1 second, which is acceptable latency for telemetry.
+
+**Why deduplication**: A single edit can trigger both a checkpoint notification (from the hook) and a modification detection (from polling). Without deduplication, we'd process the same transcript twice. The canonical file path serves as a unique key, and the in_flight set prevents concurrent/duplicate processing.
 
 **How to apply**: 
 - Worker maintains sorted queue (Immediate > High > Low) keyed by canonical transcript path
-- File watcher monitors all transcript directories (from AgentPreset.transcript_dirs())
+- Every 1 second, poll all session transcript files for size/mtime changes
 - Checkpoint notifications → Immediate priority (process within 100ms for tool_use_id linking)
-- File change events → High priority (process within 1 second to catch trailing messages)
+- Modification detection → High priority (process within 1 second to catch trailing messages)
 - Historical sessions discovered at startup → Low priority (backfill incrementally)
 - in_flight set tracks actively processing transcripts to prevent duplication
+- After processing, update last_known_size and last_modified in database
 - Errors move to back with exponential backoff
 
 **Processing Strategy**:
 - **Immediate priority**: Checkpoint-triggered, process within 100ms for tool_use_id linking
-- **High priority**: File-change-triggered, process within 1 second to catch trailing messages
+- **High priority**: Modification-detected, process within 1 second to catch trailing messages
 - **Low priority**: Historical backfill, process 1 per 5 seconds when queue has capacity
 - **Error handling**: Failed session moves to back of queue with exponential backoff
 - **Deduplication**: Canonical file path as key, in_flight set prevents duplicate work
@@ -357,18 +393,20 @@ fn on_process_complete(&mut self, key: &str) {
 - Worker receives notification and queues task at Immediate priority
 - Ensures tool_use_id linking works (tool call processed before watermark advances)
 
-**File system watcher**:
-- Monitors all transcript directories from AgentPresets
+**Modification detection**:
+- Every 1 second, poll all sessions and check file size/mtime against database
 - Detects file modifications (writes, appends)
 - Catches trailing messages (assistant responses after tool calls that don't trigger hooks)
-- Worker receives file events and queues tasks at High priority
+- Worker queues modified transcripts at High priority
 
-**Why both mechanisms needed**: Checkpoints only fire on tool executions. If an assistant writes a follow-up message after the last tool call, no checkpoint fires and that message would be missed. File watcher catches these trailing messages as they're written.
+**Why both mechanisms needed**: Checkpoints only fire on tool executions. If an assistant writes a follow-up message after the last tool call, no checkpoint fires and that message would be missed. Polling catches these trailing messages within 1 second.
 
 **Example scenario**:
-1. T=0s: Tool call (Edit) → checkpoint fires → Immediate processing (catches tool call)
-2. T=0.5s: Assistant writes "I've updated the file..." → file watcher fires → High priority processing (catches message)
-3. T=2s: User types response → file watcher fires → High priority processing (catches next user message)
+1. T=0s: Tool call (Edit) → checkpoint fires → Immediate processing (catches tool call, updates size/mtime)
+2. T=0.5s: Assistant writes "I've updated the file..." → file grows
+3. T=1s: Polling detects size change → High priority processing (catches message, updates size/mtime)
+4. T=2s: User types response → file grows
+5. T=3s: Polling detects size change → High priority processing (catches user message, updates size/mtime)
 
 **Telemetry emission**:
 - Worker batches AgentTrace events (max 100 per batch)
@@ -667,11 +705,10 @@ All transcript processing and telemetry emission works offline-first. Network un
 - Add reader unit tests with fixtures
 
 ### Phase 3: Worker (Week 3)
-- Add `notify` crate dependency for file system watching
-- Implement TranscriptWorker with priority queue and file watcher
-- Add daemon integration (spawn worker, control socket, watcher setup)
+- Implement TranscriptWorker with priority queue and polling loop
+- Add daemon integration (spawn worker, control socket)
 - Implement checkpoint notification flow with deduplication
-- Implement file change event handling with path-to-session lookup
+- Implement modification detection via file metadata polling
 - Add internal_db migration logic
 - Integration tests for worker lifecycle and deduplication
 
@@ -694,7 +731,7 @@ All transcript processing and telemetry emission works offline-first. Network un
 - [ ] All transcript readers moved to transcripts crate
 - [ ] Internal_db deprecated, all new installs use transcripts.db
 - [ ] Worker processes new checkpoints within 100ms (Immediate priority)
-- [ ] File watcher catches trailing messages within 1 second (High priority)
+- [ ] Polling detects trailing messages within 1 second (High priority)
 - [ ] Historical transcripts process incrementally without blocking (Low priority)
 - [ ] Deduplication prevents duplicate work from checkpoint + file events
 - [ ] Offline operation works (network failures don't block checkpoints)
@@ -702,5 +739,5 @@ All transcript processing and telemetry emission works offline-first. Network un
 - [ ] Server-side can link checkpoints to transcript tool calls
 - [ ] Trailing assistant messages (after last tool call) are captured
 - [ ] All existing tests pass
-- [ ] New integration tests cover worker lifecycle, file watching, and deduplication
+- [ ] New integration tests cover worker lifecycle, polling, and deduplication
 - [ ] Zero regressions in checkpoint recording performance
