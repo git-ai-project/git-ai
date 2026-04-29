@@ -72,15 +72,7 @@ fn handle_start(args: &[String]) -> Result<(), String> {
     if has_flag(args, "--mode") {
         return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
-    #[cfg(windows)]
-    {
-        start_daemon_detached(daemon_startup_timeout()).map(|_| ())
-    }
-
-    #[cfg(not(windows))]
-    {
-        ensure_daemon_running_attached(daemon_startup_timeout()).map(|_| ())
-    }
+    ensure_daemon_running_attached(daemon_startup_timeout()).map(|_| ())
 }
 
 fn daemon_startup_timeout() -> Duration {
@@ -102,9 +94,12 @@ fn daemon_startup_timeout() -> Duration {
     }
 }
 
-/// Like `ensure_daemon_running`, but spawns with inherited stderr so the user
-/// sees startup failures before the daemon detaches.
-#[cfg(not(windows))]
+/// Spawn a daemon and wait for it to become healthy. Used by explicit CLI
+/// commands (`bg start`, `bg restart`) — NOT guarded for test builds.
+///
+/// On Unix, spawns with piped stderr so startup failures are surfaced to the
+/// user. On Windows, spawns fully detached (null stdio) because piped handles
+/// cause the parent to hang when the daemon outlives it.
 fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, String> {
     let config = daemon_config_from_env_or_default_paths()?;
     if daemon_is_up(&config) {
@@ -118,43 +113,57 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
         ));
     }
 
-    let mut child = spawn_daemon_run_with_piped_stderr(&config)?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        if daemon_is_up(&config) {
-            // Daemon is healthy — let the detached child continue running.
+    #[cfg(not(windows))]
+    {
+        let mut child = spawn_daemon_run_with_piped_stderr(&config)?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if daemon_is_up(&config) {
+                return Ok(config);
+            }
+            match child.try_wait() {
+                Ok(Some(status)) if !status.success() => {
+                    let mut stderr_buf = String::new();
+                    if let Some(mut stderr) = child.stderr.take() {
+                        use std::io::Read;
+                        let _ = stderr.read_to_string(&mut stderr_buf);
+                    }
+                    let detail = if stderr_buf.trim().is_empty() {
+                        format!("daemon process exited with {}", status)
+                    } else {
+                        stderr_buf.trim().to_string()
+                    };
+                    return Err(format!("daemon failed to start: {}", detail));
+                }
+                Ok(Some(_)) => {
+                    return Err("daemon process exited before sockets were ready".to_string());
+                }
+                _ => {}
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out after {:?} waiting for daemon sockets {} and {}",
+                    timeout,
+                    config.control_socket_path.display(),
+                    config.trace_socket_path.display()
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        spawn_daemon_run_detached(&config)?;
+        if wait_for_daemon_up(&config, timeout) {
             return Ok(config);
         }
-        // Check if the child exited (startup failure).
-        match child.try_wait() {
-            Ok(Some(status)) if !status.success() => {
-                let mut stderr_buf = String::new();
-                if let Some(mut stderr) = child.stderr.take() {
-                    use std::io::Read;
-                    let _ = stderr.read_to_string(&mut stderr_buf);
-                }
-                let detail = if stderr_buf.trim().is_empty() {
-                    format!("daemon process exited with {}", status)
-                } else {
-                    stderr_buf.trim().to_string()
-                };
-                return Err(format!("daemon failed to start: {}", detail));
-            }
-            Ok(Some(_)) => {
-                // Exited successfully but sockets aren't up — unexpected.
-                return Err("daemon process exited before sockets were ready".to_string());
-            }
-            _ => {}
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "timed out after {:?} waiting for daemon sockets {} and {}",
-                timeout,
-                config.control_socket_path.display(),
-                config.trace_socket_path.display()
-            ));
-        }
-        thread::sleep(Duration::from_millis(10));
+        Err(format!(
+            "timed out after {:?} waiting for daemon sockets {} and {}",
+            timeout,
+            config.control_socket_path.display(),
+            config.trace_socket_path.display()
+        ))
     }
 }
 
@@ -262,17 +271,7 @@ fn wait_for_daemon_up(config: &DaemonConfig, timeout: Duration) -> bool {
     }
 }
 
-#[cfg(windows)]
-// Explicit daemon lifecycle command path. Unlike ensure_daemon_running(),
-// this remains available in test builds because it is only reached from
-// user/test-initiated `bg start` / `bg restart`, not hot implicit paths like
-// checkpoint delegation or telemetry initialization.
-fn start_daemon_detached(timeout: Duration) -> Result<DaemonConfig, String> {
-    let config = daemon_config_from_env_or_default_paths()?;
-    start_daemon_detached_with_config(config, timeout)
-}
-
-#[cfg(any(windows, not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn start_daemon_detached_with_config(
     config: DaemonConfig,
     timeout: Duration,
@@ -407,39 +406,11 @@ fn spawn_daemon_run_with_piped_stderr(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    // Remove git environment variables that must not leak into the daemon.
     for var in crate::daemon::GIT_ENV_VARS_TO_SANITIZE {
         child.env_remove(var);
     }
     child.env_remove("GIT_AI");
-
-    #[cfg(windows)]
-    {
-        let preferred_flags =
-            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
-        child.creation_flags(preferred_flags);
-        match child.spawn() {
-            Ok(c) => Ok(c),
-            Err(preferred_err) => {
-                tracing::debug!(
-                    "detached daemon spawn with CREATE_BREAKAWAY_FROM_JOB failed, retrying without it: {}",
-                    preferred_err
-                );
-                child.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
-                child.spawn().map_err(|fallback_err| {
-                    format!(
-                        "failed to spawn detached daemon with flags {:#x}: {}; retry without CREATE_BREAKAWAY_FROM_JOB also failed: {}",
-                        preferred_flags, preferred_err, fallback_err
-                    )
-                })
-            }
-        }
-    }
-
-    #[cfg(not(windows))]
-    {
-        child.spawn().map_err(|e| e.to_string())
-    }
+    child.spawn().map_err(|e| e.to_string())
 }
 
 fn handle_status(repo_working_dir: String) -> Result<(), String> {
@@ -597,14 +568,7 @@ fn handle_restart(args: &[String]) -> Result<(), String> {
     }
 
     // Start a fresh daemon.
-    #[cfg(windows)]
-    {
-        start_daemon_detached(daemon_startup_timeout()).map(|_| ())
-    }
-    #[cfg(not(windows))]
-    {
-        ensure_daemon_running_attached(daemon_startup_timeout()).map(|_| ())
-    }
+    ensure_daemon_running_attached(daemon_startup_timeout()).map(|_| ())
 }
 
 fn soft_shutdown_daemon(config: &DaemonConfig) -> Result<(), String> {
