@@ -85,8 +85,26 @@ transcripts/
 ```rust
 pub trait WatermarkStrategy: Send + Sync {
     fn serialize(&self) -> String;
-    fn deserialize(s: &str) -> Result<Self, TranscriptError>;
     fn advance(&mut self, bytes_read: usize, records_read: usize);
+}
+
+// Type-specific deserialization - each implementation provides its own
+pub enum WatermarkType {
+    ByteOffset,
+    RecordIndex,
+    Timestamp,
+    Hybrid,
+}
+
+impl WatermarkType {
+    pub fn deserialize(&self, s: &str) -> Result<Box<dyn WatermarkStrategy>, TranscriptError> {
+        match self {
+            WatermarkType::ByteOffset => Ok(Box::new(ByteOffsetWatermark::from_str(s)?)),
+            WatermarkType::RecordIndex => Ok(Box::new(RecordIndexWatermark::from_str(s)?)),
+            WatermarkType::Timestamp => Ok(Box::new(TimestampWatermark::from_str(s)?)),
+            WatermarkType::Hybrid => Ok(Box::new(HybridWatermark::from_str(s)?)),
+        }
+    }
 }
 
 // Implementations:
@@ -197,11 +215,11 @@ Migration runs once per installation. Failed migrations logged but don't block d
 **Add**:
 - Position 7: `tool_use_id` (String, nullable)
 
-**Usage**: When agent preset extracts tool_use_id from hook input, it's stored in checkpoint event. Server-side can join checkpoint events to AgentTrace events via `(session_id, trace_id)` where `trace_id == tool_use_id`.
+**Usage**: When agent preset extracts tool_use_id from hook input, it's stored in checkpoint event. The tool_use_id is also propagated to the checkpoint event's EventAttributes.trace_id field. Server-side can join checkpoint events to AgentTrace events via `(session_id, trace_id)` where checkpoint.trace_id matches the agent_trace.trace_id of the tool use that triggered the edit.
 
 **Why session/trace/tool_use_id linking**: Enables server-side analysis of AI agent behavior. Given a checkpoint (file edit), trace back to the exact tool call in the transcript that triggered it. Answers questions like "which Claude tool calls resulted in accepted code?" or "what's the acceptance rate per tool type?"
 
-**How to apply**: Checkpoint command extracts tool_use_id from preset metadata. Stored in CheckpointValues.tool_use_id field. Server joins checkpoint events to agent_trace events where checkpoint.trace_id == agent_trace.trace_id.
+**How to apply**: Checkpoint command extracts tool_use_id from preset metadata. Stored in both CheckpointValues.tool_use_id (position 7) and EventAttributes.trace_id (position 25). The trace_id in EventAttributes provides the join key. Server joins checkpoint events to agent_trace events where checkpoint.attrs.trace_id == agent_trace.values.trace_id (both contain the tool_use_id).
 
 ### Backward Compatibility
 
@@ -246,8 +264,8 @@ enum Priority {
 
 **Startup**:
 1. Migrate internal_db if exists
-2. Scan known transcript directories (from agent preset configs)
-3. Discover all transcript files
+2. Scan known transcript directories (each AgentPreset provides transcript_dirs() method returning Vec<PathBuf>)
+3. Discover all transcript files matching known formats
 4. Cross-reference with transcripts.db sessions table
 5. Queue any untracked sessions at Low priority
 6. Start processing loop
@@ -368,10 +386,12 @@ impl AgentPreset for ClaudeCodePreset {
 
 ### Per-Agent Configuration
 
-**Agent preset defines watermark strategy**:
+**Agent preset defines watermark strategy and transcript directories**:
 ```rust
 pub trait AgentPreset {
     fn watermark_strategy(&self) -> WatermarkType;
+    fn transcript_dirs(&self) -> Vec<PathBuf>;
+    fn discover_transcript(&self, session_id: &str) -> Option<TranscriptSource>;
 }
 
 // Most agents: byte offset
@@ -379,12 +399,20 @@ impl ClaudeCodePreset {
     fn watermark_strategy(&self) -> WatermarkType {
         WatermarkType::ByteOffset
     }
+    
+    fn transcript_dirs(&self) -> Vec<PathBuf> {
+        vec![dirs::data_dir().unwrap().join("Claude/conversations")]
+    }
 }
 
 // Droid: hybrid (record + timestamp)
 impl DroidPreset {
     fn watermark_strategy(&self) -> WatermarkType {
         WatermarkType::Hybrid
+    }
+    
+    fn transcript_dirs(&self) -> Vec<PathBuf> {
+        vec![dirs::data_dir().unwrap().join("Droid/transcripts")]
     }
 }
 ```
