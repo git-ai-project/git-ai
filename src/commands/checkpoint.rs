@@ -1004,15 +1004,15 @@ fn execute_resolved_checkpoint(
         }
 
         // Notify daemon about checkpoint for transcript processing
-        if let Some(ref cr) = checkpoint_request {
-            if let Some(ref ts) = cr.transcript_source {
-                let session_id = checkpoint.agent_id
-                    .as_ref()
-                    .map(|aid| generate_session_id(&aid.id, &aid.tool))
-                    .unwrap_or_default();
-                let trace_id_str = checkpoint.trace_id.as_deref().unwrap_or("");
-                send_checkpoint_notification(&Some(ts.clone()), &session_id, trace_id_str);
-            }
+        if let Some(ref cr) = checkpoint_request
+            && let Some(ref ts) = cr.transcript_source {
+            let session_id = checkpoint
+                .agent_id
+                .as_ref()
+                .map(|aid| generate_session_id(&aid.id, &aid.tool))
+                .unwrap_or_default();
+            let trace_id_str = checkpoint.trace_id.as_deref().unwrap_or("");
+            send_checkpoint_notification(&Some(ts.clone()), &session_id, trace_id_str);
         }
     }
 

@@ -393,7 +393,7 @@ mod tests {
             r#"{{"type":"user","message":{{"content":"First"}},"timestamp":"2025-01-01T00:00:00Z"}}"#
         )
         .unwrap();
-        writeln!(file, "").unwrap(); // Empty line
+        writeln!(file).unwrap(); // Empty line
         writeln!(
             file,
             r#"{{"type":"user","message":{{"content":"Second"}},"timestamp":"2025-01-01T00:00:01Z"}}"#
