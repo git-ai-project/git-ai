@@ -4,7 +4,7 @@ src/commands/hooks/commit_hooks.rs
 {
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "1.3.5",
-  "base_commit_sha": "dce6184c8569ca24b2ede1573eed80b06ca6e487",
+  "base_commit_sha": "9dcf7cbfe5f88a178d656f56a10b879348e1987c",
   "prompts": {
     "3800fef055e223b0": {
       "agent_id": {
