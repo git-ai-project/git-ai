@@ -1,6 +1,5 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::LineAttribution;
-use git_ai::authorship::transcript::AiTranscript;
 use git_ai::authorship::working_log::{
     AgentId, CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind,
 };

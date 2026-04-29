@@ -170,7 +170,6 @@ impl Checkpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authorship::transcript::Message;
 
     #[test]
     fn test_checkpoint_serialization() {

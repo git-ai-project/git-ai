@@ -1,5 +1,4 @@
 use crate::authorship::authorship_log::PromptRecord;
-use crate::authorship::transcript::AiTranscript;
 use crate::commands::checkpoint_agent::transcript_readers;
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
@@ -132,9 +131,9 @@ pub fn find_prompt_in_history(
 
 /// Result of attempting to update a prompt from a tool
 pub enum PromptUpdateResult {
-    Updated(AiTranscript, String), // (new_transcript, new_model)
-    Unchanged,                     // No update available or needed
-    Failed(GitAiError),            // Error occurred but not fatal
+    Updated(String),    // new_model
+    Unchanged,          // No update available or needed
+    Failed(GitAiError), // Error occurred but not fatal
 }
 
 /// Update a prompt by fetching latest transcript from the tool
@@ -175,10 +174,9 @@ pub fn update_codex_prompt(
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
             match transcript_readers::read_codex_jsonl(Path::new(transcript_path)) {
-                Ok((transcript, model)) => PromptUpdateResult::Updated(
-                    transcript,
-                    model.unwrap_or_else(|| current_model.to_string()),
-                ),
+                Ok((_, model)) => {
+                    PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
+                }
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse Codex rollout JSONL transcript from {}: {}",
@@ -212,9 +210,7 @@ fn update_cursor_prompt(
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
             match transcript_readers::read_cursor_jsonl(Path::new(transcript_path)) {
-                Ok((transcript, _)) => {
-                    PromptUpdateResult::Updated(transcript, current_model.to_string())
-                }
+                Ok((_, _)) => PromptUpdateResult::Updated(current_model.to_string()),
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse Cursor JSONL transcript from {}: {}",
@@ -250,13 +246,10 @@ pub fn update_claude_prompt(
         if let Some(transcript_path) = metadata.get("transcript_path") {
             // Try to read and parse the transcript JSONL
             match transcript_readers::read_claude_jsonl(Path::new(transcript_path)) {
-                Ok((transcript, model)) => {
+                Ok((_, model)) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
-                    PromptUpdateResult::Updated(
-                        transcript,
-                        model.unwrap_or_else(|| current_model.to_string()),
-                    )
+                    PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -295,13 +288,10 @@ pub fn update_gemini_prompt(
         if let Some(transcript_path) = metadata.get("transcript_path") {
             // Try to read and parse the transcript JSON
             match transcript_readers::read_gemini_json(Path::new(transcript_path)) {
-                Ok((transcript, model)) => {
+                Ok((_, model)) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
-                    PromptUpdateResult::Updated(
-                        transcript,
-                        model.unwrap_or_else(|| current_model.to_string()),
-                    )
+                    PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -340,13 +330,10 @@ pub fn update_github_copilot_prompt(
         if let Some(chat_session_path) = metadata.get("chat_session_path") {
             // Try to read and parse the chat session JSON
             match transcript_readers::read_copilot_session_json(Path::new(chat_session_path)) {
-                Ok((transcript, model, _)) => {
+                Ok((_, model, _)) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
-                    PromptUpdateResult::Updated(
-                        transcript,
-                        model.unwrap_or_else(|| current_model.to_string()),
-                    )
+                    PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -385,11 +372,11 @@ pub fn update_continue_cli_prompt(
         if let Some(transcript_path) = metadata.get("transcript_path") {
             // Try to read and parse the transcript JSON
             match transcript_readers::read_continue_json(Path::new(transcript_path)) {
-                Ok(transcript) => {
+                Ok(_) => {
                     // Update to the latest transcript (similar to Cursor behavior)
                     // This handles both cases: initial load failure and getting latest version
                     // IMPORTANT: Always preserve the original model from agent_id (don't overwrite)
-                    PromptUpdateResult::Updated(transcript, current_model.to_string())
+                    PromptUpdateResult::Updated(current_model.to_string())
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -425,26 +412,22 @@ pub fn update_droid_prompt(
 ) -> PromptUpdateResult {
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
-            // Re-parse transcript
-            let transcript = match transcript_readers::read_droid_jsonl(Path::new(transcript_path))
-            {
-                Ok((transcript, _model)) => transcript,
-                Err(e) => {
-                    tracing::debug!(
-                        "Failed to parse Droid JSONL transcript from {}: {}",
-                        transcript_path,
-                        e
-                    );
-                    log_error(
-                        &e,
-                        Some(serde_json::json!({
-                            "agent_tool": "droid",
-                            "operation": "transcript_and_model_from_droid_jsonl"
-                        })),
-                    );
-                    return PromptUpdateResult::Failed(e);
-                }
-            };
+            // Validate transcript can be parsed
+            if let Err(e) = transcript_readers::read_droid_jsonl(Path::new(transcript_path)) {
+                tracing::debug!(
+                    "Failed to parse Droid JSONL transcript from {}: {}",
+                    transcript_path,
+                    e
+                );
+                log_error(
+                    &e,
+                    Some(serde_json::json!({
+                        "agent_tool": "droid",
+                        "operation": "transcript_and_model_from_droid_jsonl"
+                    })),
+                );
+                return PromptUpdateResult::Failed(e);
+            }
 
             // Re-parse model from settings.json
             let model = if let Some(settings_path) = metadata.get("settings_path") {
@@ -464,7 +447,7 @@ pub fn update_droid_prompt(
                 current_model.to_string()
             };
 
-            PromptUpdateResult::Updated(transcript, model)
+            PromptUpdateResult::Updated(model)
         } else {
             // No transcript_path in metadata
             PromptUpdateResult::Unchanged
@@ -518,10 +501,9 @@ fn update_amp_prompt(
     };
 
     match result {
-        Ok((transcript, model)) => PromptUpdateResult::Updated(
-            transcript,
-            model.unwrap_or_else(|| current_model.to_string()),
-        ),
+        Ok((_, model)) => {
+            PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
+        }
         Err(e) => {
             tracing::debug!(
                 "Failed to fetch Amp transcript for thread {}: {}",
@@ -562,10 +544,9 @@ fn update_opencode_prompt(
     };
 
     match result {
-        Ok((transcript, model)) => PromptUpdateResult::Updated(
-            transcript,
-            model.unwrap_or_else(|| current_model.to_string()),
-        ),
+        Ok((_, model)) => {
+            PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
+        }
         Err(e) => {
             tracing::debug!(
                 "Failed to fetch OpenCode transcript for session {}: {}",
@@ -594,10 +575,9 @@ fn update_pi_prompt(
         .filter(|path| !path.trim().is_empty())
     {
         match transcript_readers::read_pi_session(session_path) {
-            Ok((transcript, model)) => PromptUpdateResult::Updated(
-                transcript,
-                model.unwrap_or_else(|| current_model.to_string()),
-            ),
+            Ok((_, model)) => {
+                PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
+            }
             Err(e) => {
                 tracing::debug!(
                     "Failed to parse Pi session JSONL from {}: {}",
@@ -628,10 +608,9 @@ pub fn update_windsurf_prompt(
     if let Some(metadata) = metadata {
         if let Some(transcript_path) = metadata.get("transcript_path") {
             match transcript_readers::read_windsurf_jsonl(Path::new(transcript_path)) {
-                Ok((transcript, model)) => PromptUpdateResult::Updated(
-                    transcript,
-                    model.unwrap_or_else(|| current_model.to_string()),
-                ),
+                Ok((_, model)) => {
+                    PromptUpdateResult::Updated(model.unwrap_or_else(|| current_model.to_string()))
+                }
                 Err(e) => {
                     tracing::debug!(
                         "Failed to parse Windsurf JSONL transcript from {}: {}",
@@ -668,35 +647,7 @@ pub fn format_transcript(_prompt: &PromptRecord) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authorship::authorship_log::PromptRecord;
-    use crate::authorship::transcript::Message;
-    use crate::authorship::working_log::AgentId;
     use std::collections::HashMap;
-
-    // Helper function to create a test PromptRecord
-    fn create_test_prompt_record(tool: &str, id: &str, model: &str) -> PromptRecord {
-        PromptRecord {
-            agent_id: AgentId {
-                tool: tool.to_string(),
-                id: id.to_string(),
-                model: model.to_string(),
-            },
-            human_author: Some("test_user".to_string()),
-            total_additions: 10,
-            total_deletions: 5,
-            accepted_lines: 8,
-            overriden_lines: 2,
-            custom_attributes: None,
-        }
-    }
-
-    #[test]
-
-    #[test]
-
-    #[test]
-
-    #[test]
 
     #[test]
     fn test_update_prompt_from_tool_unknown() {
@@ -832,19 +783,13 @@ mod tests {
         match result {
             PromptUpdateResult::Unchanged
             | PromptUpdateResult::Failed(_)
-            | PromptUpdateResult::Updated(_, _) => {}
+            | PromptUpdateResult::Updated(_) => {}
         }
 
         // Test dispatch to windsurf
         let result = update_prompt_from_tool("windsurf", "trajectory-123", None, "model");
         assert!(matches!(result, PromptUpdateResult::Unchanged));
     }
-
-    #[test]
-
-    #[test]
-
-    #[test]
 
     #[test]
     fn test_update_codex_prompt_invalid_path() {
