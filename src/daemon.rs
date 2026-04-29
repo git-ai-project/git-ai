@@ -5536,10 +5536,7 @@ impl ActorDaemonCoordinator {
                     next_ordinal: 1,
                     entries: BTreeMap::new(),
                 });
-            loop {
-                let Some(first_entry) = state.entries.first_entry() else {
-                    break;
-                };
+            while let Some(first_entry) = state.entries.first_entry() {
                 if matches!(first_entry.get(), FamilySequencerEntry::PendingRoot) {
                     break;
                 }
