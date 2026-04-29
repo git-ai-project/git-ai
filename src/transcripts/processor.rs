@@ -63,28 +63,16 @@ pub fn process_transcript(
             super::formats::claude::read_incremental(path, watermark, session_id)
         }
         TranscriptFormat::CursorJsonl => {
-            // TODO(Phase 2b): Implement Cursor reader
-            Err(TranscriptError::Fatal {
-                message: "Cursor format not yet implemented".to_string(),
-            })
+            super::formats::cursor::read_incremental(path, watermark, session_id)
         }
         TranscriptFormat::DroidJsonl => {
-            // TODO(Phase 2b): Implement Droid reader
-            Err(TranscriptError::Fatal {
-                message: "Droid format not yet implemented".to_string(),
-            })
+            super::formats::droid::read_incremental(path, watermark, session_id)
         }
         TranscriptFormat::CopilotSessionJson => {
-            // TODO(Phase 2b): Implement Copilot session reader
-            Err(TranscriptError::Fatal {
-                message: "Copilot session format not yet implemented".to_string(),
-            })
+            super::formats::copilot::read_session_json(path, watermark, session_id)
         }
         TranscriptFormat::CopilotEventStreamJsonl => {
-            // TODO(Phase 2b): Implement Copilot event stream reader
-            Err(TranscriptError::Fatal {
-                message: "Copilot event stream format not yet implemented".to_string(),
-            })
+            super::formats::copilot::read_event_stream(path, watermark, session_id)
         }
     }
 }
