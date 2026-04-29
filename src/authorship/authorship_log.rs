@@ -210,8 +210,6 @@ pub struct PromptRecord {
     pub overriden_lines: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub messages_url: Option<String>,
 }
 
 impl Eq for PromptRecord {}
@@ -237,7 +235,6 @@ impl SessionRecord {
             accepted_lines: 0,
             overriden_lines: 0,
             custom_attributes: self.custom_attributes.clone(),
-            messages_url: None,
         }
     }
 }
@@ -278,7 +275,6 @@ mod tests {
             accepted_lines: 0,
             overriden_lines: 0,
             custom_attributes: None,
-            messages_url: None,
         }
     }
 
