@@ -1,5 +1,5 @@
 use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::GitTestMode;
+
 use crate::test_utils::fixture_path;
 use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::authorship_log::PromptRecord;
@@ -98,60 +98,6 @@ fn normalize_blame_for_format_parity(blame_output: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn parse_blame_line(line: &str) -> (String, String) {
-    if let Some(start_paren) = line.find('(')
-        && let Some(end_paren) = line.find(')')
-    {
-        let author_section = &line[start_paren + 1..end_paren];
-        let content = line[end_paren + 1..].trim().to_string();
-        let parts: Vec<&str> = author_section.split_whitespace().collect();
-        let mut author_parts = Vec::new();
-        for part in parts {
-            if part.chars().next().unwrap_or('a').is_ascii_digit() {
-                break;
-            }
-            author_parts.push(part);
-        }
-        return (author_parts.join(" "), content);
-    }
-    ("unknown".to_string(), line.to_string())
-}
-
-fn assert_hooks_line_is_human_or_ai(
-    repo: &crate::repos::test_repo::TestRepo,
-    path: &str,
-    line: &str,
-) {
-    let blame_output = repo.git_ai(&["blame", path]).expect("blame should succeed");
-    let parsed_lines: Vec<(String, String)> = blame_output
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(parse_blame_line)
-        .collect();
-    let matched = parsed_lines
-        .iter()
-        .find(|(_, content)| content.trim() == line)
-        .expect("expected line missing from blame output");
-    let author = matched.0.trim();
-    assert!(
-        author == "Test User" || author == "mock_ai",
-        "Expected '{}' to be attributed to Test User or mock_ai, got '{}'\nBlame output:\n{}",
-        line,
-        author,
-        blame_output
-    );
-}
-
-fn assert_file_lines(
-    repo: &crate::repos::test_repo::TestRepo,
-    path: &str,
-    expected_lines: &[&str],
-) {
-    let content = fs::read_to_string(repo.path().join(path)).expect("read file");
-    let actual_lines: Vec<&str> = content.lines().collect();
-    assert_eq!(actual_lines, expected_lines);
 }
 
 fn unique_worktree_path() -> PathBuf {
@@ -286,12 +232,7 @@ crate::worktree_test_wrappers! {
         repo.git(&["stash", "pop"]).unwrap();
         repo.stage_all_and_commit("apply stash").unwrap();
 
-        if matches!(TestRepo::git_mode(), GitTestMode::Hooks) {
-            assert_file_lines(&repo, "stash.txt", &["base", "ai stash line"]);
-            assert_hooks_line_is_human_or_ai(&repo, "stash.txt", "ai stash line");
-        } else {
-            file.assert_lines_and_blame(crate::lines!["base".human(), "ai stash line".ai()]);
-        }
+        file.assert_lines_and_blame(crate::lines!["base".human(), "ai stash line".ai()]);
     }
 }
 
@@ -309,12 +250,7 @@ crate::worktree_test_wrappers! {
             .expect("mixed reset should succeed");
         repo.stage_all_and_commit("recommit after reset").unwrap();
 
-        if matches!(TestRepo::git_mode(), GitTestMode::Hooks) {
-            assert_file_lines(&repo, "reset.txt", &["base", "ai reset line"]);
-            assert_hooks_line_is_human_or_ai(&repo, "reset.txt", "ai reset line");
-        } else {
-            file.assert_lines_and_blame(crate::lines!["base".human(), "ai reset line".ai()]);
-        }
+        file.assert_lines_and_blame(crate::lines!["base".human(), "ai reset line".ai()]);
     }
 }
 
@@ -338,12 +274,7 @@ crate::worktree_test_wrappers! {
         repo.git(&["checkout", "feature"]).unwrap();
         repo.git(&["rebase", "integration"]).unwrap();
 
-        if matches!(TestRepo::git_mode(), GitTestMode::Hooks) {
-            assert_file_lines(&repo, "rebase.txt", &["base", "feature ai line"]);
-            assert_hooks_line_is_human_or_ai(&repo, "rebase.txt", "feature ai line");
-        } else {
-            file.assert_lines_and_blame(crate::lines!["base".human(), "feature ai line".ai()]);
-        }
+        file.assert_lines_and_blame(crate::lines!["base".human(), "feature ai line".ai()]);
     }
 }
 
@@ -362,12 +293,7 @@ crate::worktree_test_wrappers! {
         repo.git(&["checkout", "integration"]).unwrap();
         repo.git(&["cherry-pick", &ai_commit.commit_sha]).unwrap();
 
-        if matches!(TestRepo::git_mode(), GitTestMode::Hooks) {
-            assert_file_lines(&repo, "cherry.txt", &["base", "feature ai"]);
-            assert_hooks_line_is_human_or_ai(&repo, "cherry.txt", "feature ai");
-        } else {
-            file.assert_lines_and_blame(crate::lines!["base".human(), "feature ai".ai()]);
-        }
+        file.assert_lines_and_blame(crate::lines!["base".human(), "feature ai".ai()]);
     }
 }
 

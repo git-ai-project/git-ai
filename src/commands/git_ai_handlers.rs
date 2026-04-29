@@ -17,7 +17,7 @@ use crate::git::find_repository;
 use crate::git::find_repository_in_path;
 use crate::git::repository::{CommitRange, Repository, group_files_by_repository};
 use crate::git::sync_authorship::{NotesExistence, fetch_authorship_notes, push_authorship_notes};
-use crate::observability::wrapper_performance_targets::log_performance_for_checkpoint;
+use crate::observability::performance_targets::log_performance_for_checkpoint;
 use crate::observability::{self, log_message};
 use crate::utils::is_interactive_terminal;
 use serde::{Deserialize, Serialize};
@@ -32,46 +32,44 @@ pub fn handle_git_ai(args: &[String]) {
         return;
     }
 
-    // In async mode, initialize the global telemetry handle so that
-    // observability and CAS events are routed over the control socket instead
-    // of being written to per-PID log files.
+    // Initialize the global telemetry handle so that observability and CAS
+    // events are routed over the control socket instead of being written to
+    // per-PID log files.
     //
     // Skip for commands that must work without a running background service
     // (help, version, config, d management, debug, upgrade) so users can
     // always diagnose and recover from a broken state.
-    if config::Config::get().feature_flags().async_mode {
-        let needs_daemon = !matches!(
-            args[0].as_str(),
-            "help"
-                | "--help"
-                | "-h"
-                | "version"
-                | "--version"
-                | "-v"
-                | "config"
-                | "bg"
-                | "d"
-                | "daemon"
-                | "debug"
-                | "upgrade"
-                | "install-hooks"
-                | "install"
-                | "uninstall-hooks"
-        );
-        if needs_daemon {
-            use crate::daemon::telemetry_handle::{
-                DaemonTelemetryInitResult, init_daemon_telemetry_handle,
-            };
-            match init_daemon_telemetry_handle() {
-                DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
-                DaemonTelemetryInitResult::Failed(err) => {
-                    // Hard error for git-ai commands: the background service must be reachable.
-                    eprintln!(
-                        "error: failed to connect to git-ai background service: {}",
-                        err
-                    );
-                    std::process::exit(1);
-                }
+    let needs_daemon = !matches!(
+        args[0].as_str(),
+        "help"
+            | "--help"
+            | "-h"
+            | "version"
+            | "--version"
+            | "-v"
+            | "config"
+            | "bg"
+            | "d"
+            | "daemon"
+            | "debug"
+            | "upgrade"
+            | "install-hooks"
+            | "install"
+            | "uninstall-hooks"
+    );
+    if needs_daemon {
+        use crate::daemon::telemetry_handle::{
+            DaemonTelemetryInitResult, init_daemon_telemetry_handle,
+        };
+        match init_daemon_telemetry_handle() {
+            DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
+            DaemonTelemetryInitResult::Failed(err) => {
+                // Hard error for git-ai commands: the background service must be reachable.
+                eprintln!(
+                    "error: failed to connect to git-ai background service: {}",
+                    err
+                );
+                std::process::exit(1);
             }
         }
     }
@@ -897,187 +895,51 @@ fn run_checkpoint_via_daemon_or_local(
     allow_captured_async: bool,
     is_pre_commit: bool,
 ) -> Result<CheckpointDispatchOutcome, crate::error::GitAiError> {
-    if daemon_checkpoint_delegate_enabled() {
-        let repo_working_dir = repo.workdir().map(|p| p.to_string_lossy().to_string()).ok();
-        if let Some(repo_working_dir) = repo_working_dir {
-            let is_test = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
-                || std::env::var_os("GITAI_TEST_DB_PATH").is_some();
-            let checkpoint_daemon_timeout = if cfg!(windows) || is_test {
-                Duration::from_secs(10)
-            } else {
-                Duration::from_secs(5)
-            };
-            match crate::commands::daemon::ensure_daemon_running(checkpoint_daemon_timeout) {
-                Ok(config) => {
-                    // Early path: if the bash tool already captured a checkpoint,
-                    // submit it directly to the daemon without re-capturing.
-                    if let Some(capture_id) = checkpoint_request
-                        .as_ref()
-                        .and_then(|r| r.captured_checkpoint_id.as_deref())
-                    {
-                        // Patch the manifest with the real agent identity/transcript/metadata
-                        // so the daemon sees the actual agent context instead of the synthetic
-                        // placeholder written at bash-tool capture time.
-                        if let Err(e) =
-                            crate::commands::checkpoint::update_captured_checkpoint_agent_context(
-                                capture_id,
-                                author,
-                                checkpoint_request.as_ref(),
-                            )
-                        {
-                            tracing::debug!(
-                                "Failed to update captured checkpoint agent context: {}",
-                                e
-                            );
-                        }
-
-                        let request = ControlRequest::CheckpointRun {
-                            request: Box::new(CheckpointRunRequest::Captured(
-                                CapturedCheckpointRunRequest {
-                                    repo_working_dir: repo_working_dir.clone(),
-                                    capture_id: capture_id.to_string(),
-                                },
-                            )),
-                            wait: Some(false),
-                        };
-                        match send_control_request(&config.control_socket_path, &request) {
-                            Ok(response) if response.ok => {
-                                let estimated_files =
-                                    estimate_checkpoint_file_count(kind, &checkpoint_request);
-                                return Ok(CheckpointDispatchOutcome {
-                                    stats: (0, estimated_files, 0),
-                                    queued: true,
-                                });
-                            }
-                            Ok(response) => {
-                                let message = response
-                                    .error
-                                    .unwrap_or_else(|| "unknown error".to_string());
-                                let _ = cleanup_captured_checkpoint_after_delegate_failure(
-                                    capture_id,
-                                    &repo_working_dir,
-                                    kind,
-                                    "bash_captured_request_cleanup_failed",
-                                );
-                                log_daemon_checkpoint_delegate_failure(
-                                    "bash_captured_request_rejected",
-                                    &repo_working_dir,
-                                    kind,
-                                    &message,
-                                );
-                            }
-                            Err(e) => {
-                                let _ = cleanup_captured_checkpoint_after_delegate_failure(
-                                    capture_id,
-                                    &repo_working_dir,
-                                    kind,
-                                    "bash_captured_connect_cleanup_failed",
-                                );
-                                log_daemon_checkpoint_delegate_failure(
-                                    "bash_captured_connect_failed",
-                                    &repo_working_dir,
-                                    kind,
-                                    &e.to_string(),
-                                );
-                            }
-                        }
-                        // Fall through to normal path on failure
-                    }
-
-                    if allow_captured_async
-                        && crate::commands::checkpoint::explicit_capture_target_paths(
-                            kind,
+    if let Ok(repo_working_dir) = repo.workdir().map(|p| p.to_string_lossy().to_string()) {
+        let is_test = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+            || std::env::var_os("GITAI_TEST_DB_PATH").is_some();
+        let checkpoint_daemon_timeout = if cfg!(windows) || is_test {
+            Duration::from_secs(10)
+        } else {
+            Duration::from_secs(5)
+        };
+        let daemon_config = if is_test
+            && (std::env::var_os("GIT_AI_DAEMON_HOME").is_some()
+                || std::env::var_os("GIT_AI_DAEMON_CONTROL_SOCKET").is_some())
+        {
+            crate::daemon::DaemonConfig::from_env_or_default_paths().map_err(|e| e.to_string())
+        } else {
+            crate::commands::daemon::ensure_daemon_running(checkpoint_daemon_timeout)
+        };
+        match daemon_config {
+            Ok(config) => {
+                // Early path: if the bash tool already captured a checkpoint,
+                // submit it directly to the daemon without re-capturing.
+                if let Some(capture_id) = checkpoint_request
+                    .as_ref()
+                    .and_then(|r| r.captured_checkpoint_id.as_deref())
+                {
+                    if let Err(e) =
+                        crate::commands::checkpoint::update_captured_checkpoint_agent_context(
+                            capture_id,
+                            author,
                             checkpoint_request.as_ref(),
                         )
-                        .is_some()
                     {
-                        match crate::commands::checkpoint::prepare_captured_checkpoint(
-                            repo,
-                            author,
-                            kind,
-                            checkpoint_request.as_ref(),
-                            is_pre_commit,
-                            None,
-                        ) {
-                            Ok(Some(capture)) => {
-                                let request = ControlRequest::CheckpointRun {
-                                    request: Box::new(CheckpointRunRequest::Captured(
-                                        CapturedCheckpointRunRequest {
-                                            repo_working_dir: capture.repo_working_dir.clone(),
-                                            capture_id: capture.capture_id.clone(),
-                                        },
-                                    )),
-                                    wait: Some(false),
-                                };
-                                match send_control_request(&config.control_socket_path, &request) {
-                                    Ok(response) if response.ok => {
-                                        return Ok(CheckpointDispatchOutcome {
-                                            stats: (0, capture.file_count, 0),
-                                            queued: true,
-                                        });
-                                    }
-                                    Ok(response) => {
-                                        let message = response
-                                            .error
-                                            .unwrap_or_else(|| "unknown error".to_string());
-                                        let _ = cleanup_captured_checkpoint_after_delegate_failure(
-                                            &capture.capture_id,
-                                            &repo_working_dir,
-                                            kind,
-                                            "captured_request_cleanup_failed",
-                                        );
-                                        log_daemon_checkpoint_delegate_failure(
-                                            "captured_request_rejected",
-                                            &repo_working_dir,
-                                            kind,
-                                            &message,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        let _ = cleanup_captured_checkpoint_after_delegate_failure(
-                                            &capture.capture_id,
-                                            &repo_working_dir,
-                                            kind,
-                                            "captured_connect_cleanup_failed",
-                                        );
-                                        log_daemon_checkpoint_delegate_failure(
-                                            "captured_connect_failed",
-                                            &repo_working_dir,
-                                            kind,
-                                            &e.to_string(),
-                                        );
-                                    }
-                                }
-                            }
-                            Ok(None) => {
-                                return Ok(CheckpointDispatchOutcome {
-                                    stats: (0, 0, 0),
-                                    queued: false,
-                                });
-                            }
-                            Err(e) => {
-                                log_daemon_checkpoint_delegate_failure(
-                                    "capture_prepare_failed",
-                                    &repo_working_dir,
-                                    kind,
-                                    &e.to_string(),
-                                );
-                            }
-                        }
+                        tracing::debug!(
+                            "Failed to update captured checkpoint agent context: {}",
+                            e
+                        );
                     }
 
                     let request = ControlRequest::CheckpointRun {
-                        request: Box::new(CheckpointRunRequest::Live(Box::new(
-                            LiveCheckpointRunRequest {
+                        request: Box::new(CheckpointRunRequest::Captured(
+                            CapturedCheckpointRunRequest {
                                 repo_working_dir: repo_working_dir.clone(),
-                                kind: Some(checkpoint_kind_to_str(kind).to_string()),
-                                author: Some(author.to_string()),
-                                quiet: Some(quiet),
-                                is_pre_commit: Some(is_pre_commit),
-                                checkpoint_request: checkpoint_request.clone(),
+                                capture_id: capture_id.to_string(),
                             },
-                        ))),
-                        wait: Some(true),
+                        )),
+                        wait: Some(false),
                     };
                     match send_control_request(&config.control_socket_path, &request) {
                         Ok(response) if response.ok => {
@@ -1085,23 +947,35 @@ fn run_checkpoint_via_daemon_or_local(
                                 estimate_checkpoint_file_count(kind, &checkpoint_request);
                             return Ok(CheckpointDispatchOutcome {
                                 stats: (0, estimated_files, 0),
-                                queued: false,
+                                queued: true,
                             });
                         }
                         Ok(response) => {
                             let message = response
                                 .error
                                 .unwrap_or_else(|| "unknown error".to_string());
+                            let _ = cleanup_captured_checkpoint_after_delegate_failure(
+                                capture_id,
+                                &repo_working_dir,
+                                kind,
+                                "bash_captured_request_cleanup_failed",
+                            );
                             log_daemon_checkpoint_delegate_failure(
-                                "request_rejected",
+                                "bash_captured_request_rejected",
                                 &repo_working_dir,
                                 kind,
                                 &message,
                             );
                         }
                         Err(e) => {
+                            let _ = cleanup_captured_checkpoint_after_delegate_failure(
+                                capture_id,
+                                &repo_working_dir,
+                                kind,
+                                "bash_captured_connect_cleanup_failed",
+                            );
                             log_daemon_checkpoint_delegate_failure(
-                                "connect_failed",
+                                "bash_captured_connect_failed",
                                 &repo_working_dir,
                                 kind,
                                 &e.to_string(),
@@ -1109,14 +983,139 @@ fn run_checkpoint_via_daemon_or_local(
                         }
                     }
                 }
-                Err(e) => {
-                    log_daemon_checkpoint_delegate_failure(
-                        "startup_failed",
-                        &repo_working_dir,
+
+                if allow_captured_async
+                    && crate::commands::checkpoint::explicit_capture_target_paths(
                         kind,
-                        &e,
-                    );
+                        checkpoint_request.as_ref(),
+                    )
+                    .is_some()
+                {
+                    match crate::commands::checkpoint::prepare_captured_checkpoint(
+                        repo,
+                        author,
+                        kind,
+                        checkpoint_request.as_ref(),
+                        is_pre_commit,
+                        None,
+                    ) {
+                        Ok(Some(capture)) => {
+                            let request = ControlRequest::CheckpointRun {
+                                request: Box::new(CheckpointRunRequest::Captured(
+                                    CapturedCheckpointRunRequest {
+                                        repo_working_dir: capture.repo_working_dir.clone(),
+                                        capture_id: capture.capture_id.clone(),
+                                    },
+                                )),
+                                wait: Some(false),
+                            };
+                            match send_control_request(&config.control_socket_path, &request) {
+                                Ok(response) if response.ok => {
+                                    return Ok(CheckpointDispatchOutcome {
+                                        stats: (0, capture.file_count, 0),
+                                        queued: true,
+                                    });
+                                }
+                                Ok(response) => {
+                                    let message = response
+                                        .error
+                                        .unwrap_or_else(|| "unknown error".to_string());
+                                    let _ = cleanup_captured_checkpoint_after_delegate_failure(
+                                        &capture.capture_id,
+                                        &repo_working_dir,
+                                        kind,
+                                        "captured_request_cleanup_failed",
+                                    );
+                                    log_daemon_checkpoint_delegate_failure(
+                                        "captured_request_rejected",
+                                        &repo_working_dir,
+                                        kind,
+                                        &message,
+                                    );
+                                }
+                                Err(e) => {
+                                    let _ = cleanup_captured_checkpoint_after_delegate_failure(
+                                        &capture.capture_id,
+                                        &repo_working_dir,
+                                        kind,
+                                        "captured_connect_cleanup_failed",
+                                    );
+                                    log_daemon_checkpoint_delegate_failure(
+                                        "captured_connect_failed",
+                                        &repo_working_dir,
+                                        kind,
+                                        &e.to_string(),
+                                    );
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            return Ok(CheckpointDispatchOutcome {
+                                stats: (0, 0, 0),
+                                queued: false,
+                            });
+                        }
+                        Err(e) => {
+                            log_daemon_checkpoint_delegate_failure(
+                                "capture_prepare_failed",
+                                &repo_working_dir,
+                                kind,
+                                &e.to_string(),
+                            );
+                        }
+                    }
                 }
+
+                let request = ControlRequest::CheckpointRun {
+                    request: Box::new(CheckpointRunRequest::Live(Box::new(
+                        LiveCheckpointRunRequest {
+                            repo_working_dir: repo_working_dir.clone(),
+                            kind: Some(checkpoint_kind_to_str(kind).to_string()),
+                            author: Some(author.to_string()),
+                            quiet: Some(quiet),
+                            is_pre_commit: Some(is_pre_commit),
+                            checkpoint_request: checkpoint_request.clone(),
+                        },
+                    ))),
+                    wait: Some(true),
+                };
+                match send_control_request(&config.control_socket_path, &request) {
+                    Ok(response) if response.ok => {
+                        let estimated_files =
+                            estimate_checkpoint_file_count(kind, &checkpoint_request);
+                        return Ok(CheckpointDispatchOutcome {
+                            stats: (0, estimated_files, 0),
+                            queued: false,
+                        });
+                    }
+                    Ok(response) => {
+                        let message = response
+                            .error
+                            .unwrap_or_else(|| "unknown error".to_string());
+                        log_daemon_checkpoint_delegate_failure(
+                            "request_rejected",
+                            &repo_working_dir,
+                            kind,
+                            &message,
+                        );
+                    }
+                    Err(e) => {
+                        log_daemon_checkpoint_delegate_failure(
+                            "connect_failed",
+                            &repo_working_dir,
+                            kind,
+                            &e.to_string(),
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                log_daemon_checkpoint_delegate_failure(
+                    "startup_failed",
+                    &repo_working_dir,
+                    kind,
+                    &e,
+                );
             }
         }
     }
@@ -1132,6 +1131,12 @@ fn checkpoint_request_has_explicit_capture_scope(
     args: &[String],
     checkpoint_request: Option<&CheckpointRequest>,
 ) -> bool {
+    let args = if args.first().map(String::as_str) == Some("checkpoint") {
+        &args[1..]
+    } else {
+        args
+    };
+
     if args.first().map(String::as_str) == Some("mock_ai") {
         return args.iter().skip(1).any(|arg| !arg.starts_with("--"));
     }
@@ -1197,10 +1202,6 @@ fn log_daemon_checkpoint_delegate_failure(
         "checkpoint_kind": checkpoint_kind_to_str(kind),
     });
     observability::log_error(&error, Some(context));
-}
-
-fn daemon_checkpoint_delegate_enabled() -> bool {
-    crate::utils::checkpoint_delegation_enabled()
 }
 
 fn checkpoint_kind_to_str(kind: CheckpointKind) -> &'static str {

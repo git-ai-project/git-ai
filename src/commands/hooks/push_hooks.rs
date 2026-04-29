@@ -1,43 +1,7 @@
-use crate::commands::git_handlers::CommandHooksContext;
 use crate::commands::upgrade;
 use crate::git::cli_parser::{ParsedGitInvocation, is_dry_run};
-use crate::git::repository::{Repository, find_repository};
+use crate::git::repository::Repository;
 use crate::git::sync_authorship::push_authorship_notes;
-
-pub fn push_pre_command_hook(
-    parsed_args: &ParsedGitInvocation,
-    repository: &Repository,
-) -> Option<std::thread::JoinHandle<()>> {
-    upgrade::maybe_schedule_background_update_check();
-
-    // Early returns for cases where we shouldn't push authorship notes
-    if should_skip_authorship_push(&parsed_args.command_args) {
-        return None;
-    }
-    let remote = resolve_push_remote(parsed_args, repository);
-
-    if let Some(remote) = remote {
-        tracing::debug!("started pushing authorship notes to remote: {}", remote);
-        // Clone what we need for the background thread
-        let global_args = repository.global_args_for_exec();
-
-        // Spawn background thread to push authorship notes in parallel with main push
-        Some(std::thread::spawn(move || {
-            // Recreate repository in the background thread
-            if let Ok(repo) = find_repository(&global_args) {
-                if let Err(e) = push_authorship_notes(&repo, &remote) {
-                    tracing::debug!("authorship push failed: {}", e);
-                }
-            } else {
-                tracing::debug!("failed to open repository for authorship push");
-            }
-        }))
-    } else {
-        // No remotes configured; skip silently
-        tracing::debug!("no remotes found for authorship push; skipping");
-        None
-    }
-}
 
 pub fn run_pre_push_hook_managed(parsed_args: &ParsedGitInvocation, repository: &Repository) {
     upgrade::maybe_schedule_background_update_check();
@@ -55,20 +19,6 @@ pub fn run_pre_push_hook_managed(parsed_args: &ParsedGitInvocation, repository: 
 
     if let Err(e) = push_authorship_notes(repository, &remote) {
         tracing::debug!("authorship push failed: {}", e);
-    }
-}
-
-pub fn push_post_command_hook(
-    _repository: &Repository,
-    _parsed_args: &ParsedGitInvocation,
-    _exit_status: std::process::ExitStatus,
-    command_hooks_context: &mut CommandHooksContext,
-) {
-    // Always wait for the authorship push thread to complete if it was started,
-    // regardless of whether the main push succeeded or failed.
-    // This ensures proper cleanup of the background thread.
-    if let Some(handle) = command_hooks_context.push_authorship_handle.take() {
-        let _ = handle.join();
     }
 }
 

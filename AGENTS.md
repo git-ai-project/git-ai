@@ -20,7 +20,6 @@ task test CARGO_TEST_ARGS="--lib" # cargo-level flags (rare)
 
 # If the user explicitly asks for tests to be run in another mode (do not run test using these commands unless this test mode is explicitly asked for by the user)
 task test:wrapper-daemon
-task test:wrapper
 
 # Lint & Format
 task lint

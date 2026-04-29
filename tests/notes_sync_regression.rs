@@ -47,9 +47,6 @@ fn read_note_from_worktree(
 
 worktree_test_wrappers! {
     fn notes_sync_clone_fetches_authorship_notes_from_origin() {
-        if TestRepo::git_mode() == GitTestMode::Hooks {
-            return;
-        }
 
         let (local, upstream) = TestRepo::new_with_remote();
 
@@ -106,9 +103,6 @@ worktree_test_wrappers! {
 worktree_test_wrappers! {
     fn notes_sync_clone_relative_target_from_external_cwd_fetches_authorship_notes() {
         // Hooks mode can't intercept clone (no repo exists to have hooks installed)
-        if TestRepo::git_mode() == GitTestMode::Hooks {
-            return;
-        }
 
         let (local, upstream) = TestRepo::new_with_remote();
 
@@ -177,9 +171,6 @@ worktree_test_wrappers! {
 worktree_test_wrappers! {
     fn notes_sync_clone_from_non_repo_directory_fetches_authorship_notes() {
         // Hooks mode can't intercept clone (no repo exists to have hooks installed)
-        if TestRepo::git_mode() == GitTestMode::Hooks {
-            return;
-        }
 
         let (local, upstream) = TestRepo::new_with_remote();
 
@@ -254,9 +245,6 @@ worktree_test_wrappers! {
 // the user types `git clone URL /some/absolute/path`).
 worktree_test_wrappers! {
     fn notes_sync_clone_absolute_target_from_non_repo_cwd_fetches_authorship_notes() {
-        if TestRepo::git_mode() == GitTestMode::Hooks {
-            return;
-        }
 
         let (local, upstream) = TestRepo::new_with_remote();
 
@@ -332,9 +320,6 @@ worktree_test_wrappers! {
 // worktree.  The normalizer must prefer the root def_repo and ignore children.
 worktree_test_wrappers! {
     fn notes_sync_clone_implicit_target_from_non_repo_cwd_fetches_authorship_notes() {
-        if TestRepo::git_mode() == GitTestMode::Hooks {
-            return;
-        }
 
         let (local, upstream) = TestRepo::new_with_remote();
 
@@ -411,9 +396,6 @@ worktree_test_wrappers! {
 worktree_test_wrappers! {
     fn notes_sync_fetch_does_not_import_authorship_notes() {
         let mode = TestRepo::git_mode();
-        if mode == GitTestMode::Hooks {
-            return;
-        }
 
         let (local, _upstream) = TestRepo::new_with_remote();
 
@@ -461,13 +443,12 @@ worktree_test_wrappers! {
 
         let fetched_note = local.read_authorship_note(&seed_sha);
         match mode {
-            GitTestMode::Daemon | GitTestMode::WrapperDaemon | GitTestMode::Wrapper | GitTestMode::Both => assert!(
+            GitTestMode::Daemon | GitTestMode::WrapperDaemon => assert!(
                 fetched_note.is_none(),
                 "plain git fetch should not import authorship note for commit {} in {:?} mode",
                 seed_sha,
                 mode
             ),
-            GitTestMode::Hooks => unreachable!("hooks mode returned above"),
         }
     }
 }

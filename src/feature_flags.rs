@@ -55,7 +55,6 @@ define_feature_flags!(
     rewrite_stash: rewrite_stash, debug = true, release = true,
     inter_commit_move: checkpoint_inter_commit_move, debug = false, release = false,
     auth_keyring: auth_keyring, debug = false, release = false,
-    async_mode: async_mode, debug = false, release = true,
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
 );
@@ -107,12 +106,6 @@ impl FeatureFlags {
             envy::prefixed("GIT_AI_").from_env().unwrap_or_default();
         result = Self::merge_with(result, env_flags);
 
-        // Git core hooks have been sunset — users who had hooks enabled are
-        // migrated to async (daemon) mode automatically.
-        if result.git_hooks_enabled {
-            result.async_mode = true;
-        }
-
         result
     }
 }
@@ -130,7 +123,6 @@ mod tests {
             assert!(flags.rewrite_stash);
             assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
-            assert!(!flags.async_mode);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
         }
@@ -139,7 +131,6 @@ mod tests {
             assert!(flags.rewrite_stash);
             assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
-            assert!(flags.async_mode);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
         }
@@ -209,7 +200,6 @@ mod tests {
             std::env::remove_var("GIT_AI_REWRITE_STASH");
             std::env::remove_var("GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE");
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
-            std::env::remove_var("GIT_AI_ASYNC_MODE");
         }
 
         let flags = FeatureFlags::from_env_and_file(None);
@@ -226,20 +216,17 @@ mod tests {
             std::env::remove_var("GIT_AI_REWRITE_STASH");
             std::env::remove_var("GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE");
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
-            std::env::remove_var("GIT_AI_ASYNC_MODE");
         }
 
         let file_flags = DeserializableFeatureFlags {
             rewrite_stash: Some(true),
             auth_keyring: Some(true),
-            async_mode: Some(true),
             ..Default::default()
         };
 
         let flags = FeatureFlags::from_env_and_file(Some(file_flags));
         assert!(flags.rewrite_stash);
         assert!(flags.auth_keyring);
-        assert!(flags.async_mode);
     }
 
     #[test]
@@ -248,7 +235,6 @@ mod tests {
             rewrite_stash: true,
             inter_commit_move: false,
             auth_keyring: true,
-            async_mode: true,
             git_hooks_enabled: false,
             git_hooks_externally_managed: false,
         };
@@ -257,7 +243,6 @@ mod tests {
         assert!(serialized.contains("rewrite_stash"));
         assert!(serialized.contains("inter_commit_move"));
         assert!(serialized.contains("auth_keyring"));
-        assert!(serialized.contains("async_mode"));
         assert!(serialized.contains("git_hooks_enabled"));
         assert!(serialized.contains("git_hooks_externally_managed"));
     }
@@ -268,7 +253,6 @@ mod tests {
             rewrite_stash: true,
             inter_commit_move: false,
             auth_keyring: true,
-            async_mode: true,
             git_hooks_enabled: true,
             git_hooks_externally_managed: false,
         };
@@ -276,7 +260,6 @@ mod tests {
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
         assert_eq!(cloned.inter_commit_move, flags.inter_commit_move);
         assert_eq!(cloned.auth_keyring, flags.auth_keyring);
-        assert_eq!(cloned.async_mode, flags.async_mode);
         assert_eq!(cloned.git_hooks_enabled, flags.git_hooks_enabled);
         assert_eq!(
             cloned.git_hooks_externally_managed,

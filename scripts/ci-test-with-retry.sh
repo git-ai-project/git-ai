@@ -7,6 +7,7 @@ set -uo pipefail
 
 TEST_THREADS="${1:-4}"
 TEST_MODE="${GIT_AI_TEST_GIT_MODE:-}"
+RETRY_TIMEOUT_SECONDS="${GIT_AI_TEST_RETRY_TIMEOUT_SECONDS:-600}"
 
 run_cargo_test() {
   local filter="${1:-}"
@@ -17,6 +18,31 @@ run_cargo_test() {
   cargo test $filter -- --test-threads="$TEST_THREADS" $extra_args
 }
 
+run_retry_with_timeout() {
+  local test_name="$1"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$RETRY_TIMEOUT_SECONDS" cargo test "$test_name" -- --test-threads=1 --exact
+    return $?
+  fi
+
+  cargo test "$test_name" -- --test-threads=1 --exact &
+  local pid=$!
+  local deadline=$((SECONDS + RETRY_TIMEOUT_SECONDS))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "::error::Retry timed out after ${RETRY_TIMEOUT_SECONDS}s: $test_name"
+      kill "$pid" 2>/dev/null || true
+      sleep 2
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+  done
+
+  wait "$pid"
+}
+
 # Run the full test suite, capturing output
 OUTPUT_FILE=$(mktemp)
 cargo test -- --test-threads="$TEST_THREADS" 2>&1 | tee "$OUTPUT_FILE"
@@ -25,13 +51,6 @@ FIRST_EXIT=${PIPESTATUS[0]}
 if [ "$FIRST_EXIT" -eq 0 ]; then
   rm -f "$OUTPUT_FILE"
   exit 0
-fi
-
-# Only retry for daemon and wrapper-daemon modes
-if [ "$TEST_MODE" != "daemon" ] && [ "$TEST_MODE" != "wrapper-daemon" ]; then
-  echo "::error::Tests failed in '$TEST_MODE' mode (retry not enabled for this mode)"
-  rm -f "$OUTPUT_FILE"
-  exit 1
 fi
 
 # Parse failed test names from the output.
@@ -72,7 +91,7 @@ PASSED_ON_RETRY=""
 while IFS= read -r test_name; do
   [ -z "$test_name" ] && continue
   echo "--- Retrying: $test_name ---"
-  if cargo test "$test_name" -- --test-threads=1 --exact; then
+  if run_retry_with_timeout "$test_name"; then
     PASSED_ON_RETRY="${PASSED_ON_RETRY}${test_name}\n"
   else
     STILL_FAILING="${STILL_FAILING}${test_name}\n"
