@@ -14,7 +14,7 @@ use crate::daemon::control_api::ControlRequest;
 use crate::daemon::{DaemonConfig, send_control_request_with_timeout};
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
-use crate::utils::{checkpoint_delegation_enabled, normalize_to_posix};
+use crate::utils::normalize_to_posix;
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
@@ -1147,13 +1147,6 @@ fn attempt_pre_hook_capture(
     snap: &StatSnapshot,
     repo_root: &Path,
 ) -> Option<CapturedCheckpointInfo> {
-    if !checkpoint_delegation_enabled() {
-        tracing::debug!(
-            "Pre-hook capture: async checkpoint delegation not enabled, skipping capture"
-        );
-        return None;
-    }
-
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
     // Watermarks are already embedded in the snapshot (queried before snapshot
@@ -1249,15 +1242,6 @@ fn attempt_post_hook_capture(
     repo_root: &Path,
     changed_paths: &[String],
 ) -> Option<CapturedCheckpointInfo> {
-    // Only attempt capture when delegation is enabled — captured checkpoint
-    // files are consumed by the daemon; without it they would accumulate.
-    if !checkpoint_delegation_enabled() {
-        tracing::debug!(
-            "Post-hook capture: async checkpoint delegation not enabled, skipping capture"
-        );
-        return None;
-    }
-
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
     // Exclude deleted files: they have no post-content to capture, and recording

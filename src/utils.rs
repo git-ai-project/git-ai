@@ -46,10 +46,6 @@ pub fn normalize_to_posix(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-pub fn checkpoint_delegation_enabled() -> bool {
-    true
-}
-
 fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
     let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
 
