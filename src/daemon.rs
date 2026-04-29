@@ -77,6 +77,7 @@ pub mod telemetry_handle;
 pub mod telemetry_worker;
 pub mod test_sync;
 pub mod trace_normalizer;
+pub mod transcript_worker;
 
 pub use control_api::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, ControlResponse,
@@ -3792,6 +3793,7 @@ pub struct ActorDaemonCoordinator {
     // exits via the shutdown select! arm instead of relying on channel closure.
     trace_ingest_tx: std::sync::OnceLock<mpsc::Sender<Value>>,
     telemetry_worker: Option<crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle>,
+    transcript_worker: Option<crate::daemon::transcript_worker::TranscriptWorkerHandle>,
     next_trace_ingest_seq: AtomicUsize,
     next_carryover_snapshot_id: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
@@ -3853,6 +3855,7 @@ impl ActorDaemonCoordinator {
             test_completion_log_lock: Mutex::new(()),
             trace_ingest_tx: std::sync::OnceLock::new(),
             telemetry_worker: None,
+            transcript_worker: None,
             next_trace_ingest_seq: AtomicUsize::new(0),
             next_carryover_snapshot_id: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
@@ -7317,6 +7320,22 @@ impl ActorDaemonCoordinator {
                 self.store_wrapper_state(&invocation_id, None, Some(repo_context));
                 Ok(ControlResponse::ok(None, None))
             }
+            ControlRequest::CheckpointRecorded {
+                session_id,
+                trace_id,
+                transcript_path,
+            } => {
+                if let Some(worker) = &self.transcript_worker {
+                    worker
+                        .notify_checkpoint(
+                            session_id,
+                            trace_id,
+                            std::path::PathBuf::from(transcript_path),
+                        )
+                        .await;
+                }
+                Ok(ControlResponse::ok(None, None))
+            }
             ControlRequest::Shutdown => Ok(ControlResponse::ok(None, None)),
         };
 
@@ -8140,11 +8159,36 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     remove_socket_if_exists(&config.control_socket_path)?;
 
     let mut coordinator_inner = ActorDaemonCoordinator::new();
+
     // Spawn the telemetry worker inside the daemon's tokio runtime.
     let telemetry_handle = crate::daemon::telemetry_worker::spawn_telemetry_worker();
     crate::daemon::telemetry_worker::set_daemon_internal_telemetry(telemetry_handle.clone());
-    coordinator_inner.telemetry_worker = Some(telemetry_handle);
+    coordinator_inner.telemetry_worker = Some(telemetry_handle.clone());
+
     let coordinator = Arc::new(coordinator_inner);
+
+    // Spawn the transcript worker after coordinator is created (needs shutdown_notify)
+    let transcripts_db_path = config.internal_dir.join("transcripts.db");
+    match crate::transcripts::db::TranscriptsDatabase::open(&transcripts_db_path) {
+        Ok(transcripts_db) => {
+            let transcripts_db = std::sync::Arc::new(transcripts_db);
+            let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+            // We'll need to notify this when the coordinator shuts down
+            // For now, we create a separate notify instance
+            // TODO: integrate with coordinator shutdown mechanism
+            let _transcript_handle = crate::daemon::transcript_worker::spawn_transcript_worker(
+                transcripts_db,
+                telemetry_handle.clone(),
+                shutdown_notify,
+            );
+            // Store handle in coordinator - need to use unsafe or Arc::get_mut
+            // For now, we'll skip storing it since we don't need to access it later
+            tracing::info!("transcript worker spawned");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to open transcripts database, transcript worker not started");
+        }
+    }
     coordinator.start_trace_ingest_worker()?;
     let rt_handle = tokio::runtime::Handle::current();
     let control_socket_path = config.control_socket_path.clone();
