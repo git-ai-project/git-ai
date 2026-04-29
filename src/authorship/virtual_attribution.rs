@@ -2215,71 +2215,6 @@ impl VirtualAttributions {
         }
     }
 
-    /// Merge prompts from multiple sources, picking the newest PromptRecord for each prompt_id.
-    /// When a prompt_id appears multiple times, accumulate totals across all records (except overridden lines).
-    ///
-    /// This function collects all PromptRecords for each unique prompt_id across all sources,
-    /// sorts them by age (oldest to newest), and returns the newest version of each prompt.
-    pub fn merge_prompts_picking_newest(
-        prompt_sources: &[&BTreeMap<String, BTreeMap<String, PromptRecord>>],
-    ) -> BTreeMap<String, BTreeMap<String, PromptRecord>> {
-        let mut merged_prompts = BTreeMap::new();
-
-        // Collect all unique prompt_ids across all sources
-        let mut all_prompt_ids: HashSet<String> = HashSet::new();
-        for source in prompt_sources {
-            all_prompt_ids.extend(source.keys().cloned());
-        }
-
-        for prompt_id in all_prompt_ids {
-            // Collect all PromptRecords for this prompt_id from all sources
-            let mut all_records = Vec::new();
-
-            for source in prompt_sources {
-                if let Some(commits) = source.get(&prompt_id) {
-                    for prompt_record in commits.values() {
-                        all_records.push(prompt_record.clone());
-                    }
-                }
-            }
-
-            // Sort records oldest to newest using the Ord implementation
-            all_records.sort();
-
-            // Take the last (newest) record and accumulate totals across all records
-            if let Some(newest_record) = all_records.last() {
-                let mut merged_record = newest_record.clone();
-                let mut total_additions = 0u32;
-                let mut total_deletions = 0u32;
-
-                for record in &all_records {
-                    total_additions = total_additions.saturating_add(record.total_additions);
-                    total_deletions = total_deletions.saturating_add(record.total_deletions);
-                }
-
-                merged_record.total_additions = total_additions;
-                merged_record.total_deletions = total_deletions;
-
-                let mut prompt_commits = BTreeMap::new();
-
-                // Use commit sha from first source that has this prompt, or "merged" if not found
-                let commit_sha = prompt_sources
-                    .iter()
-                    .find_map(|source| {
-                        source
-                            .get(&prompt_id)
-                            .and_then(|commits| commits.keys().last().cloned())
-                    })
-                    .unwrap_or_else(|| "merged".to_string());
-
-                prompt_commits.insert(commit_sha, merged_record);
-                merged_prompts.insert(prompt_id.clone(), prompt_commits);
-            }
-        }
-
-        merged_prompts
-    }
-
     /// Union-merge two human records maps.
     /// Because records are keyed by content-hash of the author identity, any value
     /// for a given key is semantically equivalent. Simple `b`-wins extension is safe.
@@ -2416,9 +2351,11 @@ pub fn merge_attributions_favoring_first(
     let repo = primary.repo.clone();
     let base_commit = primary.base_commit.clone();
 
-    // Merge prompts from both VAs, picking the newest version of each prompt
-    let merged_prompts =
-        VirtualAttributions::merge_prompts_picking_newest(&[&primary.prompts, &secondary.prompts]);
+    // Merge prompts from both VAs (primary wins on conflict)
+    let mut merged_prompts = secondary.prompts.clone();
+    for (id, commits) in &primary.prompts {
+        merged_prompts.insert(id.clone(), commits.clone());
+    }
 
     // Merge humans from both VAs
     let merged_humans = VirtualAttributions::merge_humans(&primary.humans, &secondary.humans);
