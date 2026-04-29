@@ -241,25 +241,6 @@ impl SessionRecord {
 mod tests {
     use super::*;
 
-    fn create_prompt_record(additions: u32, deletions: u32) -> PromptRecord {
-        let agent_id = AgentId {
-            tool: "test".to_string(),
-            id: "test-id".to_string(),
-            model: "test-model".to_string(),
-        };
-
-        PromptRecord {
-            agent_id,
-            human_author: None,
-            messages_url: None,
-            total_additions: additions,
-            total_deletions: deletions,
-            accepted_lines: 0,
-            overriden_lines: 0,
-            custom_attributes: None,
-        }
-    }
-
     // --- LineRange::shift regression tests ---
 
     #[test]
