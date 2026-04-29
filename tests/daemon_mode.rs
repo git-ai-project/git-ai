@@ -252,8 +252,7 @@ fn handle_http_connection(mut stream: TcpStream, tx: &mpsc::Sender<Value>) {
         "/worker/cas/upload" => {
             let request_json: Value =
                 serde_json::from_slice(&body).expect("CAS upload should contain JSON");
-            tx.send(request_json.clone())
-                .expect("failed to record CAS upload");
+            let _ = tx.send(request_json.clone());
             let hashes = request_json["objects"]
                 .as_array()
                 .cloned()
