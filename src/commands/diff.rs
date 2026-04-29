@@ -2594,6 +2594,15 @@ index abc123..def456 100644
             },
             Attribution::NoData,
         );
+        // Old-side no-data should not affect unknown_lines_added.
+        attributions.insert(
+            DiffLineKey {
+                file: "f.rs".to_string(),
+                line: 10,
+                side: LineSide::Old,
+            },
+            Attribution::NoData,
+        );
 
         let mut annotations = BTreeMap::new();
         annotations.insert("p1".to_string(), vec![LineRange::Single(1)]);
