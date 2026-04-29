@@ -150,7 +150,7 @@ pub fn post_commit_with_final_state(
     // Always use Config::fresh() to support runtime config updates
     // (especially important for daemon mode, but also good for consistency)
     let config = Config::fresh();
-    let (effective_storage, custom_attrs) = (
+    let (_effective_storage, custom_attrs) = (
         config.effective_prompt_storage(&Some(repo.clone())),
         config.custom_attributes().clone(),
     );

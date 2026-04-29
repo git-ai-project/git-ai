@@ -4278,6 +4278,7 @@ fn build_note_from_conflict_wl(
                     accepted_lines: 0,
                     overriden_lines: 0,
                     custom_attributes: None,
+                    messages_url: None,
                 });
         }
 

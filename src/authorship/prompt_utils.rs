@@ -637,13 +637,6 @@ pub fn update_windsurf_prompt(
 
 /// Format a PromptRecord's messages into a human-readable transcript.
 ///
-/// Filters out ToolUse messages; keeps User, Assistant, Thinking, and Plan.
-/// Each message is prefixed with its role label.
-pub fn format_transcript(_prompt: &PromptRecord) -> String {
-    // PromptRecord no longer contains messages
-    String::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
