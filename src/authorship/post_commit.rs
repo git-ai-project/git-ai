@@ -516,8 +516,7 @@ fn record_commit_metrics(
     };
 
     // Build attributes - start with version
-    let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
-        .session_id(""); // TODO: add real session tracking in later phase
+    let mut attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION")).session_id(""); // TODO: add real session tracking in later phase
 
     attrs = attrs
         .author(human_author)

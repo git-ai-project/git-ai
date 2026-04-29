@@ -40,11 +40,14 @@
 //! ```
 
 pub mod db;
+pub mod formats;
+pub mod processor;
 pub mod types;
 pub mod watermark;
 
 // Re-export main types for convenient access
 pub use db::{SessionRecord, TranscriptsDatabase};
+pub use processor::{TranscriptFormat, process_transcript};
 pub use types::{AgentTraceValues, TranscriptBatch, TranscriptError};
 pub use watermark::{
     ByteOffsetWatermark, HybridWatermark, RecordIndexWatermark, TimestampWatermark,
