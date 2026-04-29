@@ -8,7 +8,7 @@
 ## Overview
 
 Re-implement the telemetry-streams branch work on top of PR 1198 with architectural improvements:
-- New `transcripts` workspace crate for all transcript reading logic
+- New `src/transcripts/` module for all transcript reading logic
 - Dedicated transcripts.db SQLite database (replaces internal_db)
 - Unified watermarking abstraction supporting multiple strategies
 - Long-lived daemon worker for asynchronous transcript processing
@@ -21,7 +21,7 @@ Re-implement the telemetry-streams branch work on top of PR 1198 with architectu
 
 Three major components:
 
-1. **`transcripts` crate** - Workspace member containing transcript reading/processing logic
+1. **`src/transcripts/` module** - Contains transcript reading/processing logic
 2. **Transcripts database** - SQLite at `~/.git-ai/transcripts.db` replacing internal_db
 3. **Transcript worker** - Long-lived tokio task inside daemon process
 
@@ -51,31 +51,29 @@ Checkpoint → Daemon Worker → Transcript Processor → Transcripts DB (waterm
 
 ### Component Boundaries
 
-- **Transcripts crate**: Pure logic, no daemon/tokio dependencies, testable in isolation
-- **Daemon worker**: Orchestration, priority management, calls into transcripts crate
+- **Transcripts module** (`src/transcripts/`): Reading/parsing logic, database, watermarking
+- **Daemon worker** (`src/daemon/transcript_worker.rs`): Orchestration, priority queue, polling
 - **Checkpoint command**: Minimal - extracts metadata, delegates to preset
 - **Agent presets**: Extract tool_use_id and session context from hook input
 
-## Transcripts Crate
+## Transcripts Module
 
 ### Module Organization
 
 ```
-transcripts/
-├── Cargo.toml
-├── src/
-│   ├── lib.rs              - Public API, re-exports
-│   ├── db.rs               - TranscriptsDatabase (SQLite wrapper)
-│   ├── watermark.rs        - WatermarkStrategy trait + implementations
-│   ├── processor.rs        - TranscriptProcessor (orchestrates reading)
-│   ├── formats/            - Format-specific readers
-│   │   ├── mod.rs
-│   │   ├── claude.rs       - Claude Code JSONL
-│   │   ├── cursor.rs       - Cursor JSONL
-│   │   ├── droid.rs        - Droid JSONL
-│   │   ├── copilot.rs      - Copilot session/event-stream
-│   │   └── ...             - Other agent formats
-│   └── types.rs            - Common types (AgentFormat, SessionInfo, etc.)
+src/transcripts/
+├── mod.rs              - Public API, re-exports
+├── db.rs               - TranscriptsDatabase (SQLite wrapper)
+├── watermark.rs        - WatermarkStrategy trait + implementations
+├── processor.rs        - TranscriptProcessor (orchestrates reading)
+├── formats/            - Format-specific readers
+│   ├── mod.rs
+│   ├── claude.rs       - Claude Code JSONL
+│   ├── cursor.rs       - Cursor JSONL
+│   ├── droid.rs        - Droid JSONL
+│   ├── copilot.rs      - Copilot session/event-stream
+│   └── ...             - Other agent formats
+└── types.rs            - Common types (AgentFormat, SessionInfo, etc.)
 ```
 
 ### Key Types
@@ -650,9 +648,9 @@ All transcript processing and telemetry emission works offline-first. Network un
 
 ### Unit Tests
 
-**Transcripts crate** (isolated, no daemon deps):
+**Transcripts module**:
 - Watermark serialization/deserialization
-- Each TranscriptReader with fixtures (sample JSONL files)
+- Each format reader with fixtures (sample JSONL files)
 - TranscriptsDatabase CRUD operations
 - Error handling (malformed JSON, missing files)
 
@@ -691,17 +689,17 @@ All transcript processing and telemetry emission works offline-first. Network un
 ## Implementation Phases
 
 ### Phase 1: Foundation (Week 1)
-- Create transcripts crate with basic structure
-- Implement WatermarkStrategy trait + ByteOffset/Hybrid
+- Create `src/transcripts/` module with basic structure
+- Implement WatermarkStrategy + ByteOffset/Hybrid implementations
 - Create TranscriptsDatabase schema and wrapper
 - Add session_id/trace_id to EventAttributes
 - Write unit tests for watermark and database
 
 ### Phase 2: Transcript Readers (Week 2)
-- Move Claude Code reader from checkpoint_agent/transcript_readers.rs
-- Implement TranscriptReader trait for Claude Code
-- Port other high-priority readers (Cursor, Droid, Copilot)
-- Update readers to emit AgentTraceValues
+- Move Claude Code reader from `src/commands/checkpoint_agent/transcript_readers.rs` to `src/transcripts/formats/claude.rs`
+- Update reader to use new watermark abstraction
+- Port other high-priority readers (Cursor, Droid, Copilot) to `src/transcripts/formats/`
+- Update all readers to emit AgentTraceValues
 - Add reader unit tests with fixtures
 
 ### Phase 3: Worker (Week 3)
@@ -728,7 +726,7 @@ All transcript processing and telemetry emission works offline-first. Network un
 
 ## Success Criteria
 
-- [ ] All transcript readers moved to transcripts crate
+- [ ] All transcript readers moved to `src/transcripts/` module
 - [ ] Internal_db deprecated, all new installs use transcripts.db
 - [ ] Worker processes new checkpoints within 100ms (Immediate priority)
 - [ ] Polling detects trailing messages within 1 second (High priority)
