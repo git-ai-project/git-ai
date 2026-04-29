@@ -247,11 +247,18 @@ impl PartialOrd for PromptRecord {
 
 impl Ord for PromptRecord {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Sort oldest to newest based on additions or deletions.
+        // Sort oldest to newest based on additions, then deletions, then session ID.
         // Uses lexicographic comparison to ensure a valid total ordering.
+        // The session ID (generated from agent_id) ensures deterministic ordering when stats match.
         self.total_additions
             .cmp(&other.total_additions)
             .then_with(|| self.total_deletions.cmp(&other.total_deletions))
+            .then_with(|| {
+                use crate::authorship::authorship_log_serialization::generate_short_hash;
+                let self_id = generate_short_hash(&self.agent_id.id, &self.agent_id.tool);
+                let other_id = generate_short_hash(&other.agent_id.id, &other.agent_id.tool);
+                self_id.cmp(&other_id)
+            })
     }
 }
 
@@ -279,9 +286,9 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_record_ord_equality() {
+    fn test_prompt_record_ord_uses_agent_id_tiebreaker() {
         // Two records with identical total_additions and total_deletions
-        // should compare as Equal even when other fields differ.
+        // use agent_id as tiebreaker for deterministic ordering.
         let mut a = create_prompt_record(10, 5);
         a.agent_id.tool = "tool_a".to_string();
         a.agent_id.id = "id_a".to_string();
@@ -292,12 +299,18 @@ mod tests {
         b.agent_id.id = "id_b".to_string();
         b.human_author = Some("bob".to_string());
 
-        assert_eq!(
+        // Should NOT be equal - session ID (from agent_id) is the tiebreaker
+        assert_ne!(
             a.cmp(&b),
             std::cmp::Ordering::Equal,
             "Records with same total_additions and total_deletions \
-             should compare as Equal regardless of other fields"
+             should use session ID as tiebreaker"
         );
+        // Ordering should be consistent based on generated session IDs
+        use crate::authorship::authorship_log_serialization::generate_short_hash;
+        let a_id = generate_short_hash(&a.agent_id.id, &a.agent_id.tool);
+        let b_id = generate_short_hash(&b.agent_id.id, &b.agent_id.tool);
+        assert_eq!(a.cmp(&b), a_id.cmp(&b_id));
     }
 
     #[test]
