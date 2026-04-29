@@ -113,7 +113,10 @@ impl TranscriptsDatabase {
 
     /// Run database migrations to bring schema up to current version.
     fn migrate(&self) -> Result<(), TranscriptError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Check if schema_version table exists
         let table_exists: bool = conn
@@ -164,12 +167,16 @@ impl TranscriptsDatabase {
 
     /// Insert a new session record.
     pub fn insert_session(&self, record: &SessionRecord) -> Result<(), TranscriptError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Begin transaction to ensure both inserts succeed or both fail
-        conn.execute_batch("BEGIN").map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to begin transaction: {}", e),
-        })?;
+        conn.execute_batch("BEGIN")
+            .map_err(|e| TranscriptError::Fatal {
+                message: format!("Failed to begin transaction: {}", e),
+            })?;
 
         let result = (|| {
             conn.execute(
@@ -217,9 +224,10 @@ impl TranscriptsDatabase {
 
         match result {
             Ok(_) => {
-                conn.execute_batch("COMMIT").map_err(|e| TranscriptError::Fatal {
-                    message: format!("Failed to commit transaction: {}", e),
-                })?;
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| TranscriptError::Fatal {
+                        message: format!("Failed to commit transaction: {}", e),
+                    })?;
                 Ok(())
             }
             Err(e) => {
@@ -252,7 +260,10 @@ impl TranscriptsDatabase {
 
     /// Get a session record by session_id.
     pub fn get_session(&self, session_id: &str) -> Result<Option<SessionRecord>, TranscriptError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         conn.query_row(
             r#"
             SELECT session_id, agent_type, transcript_path, transcript_format,
@@ -276,7 +287,10 @@ impl TranscriptsDatabase {
         session_id: &str,
         watermark: &dyn WatermarkStrategy,
     ) -> Result<(), TranscriptError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let now = Utc::now().timestamp();
         let watermark_value = watermark.serialize();
 
@@ -304,7 +318,10 @@ impl TranscriptsDatabase {
         file_size: u64,
         modified: Option<DateTime<Utc>>,
     ) -> Result<(), TranscriptError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let modified_ts = modified.map(|dt| dt.timestamp());
 
         let rows_changed = conn.execute(
@@ -325,8 +342,15 @@ impl TranscriptsDatabase {
     }
 
     /// Record an error for a session.
-    pub fn record_error(&self, session_id: &str, error_message: &str) -> Result<(), TranscriptError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    pub fn record_error(
+        &self,
+        session_id: &str,
+        error_message: &str,
+    ) -> Result<(), TranscriptError> {
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let rows_changed = conn.execute(
             "UPDATE sessions SET processing_errors = processing_errors + 1, last_error = ?1 WHERE session_id = ?2",
@@ -347,12 +371,16 @@ impl TranscriptsDatabase {
 
     /// Delete a session and its associated data.
     pub fn delete_session(&self, session_id: &str) -> Result<(), TranscriptError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Begin transaction to delete both session and stats
-        conn.execute_batch("BEGIN").map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to begin transaction: {}", e),
-        })?;
+        conn.execute_batch("BEGIN")
+            .map_err(|e| TranscriptError::Fatal {
+                message: format!("Failed to begin transaction: {}", e),
+            })?;
 
         let result = (|| {
             // Delete processing stats first (foreign key constraint)
@@ -365,13 +393,14 @@ impl TranscriptsDatabase {
             })?;
 
             // Delete session
-            let rows_changed = conn.execute(
-                "DELETE FROM sessions WHERE session_id = ?1",
-                params![session_id],
-            )
-            .map_err(|e| TranscriptError::Fatal {
-                message: format!("Failed to delete session: {}", e),
-            })?;
+            let rows_changed = conn
+                .execute(
+                    "DELETE FROM sessions WHERE session_id = ?1",
+                    params![session_id],
+                )
+                .map_err(|e| TranscriptError::Fatal {
+                    message: format!("Failed to delete session: {}", e),
+                })?;
 
             if rows_changed == 0 {
                 return Err(TranscriptError::Fatal {
@@ -384,9 +413,10 @@ impl TranscriptsDatabase {
 
         match result {
             Ok(_) => {
-                conn.execute_batch("COMMIT").map_err(|e| TranscriptError::Fatal {
-                    message: format!("Failed to commit transaction: {}", e),
-                })?;
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| TranscriptError::Fatal {
+                        message: format!("Failed to commit transaction: {}", e),
+                    })?;
                 Ok(())
             }
             Err(e) => {
@@ -398,7 +428,10 @@ impl TranscriptsDatabase {
 
     /// Get all session records.
     pub fn all_sessions(&self) -> Result<Vec<SessionRecord>, TranscriptError> {
-        let conn = self.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut stmt = conn
             .prepare(
                 r#"
@@ -413,11 +446,11 @@ impl TranscriptsDatabase {
                 message: format!("Failed to prepare all_sessions query: {}", e),
             })?;
 
-        let rows = stmt
-            .query_map([], Self::row_to_session)
-            .map_err(|e| TranscriptError::Fatal {
-                message: format!("Failed to query all sessions: {}", e),
-            })?;
+        let rows =
+            stmt.query_map([], Self::row_to_session)
+                .map_err(|e| TranscriptError::Fatal {
+                    message: format!("Failed to query all sessions: {}", e),
+                })?;
 
         let mut sessions = Vec::new();
         for row in rows {
@@ -655,7 +688,10 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let db = TranscriptsDatabase::open(temp_file.path()).unwrap();
 
-        let conn = db.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = db
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_sessions_%'",
@@ -671,7 +707,10 @@ mod tests {
         let temp_file = NamedTempFile::new().unwrap();
         let db = TranscriptsDatabase::open(temp_file.path()).unwrap();
 
-        let conn = db.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = db
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // synchronous returns an integer: 0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA
         let synchronous: i32 = conn
@@ -774,7 +813,10 @@ mod tests {
         assert!(db.get_session("session-1").unwrap().is_none());
 
         // Verify stats are also gone
-        let conn = db.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = db
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM processing_stats WHERE session_id = ?1",
@@ -813,7 +855,10 @@ mod tests {
         assert!(result.is_err());
 
         // Verify stats table wasn't left with an orphaned entry
-        let conn = db.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let conn = db
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let stats_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM processing_stats WHERE session_id = ?1",
@@ -843,7 +888,10 @@ mod tests {
 
         // Spawn a thread that panics while holding the lock
         let handle = thread::spawn(move || {
-            let conn = db_clone.conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let conn = db_clone
+                .conn
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             // Force a panic (commented out to not actually poison in this test)
             // panic!("Simulated panic");
             drop(conn);
