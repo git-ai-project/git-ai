@@ -37,9 +37,8 @@ impl std::fmt::Display for TranscriptError {
 
 impl std::error::Error for TranscriptError {}
 
-/// Placeholder type for agent trace event values.
-/// TODO(Phase 1b): Replace with actual AgentTraceValues from metrics module.
-pub type AgentTraceValues = ();
+/// Re-export AgentTraceValues from metrics module.
+pub use crate::metrics::events::AgentTraceValues;
 
 /// Batch of transcript events returned by transcript readers after processing.
 pub struct TranscriptBatch {

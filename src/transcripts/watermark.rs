@@ -12,6 +12,9 @@ pub trait WatermarkStrategy: Send + Sync {
 
     /// Advance the watermark based on bytes and records read.
     fn advance(&mut self, bytes_read: usize, records_read: usize);
+
+    /// Downcast support for concrete watermark types.
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Type of watermark strategy (used for deserialization).
@@ -81,6 +84,10 @@ impl WatermarkStrategy for ByteOffsetWatermark {
     fn advance(&mut self, bytes_read: usize, _records_read: usize) {
         self.0 += bytes_read as u64;
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 impl FromStr for ByteOffsetWatermark {
@@ -113,6 +120,10 @@ impl WatermarkStrategy for RecordIndexWatermark {
 
     fn advance(&mut self, _bytes_read: usize, records_read: usize) {
         self.0 += records_read as u64;
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -147,6 +158,10 @@ impl WatermarkStrategy for TimestampWatermark {
     fn advance(&mut self, _bytes_read: usize, _records_read: usize) {
         // Timestamp watermarks don't auto-advance
         // They must be explicitly updated based on record timestamps
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
@@ -193,6 +208,10 @@ impl WatermarkStrategy for HybridWatermark {
         self.offset += bytes_read as u64;
         self.record += records_read as u64;
         // Timestamp must be explicitly updated based on record data
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
