@@ -1,6 +1,7 @@
 use crate::auth::{AuthState, collect_auth_status, format_unix_timestamp};
 use crate::config;
 use crate::git::find_repository_in_path;
+use crate::perf::MeasuredCommand;
 use std::env;
 use std::fmt::Write as _;
 use std::process::Command;
@@ -299,7 +300,7 @@ fn append_indented_block(out: &mut String, content: &str) {
 fn run_command_capture(program: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(program)
         .args(args)
-        .output()
+        .measured_output()
         .map_err(|e| format!("failed to execute '{}': {}", program, e))?;
 
     if !output.status.success() {

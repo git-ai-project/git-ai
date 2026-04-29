@@ -97,6 +97,7 @@ impl FileBackend {
 
     #[cfg(windows)]
     fn set_file_protection(path: &std::path::Path) -> Result<(), String> {
+        use crate::perf::MeasuredCommand;
         use std::process::Command;
 
         let path_str = path
@@ -113,7 +114,7 @@ impl FileBackend {
                 "/grant:r",
                 &format!("{}:F", username),
             ])
-            .output()
+            .measured_output()
             .map_err(|e| format!("Failed to run icacls: {}", e))?;
 
         if !output.status.success() {
@@ -124,7 +125,7 @@ impl FileBackend {
             );
         }
 
-        let _ = Command::new("attrib").args(["+H", path_str]).output();
+        let _ = Command::new("attrib").args(["+H", path_str]).measured_output();
 
         Ok(())
     }

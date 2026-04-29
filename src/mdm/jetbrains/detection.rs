@@ -84,9 +84,11 @@ fn find_macos_installations() -> Vec<DetectedIde> {
 
 #[cfg(target_os = "macos")]
 fn find_app_by_bundle_id(bundle_id: &str) -> Option<PathBuf> {
+    use crate::perf::MeasuredCommand;
+
     let output = Command::new("mdfind")
         .args([&format!("kMDItemCFBundleIdentifier == '{}'", bundle_id)])
-        .output()
+        .measured_output()
         .ok()?;
 
     if !output.status.success() {
@@ -157,6 +159,8 @@ fn detect_macos_ide(ide: &'static JetBrainsIde, app_path: &Path) -> Option<Detec
 
 #[cfg(target_os = "macos")]
 fn get_macos_build_metadata(app_path: &Path) -> (Option<String>, Option<u32>, Option<String>) {
+    use crate::perf::MeasuredCommand;
+
     // Try product-info.json first (newer JetBrains IDEs)
     let product_info_path = app_path.join("Contents/Resources/product-info.json");
     if product_info_path.exists()
@@ -179,7 +183,7 @@ fn get_macos_build_metadata(app_path: &Path) -> (Option<String>, Option<u32>, Op
             &app_path.join("Contents/Info.plist").to_string_lossy(),
             "CFBundleVersion",
         ])
-        .output()
+        .measured_output()
         .ok();
 
     if let Some(output) = output

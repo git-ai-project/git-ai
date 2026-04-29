@@ -1,4 +1,5 @@
 use crate::error::GitAiError;
+use crate::perf::MeasuredCommand;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
@@ -138,12 +139,12 @@ pub fn install_plugin_via_cli(binary_path: &Path, plugin_id: &str) -> Result<boo
     #[cfg(windows)]
     let result = Command::new(binary_path)
         .args(["installPlugins", plugin_id])
-        .output();
+        .measured_output();
 
     #[cfg(not(windows))]
     let result = Command::new(binary_path)
         .args(["installPlugins", plugin_id])
-        .output();
+        .measured_output();
 
     match result {
         Ok(output) => {

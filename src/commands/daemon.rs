@@ -589,10 +589,12 @@ fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
 
 #[cfg(windows)]
 fn hard_kill_daemon(config: &DaemonConfig) -> Result<(), String> {
+    use crate::perf::MeasuredCommand;
+
     let pid = read_daemon_pid(config).map_err(|e| format!("cannot read daemon pid: {}", e))?;
     let output = Command::new("taskkill")
         .args(["/F", "/T", "/PID", &pid.to_string()])
-        .output()
+        .measured_output()
         .map_err(|e| format!("failed to run taskkill: {}", e))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

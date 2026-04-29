@@ -65,6 +65,7 @@ fn create_junction(
     junction_path: &std::path::Path,
     target: &std::path::Path,
 ) -> Result<(), GitAiError> {
+    use crate::perf::MeasuredCommand;
     use std::process::Command;
 
     // Use mklink /J to create a junction - this doesn't require admin privileges
@@ -76,7 +77,7 @@ fn create_junction(
             &junction_path.to_string_lossy(),
             &target.to_string_lossy(),
         ])
-        .output()
+        .measured_output()
         .map_err(|e| GitAiError::Generic(format!("Failed to run mklink: {}", e)))?;
 
     if !status.status.success() {

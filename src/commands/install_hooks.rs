@@ -8,6 +8,7 @@ use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
 use crate::mdm::utils::{get_current_binary_path, git_shim_path};
+use crate::perf::MeasuredCommand;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -129,7 +130,7 @@ fn find_running_pids(process_names: &[&str]) -> Vec<(u32, String)> {
                 .args(["axo", "pid,comm"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
-                .output()
+                .measured_output()
         }
         #[cfg(windows)]
         {
@@ -137,7 +138,7 @@ fn find_running_pids(process_names: &[&str]) -> Vec<(u32, String)> {
                 .args(["/FO", "CSV", "/NH"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
-                .output()
+                .measured_output()
         }
     };
 
@@ -195,7 +196,7 @@ fn set_global_git_config_value(git_cmd: &str, key: &str, value: &str) -> Result<
         .args(["config", "--global", key, value])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
+        .measured_status()?;
     if status.success() {
         Ok(())
     } else {
@@ -226,7 +227,7 @@ fn remove_global_git_config_section(git_cmd: &str, section: &str) -> Result<(), 
         .args(["config", "--global", "--remove-section", section])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
+        .measured_status()?;
     // Exit code 128 means the section doesn't exist, which is fine.
     if status.success() || status.code() == Some(128) {
         Ok(())

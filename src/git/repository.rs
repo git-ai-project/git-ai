@@ -10,10 +10,9 @@ use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
-#[cfg(windows)]
-use crate::utils::is_interactive_terminal;
-use unicode_normalization::UnicodeNormalization;
+use crate::perf::MeasuredCommand;
 
+use unicode_normalization::UnicodeNormalization;
 use gix_index::entry::Stage;
 use regex::Regex;
 use std::cell::Cell;
@@ -23,9 +22,11 @@ use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(windows)]
-use crate::utils::CREATE_NO_WINDOW;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use {
+    crate::utils::CREATE_NO_WINDOW,
+    std::os::windows::process::CommandExt,
+    crate::utils::is_interactive_terminal,
+};
 
 // Keep a thread-local depth for low-overhead checks on the active thread and a process-global
 // depth so internal git spawned from background threads inherits suppression state.
@@ -3167,7 +3168,7 @@ pub fn exec_git_allow_nonzero_with_profile(
         }
     }
 
-    cmd.output().map_err(GitAiError::IoError)
+    cmd.measured_output().map_err(GitAiError::IoError)
 }
 
 /// Helper to execute a git command with an explicit internal profile.

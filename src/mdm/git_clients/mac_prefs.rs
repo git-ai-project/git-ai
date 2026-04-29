@@ -4,6 +4,7 @@
 //! via the `defaults` command.
 
 use crate::error::GitAiError;
+use crate::perf::MeasuredCommand;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -12,7 +13,7 @@ use std::process::Command;
 /// Returns the path to the app bundle if found.
 pub fn find_app_by_bundle_id(bundle_id: &str) -> Option<PathBuf> {
     let query = format!("kMDItemCFBundleIdentifier == '{}'", bundle_id);
-    let output = Command::new("mdfind").arg(&query).output().ok()?;
+    let output = Command::new("mdfind").arg(&query).measured_output().ok()?;
 
     if output.status.success() {
         let path = String::from_utf8_lossy(&output.stdout)
@@ -33,7 +34,7 @@ pub fn find_app_by_bundle_id(bundle_id: &str) -> Option<PathBuf> {
 pub fn domain_exists(domain: &str) -> bool {
     Command::new("defaults")
         .args(["read", domain])
-        .output()
+        .measured_output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -69,7 +70,7 @@ impl Preferences {
     pub fn read_string(&self, key: &str) -> Option<String> {
         let output = Command::new("defaults")
             .args(["read", &self.domain, key])
-            .output()
+            .measured_output()
             .ok()?;
 
         if output.status.success() {
@@ -99,7 +100,7 @@ impl Preferences {
     pub fn write_string(&self, key: &str, value: &str) -> Result<(), GitAiError> {
         let status = Command::new("defaults")
             .args(["write", &self.domain, key, "-string", value])
-            .status()
+            .measured_status()
             .map_err(|e| GitAiError::Generic(format!("Failed to write preference: {}", e)))?;
 
         if status.success() {
@@ -116,7 +117,7 @@ impl Preferences {
     pub fn write_int(&self, key: &str, value: i32) -> Result<(), GitAiError> {
         let status = Command::new("defaults")
             .args(["write", &self.domain, key, "-int", &value.to_string()])
-            .status()
+            .measured_status()
             .map_err(|e| GitAiError::Generic(format!("Failed to write preference: {}", e)))?;
 
         if status.success() {
@@ -140,7 +141,7 @@ impl Preferences {
                 "-bool",
                 if value { "YES" } else { "NO" },
             ])
-            .status()
+            .measured_status()
             .map_err(|e| GitAiError::Generic(format!("Failed to write preference: {}", e)))?;
 
         if status.success() {
@@ -157,7 +158,7 @@ impl Preferences {
     pub fn delete(&self, key: &str) -> Result<(), GitAiError> {
         let status = Command::new("defaults")
             .args(["delete", &self.domain, key])
-            .status()
+            .measured_status()
             .map_err(|e| GitAiError::Generic(format!("Failed to delete preference: {}", e)))?;
 
         // Success if deleted OR if key didn't exist

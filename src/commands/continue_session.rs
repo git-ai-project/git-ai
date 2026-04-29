@@ -14,6 +14,7 @@ use crate::commands::search::{
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
 use crate::git::repository::{InternalGitProfile, Repository, exec_git, exec_git_with_profile};
+use crate::perf::MeasuredCommand;
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::io::{BufRead, IsTerminal, Write};
@@ -567,7 +568,7 @@ fn is_cli_available(cmd: &str) -> bool {
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .measured_status()
         .map(|s| s.success())
         .unwrap_or(false)
 }
@@ -615,7 +616,7 @@ fn launch_agent(agent: &str, context: &str, summary: bool) -> Result<(), GitAiEr
                     .stdin(Stdio::inherit())
                     .stdout(Stdio::inherit())
                     .stderr(Stdio::inherit())
-                    .status()
+                    .measured_status()
                     .map_err(|e| GitAiError::Generic(format!("Failed to spawn claude: {}", e)))?;
 
                 if !status.success() {
