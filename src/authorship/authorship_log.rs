@@ -212,8 +212,6 @@ pub struct PromptRecord {
     pub custom_attributes: Option<HashMap<String, String>>,
 }
 
-impl Eq for PromptRecord {}
-
 /// Session record for lightweight session tracking without stats
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -239,27 +237,6 @@ impl SessionRecord {
     }
 }
 
-impl PartialOrd for PromptRecord {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for PromptRecord {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Sort oldest to newest based on additions or deletions,
-        // with session ID as tiebreaker for deterministic ordering.
-        use crate::authorship::authorship_log_serialization::generate_short_hash;
-        self.total_additions
-            .cmp(&other.total_additions)
-            .then_with(|| self.total_deletions.cmp(&other.total_deletions))
-            .then_with(|| {
-                let self_id = generate_short_hash(&self.agent_id.id, &self.agent_id.tool);
-                let other_id = generate_short_hash(&other.agent_id.id, &other.agent_id.tool);
-                self_id.cmp(&other_id)
-            })
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -282,34 +259,6 @@ mod tests {
             overriden_lines: 0,
             custom_attributes: None,
         }
-    }
-
-    #[test]
-    fn test_prompt_record_ord_uses_agent_id_tiebreaker() {
-        // Two records with identical total_additions and total_deletions
-        // use agent_id as tiebreaker for deterministic ordering.
-        let mut a = create_prompt_record(10, 5);
-        a.agent_id.tool = "tool_a".to_string();
-        a.agent_id.id = "id_a".to_string();
-        a.human_author = Some("alice".to_string());
-
-        let mut b = create_prompt_record(10, 5);
-        b.agent_id.tool = "tool_b".to_string();
-        b.agent_id.id = "id_b".to_string();
-        b.human_author = Some("bob".to_string());
-
-        // Should NOT be equal - session ID (from agent_id) is the tiebreaker
-        assert_ne!(
-            a.cmp(&b),
-            std::cmp::Ordering::Equal,
-            "Records with same total_additions and total_deletions \
-             should use session ID as tiebreaker"
-        );
-        // Ordering should be consistent based on generated session IDs
-        use crate::authorship::authorship_log_serialization::generate_short_hash;
-        let a_id = generate_short_hash(&a.agent_id.id, &a.agent_id.tool);
-        let b_id = generate_short_hash(&b.agent_id.id, &b.agent_id.tool);
-        assert_eq!(a.cmp(&b), a_id.cmp(&b_id));
     }
 
     // --- LineRange::shift regression tests ---

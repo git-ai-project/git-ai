@@ -4705,11 +4705,13 @@ pub fn transform_attributions_to_final_state(
         file_contents.insert(file_path, final_content);
     }
 
-    // Merge prompts from source VA and original_head_state, picking the newest version of each
+    // Merge prompts from source VA and original_head_state (source wins on conflict)
     let mut prompts = if let Some(original_state) = original_head_state {
-        crate::authorship::virtual_attribution::VirtualAttributions::merge_prompts_picking_newest(
-            &[source_va.prompts(), original_state.prompts()],
-        )
+        let mut merged = original_state.prompts().clone();
+        for (id, commits) in source_va.prompts() {
+            merged.insert(id.clone(), commits.clone());
+        }
+        merged
     } else {
         source_va.prompts().clone()
     };
