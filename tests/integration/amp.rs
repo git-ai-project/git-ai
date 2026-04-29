@@ -159,9 +159,11 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
             );
             // Transcript should be a path reference (lazy loading)
             assert!(e.transcript_source.is_some());
-            let transcript_path_str = match e.transcript_source.as_ref().unwrap() {
-                TranscriptSource::Path { path, .. } => path.to_string_lossy().to_string(),
-            };
+            let transcript_path_str = e
+                .transcript_source
+                .as_ref()
+                .map(|ts| ts.path.to_string_lossy().to_string())
+                .unwrap();
             assert!(
                 transcript_path_str.ends_with(&format!("{}.json", AMP_SIMPLE_THREAD_ID)),
                 "transcript_path should point to the matched Amp thread file"

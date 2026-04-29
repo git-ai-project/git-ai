@@ -309,10 +309,13 @@ impl AgentPreset for AmpPreset {
             metadata,
         };
 
-        let transcript_source = resolved_transcript_path.map(|path| TranscriptSource::Path {
+        let transcript_source = resolved_transcript_path.map(|path| TranscriptSource {
             path,
             format: TranscriptFormat::AmpThreadJson,
-            session_id: None,
+            session_id: String::new(),
+            model: None,
+            tool: None,
+            external_thread_id: None,
         });
 
         let event = match (is_pre, is_bash) {

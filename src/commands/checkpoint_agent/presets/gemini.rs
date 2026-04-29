@@ -39,10 +39,13 @@ impl AgentPreset for GeminiPreset {
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]),
         };
 
-        let transcript_source = Some(TranscriptSource::Path {
+        let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(transcript_path),
             format: TranscriptFormat::GeminiJson,
-            session_id: None,
+            session_id: String::new(),
+            model: None,
+            tool: None,
+            external_thread_id: None,
         });
 
         // Gemini uses "BeforeTool" instead of "PreToolUse"
@@ -130,7 +133,7 @@ mod tests {
                 );
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
+                    Some(TranscriptSource {
                         format: TranscriptFormat::GeminiJson,
                         ..
                     })
