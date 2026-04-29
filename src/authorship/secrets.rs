@@ -474,24 +474,6 @@ pub fn redact_secrets_from_prompts(_prompts: &mut BTreeMap<String, PromptRecord>
     0
 }
 
-/// Strip all messages from prompts (used when sharing is disabled).
-/// Note: PromptRecord no longer stores messages, so this is a no-op for compatibility.
-pub fn strip_prompt_messages(_prompts: &mut BTreeMap<String, PromptRecord>) {
-    // No-op: PromptRecord no longer has messages field
-}
-
-/// Redact secrets from all session messages using entropy-based detection.
-/// Note: SessionRecord no longer stores messages, so this is a no-op for compatibility.
-pub fn redact_secrets_from_sessions(_sessions: &mut BTreeMap<String, SessionRecord>) -> usize {
-    0 // Sessions don't have messages anymore
-}
-
-/// Strip all messages from sessions (used when sharing is disabled).
-/// Note: SessionRecord no longer stores messages, so this is a no-op for compatibility.
-pub fn strip_session_messages(_sessions: &mut BTreeMap<String, SessionRecord>) {
-    // Sessions don't have messages anymore - nothing to strip
-}
-
 #[cfg(test)]
 mod tests {
     use insta::assert_debug_snapshot;
