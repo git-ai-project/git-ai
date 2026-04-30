@@ -2,16 +2,6 @@ use crate::authorship::authorship_log::PromptRecord;
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
 use crate::git::repository::Repository;
-use std::collections::HashMap;
-
-#[allow(unused_imports)]
-use crate::observability::log_error;
-#[allow(unused_imports)]
-use crate::transcripts::model_extraction::extract_model_from_tail;
-#[allow(unused_imports)]
-use crate::transcripts::sweep::TranscriptFormat;
-#[allow(unused_imports)]
-use std::path::Path;
 
 /// Find a prompt in the repository history
 ///
@@ -133,44 +123,4 @@ pub fn find_prompt_in_history(
             found_count - 1
         )))
     }
-}
-
-/// Result of attempting to update a prompt from a tool
-pub enum PromptUpdateResult {
-    Updated(String),    // new_model
-    Unchanged,          // No update available or needed
-    Failed(GitAiError), // Error occurred but not fatal
-}
-
-/// Update a prompt by fetching latest transcript from the tool
-///
-/// This function NEVER panics or stops execution on errors.
-/// Errors are logged but returned as PromptUpdateResult::Failed.
-pub fn update_prompt_from_tool(
-    _tool: &str,
-    _external_thread_id: &str,
-    _metadata: Option<&HashMap<String, String>>,
-    _current_model: &str,
-) -> PromptUpdateResult {
-    PromptUpdateResult::Unchanged // REMOVED: transcript enrichment disabled
-}
-
-/// Update Cursor prompt by re-reading the JSONL transcript file
-#[allow(dead_code)]
-fn update_cursor_prompt(
-    _conversation_id: &str,
-    _metadata: Option<&HashMap<String, String>>,
-    _current_model: &str,
-) -> PromptUpdateResult {
-    PromptUpdateResult::Unchanged // REMOVED: transcript enrichment disabled
-}
-
-/// Update Claude prompt from transcript file
-#[doc(hidden)]
-#[allow(dead_code)]
-pub fn update_claude_prompt(
-    _metadata: Option<&HashMap<String, String>>,
-    _current_model: &str,
-) -> PromptUpdateResult {
-    PromptUpdateResult::Unchanged // REMOVED: transcript enrichment disabled
 }
