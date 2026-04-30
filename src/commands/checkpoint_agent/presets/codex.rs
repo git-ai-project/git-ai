@@ -35,16 +35,9 @@ impl CodexPreset {
             return Some(tp.to_string());
         }
 
-        // 2. Search for latest rollout file on disk
-        use crate::commands::checkpoint_agent::transcript_readers;
-        match transcript_readers::find_codex_rollout_path_for_session(session_id) {
-            Ok(Some(path)) => Some(path.to_string_lossy().to_string()),
-            Ok(None) => None,
-            Err(e) => {
-                eprintln!("[Warning] Failed to locate Codex rollout for session {session_id}: {e}");
-                None
-            }
-        }
+        // 2. Search for latest rollout file on disk - REMOVED: transcript_readers deleted
+        // TODO: Re-implement using transcripts/ module if needed
+        None
     }
 }
 
