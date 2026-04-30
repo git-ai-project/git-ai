@@ -667,9 +667,7 @@ mod tests {
 
     #[test]
     fn test_extract_session_id() {
-        let path = PathBuf::from(
-            "/home/user/.config/github-copilot/sessions/abc-123.json",
-        );
+        let path = PathBuf::from("/home/user/.config/github-copilot/sessions/abc-123.json");
         let session_id = CopilotAgent::extract_session_id(&path);
         assert_eq!(session_id, Some("copilot:abc-123".to_string()));
     }

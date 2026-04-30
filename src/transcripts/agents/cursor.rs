@@ -18,9 +18,8 @@ impl CursorAgent {
         let mut paths = Vec::new();
 
         // Standard location for Cursor transcripts
-        let search_dirs = vec![
-            dirs::config_dir().map(|p| p.join("Cursor/User/globalStorage/conversations")),
-        ];
+        let search_dirs =
+            vec![dirs::config_dir().map(|p| p.join("Cursor/User/globalStorage/conversations"))];
 
         for dir_opt in search_dirs {
             if let Some(dir) = dir_opt
@@ -29,11 +28,7 @@ impl CursorAgent {
             {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_file()
-                        && path
-                            .extension()
-                            .map(|ext| ext == "jsonl")
-                            .unwrap_or(false)
+                    if path.is_file() && path.extension().map(|ext| ext == "jsonl").unwrap_or(false)
                     {
                         paths.push(path);
                     }
@@ -185,12 +180,13 @@ impl Agent for CursorAgent {
         let mut line = String::new();
         loop {
             line.clear();
-            let bytes_read = reader
-                .read_line(&mut line)
-                .map_err(|e| TranscriptError::Transient {
-                    message: format!("I/O error reading line: {}", e),
-                    retry_after: std::time::Duration::from_secs(5),
-                })?;
+            let bytes_read =
+                reader
+                    .read_line(&mut line)
+                    .map_err(|e| TranscriptError::Transient {
+                        message: format!("I/O error reading line: {}", e),
+                        retry_after: std::time::Duration::from_secs(5),
+                    })?;
 
             if bytes_read == 0 {
                 // EOF
@@ -333,8 +329,9 @@ mod tests {
 
     #[test]
     fn test_extract_session_id() {
-        let path =
-            PathBuf::from("/home/user/.config/Cursor/User/globalStorage/conversations/abc-123.jsonl");
+        let path = PathBuf::from(
+            "/home/user/.config/Cursor/User/globalStorage/conversations/abc-123.jsonl",
+        );
         let session_id = CursorAgent::extract_session_id(&path);
         assert_eq!(session_id, Some("cursor:abc-123".to_string()));
     }

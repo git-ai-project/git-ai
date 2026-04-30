@@ -18,9 +18,7 @@ impl DroidAgent {
         let mut paths = Vec::new();
 
         // Standard location for Droid transcripts
-        let search_dirs = vec![
-            dirs::config_dir().map(|p| p.join("Droid/conversations")),
-        ];
+        let search_dirs = vec![dirs::config_dir().map(|p| p.join("Droid/conversations"))];
 
         for dir_opt in search_dirs {
             if let Some(dir) = dir_opt
@@ -29,11 +27,7 @@ impl DroidAgent {
             {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_file()
-                        && path
-                            .extension()
-                            .map(|ext| ext == "jsonl")
-                            .unwrap_or(false)
+                    if path.is_file() && path.extension().map(|ext| ext == "jsonl").unwrap_or(false)
                     {
                         paths.push(path);
                     }
@@ -191,12 +185,13 @@ impl Agent for DroidAgent {
         let mut line = String::new();
         loop {
             line.clear();
-            let bytes_read = reader
-                .read_line(&mut line)
-                .map_err(|e| TranscriptError::Transient {
-                    message: format!("I/O error reading line: {}", e),
-                    retry_after: std::time::Duration::from_secs(5),
-                })?;
+            let bytes_read =
+                reader
+                    .read_line(&mut line)
+                    .map_err(|e| TranscriptError::Transient {
+                        message: format!("I/O error reading line: {}", e),
+                        retry_after: std::time::Duration::from_secs(5),
+                    })?;
 
             if bytes_read == 0 {
                 // EOF
@@ -318,7 +313,8 @@ impl Agent for DroidAgent {
                                 }
                                 Some("tool_use") => {
                                     if let Some(name) = item["name"].as_str() {
-                                        let tool_use_id = item["id"].as_str().map(|s| s.to_string());
+                                        let tool_use_id =
+                                            item["id"].as_str().map(|s| s.to_string());
 
                                         let mut event = AgentTraceValues::new()
                                             .event_type("tool_use")
@@ -362,8 +358,7 @@ mod tests {
 
     #[test]
     fn test_extract_session_id() {
-        let path =
-            PathBuf::from("/home/user/.config/Droid/conversations/abc-123.jsonl");
+        let path = PathBuf::from("/home/user/.config/Droid/conversations/abc-123.jsonl");
         let session_id = DroidAgent::extract_session_id(&path);
         assert_eq!(session_id, Some("droid:abc-123".to_string()));
     }
