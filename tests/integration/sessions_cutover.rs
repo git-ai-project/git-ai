@@ -942,7 +942,7 @@ fn test_mixed_working_log_old_and_new_checkpoints_produce_both_prompts_and_sessi
 // New checkpoints produce sessions. Re-commit must have BOTH prompts and sessions.
 #[test]
 fn test_reset_soft_old_note_then_new_session_checkpoints() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_with_daemon_scope(crate::repos::test_repo::DaemonTestScope::Dedicated);
     let file_path = repo.path().join("reset_test.txt");
 
     // Step 1: Create initial commit (needed as parent)
@@ -1274,7 +1274,7 @@ fn test_stash_pop_mixed_format_working_log() {
 // working log's format, not the original commit's note format.
 #[test]
 fn test_rebase_conflict_old_note_ai_resolves_with_sessions() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_with_daemon_scope(crate::repos::test_repo::DaemonTestScope::Dedicated);
 
     // Step 1: Create base commit
     let mut file = repo.filename("conflict.txt");
@@ -1964,7 +1964,7 @@ fn test_multiple_amends_mixed_format_accumulation() {
 // - New AI edits → sessions
 #[test]
 fn test_initial_from_old_note_plus_human_and_session_edits() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_with_daemon_scope(crate::repos::test_repo::DaemonTestScope::Dedicated);
     let file_path = repo.path().join("triple.txt");
 
     // Step 1: Base commit
