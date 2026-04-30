@@ -4,7 +4,7 @@
 // //! Tests the database integration and session record management.
 // //! The actual transcript processing and metrics emission are tested via
 // //! daemon tests and manual verification.
-// 
+//
 // use git_ai::transcripts::formats::claude::read_incremental;
 // use git_ai::transcripts::watermark::ByteOffsetWatermark;
 // use git_ai::transcripts::{SessionRecord, TranscriptsDatabase};
@@ -12,7 +12,7 @@
 // use std::io::Write;
 // use std::path::PathBuf;
 // use tempfile::TempDir;
-// 
+//
 // #[allow(dead_code)]
 // fn fixture_path(name: &str) -> PathBuf {
 //     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -21,13 +21,13 @@
 //         .join("fixtures")
 //         .join(name)
 // }
-// 
+//
 // #[test]
 // fn test_session_database_basic() {
 //     let temp_dir = TempDir::new().unwrap();
 //     let db_path = temp_dir.path().join("transcripts.db");
 //     let db = TranscriptsDatabase::open(&db_path).unwrap();
-// 
+//
 //     let now = chrono::Utc::now().timestamp();
 //     let session = SessionRecord {
 //         session_id: "s_test_123".to_string(),
@@ -46,10 +46,10 @@
 //         processing_errors: 0,
 //         last_error: None,
 //     };
-// 
+//
 //     // Insert
 //     db.insert_session(&session).unwrap();
-// 
+//
 //     // Read
 //     let retrieved = db.get_session("s_test_123").unwrap();
 //     assert!(retrieved.is_some());
@@ -57,24 +57,24 @@
 //     assert_eq!(retrieved.session_id, "s_test_123");
 //     assert_eq!(retrieved.agent_type, "claude");
 //     assert_eq!(retrieved.processing_errors, 0);
-// 
+//
 //     // Update watermark
 //     let new_watermark = ByteOffsetWatermark::new(100);
 //     db.update_watermark("s_test_123", &new_watermark).unwrap();
 //     let retrieved_updated = db.get_session("s_test_123").unwrap().unwrap();
 //     assert_eq!(retrieved_updated.watermark_value, "100");
-// 
+//
 //     // List all sessions
 //     let all_sessions = db.all_sessions().unwrap();
 //     assert_eq!(all_sessions.len(), 1);
 //     assert_eq!(all_sessions[0].session_id, "s_test_123");
 // }
-// 
+//
 // #[test]
 // fn test_watermark_integration() {
 //     let temp_dir = TempDir::new().unwrap();
 //     let transcript_file = temp_dir.path().join("watermark_test.jsonl");
-// 
+//
 //     // Write initial content
 //     let mut file = File::create(&transcript_file).unwrap();
 //     writeln!(
@@ -84,15 +84,15 @@
 //     .unwrap();
 //     file.flush().unwrap();
 //     drop(file);
-// 
+//
 //     // Read from start
 //     let watermark1 = Box::new(ByteOffsetWatermark::new(0));
 //     let result1 = read_incremental(&transcript_file, watermark1, "s_test").unwrap();
 //     assert_eq!(result1.events.len(), 1);
-// 
+//
 //     let offset1: u64 = result1.new_watermark.serialize().parse().unwrap();
 //     assert!(offset1 > 0, "Watermark should advance");
-// 
+//
 //     // Append more content
 //     let mut file = fs::OpenOptions::new()
 //         .append(true)
@@ -105,7 +105,7 @@
 //     .unwrap();
 //     file.flush().unwrap();
 //     drop(file);
-// 
+//
 //     // Read from watermark - should only get new line
 //     let watermark2 = Box::new(ByteOffsetWatermark::new(offset1));
 //     let result2 = read_incremental(&transcript_file, watermark2, "s_test").unwrap();
@@ -114,19 +114,19 @@
 //         result2.events[0].prompt_text,
 //         Some(Some("Second".to_string()))
 //     );
-// 
+//
 //     let offset2: u64 = result2.new_watermark.serialize().parse().unwrap();
 //     assert!(offset2 > offset1, "Watermark should continue advancing");
 // }
-// 
+//
 // #[test]
 // fn test_multiple_sessions_isolation() {
 //     let temp_dir = TempDir::new().unwrap();
 //     let db_path = temp_dir.path().join("transcripts.db");
 //     let db = TranscriptsDatabase::open(&db_path).unwrap();
-// 
+//
 //     let now = chrono::Utc::now().timestamp();
-// 
+//
 //     // Create multiple sessions
 //     for i in 0..5 {
 //         let session = SessionRecord {
@@ -148,11 +148,11 @@
 //         };
 //         db.insert_session(&session).unwrap();
 //     }
-// 
+//
 //     // Verify all sessions exist independently
 //     let all_sessions = db.all_sessions().unwrap();
 //     assert_eq!(all_sessions.len(), 5);
-// 
+//
 //     // Verify each session has correct data
 //     for i in 0..5 {
 //         let session = db
@@ -163,14 +163,14 @@
 //         assert_eq!(session.processing_errors, 0);
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_database_persistence() {
 //     let temp_dir = TempDir::new().unwrap();
 //     let db_path = temp_dir.path().join("transcripts.db");
-// 
+//
 //     let now = chrono::Utc::now().timestamp();
-// 
+//
 //     // Create and close database
 //     {
 //         let db = TranscriptsDatabase::open(&db_path).unwrap();
@@ -193,7 +193,7 @@
 //         };
 //         db.insert_session(&session).unwrap();
 //     }
-// 
+//
 //     // Reopen database
 //     {
 //         let db = TranscriptsDatabase::open(&db_path).unwrap();
@@ -203,13 +203,13 @@
 //         assert_eq!(retrieved.processing_errors, 0);
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_error_tracking() {
 //     let temp_dir = TempDir::new().unwrap();
 //     let db_path = temp_dir.path().join("transcripts.db");
 //     let db = TranscriptsDatabase::open(&db_path).unwrap();
-// 
+//
 //     let now = chrono::Utc::now().timestamp();
 //     let session = SessionRecord {
 //         session_id: "s_errors".to_string(),
@@ -228,15 +228,15 @@
 //         processing_errors: 0,
 //         last_error: None,
 //     };
-// 
+//
 //     db.insert_session(&session).unwrap();
-// 
+//
 //     // Simulate errors
 //     db.record_error("s_errors", "First error").unwrap();
 //     let retrieved = db.get_session("s_errors").unwrap().unwrap();
 //     assert_eq!(retrieved.processing_errors, 1);
 //     assert_eq!(retrieved.last_error, Some("First error".to_string()));
-// 
+//
 //     // More errors
 //     db.record_error("s_errors", "Second error").unwrap();
 //     let retrieved2 = db.get_session("s_errors").unwrap().unwrap();
