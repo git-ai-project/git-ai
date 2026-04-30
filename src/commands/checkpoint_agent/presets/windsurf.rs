@@ -112,7 +112,7 @@ impl AgentPreset for WindsurfPreset {
         let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(&transcript_path),
             format: TranscriptFormat::WindsurfJsonl,
-            session_id: String::new(),
+            session_id: context.session_id.clone(),
             external_thread_id: None,
         });
 

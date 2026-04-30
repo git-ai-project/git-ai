@@ -83,7 +83,7 @@ impl AgentPreset for CodexPreset {
         let transcript_source = transcript_path.map(|tp| TranscriptSource {
             path: PathBuf::from(tp),
             format: TranscriptFormat::CodexJsonl,
-            session_id: String::new(),
+            session_id: context.session_id.clone(),
             external_thread_id: None,
         });
 
