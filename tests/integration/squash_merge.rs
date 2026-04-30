@@ -439,7 +439,7 @@ fn test_squash_rebase_preserves_interleaved_attribution() {
 /// gains the AI-attributed trailing newline in the squash diff and is counted as AI.
 #[test]
 fn test_prepare_working_log_squash_with_main_changes_standard_human() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_with_daemon_scope(crate::repos::test_repo::DaemonTestScope::Dedicated);
     let mut file = repo.filename("document.txt");
 
     // Create master branch with initial content
