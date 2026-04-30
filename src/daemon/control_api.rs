@@ -32,12 +32,6 @@ pub enum ControlRequest {
     },
     #[serde(rename = "snapshot.watermarks")]
     SnapshotWatermarks { repo_working_dir: String },
-    #[serde(rename = "checkpoint.recorded")]
-    CheckpointRecorded {
-        session_id: String,
-        trace_id: String,
-        transcript_path: String,
-    },
     #[serde(rename = "shutdown")]
     Shutdown,
 }

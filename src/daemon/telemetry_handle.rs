@@ -274,13 +274,3 @@ pub fn send_wrapper_post_state(
     send_via_daemon(&request).map(|_| ())
 }
 
-/// Notify the daemon that a checkpoint was recorded for transcript processing.
-/// Fire-and-forget: returns immediately without propagating errors.
-pub fn notify_checkpoint_recorded(session_id: String, trace_id: String, transcript_path: String) {
-    let request = ControlRequest::CheckpointRecorded {
-        session_id,
-        trace_id,
-        transcript_path,
-    };
-    let _ = send_via_daemon(&request);
-}
