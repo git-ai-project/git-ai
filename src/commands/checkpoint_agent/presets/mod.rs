@@ -102,12 +102,6 @@ pub struct TranscriptSource {
     /// Defaults to empty string for backward compatibility.
     #[serde(default)]
     pub session_id: String,
-    /// Model name (e.g., "claude-3-5-sonnet-20241022").
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Tool name (e.g., "claude", "cursor").
-    #[serde(default)]
-    pub tool: Option<String>,
     /// External thread/conversation ID (agent-specific identifier).
     #[serde(default)]
     pub external_thread_id: Option<String>,

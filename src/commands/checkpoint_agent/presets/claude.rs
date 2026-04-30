@@ -81,8 +81,6 @@ impl AgentPreset for ClaudePreset {
             path: PathBuf::from(transcript_path),
             format: TranscriptFormat::ClaudeJsonl,
             session_id: session_id.clone(),
-            model: None, // Model will be extracted from transcript during processing
-            tool: Some("claude".to_string()),
             external_thread_id: Some(session_id.clone()),
         });
 
@@ -170,7 +168,6 @@ mod tests {
                 if let Some(ts) = &e.transcript_source {
                     assert_eq!(ts.format, TranscriptFormat::ClaudeJsonl);
                     assert_eq!(ts.session_id, "sess-1");
-                    assert_eq!(ts.tool, Some("claude".to_string()));
                 }
             }
             _ => panic!("Expected PostFileEdit"),

@@ -113,8 +113,6 @@ impl AgentPreset for WindsurfPreset {
             path: PathBuf::from(&transcript_path),
             format: TranscriptFormat::WindsurfJsonl,
             session_id: String::new(),
-            model: None,
-            tool: None,
             external_thread_id: None,
         });
 

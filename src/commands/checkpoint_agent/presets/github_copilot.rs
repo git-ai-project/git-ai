@@ -140,8 +140,6 @@ fn parse_legacy_extension_hooks(
         path: PathBuf::from(chat_session_path),
         format: TranscriptFormat::CopilotSessionJson,
         session_id: String::new(),
-        model: None,
-        tool: None,
         external_thread_id: None,
     });
 
@@ -246,8 +244,6 @@ fn parse_vscode_native_hooks(
         path: PathBuf::from(tp),
         format: transcript_format,
         session_id: String::new(),
-        model: None,
-        tool: None,
         external_thread_id: None,
     });
 

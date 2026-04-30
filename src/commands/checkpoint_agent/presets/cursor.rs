@@ -103,8 +103,6 @@ impl AgentPreset for CursorPreset {
             path: PathBuf::from(tp),
             format: TranscriptFormat::CursorJsonl,
             session_id: conversation_id.clone(),
-            model: Some(model.clone()),
-            tool: Some("cursor".to_string()),
             external_thread_id: Some(conversation_id.clone()),
         });
 
@@ -232,8 +230,6 @@ mod tests {
                 if let Some(ts) = &e.transcript_source {
                     assert_eq!(ts.format, TranscriptFormat::CursorJsonl);
                     assert_eq!(ts.session_id, "conv-123");
-                    assert_eq!(ts.model, Some("claude-3-5-sonnet".to_string()));
-                    assert_eq!(ts.tool, Some("cursor".to_string()));
                 }
             }
             _ => panic!("Expected PostFileEdit"),
