@@ -1,7 +1,7 @@
 // src/transcripts/model_extraction.rs
 
-use super::sweep::TranscriptFormat;
 use super::types::TranscriptError;
+use crate::transcripts::sweep::TranscriptFormat;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
