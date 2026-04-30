@@ -7,8 +7,8 @@
 //! 4. Never miss a message (complete coverage)
 //! 5. Sweep never double processes files (in_flight deduplication)
 
-use git_ai::transcripts::agents::ClaudeAgent;
 use git_ai::transcripts::agent::Agent;
+use git_ai::transcripts::agents::ClaudeAgent;
 use git_ai::transcripts::db::TranscriptsDatabase;
 use git_ai::transcripts::sweep::SweepStrategy;
 use git_ai::transcripts::watermark::ByteOffsetWatermark;
@@ -111,7 +111,9 @@ fn test_watermark_prevents_double_processing() {
 
     // First read from beginning
     let watermark1 = Box::new(ByteOffsetWatermark::new(0));
-    let batch1 = agent.read_incremental(&transcript_path, watermark1, session_id).unwrap();
+    let batch1 = agent
+        .read_incremental(&transcript_path, watermark1, session_id)
+        .unwrap();
 
     assert_eq!(batch1.events.len(), 2, "Should read 2 messages initially");
 
@@ -121,13 +123,22 @@ fn test_watermark_prevents_double_processing() {
 
     // Second read from watermark - should get nothing
     let watermark2 = Box::new(ByteOffsetWatermark::new(offset1));
-    let batch2 = agent.read_incremental(&transcript_path, watermark2, session_id).unwrap();
+    let batch2 = agent
+        .read_incremental(&transcript_path, watermark2, session_id)
+        .unwrap();
 
-    assert_eq!(batch2.events.len(), 0, "Should not re-read already processed messages");
+    assert_eq!(
+        batch2.events.len(),
+        0,
+        "Should not re-read already processed messages"
+    );
 
     // Verify watermark didn't change (no new data)
     let offset2: u64 = batch2.new_watermark.serialize().parse().unwrap();
-    assert_eq!(offset1, offset2, "Watermark should not advance when no new data");
+    assert_eq!(
+        offset1, offset2,
+        "Watermark should not advance when no new data"
+    );
 }
 
 #[test]
@@ -143,7 +154,9 @@ fn test_no_messages_missed_on_append() {
 
     // First read
     let watermark1 = Box::new(ByteOffsetWatermark::new(0));
-    let batch1 = agent.read_incremental(&transcript_path, watermark1, session_id).unwrap();
+    let batch1 = agent
+        .read_incremental(&transcript_path, watermark1, session_id)
+        .unwrap();
     assert_eq!(batch1.events.len(), 2);
     let offset1: u64 = batch1.new_watermark.serialize().parse().unwrap();
 
@@ -152,12 +165,20 @@ fn test_no_messages_missed_on_append() {
 
     // Second read from watermark
     let watermark2 = Box::new(ByteOffsetWatermark::new(offset1));
-    let batch2 = agent.read_incremental(&transcript_path, watermark2, session_id).unwrap();
+    let batch2 = agent
+        .read_incremental(&transcript_path, watermark2, session_id)
+        .unwrap();
 
-    assert_eq!(batch2.events.len(), 3, "Should read exactly the 3 new messages");
+    assert_eq!(
+        batch2.events.len(),
+        3,
+        "Should read exactly the 3 new messages"
+    );
 
     // Verify we can extract message content
-    let messages: Vec<_> = batch2.events.iter()
+    let messages: Vec<_> = batch2
+        .events
+        .iter()
         .filter_map(|e| e.prompt_text.as_ref().and_then(|t| t.as_ref()))
         .collect();
 
@@ -180,11 +201,13 @@ fn test_incremental_processing_completeness() {
     let mut current_offset = 0u64;
 
     // Read initial
-    let batch = agent.read_incremental(
-        &transcript_path,
-        Box::new(ByteOffsetWatermark::new(current_offset)),
-        session_id
-    ).unwrap();
+    let batch = agent
+        .read_incremental(
+            &transcript_path,
+            Box::new(ByteOffsetWatermark::new(current_offset)),
+            session_id,
+        )
+        .unwrap();
     all_seen_messages.extend(batch.events);
     current_offset = batch.new_watermark.serialize().parse().unwrap();
 
@@ -192,25 +215,33 @@ fn test_incremental_processing_completeness() {
     for i in 2..=10 {
         append_to_transcript(&transcript_path, &[&format!("Msg{}", i)]).unwrap();
 
-        let batch = agent.read_incremental(
-            &transcript_path,
-            Box::new(ByteOffsetWatermark::new(current_offset)),
-            session_id
-        ).unwrap();
+        let batch = agent
+            .read_incremental(
+                &transcript_path,
+                Box::new(ByteOffsetWatermark::new(current_offset)),
+                session_id,
+            )
+            .unwrap();
 
         all_seen_messages.extend(batch.events);
         current_offset = batch.new_watermark.serialize().parse().unwrap();
     }
 
     // Verify we saw all 10 messages exactly once
-    assert_eq!(all_seen_messages.len(), 10, "Should have seen all 10 messages");
+    assert_eq!(
+        all_seen_messages.len(),
+        10,
+        "Should have seen all 10 messages"
+    );
 
     // Final read should get nothing
-    let final_batch = agent.read_incremental(
-        &transcript_path,
-        Box::new(ByteOffsetWatermark::new(current_offset)),
-        session_id
-    ).unwrap();
+    let final_batch = agent
+        .read_incremental(
+            &transcript_path,
+            Box::new(ByteOffsetWatermark::new(current_offset)),
+            session_id,
+        )
+        .unwrap();
     assert_eq!(final_batch.events.len(), 0, "Should have no more messages");
 }
 
@@ -307,7 +338,10 @@ fn test_behind_detection_on_file_growth() {
 
     // SweepCoordinator.is_session_behind would detect this
     let existing = db.get_session("test_session").unwrap().unwrap();
-    assert_ne!(new_size, existing.last_known_size, "File size changed, session is behind");
+    assert_ne!(
+        new_size, existing.last_known_size,
+        "File size changed, session is behind"
+    );
 }
 
 #[test]
@@ -323,7 +357,10 @@ fn test_concurrent_processing_deduplication() {
     // The same path should canonicalize to the same value
     let canonical_path2 = std::fs::canonicalize(&transcript_path).unwrap();
 
-    assert_eq!(canonical_path1, canonical_path2, "Canonical paths should be identical");
+    assert_eq!(
+        canonical_path1, canonical_path2,
+        "Canonical paths should be identical"
+    );
 
     // If we use a HashSet like TranscriptWorker does
     use std::collections::HashSet;
@@ -333,7 +370,10 @@ fn test_concurrent_processing_deduplication() {
     assert!(in_flight.insert(canonical_path1.clone()));
 
     // Second insert fails (already in set)
-    assert!(!in_flight.insert(canonical_path2), "Should detect duplicate in_flight processing");
+    assert!(
+        !in_flight.insert(canonical_path2),
+        "Should detect duplicate in_flight processing"
+    );
 }
 
 #[test]
@@ -368,16 +408,19 @@ fn test_watermark_persistence_after_processing() {
 
     // Process with agent
     let agent = ClaudeAgent;
-    let batch = agent.read_incremental(
-        &transcript_path,
-        Box::new(ByteOffsetWatermark::new(0)),
-        "test_session"
-    ).unwrap();
+    let batch = agent
+        .read_incremental(
+            &transcript_path,
+            Box::new(ByteOffsetWatermark::new(0)),
+            "test_session",
+        )
+        .unwrap();
 
     assert_eq!(batch.events.len(), 2);
 
     // Update watermark in DB (simulating TranscriptWorker.process_session_blocking)
-    db.update_watermark("test_session", batch.new_watermark.as_ref()).unwrap();
+    db.update_watermark("test_session", batch.new_watermark.as_ref())
+        .unwrap();
 
     // Verify watermark persisted
     let updated = db.get_session("test_session").unwrap().unwrap();
@@ -386,7 +429,9 @@ fn test_watermark_persistence_after_processing() {
 
     // Second processing from persisted watermark should get nothing
     let watermark2 = Box::new(ByteOffsetWatermark::new(watermark_value));
-    let batch2 = agent.read_incremental(&transcript_path, watermark2, "test_session").unwrap();
+    let batch2 = agent
+        .read_incremental(&transcript_path, watermark2, "test_session")
+        .unwrap();
     assert_eq!(batch2.events.len(), 0, "Should not reprocess messages");
 }
 
@@ -397,11 +442,13 @@ fn test_empty_transcript_file() {
     fs::write(&transcript_path, "").unwrap(); // Empty file
 
     let agent = ClaudeAgent;
-    let batch = agent.read_incremental(
-        &transcript_path,
-        Box::new(ByteOffsetWatermark::new(0)),
-        "test_session"
-    ).unwrap();
+    let batch = agent
+        .read_incremental(
+            &transcript_path,
+            Box::new(ByteOffsetWatermark::new(0)),
+            "test_session",
+        )
+        .unwrap();
 
     assert_eq!(batch.events.len(), 0, "Empty file should yield no events");
 }
@@ -413,7 +460,11 @@ fn test_malformed_json_line_handling() {
 
     // Write a mix of valid and invalid JSON
     let mut file = fs::File::create(&transcript_path).unwrap();
-    writeln!(file, r#"{{"type":"user","message":{{"content":"Valid"}},"timestamp":"2026-04-30T12:00:00Z"}}"#).unwrap();
+    writeln!(
+        file,
+        r#"{{"type":"user","message":{{"content":"Valid"}},"timestamp":"2026-04-30T12:00:00Z"}}"#
+    )
+    .unwrap();
     writeln!(file, "this is not json").unwrap();
     writeln!(file, r#"{{"type":"user","message":{{"content":"Also valid"}},"timestamp":"2026-04-30T12:00:01Z"}}"#).unwrap();
     file.flush().unwrap();
@@ -422,7 +473,7 @@ fn test_malformed_json_line_handling() {
     let result = agent.read_incremental(
         &transcript_path,
         Box::new(ByteOffsetWatermark::new(0)),
-        "test_session"
+        "test_session",
     );
 
     // The agent should handle malformed lines gracefully
@@ -430,7 +481,10 @@ fn test_malformed_json_line_handling() {
     match result {
         Ok(batch) => {
             // If it succeeds, it should have processed the valid lines
-            assert!(batch.events.len() >= 1, "Should process at least some valid lines");
+            assert!(
+                !batch.events.is_empty(),
+                "Should process at least some valid lines"
+            );
         }
         Err(_) => {
             // Or it might return an error, which is also acceptable
@@ -451,7 +505,7 @@ fn test_file_deleted_during_processing() {
     let result = agent.read_incremental(
         &transcript_path,
         Box::new(ByteOffsetWatermark::new(0)),
-        "test_session"
+        "test_session",
     );
 
     // Should return a Fatal error (file not found)
