@@ -39,6 +39,7 @@
 //! db.update_watermark("session-123", &watermark)?;
 //! ```
 
+pub mod agent;
 pub mod db;
 pub mod formats;
 pub mod processor;
