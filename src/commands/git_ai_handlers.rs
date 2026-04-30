@@ -1784,7 +1784,6 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
     }
 }
 
-
 /// Exit mirroring the child's termination status, re-raising the original
 /// signal on Unix so the calling shell sees the correct termination reason
 /// (e.g. SIGPIPE from `git ai log | head`).
