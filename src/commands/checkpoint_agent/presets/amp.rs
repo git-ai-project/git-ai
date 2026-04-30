@@ -312,7 +312,7 @@ impl AgentPreset for AmpPreset {
         let transcript_source = resolved_transcript_path.map(|path| TranscriptSource {
             path,
             format: TranscriptFormat::AmpThreadJson,
-            session_id: String::new(),
+            session_id: context.session_id.clone(),
             external_thread_id: None,
         });
 
