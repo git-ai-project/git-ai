@@ -15,7 +15,6 @@ use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
-use crate::commands::checkpoint_agent::presets::TranscriptSource;
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
@@ -116,35 +115,6 @@ pub enum BaseOverrideResolutionPolicy {
     RequireExplicitSnapshot,
 }
 
-/// Notify the daemon about a recorded checkpoint so it can process transcripts.
-/// This sends a CheckpointRecorded message to trigger the TranscriptWorker.
-/// Errors are silently ignored (fire-and-forget notification).
-fn send_checkpoint_notification(
-    transcript_source: &Option<TranscriptSource>,
-    session_id: &str,
-    trace_id: &str,
-) {
-    let Some(ts) = transcript_source.as_ref() else {
-        return;
-    };
-
-    // Only notify if we have a real session_id (not empty/default)
-    if session_id.is_empty() {
-        return;
-    }
-
-    let transcript_path = ts.path.to_string_lossy().to_string();
-    crate::daemon::telemetry_handle::notify_checkpoint_recorded(
-        session_id.to_string(),
-        trace_id.to_string(),
-        transcript_path,
-    );
-    tracing::debug!(
-        "Sent CheckpointRecorded notification for session {} trace {}",
-        session_id,
-        trace_id
-    );
-}
 
 /// Build EventAttributes with repo metadata.
 /// Reused for both AgentUsage and Checkpoint events.
@@ -1005,22 +975,6 @@ fn execute_resolved_checkpoint(
 
             let file_attrs = attrs.clone().author(&checkpoint.author);
             crate::metrics::record(values, file_attrs);
-        }
-
-        // Notify daemon about checkpoint for transcript processing
-        // session_id uniquely identifies the AI agent conversation (derived from agent_id + tool)
-        // trace_id links this checkpoint to related operations (same as in metrics events)
-        // Daemon uses these IDs to prioritize transcript processing and emit AgentTrace events
-        if let Some(ref cr) = checkpoint_request
-            && let Some(ref ts) = cr.transcript_source
-        {
-            let session_id = checkpoint
-                .agent_id
-                .as_ref()
-                .map(|aid| generate_session_id(&aid.id, &aid.tool))
-                .unwrap_or_default();
-            let trace_id_str = checkpoint.trace_id.as_deref().unwrap_or("");
-            send_checkpoint_notification(&Some(ts.clone()), &session_id, trace_id_str);
         }
     }
 
