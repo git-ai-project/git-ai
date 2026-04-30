@@ -746,8 +746,7 @@ async fn async_run_install(
 fn emit_install_hooks_metrics(results: &[(String, InstallResult)]) {
     use crate::metrics::{EventAttributes, InstallHooksValues};
 
-    // Install hooks don't have session context, so session_id is empty
-    let attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION")).session_id("");
+    let attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"));
 
     for (tool_id, result) in results {
         let mut values = InstallHooksValues::new()
