@@ -145,23 +145,23 @@ def cmd_pr(args):
 
     # 4. Checkout PR using gh CLI (handles fetching)
     print(f"Checking out PR #{pr_number}...")
-    # Remember current branch to restore it after
-    current_result = subprocess.run(
+
+    # Save the current branch to restore it after checkout
+    current_branch_result = subprocess.run(
         ["git", "-C", repo_root, "symbolic-ref", "--short", "HEAD"],
         capture_output=True, text=True,
     )
-    original_branch = current_result.stdout.strip() if current_result.returncode == 0 else None
+    original_branch = current_branch_result.stdout.strip() if current_branch_result.returncode == 0 else None
 
-    # Run gh pr checkout from repo root
-    subprocess.run(["gh", "pr", "checkout", str(pr_number)], cwd=repo_root, check=True)
-
-    # Switch back to original branch (or main if detached)
-    if original_branch:
-        subprocess.run(["git", "-C", repo_root, "checkout", original_branch],
-                      capture_output=True, check=True)
-    else:
-        subprocess.run(["git", "-C", repo_root, "checkout", "main"],
-                      capture_output=True, check=True)
+    try:
+        subprocess.run(["gh", "pr", "checkout", str(pr_number)], cwd=repo_root, check=True)
+    finally:
+        # Restore the original branch state
+        if original_branch:
+            subprocess.run(["git", "-C", repo_root, "checkout", original_branch], capture_output=True, check=False)
+        else:
+            # Detached HEAD or other state - try to restore to main
+            subprocess.run(["git", "-C", repo_root, "checkout", "main"], capture_output=True, check=False)
 
     # 5. Verify branch not checked out in repo root
     if is_branch_checked_out_in_root(branch_name):
