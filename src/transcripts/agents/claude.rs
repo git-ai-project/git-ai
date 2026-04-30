@@ -4,7 +4,6 @@ use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
 use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy, WatermarkType};
-use chrono::{DateTime, Utc};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -51,51 +50,6 @@ impl ClaudeAgent {
             .and_then(|s| s.to_str())
             .map(|s| format!("claude:{}", s))
     }
-
-    /// Parse a Claude transcript file to extract metadata (model, timestamps).
-    fn extract_metadata(path: &Path) -> (Option<String>, Option<DateTime<Utc>>) {
-        use std::io::{BufRead, BufReader};
-
-        let Ok(file) = fs::File::open(path) else {
-            return (None, None);
-        };
-
-        let reader = BufReader::new(file);
-        let mut model = None;
-        let mut first_timestamp = None;
-
-        // Read first few lines to extract metadata
-        for line in reader.lines().take(10).flatten() {
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) {
-                // Extract model from assistant messages
-                if model.is_none()
-                    && entry["type"].as_str() == Some("assistant")
-                    && let Some(model_str) = entry["message"]["model"].as_str()
-                {
-                    model = Some(model_str.to_string());
-                }
-
-                // Extract first timestamp
-                if first_timestamp.is_none()
-                    && let Some(ts_str) = entry["timestamp"].as_str()
-                    && let Ok(ts) = DateTime::parse_from_rfc3339(ts_str)
-                {
-                    first_timestamp = Some(ts.with_timezone(&Utc));
-                }
-
-                // Stop if we have both
-                if model.is_some() && first_timestamp.is_some() {
-                    break;
-                }
-            }
-        }
-
-        (model, first_timestamp)
-    }
 }
 
 impl Agent for ClaudeAgent {
@@ -113,8 +67,8 @@ impl Agent for ClaudeAgent {
                 continue;
             };
 
-            let (model, _first_timestamp) = Self::extract_metadata(&path);
-
+            // Don't parse file content here - just filesystem scanning.
+            // Model will be extracted later during first read_incremental() if needed.
             let session = DiscoveredSession {
                 session_id,
                 agent_type: "claude".to_string(),
@@ -122,7 +76,7 @@ impl Agent for ClaudeAgent {
                 transcript_format: TranscriptFormat::ClaudeJsonl,
                 watermark_type: WatermarkType::ByteOffset,
                 initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
-                model,
+                model: None,
                 tool: Some("Claude Code".to_string()),
                 external_thread_id: None,
             };
