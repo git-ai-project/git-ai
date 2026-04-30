@@ -3795,6 +3795,7 @@ pub struct ActorDaemonCoordinator {
     trace_ingest_tx: std::sync::OnceLock<mpsc::Sender<Value>>,
     telemetry_worker: Option<crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle>,
     transcript_worker: Option<crate::daemon::transcript_worker::TranscriptWorkerHandle>,
+    transcripts_db: Option<Arc<crate::transcripts::db::TranscriptsDatabase>>,
     next_trace_ingest_seq: AtomicUsize,
     next_carryover_snapshot_id: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
@@ -3857,6 +3858,7 @@ impl ActorDaemonCoordinator {
             trace_ingest_tx: std::sync::OnceLock::new(),
             telemetry_worker: None,
             transcript_worker: None,
+            transcripts_db: None,
             next_trace_ingest_seq: AtomicUsize::new(0),
             next_carryover_snapshot_id: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
@@ -7267,6 +7269,50 @@ impl ActorDaemonCoordinator {
     async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
         let result = match request {
             ControlRequest::CheckpointRun { request, wait } => {
+                // Extract transcript notification before processing checkpoint
+                if let Some(worker) = &self.transcript_worker {
+                    if let Some(checkpoint_request) = Self::extract_checkpoint_request(&request) {
+                        if let Some(transcript_source) = &checkpoint_request.transcript_source {
+                            let session_id = transcript_source.session_id.clone();
+
+                            // Extract agent type from agent_id.tool
+                            let agent_type = checkpoint_request
+                                .agent_id
+                                .as_ref()
+                                .map(|aid| aid.tool.clone())
+                                .unwrap_or_else(|| "unknown".to_string());
+
+                            let trace_id = checkpoint_request.trace_id.clone();
+
+                            // Ensure session exists in transcripts.db
+                            if let Some(db) = &self.transcripts_db {
+                                if let Err(e) = Self::ensure_session_exists(
+                                    db,
+                                    &session_id,
+                                    &agent_type,
+                                    transcript_source,
+                                ) {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        error = %e,
+                                        "failed to ensure session exists"
+                                    );
+                                }
+                            }
+
+                            // Notify worker for immediate processing
+                            worker
+                                .notify_checkpoint(
+                                    session_id,
+                                    agent_type,
+                                    trace_id,
+                                    transcript_source.path.clone(),
+                                )
+                                .await;
+                        }
+                    }
+                }
+
                 self.ingest_checkpoint_payload(*request, wait.unwrap_or(false))
                     .await
             }
@@ -7318,23 +7364,6 @@ impl ActorDaemonCoordinator {
                 self.store_wrapper_state(&invocation_id, None, Some(repo_context));
                 Ok(ControlResponse::ok(None, None))
             }
-            ControlRequest::CheckpointRecorded {
-                session_id,
-                trace_id,
-                transcript_path,
-            } => {
-                if let Some(worker) = &self.transcript_worker {
-                    worker
-                        .notify_checkpoint(
-                            session_id,
-                            "unknown".to_string(), // TODO: extract from CheckpointRequest in Phase 7
-                            trace_id,
-                            std::path::PathBuf::from(transcript_path),
-                        )
-                        .await;
-                }
-                Ok(ControlResponse::ok(None, None))
-            }
             ControlRequest::Shutdown => Ok(ControlResponse::ok(None, None)),
         };
 
@@ -7342,6 +7371,90 @@ impl ActorDaemonCoordinator {
             Ok(response) => response,
             Err(error) => ControlResponse::err(error.to_string()),
         }
+    }
+
+    fn extract_checkpoint_request(
+        request: &CheckpointRunRequest,
+    ) -> Option<&crate::commands::checkpoint_agent::orchestrator::CheckpointRequest> {
+        match request {
+            CheckpointRunRequest::Live(live_req) => live_req.checkpoint_request.as_ref(),
+            CheckpointRunRequest::Captured(_) => None,
+        }
+    }
+
+    fn ensure_session_exists(
+        db: &crate::transcripts::db::TranscriptsDatabase,
+        session_id: &str,
+        agent_type: &str,
+        transcript_source: &crate::commands::checkpoint_agent::presets::TranscriptSource,
+    ) -> Result<(), String> {
+        // Check if session exists
+        if db
+            .get_session(session_id)
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        // Create new session record
+        let now = chrono::Utc::now().timestamp();
+
+        // Determine watermark type from format
+        let watermark_type = match transcript_source.format {
+            crate::commands::checkpoint_agent::presets::TranscriptFormat::ClaudeJsonl => {
+                crate::transcripts::watermark::WatermarkType::ByteOffset
+            }
+            crate::commands::checkpoint_agent::presets::TranscriptFormat::CursorJsonl => {
+                crate::transcripts::watermark::WatermarkType::ByteOffset
+            }
+            crate::commands::checkpoint_agent::presets::TranscriptFormat::DroidJsonl => {
+                crate::transcripts::watermark::WatermarkType::Hybrid
+            }
+            crate::commands::checkpoint_agent::presets::TranscriptFormat::CopilotSessionJson => {
+                crate::transcripts::watermark::WatermarkType::ByteOffset
+            }
+            crate::commands::checkpoint_agent::presets::TranscriptFormat::CopilotEventStreamJsonl => {
+                crate::transcripts::watermark::WatermarkType::ByteOffset
+            }
+            _ => crate::transcripts::watermark::WatermarkType::ByteOffset,
+        };
+
+        let initial_watermark = match watermark_type {
+            crate::transcripts::watermark::WatermarkType::ByteOffset => {
+                Box::new(crate::transcripts::watermark::ByteOffsetWatermark::new(0)) as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
+            }
+            crate::transcripts::watermark::WatermarkType::RecordIndex => {
+                Box::new(crate::transcripts::watermark::RecordIndexWatermark::new(0)) as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
+            }
+            crate::transcripts::watermark::WatermarkType::Timestamp => {
+                Box::new(crate::transcripts::watermark::TimestampWatermark::new(chrono::Utc::now())) as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
+            }
+            crate::transcripts::watermark::WatermarkType::Hybrid => {
+                Box::new(crate::transcripts::watermark::HybridWatermark::new(0, 0, None)) as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
+            }
+        };
+
+        let record = crate::transcripts::db::SessionRecord {
+            session_id: session_id.to_string(),
+            agent_type: agent_type.to_string(),
+            transcript_path: transcript_source.path.display().to_string(),
+            transcript_format: format!("{:?}", transcript_source.format),
+            watermark_type: format!("{:?}", watermark_type),
+            watermark_value: initial_watermark.serialize(),
+            model: transcript_source.model.clone(),
+            tool: transcript_source.tool.clone(),
+            external_thread_id: transcript_source.external_thread_id.clone(),
+            first_seen_at: now,
+            last_processed_at: 0,
+            last_known_size: 0,
+            last_modified: None,
+            processing_errors: 0,
+            last_error: None,
+        };
+
+        db.insert_session(&record).map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     fn store_wrapper_state(
@@ -8176,12 +8289,17 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
             // For now, we create a separate notify instance
             // TODO: integrate with coordinator shutdown mechanism
             let _transcript_handle = crate::daemon::transcript_worker::spawn_transcript_worker(
-                transcripts_db,
+                transcripts_db.clone(),
                 telemetry_handle.clone(),
                 shutdown_notify,
             );
-            // Store handle in coordinator - need to use unsafe or Arc::get_mut
-            // For now, we'll skip storing it since we don't need to access it later
+            // Store transcripts_db in coordinator - need to use unsafe to get mutable access
+            // Safety: We're still in single-threaded initialization, no other references exist
+            unsafe {
+                let coordinator_ptr = Arc::as_ptr(&coordinator) as *mut ActorDaemonCoordinator;
+                (*coordinator_ptr).transcripts_db = Some(transcripts_db);
+                (*coordinator_ptr).transcript_worker = Some(_transcript_handle);
+            }
             tracing::info!("transcript worker spawned");
         }
         Err(e) => {

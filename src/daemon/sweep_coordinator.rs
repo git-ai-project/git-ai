@@ -48,7 +48,7 @@ impl SweepCoordinator {
     pub fn run_sweep(&self) -> Result<Vec<SessionToProcess>, TranscriptError> {
         let mut sessions_to_process = Vec::new();
 
-        for (agent_type, agent) in &self.agent_registry {
+        for (_agent_type, agent) in &self.agent_registry {
             // Skip agents that don't support periodic sweeps
             if !matches!(agent.sweep_strategy(), SweepStrategy::Periodic(_)) {
                 continue;
