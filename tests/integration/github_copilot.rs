@@ -7,11 +7,11 @@
 // use serde_json::json;
 // use std::path::Path;
 // use std::{fs, io::Write};
-// 
+//
 // fn parse_copilot(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
 //     resolve_preset("github-copilot")?.parse(hook_input, "t_test")
 // }
-// 
+//
 // /// Ensure CODESPACES and REMOTE_CONTAINERS are not set (they cause early return in transcript parsing)
 // fn ensure_clean_env() {
 //     unsafe {
@@ -19,16 +19,16 @@
 //         std::env::remove_var("REMOTE_CONTAINERS");
 //     }
 // }
-// 
+//
 // #[test]
 // fn copilot_session_parsing_stub() {
 //     ensure_clean_env();
 //     let sample = r#"{"requests": []}"#;
-// 
+//
 //     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
 //     temp_file.write_all(sample.as_bytes()).unwrap();
 //     let temp_path = temp_file.path().to_str().unwrap();
-// 
+//
 //     let result = transcript_readers::read_copilot_session_json(Path::new(temp_path));
 //     assert!(result.is_ok());
 //     let (tx, model, edited_filepaths) = result.unwrap();
@@ -37,17 +37,17 @@
 //     assert!(edited_filepaths.is_some());
 //     assert_eq!(edited_filepaths.unwrap().len(), 0);
 // }
-// 
+//
 // #[test]
 // fn copilot_session_parsing_simple() {
 //     ensure_clean_env();
 //     let fixture = fixture_path("copilot_session_simple.json");
 //     let fixture_str = fixture.to_str().unwrap();
-// 
+//
 //     let result = transcript_readers::read_copilot_session_json(Path::new(fixture_str));
 //     assert!(result.is_ok());
 //     let (tx, model, _edited_filepaths) = result.unwrap();
-// 
+//
 //     let expected_messages = vec![
 //         Message::User {
 //             text: "What can you help me with?".to_string(),
@@ -104,65 +104,65 @@
 //             timestamp: Some("2025-10-07T15:15:59.544+00:00".to_string()),
 //         },
 //     ];
-// 
+//
 //     assert_eq!(tx.messages, expected_messages);
 //     assert_eq!(model, Some("copilot/claude-sonnet-4".to_string()));
 // }
-// 
+//
 // #[test]
 // fn test_copilot_extracts_edited_filepaths() {
 //     ensure_clean_env();
 //     let fixture = fixture_path("copilot_session_simple.json");
 //     let fixture_str = fixture.to_str().unwrap();
-// 
+//
 //     let result = transcript_readers::read_copilot_session_json(Path::new(fixture_str));
 //     assert!(result.is_ok());
 //     let (_tx, _model, edited_filepaths) = result.unwrap();
-// 
+//
 //     assert!(edited_filepaths.is_some());
 //     let paths = edited_filepaths.unwrap();
 //     assert_eq!(paths.len(), 1);
 //     assert_eq!(paths[0], "/Users/svarlamov/projects/testing-git/index.ts");
 // }
-// 
+//
 // #[test]
 // fn test_copilot_no_edited_filepaths_when_no_edits() {
 //     ensure_clean_env();
 //     let sample = r##"{"requests": [{"timestamp": 1728308673835, "message": {"text": "What can you help me with?"}, "response": [{"kind": "markdown", "value": "I can help with code!"}], "modelId": "copilot/claude-sonnet-4"}]}"##;
-// 
+//
 //     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
 //     temp_file.write_all(sample.as_bytes()).unwrap();
 //     let temp_path = temp_file.path().to_str().unwrap();
-// 
+//
 //     let result = transcript_readers::read_copilot_session_json(Path::new(temp_path));
 //     assert!(result.is_ok());
 //     let (_tx, _model, edited_filepaths) = result.unwrap();
-// 
+//
 //     assert!(edited_filepaths.is_some());
 //     let paths = edited_filepaths.unwrap();
 //     assert_eq!(paths.len(), 0);
 // }
-// 
+//
 // #[test]
 // fn test_copilot_deduplicates_edited_filepaths() {
 //     ensure_clean_env();
 //     let sample = r##"{"requests": [{"timestamp": 1728308673835, "message": {"text": "Edit the file"}, "response": [{"kind": "textEditGroup", "uri": {"fsPath": "/Users/test/file.ts"}}, {"kind": "textEditGroup", "uri": {"fsPath": "/Users/test/file.ts"}}, {"kind": "textEditGroup", "uri": {"fsPath": "/Users/test/other.ts"}}], "modelId": "copilot/claude-sonnet-4"}]}"##;
-// 
+//
 //     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
 //     temp_file.write_all(sample.as_bytes()).unwrap();
 //     let temp_path = temp_file.path().to_str().unwrap();
-// 
+//
 //     let result = transcript_readers::read_copilot_session_json(Path::new(temp_path));
 //     assert!(result.is_ok());
 //     let (_tx, _model, edited_filepaths) = result.unwrap();
-// 
+//
 //     assert!(edited_filepaths.is_some());
 //     let paths = edited_filepaths.unwrap();
 //     assert_eq!(paths.len(), 2);
 //     assert!(paths.contains(&"/Users/test/file.ts".to_string()));
 //     assert!(paths.contains(&"/Users/test/other.ts".to_string()));
 // }
-// 
+//
 // #[test]
 // #[serial_test::serial]
 // fn test_copilot_returns_empty_transcript_in_codespaces() {
@@ -170,7 +170,7 @@
 //     unsafe {
 //         std::env::set_var("CODESPACES", "true");
 //     }
-// 
+//
 //     let fixture = fixture_path("copilot_session_simple.json");
 //     let result =
 //         transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
@@ -180,7 +180,7 @@
 //     assert!(model.is_none());
 //     assert!(edited_filepaths.is_some());
 //     assert_eq!(edited_filepaths.unwrap().len(), 0);
-// 
+//
 //     unsafe {
 //         if let Some(original) = original_codespaces {
 //             std::env::set_var("CODESPACES", original);
@@ -189,7 +189,7 @@
 //         }
 //     }
 // }
-// 
+//
 // #[test]
 // #[serial_test::serial]
 // fn test_copilot_returns_empty_transcript_in_remote_containers() {
@@ -197,7 +197,7 @@
 //     unsafe {
 //         std::env::set_var("REMOTE_CONTAINERS", "true");
 //     }
-// 
+//
 //     let fixture = fixture_path("copilot_session_simple.json");
 //     let result =
 //         transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
@@ -207,7 +207,7 @@
 //     assert!(model.is_none());
 //     assert!(edited_filepaths.is_some());
 //     assert_eq!(edited_filepaths.unwrap().len(), 0);
-// 
+//
 //     unsafe {
 //         if let Some(orig) = original {
 //             std::env::set_var("REMOTE_CONTAINERS", orig);
@@ -216,11 +216,11 @@
 //         }
 //     }
 // }
-// 
+//
 // // ============================================================================
 // // Tests for before_edit / after_edit logic
 // // ============================================================================
-// 
+//
 // #[test]
 // fn test_copilot_preset_before_edit_human_checkpoint_snake_case() {
 //     let hook_input = json!({
@@ -230,7 +230,7 @@
 //         "dirty_files": { "/Users/test/project/file.ts": "console.log('hello');" }
 //     })
 //     .to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Should succeed");
 //     assert_eq!(events.len(), 1);
 //     match &events[0] {
@@ -245,7 +245,7 @@
 //         _ => panic!("Expected PreFileEdit for before_edit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_before_edit_human_checkpoint_camel_case() {
 //     let hook_input = json!({
@@ -255,7 +255,7 @@
 //         "dirtyFiles": { "/Users/test/project/file.ts": "console.log('hello');" }
 //     })
 //     .to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Should succeed");
 //     assert_eq!(events.len(), 1);
 //     match &events[0] {
@@ -266,7 +266,7 @@
 //         _ => panic!("Expected PreFileEdit for before_edit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_before_edit_requires_will_edit_filepaths() {
 //     let hook_input = json!({
@@ -275,7 +275,7 @@
 //         "dirty_files": {}
 //     })
 //     .to_string();
-// 
+//
 //     let result = parse_copilot(&hook_input);
 //     assert!(result.is_err());
 //     assert!(
@@ -285,7 +285,7 @@
 //             .contains("will_edit_filepaths is required")
 //     );
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_before_edit_requires_non_empty_filepaths() {
 //     let hook_input = json!({
@@ -295,7 +295,7 @@
 //         "dirty_files": {}
 //     })
 //     .to_string();
-// 
+//
 //     let result = parse_copilot(&hook_input);
 //     assert!(result.is_err());
 //     assert!(
@@ -305,7 +305,7 @@
 //             .contains("will_edit_filepaths cannot be empty")
 //     );
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_after_edit_requires_session_id() {
 //     let hook_input = json!({
@@ -314,7 +314,7 @@
 //         "dirty_files": {}
 //     })
 //     .to_string();
-// 
+//
 //     let result = parse_copilot(&hook_input);
 //     assert!(result.is_err());
 //     assert!(
@@ -324,7 +324,7 @@
 //             .contains("chat_session_path or chatSessionPath not found")
 //     );
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_after_edit_requires_session_id_camel_case() {
 //     let hook_input = json!({
@@ -333,7 +333,7 @@
 //         "dirtyFiles": {}
 //     })
 //     .to_string();
-// 
+//
 //     let result = parse_copilot(&hook_input);
 //     assert!(result.is_err());
 //     assert!(
@@ -343,7 +343,7 @@
 //             .contains("chat_session_path or chatSessionPath not found")
 //     );
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_invalid_hook_event_name() {
 //     let hook_input = json!({
@@ -351,7 +351,7 @@
 //         "workspace_folder": "/Users/test/project"
 //     })
 //     .to_string();
-// 
+//
 //     let result = parse_copilot(&hook_input);
 //     assert!(result.is_err());
 //     assert!(
@@ -361,7 +361,7 @@
 //             .contains("Invalid hook_event_name")
 //     );
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_before_edit_multiple_files_snake_case() {
 //     let hook_input = json!({
@@ -370,7 +370,7 @@
 //         "will_edit_filepaths": ["/Users/test/project/file1.ts", "/Users/test/project/file2.ts", "/Users/test/project/file3.ts"],
 //         "dirty_files": { "/Users/test/project/file1.ts": "content1", "/Users/test/project/file2.ts": "content2" }
 //     }).to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Should succeed");
 //     match &events[0] {
 //         ParsedHookEvent::PreFileEdit(e) => {
@@ -379,7 +379,7 @@
 //         _ => panic!("Expected PreFileEdit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_before_edit_multiple_files_camel_case() {
 //     let hook_input = json!({
@@ -388,7 +388,7 @@
 //         "will_edit_filepaths": ["/Users/test/project/file1.ts", "/Users/test/project/file2.ts", "/Users/test/project/file3.ts"],
 //         "dirtyFiles": { "/Users/test/project/file1.ts": "content1", "/Users/test/project/file2.ts": "content2" }
 //     }).to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Should succeed");
 //     match &events[0] {
 //         ParsedHookEvent::PreFileEdit(e) => {
@@ -397,7 +397,7 @@
 //         _ => panic!("Expected PreFileEdit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_after_edit_camel_case() {
 //     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
@@ -405,7 +405,7 @@
 //         .write_all(r#"{"requests": []}"#.as_bytes())
 //         .unwrap();
 //     let temp_path = temp_file.path().to_str().unwrap().to_string();
-// 
+//
 //     let hook_input = json!({
 //         "hook_event_name": "after_edit",
 //         "workspaceFolder": "/Users/test/project",
@@ -415,7 +415,7 @@
 //         "dirtyFiles": { "/Users/test/project/file.ts": "console.log('hello');" }
 //     })
 //     .to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Should succeed");
 //     match &events[0] {
 //         ParsedHookEvent::PostFileEdit(e) => {
@@ -427,7 +427,7 @@
 //         _ => panic!("Expected PostFileEdit for after_edit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_after_edit_snake_case() {
 //     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
@@ -435,7 +435,7 @@
 //         .write_all(r#"{"requests": []}"#.as_bytes())
 //         .unwrap();
 //     let temp_path = temp_file.path().to_str().unwrap().to_string();
-// 
+//
 //     let hook_input = json!({
 //         "hook_event_name": "after_edit",
 //         "workspace_folder": "/Users/test/project",
@@ -445,7 +445,7 @@
 //         "dirty_files": { "/Users/test/project/file.ts": "console.log('hello');" }
 //     })
 //     .to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Should succeed");
 //     match &events[0] {
 //         ParsedHookEvent::PostFileEdit(e) => {
@@ -457,11 +457,11 @@
 //         _ => panic!("Expected PostFileEdit for after_edit"),
 //     }
 // }
-// 
+//
 // // ============================================================================
 // // Tests for JSONL format support
 // // ============================================================================
-// 
+//
 // #[test]
 // fn copilot_session_parsing_jsonl_stub() {
 //     ensure_clean_env();
@@ -469,7 +469,7 @@
 //     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
 //     temp_file.write_all(sample.as_bytes()).unwrap();
 //     let temp_path = temp_file.path().to_str().unwrap();
-// 
+//
 //     let result = transcript_readers::read_copilot_session_json(Path::new(temp_path));
 //     assert!(result.is_ok());
 //     let (tx, model, edited_filepaths) = result.unwrap();
@@ -478,7 +478,7 @@
 //     assert!(edited_filepaths.is_some());
 //     assert_eq!(edited_filepaths.unwrap().len(), 0);
 // }
-// 
+//
 // #[test]
 // fn copilot_session_parsing_jsonl_simple() {
 //     ensure_clean_env();
@@ -490,7 +490,7 @@
 //     assert!(!tx.messages.is_empty());
 //     assert_eq!(model, Some("copilot/claude-sonnet-4".to_string()));
 // }
-// 
+//
 // #[test]
 // fn test_copilot_extracts_edited_filepaths_jsonl() {
 //     ensure_clean_env();
@@ -504,17 +504,17 @@
 //     assert_eq!(paths.len(), 1);
 //     assert_eq!(paths[0], "/Users/svarlamov/projects/testing-git/index.ts");
 // }
-// 
+//
 // #[test]
 // fn test_copilot_after_edit_with_jsonl_session() {
 //     ensure_clean_env();
-// 
+//
 //     let mut temp_file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
 //     temp_file
 //         .write_all(r#"{"kind":0,"v":{"requests": []}}"#.as_bytes())
 //         .unwrap();
 //     let temp_path = temp_file.path().to_str().unwrap().to_string();
-// 
+//
 //     let hook_input = json!({
 //         "hook_event_name": "after_edit",
 //         "workspace_folder": "/Users/test/project",
@@ -524,7 +524,7 @@
 //         "dirty_files": { "/Users/test/project/file.ts": "console.log('hello');" }
 //     })
 //     .to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Should succeed");
 //     match &events[0] {
 //         ParsedHookEvent::PostFileEdit(e) => {
@@ -536,7 +536,7 @@
 //         _ => panic!("Expected PostFileEdit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn copilot_session_parsing_multiline_jsonl() {
 //     ensure_clean_env();
@@ -545,7 +545,7 @@
 //         transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
 //     assert!(result.is_ok());
 //     let (tx, model, edited_filepaths) = result.unwrap();
-// 
+//
 //     assert!(
 //         tx.messages
 //             .iter()
@@ -558,7 +558,7 @@
 //     assert!(edited_filepaths.is_some());
 //     assert_eq!(edited_filepaths.unwrap().len(), 0);
 // }
-// 
+//
 // #[test]
 // fn copilot_session_jsonl_empty_snapshot_with_patch() {
 //     ensure_clean_env();
@@ -567,7 +567,7 @@
 //         transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
 //     assert!(result.is_ok());
 //     let (tx, model, edited_filepaths) = result.unwrap();
-// 
+//
 //     assert!(
 //         tx.messages
 //             .iter()
@@ -582,34 +582,34 @@
 //     assert!(edited_filepaths.is_some());
 //     assert_eq!(edited_filepaths.unwrap().len(), 0);
 // }
-// 
+//
 // #[test]
 // fn copilot_session_jsonl_model_from_input_state_no_requests() {
 //     ensure_clean_env();
 //     let sample = r#"{"kind":0,"v":{"requests":[],"inputState":{"selectedModel":{"identifier":"copilot/claude-sonnet-4"}}}}"#;
 //     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
 //     temp_file.write_all(sample.as_bytes()).unwrap();
-// 
+//
 //     let result = transcript_readers::read_copilot_session_json(temp_file.path());
 //     assert!(result.is_ok());
 //     let (tx, model, _) = result.unwrap();
 //     assert!(tx.messages.is_empty());
 //     assert_eq!(model, Some("copilot/claude-sonnet-4".to_string()));
 // }
-// 
+//
 // #[test]
 // fn copilot_session_jsonl_per_request_model_overrides_input_state() {
 //     ensure_clean_env();
 //     let sample = r#"{"kind":0,"v":{"requests":[{"requestId":"r1","timestamp":1000000,"message":{"text":"hi"},"response":[{"value":"hello"}],"modelId":"copilot/gpt-4o"}],"inputState":{"selectedModel":{"identifier":"copilot/claude-sonnet-4"}}}}"#;
 //     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
 //     temp_file.write_all(sample.as_bytes()).unwrap();
-// 
+//
 //     let result = transcript_readers::read_copilot_session_json(temp_file.path());
 //     assert!(result.is_ok());
 //     let (_, model, _) = result.unwrap();
 //     assert_eq!(model, Some("copilot/gpt-4o".to_string()));
 // }
-// 
+//
 // #[test]
 // fn copilot_session_jsonl_scalar_patch_applied() {
 //     ensure_clean_env();
@@ -620,13 +620,13 @@
 //     );
 //     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
 //     temp_file.write_all(sample.as_bytes()).unwrap();
-// 
+//
 //     let result = transcript_readers::read_copilot_session_json(temp_file.path());
 //     assert!(result.is_ok());
 //     let (_, model, _) = result.unwrap();
 //     assert_eq!(model, Some("copilot/new-model".to_string()));
 // }
-// 
+//
 // #[test]
 // fn copilot_session_plain_json_unaffected() {
 //     ensure_clean_env();
@@ -640,11 +640,11 @@
 //     assert!(edited_filepaths.is_some());
 //     assert_eq!(edited_filepaths.unwrap().len(), 1);
 // }
-// 
+//
 // // ============================================================================
 // // VS Code PreToolUse / PostToolUse tests
 // // ============================================================================
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_pretooluse_human_checkpoint() {
 //     let hook_input = json!({
@@ -656,7 +656,7 @@
 //         "sessionId": "copilot-session-pre"
 //     })
 //     .to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Expected human checkpoint");
 //     match &events[0] {
 //         ParsedHookEvent::PreFileEdit(e) => {
@@ -669,7 +669,7 @@
 //         _ => panic!("Expected PreFileEdit for PreToolUse"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_create_file_tool_is_supported() {
 //     let hook_input = json!({
@@ -680,7 +680,7 @@
 //         "toolInput": { "filePath": "/Users/test/project/src/new-file.ts", "content": "export const x = 1;\n" },
 //         "sessionId": "copilot-session-create"
 //     }).to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Expected human checkpoint");
 //     match &events[0] {
 //         ParsedHookEvent::PreFileEdit(e) => {
@@ -693,7 +693,7 @@
 //         _ => panic!("Expected PreFileEdit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_apply_patch_tool_is_supported() {
 //     let hook_input = json!({
@@ -705,7 +705,7 @@
 //         "sessionId": "copilot-session-apply-patch"
 //     })
 //     .to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Expected human checkpoint");
 //     match &events[0] {
 //         ParsedHookEvent::PreFileEdit(e) => {
@@ -718,7 +718,7 @@
 //         _ => panic!("Expected PreFileEdit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_editfiles_files_array_is_supported() {
 //     let hook_input = json!({
@@ -730,7 +730,7 @@
 //         "sessionId": "copilot-session-editfiles"
 //     })
 //     .to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Expected human checkpoint");
 //     match &events[0] {
 //         ParsedHookEvent::PreFileEdit(e) => {
@@ -739,7 +739,7 @@
 //         _ => panic!("Expected PreFileEdit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_posttooluse_ai_checkpoint() {
 //     let temp_dir = tempfile::tempdir().unwrap();
@@ -753,7 +753,7 @@
 //     let transcript_path = transcripts_dir.join("copilot-session-post.jsonl");
 //     fs::write(&transcript_path, r#"{"requests": []}"#).unwrap();
 //     let session_path = transcript_path.to_string_lossy().to_string();
-// 
+//
 //     let hook_input = json!({
 //         "hookEventName": "PostToolUse",
 //         "cwd": "/Users/test/project",
@@ -763,7 +763,7 @@
 //         "transcript_path": session_path
 //     })
 //     .to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Expected AI checkpoint");
 //     match &events[0] {
 //         ParsedHookEvent::PostFileEdit(e) => {
@@ -778,7 +778,7 @@
 //         _ => panic!("Expected PostFileEdit for PostToolUse"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_apply_patch_posttooluse_ai_checkpoint() {
 //     let temp_dir = tempfile::tempdir().unwrap();
@@ -792,7 +792,7 @@
 //     let transcript_path = transcripts_dir.join("copilot-session-apply-patch-post.jsonl");
 //     fs::write(&transcript_path, r#"{"requests": []}"#).unwrap();
 //     let session_path = transcript_path.to_string_lossy().to_string();
-// 
+//
 //     let hook_input = json!({
 //         "hookEventName": "PostToolUse",
 //         "cwd": "/Users/test/project",
@@ -802,7 +802,7 @@
 //         "transcript_path": session_path
 //     })
 //     .to_string();
-// 
+//
 //     let events = parse_copilot(&hook_input).expect("Expected AI checkpoint");
 //     match &events[0] {
 //         ParsedHookEvent::PostFileEdit(e) => {
@@ -817,7 +817,7 @@
 //         _ => panic!("Expected PostFileEdit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_non_edit_tool_is_filtered() {
 //     let hook_input = json!({
@@ -828,7 +828,7 @@
 //         "sessionId": "copilot-session-search"
 //     })
 //     .to_string();
-// 
+//
 //     let result = parse_copilot(&hook_input);
 //     assert!(result.is_err());
 //     assert!(
@@ -838,7 +838,7 @@
 //             .contains("unsupported tool_name")
 //     );
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_claude_transcript_path_is_rejected() {
 //     let hook_input = json!({
@@ -850,7 +850,7 @@
 //         "transcript_path": "/Users/test/.claude/projects/session.jsonl"
 //     })
 //     .to_string();
-// 
+//
 //     let result = parse_copilot(&hook_input);
 //     assert!(result.is_err());
 //     assert!(
@@ -860,7 +860,7 @@
 //             .contains("Claude transcript path")
 //     );
 // }
-// 
+//
 // #[test]
 // fn copilot_session_parsing_event_stream_jsonl() {
 //     ensure_clean_env();
@@ -869,7 +869,7 @@
 //         transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
 //     assert!(result.is_ok());
 //     let (tx, model, edited_filepaths) = result.unwrap();
-// 
+//
 //     assert!(model.is_none());
 //     assert!(!tx.messages.is_empty());
 //     assert!(
@@ -887,36 +887,36 @@
 //             .iter()
 //             .any(|m| matches!(m, Message::ToolUse { .. }))
 //     );
-// 
+//
 //     assert!(edited_filepaths.is_some());
 //     assert_eq!(
 //         edited_filepaths.unwrap(),
 //         vec!["/Users/svarlamov/projects/testing-git-vscode-hooks/jokes.csv"]
 //     );
 // }
-// 
+//
 // #[test]
 // fn copilot_session_event_stream_jsonl_model_hint_is_detected() {
 //     ensure_clean_env();
 //     let sample = r#"{"type":"session.start","data":{"sessionId":"event-session-2","modelId":"copilot/gpt-4o"},"id":"evt-1","timestamp":"2026-02-14T03:02:25.825Z","parentId":null}
 // {"type":"user.message","data":{"content":"hello"},"id":"evt-2","timestamp":"2026-02-14T03:02:26.000Z","parentId":"evt-1"}
 // {"type":"assistant.message","data":{"content":"hi"},"id":"evt-3","timestamp":"2026-02-14T03:02:27.000Z","parentId":"evt-2"}"#;
-// 
+//
 //     let mut temp_file = tempfile::NamedTempFile::new().unwrap();
 //     temp_file.write_all(sample.as_bytes()).unwrap();
-// 
+//
 //     let result = transcript_readers::read_copilot_session_json(temp_file.path());
 //     assert!(result.is_ok());
 //     let (_, model, _) = result.unwrap();
 //     assert_eq!(model, Some("copilot/gpt-4o".to_string()));
 // }
-// 
+//
 // // ============================================================================
 // // VS Code model lookup tests
 // // ============================================================================
-// 
+//
 // const VS_CODE_LOOKUP_SESSION_ID: &str = "fixture-session-id";
-// 
+//
 // fn setup_vscode_model_lookup_workspace(chat_session_fixture: &str) -> (tempfile::TempDir, String) {
 //     let temp_dir = tempfile::tempdir().unwrap();
 //     let workspace_storage = temp_dir
@@ -929,14 +929,14 @@
 //     let chat_sessions_dir = workspace_storage.join("chatSessions");
 //     fs::create_dir_all(&transcripts_dir).unwrap();
 //     fs::create_dir_all(&chat_sessions_dir).unwrap();
-// 
+//
 //     let transcript_path = transcripts_dir.join(format!("{}.jsonl", VS_CODE_LOOKUP_SESSION_ID));
 //     fs::write(
 //         &transcript_path,
 //         load_fixture("copilot_transcript_session_lookup.jsonl"),
 //     )
 //     .unwrap();
-// 
+//
 //     let fixture_p = fixture_path(chat_session_fixture);
 //     let ext = fixture_p
 //         .extension()
@@ -944,10 +944,10 @@
 //         .unwrap_or("jsonl");
 //     let chat_session_path = chat_sessions_dir.join(format!("session-lookup.{}", ext));
 //     fs::write(chat_session_path, load_fixture(chat_session_fixture)).unwrap();
-// 
+//
 //     (temp_dir, transcript_path.to_string_lossy().to_string())
 // }
-// 
+//
 // fn vscode_post_tool_use_hook_input(transcript_path: &str) -> String {
 //     json!({
 //         "hookEventName": "PostToolUse",
@@ -959,7 +959,7 @@
 //     })
 //     .to_string()
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_model_uses_auto_model_id_when_present() {
 //     ensure_clean_env();
@@ -973,7 +973,7 @@
 //         _ => panic!("Expected PostFileEdit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_model_prefers_non_auto_model_id_from_chat_sessions() {
 //     ensure_clean_env();
@@ -987,7 +987,7 @@
 //         _ => panic!("Expected PostFileEdit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_model_falls_back_to_selected_model_id() {
 //     ensure_clean_env();
@@ -1003,7 +1003,7 @@
 //         _ => panic!("Expected PostFileEdit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_model_lookup_supports_json_chat_session_file() {
 //     ensure_clean_env();
@@ -1019,7 +1019,7 @@
 //         _ => panic!("Expected PostFileEdit"),
 //     }
 // }
-// 
+//
 // #[test]
 // fn test_copilot_preset_vscode_does_not_use_details_as_model_fallback() {
 //     ensure_clean_env();
