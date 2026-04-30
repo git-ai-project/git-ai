@@ -7327,6 +7327,7 @@ impl ActorDaemonCoordinator {
                     worker
                         .notify_checkpoint(
                             session_id,
+                            "unknown".to_string(), // TODO: extract from CheckpointRequest in Phase 7
                             trace_id,
                             std::path::PathBuf::from(transcript_path),
                         )
