@@ -115,7 +115,6 @@ pub enum BaseOverrideResolutionPolicy {
     RequireExplicitSnapshot,
 }
 
-
 /// Build EventAttributes with repo metadata.
 /// Reused for both AgentUsage and Checkpoint events.
 fn build_checkpoint_attrs(
