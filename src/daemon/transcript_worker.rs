@@ -20,7 +20,8 @@ const PROCESSING_TICK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Priority levels for processing tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Priority {
+#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+pub(super) enum Priority {
     Low = 2, // Sweep-discovered sessions
     Immediate = 0, // Checkpoint-triggered, process first
              // REMOVED: High = 1 (was polling)
@@ -28,12 +29,15 @@ enum Priority {
 
 /// Task to process a session's transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProcessingTask {
-    priority: Priority,
-    session_id: String,
-    agent_type: String, // NEW: needed to get the right Agent impl
-    canonical_path: PathBuf,
-    retry_count: u32,
+#[cfg_attr(test, derive(serde::Serialize, serde::Deserialize))]
+pub(super) struct ProcessingTask {
+    pub(super) priority: Priority,
+    pub(super) session_id: String,
+    pub(super) agent_type: String, // NEW: needed to get the right Agent impl
+    pub(super) canonical_path: PathBuf,
+    pub(super) retry_count: u32,
+    #[cfg_attr(test, serde(skip))]
+    pub(super) next_retry_at: Option<std::time::Instant>,
 }
 
 impl PartialOrd for ProcessingTask {
@@ -45,8 +49,10 @@ impl PartialOrd for ProcessingTask {
 impl Ord for ProcessingTask {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Higher priority first (Immediate=0 < High=1 < Low=2)
-        self.priority
-            .cmp(&other.priority)
+        // Reverse comparison so smaller numeric value = higher priority = popped first from max-heap
+        other
+            .priority
+            .cmp(&self.priority)
             .then_with(|| self.session_id.cmp(&other.session_id))
     }
 }
@@ -180,6 +186,7 @@ impl TranscriptWorker {
                 agent_type: session.agent_type,
                 canonical_path: session.canonical_path,
                 retry_count: 0,
+                next_retry_at: None,
             });
         }
 
@@ -202,6 +209,7 @@ impl TranscriptWorker {
             agent_type: notification.agent_type, // NEW: pass through agent_type
             canonical_path,
             retry_count: 0,
+            next_retry_at: None,
         });
     }
 
@@ -210,6 +218,16 @@ impl TranscriptWorker {
         let Some(task) = self.priority_queue.pop() else {
             return;
         };
+
+        // Check if task is ready to be processed (retry delay)
+        if let Some(next_retry_at) = task.next_retry_at {
+            let now = std::time::Instant::now();
+            if now < next_retry_at {
+                // Not ready yet - push back to queue
+                self.priority_queue.push(task);
+                return;
+            }
+        }
 
         // Mark as in-flight
         self.in_flight.insert(task.canonical_path.clone());
@@ -357,9 +375,10 @@ impl TranscriptWorker {
                     "transient error, will retry"
                 );
 
-                // Re-queue with updated retry count
+                // Re-queue with updated retry count and next_retry_at
                 let mut retried_task = task.clone();
                 retried_task.retry_count = retry_count;
+                retried_task.next_retry_at = Some(std::time::Instant::now() + delay);
                 self.priority_queue.push(retried_task);
             }
             TranscriptError::Parse { line, message } => {
