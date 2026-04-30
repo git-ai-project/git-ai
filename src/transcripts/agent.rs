@@ -39,7 +39,8 @@ pub trait Agent: Send + Sync {
 /// Returns None for agents without sweep/read support (e.g., "human", "mock_ai").
 pub fn get_agent(agent_type: &str) -> Option<Box<dyn Agent>> {
     match agent_type {
-        // Agents will be added as we implement them
+        "claude" => Some(Box::new(super::agents::ClaudeAgent)),
+        // More agents will be added as we implement them
         _ => None,
     }
 }

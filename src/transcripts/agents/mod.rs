@@ -1,1 +1,3 @@
-// Agent implementations will be added here as we migrate them
+mod claude;
+
+pub use claude::ClaudeAgent;
