@@ -212,6 +212,7 @@ pub fn handle_git_ai(args: &[String]) {
             handle_push_authorship_notes_internal(&args[1..]);
         }
         #[cfg(debug_assertions)]
+#[cfg(feature = "disabled-transcript-enrichment")]
         "show-transcript" => {
             handle_show_transcript(&args[1..]);
         }
@@ -1789,6 +1790,7 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
 }
 
 #[cfg(debug_assertions)]
+#[cfg(feature = "disabled-transcript-enrichment")]
 fn handle_show_transcript(args: &[String]) {
     if args.len() < 2 {
         eprintln!("Error: show-transcript requires agent name and path/id");

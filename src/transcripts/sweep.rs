@@ -69,5 +69,12 @@ impl Clone for DiscoveredSession {
     }
 }
 
-/// Re-export TranscriptFormat from processor for convenience
-pub use crate::transcripts::processor::TranscriptFormat;
+/// Transcript file format enum
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptFormat {
+    ClaudeJsonl,
+    CursorJsonl,
+    DroidJsonl,
+    CopilotSessionJson,
+    CopilotEventStreamJsonl,
+}
