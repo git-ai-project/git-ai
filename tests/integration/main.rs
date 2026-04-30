@@ -114,6 +114,7 @@ mod status_ignore;
 mod status_unit;
 mod subdirs;
 mod sublime_merge_installer;
+mod sweep_e2e;
 mod sync_authorship_types;
 mod test_utils_unit;
 mod tls_native_certs;
