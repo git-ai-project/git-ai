@@ -142,32 +142,17 @@ pub enum PromptUpdateResult {
 /// This function NEVER panics or stops execution on errors.
 /// Errors are logged but returned as PromptUpdateResult::Failed.
 pub fn update_prompt_from_tool(
-    tool: &str,
-    external_thread_id: &str,
-    agent_metadata: Option<&HashMap<String, String>>,
-    current_model: &str,
+    _tool: &str,
+    _external_thread_id: &str,
+    _metadata: Option<&HashMap<String, String>>,
+    _current_model: &str,
 ) -> PromptUpdateResult {
-    match tool {
-        "cursor" => update_cursor_prompt(external_thread_id, agent_metadata, current_model),
-        "claude" => update_claude_prompt(agent_metadata, current_model),
-        "codex" => update_codex_prompt(agent_metadata, current_model),
-        "gemini" => update_gemini_prompt(agent_metadata, current_model),
-        "github-copilot" => update_github_copilot_prompt(agent_metadata, current_model),
-        "continue-cli" => update_continue_cli_prompt(agent_metadata, current_model),
-        "droid" => update_droid_prompt(agent_metadata, current_model),
-        "amp" => update_amp_prompt(external_thread_id, agent_metadata, current_model),
-        "opencode" => update_opencode_prompt(external_thread_id, agent_metadata, current_model),
-        "pi" => update_pi_prompt(agent_metadata, current_model),
-        "windsurf" => update_windsurf_prompt(agent_metadata, current_model),
-        _ => {
-            tracing::debug!("Unknown tool: {}", tool);
-            PromptUpdateResult::Unchanged
-        }
-    }
+    PromptUpdateResult::Unchanged // REMOVED: transcript enrichment disabled
 }
 
 /// Update Codex prompt from rollout transcript file
 #[doc(hidden)]
+#[cfg(feature = "disabled-transcript-enrichment")]
 pub fn update_codex_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
@@ -203,6 +188,7 @@ pub fn update_codex_prompt(
 }
 
 /// Update Cursor prompt by re-reading the JSONL transcript file
+#[cfg(feature = "disabled-transcript-enrichment")]
 fn update_cursor_prompt(
     _conversation_id: &str,
     metadata: Option<&HashMap<String, String>>,
@@ -238,6 +224,7 @@ fn update_cursor_prompt(
 
 /// Update Claude prompt from transcript file
 #[doc(hidden)]
+#[cfg(feature = "disabled-transcript-enrichment")]
 pub fn update_claude_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
@@ -280,6 +267,7 @@ pub fn update_claude_prompt(
 
 /// Update Gemini prompt from transcript file
 #[doc(hidden)]
+#[cfg(feature = "disabled-transcript-enrichment")]
 pub fn update_gemini_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
@@ -322,6 +310,7 @@ pub fn update_gemini_prompt(
 
 /// Update GitHub Copilot prompt from chat session file
 #[doc(hidden)]
+#[cfg(feature = "disabled-transcript-enrichment")]
 pub fn update_github_copilot_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
@@ -364,6 +353,7 @@ pub fn update_github_copilot_prompt(
 
 /// Update Continue CLI prompt from transcript file
 #[doc(hidden)]
+#[cfg(feature = "disabled-transcript-enrichment")]
 pub fn update_continue_cli_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
@@ -407,6 +397,7 @@ pub fn update_continue_cli_prompt(
 
 /// Update Droid prompt from transcript and settings files
 #[doc(hidden)]
+#[cfg(feature = "disabled-transcript-enrichment")]
 pub fn update_droid_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
@@ -460,6 +451,7 @@ pub fn update_droid_prompt(
 }
 
 /// Update Amp prompt by re-parsing the thread JSON file.
+#[cfg(feature = "disabled-transcript-enrichment")]
 fn update_amp_prompt(
     thread_id: &str,
     metadata: Option<&HashMap<String, String>>,
@@ -524,6 +516,7 @@ fn update_amp_prompt(
 }
 
 /// Update OpenCode prompt by fetching latest transcript from storage
+#[cfg(feature = "disabled-transcript-enrichment")]
 fn update_opencode_prompt(
     session_id: &str,
     metadata: Option<&HashMap<String, String>>,
@@ -567,6 +560,7 @@ fn update_opencode_prompt(
 }
 
 /// Update Pi prompt from session JSONL file
+#[cfg(feature = "disabled-transcript-enrichment")]
 fn update_pi_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
@@ -602,6 +596,7 @@ fn update_pi_prompt(
 
 /// Update Windsurf prompt from transcript JSONL file
 #[doc(hidden)]
+#[cfg(feature = "disabled-transcript-enrichment")]
 pub fn update_windsurf_prompt(
     metadata: Option<&HashMap<String, String>>,
     current_model: &str,
