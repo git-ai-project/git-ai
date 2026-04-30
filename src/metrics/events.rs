@@ -971,7 +971,10 @@ mod tests {
             .lines_added(50)
             .external_tool_use_id("tool-use-123");
 
-        assert_eq!(values.external_tool_use_id, Some(Some("tool-use-123".to_string())));
+        assert_eq!(
+            values.external_tool_use_id,
+            Some(Some("tool-use-123".to_string()))
+        );
     }
 
     #[test]
@@ -1030,7 +1033,10 @@ mod tests {
         assert_eq!(values.kind, Some(Some("ai_tab".to_string())));
         assert_eq!(values.file_path, Some(Some("lib.rs".to_string())));
         assert_eq!(values.lines_added, Some(Some(75)));
-        assert_eq!(values.external_tool_use_id, Some(Some("tool-abc".to_string())));
+        assert_eq!(
+            values.external_tool_use_id,
+            Some(Some("tool-abc".to_string()))
+        );
     }
 
     #[test]

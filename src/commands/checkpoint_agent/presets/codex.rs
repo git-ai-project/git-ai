@@ -29,7 +29,7 @@ impl CodexPreset {
             })
     }
 
-    fn resolve_transcript_path(data: &serde_json::Value, session_id: &str) -> Option<String> {
+    fn resolve_transcript_path(data: &serde_json::Value, _session_id: &str) -> Option<String> {
         // 1. Explicit transcript_path in hook input
         if let Some(tp) = parse::optional_str(data, "transcript_path") {
             return Some(tp.to_string());

@@ -5,7 +5,7 @@
 //! 2. **Periodic sweeps** (Low priority, every 30min) - agent-specific discovery of all sessions
 
 use crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle;
-use crate::metrics::{record, EventAttributes};
+use crate::metrics::{EventAttributes, record};
 use crate::transcripts::db::TranscriptsDatabase;
 use crate::transcripts::types::TranscriptError;
 use crate::transcripts::watermark::WatermarkType;
@@ -14,16 +14,16 @@ use std::collections::{BinaryHeap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 
 const PROCESSING_TICK_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Priority levels for processing tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Priority {
-    Low = 2,       // Sweep-discovered sessions
+    Low = 2, // Sweep-discovered sessions
     Immediate = 0, // Checkpoint-triggered, process first
-    // REMOVED: High = 1 (was polling)
+             // REMOVED: High = 1 (was polling)
 }
 
 /// Task to process a session's transcript.
@@ -295,8 +295,8 @@ impl TranscriptWorker {
 
         // Emit events via metrics::record
         for event_values in batch.events {
-            let attrs =
-                EventAttributes::with_version(env!("CARGO_PKG_VERSION")).session_id(session.session_id.clone());
+            let attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+                .session_id(session.session_id.clone());
             record(event_values, attrs);
         }
 

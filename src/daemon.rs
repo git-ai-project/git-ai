@@ -7270,47 +7270,46 @@ impl ActorDaemonCoordinator {
         let result = match request {
             ControlRequest::CheckpointRun { request, wait } => {
                 // Extract transcript notification before processing checkpoint
-                if let Some(worker) = &self.transcript_worker {
-                    if let Some(checkpoint_request) = Self::extract_checkpoint_request(&request) {
-                        if let Some(transcript_source) = &checkpoint_request.transcript_source {
-                            let session_id = transcript_source.session_id.clone();
+                if let Some(worker) = &self.transcript_worker
+                    && let Some(checkpoint_request) = Self::extract_checkpoint_request(&request)
+                    && let Some(transcript_source) = &checkpoint_request.transcript_source
+                {
+                    let session_id = transcript_source.session_id.clone();
 
-                            // Extract agent type from agent_id.tool
-                            let agent_type = checkpoint_request
-                                .agent_id
-                                .as_ref()
-                                .map(|aid| aid.tool.clone())
-                                .unwrap_or_else(|| "unknown".to_string());
+                    // Extract agent type from agent_id.tool
+                    let agent_type = checkpoint_request
+                        .agent_id
+                        .as_ref()
+                        .map(|aid| aid.tool.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
 
-                            let trace_id = checkpoint_request.trace_id.clone();
+                    let trace_id = checkpoint_request.trace_id.clone();
 
-                            // Ensure session exists in transcripts.db
-                            if let Some(db) = &self.transcripts_db {
-                                if let Err(e) = Self::ensure_session_exists(
-                                    db,
-                                    &session_id,
-                                    &agent_type,
-                                    transcript_source,
-                                ) {
-                                    tracing::warn!(
-                                        session_id = %session_id,
-                                        error = %e,
-                                        "failed to ensure session exists"
-                                    );
-                                }
-                            }
-
-                            // Notify worker for immediate processing
-                            worker
-                                .notify_checkpoint(
-                                    session_id,
-                                    agent_type,
-                                    trace_id,
-                                    transcript_source.path.clone(),
-                                )
-                                .await;
-                        }
+                    // Ensure session exists in transcripts.db
+                    if let Some(db) = &self.transcripts_db
+                        && let Err(e) = Self::ensure_session_exists(
+                            db,
+                            &session_id,
+                            &agent_type,
+                            transcript_source,
+                        )
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "failed to ensure session exists"
+                        );
                     }
+
+                    // Notify worker for immediate processing
+                    worker
+                        .notify_checkpoint(
+                            session_id,
+                            agent_type,
+                            trace_id,
+                            transcript_source.path.clone(),
+                        )
+                        .await;
                 }
 
                 self.ingest_checkpoint_payload(*request, wait.unwrap_or(false))
@@ -7422,17 +7421,21 @@ impl ActorDaemonCoordinator {
 
         let initial_watermark = match watermark_type {
             crate::transcripts::watermark::WatermarkType::ByteOffset => {
-                Box::new(crate::transcripts::watermark::ByteOffsetWatermark::new(0)) as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
+                Box::new(crate::transcripts::watermark::ByteOffsetWatermark::new(0))
+                    as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
             }
             crate::transcripts::watermark::WatermarkType::RecordIndex => {
-                Box::new(crate::transcripts::watermark::RecordIndexWatermark::new(0)) as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
+                Box::new(crate::transcripts::watermark::RecordIndexWatermark::new(0))
+                    as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
             }
-            crate::transcripts::watermark::WatermarkType::Timestamp => {
-                Box::new(crate::transcripts::watermark::TimestampWatermark::new(chrono::Utc::now())) as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
-            }
-            crate::transcripts::watermark::WatermarkType::Hybrid => {
-                Box::new(crate::transcripts::watermark::HybridWatermark::new(0, 0, None)) as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
-            }
+            crate::transcripts::watermark::WatermarkType::Timestamp => Box::new(
+                crate::transcripts::watermark::TimestampWatermark::new(chrono::Utc::now()),
+            )
+                as Box<dyn crate::transcripts::watermark::WatermarkStrategy>,
+            crate::transcripts::watermark::WatermarkType::Hybrid => Box::new(
+                crate::transcripts::watermark::HybridWatermark::new(0, 0, None),
+            )
+                as Box<dyn crate::transcripts::watermark::WatermarkStrategy>,
         };
 
         let record = crate::transcripts::db::SessionRecord {
