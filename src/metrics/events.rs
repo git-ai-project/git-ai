@@ -1,9 +1,9 @@
 //! Event-specific value structs for metrics.
 
 use super::pos_encoded::{
-    PosEncoded, PosField, sparse_get_string, sparse_get_u32, sparse_get_u64, sparse_get_vec_string,
-    sparse_get_vec_u32, sparse_set, string_to_json, u32_to_json, u64_to_json, vec_string_to_json,
-    vec_u32_to_json,
+    PosEncoded, PosField, f64_to_json, sparse_get_f64, sparse_get_string, sparse_get_u32,
+    sparse_get_u64, sparse_get_vec_string, sparse_get_vec_u32, sparse_set, string_to_json,
+    u32_to_json, u64_to_json, vec_string_to_json, vec_u32_to_json,
 };
 use super::types::{EventValues, MetricEventId, SparseArray};
 
@@ -1083,6 +1083,11 @@ pub mod agent_trace_pos {
     pub const TOOL_NAME: usize = 3; // String - for tool_use events (nullable)
     pub const PROMPT_TEXT: usize = 4; // String - user message text (nullable)
     pub const RESPONSE_TEXT: usize = 5; // String - assistant message text (nullable)
+    pub const INPUT_TOKENS: usize = 6; // u64 - token usage (nullable)
+    pub const OUTPUT_TOKENS: usize = 7; // u64 - token usage (nullable)
+    pub const CACHE_READ_INPUT_TOKENS: usize = 8; // u64 - token usage (nullable)
+    pub const CACHE_CREATION_INPUT_TOKENS: usize = 9; // u64 - token usage (nullable)
+    pub const COST_USD: usize = 10; // f64 - cost in USD (nullable)
 }
 
 /// Values for Event ID 5: agent_trace
@@ -1099,6 +1104,11 @@ pub mod agent_trace_pos {
 /// | 3 | tool_name | String (nullable) |
 /// | 4 | prompt_text | String (nullable) |
 /// | 5 | response_text | String (nullable) |
+/// | 6 | input_tokens | u64 (nullable) |
+/// | 7 | output_tokens | u64 (nullable) |
+/// | 8 | cache_read_input_tokens | u64 (nullable) |
+/// | 9 | cache_creation_input_tokens | u64 (nullable) |
+/// | 10 | cost_usd | f64 (nullable) |
 #[derive(Debug, Clone, Default)]
 pub struct AgentTraceValues {
     pub event_type: PosField<String>,
@@ -1107,6 +1117,11 @@ pub struct AgentTraceValues {
     pub tool_name: PosField<String>,
     pub prompt_text: PosField<String>,
     pub response_text: PosField<String>,
+    pub input_tokens: PosField<u64>,
+    pub output_tokens: PosField<u64>,
+    pub cache_read_input_tokens: PosField<u64>,
+    pub cache_creation_input_tokens: PosField<u64>,
+    pub cost_usd: PosField<f64>,
 }
 
 impl AgentTraceValues {
@@ -1179,6 +1194,61 @@ impl AgentTraceValues {
         self.response_text = Some(None);
         self
     }
+
+    pub fn input_tokens(mut self, value: u64) -> Self {
+        self.input_tokens = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn input_tokens_null(mut self) -> Self {
+        self.input_tokens = Some(None);
+        self
+    }
+
+    pub fn output_tokens(mut self, value: u64) -> Self {
+        self.output_tokens = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn output_tokens_null(mut self) -> Self {
+        self.output_tokens = Some(None);
+        self
+    }
+
+    pub fn cache_read_input_tokens(mut self, value: u64) -> Self {
+        self.cache_read_input_tokens = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn cache_read_input_tokens_null(mut self) -> Self {
+        self.cache_read_input_tokens = Some(None);
+        self
+    }
+
+    pub fn cache_creation_input_tokens(mut self, value: u64) -> Self {
+        self.cache_creation_input_tokens = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn cache_creation_input_tokens_null(mut self) -> Self {
+        self.cache_creation_input_tokens = Some(None);
+        self
+    }
+
+    pub fn cost_usd(mut self, value: f64) -> Self {
+        self.cost_usd = Some(Some(value));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn cost_usd_null(mut self) -> Self {
+        self.cost_usd = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for AgentTraceValues {
@@ -1215,6 +1285,31 @@ impl PosEncoded for AgentTraceValues {
             agent_trace_pos::RESPONSE_TEXT,
             string_to_json(&self.response_text),
         );
+        sparse_set(
+            &mut map,
+            agent_trace_pos::INPUT_TOKENS,
+            u64_to_json(&self.input_tokens),
+        );
+        sparse_set(
+            &mut map,
+            agent_trace_pos::OUTPUT_TOKENS,
+            u64_to_json(&self.output_tokens),
+        );
+        sparse_set(
+            &mut map,
+            agent_trace_pos::CACHE_READ_INPUT_TOKENS,
+            u64_to_json(&self.cache_read_input_tokens),
+        );
+        sparse_set(
+            &mut map,
+            agent_trace_pos::CACHE_CREATION_INPUT_TOKENS,
+            u64_to_json(&self.cache_creation_input_tokens),
+        );
+        sparse_set(
+            &mut map,
+            agent_trace_pos::COST_USD,
+            f64_to_json(&self.cost_usd),
+        );
 
         map
     }
@@ -1227,6 +1322,11 @@ impl PosEncoded for AgentTraceValues {
             tool_name: sparse_get_string(arr, agent_trace_pos::TOOL_NAME),
             prompt_text: sparse_get_string(arr, agent_trace_pos::PROMPT_TEXT),
             response_text: sparse_get_string(arr, agent_trace_pos::RESPONSE_TEXT),
+            input_tokens: sparse_get_u64(arr, agent_trace_pos::INPUT_TOKENS),
+            output_tokens: sparse_get_u64(arr, agent_trace_pos::OUTPUT_TOKENS),
+            cache_read_input_tokens: sparse_get_u64(arr, agent_trace_pos::CACHE_READ_INPUT_TOKENS),
+            cache_creation_input_tokens: sparse_get_u64(arr, agent_trace_pos::CACHE_CREATION_INPUT_TOKENS),
+            cost_usd: sparse_get_f64(arr, agent_trace_pos::COST_USD),
         }
     }
 }

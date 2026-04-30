@@ -16,35 +16,53 @@ impl ClaudeAgent {
     fn scan_conversation_files() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        // Standard locations for Claude Code transcripts
+        // Check CLAUDE_CONFIG_DIR override first
+        let base_dir = if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+            Some(PathBuf::from(config_dir))
+        } else {
+            dirs::home_dir().map(|p| p.join(".claude"))
+        };
+
+        // Search paths:
+        // 1. ~/.claude/projects/**/*.jsonl (or $CLAUDE_CONFIG_DIR/projects/**/*.jsonl)
+        // 2. ~/.config/claude/projects/**/*.jsonl
         let search_dirs = vec![
-            // macOS/Linux Claude Code
-            dirs::config_dir().map(|p| p.join("Claude/conversations")),
-            // VS Code extension
-            dirs::config_dir().map(|p| p.join("Code/User/globalStorage/claude/conversations")),
+            base_dir.as_ref().map(|p| p.join("projects")),
+            dirs::config_dir().map(|p| p.join("claude/projects")),
         ];
 
         for dir_opt in search_dirs {
             if let Some(dir) = dir_opt
                 && dir.exists()
-                && let Ok(entries) = fs::read_dir(&dir)
             {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() && path.extension().map(|ext| ext == "jsonl").unwrap_or(false)
-                    {
-                        paths.push(path);
-                    }
-                }
+                // Recursively scan for *.jsonl files
+                Self::scan_jsonl_recursive(&dir, &mut paths);
             }
         }
 
         paths
     }
 
+    /// Recursively scan directory for *.jsonl files.
+    fn scan_jsonl_recursive(dir: &Path, paths: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                Self::scan_jsonl_recursive(&path, paths);
+            } else if path.is_file() && path.extension().map(|ext| ext == "jsonl").unwrap_or(false)
+            {
+                paths.push(path);
+            }
+        }
+    }
+
     /// Extract session ID from a Claude conversation file path.
     ///
-    /// Claude files are typically named like: `conversation_<uuid>.jsonl`
+    /// Claude files are typically named like: `<uuid>.jsonl` under `projects/<project-dir>/`
     fn extract_session_id(path: &Path) -> Option<String> {
         path.file_stem()
             .and_then(|s| s.to_str())
@@ -233,6 +251,25 @@ impl Agent for ClaudeAgent {
                     }
                 }
                 Some("assistant") => {
+                    // Extract token usage once per assistant message
+                    let usage = entry["message"]["usage"].as_object();
+                    let input_tokens = usage
+                        .and_then(|u| u.get("input_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .filter(|&n| n < 100_000_000);
+                    let output_tokens = usage
+                        .and_then(|u| u.get("output_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .filter(|&n| n < 100_000_000);
+                    let cache_read = usage
+                        .and_then(|u| u.get("cache_read_input_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .filter(|&n| n < 100_000_000);
+                    let cache_creation = usage
+                        .and_then(|u| u.get("cache_creation_input_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .filter(|&n| n < 100_000_000);
+
                     // Assistant message - can contain text, thinking, and tool_use
                     if let Some(content_array) = entry["message"]["content"].as_array() {
                         for item in content_array {
@@ -241,15 +278,25 @@ impl Agent for ClaudeAgent {
                                     if let Some(text) = item["text"].as_str()
                                         && !text.trim().is_empty()
                                     {
-                                        let event = AgentTraceValues::new()
+                                        let mut event = AgentTraceValues::new()
                                             .event_type("assistant_message")
                                             .response_text(text);
 
-                                        let event = if let Some(ts) = timestamp_opt {
-                                            event.event_ts(ts)
-                                        } else {
-                                            event
-                                        };
+                                        if let Some(ts) = timestamp_opt {
+                                            event = event.event_ts(ts);
+                                        }
+                                        if let Some(tokens) = input_tokens {
+                                            event = event.input_tokens(tokens);
+                                        }
+                                        if let Some(tokens) = output_tokens {
+                                            event = event.output_tokens(tokens);
+                                        }
+                                        if let Some(tokens) = cache_read {
+                                            event = event.cache_read_input_tokens(tokens);
+                                        }
+                                        if let Some(tokens) = cache_creation {
+                                            event = event.cache_creation_input_tokens(tokens);
+                                        }
 
                                         events.push(event);
                                     }
@@ -358,5 +405,47 @@ mod tests {
 
         assert_eq!(result.events.len(), 2);
         assert_eq!(result.model, Some("claude-sonnet-4".to_string()));
+    }
+
+    #[test]
+    fn test_scan_discovers_real_claude_files() {
+        let paths = ClaudeAgent::scan_conversation_files();
+        // On this machine we have files in ~/.claude/projects/
+        if std::path::Path::new(&std::env::var("HOME").unwrap())
+            .join(".claude/projects")
+            .exists()
+        {
+            assert!(!paths.is_empty(), "Should discover files in ~/.claude/projects/");
+            for path in &paths {
+                assert!(path.extension().and_then(|s| s.to_str()) == Some("jsonl"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_incremental_with_token_usage() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Response"}}],"model":"claude-sonnet-4","usage":{{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":200,"cache_creation_input_tokens":300}}}},"timestamp":"2025-01-01T00:00:01Z"}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let agent = ClaudeAgent;
+        let watermark = Box::new(ByteOffsetWatermark::new(0));
+        let result = agent
+            .read_incremental(file.path(), watermark, "test-session")
+            .unwrap();
+
+        assert_eq!(result.events.len(), 1);
+        let event = &result.events[0];
+        assert_eq!(event.input_tokens, Some(Some(100)));
+        assert_eq!(event.output_tokens, Some(Some(50)));
+        assert_eq!(event.cache_read_input_tokens, Some(Some(200)));
+        assert_eq!(event.cache_creation_input_tokens, Some(Some(300)));
     }
 }

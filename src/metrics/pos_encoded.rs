@@ -50,6 +50,15 @@ pub fn u64_to_json(field: &PosField<u64>) -> Option<Value> {
     }
 }
 
+/// Convert a `PosField<f64>` to JSON Value for sparse array.
+pub fn f64_to_json(field: &PosField<f64>) -> Option<Value> {
+    match field {
+        None => None,
+        Some(None) => Some(Value::Null),
+        Some(Some(f)) => serde_json::Number::from_f64(*f).map(Value::Number),
+    }
+}
+
 /// Get a string field from a sparse array at a position.
 #[allow(dead_code)]
 pub fn sparse_get_string(arr: &SparseArray, pos: usize) -> PosField<String> {
@@ -85,6 +94,17 @@ pub fn sparse_get_u64(arr: &SparseArray, pos: usize) -> PosField<u64> {
         None => None,
         Some(Value::Null) => Some(None),
         Some(Value::Number(n)) => n.as_u64().map(Some),
+        Some(_) => None,
+    }
+}
+
+/// Get a f64 field from a sparse array at a position.
+#[allow(dead_code)]
+pub fn sparse_get_f64(arr: &SparseArray, pos: usize) -> PosField<f64> {
+    match arr.get(&pos.to_string()) {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::Number(n)) => n.as_f64().map(Some),
         Some(_) => None,
     }
 }
