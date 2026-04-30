@@ -160,7 +160,7 @@ impl AgentPreset for PiPreset {
             Some(TranscriptSource {
                 path,
                 format: TranscriptFormat::PiJsonl,
-                session_id: String::new(),
+                session_id: context.session_id.clone(),
                 external_thread_id: None,
             })
         };
