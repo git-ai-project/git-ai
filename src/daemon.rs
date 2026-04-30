@@ -8287,9 +8287,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     crate::daemon::telemetry_worker::set_daemon_internal_telemetry(telemetry_handle.clone());
     coordinator_inner.telemetry_worker = Some(telemetry_handle.clone());
 
-    let coordinator = Arc::new(coordinator_inner);
-
-    // Spawn the transcript worker after coordinator is created (needs shutdown_notify)
+    // Spawn the transcript worker BEFORE wrapping coordinator in Arc
     let transcripts_db_path = config.internal_dir.join("transcripts.db");
     match crate::transcripts::db::TranscriptsDatabase::open(&transcripts_db_path) {
         Ok(transcripts_db) => {
@@ -8298,24 +8296,21 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
             // We'll need to notify this when the coordinator shuts down
             // For now, we create a separate notify instance
             // TODO: integrate with coordinator shutdown mechanism
-            let _transcript_handle = crate::daemon::transcript_worker::spawn_transcript_worker(
+            let transcript_handle = crate::daemon::transcript_worker::spawn_transcript_worker(
                 transcripts_db.clone(),
                 telemetry_handle.clone(),
                 shutdown_notify,
             );
-            // Store transcripts_db in coordinator - need to use unsafe to get mutable access
-            // Safety: We're still in single-threaded initialization, no other references exist
-            unsafe {
-                let coordinator_ptr = Arc::as_ptr(&coordinator) as *mut ActorDaemonCoordinator;
-                (*coordinator_ptr).transcripts_db = Some(transcripts_db);
-                (*coordinator_ptr).transcript_worker = Some(_transcript_handle);
-            }
+            coordinator_inner.transcripts_db = Some(transcripts_db);
+            coordinator_inner.transcript_worker = Some(transcript_handle);
             tracing::info!("transcript worker spawned");
         }
         Err(e) => {
             tracing::error!(error = %e, "failed to open transcripts database, transcript worker not started");
         }
     }
+
+    let coordinator = Arc::new(coordinator_inner);
     coordinator.start_trace_ingest_worker()?;
     let rt_handle = tokio::runtime::Handle::current();
     let control_socket_path = config.control_socket_path.clone();
@@ -8693,6 +8688,9 @@ pub fn send_control_request(
         control_request_response_timeout(request),
     )
 }
+
+#[cfg(test)]
+mod transcript_worker_tests;
 
 #[cfg(test)]
 mod tests {
