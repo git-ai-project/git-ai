@@ -76,7 +76,6 @@ fn append_assistant_message(session_path: &Path, provider: &str, model: &str, te
 
 #[test]
 #[ignore] // DISABLED: transcript enrichment removed
-#[ignore] // DISABLED: transcript enrichment removed
 #[serial_test::serial]
 fn test_pi_before_edit_checkpoint_via_cli_creates_human_checkpoint() {
     let repo = TestRepo::new();
