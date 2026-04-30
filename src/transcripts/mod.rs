@@ -40,6 +40,7 @@
 //! ```
 
 pub mod agent;
+pub mod agents;
 pub mod db;
 pub mod formats;
 pub mod processor;
