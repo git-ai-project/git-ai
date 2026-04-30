@@ -40,7 +40,9 @@ pub trait Agent: Send + Sync {
 pub fn get_agent(agent_type: &str) -> Option<Box<dyn Agent>> {
     match agent_type {
         "claude" => Some(Box::new(super::agents::ClaudeAgent)),
-        // More agents will be added as we implement them
+        "cursor" => Some(Box::new(super::agents::CursorAgent)),
+        "droid" => Some(Box::new(super::agents::DroidAgent)),
+        "copilot" => Some(Box::new(super::agents::CopilotAgent)),
         _ => None,
     }
 }
