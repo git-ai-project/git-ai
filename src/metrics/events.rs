@@ -434,7 +434,7 @@ pub mod checkpoint_pos {
 /// | 4 | lines_deleted | u32 |
 /// | 5 | lines_added_sloc | u32 |
 /// | 6 | lines_deleted_sloc | u32 |
-/// | 7 | tool_use_id | String (nullable) |
+/// | 7 | external_tool_use_id | String (nullable) |
 #[derive(Debug, Clone, Default)]
 pub struct CheckpointValues {
     pub checkpoint_ts: PosField<u64>,
@@ -444,7 +444,7 @@ pub struct CheckpointValues {
     pub lines_deleted: PosField<u32>,
     pub lines_added_sloc: PosField<u32>,
     pub lines_deleted_sloc: PosField<u32>,
-    pub tool_use_id: PosField<String>,
+    pub external_tool_use_id: PosField<String>,
 }
 
 impl CheckpointValues {
@@ -529,14 +529,14 @@ impl CheckpointValues {
         self
     }
 
-    pub fn tool_use_id(mut self, value: impl Into<String>) -> Self {
-        self.tool_use_id = Some(Some(value.into()));
+    pub fn external_tool_use_id(mut self, value: impl Into<String>) -> Self {
+        self.external_tool_use_id = Some(Some(value.into()));
         self
     }
 
     #[allow(dead_code)]
-    pub fn tool_use_id_null(mut self) -> Self {
-        self.tool_use_id = Some(None);
+    pub fn external_tool_use_id_null(mut self) -> Self {
+        self.external_tool_use_id = Some(None);
         self
     }
 }
@@ -579,7 +579,7 @@ impl PosEncoded for CheckpointValues {
         sparse_set(
             &mut map,
             checkpoint_pos::TOOL_USE_ID,
-            string_to_json(&self.tool_use_id),
+            string_to_json(&self.external_tool_use_id),
         );
 
         map
@@ -594,7 +594,7 @@ impl PosEncoded for CheckpointValues {
             lines_deleted: sparse_get_u32(arr, checkpoint_pos::LINES_DELETED),
             lines_added_sloc: sparse_get_u32(arr, checkpoint_pos::LINES_ADDED_SLOC),
             lines_deleted_sloc: sparse_get_u32(arr, checkpoint_pos::LINES_DELETED_SLOC),
-            tool_use_id: sparse_get_string(arr, checkpoint_pos::TOOL_USE_ID),
+            external_tool_use_id: sparse_get_string(arr, checkpoint_pos::TOOL_USE_ID),
         }
     }
 }
@@ -963,29 +963,29 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_values_with_tool_use_id() {
+    fn test_checkpoint_values_with_external_tool_use_id() {
         let values = CheckpointValues::new()
             .checkpoint_ts(1704067200)
             .kind("ai_agent")
             .file_path("src/main.rs")
             .lines_added(50)
-            .tool_use_id("tool-use-123");
+            .external_tool_use_id("tool-use-123");
 
-        assert_eq!(values.tool_use_id, Some(Some("tool-use-123".to_string())));
+        assert_eq!(values.external_tool_use_id, Some(Some("tool-use-123".to_string())));
     }
 
     #[test]
-    fn test_checkpoint_values_tool_use_id_null() {
+    fn test_checkpoint_values_external_tool_use_id_null() {
         let values = CheckpointValues::new()
             .checkpoint_ts(1704067200)
             .kind("human")
-            .tool_use_id_null();
+            .external_tool_use_id_null();
 
-        assert_eq!(values.tool_use_id, Some(None));
+        assert_eq!(values.external_tool_use_id, Some(None));
     }
 
     #[test]
-    fn test_checkpoint_values_to_sparse_with_tool_use_id() {
+    fn test_checkpoint_values_to_sparse_with_external_tool_use_id() {
         use super::PosEncoded;
 
         let values = CheckpointValues::new()
@@ -993,7 +993,7 @@ mod tests {
             .kind("ai_agent")
             .file_path("tests/test.rs")
             .lines_added(100)
-            .tool_use_id("tool-xyz");
+            .external_tool_use_id("tool-xyz");
 
         let sparse = PosEncoded::to_sparse(&values);
 
@@ -1014,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_values_from_sparse_with_tool_use_id() {
+    fn test_checkpoint_values_from_sparse_with_external_tool_use_id() {
         use super::PosEncoded;
 
         let mut sparse = SparseArray::new();
@@ -1030,11 +1030,11 @@ mod tests {
         assert_eq!(values.kind, Some(Some("ai_tab".to_string())));
         assert_eq!(values.file_path, Some(Some("lib.rs".to_string())));
         assert_eq!(values.lines_added, Some(Some(75)));
-        assert_eq!(values.tool_use_id, Some(Some("tool-abc".to_string())));
+        assert_eq!(values.external_tool_use_id, Some(Some("tool-abc".to_string())));
     }
 
     #[test]
-    fn test_checkpoint_values_roundtrip_with_tool_use_id() {
+    fn test_checkpoint_values_roundtrip_with_external_tool_use_id() {
         use super::PosEncoded;
 
         let original = CheckpointValues::new()
@@ -1042,7 +1042,7 @@ mod tests {
             .kind("ai_agent")
             .file_path("src/lib.rs")
             .lines_added(50)
-            .tool_use_id_null();
+            .external_tool_use_id_null();
 
         let sparse = PosEncoded::to_sparse(&original);
         let restored = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
@@ -1051,21 +1051,21 @@ mod tests {
         assert_eq!(restored.kind, Some(Some("ai_agent".to_string())));
         assert_eq!(restored.file_path, Some(Some("src/lib.rs".to_string())));
         assert_eq!(restored.lines_added, Some(Some(50)));
-        assert_eq!(restored.tool_use_id, Some(None)); // explicitly null
+        assert_eq!(restored.external_tool_use_id, Some(None)); // explicitly null
     }
 
     #[test]
-    fn test_checkpoint_values_tool_use_id_not_set() {
+    fn test_checkpoint_values_external_tool_use_id_not_set() {
         use super::PosEncoded;
 
         let mut sparse = SparseArray::new();
         sparse.insert("0".to_string(), Value::Number(1700000000.into()));
         sparse.insert("1".to_string(), Value::String("human".to_string()));
-        // tool_use_id not included
+        // external_tool_use_id not included
 
         let values = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
 
-        assert_eq!(values.tool_use_id, None); // not set
+        assert_eq!(values.external_tool_use_id, None); // not set
     }
 }
 
@@ -1089,7 +1089,7 @@ pub mod agent_trace_pos {
 /// |----------|------|------|
 /// | 0 | event_type | String |
 /// | 1 | event_ts | u64 (nullable) |
-/// | 2 | tool_use_id | String (nullable) |
+/// | 2 | external_tool_use_id | String (nullable) |
 /// | 3 | tool_name | String (nullable) |
 /// | 4 | prompt_text | String (nullable) |
 /// | 5 | response_text | String (nullable) |
@@ -1097,7 +1097,7 @@ pub mod agent_trace_pos {
 pub struct AgentTraceValues {
     pub event_type: PosField<String>,
     pub event_ts: PosField<u64>,
-    pub tool_use_id: PosField<String>,
+    pub external_tool_use_id: PosField<String>,
     pub tool_name: PosField<String>,
     pub prompt_text: PosField<String>,
     pub response_text: PosField<String>,
@@ -1130,14 +1130,14 @@ impl AgentTraceValues {
         self
     }
 
-    pub fn tool_use_id(mut self, value: impl Into<String>) -> Self {
-        self.tool_use_id = Some(Some(value.into()));
+    pub fn external_tool_use_id(mut self, value: impl Into<String>) -> Self {
+        self.external_tool_use_id = Some(Some(value.into()));
         self
     }
 
     #[allow(dead_code)]
-    pub fn tool_use_id_null(mut self) -> Self {
-        self.tool_use_id = Some(None);
+    pub fn external_tool_use_id_null(mut self) -> Self {
+        self.external_tool_use_id = Some(None);
         self
     }
 
@@ -1192,7 +1192,7 @@ impl PosEncoded for AgentTraceValues {
         sparse_set(
             &mut map,
             agent_trace_pos::TOOL_USE_ID,
-            string_to_json(&self.tool_use_id),
+            string_to_json(&self.external_tool_use_id),
         );
         sparse_set(
             &mut map,
@@ -1217,7 +1217,7 @@ impl PosEncoded for AgentTraceValues {
         Self {
             event_type: sparse_get_string(arr, agent_trace_pos::EVENT_TYPE),
             event_ts: sparse_get_u64(arr, agent_trace_pos::EVENT_TS),
-            tool_use_id: sparse_get_string(arr, agent_trace_pos::TOOL_USE_ID),
+            external_tool_use_id: sparse_get_string(arr, agent_trace_pos::TOOL_USE_ID),
             tool_name: sparse_get_string(arr, agent_trace_pos::TOOL_NAME),
             prompt_text: sparse_get_string(arr, agent_trace_pos::PROMPT_TEXT),
             response_text: sparse_get_string(arr, agent_trace_pos::RESPONSE_TEXT),

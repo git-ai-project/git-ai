@@ -279,7 +279,7 @@ impl Agent for CursorAgent {
 
                                         // Cursor doesn't typically have tool_use IDs in the same format
                                         if let Some(id) = item["id"].as_str() {
-                                            event = event.tool_use_id(id);
+                                            event = event.external_tool_use_id(id);
                                         }
 
                                         if let Some(ts) = timestamp_opt {

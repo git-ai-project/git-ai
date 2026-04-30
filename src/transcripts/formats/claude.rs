@@ -221,7 +221,7 @@ pub fn read_incremental(
                                         .tool_name(name);
 
                                     if let Some(id) = tool_use_id {
-                                        event = event.tool_use_id(id);
+                                        event = event.external_tool_use_id(id);
                                     }
 
                                     if let Some(ts) = timestamp_opt {
@@ -319,7 +319,7 @@ mod tests {
         let event = &result.events[0];
         assert_eq!(event.event_type, Some(Some("tool_use".to_string())));
         assert_eq!(event.tool_name, Some(Some("Read".to_string())));
-        assert_eq!(event.tool_use_id, Some(Some("toolu_123".to_string())));
+        assert_eq!(event.external_tool_use_id, Some(Some("toolu_123".to_string())));
     }
 
     #[test]

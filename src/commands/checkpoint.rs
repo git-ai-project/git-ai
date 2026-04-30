@@ -970,7 +970,7 @@ fn execute_resolved_checkpoint(
 
             // Add tool_use_id if available
             if let Some(tuid) = tool_use_id {
-                values = values.tool_use_id(tuid);
+                values = values.external_tool_use_id(tuid);
             }
 
             let file_attrs = attrs.clone().author(&checkpoint.author);
