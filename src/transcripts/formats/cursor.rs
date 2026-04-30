@@ -187,7 +187,7 @@ pub fn read_incremental(
 
                                     // Cursor doesn't typically have tool_use IDs in the same format
                                     if let Some(id) = item["id"].as_str() {
-                                        event = event.tool_use_id(id);
+                                        event = event.external_tool_use_id(id);
                                     }
 
                                     if let Some(ts) = timestamp_opt {
@@ -298,7 +298,7 @@ mod tests {
         let event = &result.events[0];
         assert_eq!(event.event_type, Some(Some("tool_use".to_string())));
         assert_eq!(event.tool_name, Some(Some("Read".to_string())));
-        assert_eq!(event.tool_use_id, Some(Some("tool_123".to_string())));
+        assert_eq!(event.external_tool_use_id, Some(Some("tool_123".to_string())));
     }
 
     #[test]
