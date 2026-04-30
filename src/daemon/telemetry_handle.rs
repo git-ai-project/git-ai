@@ -273,4 +273,3 @@ pub fn send_wrapper_post_state(
     };
     send_via_daemon(&request).map(|_| ())
 }
-

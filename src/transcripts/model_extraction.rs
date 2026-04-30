@@ -53,21 +53,21 @@ fn extract_model_from_jsonl_tail(
         })?;
 
     let reader = BufReader::new(file);
-    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
 
     // Parse last complete line
-    if let Some(last_line) = lines.last() {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(last_line) {
-            // Try to find model in various locations
-            if let Some(model) = json.get(model_field).and_then(|v| v.as_str()) {
-                return Ok(Some(model.to_string()));
-            }
-            // Try nested in message.model
-            if let Some(message) = json.get("message") {
-                if let Some(model) = message.get(model_field).and_then(|v| v.as_str()) {
-                    return Ok(Some(model.to_string()));
-                }
-            }
+    if let Some(last_line) = lines.last()
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(last_line)
+    {
+        // Try to find model in various locations
+        if let Some(model) = json.get(model_field).and_then(|v| v.as_str()) {
+            return Ok(Some(model.to_string()));
+        }
+        // Try nested in message.model
+        if let Some(message) = json.get("message")
+            && let Some(model) = message.get(model_field).and_then(|v| v.as_str())
+        {
+            return Ok(Some(model.to_string()));
         }
     }
 
@@ -80,21 +80,20 @@ fn extract_model_from_session_json(path: &Path) -> Result<Option<String>, Transc
         message: format!("failed to open transcript: {}", e),
     })?;
 
-    let json: serde_json::Value = serde_json::from_reader(file).map_err(|e| {
-        TranscriptError::Parse {
+    let json: serde_json::Value =
+        serde_json::from_reader(file).map_err(|e| TranscriptError::Parse {
             line: 0,
             message: format!("failed to parse session.json: {}", e),
-        }
-    })?;
+        })?;
 
     // Try common locations for model field
     if let Some(model) = json.get("model").and_then(|v| v.as_str()) {
         return Ok(Some(model.to_string()));
     }
-    if let Some(metadata) = json.get("metadata") {
-        if let Some(model) = metadata.get("model").and_then(|v| v.as_str()) {
-            return Ok(Some(model.to_string()));
-        }
+    if let Some(metadata) = json.get("metadata")
+        && let Some(model) = metadata.get("model").and_then(|v| v.as_str())
+    {
+        return Ok(Some(model.to_string()));
     }
 
     Ok(None)

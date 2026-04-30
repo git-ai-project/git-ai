@@ -1,6 +1,6 @@
 // src/daemon/sweep_coordinator.rs
 
-use crate::transcripts::agent::{get_agent, Agent};
+use crate::transcripts::agent::{Agent, get_agent};
 use crate::transcripts::db::{SessionRecord, TranscriptsDatabase};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::TranscriptError;
