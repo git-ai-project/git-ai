@@ -35,6 +35,36 @@ def open_worktree(worktree_dir, branch_name, resume_session=False):
     os.execvp("claude", claude_args)
 
 
+def check_local_branch_exists(branch):
+    """Check if a local branch exists."""
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", f"refs/heads/{branch}"],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def check_remote_branch_exists(branch):
+    """Check if a remote branch exists on origin."""
+    result = subprocess.run(
+        ["git", "show-ref", "--verify", f"refs/remotes/origin/{branch}"],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def is_branch_checked_out_in_root(branch):
+    """Check if a branch is currently checked out in the repo root."""
+    result = subprocess.run(
+        ["git", "-C", get_repo_root(), "symbolic-ref", "--short", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return False
+    current_branch = result.stdout.strip()
+    return current_branch == branch
+
+
 def cmd_new(args):
     """Create a new worktree from origin/main and open claude in it."""
     branch = args.branch
