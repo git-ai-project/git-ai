@@ -327,7 +327,7 @@ impl Agent for ClaudeAgent {
                                             .tool_name(name);
 
                                         if let Some(id) = tool_use_id {
-                                            event = event.tool_use_id(id);
+                                            event = event.external_tool_use_id(id);
                                         }
 
                                         if let Some(ts) = timestamp_opt {
