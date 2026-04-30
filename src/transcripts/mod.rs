@@ -42,6 +42,7 @@
 pub mod db;
 pub mod formats;
 pub mod processor;
+pub mod sweep;
 pub mod types;
 pub mod watermark;
 
