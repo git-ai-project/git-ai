@@ -4,7 +4,6 @@ use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
 use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy, WatermarkType};
-use chrono::{DateTime, Utc};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -48,41 +47,6 @@ impl CursorAgent {
             .map(|s| format!("cursor:{}", s))
     }
 
-    /// Parse a Cursor transcript file to extract metadata (timestamps).
-    fn extract_metadata(path: &Path) -> (Option<String>, Option<DateTime<Utc>>) {
-        use std::io::{BufRead, BufReader};
-
-        let Ok(file) = fs::File::open(path) else {
-            return (None, None);
-        };
-
-        let reader = BufReader::new(file);
-        let mut first_timestamp = None;
-
-        // Read first few lines to extract metadata
-        // Cursor doesn't store model in JSONL, so we can't extract it here
-        for line in reader.lines().take(10).flatten() {
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) {
-                // Extract first timestamp
-                if first_timestamp.is_none()
-                    && let Some(ts_str) = entry["timestamp"].as_str()
-                    && let Ok(ts) = DateTime::parse_from_rfc3339(ts_str)
-                {
-                    first_timestamp = Some(ts.with_timezone(&Utc));
-                }
-
-                if first_timestamp.is_some() {
-                    break;
-                }
-            }
-        }
-
-        (None, first_timestamp)
-    }
 }
 
 impl Agent for CursorAgent {
@@ -100,8 +64,8 @@ impl Agent for CursorAgent {
                 continue;
             };
 
-            let (model, _first_timestamp) = Self::extract_metadata(&path);
-
+            // Don't parse file content here - just filesystem scanning.
+            // Model will be extracted later during first read_incremental() if needed.
             let session = DiscoveredSession {
                 session_id,
                 agent_type: "cursor".to_string(),
@@ -109,7 +73,7 @@ impl Agent for CursorAgent {
                 transcript_format: TranscriptFormat::CursorJsonl,
                 watermark_type: WatermarkType::ByteOffset,
                 initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
-                model,
+                model: None,
                 tool: Some("Cursor".to_string()),
                 external_thread_id: None,
             };

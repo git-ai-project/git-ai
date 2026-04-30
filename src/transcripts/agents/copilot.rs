@@ -4,7 +4,6 @@ use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
 use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy, WatermarkType};
-use chrono::{DateTime, Utc};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -66,86 +65,6 @@ impl CopilotAgent {
         }
     }
 
-    /// Parse a Copilot transcript file to extract metadata (model, timestamps).
-    fn extract_metadata(path: &Path) -> (Option<String>, Option<DateTime<Utc>>) {
-        // Try to read as session JSON first
-        if let Ok(content) = fs::read_to_string(path)
-            && let Ok(session_json) = serde_json::from_str::<serde_json::Value>(&content)
-        {
-            // Check if this looks like an event stream format
-            if looks_like_event_stream(&session_json) {
-                return Self::extract_metadata_from_event_stream(path);
-            }
-
-            // Extract model from session JSON
-            let model = session_json
-                .get("inputState")
-                .and_then(|is| is.get("selectedModel"))
-                .and_then(|sm| sm.get("identifier"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            // Extract first timestamp from requests
-            let first_timestamp = session_json
-                .get("requests")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|req| req.get("timestamp"))
-                .and_then(|v| v.as_i64())
-                .and_then(|ms| {
-                    chrono::TimeZone::timestamp_millis_opt(&chrono::Utc, ms)
-                        .single()
-                        .map(|dt| dt.with_timezone(&Utc))
-                });
-
-            return (model, first_timestamp);
-        }
-
-        // Try to read as event stream
-        Self::extract_metadata_from_event_stream(path)
-    }
-
-    /// Extract metadata from event stream JSONL.
-    fn extract_metadata_from_event_stream(path: &Path) -> (Option<String>, Option<DateTime<Utc>>) {
-        use std::io::{BufRead, BufReader};
-
-        let Ok(file) = fs::File::open(path) else {
-            return (None, None);
-        };
-
-        let reader = BufReader::new(file);
-        let mut model = None;
-        let mut first_timestamp = None;
-
-        for line in reader.lines().take(10).flatten() {
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
-                // Extract timestamp
-                if first_timestamp.is_none()
-                    && let Some(ts_str) = event.get("timestamp").and_then(|v| v.as_str())
-                    && let Ok(ts) = DateTime::parse_from_rfc3339(ts_str)
-                {
-                    first_timestamp = Some(ts.with_timezone(&Utc));
-                }
-
-                // Extract model from data field
-                if model.is_none()
-                    && let Some(data) = event.get("data")
-                {
-                    model = extract_model_hint(data);
-                }
-
-                if model.is_some() && first_timestamp.is_some() {
-                    break;
-                }
-            }
-        }
-
-        (model, first_timestamp)
-    }
 }
 
 impl Agent for CopilotAgent {
@@ -163,9 +82,11 @@ impl Agent for CopilotAgent {
                 continue;
             };
 
+            // Determine format from file extension (no I/O, just checking path)
             let format = Self::determine_format(&path);
-            let (model, _first_timestamp) = Self::extract_metadata(&path);
 
+            // Don't parse file content here - just filesystem scanning.
+            // Model will be extracted later during first read_incremental() if needed.
             let session = DiscoveredSession {
                 session_id,
                 agent_type: "copilot".to_string(),
@@ -173,7 +94,7 @@ impl Agent for CopilotAgent {
                 transcript_format: format,
                 watermark_type: WatermarkType::ByteOffset,
                 initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
-                model,
+                model: None,
                 tool: Some("GitHub Copilot".to_string()),
                 external_thread_id: None,
             };
