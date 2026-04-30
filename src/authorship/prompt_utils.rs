@@ -1,5 +1,6 @@
 use crate::authorship::authorship_log::PromptRecord;
-use crate::commands::checkpoint_agent::transcript_readers;
+use crate::transcripts::model_extraction::extract_model_from_tail;
+use crate::transcripts::sweep::TranscriptFormat;
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, grep_ai_notes};
 use crate::git::repository::Repository;

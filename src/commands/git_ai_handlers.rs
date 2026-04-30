@@ -7,7 +7,6 @@ use crate::authorship::working_log::CheckpointKind;
 use crate::commands;
 use crate::commands::checkpoint::PreparedPathRole;
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
-use crate::commands::checkpoint_agent::transcript_readers;
 use crate::config;
 use crate::daemon::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, LiveCheckpointRunRequest,
