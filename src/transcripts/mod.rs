@@ -43,6 +43,7 @@ pub mod agent;
 pub mod agents;
 pub mod db;
 pub mod formats;
+pub mod model_extraction;
 pub mod processor;
 pub mod sweep;
 pub mod types;
