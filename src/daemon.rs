@@ -7292,6 +7292,7 @@ impl ActorDaemonCoordinator {
                             &session_id,
                             &agent_type,
                             transcript_source,
+                            checkpoint_request.agent_id.as_ref(),
                         )
                     {
                         tracing::warn!(
@@ -7386,6 +7387,7 @@ impl ActorDaemonCoordinator {
         session_id: &str,
         agent_type: &str,
         transcript_source: &crate::commands::checkpoint_agent::presets::TranscriptSource,
+        agent_id: Option<&crate::authorship::working_log::AgentId>,
     ) -> Result<(), String> {
         // Check if session exists
         if db
@@ -7438,6 +7440,11 @@ impl ActorDaemonCoordinator {
                 as Box<dyn crate::transcripts::watermark::WatermarkStrategy>,
         };
 
+        // Extract model and tool from agent_id if available
+        let (model, tool) = agent_id
+            .map(|aid| (Some(aid.model.clone()), Some(aid.tool.clone())))
+            .unwrap_or((None, None));
+
         let record = crate::transcripts::db::SessionRecord {
             session_id: session_id.to_string(),
             agent_type: agent_type.to_string(),
@@ -7445,8 +7452,8 @@ impl ActorDaemonCoordinator {
             transcript_format: format!("{:?}", transcript_source.format),
             watermark_type: format!("{:?}", watermark_type),
             watermark_value: initial_watermark.serialize(),
-            model: transcript_source.model.clone(),
-            tool: transcript_source.tool.clone(),
+            model,
+            tool,
             external_thread_id: transcript_source.external_thread_id.clone(),
             first_seen_at: now,
             last_processed_at: 0,

@@ -84,8 +84,6 @@ impl AgentPreset for CodexPreset {
             path: PathBuf::from(tp),
             format: TranscriptFormat::CodexJsonl,
             session_id: String::new(),
-            model: None,
-            tool: None,
             external_thread_id: None,
         });
 

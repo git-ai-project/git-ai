@@ -150,8 +150,6 @@ impl AgentPreset for DroidPreset {
             path: PathBuf::from(&resolved_transcript_path),
             format: TranscriptFormat::DroidJsonl,
             session_id: context.session_id.clone(),
-            model: None, // Model will be extracted from transcript during processing
-            tool: Some("droid".to_string()),
             external_thread_id: Some(context.session_id.clone()),
         });
 
@@ -259,7 +257,6 @@ mod tests {
                 assert!(e.transcript_source.is_some());
                 if let Some(ts) = &e.transcript_source {
                     assert_eq!(ts.format, TranscriptFormat::DroidJsonl);
-                    assert_eq!(ts.tool, Some("droid".to_string()));
                 }
             }
             _ => panic!("Expected PostFileEdit"),
@@ -293,7 +290,6 @@ mod tests {
                 assert!(e.transcript_source.is_some());
                 if let Some(ts) = &e.transcript_source {
                     assert_eq!(ts.format, TranscriptFormat::DroidJsonl);
-                    assert_eq!(ts.tool, Some("droid".to_string()));
                 }
             }
             _ => panic!("Expected PostBashCall"),

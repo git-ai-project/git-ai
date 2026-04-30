@@ -43,8 +43,6 @@ impl AgentPreset for GeminiPreset {
             path: PathBuf::from(transcript_path),
             format: TranscriptFormat::GeminiJson,
             session_id: String::new(),
-            model: None,
-            tool: None,
             external_thread_id: None,
         });
 

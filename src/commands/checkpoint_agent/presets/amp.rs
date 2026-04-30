@@ -313,8 +313,6 @@ impl AgentPreset for AmpPreset {
             path,
             format: TranscriptFormat::AmpThreadJson,
             session_id: String::new(),
-            model: None,
-            tool: None,
             external_thread_id: None,
         });
 
