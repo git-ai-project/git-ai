@@ -2,7 +2,6 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
-use crate::authorship::prompt_utils::{PromptUpdateResult, update_prompt_from_tool};
 use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
@@ -393,44 +392,8 @@ fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiE
         }
     }
 
-    // For each unique agent/conversation, update only the LAST checkpoint
-    for (_agent_key, indices) in agent_checkpoint_indices {
-        if indices.is_empty() {
-            continue;
-        }
-
-        // Get the last checkpoint index for this agent
-        let last_idx = *indices.last().unwrap();
-        let checkpoint = &checkpoints[last_idx];
-
-        if let Some(agent_id) = &checkpoint.agent_id {
-            // Use shared update logic from prompt_updater module
-            let result = update_prompt_from_tool(
-                &agent_id.tool,
-                &agent_id.id,
-                checkpoint.agent_metadata.as_ref(),
-                &agent_id.model,
-            );
-
-            // Apply the update to the last checkpoint only
-            match result {
-                PromptUpdateResult::Updated(latest_model) => {
-                    let checkpoint = &mut checkpoints[last_idx];
-                    // Transcript no longer stored
-                    if let Some(agent_id) = &mut checkpoint.agent_id {
-                        agent_id.model = latest_model;
-                    }
-                }
-                PromptUpdateResult::Unchanged => {
-                    // No update available, keep existing transcript
-                }
-                PromptUpdateResult::Failed(_e) => {
-                    // Error already logged in update_prompt_from_tool
-                    // Continue processing other checkpoints
-                }
-            }
-        }
-    }
+    // Transcript enrichment disabled - model is already set from checkpoint
+    // No per-agent updates needed
 
     Ok(())
 }
