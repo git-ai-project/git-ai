@@ -313,17 +313,6 @@ pub struct CommitRange<'a> {
 }
 
 impl<'a> CommitRange<'a> {
-    /// Create an empty CommitRange with no commits in its iterator.
-    #[allow(dead_code)]
-    pub fn empty(repo: &'a Repository) -> Self {
-        Self {
-            repo,
-            start_oid: String::new(),
-            end_oid: String::new(),
-            refname: String::new(),
-        }
-    }
-
     #[allow(dead_code)]
     pub fn new(
         repo: &'a Repository,
