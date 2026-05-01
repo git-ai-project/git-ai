@@ -950,11 +950,6 @@ pub struct Blob<'a> {
 }
 
 impl<'a> Blob<'a> {
-    #[allow(dead_code)]
-    pub fn id(&self) -> String {
-        self.oid.clone()
-    }
-
     // Get the content of this blob.
     pub fn content(&self) -> Result<Vec<u8>, GitAiError> {
         let mut args = self.repo.global_args_for_exec();
@@ -976,11 +971,6 @@ impl<'a> Reference<'a> {
         Some(&self.ref_name)
     }
 
-    #[allow(dead_code)]
-    pub fn is_branch(&self) -> bool {
-        self.ref_name.starts_with("refs/heads/")
-    }
-
     pub fn shorthand(&self) -> Result<String, GitAiError> {
         let mut args = self.repo.global_args_for_exec();
         args.push("rev-parse".to_string());
@@ -996,22 +986,6 @@ impl<'a> Reference<'a> {
         args.push(self.ref_name.clone());
         let output = exec_git(&args)?;
         Ok(String::from_utf8(output.stdout)?.trim().to_string())
-    }
-
-    // Peel a reference to a blob
-    // This method recursively peels the reference until it reaches a blob.
-    #[allow(dead_code)]
-    pub fn peel_to_blob(&self) -> Result<Blob<'a>, GitAiError> {
-        let mut args = self.repo.global_args_for_exec();
-        args.push("rev-parse".to_string());
-        // args.push("-q".to_string());
-        args.push("--verify".to_string());
-        args.push(format!("{}^{}", self.ref_name, "{blob}"));
-        let output = exec_git(&args)?;
-        Ok(Blob {
-            repo: self.repo,
-            oid: String::from_utf8(output.stdout)?.trim().to_string(),
-        })
     }
 
     // Peel a reference to a commit This method recursively peels the reference until it reaches a commit.
