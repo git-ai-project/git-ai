@@ -802,19 +802,15 @@ impl<'a> Commit<'a> {
 }
 
 pub struct TreeEntry<'a> {
-    #[allow(dead_code)]
-    repo: &'a Repository,
     // Object id (SHA-1/oid) that this tree entry points to
     oid: String,
-    // One of: blob, tree, commit (gitlink)
-    #[allow(dead_code)]
-    object_type: String,
     // File mode as provided by git ls-tree (e.g. 100644, 100755, 120000, 040000)
     #[allow(dead_code)]
     mode: String,
     // Full path relative to the root of the tree used for lookup
     #[allow(dead_code)]
     path: String,
+    _phantom: std::marker::PhantomData<&'a ()>,
 }
 
 impl<'a> TreeEntry<'a> {
@@ -890,11 +886,10 @@ impl<'a> Tree<'a> {
             // Prefer exact path match if multiple records somehow appear
             if found_entry.is_none() || file_path == path_str {
                 found_entry = Some(TreeEntry {
-                    repo: self.repo,
                     oid,
-                    object_type,
                     mode,
                     path: file_path,
+                    _phantom: std::marker::PhantomData,
                 });
             }
         }
