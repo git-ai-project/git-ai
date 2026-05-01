@@ -4184,6 +4184,7 @@ fn build_note_from_conflict_wl(
                 overriden_lines: 0,
                 messages_url: None,
                 custom_attributes: None,
+                parent_id: None,
             });
 
         for entry in &checkpoint.entries {
@@ -5161,6 +5162,7 @@ mod tests {
                     ("employee_id".to_string(), "E100".to_string()),
                     ("team".to_string(), "test".to_string()),
                 ])),
+                parent_id: None,
             },
         );
 
@@ -5356,6 +5358,7 @@ mod tests {
                     ("employee_id".to_string(), "E200".to_string()),
                     ("team".to_string(), "platform".to_string()),
                 ])),
+                parent_id: None,
             },
         );
         prompts.insert(
@@ -5377,6 +5380,7 @@ mod tests {
                     ("employee_id".to_string(), "E200".to_string()),
                     ("team".to_string(), "platform".to_string()),
                 ])),
+                parent_id: None,
             },
         );
 
@@ -5489,6 +5493,7 @@ mod tests {
                     ("employee_id".to_string(), "E300".to_string()),
                     ("team".to_string(), "infra".to_string()),
                 ])),
+                parent_id: None,
             },
         );
 
@@ -5635,6 +5640,7 @@ mod tests {
                     ("employee_id".to_string(), "E400".to_string()),
                     ("team".to_string(), "backend".to_string()),
                 ])),
+                parent_id: None,
             },
         );
         let old_wl = repo
@@ -5763,6 +5769,7 @@ mod tests {
                     ("employee_id".to_string(), "E400".to_string()),
                     ("team".to_string(), "backend".to_string()),
                 ])),
+                parent_id: None,
             },
         );
         let v1_wl = repo
@@ -5937,6 +5944,7 @@ mod tests {
                     ("employee_id".to_string(), "E500".to_string()),
                     ("team".to_string(), "security".to_string()),
                 ])),
+                parent_id: None,
             },
         );
         prompts.insert(
@@ -5958,6 +5966,7 @@ mod tests {
                     ("employee_id".to_string(), "E500".to_string()),
                     ("team".to_string(), "security".to_string()),
                 ])),
+                parent_id: None,
             },
         );
 

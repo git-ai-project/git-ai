@@ -225,6 +225,9 @@ pub struct PromptRecord {
     pub messages_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_attributes: Option<HashMap<String, String>>,
+    /// Hash of the parent prompt record (for subagent transcripts)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 impl Eq for PromptRecord {}
@@ -272,6 +275,7 @@ mod tests {
             overriden_lines: 0,
             messages_url: None,
             custom_attributes: None,
+            parent_id: None,
         }
     }
 
