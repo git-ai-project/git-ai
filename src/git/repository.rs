@@ -454,24 +454,6 @@ impl<'a> CommitRange<'a> {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn length(&self) -> usize {
-        // Use git rev-list --count to get the number of commits between start and end
-        // Format: start_oid..end_oid means commits reachable from end_oid but not from start_oid
-        let mut args = self.repo.global_args_for_exec();
-        args.push("rev-list".to_string());
-        args.push("--count".to_string());
-        args.push(format!("{}..{}", self.start_oid, self.end_oid));
-
-        match exec_git(&args) {
-            Ok(output) => {
-                let count_str = String::from_utf8(output.stdout).unwrap_or_default();
-                count_str.trim().parse().unwrap_or(0)
-            }
-            Err(_) => 0, // If they don't share lineage or error occurs, return 0
-        }
-    }
-
     pub fn all_commits(&self) -> Vec<String> {
         let mut commits = Vec::new();
         let itt = self.clone().into_iter();
