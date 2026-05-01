@@ -298,7 +298,6 @@ impl<'a> Object<'a> {
         Ok(Commit {
             repo: self.repo,
             oid: String::from_utf8(output.stdout)?.trim().to_string(),
-            authorship_log: std::cell::OnceCell::new(),
         })
     }
 }
@@ -313,25 +312,6 @@ pub struct CommitRange<'a> {
 }
 
 impl<'a> CommitRange<'a> {
-    #[allow(dead_code)]
-    pub fn new(
-        repo: &'a Repository,
-        start_oid: String,
-        end_oid: String,
-        refname: String,
-    ) -> Result<Self, GitAiError> {
-        // Resolve start_oid and end_oid to actual commit SHAs
-        let resolved_start = repo.revparse_single(&start_oid)?.oid;
-        let resolved_end = repo.revparse_single(&end_oid)?.oid;
-
-        Ok(Self {
-            repo,
-            start_oid: resolved_start,
-            end_oid: resolved_end,
-            refname,
-        })
-    }
-
     /// Create a new CommitRange with automatic refname inference.
     /// If refname is None, tries to find a single ref pointing to end_oid.
     /// If exactly one ref is found, uses that. Otherwise falls back to current HEAD.
@@ -532,7 +512,6 @@ impl<'a> Iterator for CommitRangeIterator<'a> {
         Some(Commit {
             repo: self.repo,
             oid,
-            authorship_log: std::cell::OnceCell::new(),
         })
     }
 }
@@ -604,8 +583,6 @@ impl<'a> Signature<'a> {
 pub struct Commit<'a> {
     repo: &'a Repository,
     oid: String,
-    #[allow(dead_code)]
-    authorship_log: std::cell::OnceCell<AuthorshipLog>,
 }
 
 impl<'a> Commit<'a> {
@@ -637,7 +614,6 @@ impl<'a> Commit<'a> {
         Ok(Commit {
             repo: self.repo,
             oid: String::from_utf8(output.stdout)?.trim().to_string(),
-            authorship_log: std::cell::OnceCell::new(),
         })
     }
 
@@ -753,17 +729,6 @@ impl<'a> Commit<'a> {
     pub fn time(&self) -> Result<Time, GitAiError> {
         let signature = self.committer()?;
         Ok(signature.when())
-    }
-
-    // lazy load the authorship log
-    #[allow(dead_code)]
-    pub fn authorship(&self) -> &AuthorshipLog {
-        self.authorship_log
-            .get_or_init(|| get_authorship(self.repo, self.oid.as_str()).unwrap_or_default())
-    }
-    #[allow(dead_code)]
-    pub fn authorship_uncached(&self) -> AuthorshipLog {
-        get_authorship(self.repo, self.oid.as_str()).unwrap_or_default()
     }
 
     /// Find the first parent that exists on the specified refname
@@ -986,7 +951,6 @@ impl<'a> Reference<'a> {
         Ok(Commit {
             repo: self.repo,
             oid: String::from_utf8(output.stdout)?.trim().to_string(),
-            authorship_log: std::cell::OnceCell::new(),
         })
     }
 }
@@ -1009,7 +973,6 @@ impl<'a> Iterator for Parents<'a> {
         Some(Commit {
             repo: self.repo,
             oid,
-            authorship_log: std::cell::OnceCell::new(),
         })
     }
 }
@@ -1672,12 +1635,6 @@ impl Repository {
     }
 
     #[allow(dead_code)]
-    pub fn fetch_authorship(&self, remote_name: &str) -> Result<(), GitAiError> {
-        // Discards whether notes were found or not, just returns success/error
-        fetch_authorship_notes(self, remote_name).map(|_| ())
-    }
-
-    #[allow(dead_code)]
     pub fn push_authorship(&self, remote_name: &str) -> Result<(), GitAiError> {
         push_authorship_notes(self, remote_name)
     }
@@ -1744,7 +1701,6 @@ impl Repository {
         Ok(Commit {
             repo: self,
             oid,
-            authorship_log: std::cell::OnceCell::new(),
         })
     }
 
