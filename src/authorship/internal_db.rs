@@ -1,13 +1,5 @@
-// DEPRECATED: This module is deprecated in favor of the `transcripts` module.
-//
-// All new installations use `transcripts.db` for session tracking and telemetry.
-// This module is retained only for migration purposes to support existing
-// installations that have `internal.db` files with historical prompt records.
-//
-// On daemon startup, existing `internal.db` data is automatically migrated to
-// `transcripts.db` (see `src/daemon/transcript_worker.rs` migration logic).
-//
-// See `src/transcripts/` for the replacement implementation.
+// DEPRECATED: The internal DB is deprecated and in the process of being removed.
+// It has been superseded by use-case-specific databases.
 
 use crate::error::GitAiError;
 use dirs;
