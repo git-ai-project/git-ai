@@ -27,11 +27,19 @@ fn test_priority_queue_ordering_immediate_first() {
 
     // pop() should return Immediate first, then High, then Low
     let first = heap.pop().unwrap();
-    assert_eq!(first.priority, Priority::Immediate, "Immediate priority should be popped first");
+    assert_eq!(
+        first.priority,
+        Priority::Immediate,
+        "Immediate priority should be popped first"
+    );
     assert_eq!(first.session_id, "immediate");
 
     let second = heap.pop().unwrap();
-    assert_eq!(second.priority, Priority::Low, "Low priority should be popped last");
+    assert_eq!(
+        second.priority,
+        Priority::Low,
+        "Low priority should be popped last"
+    );
     assert_eq!(second.session_id, "low");
 }
 
@@ -100,7 +108,10 @@ fn test_retry_delay_prevents_immediate_reprocessing() {
 
     // But it should NOT be processable until next_retry_at has passed
     assert!(popped.next_retry_at.is_some());
-    assert!(popped.next_retry_at.unwrap() > now, "Task should have a future retry time");
+    assert!(
+        popped.next_retry_at.unwrap() > now,
+        "Task should have a future retry time"
+    );
 
     // Simulating the check: is it time to process?
     let ready_to_process = popped
@@ -108,7 +119,10 @@ fn test_retry_delay_prevents_immediate_reprocessing() {
         .map(|retry_at| Instant::now() >= retry_at)
         .unwrap_or(true);
 
-    assert!(!ready_to_process, "Task should not be ready for immediate processing");
+    assert!(
+        !ready_to_process,
+        "Task should not be ready for immediate processing"
+    );
 }
 
 #[test]
@@ -133,5 +147,8 @@ fn test_retry_delay_allows_processing_after_delay() {
         .map(|retry_at| Instant::now() >= retry_at)
         .unwrap_or(true);
 
-    assert!(ready_to_process, "Task with past retry time should be ready for processing");
+    assert!(
+        ready_to_process,
+        "Task with past retry time should be ready for processing"
+    );
 }

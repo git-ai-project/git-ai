@@ -1445,7 +1445,8 @@ cat {} > "$1"
 /// when the real post-commit pipeline injects them.
 #[test]
 fn test_rebase_preserves_custom_attributes_from_config() {
-    let mut repo = TestRepo::new_with_daemon_scope(crate::repos::test_repo::DaemonTestScope::Dedicated);
+    let mut repo =
+        TestRepo::new_with_daemon_scope(crate::repos::test_repo::DaemonTestScope::Dedicated);
 
     // Configure custom attributes via config patch
     let mut attrs = HashMap::new();

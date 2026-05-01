@@ -46,7 +46,6 @@ impl CursorAgent {
             .and_then(|s| s.to_str())
             .map(|s| format!("cursor:{}", s))
     }
-
 }
 
 impl Agent for CursorAgent {

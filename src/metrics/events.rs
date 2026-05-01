@@ -1325,7 +1325,10 @@ impl PosEncoded for AgentTraceValues {
             input_tokens: sparse_get_u64(arr, agent_trace_pos::INPUT_TOKENS),
             output_tokens: sparse_get_u64(arr, agent_trace_pos::OUTPUT_TOKENS),
             cache_read_input_tokens: sparse_get_u64(arr, agent_trace_pos::CACHE_READ_INPUT_TOKENS),
-            cache_creation_input_tokens: sparse_get_u64(arr, agent_trace_pos::CACHE_CREATION_INPUT_TOKENS),
+            cache_creation_input_tokens: sparse_get_u64(
+                arr,
+                agent_trace_pos::CACHE_CREATION_INPUT_TOKENS,
+            ),
             cost_usd: sparse_get_f64(arr, agent_trace_pos::COST_USD),
         }
     }
