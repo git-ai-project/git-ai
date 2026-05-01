@@ -249,6 +249,11 @@ impl DaemonConfig {
             .parent()
             .ok_or_else(|| GitAiError::Generic("daemon lock path has no parent".to_string()))?;
         fs::create_dir_all(daemon_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(daemon_dir, fs::Permissions::from_mode(0o700))?;
+        }
         fs::create_dir_all(&self.internal_dir)?;
         Ok(())
     }
@@ -7182,12 +7187,23 @@ impl ActorDaemonCoordinator {
             .await?;
         let latest_seq = status.applied_seq;
         let family_key = family.0;
+        let (dropped_envelopes, dropped_cas_records) = if let Some(worker) = &self.telemetry_worker
+        {
+            (
+                worker.dropped_envelope_count(),
+                worker.dropped_cas_record_count(),
+            )
+        } else {
+            (0, 0)
+        };
         Ok(FamilyStatus {
             family_key: family_key.clone(),
             latest_seq,
             last_error: status
                 .last_error
                 .or_else(|| self.latest_side_effect_error(&family_key).ok().flatten()),
+            dropped_envelopes,
+            dropped_cas_records,
         })
     }
 
@@ -7360,9 +7376,17 @@ fn control_listener_loop_actor(
     coordinator: Arc<ActorDaemonCoordinator>,
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
+    // TODO(H15): Add socket auth token — generate 32-byte random token at
+    // daemon startup, write to `<daemon_dir>/auth_token` with mode 0o600,
+    // and validate in handle_control_connection_actor_reader before processing
+    // requests. Skipped as it requires protocol changes (AuthenticatedRequest
+    // wrapper) and client-side updates.
+
     #[cfg(not(windows))]
     {
         remove_socket_if_exists(&control_socket_path)?;
+        // Umask 0o077 is set once in run_daemon() before spawning listener
+        // threads, so the socket is created with restrictive permissions.
         let listener = ListenerOptions::new()
             .name(local_socket_name(&control_socket_path)?)
             .create_sync()
@@ -7559,6 +7583,8 @@ fn trace_listener_loop_actor(
     #[cfg(not(windows))]
     {
         remove_socket_if_exists(&trace_socket_path)?;
+        // Umask 0o077 is set once in run_daemon() before spawning listener
+        // threads, so the socket is created with restrictive permissions.
         let listener = ListenerOptions::new()
             .name(local_socket_name(&trace_socket_path)?)
             .create_sync()
@@ -7767,21 +7793,22 @@ pub const GIT_ENV_VARS_TO_SANITIZE: &[&str] = &[
     "GIT_NAMESPACE",
 ];
 
-fn sanitize_git_env_for_daemon() {
+pub(crate) fn sanitize_git_env_for_daemon() {
     for var in GIT_ENV_VARS_TO_SANITIZE {
-        // SAFETY: daemon startup is single-threaded at this point -- the tokio
-        // runtime is not yet running and no other threads exist.
+        // SAFETY: must be called before the tokio runtime is built so that no
+        // other threads exist yet (env::remove_var is not thread-safe on POSIX).
         unsafe {
             std::env::remove_var(var);
         }
     }
 }
 
-fn disable_trace2_for_daemon_process() {
+pub(crate) fn disable_trace2_for_daemon_process() {
     // The daemon executes internal git commands while processing events and control requests.
     // If trace2.eventTarget points at this daemon socket globally, those internal git
     // commands can recursively feed trace2 events back into the daemon and starve progress.
     // Force-disable trace2 emission for the daemon process and all of its child git commands.
+    // SAFETY: must be called before the tokio runtime is built (see sanitize_git_env_for_daemon).
     unsafe {
         std::env::set_var("GIT_TRACE2_EVENT", "0");
     }
@@ -8015,9 +8042,7 @@ pub(crate) fn daemon_run_pending_self_update() {
     }
 }
 
-pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
-    sanitize_git_env_for_daemon();
-    disable_trace2_for_daemon_process();
+pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     config.ensure_parent_dirs()?;
     if let Err(error) = crate::commands::checkpoint::prune_stale_captured_checkpoints(
         Duration::from_secs(60 * 60 * 24),
@@ -8078,6 +8103,17 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     let control_socket_path = config.control_socket_path.clone();
     let trace_socket_path = config.trace_socket_path.clone();
 
+    // Set restrictive umask for the daemon's lifetime. This ensures all
+    // sockets and files created by the daemon (including those in spawned
+    // threads) are owner-only by default. We intentionally do not restore
+    // the old umask because std::thread::spawn does not guarantee the
+    // spawned thread has executed before returning, so restoring early
+    // would race with socket creation in the listener threads.
+    #[cfg(unix)]
+    unsafe {
+        libc::umask(0o077);
+    }
+
     let control_coord = coordinator.clone();
     let control_shutdown_coord = coordinator.clone();
     let control_handle = rt_handle.clone();
@@ -8116,6 +8152,9 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
         // Always request shutdown so the daemon doesn't stay half-alive.
         trace_shutdown_coord.request_shutdown();
     });
+
+    // Note: umask is intentionally not restored — the daemon is a dedicated
+    // process and keeping 0o077 for its lifetime is strictly more secure.
 
     let started_at_ns = now_unix_nanos();
     let update_coord = coordinator.clone();

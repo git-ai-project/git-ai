@@ -119,6 +119,16 @@ pub struct FamilyStatus {
     pub family_key: String,
     pub latest_seq: u64,
     pub last_error: Option<String>,
+    /// Number of telemetry envelopes dropped due to buffer lock contention.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dropped_envelopes: u64,
+    /// Number of CAS records dropped due to buffer lock contention.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dropped_cas_records: u64,
+}
+
+fn is_zero(val: &u64) -> bool {
+    *val == 0
 }
 
 /// A telemetry envelope sent from client to daemon.

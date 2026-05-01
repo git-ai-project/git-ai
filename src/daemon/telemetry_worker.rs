@@ -12,6 +12,7 @@ use crate::observability::MAX_METRICS_PER_ENVELOPE;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, interval};
 
@@ -134,6 +135,10 @@ impl TelemetryBuffer {
 #[derive(Clone)]
 pub struct DaemonTelemetryWorkerHandle {
     buffer: Arc<Mutex<TelemetryBuffer>>,
+    /// Number of telemetry envelopes dropped because the buffer lock was contended.
+    dropped_envelopes: Arc<AtomicU64>,
+    /// Number of CAS records dropped because the buffer lock was contended.
+    dropped_cas_records: Arc<AtomicU64>,
 }
 
 impl DaemonTelemetryWorkerHandle {
@@ -152,9 +157,13 @@ impl DaemonTelemetryWorkerHandle {
     /// Used by the daemon process's own `observability::log_*()` calls which
     /// cannot go through the control socket (the daemon can't connect to itself).
     /// Uses `try_lock()` to avoid blocking the caller if the buffer is contested.
+    /// Increments a drop counter when the lock cannot be acquired.
     pub fn submit_telemetry_sync(&self, envelopes: Vec<TelemetryEnvelope>) {
         if let Ok(mut buf) = self.buffer.try_lock() {
             buf.ingest_envelopes(envelopes);
+        } else {
+            self.dropped_envelopes
+                .fetch_add(envelopes.len() as u64, Ordering::Relaxed);
         }
     }
 
@@ -162,10 +171,24 @@ impl DaemonTelemetryWorkerHandle {
     ///
     /// Used by daemon-owned post-commit paths that cannot route through the
     /// control socket because the daemon cannot connect to itself.
+    /// Increments a drop counter when the lock cannot be acquired.
     pub fn submit_cas_sync(&self, records: Vec<CasSyncPayload>) {
         if let Ok(mut buf) = self.buffer.try_lock() {
             buf.ingest_cas(records);
+        } else {
+            self.dropped_cas_records
+                .fetch_add(records.len() as u64, Ordering::Relaxed);
         }
+    }
+
+    /// Return the number of telemetry envelopes dropped due to lock contention.
+    pub fn dropped_envelope_count(&self) -> u64 {
+        self.dropped_envelopes.load(Ordering::Relaxed)
+    }
+
+    /// Return the number of CAS records dropped due to lock contention.
+    pub fn dropped_cas_record_count(&self) -> u64 {
+        self.dropped_cas_records.load(Ordering::Relaxed)
     }
 }
 
@@ -220,6 +243,8 @@ pub fn spawn_telemetry_worker() -> DaemonTelemetryWorkerHandle {
     let buffer = Arc::new(Mutex::new(TelemetryBuffer::new()));
     let handle = DaemonTelemetryWorkerHandle {
         buffer: buffer.clone(),
+        dropped_envelopes: Arc::new(AtomicU64::new(0)),
+        dropped_cas_records: Arc::new(AtomicU64::new(0)),
     };
 
     tokio::spawn(async move {
