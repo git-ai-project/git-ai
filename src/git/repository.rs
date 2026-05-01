@@ -1136,15 +1136,6 @@ impl Repository {
         args
     }
 
-    /// Execute an arbitrary git command and return stdout as string
-    #[allow(dead_code)]
-    pub fn git(&self, args: &[&str]) -> Result<String, GitAiError> {
-        let mut full_args = self.global_args_for_exec();
-        full_args.extend(args.iter().map(|s| s.to_string()));
-        let output = exec_git(&full_args)?;
-        Ok(String::from_utf8(output.stdout)?)
-    }
-
     pub fn require_pre_command_head(&mut self) {
         if self.pre_command_base_commit.is_some() || self.pre_command_refname.is_some() {
             return;
@@ -1264,12 +1255,6 @@ impl Repository {
     }
 
     /// Get the canonical (absolute, resolved) path of the working directory
-    /// On Windows, this uses the \\?\ UNC prefix format for reliable path comparisons
-    #[allow(dead_code)]
-    pub fn canonical_workdir(&self) -> &Path {
-        &self.canonical_workdir
-    }
-
     /// Check if a path is within the repository's working directory.
     ///
     /// Returns `false` for paths inside nested independent git repos (subdirectories
@@ -1516,43 +1501,6 @@ impl Repository {
     }
 
     // Write an in-memory buffer to the ODB as a blob.
-    // The Oid returned can in turn be passed to find_blob to get a handle to the blob.
-    #[allow(dead_code)]
-    pub fn blob(&self, data: &[u8]) -> Result<String, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("hash-object".to_string());
-        args.push("-w".to_string());
-        args.push("--stdin".to_string());
-        let output = exec_git_stdin(&args, data)?;
-        Ok(String::from_utf8(output.stdout)?.trim().to_string())
-    }
-
-    // Create a new direct reference. This function will return an error if a reference already exists with the given name unless force is true, in which case it will be overwritten.
-    #[allow(dead_code)]
-    pub fn reference<'a>(
-        &'a self,
-        name: &str,
-        id: String,
-        force: bool,
-        log_message: &str,
-    ) -> Result<Reference<'a>, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("update-ref".to_string());
-        args.push("--stdin".to_string());
-        args.push("--create-reflog".to_string());
-        args.push("-m".to_string());
-        args.push(log_message.to_string());
-
-        let verb = if force { "update" } else { "create" };
-        let stdin_line = format!("{} {} {}\n", verb, name, id.trim());
-        exec_git_stdin(&args, stdin_line.as_bytes())?;
-
-        Ok(Reference {
-            repo: self,
-            ref_name: name.to_string(),
-        })
-    }
-
     #[allow(dead_code)]
     pub fn remote_head(&self, remote_name: &str) -> Result<String, GitAiError> {
         let mut args = self.global_args_for_exec();
@@ -1564,20 +1512,6 @@ impl Repository {
         Ok(String::from_utf8(output.stdout)?.trim().to_string())
     }
 
-    // Lookup a reference to one of the objects in a repository. Requires full ref name.
-    #[allow(dead_code)]
-    pub fn find_reference(&self, name: &str) -> Result<Reference<'_>, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("show-ref".to_string());
-        args.push("--verify".to_string());
-        args.push("-s".to_string());
-        args.push(name.to_string());
-        exec_git(&args)?;
-        Ok(Reference {
-            repo: self,
-            ref_name: name.to_string(),
-        })
-    }
     // Find a merge base between two commits
     pub fn merge_base(&self, one: String, two: String) -> Result<String, GitAiError> {
         let mut args = self.global_args_for_exec();
