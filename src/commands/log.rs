@@ -1,4 +1,5 @@
 use crate::config;
+use crate::perf::MeasuredCommand;
 
 /// Extract recognized Git global flags from args so they can be placed
 /// before the `log` subcommand. Everything else passes through to `git log`.
@@ -161,7 +162,7 @@ pub fn handle_log(args: &[String]) -> std::process::ExitStatus {
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
 
-    match cmd.status() {
+    match cmd.measured_status() {
         Ok(status) => status,
         Err(e) => {
             eprintln!("Failed to execute git log: {}", e);

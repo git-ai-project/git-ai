@@ -586,6 +586,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
 
     #[cfg(not(windows))]
     {
+        use crate::perf::MeasuredCommand;
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -617,7 +618,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
 
-        let result = match cmd.status() {
+        let result = match cmd.measured_status() {
             Ok(status) => {
                 if status.success() {
                     Ok(())

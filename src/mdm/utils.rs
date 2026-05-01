@@ -1,5 +1,6 @@
 use crate::authorship::imara_diff_utils::{LineChangeTag, compute_line_changes};
 use crate::error::GitAiError;
+use crate::perf::MeasuredCommand;
 use jsonc_parser::ParseOptions;
 use jsonc_parser::cst::CstRootNode;
 use std::fs;
@@ -16,7 +17,7 @@ pub const MIN_CLAUDE_VERSION: (u32, u32) = (2, 0);
 pub fn get_binary_version(binary: &str) -> Result<String, GitAiError> {
     let output = Command::new(binary)
         .arg("--version")
-        .output()
+        .measured_output()
         .map_err(|e| GitAiError::Generic(format!("Failed to run {} --version: {}", binary, e)))?;
 
     if !output.status.success() {
@@ -32,7 +33,7 @@ pub fn get_binary_version(binary: &str) -> Result<String, GitAiError> {
 
 /// Get version from an editor CLI command's --version output
 pub fn get_editor_version(cli: &EditorCliCommand) -> Result<String, GitAiError> {
-    let output = cli.command(&["--version"]).output().map_err(|e| {
+    let output = cli.command(&["--version"]).measured_output().map_err(|e| {
         GitAiError::Generic(format!("Failed to run {} --version: {}", cli.program, e))
     })?;
 
@@ -587,7 +588,7 @@ pub fn is_vsc_editor_extension_installed(
     // NOTE: We try up to 3 times, because the editor CLI can be flaky (throws intermittent JS errors)
     let mut last_error_message: Option<String> = None;
     for attempt in 1..=3 {
-        let cmd_result = cli.command(&["--list-extensions"]).output();
+        let cmd_result = cli.command(&["--list-extensions"]).measured_output();
 
         match cmd_result {
             Ok(output) => {
@@ -621,7 +622,7 @@ pub fn install_vsc_editor_extension(
     for attempt in 1..=3 {
         let cmd_status = cli
             .command(&["--install-extension", id_or_vsix, "--force"])
-            .status();
+            .measured_status();
 
         match cmd_status {
             Ok(status) => {
