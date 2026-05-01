@@ -64,7 +64,6 @@ impl CopilotAgent {
             TranscriptFormat::CopilotSessionJson
         }
     }
-
 }
 
 impl Agent for CopilotAgent {

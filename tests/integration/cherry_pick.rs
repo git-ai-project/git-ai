@@ -572,7 +572,8 @@ fn test_cherry_pick_empty_commits() {
 /// when the real post-commit pipeline injects them.
 #[test]
 fn test_cherry_pick_preserves_custom_attributes_from_config() {
-    let mut repo = TestRepo::new_with_daemon_scope(crate::repos::test_repo::DaemonTestScope::Dedicated);
+    let mut repo =
+        TestRepo::new_with_daemon_scope(crate::repos::test_repo::DaemonTestScope::Dedicated);
 
     // Configure custom attributes via config patch
     let mut attrs = HashMap::new();
