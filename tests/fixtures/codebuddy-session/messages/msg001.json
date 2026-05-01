@@ -1,0 +1,7 @@
+{
+  "role": "user",
+  "message": "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Write a function to add two numbers\"}]}",
+  "id": "msg001",
+  "references": [],
+  "extra": "{\"requestId\":\"req001\",\"modelId\":\"glm-5.0-turbo\"}"
+}

@@ -1,0 +1,7 @@
+{
+  "role": "user",
+  "message": "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Now write tests for it\"}]}",
+  "id": "msg003",
+  "references": [],
+  "extra": "{\"requestId\":\"req003\",\"modelId\":\"glm-5.0-turbo\"}"
+}

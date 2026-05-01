@@ -210,6 +210,12 @@ impl AgentCheckpointPreset for ClaudePreset {
                 "Skipping Cursor hook payload in Claude preset; use cursor hooks.".to_string(),
             ));
         }
+        if ClaudePreset::is_codebuddy_hook_payload(&hook_data) {
+            return Err(GitAiError::PresetError(
+                "Skipping CodeBuddy hook payload in Claude preset; use codebuddy hooks."
+                    .to_string(),
+            ));
+        }
 
         // Extract transcript_path and cwd from the JSON
         let transcript_path = hook_data
@@ -405,6 +411,19 @@ impl ClaudePreset {
     fn looks_like_cursor_transcript_path(path: &str) -> bool {
         let normalized = path.replace('\\', "/").to_ascii_lowercase();
         normalized.contains("/.cursor/projects/") && normalized.contains("/agent-transcripts/")
+    }
+
+    fn is_codebuddy_hook_payload(hook_data: &serde_json::Value) -> bool {
+        if hook_data.get("client").and_then(|v| v.as_str()) == Some("CodeBuddyIDE") {
+            return true;
+        }
+        if let Some(path) = hook_data.get("transcript_path").and_then(|v| v.as_str()) {
+            let normalized = path.replace('\\', "/").to_ascii_lowercase();
+            if normalized.contains("codebuddyextension") {
+                return true;
+            }
+        }
+        false
     }
 
     /// Parse a Claude Code JSONL file into a transcript and extract model info

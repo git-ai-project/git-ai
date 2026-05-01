@@ -17,6 +17,7 @@ const AI_AUTHOR_NAMES: &[&str] = &[
     "amp",
     "windsurf",
     "devin",
+    "codebuddy",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
