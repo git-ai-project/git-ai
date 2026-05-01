@@ -3,7 +3,7 @@
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
-use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy, WatermarkType};
+use crate::transcripts::watermark::{HybridWatermark, WatermarkStrategy, WatermarkType};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,25 +16,42 @@ impl DroidAgent {
     fn scan_conversation_files() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        // Standard location for Droid transcripts
-        let search_dirs = vec![dirs::config_dir().map(|p| p.join("Droid/conversations"))];
+        // Droid transcripts are stored in ~/.factory/sessions/<project-dir>/<uuid>.jsonl
+        let search_dirs = vec![dirs::home_dir().map(|p| p.join(".factory/sessions"))];
 
         for dir_opt in search_dirs {
-            if let Some(dir) = dir_opt
-                && dir.exists()
-                && let Ok(entries) = fs::read_dir(&dir)
+            if let Some(sessions_dir) = dir_opt
+                && sessions_dir.exists()
             {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() && path.extension().map(|ext| ext == "jsonl").unwrap_or(false)
-                    {
-                        paths.push(path);
-                    }
-                }
+                // Recursively scan all project directories under sessions/
+                Self::scan_jsonl_recursive(&sessions_dir, &mut paths);
             }
         }
 
         paths
+    }
+
+    /// Recursively scan directory for *.jsonl files (excluding .settings.json).
+    fn scan_jsonl_recursive(dir: &Path, paths: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                Self::scan_jsonl_recursive(&path, paths);
+            } else if path.is_file()
+                && path.extension().map(|ext| ext == "jsonl").unwrap_or(false)
+                && !path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.contains(".settings."))
+                    .unwrap_or(false)
+            {
+                paths.push(path);
+            }
+        }
     }
 
     /// Extract session ID from a Droid conversation file path.
@@ -45,7 +62,6 @@ impl DroidAgent {
             .and_then(|s| s.to_str())
             .map(|s| format!("droid:{}", s))
     }
-
 }
 
 impl Agent for DroidAgent {
@@ -70,8 +86,8 @@ impl Agent for DroidAgent {
                 agent_type: "droid".to_string(),
                 transcript_path: path,
                 transcript_format: TranscriptFormat::DroidJsonl,
-                watermark_type: WatermarkType::ByteOffset,
-                initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
+                watermark_type: WatermarkType::Hybrid,
+                initial_watermark: Box::new(HybridWatermark::new(0, 0, None)),
                 model: None,
                 tool: Some("Droid".to_string()),
                 external_thread_id: None,
@@ -94,18 +110,19 @@ impl Agent for DroidAgent {
         use std::fs::File;
         use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
-        // Downcast watermark to ByteOffsetWatermark
-        let byte_watermark = watermark
+        // Downcast watermark to HybridWatermark
+        let hybrid_watermark = watermark
             .as_any()
-            .downcast_ref::<ByteOffsetWatermark>()
+            .downcast_ref::<HybridWatermark>()
             .ok_or_else(|| TranscriptError::Fatal {
                 message: format!(
-                    "Droid reader requires ByteOffsetWatermark, got incompatible type for session {}",
+                    "Droid reader requires HybridWatermark, got incompatible type for session {}",
                     session_id
                 ),
             })?;
 
-        let start_offset = byte_watermark.0;
+        let start_offset = hybrid_watermark.offset;
+        let mut record_count = hybrid_watermark.record;
 
         // Open file
         let file = File::open(path).map_err(|e| {
@@ -138,6 +155,8 @@ impl Agent for DroidAgent {
         let mut events = Vec::new();
         let mut current_offset = start_offset;
         let mut line_number = 0;
+        let mut latest_timestamp: Option<chrono::DateTime<chrono::Utc>> =
+            hybrid_watermark.timestamp;
 
         // Read lines from watermark position
         let mut line = String::new();
@@ -178,12 +197,25 @@ impl Agent for DroidAgent {
                 continue;
             }
 
+            // Track record count for hybrid watermark
+            record_count += 1;
+
             // Extract timestamp
             let timestamp_opt = entry["timestamp"].as_str().and_then(|s| {
                 chrono::DateTime::parse_from_rfc3339(s)
                     .ok()
                     .map(|dt| dt.timestamp() as u64)
             });
+
+            // Update latest_timestamp for hybrid watermark
+            if let Some(ts_str) = entry["timestamp"].as_str()
+                && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts_str)
+            {
+                let utc_dt = dt.with_timezone(&chrono::Utc);
+                if latest_timestamp.is_none() || Some(utc_dt) > latest_timestamp {
+                    latest_timestamp = Some(utc_dt);
+                }
+            }
 
             let message = &entry["message"];
             let role = match message["role"].as_str() {
@@ -298,8 +330,12 @@ impl Agent for DroidAgent {
             }
         }
 
-        // Create new watermark with updated offset
-        let new_watermark = Box::new(ByteOffsetWatermark::new(current_offset));
+        // Create new hybrid watermark with updated offset, record count, and timestamp
+        let new_watermark = Box::new(HybridWatermark::new(
+            current_offset,
+            record_count,
+            latest_timestamp,
+        ));
 
         // Droid doesn't store model in JSONL - it comes from .settings.json
         Ok(TranscriptBatch {
@@ -316,7 +352,7 @@ mod tests {
 
     #[test]
     fn test_extract_session_id() {
-        let path = PathBuf::from("/home/user/.config/Droid/conversations/abc-123.jsonl");
+        let path = PathBuf::from("/home/user/.factory/sessions/project-name/abc-123.jsonl");
         let session_id = DroidAgent::extract_session_id(&path);
         assert_eq!(session_id, Some("droid:abc-123".to_string()));
     }
@@ -349,12 +385,22 @@ mod tests {
         file.flush().unwrap();
 
         let agent = DroidAgent;
-        let watermark = Box::new(ByteOffsetWatermark::new(0));
+        let watermark = Box::new(HybridWatermark::new(0, 0, None));
         let result = agent
             .read_incremental(file.path(), watermark, "test-session")
             .unwrap();
 
         assert_eq!(result.events.len(), 2);
         assert_eq!(result.model, None); // Droid doesn't have model in JSONL
+
+        // Verify hybrid watermark was updated
+        let new_watermark = result
+            .new_watermark
+            .as_any()
+            .downcast_ref::<HybridWatermark>()
+            .unwrap();
+        assert!(new_watermark.offset > 0); // Byte offset advanced
+        assert_eq!(new_watermark.record, 2); // Two message records processed
+        assert!(new_watermark.timestamp.is_some()); // Timestamp captured
     }
 }
