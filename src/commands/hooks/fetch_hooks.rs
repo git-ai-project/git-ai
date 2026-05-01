@@ -187,7 +187,9 @@ pub fn pull_post_command_hook(
                     onto_head,
                 ),
             );
-            let _ = repository.storage.append_rewrite_event(start_event);
+            if let Err(e) = repository.storage.append_rewrite_event(start_event) {
+                tracing::debug!("Failed to append rebase start event: {}", e);
+            }
         } else if config.is_rebase {
             // Pull --rebase failed but no conflict dir exists (e.g. network
             // error). Cancel the speculative RebaseStart from the pre-hook.
@@ -241,7 +243,12 @@ pub fn pull_post_command_hook(
     // Check for fast-forward pull and rename working log if applicable
     if was_fast_forward_pull(repository, &new_head) {
         tracing::debug!("Fast-forward detected: {} -> {}", old_head, new_head);
-        let _ = repository.storage.rename_working_log(&old_head, &new_head);
+        if let Err(e) = repository.storage.rename_working_log(&old_head, &new_head) {
+            tracing::debug!(
+                "Failed to rename working log {} -> {}: {}",
+                old_head, new_head, e
+            );
+        }
         return;
     }
 
@@ -438,7 +445,9 @@ fn cancel_speculative_rebase_start(repository: &Repository) {
         let abort_event = RewriteLogEvent::rebase_abort(
             crate::git::rewrite_log::RebaseAbortEvent::new(original_head.clone()),
         );
-        let _ = repository.storage.append_rewrite_event(abort_event);
+        if let Err(e) = repository.storage.append_rewrite_event(abort_event) {
+            tracing::debug!("Failed to append rebase abort event: {}", e);
+        }
     }
 }
 
