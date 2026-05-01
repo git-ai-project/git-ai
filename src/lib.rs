@@ -13,4 +13,5 @@ pub mod mdm;
 pub mod metrics;
 pub mod observability;
 pub mod repo_url;
+pub mod synopsis;
 pub mod utils;
