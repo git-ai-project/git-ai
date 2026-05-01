@@ -1,15 +1,13 @@
-use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
-use crate::git::refs::get_authorship;
 use crate::git::repo_state::{
     common_dir_for_git_dir, git_dir_for_worktree, worktree_root_for_path,
 };
 use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
-use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
+use crate::git::sync_authorship::push_authorship_notes;
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 use unicode_normalization::UnicodeNormalization;
@@ -516,70 +514,6 @@ impl<'a> Iterator for CommitRangeIterator<'a> {
     }
 }
 
-pub struct Signature<'a> {
-    _repo: std::marker::PhantomData<&'a Repository>,
-    #[allow(dead_code)]
-    name: String,
-    #[allow(dead_code)]
-    email: String,
-    time_iso8601: String,
-}
-
-pub struct Time {
-    seconds: i64,
-    #[allow(dead_code)]
-    offset_minutes: i32,
-}
-
-impl Time {
-    pub fn seconds(&self) -> i64 {
-        self.seconds
-    }
-
-    #[allow(dead_code)]
-    pub fn offset_minutes(&self) -> i32 {
-        self.offset_minutes
-    }
-}
-
-impl<'a> Signature<'a> {
-    #[allow(dead_code)]
-    pub fn name(&self) -> Option<&str> {
-        if self.name.is_empty() {
-            None
-        } else {
-            Some(self.name.as_str())
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn email(&self) -> Option<&str> {
-        if self.email.is_empty() {
-            None
-        } else {
-            Some(self.email.as_str())
-        }
-    }
-
-    pub fn when(&self) -> Time {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&self.time_iso8601) {
-            let seconds = dt.timestamp();
-            let offset_minutes = dt.offset().local_minus_utc() / 60;
-            Time {
-                seconds,
-                offset_minutes,
-            }
-        } else {
-            // TODO Log error
-            // Fallback to epoch if parsing fails
-            Time {
-                seconds: 0,
-                offset_minutes: 0,
-            }
-        }
-    }
-}
-
 pub struct Commit<'a> {
     repo: &'a Repository,
     oid: String,
@@ -673,62 +607,6 @@ impl<'a> Commit<'a> {
         args.push(self.oid.clone());
         let output = exec_git(&args)?;
         Ok(String::from_utf8(output.stdout)?.trim().to_string())
-    }
-
-    // Get the author of this commit.
-    #[allow(dead_code)]
-    pub fn author(&self) -> Result<Signature<'a>, GitAiError> {
-        let mut args = self.repo.global_args_for_exec();
-        args.push("show".to_string());
-        args.push("-s".to_string());
-        args.push("--no-notes".to_string());
-        args.push("--encoding=UTF-8".to_string());
-        args.push("--format=%an%n%ae%n%aI".to_string());
-        args.push(self.oid.clone());
-        let output = exec_git(&args)?;
-        let stdout = String::from_utf8(output.stdout)?;
-        let mut lines = stdout.lines();
-        let name = lines.next().unwrap_or("").trim().to_string();
-        let email = lines.next().unwrap_or("").trim().to_string();
-        let time_iso8601 = lines.next().unwrap_or("").trim().to_string();
-        Ok(Signature {
-            _repo: std::marker::PhantomData,
-            name,
-            email,
-            time_iso8601,
-        })
-    }
-
-    // Get the committer of this commit.
-    #[allow(dead_code)]
-    pub fn committer(&self) -> Result<Signature<'a>, GitAiError> {
-        let mut args = self.repo.global_args_for_exec();
-        args.push("show".to_string());
-        args.push("-s".to_string());
-        args.push("--no-notes".to_string());
-        args.push("--encoding=UTF-8".to_string());
-        args.push("--format=%cn%n%ce%n%cI".to_string());
-        args.push(self.oid.clone());
-        let output = exec_git(&args)?;
-        let stdout = String::from_utf8(output.stdout)?;
-        let mut lines = stdout.lines();
-        let name = lines.next().unwrap_or("").trim().to_string();
-        let email = lines.next().unwrap_or("").trim().to_string();
-        let time_iso8601 = lines.next().unwrap_or("").trim().to_string();
-        Ok(Signature {
-            _repo: std::marker::PhantomData,
-            name,
-            email,
-            time_iso8601,
-        })
-    }
-
-    // Get the commit time (i.e. committer time) of a commit.
-    // The first element of the tuple is the time, in seconds, since the epoch. The second element is the offset, in minutes, of the time zone of the committer's preferred time zone.
-    #[allow(dead_code)]
-    pub fn time(&self) -> Result<Time, GitAiError> {
-        let signature = self.committer()?;
-        Ok(signature.when())
     }
 
     /// Find the first parent that exists on the specified refname
@@ -1485,123 +1363,6 @@ impl Repository {
         Ok(String::from_utf8(output.stdout)?.trim().to_string())
     }
 
-    // Create new commit in the repository If the update_ref is not None, name of the reference that will be updated to point to this commit. If the reference is not direct, it will be resolved to a direct reference. Use "HEAD" to update the HEAD of the current branch and make it point to this commit. If the reference doesn't exist yet, it will be created. If it does exist, the first parent must be the tip of this branch.
-    #[allow(dead_code)]
-    pub fn commit(
-        &self,
-        update_ref: Option<&str>,
-        author: &Signature<'_>,
-        committer: &Signature<'_>,
-        message: &str,
-        tree: &Tree<'_>,
-        parents: &[&Commit<'_>],
-    ) -> Result<String, GitAiError> {
-        // Validate identities
-        let author_name = author.name().unwrap_or("").trim().to_string();
-        let author_email = author.email().unwrap_or("").trim().to_string();
-        let committer_name = committer.name().unwrap_or("").trim().to_string();
-        let committer_email = committer.email().unwrap_or("").trim().to_string();
-
-        if author_name.is_empty() || author_email.is_empty() {
-            return Err(GitAiError::Generic(
-                "Missing author name or email".to_string(),
-            ));
-        }
-        if committer_name.is_empty() || committer_email.is_empty() {
-            return Err(GitAiError::Generic(
-                "Missing committer name or email".to_string(),
-            ));
-        }
-
-        // Format dates as "<unix-seconds> <±HHMM>" which Git accepts
-        let fmt_git_date = |t: Time| -> String {
-            let seconds = t.seconds();
-            let offset_min = t.offset_minutes();
-            let sign = if offset_min >= 0 { '+' } else { '-' };
-            let abs = offset_min.abs();
-            let hh = abs / 60;
-            let mm = abs % 60;
-            format!("{} {}{:02}{:02}", seconds, sign, hh, mm)
-        };
-        let author_date = fmt_git_date(author.when());
-        let committer_date = fmt_git_date(committer.when());
-
-        // Build env for commit-tree
-        let env: Vec<(String, String)> = vec![
-            ("GIT_AUTHOR_NAME".to_string(), author_name),
-            ("GIT_AUTHOR_EMAIL".to_string(), author_email),
-            ("GIT_AUTHOR_DATE".to_string(), author_date),
-            ("GIT_COMMITTER_NAME".to_string(), committer_name),
-            ("GIT_COMMITTER_EMAIL".to_string(), committer_email),
-            ("GIT_COMMITTER_DATE".to_string(), committer_date),
-        ];
-
-        // 1) Create the commit object via commit-tree, piping message on stdin
-        let mut ct_args = self.global_args_for_exec();
-        ct_args.push("commit-tree".to_string());
-        ct_args.push(tree.oid.clone());
-        for p in parents.iter() {
-            ct_args.push("-p".to_string());
-            ct_args.push(p.id());
-        }
-        let ct_out = exec_git_stdin_with_env(&ct_args, &env, message.as_bytes())?;
-        let new_commit = String::from_utf8(ct_out.stdout)?.trim().to_string();
-
-        // 2) Optionally update a ref with CAS semantics
-        if let Some(update_ref_name) = update_ref {
-            // Resolve target ref (HEAD may be symbolic)
-            let target_ref = if update_ref_name == "HEAD" {
-                // If HEAD is symbolic this returns e.g. refs/heads/main; otherwise "HEAD"
-                self.head()?.name().unwrap().to_string()
-            } else {
-                update_ref_name.to_string()
-            };
-
-            // Capture current tip if any: rev-parse -q --verify <target_ref>
-            let mut rp_args = self.global_args_for_exec();
-            rp_args.push("rev-parse".to_string());
-            // rp_args.push("-q".to_string()); // For gitai, we want to see the error message if the ref doesn't exist
-            rp_args.push("--verify".to_string());
-            rp_args.push(target_ref.clone());
-
-            let old_tip: Option<String> =
-                match exec_git_with_profile(&rp_args, InternalGitProfile::General) {
-                    Ok(output) => Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
-                    Err(_) => None,
-                };
-
-            // Enforce first-parent matches current tip if ref exists
-            if let Some(ref tip) = old_tip {
-                if parents.is_empty() {
-                    return Err(GitAiError::Generic(
-                        "Ref exists but no parents were provided".to_string(),
-                    ));
-                }
-                let first_parent = parents[0].id();
-                if first_parent.trim() != tip {
-                    return Err(GitAiError::Generic(format!(
-                        "First parent ({}) != current tip ({}) of {}",
-                        first_parent, tip, target_ref
-                    )));
-                }
-            }
-
-            // Update the ref atomically (include OLD_TIP for CAS if present)
-            let mut ur_args = self.global_args_for_exec();
-            ur_args.push("update-ref".to_string());
-            ur_args.push("-m".to_string());
-            ur_args.push(message.to_string());
-            ur_args.push(target_ref.clone());
-            ur_args.push(new_commit.clone());
-            if let Some(tip) = old_tip {
-                ur_args.push(tip);
-            }
-            exec_git(&ur_args)?;
-        }
-
-        Ok(new_commit)
-    }
-
     // Find a single object, as specified by a revision string.
     pub fn revparse_single(&self, spec: &str) -> Result<Object<'_>, GitAiError> {
         let mut args = self.global_args_for_exec();
@@ -1698,10 +1459,7 @@ impl Repository {
                 oid, typ
             )));
         }
-        Ok(Commit {
-            repo: self,
-            oid,
-        })
+        Ok(Commit { repo: self, oid })
     }
 
     // Lookup a reference to one of the objects in a repository.
@@ -2852,80 +2610,6 @@ pub fn exec_git_stdin_with_profile(
     // before reading stdout, the child's stdout pipe buffer can fill up, causing
     // the child to block on write, which prevents it from consuming more stdin,
     // which blocks our write_all. Writing concurrently avoids this.
-    let stdin_handle = child.stdin.take().map(|mut stdin| {
-        let data = stdin_data.to_vec();
-        std::thread::spawn(move || {
-            use std::io::Write;
-            stdin.write_all(&data)
-        })
-    });
-
-    let output = child.wait_with_output().map_err(GitAiError::IoError)?;
-
-    if let Some(handle) = stdin_handle
-        && let Err(e) = handle.join().expect("stdin writer thread panicked")
-        && e.kind() != std::io::ErrorKind::BrokenPipe
-    {
-        return Err(GitAiError::IoError(e));
-    }
-
-    if !output.status.success() {
-        let code = output.status.code();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        return Err(GitAiError::GitCliError {
-            code,
-            stderr,
-            args: effective_args,
-        });
-    }
-
-    Ok(output)
-}
-
-/// Helper to execute a git command with data provided on stdin and additional environment variables
-#[allow(dead_code)]
-pub fn exec_git_stdin_with_env(
-    args: &[String],
-    env: &[(String, String)],
-    stdin_data: &[u8],
-) -> Result<Output, GitAiError> {
-    exec_git_stdin_with_env_with_profile(args, env, stdin_data, InternalGitProfile::General)
-}
-
-/// Helper to execute a git command with data provided on stdin, env overrides, and profile.
-#[allow(dead_code)]
-pub fn exec_git_stdin_with_env_with_profile(
-    args: &[String],
-    env: &[(String, String)],
-    stdin_data: &[u8],
-    profile: InternalGitProfile,
-) -> Result<Output, GitAiError> {
-    // TODO Make sure to handle process signals, etc.
-    let effective_args =
-        args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
-    let mut cmd = Command::new(config::Config::get().git_cmd());
-    cmd.args(&effective_args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    // Apply env overrides
-    for (k, v) in env.iter() {
-        cmd.env(k, v);
-    }
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
-
-    #[cfg(windows)]
-    {
-        if !is_interactive_terminal() {
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-    }
-
-    let mut child = cmd.spawn().map_err(GitAiError::IoError)?;
-
-    // Write stdin in a separate thread to avoid deadlock (see exec_git_stdin_with_profile).
     let stdin_handle = child.stdin.take().map(|mut stdin| {
         let data = stdin_data.to_vec();
         std::thread::spawn(move || {

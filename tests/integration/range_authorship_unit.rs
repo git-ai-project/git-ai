@@ -35,11 +35,11 @@ fn test_range_authorship_simple_range() {
 
     // Test range authorship from first to second commit
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let commit_range = CommitRange::new(
+    let commit_range = CommitRange::new_infer_refname(
         &gitai_repo,
         first_sha.clone(),
         second_sha.clone(),
-        "HEAD".to_string(),
+        Some("HEAD".to_string()),
     )
     .unwrap();
 
@@ -84,11 +84,11 @@ fn test_range_authorship_from_empty_tree() {
 
     // Test range authorship from empty tree to HEAD
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let commit_range = CommitRange::new(
+    let commit_range = CommitRange::new_infer_refname(
         &gitai_repo,
         EMPTY_TREE_HASH.to_string(),
         head_sha.clone(),
-        "HEAD".to_string(),
+        Some("HEAD".to_string()),
     )
     .unwrap();
 
@@ -132,11 +132,11 @@ fn test_range_authorship_single_commit() {
 
     // Test range authorship for single commit (start == end)
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let commit_range = CommitRange::new(
+    let commit_range = CommitRange::new_infer_refname(
         &gitai_repo,
         head_sha.clone(),
         head_sha.clone(),
-        "HEAD".to_string(),
+        Some("HEAD".to_string()),
     )
     .unwrap();
 
@@ -202,11 +202,11 @@ fn test_range_authorship_mixed_commits() {
 
     // Test range authorship from first to head
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let commit_range = CommitRange::new(
+    let commit_range = CommitRange::new_infer_refname(
         &gitai_repo,
         first_sha.clone(),
         head_sha.clone(),
-        "HEAD".to_string(),
+        Some("HEAD".to_string()),
     )
     .unwrap();
 
@@ -247,8 +247,13 @@ fn test_range_authorship_no_changes() {
 
     // Test range authorship with same start and end (already tested above but worth verifying)
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let commit_range =
-        CommitRange::new(&gitai_repo, sha.clone(), sha.clone(), "HEAD".to_string()).unwrap();
+    let commit_range = CommitRange::new_infer_refname(
+        &gitai_repo,
+        sha.clone(),
+        sha.clone(),
+        Some("HEAD".to_string()),
+    )
+    .unwrap();
 
     let lockfile_patterns = vec![
         "Cargo.lock".to_string(),
@@ -283,11 +288,11 @@ fn test_range_authorship_empty_tree_with_multiple_files() {
 
     // Test range authorship from empty tree
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let commit_range = CommitRange::new(
+    let commit_range = CommitRange::new_infer_refname(
         &gitai_repo,
         EMPTY_TREE_HASH.to_string(),
         head_sha.clone(),
-        "HEAD".to_string(),
+        Some("HEAD".to_string()),
     )
     .unwrap();
 
@@ -346,11 +351,11 @@ fn test_range_authorship_ignores_single_lockfile() {
 
     // Test range authorship
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let commit_range = CommitRange::new(
+    let commit_range = CommitRange::new_infer_refname(
         &gitai_repo,
         first_sha.clone(),
         second_sha.clone(),
-        "HEAD".to_string(),
+        Some("HEAD".to_string()),
     )
     .unwrap();
 
@@ -423,11 +428,11 @@ fn test_range_authorship_mixed_lockfile_and_source() {
 
     // Test range authorship
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let commit_range = CommitRange::new(
+    let commit_range = CommitRange::new_infer_refname(
         &gitai_repo,
         first_sha.clone(),
         head_sha.clone(),
-        "HEAD".to_string(),
+        Some("HEAD".to_string()),
     )
     .unwrap();
 
@@ -496,11 +501,11 @@ fn test_range_authorship_multiple_lockfile_types() {
 
     // Test range authorship
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let commit_range = CommitRange::new(
+    let commit_range = CommitRange::new_infer_refname(
         &gitai_repo,
         first_sha.clone(),
         second_sha.clone(),
-        "HEAD".to_string(),
+        Some("HEAD".to_string()),
     )
     .unwrap();
 
@@ -557,11 +562,11 @@ fn test_range_authorship_lockfile_only_commit() {
 
     // Test range authorship
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let commit_range = CommitRange::new(
+    let commit_range = CommitRange::new_infer_refname(
         &gitai_repo,
         first_sha.clone(),
         second_sha.clone(),
-        "HEAD".to_string(),
+        Some("HEAD".to_string()),
     )
     .unwrap();
 
@@ -1008,11 +1013,11 @@ fn test_range_authorship_with_glob_patterns() {
         .to_string();
 
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let commit_range = CommitRange::new(
+    let commit_range = CommitRange::new_infer_refname(
         &gitai_repo,
         first_sha.clone(),
         second_sha.clone(),
-        "HEAD".to_string(),
+        Some("HEAD".to_string()),
     )
     .unwrap();
 
