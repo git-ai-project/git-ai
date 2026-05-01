@@ -78,7 +78,7 @@ fn test_initial_sweep_discovers_all_claude_transcripts() {
     create_claude_transcript(&transcript3, &["Message 3A", "Message 3B", "Message 3C"]).unwrap();
 
     // Create TranscriptsDatabase
-    let db_path = temp_dir.path().join("transcripts.db");
+    let db_path = temp_dir.path().join("transcripts-db");
     let _db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
 
     // Note: We can't easily mock the dirs::config_dir() to point to our temp directory,
@@ -248,7 +248,7 @@ fn test_incremental_processing_completeness() {
 #[test]
 fn test_sweep_deduplication_via_session_id() {
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("transcripts.db");
+    let db_path = temp_dir.path().join("transcripts-db");
     let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
 
     let conversations_dir = temp_dir.path().join("conversations");
@@ -297,7 +297,7 @@ fn test_sweep_deduplication_via_session_id() {
 #[test]
 fn test_behind_detection_on_file_growth() {
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("transcripts.db");
+    let db_path = temp_dir.path().join("transcripts-db");
     let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
 
     let transcript_path = temp_dir.path().join("conversation.jsonl");
@@ -379,7 +379,7 @@ fn test_concurrent_processing_deduplication() {
 #[test]
 fn test_watermark_persistence_after_processing() {
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("transcripts.db");
+    let db_path = temp_dir.path().join("transcripts-db");
     let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
 
     let transcript_path = temp_dir.path().join("conversation.jsonl");

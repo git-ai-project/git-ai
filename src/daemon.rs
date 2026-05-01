@@ -7285,7 +7285,7 @@ impl ActorDaemonCoordinator {
 
                     let trace_id = checkpoint_request.trace_id.clone();
 
-                    // Ensure session exists in transcripts.db
+                    // Ensure session exists in transcripts-db
                     if let Some(db) = &self.transcripts_db
                         && let Err(e) = Self::ensure_session_exists(
                             db,
@@ -8288,7 +8288,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     coordinator_inner.telemetry_worker = Some(telemetry_handle.clone());
 
     // Spawn the transcript worker BEFORE wrapping coordinator in Arc
-    let transcripts_db_path = config.internal_dir.join("transcripts.db");
+    let transcripts_db_path = config.internal_dir.join("transcripts-db");
     match crate::transcripts::db::TranscriptsDatabase::open(&transcripts_db_path) {
         Ok(transcripts_db) => {
             let transcripts_db = std::sync::Arc::new(transcripts_db);

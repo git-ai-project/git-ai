@@ -15,7 +15,7 @@ pub trait Agent: Send + Sync {
 
     /// Discover all sessions in the agent's storage.
     ///
-    /// Returns ALL sessions found, regardless of whether they're in transcripts.db.
+    /// Returns ALL sessions found, regardless of whether they're in transcripts-db.
     /// The coordinator will compare against the DB to decide what to process.
     fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, TranscriptError>;
 
