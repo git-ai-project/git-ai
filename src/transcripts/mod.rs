@@ -19,7 +19,7 @@
 //! use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy};
 //!
 //! // Open database
-//! let db = TranscriptsDatabase::open("~/.git-ai/transcripts.db")?;
+//! let db = TranscriptsDatabase::open("~/.git-ai/transcripts-db")?;
 //!
 //! // Create session with watermark
 //! let session = SessionRecord {

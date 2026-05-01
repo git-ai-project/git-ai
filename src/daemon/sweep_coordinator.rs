@@ -58,7 +58,7 @@ impl SweepCoordinator {
             let discovered = agent.discover_sessions()?;
 
             for session in discovered {
-                // Check against transcripts.db
+                // Check against transcripts-db
                 match self.transcripts_db.get_session(&session.session_id)? {
                     None => {
                         // New session - insert and queue for processing

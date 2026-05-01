@@ -411,9 +411,9 @@ mod tests {
     fn test_scan_discovers_real_claude_files() {
         let paths = ClaudeAgent::scan_conversation_files();
         // On this machine we have files in ~/.claude/projects/
-        if std::path::Path::new(&std::env::var("HOME").unwrap())
-            .join(".claude/projects")
-            .exists()
+        if dirs::home_dir()
+            .map(|h| h.join(".claude/projects").exists())
+            .unwrap_or(false)
         {
             assert!(
                 !paths.is_empty(),
