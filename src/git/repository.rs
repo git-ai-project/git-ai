@@ -1746,29 +1746,6 @@ impl Repository {
         }
     }
 
-    // Create an iterator for the repo's references (git2-style)
-    #[allow(dead_code)]
-    pub fn references<'a>(&'a self) -> Result<References<'a>, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("for-each-ref".to_string());
-        args.push("--format=%(refname)".to_string());
-
-        let output = exec_git(&args)?;
-        let stdout = String::from_utf8(output.stdout)?;
-        let refs: Vec<String> = stdout
-            .lines()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect();
-
-        Ok(References {
-            repo: self,
-            refs,
-            index: 0,
-        })
-    }
-
     // Lookup a reference to one of the commits in a repository.
     pub fn find_commit(&self, oid: String) -> Result<Commit<'_>, GitAiError> {
         let typ = self.object_type(&oid)?;
@@ -2063,52 +2040,6 @@ impl Repository {
     /// Get added line ranges from git diff between a commit and the working directory
     /// Returns a HashMap of file paths to vectors of added line numbers
     ///
-    /// Similar to diff_added_lines but compares against the working directory
-    #[allow(dead_code)]
-    pub fn diff_workdir_added_lines(
-        &self,
-        from_ref: &str,
-        pathspecs: Option<&HashSet<String>>,
-    ) -> Result<HashMap<String, Vec<u32>>, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("diff".to_string());
-        args.push("-U0".to_string()); // Zero context lines
-        args.push("--no-color".to_string());
-        // Use permissive rename detection to properly handle renames
-        args.push("--find-renames=1%".to_string());
-        args.push(from_ref.to_string());
-
-        // See diff_added_lines for why non-ASCII pathspecs need post-filtering.
-        let needs_post_filter = if let Some(paths) = pathspecs {
-            if paths.is_empty() {
-                return Ok(HashMap::new());
-            }
-            if paths.len() > MAX_PATHSPEC_ARGS || has_non_ascii_pathspec(paths) {
-                true
-            } else {
-                args.push("--".to_string());
-                for path in paths {
-                    args.push(path.clone());
-                }
-                false
-            }
-        } else {
-            false
-        };
-
-        let output = exec_git_with_profile(&args, InternalGitProfile::PatchParse)?;
-        let diff_output = String::from_utf8_lossy(&output.stdout);
-
-        let (mut result, _deleted_count) = parse_diff_added_lines(&diff_output)?;
-
-        if needs_post_filter && let Some(paths) = pathspecs {
-            let nfc_paths: HashSet<String> = paths.iter().map(|s| s.nfc().collect()).collect();
-            result.retain(|path, _| nfc_paths.contains(path));
-        }
-
-        Ok(result)
-    }
-
     /// Get added line ranges from git diff between a commit and the working directory,
     /// along with information about which lines are pure insertions (old_count=0).
     ///
