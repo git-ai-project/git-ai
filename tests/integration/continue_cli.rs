@@ -7,244 +7,25 @@ use git_ai::transcripts::agents::ContinueAgent;
 use git_ai::transcripts::watermark::RecordIndexWatermark;
 use serde_json::json;
 use std::fs;
-use std::io::Write;
 
 fn parse_continue(hook_input: &str) -> Result<Vec<ParsedHookEvent>, git_ai::error::GitAiError> {
     resolve_preset("continue-cli")?.parse(hook_input, "t_test")
 }
 
 #[test]
-fn test_parse_example_continue_cli_json() {
+fn test_continue_cli_raw_event_fidelity() {
     let fixture = fixture_path("continue-cli-session-simple.json");
     let agent = ContinueAgent;
     let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Failed to parse Continue CLI JSON");
+        .expect("Should parse continue-cli session JSON");
 
-    assert!(!result.events.is_empty());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fixture).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["history"].as_array().unwrap().clone();
 
-    // Events are raw history items from the Continue session JSON.
-    // The continue-cli-session-simple.json fixture has 4 history entries.
-    println!("Parsed {} events:", result.events.len());
-    for (i, e) in result.events.iter().enumerate() {
-        let role = e["message"]["role"].as_str().unwrap_or("unknown");
-        let content = e["message"]["content"].as_str().unwrap_or("");
-        println!("{}: {}: {}", i, role, &content[..content.len().min(80)]);
-    }
-}
-
-#[test]
-fn test_continue_cli_parses_user_messages() {
-    let fixture = fixture_path("continue-cli-session-simple.json");
-    let agent = ContinueAgent;
-    let watermark = Box::new(RecordIndexWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Failed to parse Continue CLI JSON");
-
-    // Events are raw history items. Filter for user messages by role.
-    let user_messages: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e["message"]["role"] == "user")
-        .collect();
-
-    assert_eq!(
-        user_messages.len(),
-        1,
-        "Should have exactly one user message"
-    );
-
-    let text = user_messages[0]["message"]["content"]
-        .as_str()
-        .unwrap_or("");
-    assert!(text.contains("Add another hello world line"));
-}
-
-#[test]
-fn test_continue_cli_parses_assistant_messages() {
-    let fixture = fixture_path("continue-cli-session-simple.json");
-    let agent = ContinueAgent;
-    let watermark = Box::new(RecordIndexWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Failed to parse Continue CLI JSON");
-
-    // Events are raw history items. Filter for assistant messages by role.
-    let assistant_messages: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e["message"]["role"] == "assistant")
-        .collect();
-
-    assert!(
-        !assistant_messages.is_empty(),
-        "Should have at least one assistant message"
-    );
-
-    let text = assistant_messages[0]["message"]["content"]
-        .as_str()
-        .unwrap_or("");
-    assert!(text.contains("I'll read the file first"));
-}
-
-#[test]
-fn test_continue_cli_parses_tool_calls_from_context_items() {
-    // The ContinueAgent reader extracts tool calls from contextItems, not from
-    // message.toolCalls. The simple fixture does not have contextItems with tool data,
-    // so we create a temp fixture that includes them.
-    let sample = r##"{
-        "sessionId": "test-session",
-        "title": "Test",
-        "workspaceDirectory": "/test",
-        "history": [
-            {
-                "message": { "role": "user", "content": "Read file" },
-                "contextItems": []
-            },
-            {
-                "message": { "role": "assistant", "content": "I'll read it" },
-                "contextItems": [
-                    {
-                        "name": "Read",
-                        "content": {"filepath": "/test/main.rs"}
-                    }
-                ]
-            }
-        ]
-    }"##;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
-    let agent = ContinueAgent;
-    let watermark = Box::new(RecordIndexWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_file.path(), watermark, "test")
-        .expect("Failed to parse Continue CLI JSON");
-
-    // Events are raw history items. Assistant messages with contextItems contain tool calls.
-    let tool_uses: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| {
-            e["message"]["role"] == "assistant"
-                && e["contextItems"].as_array().is_some_and(|a| !a.is_empty())
-        })
-        .collect();
-
-    assert!(!tool_uses.is_empty(), "Should have at least one tool call");
-
-    let first_tool_name = tool_uses[0]["contextItems"][0]["name"]
-        .as_str()
-        .unwrap_or("");
-    assert_eq!(first_tool_name, "Read");
-}
-
-#[test]
-fn test_continue_cli_parses_tool_call_args_from_context_items() {
-    let sample = r##"{
-        "sessionId": "test-session",
-        "title": "Test",
-        "workspaceDirectory": "/test",
-        "history": [
-            {
-                "message": { "role": "assistant", "content": "Reading" },
-                "contextItems": [
-                    {
-                        "name": "Read",
-                        "content": {"filepath": "/test/main.rs"}
-                    }
-                ]
-            }
-        ]
-    }"##;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
-    let agent = ContinueAgent;
-    let watermark = Box::new(RecordIndexWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_file.path(), watermark, "test")
-        .expect("Failed to parse Continue CLI JSON");
-
-    // Events are raw history items. Find one with a contextItem named "Read".
-    let read_tool = result
-        .events
-        .iter()
-        .find(|e| {
-            e["contextItems"]
-                .as_array()
-                .is_some_and(|items| items.iter().any(|ci| ci["name"] == "Read"))
-        })
-        .expect("Should find a Read tool call");
-
-    assert_eq!(
-        read_tool["contextItems"][0]["name"], "Read",
-        "Tool call should have name 'Read'"
-    );
-}
-
-#[test]
-fn test_continue_cli_handles_empty_content() {
-    let sample = r##"{
-        "sessionId": "test-session",
-        "title": "Test",
-        "workspaceDirectory": "/test",
-        "history": [
-            {
-                "message": {
-                    "role": "user",
-                    "content": "Hello"
-                },
-                "contextItems": []
-            },
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": ""
-                },
-                "contextItems": []
-            },
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "Response text"
-                },
-                "contextItems": []
-            }
-        ]
-    }"##;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
-    let agent = ContinueAgent;
-    let watermark = Box::new(RecordIndexWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_file.path(), watermark, "test")
-        .expect("Failed to parse Continue CLI JSON");
-
-    // Events are raw history items. Count by role.
-    let user_count = result
-        .events
-        .iter()
-        .filter(|e| e["message"]["role"] == "user")
-        .count();
-    let assistant_count = result
-        .events
-        .iter()
-        .filter(|e| e["message"]["role"] == "assistant")
-        .count();
-
-    assert_eq!(user_count, 1);
-    // Raw events include all history items, even those with empty content
-    assert_eq!(
-        assistant_count, 2,
-        "Raw events include all assistant entries"
-    );
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -699,12 +480,7 @@ fn test_continue_cli_e2e_preserves_model_on_commit() {
 }
 
 crate::reuse_tests_in_worktree!(
-    test_parse_example_continue_cli_json,
-    test_continue_cli_parses_user_messages,
-    test_continue_cli_parses_assistant_messages,
-    test_continue_cli_parses_tool_calls_from_context_items,
-    test_continue_cli_parses_tool_call_args_from_context_items,
-    test_continue_cli_handles_empty_content,
+    test_continue_cli_raw_event_fidelity,
     test_continue_cli_preset_extracts_model_from_hook_input,
     test_continue_cli_preset_defaults_to_unknown_model,
     test_continue_cli_preset_extracts_edited_filepath,

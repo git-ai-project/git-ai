@@ -182,61 +182,23 @@ fn test_windsurf_preset_invalid_json() {
 // ============================================================================
 
 #[test]
-fn test_windsurf_transcript_parser_basic() {
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    writeln!(temp_file, r#"{{"status":"done","type":"user_input","user_input":{{"user_response":"Add a hello world function"}}}}"#).unwrap();
-    writeln!(temp_file, r#"{{"planner_response":{{"response":"I'll create a hello world function for you."}},"status":"done","type":"planner_response"}}"#).unwrap();
-    writeln!(temp_file, r#"{{"code_action":{{"path":"file:///src/main.rs","new_content":"fn hello() {{ println!(\"Hello!\"); }}"}},"status":"done","type":"code_action"}}"#).unwrap();
-
+fn test_windsurf_raw_event_fidelity() {
+    let fixture = crate::test_utils::fixture_path("windsurf-session-simple.jsonl");
     let agent = WindsurfAgent;
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
-        .read_incremental(temp_file.path(), watermark, "test")
-        .expect("Failed to parse Windsurf JSONL");
+        .read_incremental(fixture.as_path(), watermark, "test")
+        .expect("Should parse windsurf JSONL");
 
-    // 3 JSONL lines = 3 raw events
-    assert_eq!(result.events.len(), 3);
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
 
-    let e0 = &result.events[0];
-    assert_eq!(e0["type"].as_str(), Some("user_input"));
-    assert_eq!(
-        e0["user_input"]["user_response"].as_str(),
-        Some("Add a hello world function")
-    );
-
-    let e1 = &result.events[1];
-    assert_eq!(e1["type"].as_str(), Some("planner_response"));
-    assert!(
-        e1["planner_response"]["response"]
-            .as_str()
-            .unwrap()
-            .contains("hello world")
-    );
-
-    let e2 = &result.events[2];
-    assert_eq!(e2["type"].as_str(), Some("code_action"));
-}
-
-#[test]
-fn test_windsurf_transcript_parser_skips_empty_content() {
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    writeln!(
-        temp_file,
-        r#"{{"status":"done","type":"user_input","user_input":{{"user_response":""}}}}"#
-    )
-    .unwrap();
-    writeln!(temp_file, r#"{{"planner_response":{{"response":"Real response"}},"status":"done","type":"planner_response"}}"#).unwrap();
-
-    let agent = WindsurfAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_file.path(), watermark, "test")
-        .expect("Failed to parse Windsurf JSONL");
-
-    // Both JSONL lines are returned as raw events
-    assert_eq!(result.events.len(), 2);
-    assert_eq!(result.events[0]["type"].as_str(), Some("user_input"));
-    assert_eq!(result.events[1]["type"].as_str(), Some("planner_response"));
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -278,107 +240,6 @@ fn test_windsurf_transcript_parser_empty_file() {
         .expect("Failed to parse empty JSONL");
 
     assert!(result.events.is_empty());
-}
-
-#[test]
-fn test_windsurf_transcript_parser_real_fixture() {
-    let fixture = crate::test_utils::fixture_path("windsurf-session-simple.jsonl");
-    let agent = WindsurfAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Failed to parse real Windsurf JSONL fixture");
-
-    assert!(!result.events.is_empty());
-
-    // Check for user_input events
-    let user_msgs: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e["type"].as_str() == Some("user_input"))
-        .collect();
-    assert!(
-        !user_msgs.is_empty(),
-        "Should have at least one user_input event"
-    );
-
-    // Check for planner_response events
-    let assistant_msgs: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e["type"].as_str() == Some("planner_response"))
-        .collect();
-    assert!(
-        !assistant_msgs.is_empty(),
-        "Should have at least one planner_response event"
-    );
-
-    // Check for tool-like events (code_action, view_file, run_command, etc.)
-    let tool_types = [
-        "code_action",
-        "view_file",
-        "run_command",
-        "find",
-        "grep_search",
-        "list_directory",
-    ];
-    let tool_msgs: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| tool_types.iter().any(|t| e["type"].as_str() == Some(t)))
-        .collect();
-    assert!(
-        !tool_msgs.is_empty(),
-        "Should have at least one tool-like event"
-    );
-
-    // First user message should mention "song"
-    let first_user_text = user_msgs[0]["user_input"]["user_response"]
-        .as_str()
-        .expect("First user message should have text");
-    assert!(
-        first_user_text.contains("song"),
-        "First user message should mention 'song'"
-    );
-
-    // Check for code_action events specifically
-    let code_actions: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e["type"].as_str() == Some("code_action"))
-        .collect();
-    assert!(!code_actions.is_empty(), "Should have code_action events");
-}
-
-#[test]
-fn test_windsurf_transcript_maps_all_tool_types() {
-    let fixture = crate::test_utils::fixture_path("windsurf-session-simple.jsonl");
-    let agent = WindsurfAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Failed to parse Windsurf JSONL");
-
-    // Collect all event types
-    let event_types: Vec<&str> = result
-        .events
-        .iter()
-        .filter_map(|e| e["type"].as_str())
-        .collect();
-
-    assert!(
-        event_types.contains(&"code_action"),
-        "Should have code_action events"
-    );
-    assert!(
-        event_types.contains(&"view_file"),
-        "Should have view_file events"
-    );
-    assert!(
-        event_types.contains(&"run_command"),
-        "Should have run_command events"
-    );
-    assert!(event_types.contains(&"find"), "Should have find events");
 }
 
 // ============================================================================

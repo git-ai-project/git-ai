@@ -15,7 +15,7 @@ fn parse_cursor(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
 }
 
 #[test]
-fn test_cursor_jsonl_basic_parsing() {
+fn test_cursor_raw_event_fidelity() {
     let fixture = fixture_path("cursor-session-simple.jsonl");
     let agent = CursorAgent;
     let watermark = Box::new(ByteOffsetWatermark::new(0));
@@ -23,183 +23,15 @@ fn test_cursor_jsonl_basic_parsing() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Should parse cursor JSONL");
 
-    let events = &result.events;
-    assert!(
-        !events.is_empty(),
-        "Should have parsed events from the fixture"
-    );
-
-    // The fixture has 11 JSONL lines, so we get 11 raw events.
-    // Line 1: role=user
-    // Lines 2-10: role=assistant (each with text + tool_use content blocks)
-    // Line 11: role=assistant (text only)
-    let user_count = events
-        .iter()
-        .filter(|e| e["role"].as_str() == Some("user"))
-        .count();
-    let assistant_count = events
-        .iter()
-        .filter(|e| e["role"].as_str() == Some("assistant"))
-        .count();
-
-    assert_eq!(user_count, 1, "Should have 1 user message");
-    assert_eq!(assistant_count, 10, "Should have 10 assistant messages");
-
-    // Count tool_use content blocks across all assistant messages
-    let tool_use_block_count: usize = events
-        .iter()
-        .filter(|e| e["role"].as_str() == Some("assistant"))
-        .map(|e| {
-            e["message"]["content"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter(|c| c["type"].as_str() == Some("tool_use"))
-                        .count()
-                })
-                .unwrap_or(0)
-        })
-        .sum();
-    assert!(
-        tool_use_block_count >= 10,
-        "Should have at least 10 tool_use content blocks, got {}",
-        tool_use_block_count
-    );
-}
-
-#[test]
-fn test_cursor_jsonl_user_query_tag_stripping() {
-    let fixture = fixture_path("cursor-session-simple.jsonl");
-    let agent = CursorAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Should parse cursor JSONL");
-
-    // With raw JSON events, the user_query tags are in the raw content.
-    // Find the user message and check the raw text content.
-    let first_user = result
-        .events
-        .iter()
-        .find(|e| e["role"].as_str() == Some("user"))
-        .expect("Should have at least one user message");
-
-    let content = first_user["message"]["content"]
-        .as_array()
-        .expect("User message should have content array");
-    let text_block = content
-        .iter()
-        .find(|c| c["type"].as_str() == Some("text"))
-        .expect("Should have a text content block");
-    let text = text_block["text"].as_str().expect("Should have text");
-
-    // Raw events preserve the original content including user_query tags
-    assert!(
-        text.contains("HBO"),
-        "User message text should contain HBO reference"
-    );
-}
-
-#[test]
-fn test_cursor_jsonl_tool_normalization() {
-    let fixture = fixture_path("cursor-session-simple.jsonl");
-    let agent = CursorAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Should parse cursor JSONL");
-
-    // Collect tool names from tool_use content blocks
-    let tool_names: Vec<&str> = result
-        .events
-        .iter()
-        .filter(|e| e["role"].as_str() == Some("assistant"))
-        .flat_map(|e| {
-            e["message"]["content"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter(|c| c["type"].as_str() == Some("tool_use"))
-                        .filter_map(|c| c["name"].as_str())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        })
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
         .collect();
 
-    assert!(
-        tool_names.contains(&"Write"),
-        "Should have a Write tool_use, got: {:?}",
-        tool_names
-    );
-    assert!(
-        tool_names.contains(&"Read"),
-        "Should have a Read tool_use, got: {:?}",
-        tool_names
-    );
-}
-
-#[test]
-fn test_cursor_jsonl_read_tool_full_args() {
-    let fixture = fixture_path("cursor-session-simple.jsonl");
-    let agent = CursorAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Should parse cursor JSONL");
-
-    // Find a Read tool_use in the content blocks
-    let has_read = result
-        .events
-        .iter()
-        .filter(|e| e["role"].as_str() == Some("assistant"))
-        .any(|e| {
-            e["message"]["content"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter().any(|c| {
-                        c["type"].as_str() == Some("tool_use") && c["name"].as_str() == Some("Read")
-                    })
-                })
-                .unwrap_or(false)
-        });
-
-    assert!(has_read, "Should have a Read tool_use content block");
-}
-
-#[test]
-fn test_cursor_jsonl_preserves_text_content() {
-    let fixture = fixture_path("cursor-session-simple.jsonl");
-    let agent = CursorAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Should parse cursor JSONL");
-
-    // Check that assistant text content blocks contain HBO reference
-    let has_hbo = result
-        .events
-        .iter()
-        .filter(|e| e["role"].as_str() == Some("assistant"))
-        .any(|e| {
-            e["message"]["content"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter().any(|c| {
-                        c["type"].as_str() == Some("text")
-                            && c["text"]
-                                .as_str()
-                                .map(|t| t.contains("HBO"))
-                                .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-        });
-
-    assert!(
-        has_hbo,
-        "Should keep real content from assistant messages (HBO reference)"
-    );
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -687,9 +519,7 @@ fn test_cursor_checkpoint_routes_nested_worktree_file_to_worktree_repo() {
 }
 
 crate::reuse_tests_in_worktree!(
-    test_cursor_jsonl_basic_parsing,
-    test_cursor_jsonl_user_query_tag_stripping,
-    test_cursor_jsonl_tool_normalization,
+    test_cursor_raw_event_fidelity,
     test_cursor_preset_multi_root_workspace_detection,
     test_cursor_preset_human_checkpoint_no_filepath,
     test_cursor_e2e_with_attribution,
