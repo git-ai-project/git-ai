@@ -2847,7 +2847,7 @@ fn test_diff_visual_output_shows_human_author_name_not_id() {
 
     // Bug: Currently shows the h_-prefixed ID instead of the author name
     // Expected behavior: should show a readable author name like "Test User <test@example.com>"
-    // Actual behavior: shows "h_9e95a89b42f1fb" (the hash ID)
+    // Actual behavior: shows "h_e858f2c2faea28" (the hash ID)
     // This assertion will fail until we fix it
     assert!(
         !displayed_name.starts_with("h_"),
