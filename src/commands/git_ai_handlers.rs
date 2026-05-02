@@ -393,7 +393,7 @@ fn handle_checkpoint(args: &[String]) {
                 for extra in results {
                     let working_dir = extra.repo_working_dir.to_string_lossy().to_string();
                     if let Ok(extra_repo) = find_repository_in_path(&working_dir) {
-                        let user_name = extra_repo.git_author_identity().name_or_unknown();
+                        let user_name = extra_repo.git_author_identity().formatted_or_unknown();
                         let _ = run_checkpoint_via_daemon_or_local(
                             &extra_repo,
                             &user_name,
@@ -569,7 +569,7 @@ fn handle_checkpoint(args: &[String]) {
                 );
 
                 // Get user name from this repo's config
-                let default_user_name = repo.git_author_identity().name_or_unknown();
+                let default_user_name = repo.git_author_identity().formatted_or_unknown();
 
                 // Create a modified checkpoint_request with only this repo's files
                 let repo_checkpoint_request = checkpoint_request.as_ref().map(|r| {
@@ -729,7 +729,7 @@ fn handle_checkpoint(args: &[String]) {
     }
 
     // Get the current user name
-    let default_user_name = repo.git_author_identity().name_or_unknown();
+    let default_user_name = repo.git_author_identity().formatted_or_unknown();
 
     let checkpoint_start = std::time::Instant::now();
     let agent_tool = checkpoint_request
@@ -822,7 +822,7 @@ fn handle_checkpoint(args: &[String]) {
                 continue;
             }
 
-            let ext_user_name = ext_repo.git_author_identity().name_or_unknown();
+            let ext_user_name = ext_repo.git_author_identity().formatted_or_unknown();
 
             let mut modified = base_result.clone();
             modified.repo_working_dir = repo_workdir.clone();

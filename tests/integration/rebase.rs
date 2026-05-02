@@ -2489,6 +2489,12 @@ sed -i.bak '3s/pick/fixup/' "$1"
         !squashed_log.metadata.humans.is_empty(),
         "Post-squash: humans metadata block must be preserved (issue #1214)"
     );
+    for record in squashed_log.metadata.humans.values() {
+        assert_eq!(
+            record.author, "Test User <test@example.com>",
+            "HumanRecord.author should include email"
+        );
+    }
 
     // Verify line-level attribution: human line must still show as human
     // Note: the closing `}` may lose AI attribution during squash-rebase

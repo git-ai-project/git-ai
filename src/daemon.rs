@@ -1367,7 +1367,7 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
                 .unwrap_or(CheckpointKind::Human);
             let author = request
                 .author
-                .unwrap_or_else(|| repo.git_author_identity().name_or_unknown());
+                .unwrap_or_else(|| repo.git_author_identity().formatted_or_unknown());
 
             let _ = crate::commands::checkpoint::run(
                 &repo,
