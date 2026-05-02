@@ -149,8 +149,8 @@ fn test_gemini_preset_extracts_model() {
     let events = parse_gemini(&hook_input).expect("Failed to run GeminiPreset");
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
-            // Model comes from transcript which is lazily loaded, so it's "unknown" at parse time
-            assert_eq!(e.context.agent_id.model, "unknown");
+            // Model is extracted from the fixture transcript file at parse time
+            assert_eq!(e.context.agent_id.model, "gemini-2.5-flash");
             assert_eq!(e.context.agent_id.tool, "gemini");
             assert_eq!(
                 e.context.agent_id.id,
@@ -308,7 +308,7 @@ fn test_gemini_e2e_with_attribution() {
         .next()
         .expect("Should have at least one session record");
 
-    assert_eq!(session_record.agent_id.model, "unknown");
+    assert_eq!(session_record.agent_id.model, "gemini-2.5-flash");
 }
 
 #[test]

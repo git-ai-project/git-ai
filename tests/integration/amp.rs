@@ -133,8 +133,8 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
         ParsedHookEvent::PostFileEdit(e) => {
             assert_eq!(e.context.agent_id.tool, "amp");
             assert_eq!(e.context.agent_id.id, AMP_SIMPLE_THREAD_ID);
-            // Model is lazily resolved from transcript, so at parse time it's "unknown"
-            assert_eq!(e.context.agent_id.model, "unknown");
+            // Model is extracted from the resolved Amp thread fixture file
+            assert_eq!(e.context.agent_id.model, "claude-opus-4-6");
             assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
             assert_eq!(
                 e.file_paths,
@@ -232,7 +232,7 @@ fn test_amp_e2e_checkpoint_and_commit() {
         .expect("session record should exist");
 
     assert_eq!(session_record.agent_id.tool, "amp");
-    assert_eq!(session_record.agent_id.model, "unknown");
+    assert_eq!(session_record.agent_id.model, "claude-opus-4-6");
 }
 
 #[test]

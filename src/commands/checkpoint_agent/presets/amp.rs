@@ -301,7 +301,17 @@ impl AgentPreset for AmpPreset {
             agent_id: AgentId {
                 tool: "amp".to_string(),
                 id: session_id.clone(),
-                model: "unknown".to_string(), // model resolved later from transcript
+                model: resolved_transcript_path
+                    .as_ref()
+                    .and_then(|tp| {
+                        crate::transcripts::model_extraction::extract_model(
+                            tp,
+                            crate::transcripts::sweep::TranscriptFormat::AmpThreadJson,
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .unwrap_or_else(|| "unknown".to_string()),
             },
             session_id,
             trace_id: trace_id.to_string(),

@@ -277,11 +277,20 @@ impl AgentPreset for OpenCodePreset {
         // Resolve transcript source
         let transcript_result = Self::resolve_transcript_source(&session_id);
 
+        let extracted_model = transcript_result.as_ref().and_then(|(ts, _)| {
+            crate::transcripts::model_extraction::extract_model(
+                &ts.path,
+                crate::transcripts::sweep::TranscriptFormat::OpenCodeSqlite,
+            )
+            .ok()
+            .flatten()
+        });
+
         let context = PresetContext {
             agent_id: AgentId {
                 tool: "opencode".to_string(),
                 id: session_id.clone(),
-                model: "unknown".to_string(), // model resolved later from transcript
+                model: extracted_model.unwrap_or_else(|| "unknown".to_string()),
             },
             session_id,
             trace_id: trace_id.to_string(),

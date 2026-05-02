@@ -270,8 +270,8 @@ fn test_droid_e2e_prefers_latest_checkpoint_for_prompts() {
         .expect("Session record should exist");
 
     assert_eq!(
-        session_record.agent_id.model, "unknown",
-        "Session record model comes from preset AgentId (model resolution not wired up)"
+        session_record.agent_id.model, "custom:BYOK-GPT-5-MINI-0",
+        "Session record model should be extracted from droid settings fixture"
     );
 }
 

@@ -243,10 +243,10 @@ fn test_claude_e2e_prefers_latest_checkpoint_for_prompts() {
         .next()
         .expect("Session record should exist");
 
-    // Model comes from preset AgentId (model resolution from transcript not wired up)
+    // Model is extracted from the real transcript fixture copied in the second checkpoint
     assert_eq!(
-        session_record.agent_id.model, "unknown",
-        "Session record model comes from preset AgentId"
+        session_record.agent_id.model, "claude-sonnet-4-20250514",
+        "Session record model should come from the latest checkpoint's transcript"
     );
 }
 

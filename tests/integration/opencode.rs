@@ -186,8 +186,8 @@ fn test_opencode_preset_posttooluse_returns_ai_checkpoint() {
             );
             assert_eq!(e.context.agent_id.tool, "opencode");
             assert_eq!(e.context.agent_id.id, "test-session-123");
-            // Model is lazily resolved from transcript, so at parse time it's "unknown"
-            assert_eq!(e.context.agent_id.model, "unknown");
+            // Model is extracted from the OpenCode SQLite fixture at parse time
+            assert_eq!(e.context.agent_id.model, "gpt-5");
         }
         _ => panic!("Expected PostFileEdit for PostToolUse"),
     }
@@ -404,8 +404,8 @@ fn test_opencode_e2e_checkpoint_and_commit() {
         "Agent tool should be opencode"
     );
     assert_eq!(
-        session_record.agent_id.model, "unknown",
-        "Session record model comes from preset AgentId"
+        session_record.agent_id.model, "gpt-5",
+        "Session record model should be extracted from OpenCode SQLite fixture"
     );
 }
 

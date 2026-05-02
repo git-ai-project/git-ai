@@ -6,6 +6,7 @@ use super::{
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::ToolClass;
 use crate::error::GitAiError;
+use crate::transcripts::model_extraction;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -128,7 +129,13 @@ fn parse_legacy_extension_hooks(
         agent_id: AgentId {
             tool: "github-copilot".to_string(),
             id: session_id.clone(),
-            model: "unknown".to_string(),
+            model: model_extraction::extract_model(
+                Path::new(chat_session_path),
+                crate::transcripts::sweep::TranscriptFormat::CopilotSessionJson,
+            )
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "unknown".to_string()),
         },
         session_id,
         trace_id: trace_id.to_string(),
@@ -232,7 +239,20 @@ fn parse_vscode_native_hooks(
         agent_id: AgentId {
             tool: "github-copilot".to_string(),
             id: session_id.clone(),
-            model: "unknown".to_string(),
+            model: transcript_path
+                .as_ref()
+                .and_then(|tp| {
+                    let sweep_format = match transcript_format {
+                        TranscriptFormat::CopilotEventStreamJsonl => {
+                            crate::transcripts::sweep::TranscriptFormat::CopilotEventStreamJsonl
+                        }
+                        _ => crate::transcripts::sweep::TranscriptFormat::CopilotSessionJson,
+                    };
+                    model_extraction::extract_model(Path::new(tp.as_str()), sweep_format)
+                        .ok()
+                        .flatten()
+                })
+                .unwrap_or_else(|| "unknown".to_string()),
         },
         session_id,
         trace_id: trace_id.to_string(),

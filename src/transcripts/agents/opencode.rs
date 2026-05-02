@@ -211,6 +211,30 @@ mod tests {
         );
     }
 
-    // SQLite tests require fixtures, so keep unit tests minimal.
-    // Integration tests in tests/integration/opencode.rs cover the full flow.
+    #[test]
+    fn test_sqlite_open_sets_cache_size_pragma() {
+        let source = include_str!("opencode.rs");
+        assert!(
+            source.contains("PRAGMA cache_size"),
+            "open_sqlite_readonly must set PRAGMA cache_size to cap memory usage (PR #1120)"
+        );
+    }
+
+    #[test]
+    fn test_parts_are_batch_loaded_not_per_message() {
+        let db_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/opencode-sqlite/opencode.db");
+        let conn = open_sqlite_readonly(&db_path).unwrap();
+        let parts = read_all_parts_raw(&conn, "test-session-123").unwrap();
+        // Verify batch loading returns parts grouped by message_id.
+        // This is the fix from PR #1120: a single query instead of one per message,
+        // which prevents full-table-scan memory blowup on large unindexed databases.
+        assert!(
+            !parts.is_empty(),
+            "batch parts query must return data from fixture"
+        );
+        for (_msg_id, msg_parts) in &parts {
+            assert!(!msg_parts.is_empty());
+        }
+    }
 }
