@@ -20,40 +20,7 @@ fn amp_simple_thread_fixture_path() -> PathBuf {
 }
 
 #[test]
-fn test_parse_amp_thread_transcript() {
-    let thread_path = amp_simple_thread_fixture_path();
-
-    let agent = AmpAgent;
-    let watermark = Box::new(RecordIndexWatermark::new(0));
-    let result = agent
-        .read_incremental(&thread_path, watermark, "test")
-        .expect("Failed to parse Amp thread JSON");
-
-    // Events are raw message objects from the Amp thread JSON's messages array.
-    assert!(!result.events.is_empty());
-
-    // Model is in the usage field of assistant messages, not on TranscriptBatch.
-    let model = result
-        .events
-        .iter()
-        .find_map(|e| e["usage"]["model"].as_str());
-    assert_eq!(model, Some("claude-opus-4-6"));
-
-    let has_user = result.events.iter().any(|e| e["role"] == "user");
-    let has_assistant = result.events.iter().any(|e| e["role"] == "assistant");
-    let has_tool_use = result.events.iter().any(|e| {
-        e["content"]
-            .as_array()
-            .is_some_and(|items| items.iter().any(|c| c["type"] == "tool_use"))
-    });
-
-    assert!(has_user, "Expected at least one user message");
-    assert!(has_assistant, "Expected at least one assistant message");
-    assert!(has_tool_use, "Expected at least one tool use message");
-}
-
-#[test]
-fn test_parse_amp_thread_with_thinking_blocks() {
+fn test_amp_raw_event_fidelity() {
     let thread_path = amp_threads_fixture_path().join(format!("{}.json", AMP_THINKING_THREAD_ID));
 
     let agent = AmpAgent;
@@ -62,30 +29,32 @@ fn test_parse_amp_thread_with_thinking_blocks() {
         .read_incremental(&thread_path, watermark, "test")
         .expect("Failed to parse Amp thread JSON");
 
-    // Model is in the usage field of assistant messages, not on TranscriptBatch.
-    let model = result
-        .events
-        .iter()
-        .find_map(|e| e["usage"]["model"].as_str());
-    assert_eq!(model, Some("claude-opus-4-6"));
+    // Independently parse the fixture and extract the messages array.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&thread_path).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["messages"].as_array().unwrap().clone();
 
-    // Raw events are message objects. Thinking blocks are content items within assistant messages.
-    let contains_thinking_text = result.events.iter().any(|e| {
-        e["role"] == "assistant"
-            && e["content"].as_array().is_some_and(|items| {
-                items.iter().any(|c| {
-                    c["type"] == "thinking"
-                        && c["thinking"]
-                            .as_str()
-                            .is_some_and(|t| t.contains("create a plan"))
-                })
-            })
-    });
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
+}
 
-    assert!(
-        contains_thinking_text,
-        "Assistant transcript should include thinking blocks with 'create a plan'"
-    );
+#[test]
+fn test_amp_raw_event_fidelity_with_thinking() {
+    let thread_path = amp_simple_thread_fixture_path();
+
+    let agent = AmpAgent;
+    let watermark = Box::new(RecordIndexWatermark::new(0));
+    let result = agent
+        .read_incremental(&thread_path, watermark, "test")
+        .expect("Failed to parse Amp thread JSON");
+
+    // Independently parse the fixture and extract the messages array.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&thread_path).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["messages"].as_array().unwrap().clone();
+
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -392,3 +361,8 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+crate::reuse_tests_in_worktree!(
+    test_amp_raw_event_fidelity,
+    test_amp_raw_event_fidelity_with_thinking,
+);

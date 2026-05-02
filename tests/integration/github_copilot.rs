@@ -20,69 +20,42 @@ fn ensure_clean_env() {
 }
 
 #[test]
-fn copilot_session_parsing_stub() {
+fn test_copilot_session_json_raw_event_fidelity() {
     ensure_clean_env();
-    let sample = r#"{"requests": []}"#;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
+    let fixture = fixture_path("copilot_session_simple.json");
     let agent = CopilotAgent;
     let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent.read_incremental(temp_file.path(), watermark, "test");
-    assert!(result.is_ok());
-    let batch = result.unwrap();
-    assert!(batch.events.is_empty());
-    // TranscriptBatch no longer has a model field
+    let result = agent
+        .read_incremental(fixture.as_path(), watermark, "test")
+        .expect("Should parse copilot session JSON");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fixture).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["requests"].as_array().unwrap().clone();
+
+    assert_eq!(result.events, expected);
 }
 
 #[test]
-fn copilot_session_parsing_simple() {
+fn test_copilot_event_stream_raw_event_fidelity() {
     ensure_clean_env();
-    let fixture = fixture_path("copilot_session_simple.json");
-
+    let fixture = fixture_path("copilot_session_event_stream.jsonl");
     let agent = CopilotAgent;
     let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent.read_incremental(fixture.as_path(), watermark, "test");
-    assert!(result.is_ok());
-    let batch = result.unwrap();
+    let result = agent
+        .read_incremental(fixture.as_path(), watermark, "test")
+        .expect("Should parse copilot event stream JSONL");
 
-    // Events are raw request objects from the Copilot session JSON's requests array.
-    // The session has 3 requests.
-    assert_eq!(batch.events.len(), 3);
-
-    // Verify user messages are in the raw request objects
-    assert_eq!(
-        batch.events[0]["message"]["text"],
-        "What can you help me with?"
-    );
-    assert_eq!(
-        batch.events[1]["message"]["text"],
-        "Change Bonjour World to hello world"
-    );
-    assert_eq!(
-        batch.events[2]["message"]["text"],
-        "Search for any other mentions of Bonjour"
-    );
-
-    // Verify tool use response items exist in raw request responses
-    let all_response_items: Vec<&serde_json::Value> = batch
-        .events
-        .iter()
-        .flat_map(|req| {
-            req["response"]
-                .as_array()
-                .map_or(vec![], |a| a.iter().collect())
-        })
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert!(!all_response_items.is_empty());
 
-    // The simple fixture doesn't have inputState, so no model info in raw data.
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
-
-// NOTE: test_copilot_extracts_edited_filepaths, test_copilot_no_edited_filepaths_when_no_edits,
-// and test_copilot_deduplicates_edited_filepaths were removed because the new CopilotAgent API
-// (read_incremental) does not return edited filepaths.
 
 #[test]
 #[serial_test::serial]
@@ -99,7 +72,6 @@ fn test_copilot_returns_empty_transcript_in_codespaces() {
     assert!(result.is_ok());
     let batch = result.unwrap();
     assert!(batch.events.is_empty());
-    // TranscriptBatch no longer has a model field
 
     unsafe {
         if let Some(original) = original_codespaces {
@@ -125,7 +97,6 @@ fn test_copilot_returns_empty_transcript_in_remote_containers() {
     assert!(result.is_ok());
     let batch = result.unwrap();
     assert!(batch.events.is_empty());
-    // TranscriptBatch no longer has a model field
 
     unsafe {
         if let Some(orig) = original {
@@ -424,21 +395,6 @@ fn test_copilot_after_edit_with_jsonl_session() {
 // copilot_session_jsonl_scalar_patch_applied were removed because the new CopilotAgent API
 // does not support the kind:0/kind:1 JSONL snapshot+patch protocol.
 
-#[test]
-fn copilot_session_plain_json_unaffected() {
-    ensure_clean_env();
-    let fixture = fixture_path("copilot_session_simple.json");
-    let agent = CopilotAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent.read_incremental(fixture.as_path(), watermark, "test");
-    assert!(result.is_ok());
-    let batch = result.unwrap();
-    assert!(!batch.events.is_empty());
-    // Model is extracted from inputState.selectedModel.identifier (not per-request modelId).
-    // The simple fixture doesn't have inputState, so model is None.
-    // TranscriptBatch no longer has a model field
-}
-
 // ============================================================================
 // VS Code PreToolUse / PostToolUse tests
 // ============================================================================
@@ -657,63 +613,6 @@ fn test_copilot_preset_vscode_claude_transcript_path_is_rejected() {
             .to_string()
             .contains("Claude transcript path")
     );
-}
-
-#[test]
-fn copilot_session_parsing_event_stream_jsonl() {
-    ensure_clean_env();
-    let fixture = fixture_path("copilot_session_event_stream.jsonl");
-    let agent = CopilotAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent.read_incremental(fixture.as_path(), watermark, "test");
-    assert!(result.is_ok());
-    let batch = result.unwrap();
-
-    // TranscriptBatch no longer has a model field
-    assert!(!batch.events.is_empty());
-    // Events are raw JSONL lines from the event stream.
-    // The fixture has 7 lines: session.start, user.message, assistant.message x3, tool.execution_start x2
-    assert!(
-        batch.events.iter().any(|e| e["type"] == "user.message"),
-        "Should have user.message events"
-    );
-    assert!(
-        batch
-            .events
-            .iter()
-            .any(|e| e["type"] == "assistant.message"),
-        "Should have assistant.message events"
-    );
-    assert!(
-        batch
-            .events
-            .iter()
-            .any(|e| e["type"] == "tool.execution_start"),
-        "Should have tool.execution_start events"
-    );
-}
-
-#[test]
-fn copilot_session_event_stream_jsonl_model_hint_is_detected() {
-    ensure_clean_env();
-    let sample = r#"{"type":"session.start","data":{"sessionId":"event-session-2","modelId":"copilot/gpt-4o"},"id":"evt-1","timestamp":"2026-02-14T03:02:25.825Z","parentId":null}
-{"type":"user.message","data":{"content":"hello"},"id":"evt-2","timestamp":"2026-02-14T03:02:26.000Z","parentId":"evt-1"}
-{"type":"assistant.message","data":{"content":"hi"},"id":"evt-3","timestamp":"2026-02-14T03:02:27.000Z","parentId":"evt-2"}"#;
-
-    let mut temp_file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
-    let agent = CopilotAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent.read_incremental(temp_file.path(), watermark, "test");
-    assert!(result.is_ok());
-    let batch = result.unwrap();
-    // Model is now in the raw event data, not on TranscriptBatch
-    let model = batch
-        .events
-        .iter()
-        .find_map(|e| e["data"]["modelId"].as_str());
-    assert_eq!(model, Some("copilot/gpt-4o"));
 }
 
 // ============================================================================

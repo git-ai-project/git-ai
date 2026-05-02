@@ -15,7 +15,7 @@ fn parse_droid(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
 }
 
 #[test]
-fn test_parse_droid_jsonl_transcript() {
+fn test_droid_raw_event_fidelity() {
     let fixture = fixture_path("droid-session.jsonl");
     let agent = DroidAgent;
     let watermark = Box::new(HybridWatermark::new(0, 0, None));
@@ -23,40 +23,17 @@ fn test_parse_droid_jsonl_transcript() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Failed to parse JSONL");
 
-    // Verify we parsed some events (one per JSONL line)
-    assert!(!result.events.is_empty(), "Result should contain events");
+    // Independently parse the fixture, applying the same "message"-only filter the Droid agent uses.
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|v| v["type"].as_str() == Some("message"))
+        .collect();
 
-    // Verify the fixture has the expected number of raw events (only "message" type lines)
-    assert_eq!(result.events.len(), 10, "Should have 10 raw message events");
-
-    // Verify correct event types exist in the raw JSON
-    let has_user = result.events.iter().any(|e| {
-        e["type"].as_str() == Some("message") && e["message"]["role"].as_str() == Some("user")
-    });
-    let has_assistant = result.events.iter().any(|e| {
-        e["type"].as_str() == Some("message") && e["message"]["role"].as_str() == Some("assistant")
-    });
-    let has_tool_use = result.events.iter().any(|e| {
-        e["type"].as_str() == Some("message")
-            && e["message"]["content"]
-                .as_array()
-                .map(|arr| arr.iter().any(|c| c["type"].as_str() == Some("tool_use")))
-                .unwrap_or(false)
-    });
-
-    assert!(has_user, "Should have user message events");
-    assert!(has_assistant, "Should have assistant message events");
-    assert!(has_tool_use, "Should have tool_use events");
-
-    // Verify timestamps are present on message events
-    for event in &result.events {
-        if event["type"].as_str() == Some("message") {
-            assert!(
-                event["timestamp"].as_str().is_some(),
-                "Message events should have a timestamp"
-            );
-        }
-    }
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -232,79 +209,6 @@ fn test_droid_preset_uses_raw_session_id() {
 }
 
 #[test]
-fn test_droid_jsonl_skips_non_message_entries() {
-    // Droid agent filters to only "message" type entries, skipping session_start, todo_state, etc.
-    let jsonl_content = r#"{"type":"session_start","id":"abc","title":"Test","cwd":"/tmp"}
-{"type":"message","id":"msg1","timestamp":"2026-01-28T16:57:01.391Z","message":{"role":"user","content":[{"type":"text","text":"Hello"}]}}
-{"type":"todo_state","id":"todo1","timestamp":"2026-01-28T16:57:02.000Z","todos":{"todos":"1. test"}}
-{"type":"message","id":"msg2","timestamp":"2026-01-28T16:57:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Hi there!"}]}}
-"#;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(jsonl_content.as_bytes()).unwrap();
-
-    let agent = DroidAgent;
-    let watermark = Box::new(HybridWatermark::new(0, 0, None));
-    let result = agent
-        .read_incremental(temp_file.path(), watermark, "test")
-        .expect("Failed to parse JSONL");
-
-    // Only "message" type entries are returned (session_start and todo_state are skipped)
-    assert_eq!(
-        result.events.len(),
-        2,
-        "Should return only 2 message events, got {} events",
-        result.events.len()
-    );
-
-    // Verify the message types
-    assert_eq!(result.events[0]["type"].as_str(), Some("message"));
-    assert_eq!(result.events[0]["message"]["role"].as_str(), Some("user"));
-    assert_eq!(result.events[1]["type"].as_str(), Some("message"));
-    assert_eq!(
-        result.events[1]["message"]["role"].as_str(),
-        Some("assistant"),
-    );
-}
-
-#[test]
-fn test_droid_tool_results_are_not_parsed_as_user_messages() {
-    // With raw JSON, tool_result lines ARE included as raw events.
-    let jsonl_content = r#"{"type":"message","id":"msg1","timestamp":"2026-01-28T16:57:16.179Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_123","content":"File read successfully"}]}}
-{"type":"message","id":"msg2","timestamp":"2026-01-28T16:57:17.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Done!"}]}}
-"#;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(jsonl_content.as_bytes()).unwrap();
-
-    let agent = DroidAgent;
-    let watermark = Box::new(HybridWatermark::new(0, 0, None));
-    let result = agent
-        .read_incremental(temp_file.path(), watermark, "test")
-        .expect("Failed to parse JSONL");
-
-    // Both lines are returned as raw events
-    assert_eq!(
-        result.events.len(),
-        2,
-        "Both JSONL lines should be returned as raw events"
-    );
-
-    assert_eq!(result.events[0]["type"].as_str(), Some("message"),);
-    assert_eq!(result.events[0]["message"]["role"].as_str(), Some("user"),);
-    assert_eq!(result.events[1]["type"].as_str(), Some("message"),);
-    assert_eq!(
-        result.events[1]["message"]["role"].as_str(),
-        Some("assistant"),
-    );
-    assert_eq!(
-        result.events[1]["message"]["content"][0]["text"].as_str(),
-        Some("Done!"),
-        "Assistant response text should be 'Done!'"
-    );
-}
-
-#[test]
 fn test_droid_e2e_prefers_latest_checkpoint_for_prompts() {
     use crate::repos::test_repo::TestRepo;
 
@@ -421,70 +325,14 @@ fn test_droid_settings_missing_model_field() {
     assert!(model.is_none(), "Missing model field should return None");
 }
 
-#[test]
-fn test_droid_jsonl_parses_thinking_blocks() {
-    // With raw JSON, a single JSONL line with thinking+text content blocks = 1 raw event.
-    let jsonl = r#"{"type":"message","id":"m1","timestamp":"2026-01-28T17:00:00.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Let me think about this..."},{"type":"text","text":"Here is my answer."}]}}
-"#;
-    let mut temp = NamedTempFile::new().unwrap();
-    temp.write_all(jsonl.as_bytes()).unwrap();
-
-    let agent = DroidAgent;
-    let watermark = Box::new(HybridWatermark::new(0, 0, None));
-    let result = agent
-        .read_incremental(temp.path(), watermark, "test")
-        .expect("Failed to parse JSONL");
-
-    // Single JSONL line = single raw event
-    assert_eq!(
-        result.events.len(),
-        1,
-        "Single JSONL line should produce single raw event"
-    );
-
-    // Verify the content blocks are preserved in the raw event
-    let content = result.events[0]["message"]["content"]
-        .as_array()
-        .expect("content should be an array");
-    assert_eq!(content.len(), 2, "Should have 2 content blocks");
-
-    assert_eq!(
-        content[0]["type"].as_str(),
-        Some("thinking"),
-        "First content block should be thinking"
-    );
-    let thinking_text = content[0]["thinking"]
-        .as_str()
-        .expect("thinking block should have text");
-    assert!(
-        thinking_text.contains("think"),
-        "Thinking block should contain 'think', got: {}",
-        thinking_text
-    );
-
-    assert_eq!(
-        content[1]["type"].as_str(),
-        Some("text"),
-        "Second content block should be text"
-    );
-    assert_eq!(
-        content[1]["text"].as_str(),
-        Some("Here is my answer."),
-        "Text block should contain the answer"
-    );
-}
-
 crate::reuse_tests_in_worktree!(
-    test_parse_droid_jsonl_transcript,
+    test_droid_raw_event_fidelity,
     test_parse_droid_settings_model,
     test_droid_preset_extracts_edited_filepath,
     test_droid_preset_extracts_applypatch_filepath,
     test_droid_preset_stores_metadata_paths,
     test_droid_preset_uses_raw_session_id,
-    test_droid_jsonl_skips_non_message_entries,
-    test_droid_tool_results_are_not_parsed_as_user_messages,
     test_droid_e2e_prefers_latest_checkpoint_for_prompts,
     test_droid_preset_pretooluse_returns_human_checkpoint,
     test_droid_settings_missing_model_field,
-    test_droid_jsonl_parses_thinking_blocks,
 );

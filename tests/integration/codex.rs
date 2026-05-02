@@ -15,52 +15,23 @@ fn parse_codex(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
 }
 
 #[test]
-fn test_parse_codex_rollout_transcript() {
+fn test_codex_raw_event_fidelity() {
     let fixture = fixture_path("codex-session-simple.jsonl");
     let agent = CodexAgent;
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Failed to parse Codex rollout");
+        .expect("Should parse codex JSONL");
 
-    assert!(
-        !result.events.is_empty(),
-        "Transcript should contain events"
-    );
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
 
-    // Events are now raw JSONL entries from the codex transcript.
-    // The codex-session-simple.jsonl fixture has 5 lines:
-    //   session_meta, turn_context, response_item (user), response_item (function_call), response_item (assistant)
-    assert_eq!(result.events.len(), 5, "Should have 5 raw JSONL entries");
-
-    // Verify model is in the turn_context entry
-    let turn_context = result
-        .events
-        .iter()
-        .find(|e| e["type"] == "turn_context")
-        .expect("Should have a turn_context entry");
-    assert_eq!(
-        turn_context["payload"]["model"], "gpt-5-codex",
-        "Model should come from turn_context.payload.model"
-    );
-
-    // Verify we have user, assistant, and function_call response_items
-    let has_user = result
-        .events
-        .iter()
-        .any(|e| e["type"] == "response_item" && e["payload"]["role"] == "user");
-    let has_assistant = result
-        .events
-        .iter()
-        .any(|e| e["type"] == "response_item" && e["payload"]["role"] == "assistant");
-    let has_function_call = result
-        .events
-        .iter()
-        .any(|e| e["type"] == "response_item" && e["payload"]["type"] == "function_call");
-
-    assert!(has_user, "Should parse user messages");
-    assert!(has_assistant, "Should parse assistant messages");
-    assert!(has_function_call, "Should parse function calls");
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -728,7 +699,7 @@ fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai_standard
 }
 
 crate::reuse_tests_in_worktree!(
-    test_parse_codex_rollout_transcript,
+    test_codex_raw_event_fidelity,
     test_codex_preset_legacy_hook_input,
     test_codex_preset_structured_hook_input,
     test_codex_preset_bash_pre_tool_use_skips_checkpoint_after_capturing_snapshot,

@@ -14,79 +14,90 @@ fn opencode_sqlite_fixture_path() -> std::path::PathBuf {
 }
 
 #[test]
-fn test_parse_opencode_sqlite_transcript() {
+fn test_opencode_raw_event_fidelity() {
     use chrono::{DateTime, Utc};
     use git_ai::transcripts::agent::Agent;
     use git_ai::transcripts::agents::OpenCodeAgent;
     use git_ai::transcripts::watermark::TimestampWatermark;
+    use rusqlite::{Connection, OpenFlags};
 
     let opencode_root = opencode_sqlite_fixture_path();
-    let db_path = opencode_root.join("opencode.db");
+    let fixture = opencode_root.join("opencode.db");
     let session_id = "test-session-123";
 
     let agent = OpenCodeAgent;
     let watermark = Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
     let result = agent
-        .read_incremental(&db_path, watermark, session_id)
+        .read_incremental(&fixture, watermark, session_id)
         .unwrap();
 
-    assert!(
-        !result.events.is_empty(),
-        "Transcript should contain events"
-    );
+    // Independently query the SQLite DB to construct the same expected events.
+    let conn = Connection::open_with_flags(&fixture, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
 
-    // Events are raw JSON objects with "message" (and optional "parts") from SQLite.
-    // The message field contains the raw data column from the message table.
-    // Model is embedded within assistant message metadata, not on TranscriptBatch.
+    let watermark_millis = DateTime::<Utc>::UNIX_EPOCH.timestamp_millis();
 
-    // First event should be a user message (role in the message data)
-    let first = &result.events[0];
-    let first_role = first["message"]["role"].as_str().unwrap_or("");
-    assert_eq!(first_role, "user", "First event should be from user");
-
-    // Check user message content is in the parts (user text is in parts, not message.content)
-    let first_parts = first["parts"].as_array();
-    let first_text = first_parts
-        .and_then(|parts| parts.iter().find_map(|p| p["text"].as_str()))
-        .unwrap_or("");
-    assert!(
-        first_text.contains("sqlite transcript data"),
-        "Expected sqlite fixture user text, got: {}",
-        first_text
-    );
-
-    // Should have an assistant message event
-    let has_assistant = result
-        .events
-        .iter()
-        .any(|e| e["message"]["role"] == "assistant");
-    assert!(has_assistant, "Should have assistant message events");
-
-    // Should have a tool part (type: "tool" in parts of assistant messages)
-    let has_tool_use = result.events.iter().any(|e| {
-        e["parts"]
-            .as_array()
-            .is_some_and(|parts| parts.iter().any(|p| p["type"] == "tool"))
-    });
-    assert!(has_tool_use, "Should have tool_use events");
-
-    // Check tool event has tool name
-    let tool_event = result
-        .events
-        .iter()
-        .find(|e| {
-            e["parts"]
-                .as_array()
-                .is_some_and(|parts| parts.iter().any(|p| p["type"] == "tool"))
+    // Read messages for this session with time_created > watermark (same filter as the agent)
+    let mut msg_stmt = conn
+        .prepare(
+            "SELECT id, time_created, data FROM message \
+             WHERE session_id = ? AND time_created > ? \
+             ORDER BY time_created ASC, id ASC",
+        )
+        .unwrap();
+    let messages: Vec<(String, i64, serde_json::Value)> = msg_stmt
+        .query_map(rusqlite::params![session_id, watermark_millis], |row| {
+            let id: String = row.get(0)?;
+            let time_created: i64 = row.get(1)?;
+            let data: String = row.get(2)?;
+            Ok((id, time_created, data))
         })
-        .expect("Should find a tool event");
-    let tool_part = tool_event["parts"]
-        .as_array()
         .unwrap()
-        .iter()
-        .find(|p| p["type"] == "tool")
+        .map(|r| {
+            let (id, time_created, data) = r.unwrap();
+            (id, time_created, serde_json::from_str(&data).unwrap())
+        })
+        .collect();
+
+    // Read parts grouped by message_id (same query as the agent)
+    let mut part_stmt = conn
+        .prepare(
+            "SELECT message_id, data FROM part \
+             WHERE session_id = ? \
+             ORDER BY message_id ASC, time_created ASC, id ASC",
+        )
         .unwrap();
-    assert_eq!(tool_part["tool"], "edit", "Tool name should be 'edit'");
+    let parts_rows: Vec<(String, serde_json::Value)> = part_stmt
+        .query_map(rusqlite::params![session_id], |row| {
+            let message_id: String = row.get(0)?;
+            let data: String = row.get(1)?;
+            Ok((message_id, data))
+        })
+        .unwrap()
+        .map(|r| {
+            let (message_id, data) = r.unwrap();
+            (message_id, serde_json::from_str(&data).unwrap())
+        })
+        .collect();
+
+    let mut parts_by_msg: std::collections::HashMap<String, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
+    for (msg_id, data) in parts_rows {
+        parts_by_msg.entry(msg_id).or_default().push(data);
+    }
+
+    let expected: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|(id, _, data)| {
+            if let Some(parts) = parts_by_msg.get(id) {
+                serde_json::json!({"message": data, "parts": parts})
+            } else {
+                serde_json::json!({"message": data})
+            }
+        })
+        .collect();
+
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -398,4 +409,4 @@ fn test_opencode_e2e_checkpoint_and_commit() {
     );
 }
 
-crate::reuse_tests_in_worktree!(test_parse_opencode_sqlite_transcript,);
+crate::reuse_tests_in_worktree!(test_opencode_raw_event_fidelity,);
