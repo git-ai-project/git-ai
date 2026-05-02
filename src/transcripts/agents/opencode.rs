@@ -233,7 +233,7 @@ mod tests {
             !parts.is_empty(),
             "batch parts query must return data from fixture"
         );
-        for (_msg_id, msg_parts) in &parts {
+        for msg_parts in parts.values() {
             assert!(!msg_parts.is_empty());
         }
     }

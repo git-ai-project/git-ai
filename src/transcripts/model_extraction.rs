@@ -82,10 +82,10 @@ fn extract_model_from_jsonl_tail(path: &Path) -> Result<Option<String>, Transcri
             .and_then(|v| v.as_str())
             .or_else(|| json.get("model").and_then(|v| v.as_str()));
 
-        if let Some(model) = candidate {
-            if model != "<synthetic>" {
-                return Ok(Some(model.to_string()));
-            }
+        if let Some(model) = candidate
+            && model != "<synthetic>"
+        {
+            return Ok(Some(model.to_string()));
         }
     }
 
@@ -276,7 +276,12 @@ mod tests {
     #[test]
     fn test_extract_model_opencode() {
         let path = fixture_path("opencode-sqlite/opencode.db");
-        let result = extract_model(&path, TranscriptFormat::OpenCodeSqlite, Some("test-session-123")).unwrap();
+        let result = extract_model(
+            &path,
+            TranscriptFormat::OpenCodeSqlite,
+            Some("test-session-123"),
+        )
+        .unwrap();
         assert_eq!(result, Some("gpt-5".to_string()));
     }
 
@@ -291,7 +296,8 @@ mod tests {
         ).unwrap();
         drop(conn);
 
-        let result = extract_model(&db_path, TranscriptFormat::OpenCodeSqlite, Some("sess-1")).unwrap();
+        let result =
+            extract_model(&db_path, TranscriptFormat::OpenCodeSqlite, Some("sess-1")).unwrap();
         assert_eq!(result, Some("claude-opus-4-6".to_string()));
     }
 
@@ -342,5 +348,4 @@ mod tests {
         let result = extract_model(file.path(), TranscriptFormat::ClaudeJsonl, None).unwrap();
         assert_eq!(result, Some("claude-opus-4-6".to_string()));
     }
-
 }
