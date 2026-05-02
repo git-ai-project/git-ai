@@ -114,6 +114,8 @@ mod status_ignore;
 mod status_unit;
 mod subdirs;
 mod sublime_merge_installer;
+mod subprocess_instrumentation;
+mod fast_git_impl;
 mod sweep_e2e;
 mod sync_authorship_types;
 mod test_utils_unit;

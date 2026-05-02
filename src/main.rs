@@ -12,6 +12,11 @@ struct Cli {
 }
 
 fn main() {
+    // Enable subprocess instrumentation if requested
+    if std::env::var("GIT_AI_INSTRUMENT_SUBPROCESSES").is_ok() {
+        git_ai::perf::subprocess_instrumentation::enable_instrumentation();
+    }
+
     // Get the binary name that was called
     let binary_name = std::env::args_os()
         .next()
@@ -40,14 +45,41 @@ fn main() {
     {
         if std::env::var("GIT_AI").as_deref() == Ok("git") {
             commands::git_handlers::handle_git(&cli.args);
+
+            // Print instrumentation report if enabled
+            if git_ai::perf::subprocess_instrumentation::is_enabled() {
+                if std::env::var("GIT_AI_INSTRUMENT_JSON").is_ok() {
+                    git_ai::perf::subprocess_instrumentation::print_json();
+                } else {
+                    git_ai::perf::subprocess_instrumentation::print_summary();
+                }
+            }
             return;
         }
     }
 
     if binary_name == "git-ai" || binary_name == "git-ai.exe" {
         commands::git_ai_handlers::handle_git_ai(&cli.args);
+
+        // Print instrumentation report if enabled
+        if git_ai::perf::subprocess_instrumentation::is_enabled() {
+            if std::env::var("GIT_AI_INSTRUMENT_JSON").is_ok() {
+                git_ai::perf::subprocess_instrumentation::print_json();
+            } else {
+                git_ai::perf::subprocess_instrumentation::print_summary();
+            }
+        }
         std::process::exit(0);
     }
 
     commands::git_handlers::handle_git(&cli.args);
+
+    // Print instrumentation report if enabled
+    if git_ai::perf::subprocess_instrumentation::is_enabled() {
+        if std::env::var("GIT_AI_INSTRUMENT_JSON").is_ok() {
+            git_ai::perf::subprocess_instrumentation::print_json();
+        } else {
+            git_ai::perf::subprocess_instrumentation::print_summary();
+        }
+    }
 }

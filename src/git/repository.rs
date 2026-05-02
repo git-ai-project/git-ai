@@ -10,6 +10,7 @@ use crate::git::repo_storage::RepoStorage;
 use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::{fetch_authorship_notes, push_authorship_notes};
+use crate::perf::subprocess_instrumentation::{SubprocessContext, record_subprocess};
 #[cfg(windows)]
 use crate::utils::is_interactive_terminal;
 use unicode_normalization::UnicodeNormalization;
@@ -21,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 #[cfg(windows)]
 use crate::utils::CREATE_NO_WINDOW;
@@ -1020,6 +1022,13 @@ impl<'a> Reference<'a> {
     }
 
     pub fn target(&self) -> Result<String, GitAiError> {
+        // Try fast path first (direct .git parsing)
+        let fast_reader = crate::git::r#impl::FastGitReader::new(self.repo.git_dir.clone());
+        if let Ok(Some(sha)) = fast_reader.try_resolve_ref(&self.ref_name) {
+            return Ok(sha);
+        }
+
+        // Fallback to git CLI
         let mut args = self.repo.global_args_for_exec();
         args.push("rev-parse".to_string());
         args.push(self.ref_name.clone());
@@ -1281,6 +1290,16 @@ impl Repository {
     // If HEAD is a symbolic ref, return the refname (e.g., "refs/heads/main").
     // Otherwise, return "HEAD".
     pub fn head<'a>(&'a self) -> Result<Reference<'a>, GitAiError> {
+        // Try fast path first (direct .git parsing)
+        let fast_reader = crate::git::r#impl::FastGitReader::new(self.git_dir.clone());
+        if let Ok(Some(refname)) = fast_reader.try_read_head_symbolic() {
+            return Ok(Reference {
+                repo: self,
+                ref_name: refname,
+            });
+        }
+
+        // Fallback to git CLI
         let mut args = self.global_args_for_exec();
         args.push("symbolic-ref".to_string());
         // args.push("-q".to_string());
@@ -3142,6 +3161,14 @@ pub fn exec_git(args: &[String]) -> Result<Output, GitAiError> {
     exec_git_with_profile(args, InternalGitProfile::General)
 }
 
+/// Helper to execute a git command with instrumentation context
+pub fn exec_git_with_context(
+    args: &[String],
+    context: SubprocessContext,
+) -> Result<Output, GitAiError> {
+    exec_git_with_profile_and_context(args, InternalGitProfile::General, Some(context))
+}
+
 /// Helper to execute a git command and return output regardless of exit status.
 /// Callers that need success-only behavior should use `exec_git*`.
 pub fn exec_git_allow_nonzero(args: &[String]) -> Result<Output, GitAiError> {
@@ -3154,6 +3181,16 @@ pub fn exec_git_allow_nonzero_with_profile(
     args: &[String],
     profile: InternalGitProfile,
 ) -> Result<Output, GitAiError> {
+    exec_git_allow_nonzero_with_profile_and_context(args, profile, None)
+}
+
+/// Helper with optional instrumentation context
+pub fn exec_git_allow_nonzero_with_profile_and_context(
+    args: &[String],
+    profile: InternalGitProfile,
+    context: Option<SubprocessContext>,
+) -> Result<Output, GitAiError> {
+    let start = Instant::now();
     let effective_args =
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
     let mut cmd = Command::new(config::Config::get().git_cmd());
@@ -3168,7 +3205,40 @@ pub fn exec_git_allow_nonzero_with_profile(
         }
     }
 
-    cmd.output().map_err(GitAiError::IoError)
+    let result = cmd.output().map_err(GitAiError::IoError);
+    let duration = start.elapsed();
+
+    // Auto-instrument ALL calls when enabled, even without explicit context
+    if crate::perf::subprocess_instrumentation::is_enabled() {
+        let ctx = context.unwrap_or_else(|| {
+            // Extract git subcommand from args, skipping flags and their values
+            let git_cmd = {
+                let mut skip_next = false;
+                args.iter()
+                    .find_map(|arg| {
+                        if skip_next {
+                            skip_next = false;
+                            None
+                        } else if arg == "-C" || arg == "--git-dir" || arg == "--work-tree" {
+                            skip_next = true;
+                            None
+                        } else if arg.starts_with('-') {
+                            None
+                        } else {
+                            Some(arg.as_str())
+                        }
+                    })
+                    .unwrap_or("unknown")
+            };
+            SubprocessContext::new(
+                crate::perf::subprocess_instrumentation::SubprocessCategory::Other,
+                git_cmd
+            )
+        });
+        record_subprocess(ctx, duration, &effective_args);
+    }
+
+    result
 }
 
 /// Helper to execute a git command with an explicit internal profile.
@@ -3176,9 +3246,18 @@ pub fn exec_git_with_profile(
     args: &[String],
     profile: InternalGitProfile,
 ) -> Result<Output, GitAiError> {
+    exec_git_with_profile_and_context(args, profile, None)
+}
+
+/// Helper with optional instrumentation context
+pub fn exec_git_with_profile_and_context(
+    args: &[String],
+    profile: InternalGitProfile,
+    context: Option<SubprocessContext>,
+) -> Result<Output, GitAiError> {
     let effective_args =
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
-    let output = exec_git_allow_nonzero_with_profile(args, profile)?;
+    let output = exec_git_allow_nonzero_with_profile_and_context(args, profile, context)?;
 
     if !output.status.success() {
         let code = output.status.code();
@@ -3204,6 +3283,17 @@ pub fn exec_git_stdin_with_profile(
     stdin_data: &[u8],
     profile: InternalGitProfile,
 ) -> Result<Output, GitAiError> {
+    exec_git_stdin_with_profile_and_context(args, stdin_data, profile, None)
+}
+
+/// Helper with optional instrumentation context
+pub fn exec_git_stdin_with_profile_and_context(
+    args: &[String],
+    stdin_data: &[u8],
+    profile: InternalGitProfile,
+    context: Option<SubprocessContext>,
+) -> Result<Output, GitAiError> {
+    let start = Instant::now();
     // TODO Make sure to handle process signals, etc.
     let effective_args =
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
@@ -3237,6 +3327,37 @@ pub fn exec_git_stdin_with_profile(
     });
 
     let output = child.wait_with_output().map_err(GitAiError::IoError)?;
+    let duration = start.elapsed();
+
+    // Auto-instrument ALL calls when enabled, even without explicit context
+    if crate::perf::subprocess_instrumentation::is_enabled() {
+        let ctx = context.unwrap_or_else(|| {
+            // Extract git subcommand from args, skipping flags and their values
+            let git_cmd = {
+                let mut skip_next = false;
+                args.iter()
+                    .find_map(|arg| {
+                        if skip_next {
+                            skip_next = false;
+                            None
+                        } else if arg == "-C" || arg == "--git-dir" || arg == "--work-tree" {
+                            skip_next = true;
+                            None
+                        } else if arg.starts_with('-') {
+                            None
+                        } else {
+                            Some(arg.as_str())
+                        }
+                    })
+                    .unwrap_or("unknown")
+            };
+            SubprocessContext::new(
+                crate::perf::subprocess_instrumentation::SubprocessCategory::Other,
+                git_cmd
+            )
+        });
+        record_subprocess(ctx, duration, &effective_args);
+    }
 
     if let Some(handle) = stdin_handle
         && let Err(e) = handle.join().expect("stdin writer thread panicked")

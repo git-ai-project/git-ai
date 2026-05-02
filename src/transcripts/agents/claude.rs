@@ -415,7 +415,10 @@ mod tests {
             .join(".claude/projects")
             .exists()
         {
-            assert!(!paths.is_empty(), "Should discover files in ~/.claude/projects/");
+            assert!(
+                !paths.is_empty(),
+                "Should discover files in ~/.claude/projects/"
+            );
             for path in &paths {
                 assert!(path.extension().and_then(|s| s.to_str()) == Some("jsonl"));
             }

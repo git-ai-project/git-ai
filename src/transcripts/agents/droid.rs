@@ -45,7 +45,6 @@ impl DroidAgent {
             .and_then(|s| s.to_str())
             .map(|s| format!("droid:{}", s))
     }
-
 }
 
 impl Agent for DroidAgent {
