@@ -239,13 +239,7 @@ impl Agent for AmpAgent {
             let timestamp_opt: Option<u64> = match msg.role.as_str() {
                 "user" => msg.meta.as_ref().and_then(|meta| {
                     meta.sent_at.and_then(|ms| {
-                        DateTime::from_timestamp_millis(ms).map(|dt| {
-                            let rfc3339 = dt.to_rfc3339();
-                            DateTime::parse_from_rfc3339(&rfc3339)
-                                .ok()
-                                .map(|parsed| parsed.timestamp() as u64)
-                                .unwrap_or(0)
-                        })
+                        DateTime::from_timestamp_millis(ms).map(|dt| dt.timestamp() as u64)
                     })
                 }),
                 "assistant" => msg.usage.as_ref().and_then(|usage| {
