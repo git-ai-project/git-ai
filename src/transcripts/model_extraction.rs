@@ -180,13 +180,16 @@ fn extract_model_from_opencode_sqlite(
     // Cap SQLite page cache to ~2MB to prevent unbounded memory growth on large databases
     let _ = conn.execute_batch("PRAGMA cache_size = -2000;");
 
+    // OpenCode stores model info in two places depending on message role:
+    //   User messages:     data.model.modelID  (nested object)
+    //   Assistant messages: data.modelID        (top-level string)
     let (query, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match session_id {
         Some(sid) => (
-            "SELECT data FROM message WHERE session_id = ? AND data LIKE '%\"model\"%' LIMIT 1",
+            "SELECT data FROM message WHERE session_id = ? AND (data LIKE '%\"modelID\"%' OR data LIKE '%\"model\"%') LIMIT 1",
             vec![Box::new(sid.to_string())],
         ),
         None => (
-            "SELECT data FROM message WHERE data LIKE '%\"model\"%' LIMIT 1",
+            "SELECT data FROM message WHERE (data LIKE '%\"modelID\"%' OR data LIKE '%\"model\"%') LIMIT 1",
             vec![],
         ),
     };
@@ -198,8 +201,16 @@ fn extract_model_from_opencode_sqlite(
         .ok()
         .and_then(|data| {
             let json: serde_json::Value = serde_json::from_str(&data).ok()?;
-            json.get("model")
+            // Try user message format: data.model.modelID
+            if let Some(model) = json
+                .get("model")
                 .and_then(|m| m.get("modelID"))
+                .and_then(|v| v.as_str())
+            {
+                return Some(model.to_string());
+            }
+            // Try assistant message format: data.modelID
+            json.get("modelID")
                 .and_then(|v| v.as_str())
                 .map(String::from)
         });
@@ -267,6 +278,21 @@ mod tests {
         let path = fixture_path("opencode-sqlite/opencode.db");
         let result = extract_model(&path, TranscriptFormat::OpenCodeSqlite, Some("test-session-123")).unwrap();
         assert_eq!(result, Some("gpt-5".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_opencode_assistant_message_format() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("opencode.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+             INSERT INTO message VALUES ('msg-1', 'sess-1', 1000, 1000, '{\"role\":\"assistant\",\"modelID\":\"claude-opus-4-6\",\"providerID\":\"anthropic\"}');",
+        ).unwrap();
+        drop(conn);
+
+        let result = extract_model(&db_path, TranscriptFormat::OpenCodeSqlite, Some("sess-1")).unwrap();
+        assert_eq!(result, Some("claude-opus-4-6".to_string()));
     }
 
     #[test]
