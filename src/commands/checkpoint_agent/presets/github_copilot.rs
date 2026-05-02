@@ -132,6 +132,7 @@ fn parse_legacy_extension_hooks(
             model: model_extraction::extract_model(
                 Path::new(chat_session_path),
                 crate::transcripts::sweep::TranscriptFormat::CopilotSessionJson,
+                None,
             )
             .ok()
             .flatten()
@@ -248,7 +249,7 @@ fn parse_vscode_native_hooks(
                         }
                         _ => crate::transcripts::sweep::TranscriptFormat::CopilotSessionJson,
                     };
-                    model_extraction::extract_model(Path::new(tp.as_str()), sweep_format)
+                    model_extraction::extract_model(Path::new(tp.as_str()), sweep_format, None)
                         .ok()
                         .flatten()
                 })

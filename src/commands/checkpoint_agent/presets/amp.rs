@@ -307,6 +307,7 @@ impl AgentPreset for AmpPreset {
                         crate::transcripts::model_extraction::extract_model(
                             tp,
                             crate::transcripts::sweep::TranscriptFormat::AmpThreadJson,
+                            None,
                         )
                         .ok()
                         .flatten()
