@@ -120,7 +120,6 @@ pub enum TranscriptFormat {
     CopilotEventStreamJsonl,
     AmpThreadJson,
     OpenCodeSqlite,
-    OpenCodeLegacyJson,
     PiJsonl,
 }
 
