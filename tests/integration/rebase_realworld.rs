@@ -9893,12 +9893,12 @@ fn test_conflict_ai_resolves_timeout_constant() {
         conflict_note
             .metadata
             .humans
-            .contains_key("h_9e95a89b42f1fb"),
-        "c3' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
+            .contains_key("h_e858f2c2faea28"),
+        "c3' should have h_e858f2c2faea28 in metadata.humans (human context lines in resolved file)"
     );
     assert_eq!(
-        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
-        "Test User"
+        conflict_note.metadata.humans["h_e858f2c2faea28"].author,
+        "Test User <test@example.com>"
     );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
@@ -10335,12 +10335,12 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
         conflict_note
             .metadata
             .humans
-            .contains_key("h_9e95a89b42f1fb"),
-        "c3' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
+            .contains_key("h_e858f2c2faea28"),
+        "c3' should have h_e858f2c2faea28 in metadata.humans (human context lines in resolved file)"
     );
     assert_eq!(
-        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
-        "Test User"
+        conflict_note.metadata.humans["h_e858f2c2faea28"].author,
+        "Test User <test@example.com>"
     );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
@@ -10533,12 +10533,12 @@ fn test_conflict_ai_resolves_on_first_commit() {
         conflict_note
             .metadata
             .humans
-            .contains_key("h_9e95a89b42f1fb"),
-        "c1' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
+            .contains_key("h_e858f2c2faea28"),
+        "c1' should have h_e858f2c2faea28 in metadata.humans (human context lines in resolved file)"
     );
     assert_eq!(
-        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
-        "Test User"
+        conflict_note.metadata.humans["h_e858f2c2faea28"].author,
+        "Test User <test@example.com>"
     );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
@@ -10739,12 +10739,12 @@ fn test_conflict_ai_resolves_on_last_commit() {
         conflict_note
             .metadata
             .humans
-            .contains_key("h_9e95a89b42f1fb"),
-        "c5' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
+            .contains_key("h_e858f2c2faea28"),
+        "c5' should have h_e858f2c2faea28 in metadata.humans (human context lines in resolved file)"
     );
     assert_eq!(
-        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
-        "Test User"
+        conflict_note.metadata.humans["h_e858f2c2faea28"].author,
+        "Test User <test@example.com>"
     );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
@@ -10965,12 +10965,12 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit() {
         conflict_note
             .metadata
             .humans
-            .contains_key("h_9e95a89b42f1fb"),
-        "c3' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
+            .contains_key("h_e858f2c2faea28"),
+        "c3' should have h_e858f2c2faea28 in metadata.humans (human context lines in resolved file)"
     );
     assert_eq!(
-        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
-        "Test User"
+        conflict_note.metadata.humans["h_e858f2c2faea28"].author,
+        "Test User <test@example.com>"
     );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
@@ -11166,12 +11166,12 @@ fn test_conflict_ai_resolves_then_more_ai_builds_on_result() {
         conflict_note
             .metadata
             .humans
-            .contains_key("h_9e95a89b42f1fb"),
-        "c2' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
+            .contains_key("h_e858f2c2faea28"),
+        "c2' should have h_e858f2c2faea28 in metadata.humans (human context lines in resolved file)"
     );
     assert_eq!(
-        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
-        "Test User"
+        conflict_note.metadata.humans["h_e858f2c2faea28"].author,
+        "Test User <test@example.com>"
     );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
@@ -11389,12 +11389,12 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
         conflict_note
             .metadata
             .humans
-            .contains_key("h_9e95a89b42f1fb"),
-        "c3' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
+            .contains_key("h_e858f2c2faea28"),
+        "c3' should have h_e858f2c2faea28 in metadata.humans (human context lines in resolved file)"
     );
     assert_eq!(
-        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
-        "Test User"
+        conflict_note.metadata.humans["h_e858f2c2faea28"].author,
+        "Test User <test@example.com>"
     );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {
@@ -11651,12 +11651,12 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
         conflict_note
             .metadata
             .humans
-            .contains_key("h_9e95a89b42f1fb"),
-        "c4' should have h_9e95a89b42f1fb in metadata.humans (human context lines in resolved file)"
+            .contains_key("h_e858f2c2faea28"),
+        "c4' should have h_e858f2c2faea28 in metadata.humans (human context lines in resolved file)"
     );
     assert_eq!(
-        conflict_note.metadata.humans["h_9e95a89b42f1fb"].author,
-        "Test User"
+        conflict_note.metadata.humans["h_e858f2c2faea28"].author,
+        "Test User <test@example.com>"
     );
     // Other commits (pure AI) should have no humans entry
     for (i, sha) in chain.iter().enumerate() {

@@ -1,5 +1,6 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use std::fs;
 
 fn configure_diff_settings(repo: &TestRepo, settings: &[(&str, &str)]) {
@@ -1832,6 +1833,59 @@ fn test_ai_generated_file_then_human_full_rewrite() {
     ]);
 }
 
+/// Regression test: known-human checkpoint must store the full git identity
+/// ("Name <email>") in the HumanRecord, not just the name.
+///
+/// The test harness configures user.name = "Test User" and
+/// user.email = "test@example.com", so the expected author field is
+/// "Test User <test@example.com>".
+#[test]
+fn test_known_human_record_includes_email() {
+    let repo = TestRepo::new();
+
+    let file_path = repo.path().join("app.go");
+
+    // AI writes the initial file
+    repo.git_ai(&["checkpoint", "human", "app.go"]).unwrap();
+    fs::write(&file_path, "func main() {}\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "app.go"]).unwrap();
+    repo.stage_all_and_commit("AI commit").unwrap();
+
+    // Human edits the file
+    fs::write(&file_path, "func main() {}\nfunc helper() {}\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "app.go"])
+        .unwrap();
+    repo.stage_all_and_commit("Human commit").unwrap();
+
+    let mut file = repo.filename("app.go");
+    file.assert_committed_lines(crate::lines![
+        "func main() {}".ai(),
+        "func helper() {}".human(),
+    ]);
+
+    // Verify the HumanRecord has the full identity with email
+    let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let note = repo
+        .read_authorship_note(&sha)
+        .expect("human commit should have note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
+    assert!(
+        !log.metadata.humans.is_empty(),
+        "should have humans metadata"
+    );
+    for record in log.metadata.humans.values() {
+        assert!(
+            record.author.contains('<') && record.author.contains('>'),
+            "HumanRecord.author should include email in angle brackets, got: {:?}",
+            record.author
+        );
+        assert_eq!(
+            record.author, "Test User <test@example.com>",
+            "HumanRecord.author should be the full git identity"
+        );
+    }
+}
+
 crate::reuse_tests_in_worktree!(
     test_simple_additions_empty_repo,
     test_simple_additions_with_base_commit,
@@ -1844,4 +1898,5 @@ crate::reuse_tests_in_worktree!(
     test_partial_staging_filters_unstaged_lines,
     test_human_stages_some_ai_lines,
     test_ai_generated_file_then_human_full_rewrite,
+    test_known_human_record_includes_email,
 );
