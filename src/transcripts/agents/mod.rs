@@ -1,9 +1,24 @@
+mod amp;
 mod claude;
+mod codex;
+mod continue_cli;
 mod copilot;
 mod cursor;
 mod droid;
+mod gemini;
+mod opencode;
+mod pi;
+mod windsurf;
 
+pub use amp::AmpAgent;
 pub use claude::ClaudeAgent;
+pub use claude::{extract_plan_from_tool_use, is_plan_file_path};
+pub use codex::CodexAgent;
+pub use continue_cli::ContinueAgent;
 pub use copilot::CopilotAgent;
 pub use cursor::CursorAgent;
 pub use droid::DroidAgent;
+pub use gemini::GeminiAgent;
+pub use opencode::OpenCodeAgent;
+pub use pi::PiAgent;
+pub use windsurf::WindsurfAgent;

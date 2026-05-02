@@ -164,23 +164,6 @@ impl OpenCodePreset {
             ));
         }
 
-        // Fall back to legacy JSON storage
-        let storage_path = Self::resolve_legacy_storage_path(&opencode_path);
-        if let Some(storage_path) = storage_path {
-            let session_dir = storage_path.join("message").join(session_id);
-            if session_dir.exists() {
-                return Some((
-                    TranscriptSource {
-                        path: storage_path,
-                        format: TranscriptFormat::OpenCodeLegacyJson,
-                        session_id: session_id.to_string(),
-                        external_thread_id: Some(session_id.to_string()),
-                    },
-                    opencode_path,
-                ));
-            }
-        }
-
         None
     }
 
@@ -253,37 +236,6 @@ impl OpenCodePreset {
             if sibling_db.exists() {
                 return Some(sibling_db);
             }
-        }
-
-        None
-    }
-
-    fn resolve_legacy_storage_path(path: &Path) -> Option<PathBuf> {
-        if path.is_file() {
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name == "opencode.db")
-            {
-                let storage = path.parent()?.join("storage");
-                if storage.exists() {
-                    return Some(storage);
-                }
-            }
-            return None;
-        }
-
-        if !path.is_dir() {
-            return None;
-        }
-
-        if path.join("message").exists() || path.join("part").exists() {
-            return Some(path.to_path_buf());
-        }
-
-        let nested_storage = path.join("storage");
-        if nested_storage.exists() {
-            return Some(nested_storage);
         }
 
         None

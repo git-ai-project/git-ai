@@ -43,6 +43,13 @@ pub fn get_agent(agent_type: &str) -> Option<Box<dyn Agent>> {
         "cursor" => Some(Box::new(super::agents::CursorAgent)),
         "droid" => Some(Box::new(super::agents::DroidAgent)),
         "copilot" => Some(Box::new(super::agents::CopilotAgent)),
+        "gemini" => Some(Box::new(super::agents::GeminiAgent)),
+        "continue-cli" => Some(Box::new(super::agents::ContinueAgent)),
+        "windsurf" => Some(Box::new(super::agents::WindsurfAgent)),
+        "codex" => Some(Box::new(super::agents::CodexAgent)),
+        "amp" => Some(Box::new(super::agents::AmpAgent)),
+        "opencode" => Some(Box::new(super::agents::OpenCodeAgent)),
+        "pi" => Some(Box::new(super::agents::PiAgent)),
         _ => None,
     }
 }

@@ -20,6 +20,13 @@ pub fn extract_model_from_tail(
         TranscriptFormat::DroidJsonl => extract_model_from_jsonl_tail(path, "model"),
         TranscriptFormat::CopilotEventStreamJsonl => extract_model_from_jsonl_tail(path, "model"),
         TranscriptFormat::CopilotSessionJson => extract_model_from_session_json(path),
+        TranscriptFormat::GeminiJson => extract_model_from_session_json(path),
+        TranscriptFormat::CodexJsonl => extract_model_from_jsonl_tail(path, "model"),
+        TranscriptFormat::WindsurfJsonl => Ok(None),
+        TranscriptFormat::ContinueJson => Ok(None),
+        TranscriptFormat::AmpThreadJson => extract_model_from_session_json(path),
+        TranscriptFormat::OpenCodeSqlite => Ok(None),
+        TranscriptFormat::PiJsonl => extract_model_from_jsonl_tail(path, "model"),
     }
 }
 
