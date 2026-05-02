@@ -29,7 +29,8 @@ fn open_sqlite_readonly(path: &Path) -> Result<Connection, TranscriptError> {
     Ok(conn)
 }
 
-/// Read messages from the database, returning raw JSON values with their update timestamps.
+/// Read messages from the database, returning each row as a complete JSON object
+/// containing all columns (id, session_id, time_created, time_updated, data).
 fn read_session_messages_raw(
     conn: &Connection,
     session_id: &str,
@@ -37,7 +38,7 @@ fn read_session_messages_raw(
 ) -> Result<Vec<(String, i64, serde_json::Value)>, TranscriptError> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, time_updated, data FROM message \
+            "SELECT id, session_id, time_created, time_updated, data FROM message \
              WHERE session_id = ? AND time_updated > ? \
              ORDER BY time_updated ASC, id ASC",
         )
@@ -48,9 +49,11 @@ fn read_session_messages_raw(
     let rows = stmt
         .query_map(rusqlite::params![session_id, after_updated], |row| {
             let id: String = row.get(0)?;
-            let time_updated: i64 = row.get(1)?;
-            let data: String = row.get(2)?;
-            Ok((id, time_updated, data))
+            let row_session_id: String = row.get(1)?;
+            let time_created: i64 = row.get(2)?;
+            let time_updated: i64 = row.get(3)?;
+            let data: String = row.get(4)?;
+            Ok((id, row_session_id, time_created, time_updated, data))
         })
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to query messages: {}", e),
@@ -58,31 +61,46 @@ fn read_session_messages_raw(
 
     let mut messages = Vec::new();
     for row in rows {
-        let (id, time_updated, data) = row.map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to read message row: {}", e),
-        })?;
+        let (id, row_session_id, time_created, time_updated, data) =
+            row.map_err(|e| TranscriptError::Fatal {
+                message: format!("Failed to read message row: {}", e),
+            })?;
 
-        let parsed: serde_json::Value =
+        let parsed_data: serde_json::Value =
             serde_json::from_str(&data).map_err(|e| TranscriptError::Parse {
                 line: 0,
                 message: format!("Failed to parse message data for id {}: {}", id, e),
             })?;
 
-        messages.push((id, time_updated, parsed));
+        // Build directly via Map to move parsed_data instead of cloning (json! macro clones)
+        let mut map = serde_json::Map::with_capacity(5);
+        map.insert("id".into(), serde_json::Value::String(id.clone()));
+        map.insert("session_id".into(), serde_json::Value::String(row_session_id));
+        map.insert("time_created".into(), serde_json::Value::Number(time_created.into()));
+        map.insert("time_updated".into(), serde_json::Value::Number(time_updated.into()));
+        map.insert("data".into(), parsed_data);
+
+        messages.push((id, time_updated, serde_json::Value::Object(map)));
     }
 
     Ok(messages)
 }
 
-/// Read all parts for the session, returning raw JSON values grouped by message_id.
-fn read_all_parts_raw(
+/// Read parts for the matched messages only, using an IN-subquery to avoid loading
+/// all parts for the entire session. Returns each row as a complete JSON object
+/// containing all columns (id, message_id, session_id, time_created, time_updated, data),
+/// grouped by message_id.
+fn read_parts_for_messages(
     conn: &Connection,
     session_id: &str,
+    after_updated: i64,
 ) -> Result<HashMap<String, Vec<serde_json::Value>>, TranscriptError> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, message_id, time_updated, data FROM part \
-             WHERE session_id = ? \
+            "SELECT id, message_id, session_id, time_created, time_updated, data FROM part \
+             WHERE message_id IN ( \
+                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? \
+             ) \
              ORDER BY message_id ASC, time_updated ASC, id ASC",
         )
         .map_err(|e| TranscriptError::Fatal {
@@ -90,12 +108,14 @@ fn read_all_parts_raw(
         })?;
 
     let rows = stmt
-        .query_map(rusqlite::params![session_id], |row| {
-            let _id: String = row.get(0)?;
+        .query_map(rusqlite::params![session_id, after_updated], |row| {
+            let id: String = row.get(0)?;
             let message_id: String = row.get(1)?;
-            let _time_updated: i64 = row.get(2)?;
-            let data: String = row.get(3)?;
-            Ok((message_id, data))
+            let row_session_id: String = row.get(2)?;
+            let time_created: i64 = row.get(3)?;
+            let time_updated: i64 = row.get(4)?;
+            let data: String = row.get(5)?;
+            Ok((id, message_id, row_session_id, time_created, time_updated, data))
         })
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to query parts: {}", e),
@@ -103,13 +123,23 @@ fn read_all_parts_raw(
 
     let mut parts_by_message: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     for row in rows {
-        let (message_id, data) = row.map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to read part row: {}", e),
-        })?;
+        let (id, message_id, row_session_id, time_created, time_updated, data) =
+            row.map_err(|e| TranscriptError::Fatal {
+                message: format!("Failed to read part row: {}", e),
+            })?;
 
-        // Parse each part's data column as raw JSON
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
-            parts_by_message.entry(message_id).or_default().push(parsed);
+        if let Ok(parsed_data) = serde_json::from_str::<serde_json::Value>(&data) {
+            let mut map = serde_json::Map::with_capacity(6);
+            map.insert("id".into(), serde_json::Value::String(id));
+            map.insert("message_id".into(), serde_json::Value::String(message_id.clone()));
+            map.insert("session_id".into(), serde_json::Value::String(row_session_id));
+            map.insert("time_created".into(), serde_json::Value::Number(time_created.into()));
+            map.insert("time_updated".into(), serde_json::Value::Number(time_updated.into()));
+            map.insert("data".into(), parsed_data);
+            parts_by_message
+                .entry(message_id)
+                .or_default()
+                .push(serde_json::Value::Object(map));
         }
     }
 
@@ -158,31 +188,25 @@ impl Agent for OpenCodeAgent {
             });
         }
 
-        // Read all parts for the session, build HashMap by message_id
-        let parts_by_message = read_all_parts_raw(&conn, session_id)?;
+        // Read only parts for the matched messages (IN-subquery, single scan)
+        let mut parts_by_message = read_parts_for_messages(&conn, session_id, watermark_millis)?;
 
         let mut max_updated: i64 = watermark_millis;
-        let mut events = Vec::new();
+        let mut events = Vec::with_capacity(messages.len());
 
-        for (msg_id, time_updated, msg_data) in &messages {
-            if *time_updated > max_updated {
-                max_updated = *time_updated;
+        for (msg_id, time_updated, msg_data) in messages {
+            if time_updated > max_updated {
+                max_updated = time_updated;
             }
 
-            // Compose a JSON value with the message data and its parts
-            let parts = parts_by_message.get(msg_id);
-            let event = if let Some(parts) = parts {
-                serde_json::json!({
-                    "message": msg_data,
-                    "parts": parts,
-                })
-            } else {
-                serde_json::json!({
-                    "message": msg_data,
-                })
-            };
+            // Use .remove() to move parts out of the HashMap instead of cloning via .get()
+            let mut map = serde_json::Map::with_capacity(2);
+            map.insert("message".into(), msg_data);
+            if let Some(parts) = parts_by_message.remove(&msg_id) {
+                map.insert("parts".into(), serde_json::Value::Array(parts));
+            }
 
-            events.push(event);
+            events.push(serde_json::Value::Object(map));
         }
 
         let new_watermark_ts =
@@ -223,10 +247,11 @@ mod tests {
         let db_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/opencode-sqlite/opencode.db");
         let conn = open_sqlite_readonly(&db_path).unwrap();
-        let parts = read_all_parts_raw(&conn, "test-session-123").unwrap();
-        // Verify batch loading returns parts grouped by message_id.
-        // This is the fix from PR #1120: a single query instead of one per message,
-        // which prevents full-table-scan memory blowup on large unindexed databases.
+        // watermark=0 matches all messages in the fixture
+        let parts = read_parts_for_messages(&conn, "test-session-123", 0).unwrap();
+        // Verify IN-subquery loading returns parts grouped by message_id.
+        // Single query with IN-subquery instead of one per message,
+        // prevents full-table-scan memory blowup on large unindexed databases.
         assert!(
             !parts.is_empty(),
             "batch parts query must return data from fixture"

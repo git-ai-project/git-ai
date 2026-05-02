@@ -36,62 +36,87 @@ fn test_opencode_raw_event_fidelity() {
 
     let watermark_millis = DateTime::<Utc>::UNIX_EPOCH.timestamp_millis();
 
-    // Read messages for this session with time_updated > watermark (same filter as the agent)
+    // Read full message rows for this session with time_updated > watermark (same filter as the agent)
     let mut msg_stmt = conn
         .prepare(
-            "SELECT id, time_updated, data FROM message \
+            "SELECT id, session_id, time_created, time_updated, data FROM message \
              WHERE session_id = ? AND time_updated > ? \
              ORDER BY time_updated ASC, id ASC",
         )
         .unwrap();
-    let messages: Vec<(String, i64, serde_json::Value)> = msg_stmt
+    let messages: Vec<(String, serde_json::Value)> = msg_stmt
         .query_map(rusqlite::params![session_id, watermark_millis], |row| {
             let id: String = row.get(0)?;
-            let time_updated: i64 = row.get(1)?;
-            let data: String = row.get(2)?;
-            Ok((id, time_updated, data))
+            let row_session_id: String = row.get(1)?;
+            let time_created: i64 = row.get(2)?;
+            let time_updated: i64 = row.get(3)?;
+            let data: String = row.get(4)?;
+            Ok((id, row_session_id, time_created, time_updated, data))
         })
         .unwrap()
         .map(|r| {
-            let (id, time_updated, data) = r.unwrap();
-            (id, time_updated, serde_json::from_str(&data).unwrap())
+            let (id, row_session_id, time_created, time_updated, data) = r.unwrap();
+            let parsed_data: serde_json::Value = serde_json::from_str(&data).unwrap();
+            let row_json = json!({
+                "id": id,
+                "session_id": row_session_id,
+                "time_created": time_created,
+                "time_updated": time_updated,
+                "data": parsed_data,
+            });
+            (id, row_json)
         })
         .collect();
 
-    // Read parts grouped by message_id (same query as the agent)
+    // Read parts only for matched messages via IN-subquery (same query as the agent)
     let mut part_stmt = conn
         .prepare(
-            "SELECT message_id, data FROM part \
-             WHERE session_id = ? \
+            "SELECT id, message_id, session_id, time_created, time_updated, data FROM part \
+             WHERE message_id IN ( \
+                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? \
+             ) \
              ORDER BY message_id ASC, time_updated ASC, id ASC",
         )
         .unwrap();
     let parts_rows: Vec<(String, serde_json::Value)> = part_stmt
-        .query_map(rusqlite::params![session_id], |row| {
-            let message_id: String = row.get(0)?;
-            let data: String = row.get(1)?;
-            Ok((message_id, data))
+        .query_map(rusqlite::params![session_id, watermark_millis], |row| {
+            let id: String = row.get(0)?;
+            let message_id: String = row.get(1)?;
+            let row_session_id: String = row.get(2)?;
+            let time_created: i64 = row.get(3)?;
+            let time_updated: i64 = row.get(4)?;
+            let data: String = row.get(5)?;
+            Ok((id, message_id, row_session_id, time_created, time_updated, data))
         })
         .unwrap()
         .map(|r| {
-            let (message_id, data) = r.unwrap();
-            (message_id, serde_json::from_str(&data).unwrap())
+            let (id, message_id, row_session_id, time_created, time_updated, data) = r.unwrap();
+            let parsed_data: serde_json::Value = serde_json::from_str(&data).unwrap();
+            let row_json = json!({
+                "id": id,
+                "message_id": message_id,
+                "session_id": row_session_id,
+                "time_created": time_created,
+                "time_updated": time_updated,
+                "data": parsed_data,
+            });
+            (message_id, row_json)
         })
         .collect();
 
     let mut parts_by_msg: std::collections::HashMap<String, Vec<serde_json::Value>> =
         std::collections::HashMap::new();
-    for (msg_id, data) in parts_rows {
-        parts_by_msg.entry(msg_id).or_default().push(data);
+    for (msg_id, row_json) in parts_rows {
+        parts_by_msg.entry(msg_id).or_default().push(row_json);
     }
 
     let expected: Vec<serde_json::Value> = messages
         .iter()
-        .map(|(id, _, data)| {
+        .map(|(id, row_json)| {
             if let Some(parts) = parts_by_msg.get(id) {
-                serde_json::json!({"message": data, "parts": parts})
+                json!({"message": row_json, "parts": parts})
             } else {
-                serde_json::json!({"message": data})
+                json!({"message": row_json})
             }
         })
         .collect();
