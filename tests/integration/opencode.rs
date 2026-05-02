@@ -36,25 +36,25 @@ fn test_opencode_raw_event_fidelity() {
 
     let watermark_millis = DateTime::<Utc>::UNIX_EPOCH.timestamp_millis();
 
-    // Read messages for this session with time_created > watermark (same filter as the agent)
+    // Read messages for this session with time_updated > watermark (same filter as the agent)
     let mut msg_stmt = conn
         .prepare(
-            "SELECT id, time_created, data FROM message \
-             WHERE session_id = ? AND time_created > ? \
-             ORDER BY time_created ASC, id ASC",
+            "SELECT id, time_updated, data FROM message \
+             WHERE session_id = ? AND time_updated > ? \
+             ORDER BY time_updated ASC, id ASC",
         )
         .unwrap();
     let messages: Vec<(String, i64, serde_json::Value)> = msg_stmt
         .query_map(rusqlite::params![session_id, watermark_millis], |row| {
             let id: String = row.get(0)?;
-            let time_created: i64 = row.get(1)?;
+            let time_updated: i64 = row.get(1)?;
             let data: String = row.get(2)?;
-            Ok((id, time_created, data))
+            Ok((id, time_updated, data))
         })
         .unwrap()
         .map(|r| {
-            let (id, time_created, data) = r.unwrap();
-            (id, time_created, serde_json::from_str(&data).unwrap())
+            let (id, time_updated, data) = r.unwrap();
+            (id, time_updated, serde_json::from_str(&data).unwrap())
         })
         .collect();
 
@@ -63,7 +63,7 @@ fn test_opencode_raw_event_fidelity() {
         .prepare(
             "SELECT message_id, data FROM part \
              WHERE session_id = ? \
-             ORDER BY message_id ASC, time_created ASC, id ASC",
+             ORDER BY message_id ASC, time_updated ASC, id ASC",
         )
         .unwrap();
     let parts_rows: Vec<(String, serde_json::Value)> = part_stmt

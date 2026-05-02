@@ -29,28 +29,28 @@ fn open_sqlite_readonly(path: &Path) -> Result<Connection, TranscriptError> {
     Ok(conn)
 }
 
-/// Read messages from the database, returning raw JSON values with their timestamps.
+/// Read messages from the database, returning raw JSON values with their update timestamps.
 fn read_session_messages_raw(
     conn: &Connection,
     session_id: &str,
-    after_created: i64,
+    after_updated: i64,
 ) -> Result<Vec<(String, i64, serde_json::Value)>, TranscriptError> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, time_created, data FROM message \
-             WHERE session_id = ? AND time_created > ? \
-             ORDER BY time_created ASC, id ASC",
+            "SELECT id, time_updated, data FROM message \
+             WHERE session_id = ? AND time_updated > ? \
+             ORDER BY time_updated ASC, id ASC",
         )
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to prepare message query: {}", e),
         })?;
 
     let rows = stmt
-        .query_map(rusqlite::params![session_id, after_created], |row| {
+        .query_map(rusqlite::params![session_id, after_updated], |row| {
             let id: String = row.get(0)?;
-            let time_created: i64 = row.get(1)?;
+            let time_updated: i64 = row.get(1)?;
             let data: String = row.get(2)?;
-            Ok((id, time_created, data))
+            Ok((id, time_updated, data))
         })
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to query messages: {}", e),
@@ -58,7 +58,7 @@ fn read_session_messages_raw(
 
     let mut messages = Vec::new();
     for row in rows {
-        let (id, time_created, data) = row.map_err(|e| TranscriptError::Fatal {
+        let (id, time_updated, data) = row.map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to read message row: {}", e),
         })?;
 
@@ -68,7 +68,7 @@ fn read_session_messages_raw(
                 message: format!("Failed to parse message data for id {}: {}", id, e),
             })?;
 
-        messages.push((id, time_created, parsed));
+        messages.push((id, time_updated, parsed));
     }
 
     Ok(messages)
@@ -81,9 +81,9 @@ fn read_all_parts_raw(
 ) -> Result<HashMap<String, Vec<serde_json::Value>>, TranscriptError> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, message_id, time_created, data FROM part \
+            "SELECT id, message_id, time_updated, data FROM part \
              WHERE session_id = ? \
-             ORDER BY message_id ASC, time_created ASC, id ASC",
+             ORDER BY message_id ASC, time_updated ASC, id ASC",
         )
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to prepare part query: {}", e),
@@ -93,7 +93,7 @@ fn read_all_parts_raw(
         .query_map(rusqlite::params![session_id], |row| {
             let _id: String = row.get(0)?;
             let message_id: String = row.get(1)?;
-            let _time_created: i64 = row.get(2)?;
+            let _time_updated: i64 = row.get(2)?;
             let data: String = row.get(3)?;
             Ok((message_id, data))
         })
@@ -148,7 +148,7 @@ impl Agent for OpenCodeAgent {
         // Open SQLite read-only
         let conn = open_sqlite_readonly(path)?;
 
-        // Read messages with time_created > watermark_millis
+        // Read messages with time_updated > watermark_millis
         let messages = read_session_messages_raw(&conn, session_id, watermark_millis)?;
 
         if messages.is_empty() {
@@ -161,13 +161,12 @@ impl Agent for OpenCodeAgent {
         // Read all parts for the session, build HashMap by message_id
         let parts_by_message = read_all_parts_raw(&conn, session_id)?;
 
-        let mut max_created: i64 = watermark_millis;
+        let mut max_updated: i64 = watermark_millis;
         let mut events = Vec::new();
 
-        for (msg_id, time_created, msg_data) in &messages {
-            // Update max_created
-            if *time_created > max_created {
-                max_created = *time_created;
+        for (msg_id, time_updated, msg_data) in &messages {
+            if *time_updated > max_updated {
+                max_updated = *time_updated;
             }
 
             // Compose a JSON value with the message data and its parts
@@ -186,9 +185,8 @@ impl Agent for OpenCodeAgent {
             events.push(event);
         }
 
-        // New watermark from max_created
         let new_watermark_ts =
-            DateTime::from_timestamp_millis(max_created).unwrap_or(ts_watermark.0);
+            DateTime::from_timestamp_millis(max_updated).unwrap_or(ts_watermark.0);
         let new_watermark = Box::new(TimestampWatermark::new(new_watermark_ts));
 
         Ok(TranscriptBatch {
