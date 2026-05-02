@@ -354,7 +354,8 @@ mod tests {
         );
     }
 
-    #[test]                                                                                                                                                                                                            
+    #[test]
+    #[serial_test::serial]                                                                                                                                                        
     fn test_lookback_minutes_defaults_to_15() {
         std::env::remove_var("GIT_AI_CI_LOOKBACK_MINUTES");                                                                                                                                                            
         let lookback = std::env::var("GIT_AI_CI_LOOKBACK_MINUTES")                                                                                                                                                   
@@ -364,7 +365,8 @@ mod tests {
         assert_eq!(lookback, 15);                                                                                                                                                                                      
     }                                                                                                                                                                                                                
     
-    #[test]                                                                                                                                                                                                            
+    #[test]
+    #[serial_test::serial]                                                                                                                                                                                                     
     fn test_lookback_minutes_reads_env_var() {
         std::env::set_var("GIT_AI_CI_LOOKBACK_MINUTES", "4320");                                                                                                                                                       
         let lookback = std::env::var("GIT_AI_CI_LOOKBACK_MINUTES")                                                                                                                                                   
@@ -375,7 +377,8 @@ mod tests {
         assert_eq!(lookback, 4320);                                                                                                                                                                                  
     }                                                                                                                                                                                                                  
     
-    #[test]                                                                                                                                                                                                            
+    #[test]
+    #[serial_test::serial]                                                                                                                                                                                                          
     fn test_lookback_minutes_falls_back_on_invalid_value() {                                                                                                                                                         
         std::env::set_var("GIT_AI_CI_LOOKBACK_MINUTES", "not-a-number");
         let lookback = std::env::var("GIT_AI_CI_LOOKBACK_MINUTES")      
