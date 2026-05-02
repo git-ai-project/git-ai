@@ -23,39 +23,39 @@ fn test_parse_droid_jsonl_transcript() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Failed to parse JSONL");
 
-    // Verify we parsed some events
+    // Verify we parsed some events (one per JSONL line)
     assert!(!result.events.is_empty(), "Result should contain events");
 
-    // Model should be None — Droid stores model in .settings.json, not JSONL
-    assert!(
-        result.model.is_none(),
-        "Model should be None (comes from settings.json, not JSONL)"
-    );
+    // Verify the fixture has the expected number of raw events (only "message" type lines)
+    assert_eq!(result.events.len(), 10, "Should have 10 raw message events");
 
-    // Verify correct event types exist
-    let has_user = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("user_message".to_string())));
-    let has_assistant = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("assistant_message".to_string())));
-    let has_tool_use = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("tool_use".to_string())));
+    // Verify correct event types exist in the raw JSON
+    let has_user = result.events.iter().any(|e| {
+        e["type"].as_str() == Some("message") && e["message"]["role"].as_str() == Some("user")
+    });
+    let has_assistant = result.events.iter().any(|e| {
+        e["type"].as_str() == Some("message") && e["message"]["role"].as_str() == Some("assistant")
+    });
+    let has_tool_use = result.events.iter().any(|e| {
+        e["type"].as_str() == Some("message")
+            && e["message"]["content"]
+                .as_array()
+                .map(|arr| arr.iter().any(|c| c["type"].as_str() == Some("tool_use")))
+                .unwrap_or(false)
+    });
 
-    assert!(has_user, "Should have user_message events");
-    assert!(has_assistant, "Should have assistant_message events");
+    assert!(has_user, "Should have user message events");
+    assert!(has_assistant, "Should have assistant message events");
     assert!(has_tool_use, "Should have tool_use events");
 
-    // Verify timestamps are present (event_ts is a u64 epoch)
+    // Verify timestamps are present on message events
     for event in &result.events {
-        assert!(
-            event.event_ts.is_some(),
-            "All events should have a timestamp"
-        );
+        if event["type"].as_str() == Some("message") {
+            assert!(
+                event["timestamp"].as_str().is_some(),
+                "Message events should have a timestamp"
+            );
+        }
     }
 }
 
@@ -233,6 +233,7 @@ fn test_droid_preset_uses_raw_session_id() {
 
 #[test]
 fn test_droid_jsonl_skips_non_message_entries() {
+    // Droid agent filters to only "message" type entries, skipping session_start, todo_state, etc.
     let jsonl_content = r#"{"type":"session_start","id":"abc","title":"Test","cwd":"/tmp"}
 {"type":"message","id":"msg1","timestamp":"2026-01-28T16:57:01.391Z","message":{"role":"user","content":[{"type":"text","text":"Hello"}]}}
 {"type":"todo_state","id":"todo1","timestamp":"2026-01-28T16:57:02.000Z","todos":{"todos":"1. test"}}
@@ -248,27 +249,27 @@ fn test_droid_jsonl_skips_non_message_entries() {
         .read_incremental(temp_file.path(), watermark, "test")
         .expect("Failed to parse JSONL");
 
+    // Only "message" type entries are returned (session_start and todo_state are skipped)
     assert_eq!(
         result.events.len(),
         2,
-        "Should only parse 'message' type entries, got {} events",
+        "Should return only 2 message events, got {} events",
         result.events.len()
     );
 
+    // Verify the message types
+    assert_eq!(result.events[0]["type"].as_str(), Some("message"));
+    assert_eq!(result.events[0]["message"]["role"].as_str(), Some("user"));
+    assert_eq!(result.events[1]["type"].as_str(), Some("message"));
     assert_eq!(
-        result.events[0].event_type,
-        Some(Some("user_message".to_string())),
-        "First event should be user_message"
-    );
-    assert_eq!(
-        result.events[1].event_type,
-        Some(Some("assistant_message".to_string())),
-        "Second event should be assistant_message"
+        result.events[1]["message"]["role"].as_str(),
+        Some("assistant"),
     );
 }
 
 #[test]
 fn test_droid_tool_results_are_not_parsed_as_user_messages() {
+    // With raw JSON, tool_result lines ARE included as raw events.
     let jsonl_content = r#"{"type":"message","id":"msg1","timestamp":"2026-01-28T16:57:16.179Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_123","content":"File read successfully"}]}}
 {"type":"message","id":"msg2","timestamp":"2026-01-28T16:57:17.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Done!"}]}}
 "#;
@@ -282,20 +283,23 @@ fn test_droid_tool_results_are_not_parsed_as_user_messages() {
         .read_incremental(temp_file.path(), watermark, "test")
         .expect("Failed to parse JSONL");
 
+    // Both lines are returned as raw events
     assert_eq!(
         result.events.len(),
-        1,
-        "Tool results should not be parsed as user messages"
+        2,
+        "Both JSONL lines should be returned as raw events"
     );
 
+    assert_eq!(result.events[0]["type"].as_str(), Some("message"),);
+    assert_eq!(result.events[0]["message"]["role"].as_str(), Some("user"),);
+    assert_eq!(result.events[1]["type"].as_str(), Some("message"),);
     assert_eq!(
-        result.events[0].event_type,
-        Some(Some("assistant_message".to_string())),
-        "Only event should be assistant_message"
+        result.events[1]["message"]["role"].as_str(),
+        Some("assistant"),
     );
     assert_eq!(
-        result.events[0].response_text,
-        Some(Some("Done!".to_string())),
+        result.events[1]["message"]["content"][0]["text"].as_str(),
+        Some("Done!"),
         "Assistant response text should be 'Done!'"
     );
 }
@@ -419,6 +423,7 @@ fn test_droid_settings_missing_model_field() {
 
 #[test]
 fn test_droid_jsonl_parses_thinking_blocks() {
+    // With raw JSON, a single JSONL line with thinking+text content blocks = 1 raw event.
     let jsonl = r#"{"type":"message","id":"m1","timestamp":"2026-01-28T17:00:00.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Let me think about this..."},{"type":"text","text":"Here is my answer."}]}}
 "#;
     let mut temp = NamedTempFile::new().unwrap();
@@ -430,31 +435,42 @@ fn test_droid_jsonl_parses_thinking_blocks() {
         .read_incremental(temp.path(), watermark, "test")
         .expect("Failed to parse JSONL");
 
+    // Single JSONL line = single raw event
     assert_eq!(
         result.events.len(),
-        2,
-        "Should parse both thinking and text blocks"
+        1,
+        "Single JSONL line should produce single raw event"
+    );
+
+    // Verify the content blocks are preserved in the raw event
+    let content = result.events[0]["message"]["content"]
+        .as_array()
+        .expect("content should be an array");
+    assert_eq!(content.len(), 2, "Should have 2 content blocks");
+
+    assert_eq!(
+        content[0]["type"].as_str(),
+        Some("thinking"),
+        "First content block should be thinking"
+    );
+    let thinking_text = content[0]["thinking"]
+        .as_str()
+        .expect("thinking block should have text");
+    assert!(
+        thinking_text.contains("think"),
+        "Thinking block should contain 'think', got: {}",
+        thinking_text
     );
 
     assert_eq!(
-        result.events[0].event_type,
-        Some(Some("assistant_thinking".to_string())),
-        "First event should be assistant_thinking"
+        content[1]["type"].as_str(),
+        Some("text"),
+        "Second content block should be text"
     );
-    if let Some(Some(ref text)) = result.events[0].response_text {
-        assert!(
-            text.contains("think"),
-            "First event should be the thinking block, got: {}",
-            text
-        );
-    } else {
-        panic!("Expected response_text in thinking event");
-    }
-
     assert_eq!(
-        result.events[1].event_type,
-        Some(Some("assistant_message".to_string())),
-        "Second event should be assistant_message"
+        content[1]["text"].as_str(),
+        Some("Here is my answer."),
+        "Text block should contain the answer"
     );
 }
 

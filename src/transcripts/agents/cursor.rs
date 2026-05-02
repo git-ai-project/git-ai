@@ -89,12 +89,9 @@ impl Agent for CursorAgent {
         watermark: Box<dyn WatermarkStrategy>,
         session_id: &str,
     ) -> Result<TranscriptBatch, TranscriptError> {
-        // Migrated from formats/cursor.rs (will be removed in Phase 9)
-        use crate::metrics::events::AgentTraceValues;
         use std::fs::File;
         use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
-        // Downcast watermark to ByteOffsetWatermark
         let byte_watermark = watermark
             .as_any()
             .downcast_ref::<ByteOffsetWatermark>()
@@ -107,7 +104,6 @@ impl Agent for CursorAgent {
 
         let start_offset = byte_watermark.0;
 
-        // Open file
         let file = File::open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 TranscriptError::Fatal {
@@ -127,7 +123,6 @@ impl Agent for CursorAgent {
 
         let mut reader = BufReader::new(file);
 
-        // Seek to watermark position
         reader
             .seek(SeekFrom::Start(start_offset))
             .map_err(|e| TranscriptError::Transient {
@@ -139,7 +134,6 @@ impl Agent for CursorAgent {
         let mut current_offset = start_offset;
         let mut line_number = 0;
 
-        // Read lines from watermark position
         let mut line = String::new();
         loop {
             line.clear();
@@ -152,137 +146,31 @@ impl Agent for CursorAgent {
                     })?;
 
             if bytes_read == 0 {
-                // EOF
                 break;
             }
 
             line_number += 1;
-
-            // Update offset before processing (so we skip this line on next read even if parsing fails)
             current_offset += bytes_read as u64;
 
-            // Skip empty lines
             if line.trim().is_empty() {
                 continue;
             }
 
-            // Parse JSONL entry
             let entry: serde_json::Value =
                 serde_json::from_str(&line).map_err(|e| TranscriptError::Parse {
                     line: line_number,
                     message: format!("Invalid JSON in {}: {}", path.display(), e),
                 })?;
 
-            // Cursor doesn't have timestamps in the JSONL format
-            let timestamp_opt = None;
-
-            // Extract events based on role
-            match entry["role"].as_str() {
-                Some("user") => {
-                    // User message - extract text content from content array
-                    if let Some(content_array) = entry["message"]["content"].as_array() {
-                        let mut texts = Vec::new();
-                        for item in content_array {
-                            // Skip tool_result items - those are system-generated responses
-                            if item["type"].as_str() == Some("tool_result") {
-                                continue;
-                            }
-                            if item["type"].as_str() == Some("text")
-                                && let Some(text) = item["text"].as_str()
-                            {
-                                // Strip Cursor's <user_query>...</user_query> wrapper tags
-                                let cleaned = strip_cursor_user_query_tags(text);
-                                if !cleaned.is_empty() {
-                                    texts.push(cleaned);
-                                }
-                            }
-                        }
-
-                        if !texts.is_empty() {
-                            let event = AgentTraceValues::new()
-                                .event_type("user_message")
-                                .prompt_text(texts.join("\n"));
-
-                            events.push(event);
-                        }
-                    }
-                }
-                Some("assistant") => {
-                    // Assistant message - can contain text, thinking, and tool_use
-                    if let Some(content_array) = entry["message"]["content"].as_array() {
-                        for item in content_array {
-                            match item["type"].as_str() {
-                                Some("text") => {
-                                    if let Some(text) = item["text"].as_str()
-                                        && !text.trim().is_empty()
-                                    {
-                                        let event = AgentTraceValues::new()
-                                            .event_type("assistant_message")
-                                            .response_text(text);
-
-                                        events.push(event);
-                                    }
-                                }
-                                Some("thinking") => {
-                                    if let Some(thinking) = item["thinking"].as_str()
-                                        && !thinking.trim().is_empty()
-                                    {
-                                        let event = AgentTraceValues::new()
-                                            .event_type("assistant_thinking")
-                                            .response_text(thinking);
-
-                                        events.push(event);
-                                    }
-                                }
-                                Some("tool_use") => {
-                                    if let Some(name) = item["name"].as_str() {
-                                        let mut event = AgentTraceValues::new()
-                                            .event_type("tool_use")
-                                            .tool_name(name);
-
-                                        // Cursor doesn't typically have tool_use IDs in the same format
-                                        if let Some(id) = item["id"].as_str() {
-                                            event = event.external_tool_use_id(id);
-                                        }
-
-                                        if let Some(ts) = timestamp_opt {
-                                            event = event.event_ts(ts);
-                                        }
-
-                                        events.push(event);
-                                    }
-                                }
-                                _ => {} // Skip unknown content types
-                            }
-                        }
-                    }
-                }
-                _ => {} // Skip unknown roles
-            }
+            events.push(entry);
         }
 
-        // Create new watermark with updated offset
         let new_watermark = Box::new(ByteOffsetWatermark::new(current_offset));
 
-        // Cursor doesn't store model in JSONL - it comes from hook input
         Ok(TranscriptBatch {
             events,
-            model: None,
             new_watermark,
         })
-    }
-}
-
-/// Strip `<user_query>...</user_query>` wrapper tags from Cursor user messages.
-fn strip_cursor_user_query_tags(text: &str) -> String {
-    let trimmed = text.trim();
-    if let Some(inner) = trimmed
-        .strip_prefix("<user_query>")
-        .and_then(|s| s.strip_suffix("</user_query>"))
-    {
-        inner.trim().to_string()
-    } else {
-        trimmed.to_string()
     }
 }
 
@@ -333,23 +221,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, None); // Cursor doesn't have model in JSONL
-    }
-
-    #[test]
-    fn test_strip_cursor_user_query_tags() {
-        assert_eq!(
-            strip_cursor_user_query_tags("<user_query>Hello</user_query>"),
-            "Hello"
-        );
-        assert_eq!(
-            strip_cursor_user_query_tags("  <user_query>  Test  </user_query>  "),
-            "Test"
-        );
-        assert_eq!(strip_cursor_user_query_tags("No tags here"), "No tags here");
-        assert_eq!(
-            strip_cursor_user_query_tags("<user_query>Partial"),
-            "<user_query>Partial"
-        );
+        assert_eq!(result.events[0]["role"].as_str(), Some("user"));
+        assert_eq!(result.events[1]["role"].as_str(), Some("assistant"));
     }
 }

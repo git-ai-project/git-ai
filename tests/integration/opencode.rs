@@ -34,54 +34,59 @@ fn test_parse_opencode_sqlite_transcript() {
         !result.events.is_empty(),
         "Transcript should contain events"
     );
-    assert_eq!(
-        result.model.as_deref(),
-        Some("openai/gpt-5"),
-        "Model should come from sqlite assistant message metadata"
-    );
 
-    // First event should be a user_message
+    // Events are raw JSON objects with "message" (and optional "parts") from SQLite.
+    // The message field contains the raw data column from the message table.
+    // Model is embedded within assistant message metadata, not on TranscriptBatch.
+
+    // First event should be a user message (role in the message data)
     let first = &result.events[0];
-    assert_eq!(
-        first.event_type,
-        Some(Some("user_message".to_string())),
-        "First event should be from user"
-    );
+    let first_role = first["message"]["role"].as_str().unwrap_or("");
+    assert_eq!(first_role, "user", "First event should be from user");
+
+    // Check user message content is in the parts (user text is in parts, not message.content)
+    let first_parts = first["parts"].as_array();
+    let first_text = first_parts
+        .and_then(|parts| parts.iter().find_map(|p| p["text"].as_str()))
+        .unwrap_or("");
     assert!(
-        first
-            .prompt_text
-            .as_ref()
-            .and_then(|v| v.as_ref())
-            .map(|t| t.contains("sqlite transcript data"))
-            .unwrap_or(false),
-        "Expected sqlite fixture user text"
+        first_text.contains("sqlite transcript data"),
+        "Expected sqlite fixture user text, got: {}",
+        first_text
     );
 
-    // Should have an assistant_message event
+    // Should have an assistant message event
     let has_assistant = result
         .events
         .iter()
-        .any(|e| e.event_type == Some(Some("assistant_message".to_string())));
+        .any(|e| e["message"]["role"] == "assistant");
     assert!(has_assistant, "Should have assistant message events");
 
-    // Should have a tool_use event
-    let has_tool_use = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("tool_use".to_string())));
+    // Should have a tool part (type: "tool" in parts of assistant messages)
+    let has_tool_use = result.events.iter().any(|e| {
+        e["parts"]
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(|p| p["type"] == "tool"))
+    });
     assert!(has_tool_use, "Should have tool_use events");
 
-    // Check tool_use event has tool_name
+    // Check tool event has tool name
     let tool_event = result
         .events
         .iter()
-        .find(|e| e.event_type == Some(Some("tool_use".to_string())))
+        .find(|e| {
+            e["parts"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|p| p["type"] == "tool"))
+        })
+        .expect("Should find a tool event");
+    let tool_part = tool_event["parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["type"] == "tool")
         .unwrap();
-    assert_eq!(
-        tool_event.tool_name,
-        Some(Some("edit".to_string())),
-        "Tool name should be 'edit'"
-    );
+    assert_eq!(tool_part["tool"], "edit", "Tool name should be 'edit'");
 }
 
 #[test]

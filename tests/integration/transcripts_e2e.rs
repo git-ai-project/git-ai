@@ -116,8 +116,8 @@ fn test_watermark_integration() {
         .unwrap();
     assert_eq!(result2.events.len(), 1);
     assert_eq!(
-        result2.events[0].prompt_text,
-        Some(Some("Second".to_string()))
+        result2.events[0]["message"]["content"].as_str(),
+        Some("Second")
     );
 
     let offset2: u64 = result2.new_watermark.serialize().parse().unwrap();

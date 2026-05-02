@@ -1,6 +1,5 @@
 //! Gemini agent implementation with sweep discovery.
 
-use crate::metrics::events::AgentTraceValues;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -143,15 +142,9 @@ impl Agent for GeminiAgent {
             })?;
 
         let mut events = Vec::new();
-        let mut model: Option<String> = None;
         let mut max_timestamp = watermark_timestamp;
 
         for message in messages {
-            let msg_type = match message.get("type").and_then(|v| v.as_str()) {
-                Some(t) => t,
-                None => continue,
-            };
-
             // Parse timestamp if available
             let parsed_dt = message
                 .get("timestamp")
@@ -171,69 +164,13 @@ impl Agent for GeminiAgent {
                 }
             }
 
-            let event_ts_epoch = parsed_dt.map(|dt| dt.timestamp() as u64);
-
-            match msg_type {
-                "user" => {
-                    if let Some(content_str) = message.get("content").and_then(|v| v.as_str()) {
-                        let mut event = AgentTraceValues::new()
-                            .event_type("user_message")
-                            .prompt_text(content_str);
-
-                        if let Some(ts) = event_ts_epoch {
-                            event = event.event_ts(ts);
-                        }
-
-                        events.push(event);
-                    }
-                }
-                "gemini" => {
-                    // Extract model (first gemini message with model wins)
-                    if model.is_none()
-                        && let Some(m) = message.get("model").and_then(|v| v.as_str())
-                    {
-                        model = Some(m.to_string());
-                    }
-
-                    // Assistant message
-                    if let Some(content_str) = message.get("content").and_then(|v| v.as_str()) {
-                        let mut event = AgentTraceValues::new()
-                            .event_type("assistant_message")
-                            .response_text(content_str);
-
-                        if let Some(ts) = event_ts_epoch {
-                            event = event.event_ts(ts);
-                        }
-
-                        events.push(event);
-                    }
-
-                    // Tool calls
-                    if let Some(tool_calls) = message.get("toolCalls").and_then(|v| v.as_array()) {
-                        for tool_call in tool_calls {
-                            if let Some(name) = tool_call.get("name").and_then(|v| v.as_str()) {
-                                let mut event = AgentTraceValues::new()
-                                    .event_type("tool_use")
-                                    .tool_name(name);
-
-                                if let Some(ts) = event_ts_epoch {
-                                    event = event.event_ts(ts);
-                                }
-
-                                events.push(event);
-                            }
-                        }
-                    }
-                }
-                _ => {} // Skip unknown types
-            }
+            events.push(message.clone());
         }
 
         let new_watermark = Box::new(TimestampWatermark::new(max_timestamp));
 
         Ok(TranscriptBatch {
             events,
-            model,
             new_watermark,
         })
     }
@@ -275,7 +212,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, Some("gemini-pro".to_string()));
+        // First event is the raw user message
+        assert_eq!(result.events[0]["type"], "user");
+        assert_eq!(result.events[0]["content"], "Hello");
+        // Second event is the raw gemini message
+        assert_eq!(result.events[1]["type"], "gemini");
+        assert_eq!(result.events[1]["content"], "Hi there");
     }
 
     #[test]
@@ -306,5 +248,6 @@ mod tests {
 
         // Only the second message should be returned (strictly greater than watermark)
         assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0]["content"], "New message");
     }
 }

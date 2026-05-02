@@ -29,21 +29,23 @@ fn test_parse_amp_thread_transcript() {
         .read_incremental(&thread_path, watermark, "test")
         .expect("Failed to parse Amp thread JSON");
 
-    assert_eq!(result.model.as_deref(), Some("claude-opus-4-6"));
+    // Events are raw message objects from the Amp thread JSON's messages array.
     assert!(!result.events.is_empty());
 
-    let has_user = result
+    // Model is in the usage field of assistant messages, not on TranscriptBatch.
+    let model = result
         .events
         .iter()
-        .any(|e| e.event_type == Some(Some("user_message".to_string())));
-    let has_assistant = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("assistant_message".to_string())));
-    let has_tool_use = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("tool_use".to_string())));
+        .find_map(|e| e["usage"]["model"].as_str());
+    assert_eq!(model, Some("claude-opus-4-6"));
+
+    let has_user = result.events.iter().any(|e| e["role"] == "user");
+    let has_assistant = result.events.iter().any(|e| e["role"] == "assistant");
+    let has_tool_use = result.events.iter().any(|e| {
+        e["content"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|c| c["type"] == "tool_use"))
+    });
 
     assert!(has_user, "Expected at least one user message");
     assert!(has_assistant, "Expected at least one assistant message");
@@ -60,20 +62,29 @@ fn test_parse_amp_thread_with_thinking_blocks() {
         .read_incremental(&thread_path, watermark, "test")
         .expect("Failed to parse Amp thread JSON");
 
-    assert_eq!(result.model.as_deref(), Some("claude-opus-4-6"));
+    // Model is in the usage field of assistant messages, not on TranscriptBatch.
+    let model = result
+        .events
+        .iter()
+        .find_map(|e| e["usage"]["model"].as_str());
+    assert_eq!(model, Some("claude-opus-4-6"));
 
+    // Raw events are message objects. Thinking blocks are content items within assistant messages.
     let contains_thinking_text = result.events.iter().any(|e| {
-        e.event_type == Some(Some("assistant_thinking".to_string()))
-            && e.response_text
-                .as_ref()
-                .and_then(|v| v.as_ref())
-                .map(|t| t.contains("create a plan"))
-                .unwrap_or(false)
+        e["role"] == "assistant"
+            && e["content"].as_array().is_some_and(|items| {
+                items.iter().any(|c| {
+                    c["type"] == "thinking"
+                        && c["thinking"]
+                            .as_str()
+                            .is_some_and(|t| t.contains("create a plan"))
+                })
+            })
     });
 
     assert!(
         contains_thinking_text,
-        "Assistant transcript should include converted thinking blocks"
+        "Assistant transcript should include thinking blocks with 'create a plan'"
     );
 }
 

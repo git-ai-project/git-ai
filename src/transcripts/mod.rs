@@ -42,14 +42,13 @@
 pub mod agent;
 pub mod agents;
 pub mod db;
-pub mod model_extraction;
 pub mod sweep;
 pub mod types;
 pub mod watermark;
 
 // Re-export main types for convenient access
 pub use db::{SessionRecord, TranscriptsDatabase};
-pub use types::{AgentTraceValues, TranscriptBatch, TranscriptError};
+pub use types::{TranscriptBatch, TranscriptError};
 pub use watermark::{
     ByteOffsetWatermark, HybridWatermark, RecordIndexWatermark, TimestampWatermark,
     WatermarkStrategy, WatermarkType,

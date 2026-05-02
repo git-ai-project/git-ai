@@ -129,7 +129,7 @@ fn test_claude_transcript_parsing_empty_file() {
     assert!(result.is_ok());
     let batch = result.unwrap();
     assert!(batch.events.is_empty());
-    assert!(batch.model.is_none());
+    // TranscriptBatch no longer has a model field
 
     fs::remove_file(temp_file).ok();
 }
@@ -162,7 +162,12 @@ fn test_claude_transcript_parsing_with_empty_lines() {
     assert!(result.is_ok());
     let batch = result.unwrap();
     assert_eq!(batch.events.len(), 2);
-    assert_eq!(batch.model, Some("claude-3".to_string()));
+    // Model is in the raw event data, not on TranscriptBatch
+    let model = batch
+        .events
+        .iter()
+        .find_map(|e| e["message"]["model"].as_str());
+    assert_eq!(model, Some("claude-3"));
 
     fs::remove_file(temp_file).ok();
 }
@@ -354,7 +359,7 @@ fn test_gemini_transcript_parsing_empty_messages() {
     assert!(result.is_ok());
     let batch = result.unwrap();
     assert!(batch.events.is_empty());
-    assert!(batch.model.is_none());
+    // TranscriptBatch no longer has a model field
 
     fs::remove_file(temp_file).ok();
 }
@@ -1020,8 +1025,8 @@ fn test_gemini_transcript_with_unknown_message_types() {
         )
         .expect("Should parse successfully");
 
-    // Should only parse user and gemini messages
-    assert_eq!(batch.events.len(), 2);
+    // Raw events include all messages from the array (no type filtering)
+    assert_eq!(batch.events.len(), 4);
 
     fs::remove_file(temp_file).ok();
 }
@@ -1037,11 +1042,11 @@ fn test_claude_transcript_with_tool_result_in_user_content() {
         .read_incremental(&temp_file, Box::new(ByteOffsetWatermark::new(0)), "test")
         .expect("Should parse successfully");
 
-    // Should skip tool_result but include the text content
+    // Events are raw JSONL entries. The user entry is a single event.
     let user_events: Vec<_> = batch
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
+        .filter(|e| e["type"] == "user")
         .collect();
     assert_eq!(user_events.len(), 1);
 
@@ -1098,13 +1103,13 @@ fn test_gemini_transcript_tool_call_without_args() {
         )
         .expect("Should parse successfully");
 
-    // Tool call should still be added
-    let tool_uses: Vec<_> = batch
+    // Events are raw Gemini messages. The gemini message has a toolCalls array.
+    let tool_messages: Vec<_> = batch
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("tool_use".to_string())))
+        .filter(|e| e["toolCalls"].as_array().is_some_and(|a| !a.is_empty()))
         .collect();
-    assert_eq!(tool_uses.len(), 1);
+    assert_eq!(tool_messages.len(), 1);
 
     fs::remove_file(temp_file).ok();
 }

@@ -1,6 +1,5 @@
 //! Continue CLI agent implementation with sweep discovery.
 
-use crate::metrics::events::AgentTraceValues;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -144,97 +143,13 @@ impl Agent for ContinueAgent {
             &history[already_processed as usize..]
         };
 
-        let mut events = Vec::new();
-
-        for history_item in new_entries {
-            let message = history_item.get("message");
-            let role = message.and_then(|m| m.get("role")).and_then(|v| v.as_str());
-
-            match role {
-                Some("user") => {
-                    // User message: content is a string
-                    if let Some(text) = message
-                        .and_then(|m| m.get("content"))
-                        .and_then(|v| v.as_str())
-                    {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            let event = AgentTraceValues::new()
-                                .event_type("user_message")
-                                .prompt_text(trimmed);
-
-                            events.push(event);
-                        }
-                    }
-                }
-                Some("assistant") => {
-                    // Assistant message: content can be String or Array
-                    if let Some(content) = message.and_then(|m| m.get("content")) {
-                        match content {
-                            serde_json::Value::String(text) => {
-                                let trimmed = text.trim();
-                                if !trimmed.is_empty() {
-                                    let event = AgentTraceValues::new()
-                                        .event_type("assistant_message")
-                                        .response_text(trimmed);
-
-                                    events.push(event);
-                                }
-                            }
-                            serde_json::Value::Array(parts) => {
-                                for part in parts {
-                                    if let Some(text) = part.as_str() {
-                                        let trimmed = text.trim();
-                                        if !trimmed.is_empty() {
-                                            let event = AgentTraceValues::new()
-                                                .event_type("assistant_message")
-                                                .response_text(trimmed);
-
-                                            events.push(event);
-                                        }
-                                    } else if let Some(text) =
-                                        part.get("text").and_then(|v| v.as_str())
-                                    {
-                                        let trimmed = text.trim();
-                                        if !trimmed.is_empty() {
-                                            let event = AgentTraceValues::new()
-                                                .event_type("assistant_message")
-                                                .response_text(trimmed);
-
-                                            events.push(event);
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // Check contextItems on the history item (NOT the message)
-                    if let Some(context_items) =
-                        history_item.get("contextItems").and_then(|v| v.as_array())
-                    {
-                        for item in context_items {
-                            if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
-                                let event = AgentTraceValues::new()
-                                    .event_type("tool_use")
-                                    .tool_name(name);
-
-                                events.push(event);
-                            }
-                        }
-                    }
-                }
-                _ => {} // Skip unknown roles
-            }
-        }
+        let events: Vec<serde_json::Value> = new_entries.to_vec();
 
         // New watermark = total history length
         let new_watermark = Box::new(RecordIndexWatermark::new(total_history_length));
 
         Ok(TranscriptBatch {
             events,
-            model: None,
             new_watermark,
         })
     }
@@ -276,7 +191,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, None);
+        // Raw history items are returned
+        assert_eq!(result.events[0]["message"]["role"], "user");
+        assert_eq!(result.events[1]["message"]["role"], "assistant");
     }
 
     #[test]
@@ -303,6 +220,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.events.len(), 1); // Only the new message
+        assert_eq!(result.events[0]["message"]["content"], "New");
     }
 
     #[test]
@@ -331,7 +249,9 @@ mod tests {
             .read_incremental(file.path(), watermark, "test")
             .unwrap();
 
-        // assistant_message + tool_use
-        assert_eq!(result.events.len(), 2);
+        // One raw history item containing both message and contextItems
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0]["message"]["content"], "Let me check");
+        assert!(result.events[0]["contextItems"].is_array());
     }
 }

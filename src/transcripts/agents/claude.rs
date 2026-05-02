@@ -111,12 +111,9 @@ impl Agent for ClaudeAgent {
         watermark: Box<dyn WatermarkStrategy>,
         session_id: &str,
     ) -> Result<TranscriptBatch, TranscriptError> {
-        // Migrated from formats/claude.rs (will be removed in Phase 9)
-        use crate::metrics::events::AgentTraceValues;
         use std::fs::File;
         use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
-        // Downcast watermark to ByteOffsetWatermark
         let byte_watermark = watermark
             .as_any()
             .downcast_ref::<ByteOffsetWatermark>()
@@ -129,7 +126,6 @@ impl Agent for ClaudeAgent {
 
         let start_offset = byte_watermark.0;
 
-        // Open file
         let file = File::open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 TranscriptError::Fatal {
@@ -149,7 +145,6 @@ impl Agent for ClaudeAgent {
 
         let mut reader = BufReader::new(file);
 
-        // Seek to watermark position
         reader
             .seek(SeekFrom::Start(start_offset))
             .map_err(|e| TranscriptError::Transient {
@@ -158,11 +153,9 @@ impl Agent for ClaudeAgent {
             })?;
 
         let mut events = Vec::new();
-        let mut model = None;
         let mut current_offset = start_offset;
         let mut line_number = 0;
 
-        // Read lines from watermark position
         let mut line = String::new();
         loop {
             line.clear();
@@ -175,184 +168,29 @@ impl Agent for ClaudeAgent {
                     })?;
 
             if bytes_read == 0 {
-                // EOF
                 break;
             }
 
             line_number += 1;
-
-            // Update offset before processing (so we skip this line on next read even if parsing fails)
             current_offset += bytes_read as u64;
 
-            // Skip empty lines
             if line.trim().is_empty() {
                 continue;
             }
 
-            // Parse JSONL entry
             let entry: serde_json::Value =
                 serde_json::from_str(&line).map_err(|e| TranscriptError::Parse {
                     line: line_number,
                     message: format!("Invalid JSON in {}: {}", path.display(), e),
                 })?;
 
-            // Extract timestamp
-            let timestamp_opt = entry["timestamp"].as_str().and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .ok()
-                    .map(|dt| dt.timestamp() as u64)
-            });
-
-            // Extract model from assistant messages
-            if model.is_none()
-                && entry["type"].as_str() == Some("assistant")
-                && let Some(model_str) = entry["message"]["model"].as_str()
-            {
-                model = Some(model_str.to_string());
-            }
-
-            // Extract events based on message type
-            match entry["type"].as_str() {
-                Some("user") => {
-                    // User message - extract text content
-                    let text = if let Some(content) = entry["message"]["content"].as_str() {
-                        content.to_string()
-                    } else if let Some(content_array) = entry["message"]["content"].as_array() {
-                        // Handle content array - concatenate text blocks, skip tool_result
-                        let mut texts = Vec::new();
-                        for item in content_array {
-                            if item["type"].as_str() == Some("tool_result") {
-                                continue; // Skip system-generated tool results
-                            }
-                            if item["type"].as_str() == Some("text")
-                                && let Some(text) = item["text"].as_str()
-                                && !text.trim().is_empty()
-                            {
-                                texts.push(text.to_string());
-                            }
-                        }
-                        texts.join("\n")
-                    } else {
-                        String::new()
-                    };
-
-                    if !text.trim().is_empty() {
-                        let event = AgentTraceValues::new()
-                            .event_type("user_message")
-                            .prompt_text(text);
-
-                        let event = if let Some(ts) = timestamp_opt {
-                            event.event_ts(ts)
-                        } else {
-                            event
-                        };
-
-                        events.push(event);
-                    }
-                }
-                Some("assistant") => {
-                    // Extract token usage once per assistant message
-                    let usage = entry["message"]["usage"].as_object();
-                    let input_tokens = usage
-                        .and_then(|u| u.get("input_tokens"))
-                        .and_then(|v| v.as_u64())
-                        .filter(|&n| n < 100_000_000);
-                    let output_tokens = usage
-                        .and_then(|u| u.get("output_tokens"))
-                        .and_then(|v| v.as_u64())
-                        .filter(|&n| n < 100_000_000);
-                    let cache_read = usage
-                        .and_then(|u| u.get("cache_read_input_tokens"))
-                        .and_then(|v| v.as_u64())
-                        .filter(|&n| n < 100_000_000);
-                    let cache_creation = usage
-                        .and_then(|u| u.get("cache_creation_input_tokens"))
-                        .and_then(|v| v.as_u64())
-                        .filter(|&n| n < 100_000_000);
-
-                    // Assistant message - can contain text, thinking, and tool_use
-                    if let Some(content_array) = entry["message"]["content"].as_array() {
-                        for item in content_array {
-                            match item["type"].as_str() {
-                                Some("text") => {
-                                    if let Some(text) = item["text"].as_str()
-                                        && !text.trim().is_empty()
-                                    {
-                                        let mut event = AgentTraceValues::new()
-                                            .event_type("assistant_message")
-                                            .response_text(text);
-
-                                        if let Some(ts) = timestamp_opt {
-                                            event = event.event_ts(ts);
-                                        }
-                                        if let Some(tokens) = input_tokens {
-                                            event = event.input_tokens(tokens);
-                                        }
-                                        if let Some(tokens) = output_tokens {
-                                            event = event.output_tokens(tokens);
-                                        }
-                                        if let Some(tokens) = cache_read {
-                                            event = event.cache_read_input_tokens(tokens);
-                                        }
-                                        if let Some(tokens) = cache_creation {
-                                            event = event.cache_creation_input_tokens(tokens);
-                                        }
-
-                                        events.push(event);
-                                    }
-                                }
-                                Some("thinking") => {
-                                    if let Some(thinking) = item["thinking"].as_str()
-                                        && !thinking.trim().is_empty()
-                                    {
-                                        let event = AgentTraceValues::new()
-                                            .event_type("assistant_thinking")
-                                            .response_text(thinking);
-
-                                        let event = if let Some(ts) = timestamp_opt {
-                                            event.event_ts(ts)
-                                        } else {
-                                            event
-                                        };
-
-                                        events.push(event);
-                                    }
-                                }
-                                Some("tool_use") => {
-                                    if let Some(name) = item["name"].as_str() {
-                                        let tool_use_id =
-                                            item["id"].as_str().map(|s| s.to_string());
-
-                                        let mut event = AgentTraceValues::new()
-                                            .event_type("tool_use")
-                                            .tool_name(name);
-
-                                        if let Some(id) = tool_use_id {
-                                            event = event.external_tool_use_id(id);
-                                        }
-
-                                        if let Some(ts) = timestamp_opt {
-                                            event = event.event_ts(ts);
-                                        }
-
-                                        events.push(event);
-                                    }
-                                }
-                                _ => {} // Skip unknown content types
-                            }
-                        }
-                    }
-                }
-                _ => {} // Skip unknown message types
-            }
+            events.push(entry);
         }
 
-        // Create new watermark with updated offset
         let new_watermark = Box::new(ByteOffsetWatermark::new(current_offset));
 
         Ok(TranscriptBatch {
             events,
-            model,
             new_watermark,
         })
     }
@@ -484,7 +322,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, Some("claude-sonnet-4".to_string()));
+        assert_eq!(result.events[0]["type"].as_str(), Some("user"));
+        assert_eq!(
+            result.events[1]["message"]["model"].as_str(),
+            Some("claude-sonnet-4")
+        );
     }
 
     #[test]
@@ -526,10 +368,11 @@ mod tests {
 
         assert_eq!(result.events.len(), 1);
         let event = &result.events[0];
-        assert_eq!(event.input_tokens, Some(Some(100)));
-        assert_eq!(event.output_tokens, Some(Some(50)));
-        assert_eq!(event.cache_read_input_tokens, Some(Some(200)));
-        assert_eq!(event.cache_creation_input_tokens, Some(Some(300)));
+        let usage = &event["message"]["usage"];
+        assert_eq!(usage["input_tokens"].as_u64(), Some(100));
+        assert_eq!(usage["output_tokens"].as_u64(), Some(50));
+        assert_eq!(usage["cache_read_input_tokens"].as_u64(), Some(200));
+        assert_eq!(usage["cache_creation_input_tokens"].as_u64(), Some(300));
     }
 
     #[test]

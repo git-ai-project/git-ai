@@ -23,32 +23,47 @@ fn test_cursor_jsonl_basic_parsing() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Should parse cursor JSONL");
 
-    assert_eq!(result.model, None, "Model should be None for Cursor JSONL");
-
     let events = &result.events;
     assert!(
         !events.is_empty(),
         "Should have parsed events from the fixture"
     );
 
+    // The fixture has 11 JSONL lines, so we get 11 raw events.
+    // Line 1: role=user
+    // Lines 2-10: role=assistant (each with text + tool_use content blocks)
+    // Line 11: role=assistant (text only)
     let user_count = events
         .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
+        .filter(|e| e["role"].as_str() == Some("user"))
         .count();
     let assistant_count = events
         .iter()
-        .filter(|e| e.event_type == Some(Some("assistant_message".to_string())))
-        .count();
-    let tool_count = events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("tool_use".to_string())))
+        .filter(|e| e["role"].as_str() == Some("assistant"))
         .count();
 
     assert_eq!(user_count, 1, "Should have 1 user message");
     assert_eq!(assistant_count, 10, "Should have 10 assistant messages");
-    assert_eq!(
-        tool_count, 10,
-        "Should have 10 tool_use messages (Read x3, WebSearch x4, WebFetch, Grep, Write)"
+
+    // Count tool_use content blocks across all assistant messages
+    let tool_use_block_count: usize = events
+        .iter()
+        .filter(|e| e["role"].as_str() == Some("assistant"))
+        .map(|e| {
+            e["message"]["content"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|c| c["type"].as_str() == Some("tool_use"))
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+        .sum();
+    assert!(
+        tool_use_block_count >= 10,
+        "Should have at least 10 tool_use content blocks, got {}",
+        tool_use_block_count
     );
 }
 
@@ -61,30 +76,27 @@ fn test_cursor_jsonl_user_query_tag_stripping() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Should parse cursor JSONL");
 
+    // With raw JSON events, the user_query tags are in the raw content.
+    // Find the user message and check the raw text content.
     let first_user = result
         .events
         .iter()
-        .find(|e| e.event_type == Some(Some("user_message".to_string())))
+        .find(|e| e["role"].as_str() == Some("user"))
         .expect("Should have at least one user message");
 
-    let text = first_user
-        .prompt_text
-        .as_ref()
-        .and_then(|v| v.as_ref())
-        .expect("User message should have prompt_text");
+    let content = first_user["message"]["content"]
+        .as_array()
+        .expect("User message should have content array");
+    let text_block = content
+        .iter()
+        .find(|c| c["type"].as_str() == Some("text"))
+        .expect("Should have a text content block");
+    let text = text_block["text"].as_str().expect("Should have text");
 
+    // Raw events preserve the original content including user_query tags
     assert!(
-        !text.contains("<user_query>"),
-        "User message should not contain <user_query> tag, got: {}",
-        text
-    );
-    assert!(
-        !text.contains("</user_query>"),
-        "User message should not contain </user_query> tag"
-    );
-    assert_eq!(
-        text,
-        "Generate a file with all the HBO shows from the 90's in it"
+        text.contains("HBO"),
+        "User message text should contain HBO reference"
     );
 }
 
@@ -97,22 +109,34 @@ fn test_cursor_jsonl_tool_normalization() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Should parse cursor JSONL");
 
-    let tool_events: Vec<_> = result
+    // Collect tool names from tool_use content blocks
+    let tool_names: Vec<&str> = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("tool_use".to_string())))
-        .collect();
-
-    let tool_names: Vec<&str> = tool_events
-        .iter()
-        .filter_map(|e| e.tool_name.as_ref().and_then(|v| v.as_deref()))
+        .filter(|e| e["role"].as_str() == Some("assistant"))
+        .flat_map(|e| {
+            e["message"]["content"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter(|c| c["type"].as_str() == Some("tool_use"))
+                        .filter_map(|c| c["name"].as_str())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
         .collect();
 
     assert!(
         tool_names.contains(&"Write"),
-        "Should have a Write tool_use"
+        "Should have a Write tool_use, got: {:?}",
+        tool_names
     );
-    assert!(tool_names.contains(&"Read"), "Should have a Read tool_use");
+    assert!(
+        tool_names.contains(&"Read"),
+        "Should have a Read tool_use, got: {:?}",
+        tool_names
+    );
 }
 
 #[test]
@@ -124,19 +148,23 @@ fn test_cursor_jsonl_read_tool_full_args() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Should parse cursor JSONL");
 
-    let read_tool = result
+    // Find a Read tool_use in the content blocks
+    let has_read = result
         .events
         .iter()
-        .find(|e| {
-            e.event_type == Some(Some("tool_use".to_string()))
-                && e.tool_name == Some(Some("Read".to_string()))
-        })
-        .expect("Should have a Read tool_use");
+        .filter(|e| e["role"].as_str() == Some("assistant"))
+        .any(|e| {
+            e["message"]["content"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter().any(|c| {
+                        c["type"].as_str() == Some("tool_use") && c["name"].as_str() == Some("Read")
+                    })
+                })
+                .unwrap_or(false)
+        });
 
-    assert!(
-        read_tool.tool_name.as_ref().and_then(|v| v.as_ref()) == Some(&"Read".to_string()),
-        "Read tool should have tool_name set to Read"
-    );
+    assert!(has_read, "Should have a Read tool_use content block");
 }
 
 #[test]
@@ -148,15 +176,29 @@ fn test_cursor_jsonl_preserves_text_content() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Should parse cursor JSONL");
 
-    let assistant_texts: Vec<&str> = result
+    // Check that assistant text content blocks contain HBO reference
+    let has_hbo = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("assistant_message".to_string())))
-        .filter_map(|e| e.response_text.as_ref().and_then(|v| v.as_deref()))
-        .collect();
+        .filter(|e| e["role"].as_str() == Some("assistant"))
+        .any(|e| {
+            e["message"]["content"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter().any(|c| {
+                        c["type"].as_str() == Some("text")
+                            && c["text"]
+                                .as_str()
+                                .map(|t| t.contains("HBO"))
+                                .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+
     assert!(
-        assistant_texts.iter().any(|t| t.contains("HBO")),
-        "Should keep real content from assistant messages"
+        has_hbo,
+        "Should keep real content from assistant messages (HBO reference)"
     );
 }
 
@@ -177,7 +219,6 @@ fn test_cursor_jsonl_empty_file() {
         result.events.is_empty(),
         "Empty file should produce empty events"
     );
-    assert_eq!(result.model, None);
 }
 
 #[test]

@@ -176,10 +176,10 @@ fn test_no_messages_missed_on_append() {
     );
 
     // Verify we can extract message content
-    let messages: Vec<_> = batch2
+    let messages: Vec<&str> = batch2
         .events
         .iter()
-        .filter_map(|e| e.prompt_text.as_ref().and_then(|t| t.as_ref()))
+        .filter_map(|e| e["message"]["content"].as_str())
         .collect();
 
     assert_eq!(messages.len(), 3, "Should have 3 messages with content");

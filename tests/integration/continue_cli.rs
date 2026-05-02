@@ -24,15 +24,13 @@ fn test_parse_example_continue_cli_json() {
 
     assert!(!result.events.is_empty());
 
+    // Events are raw history items from the Continue session JSON.
+    // The continue-cli-session-simple.json fixture has 4 history entries.
     println!("Parsed {} events:", result.events.len());
     for (i, e) in result.events.iter().enumerate() {
-        if e.event_type == Some(Some("user_message".to_string())) {
-            println!("{}: User: {:?}", i, e.prompt_text);
-        } else if e.event_type == Some(Some("assistant_message".to_string())) {
-            println!("{}: Assistant: {:?}", i, e.response_text);
-        } else if e.event_type == Some(Some("tool_use".to_string())) {
-            println!("{}: ToolUse: {:?}", i, e.tool_name);
-        }
+        let role = e["message"]["role"].as_str().unwrap_or("unknown");
+        let content = e["message"]["content"].as_str().unwrap_or("");
+        println!("{}: {}: {}", i, role, &content[..content.len().min(80)]);
     }
 }
 
@@ -45,10 +43,11 @@ fn test_continue_cli_parses_user_messages() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Failed to parse Continue CLI JSON");
 
+    // Events are raw history items. Filter for user messages by role.
     let user_messages: Vec<_> = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
+        .filter(|e| e["message"]["role"] == "user")
         .collect();
 
     assert_eq!(
@@ -57,9 +56,10 @@ fn test_continue_cli_parses_user_messages() {
         "Should have exactly one user message"
     );
 
-    if let Some(Some(ref text)) = user_messages[0].prompt_text {
-        assert!(text.contains("Add another hello world line"));
-    }
+    let text = user_messages[0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
+    assert!(text.contains("Add another hello world line"));
 }
 
 #[test]
@@ -71,10 +71,11 @@ fn test_continue_cli_parses_assistant_messages() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Failed to parse Continue CLI JSON");
 
+    // Events are raw history items. Filter for assistant messages by role.
     let assistant_messages: Vec<_> = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("assistant_message".to_string())))
+        .filter(|e| e["message"]["role"] == "assistant")
         .collect();
 
     assert!(
@@ -82,9 +83,10 @@ fn test_continue_cli_parses_assistant_messages() {
         "Should have at least one assistant message"
     );
 
-    if let Some(Some(ref text)) = assistant_messages[0].response_text {
-        assert!(text.contains("I'll read the file first"));
-    }
+    let text = assistant_messages[0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
+    assert!(text.contains("I'll read the file first"));
 }
 
 #[test]
@@ -122,17 +124,22 @@ fn test_continue_cli_parses_tool_calls_from_context_items() {
         .read_incremental(temp_file.path(), watermark, "test")
         .expect("Failed to parse Continue CLI JSON");
 
+    // Events are raw history items. Assistant messages with contextItems contain tool calls.
     let tool_uses: Vec<_> = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("tool_use".to_string())))
+        .filter(|e| {
+            e["message"]["role"] == "assistant"
+                && e["contextItems"].as_array().is_some_and(|a| !a.is_empty())
+        })
         .collect();
 
     assert!(!tool_uses.is_empty(), "Should have at least one tool call");
 
-    if let Some(Some(ref name)) = tool_uses[0].tool_name {
-        assert_eq!(name, "Read");
-    }
+    let first_tool_name = tool_uses[0]["contextItems"][0]["name"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(first_tool_name, "Read");
 }
 
 #[test]
@@ -163,18 +170,19 @@ fn test_continue_cli_parses_tool_call_args_from_context_items() {
         .read_incremental(temp_file.path(), watermark, "test")
         .expect("Failed to parse Continue CLI JSON");
 
+    // Events are raw history items. Find one with a contextItem named "Read".
     let read_tool = result
         .events
         .iter()
         .find(|e| {
-            e.event_type == Some(Some("tool_use".to_string()))
-                && e.tool_name == Some(Some("Read".to_string()))
+            e["contextItems"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|ci| ci["name"] == "Read"))
         })
         .expect("Should find a Read tool call");
 
     assert_eq!(
-        read_tool.tool_name,
-        Some(Some("Read".to_string())),
+        read_tool["contextItems"][0]["name"], "Read",
         "Tool call should have name 'Read'"
     );
 }
@@ -219,19 +227,24 @@ fn test_continue_cli_handles_empty_content() {
         .read_incremental(temp_file.path(), watermark, "test")
         .expect("Failed to parse Continue CLI JSON");
 
+    // Events are raw history items. Count by role.
     let user_count = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
+        .filter(|e| e["message"]["role"] == "user")
         .count();
     let assistant_count = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("assistant_message".to_string())))
+        .filter(|e| e["message"]["role"] == "assistant")
         .count();
 
     assert_eq!(user_count, 1);
-    assert_eq!(assistant_count, 1, "Should skip empty content");
+    // Raw events include all history items, even those with empty content
+    assert_eq!(
+        assistant_count, 2,
+        "Raw events include all assistant entries"
+    );
 }
 
 #[test]
