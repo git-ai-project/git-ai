@@ -191,10 +191,12 @@ fn read_session_messages(
     Ok(messages)
 }
 
+// Loads all parts for the session. Parts lack a reliable timestamp correlated with
+// their parent message's `time_created`, so we can't filter by watermark here.
+// Only parts whose message_id matches a filtered message are used by the caller.
 fn read_all_parts(
     conn: &Connection,
     session_id: &str,
-    _after_created: i64,
 ) -> Result<HashMap<String, Vec<OpenCodePart>>, TranscriptError> {
     let mut stmt = conn
         .prepare(
@@ -298,7 +300,7 @@ impl Agent for OpenCodeAgent {
         }
 
         // Read all parts for the session, build HashMap by message_id
-        let parts_by_message = read_all_parts(&conn, session_id, watermark_millis)?;
+        let parts_by_message = read_all_parts(&conn, session_id)?;
 
         // Track model: first assistant with provider_id/model_id
         let mut model: Option<String> = None;
