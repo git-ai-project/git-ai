@@ -1886,6 +1886,40 @@ fn test_known_human_record_includes_email() {
     }
 }
 
+#[test]
+fn test_session_record_human_author_includes_email() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.rs");
+
+    repo.git_ai(&["checkpoint", "human", "main.rs"]).unwrap();
+    fs::write(&file_path, "fn main() {}\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.rs"]).unwrap();
+    repo.stage_all_and_commit("AI commit").unwrap();
+
+    let mut file = repo.filename("main.rs");
+    file.assert_committed_lines(crate::lines!["fn main() {}".ai()]);
+
+    let sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let note = repo
+        .read_authorship_note(&sha)
+        .expect("AI commit should have note");
+    let log = AuthorshipLog::deserialize_from_string(&note).expect("parse note");
+    assert!(
+        !log.metadata.sessions.is_empty(),
+        "should have sessions metadata"
+    );
+    for record in log.metadata.sessions.values() {
+        let author = record
+            .human_author
+            .as_deref()
+            .expect("human_author should be set");
+        assert_eq!(
+            author, "Test User <test@example.com>",
+            "SessionRecord.human_author should be the full git identity"
+        );
+    }
+}
+
 crate::reuse_tests_in_worktree!(
     test_simple_additions_empty_repo,
     test_simple_additions_with_base_commit,
@@ -1899,4 +1933,5 @@ crate::reuse_tests_in_worktree!(
     test_human_stages_some_ai_lines,
     test_ai_generated_file_then_human_full_rewrite,
     test_known_human_record_includes_email,
+    test_session_record_human_author_includes_email,
 );
