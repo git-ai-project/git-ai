@@ -281,6 +281,7 @@ impl AgentPreset for OpenCodePreset {
             crate::transcripts::model_extraction::extract_model(
                 &ts.path,
                 crate::transcripts::sweep::TranscriptFormat::OpenCodeSqlite,
+                Some(session_id.as_str()),
             )
             .ok()
             .flatten()

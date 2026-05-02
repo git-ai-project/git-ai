@@ -7,6 +7,7 @@ use std::path::Path;
 pub fn extract_model(
     path: &Path,
     format: TranscriptFormat,
+    session_id: Option<&str>,
 ) -> Result<Option<String>, TranscriptError> {
     match format {
         TranscriptFormat::ClaudeJsonl | TranscriptFormat::CopilotEventStreamJsonl => {
@@ -15,7 +16,7 @@ pub fn extract_model(
         TranscriptFormat::CopilotSessionJson => extract_model_from_copilot_session_json(path),
         TranscriptFormat::GeminiJson => extract_model_from_gemini_json(path),
         TranscriptFormat::AmpThreadJson => extract_model_from_amp_thread_json(path),
-        TranscriptFormat::OpenCodeSqlite => extract_model_from_opencode_sqlite(path),
+        TranscriptFormat::OpenCodeSqlite => extract_model_from_opencode_sqlite(path, session_id),
         // Droid uses extract_model_from_droid_settings() with the settings path instead
         _ => Ok(None),
     }
@@ -164,7 +165,10 @@ fn extract_model_from_amp_thread_json(path: &Path) -> Result<Option<String>, Tra
     Ok(model)
 }
 
-fn extract_model_from_opencode_sqlite(path: &Path) -> Result<Option<String>, TranscriptError> {
+fn extract_model_from_opencode_sqlite(
+    path: &Path,
+    session_id: Option<&str>,
+) -> Result<Option<String>, TranscriptError> {
     let conn = match rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -176,12 +180,21 @@ fn extract_model_from_opencode_sqlite(path: &Path) -> Result<Option<String>, Tra
     // Cap SQLite page cache to ~2MB to prevent unbounded memory growth on large databases
     let _ = conn.execute_batch("PRAGMA cache_size = -2000;");
 
-    let result: Option<String> = conn
-        .query_row(
+    let (query, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match session_id {
+        Some(sid) => (
+            "SELECT data FROM message WHERE session_id = ? AND data LIKE '%\"model\"%' LIMIT 1",
+            vec![Box::new(sid.to_string())],
+        ),
+        None => (
             "SELECT data FROM message WHERE data LIKE '%\"model\"%' LIMIT 1",
-            [],
-            |row| row.get::<_, String>(0),
-        )
+            vec![],
+        ),
+    };
+
+    let result: Option<String> = conn
+        .query_row(query, rusqlite::params_from_iter(params.iter()), |row| {
+            row.get::<_, String>(0)
+        })
         .ok()
         .and_then(|data| {
             let json: serde_json::Value = serde_json::from_str(&data).ok()?;
@@ -209,7 +222,7 @@ mod tests {
     #[test]
     fn test_extract_model_claude() {
         let path = fixture_path("example-claude-code.jsonl");
-        let result = extract_model(&path, TranscriptFormat::ClaudeJsonl).unwrap();
+        let result = extract_model(&path, TranscriptFormat::ClaudeJsonl, None).unwrap();
         assert_eq!(result, Some("claude-sonnet-4-20250514".to_string()));
     }
 
@@ -223,14 +236,14 @@ mod tests {
     #[test]
     fn test_extract_model_copilot_session() {
         let path = fixture_path("copilot_session_simple.json");
-        let result = extract_model(&path, TranscriptFormat::CopilotSessionJson).unwrap();
+        let result = extract_model(&path, TranscriptFormat::CopilotSessionJson, None).unwrap();
         assert_eq!(result, Some("copilot/claude-sonnet-4".to_string()));
     }
 
     #[test]
     fn test_extract_model_copilot_event_stream() {
         let path = fixture_path("copilot_session_event_stream.jsonl");
-        let result = extract_model(&path, TranscriptFormat::CopilotEventStreamJsonl).unwrap();
+        let result = extract_model(&path, TranscriptFormat::CopilotEventStreamJsonl, None).unwrap();
         // No model field in this fixture
         assert_eq!(result, None);
     }
@@ -238,35 +251,35 @@ mod tests {
     #[test]
     fn test_extract_model_gemini() {
         let path = fixture_path("gemini-session-simple.json");
-        let result = extract_model(&path, TranscriptFormat::GeminiJson).unwrap();
+        let result = extract_model(&path, TranscriptFormat::GeminiJson, None).unwrap();
         assert_eq!(result, Some("gemini-2.5-flash".to_string()));
     }
 
     #[test]
     fn test_extract_model_amp() {
         let path = fixture_path("amp-threads/T-019ca1ce-3ae2-7686-a41e-ccc078837f8a.json");
-        let result = extract_model(&path, TranscriptFormat::AmpThreadJson).unwrap();
+        let result = extract_model(&path, TranscriptFormat::AmpThreadJson, None).unwrap();
         assert_eq!(result, Some("claude-opus-4-6".to_string()));
     }
 
     #[test]
     fn test_extract_model_opencode() {
         let path = fixture_path("opencode-sqlite/opencode.db");
-        let result = extract_model(&path, TranscriptFormat::OpenCodeSqlite).unwrap();
+        let result = extract_model(&path, TranscriptFormat::OpenCodeSqlite, Some("test-session-123")).unwrap();
         assert_eq!(result, Some("gpt-5".to_string()));
     }
 
     #[test]
     fn test_extract_model_missing_file() {
         let path = PathBuf::from("/nonexistent/path/to/file.jsonl");
-        let result = extract_model(&path, TranscriptFormat::ClaudeJsonl).unwrap();
+        let result = extract_model(&path, TranscriptFormat::ClaudeJsonl, None).unwrap();
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_extract_model_empty_file() {
         let file = tempfile::NamedTempFile::new().unwrap();
-        let result = extract_model(file.path(), TranscriptFormat::ClaudeJsonl).unwrap();
+        let result = extract_model(file.path(), TranscriptFormat::ClaudeJsonl, None).unwrap();
         assert_eq!(result, None);
     }
 
@@ -280,14 +293,14 @@ mod tests {
     #[test]
     fn test_extract_model_unsupported_format_returns_none() {
         let path = fixture_path("example-claude-code.jsonl");
-        let result = extract_model(&path, TranscriptFormat::DroidJsonl).unwrap();
+        let result = extract_model(&path, TranscriptFormat::DroidJsonl, None).unwrap();
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_extract_model_claude_model_not_on_last_line() {
         let path = fixture_path("claude-model-not-last.jsonl");
-        let result = extract_model(&path, TranscriptFormat::ClaudeJsonl).unwrap();
+        let result = extract_model(&path, TranscriptFormat::ClaudeJsonl, None).unwrap();
         assert_eq!(result, Some("claude-opus-4-6".to_string()));
     }
 
@@ -300,7 +313,7 @@ mod tests {
         writeln!(file, r#"{{"type":"assistant","message":{{"model":"<synthetic>","content":[{{"type":"text","text":"bye"}}]}}}}"#).unwrap();
         file.flush().unwrap();
 
-        let result = extract_model(file.path(), TranscriptFormat::ClaudeJsonl).unwrap();
+        let result = extract_model(file.path(), TranscriptFormat::ClaudeJsonl, None).unwrap();
         assert_eq!(result, Some("claude-opus-4-6".to_string()));
     }
 

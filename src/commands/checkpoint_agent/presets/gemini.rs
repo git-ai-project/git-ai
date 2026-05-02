@@ -34,6 +34,7 @@ impl AgentPreset for GeminiPreset {
                 model: crate::transcripts::model_extraction::extract_model(
                     Path::new(transcript_path),
                     crate::transcripts::sweep::TranscriptFormat::GeminiJson,
+                    None,
                 )
                 .ok()
                 .flatten()

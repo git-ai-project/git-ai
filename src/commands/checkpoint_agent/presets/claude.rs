@@ -72,6 +72,7 @@ impl AgentPreset for ClaudePreset {
                 model: crate::transcripts::model_extraction::extract_model(
                     Path::new(transcript_path),
                     crate::transcripts::sweep::TranscriptFormat::ClaudeJsonl,
+                    None,
                 )
                 .ok()
                 .flatten()
