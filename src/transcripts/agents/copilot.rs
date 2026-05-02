@@ -126,8 +126,6 @@ fn read_session_json(
     watermark: Box<dyn WatermarkStrategy>,
     session_id: &str,
 ) -> Result<TranscriptBatch, TranscriptError> {
-    use crate::metrics::events::AgentTraceValues;
-
     // Downcast watermark to ByteOffsetWatermark
     let byte_watermark = watermark
         .as_any()
@@ -146,7 +144,6 @@ fn read_session_json(
     if is_codespaces || is_remote_containers {
         return Ok(TranscriptBatch {
             events: Vec::new(),
-            model: None,
             new_watermark: watermark,
         });
     }
@@ -173,7 +170,6 @@ fn read_session_json(
     if byte_watermark.0 >= content.len() as u64 {
         return Ok(TranscriptBatch {
             events: Vec::new(),
-            model: None,
             new_watermark: watermark,
         });
     }
@@ -185,11 +181,6 @@ fn read_session_json(
             message: format!("Invalid JSON in {}: {}", path.display(), e),
         })?;
 
-    // Check if this looks like an event stream format (should use read_event_stream instead)
-    if looks_like_event_stream(&session_json) {
-        return read_event_stream(path, Box::new(ByteOffsetWatermark::new(0)), session_id);
-    }
-
     // Extract the requests array
     let requests = session_json
         .get("requests")
@@ -199,109 +190,14 @@ fn read_session_json(
             message: "requests array not found in Copilot session JSON".to_string(),
         })?;
 
-    // Extract session-level model
-    let model = session_json
-        .get("inputState")
-        .and_then(|is| is.get("selectedModel"))
-        .and_then(|sm| sm.get("identifier"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let mut events = Vec::new();
-
-    for request in requests {
-        // Parse the user timestamp
-        let user_ts_opt = request
-            .get("timestamp")
-            .and_then(|v| v.as_i64())
-            .and_then(|ms| {
-                chrono::TimeZone::timestamp_millis_opt(&chrono::Utc, ms)
-                    .single()
-                    .map(|dt| dt.timestamp() as u64)
-            });
-
-        // Add the user's message
-        if let Some(user_text) = request
-            .get("message")
-            .and_then(|m| m.get("text"))
-            .and_then(|v| v.as_str())
-        {
-            let trimmed = user_text.trim();
-            if !trimmed.is_empty() {
-                let event = AgentTraceValues::new()
-                    .event_type("user_message")
-                    .prompt_text(trimmed);
-
-                let event = if let Some(ts) = user_ts_opt {
-                    event.event_ts(ts)
-                } else {
-                    event
-                };
-
-                events.push(event);
-            }
-        }
-
-        // Process assistant response items
-        if let Some(response_items) = request.get("response").and_then(|v| v.as_array()) {
-            for item in response_items {
-                // Handle different kinds of response items
-                if let Some(kind) = item.get("kind").and_then(|v| v.as_str()) {
-                    match kind {
-                        "markdownContent" => {
-                            if let Some(text) = item.get("value").and_then(|v| v.as_str())
-                                && !text.trim().is_empty()
-                            {
-                                let event = AgentTraceValues::new()
-                                    .event_type("assistant_message")
-                                    .response_text(text);
-
-                                let event = if let Some(ts) = user_ts_opt {
-                                    event.event_ts(ts)
-                                } else {
-                                    event
-                                };
-
-                                events.push(event);
-                            }
-                        }
-                        "toolInvocationSerialized" => {
-                            if let Some(tool_name) = item.get("toolId").and_then(|v| v.as_str()) {
-                                let mut event = AgentTraceValues::new()
-                                    .event_type("tool_use")
-                                    .tool_name(tool_name);
-
-                                if let Some(ts) = user_ts_opt {
-                                    event = event.event_ts(ts);
-                                }
-
-                                events.push(event);
-                            }
-                        }
-                        "textEditGroup" | "prepareToolInvocation" => {
-                            let mut event = AgentTraceValues::new()
-                                .event_type("tool_use")
-                                .tool_name(kind);
-
-                            if let Some(ts) = user_ts_opt {
-                                event = event.event_ts(ts);
-                            }
-
-                            events.push(event);
-                        }
-                        _ => {} // Skip other kinds
-                    }
-                }
-            }
-        }
-    }
+    // Push each request object as a raw serde_json::Value
+    let events: Vec<serde_json::Value> = requests.to_vec();
 
     // Update watermark to end of file
     let new_watermark = Box::new(ByteOffsetWatermark::new(content.len() as u64));
 
     Ok(TranscriptBatch {
         events,
-        model,
         new_watermark,
     })
 }
@@ -312,7 +208,6 @@ fn read_event_stream(
     watermark: Box<dyn WatermarkStrategy>,
     session_id: &str,
 ) -> Result<TranscriptBatch, TranscriptError> {
-    use crate::metrics::events::AgentTraceValues;
     use std::fs::File;
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
@@ -358,7 +253,6 @@ fn read_event_stream(
         })?;
 
     let mut events = Vec::new();
-    let mut model = None;
     let mut current_offset = start_offset;
     let mut line_number = 0;
 
@@ -388,128 +282,14 @@ fn read_event_stream(
             continue;
         }
 
-        // Parse JSONL entry
-        let event: serde_json::Value =
+        // Parse JSONL entry and push raw JSON
+        let entry: serde_json::Value =
             serde_json::from_str(&line).map_err(|e| TranscriptError::Parse {
                 line: line_number,
                 message: format!("Invalid JSON in {}: {}", path.display(), e),
             })?;
 
-        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let data = event.get("data");
-
-        // Extract timestamp
-        let timestamp_opt = event
-            .get("timestamp")
-            .and_then(|v| v.as_str())
-            .and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .ok()
-                    .map(|dt| dt.timestamp() as u64)
-            });
-
-        // Try to extract model if we haven't found it yet
-        if model.is_none()
-            && let Some(d) = data
-        {
-            model = extract_model_hint(d);
-        }
-
-        // Process events based on type
-        match event_type {
-            "user.message" => {
-                if let Some(text) = data
-                    .and_then(|d| d.get("content"))
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    let event = AgentTraceValues::new()
-                        .event_type("user_message")
-                        .prompt_text(text);
-
-                    let event = if let Some(ts) = timestamp_opt {
-                        event.event_ts(ts)
-                    } else {
-                        event
-                    };
-
-                    events.push(event);
-                }
-            }
-            "assistant.message" => {
-                // Extract visible content or reasoning text
-                let assistant_text = data
-                    .and_then(|d| d.get("content"))
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .or_else(|| {
-                        data.and_then(|d| d.get("reasoningText"))
-                            .and_then(|v| v.as_str())
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string)
-                    });
-
-                if let Some(text) = assistant_text {
-                    let event = AgentTraceValues::new()
-                        .event_type("assistant_message")
-                        .response_text(text);
-
-                    let event = if let Some(ts) = timestamp_opt {
-                        event.event_ts(ts)
-                    } else {
-                        event
-                    };
-
-                    events.push(event);
-                }
-
-                // Extract tool requests
-                if let Some(tool_requests) = data
-                    .and_then(|d| d.get("toolRequests"))
-                    .and_then(|v| v.as_array())
-                {
-                    for request in tool_requests {
-                        let name = request
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("tool")
-                            .to_string();
-
-                        let mut event = AgentTraceValues::new()
-                            .event_type("tool_use")
-                            .tool_name(&name);
-
-                        if let Some(ts) = timestamp_opt {
-                            event = event.event_ts(ts);
-                        }
-
-                        events.push(event);
-                    }
-                }
-            }
-            "tool.execution_start" => {
-                let name = data
-                    .and_then(|d| d.get("toolName"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("tool")
-                    .to_string();
-
-                let mut event = AgentTraceValues::new()
-                    .event_type("tool_use")
-                    .tool_name(&name);
-
-                if let Some(ts) = timestamp_opt {
-                    event = event.event_ts(ts);
-                }
-
-                events.push(event);
-            }
-            _ => {} // Skip other event types
-        }
+        events.push(entry);
     }
 
     // Create new watermark with updated offset
@@ -517,68 +297,8 @@ fn read_event_stream(
 
     Ok(TranscriptBatch {
         events,
-        model,
         new_watermark,
     })
-}
-
-/// Check if a parsed JSON looks like a Copilot event stream format.
-fn looks_like_event_stream(parsed: &serde_json::Value) -> bool {
-    parsed
-        .get("type")
-        .and_then(|v| v.as_str())
-        .map(|event_type| {
-            parsed.get("data").map(|v| v.is_object()).unwrap_or(false)
-                && parsed.get("kind").is_none()
-                && (event_type.starts_with("session.")
-                    || event_type.starts_with("assistant.")
-                    || event_type.starts_with("user.")
-                    || event_type.starts_with("tool."))
-        })
-        .unwrap_or(false)
-}
-
-/// Extract model hint from Copilot data.
-fn extract_model_hint(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::Object(map) => {
-            // Check for direct model fields
-            if let Some(model_id) = map.get("modelId").and_then(|v| v.as_str())
-                && model_id.starts_with("copilot/")
-            {
-                return Some(model_id.to_string());
-            }
-            if let Some(model) = map.get("model").and_then(|v| v.as_str())
-                && model.starts_with("copilot/")
-            {
-                return Some(model.to_string());
-            }
-            if let Some(identifier) = map
-                .get("selectedModel")
-                .and_then(|v| v.get("identifier"))
-                .and_then(|v| v.as_str())
-                && identifier.starts_with("copilot/")
-            {
-                return Some(identifier.to_string());
-            }
-            // Recursively search nested objects
-            for val in map.values() {
-                if let Some(found) = extract_model_hint(val) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        serde_json::Value::Array(arr) => arr.iter().find_map(extract_model_hint),
-        serde_json::Value::String(s) => {
-            if s.starts_with("copilot/") {
-                Some(s.to_string())
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -645,8 +365,10 @@ mod tests {
             .read_incremental(file.path(), watermark, "test-session")
             .unwrap();
 
-        assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, Some("copilot/gpt-4".to_string()));
+        // Each request object is returned as a raw JSON event
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0]["message"]["text"], "Hello");
+        assert_eq!(result.events[0]["response"][0]["kind"], "markdownContent");
     }
 
     #[test]
@@ -674,7 +396,11 @@ mod tests {
             .read_incremental(file.path(), watermark, "test-session")
             .unwrap();
 
+        // Both JSONL lines are returned as raw JSON
         assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, Some("copilot/gpt-4".to_string()));
+        assert_eq!(result.events[0]["type"], "user.message");
+        assert_eq!(result.events[0]["data"]["content"], "Hello");
+        assert_eq!(result.events[1]["type"], "assistant.message");
+        assert_eq!(result.events[1]["data"]["modelId"], "copilot/gpt-4");
     }
 }

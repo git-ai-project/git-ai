@@ -1,6 +1,5 @@
 //! Codex agent implementation with sweep discovery.
 
-use crate::metrics::events::AgentTraceValues;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -122,8 +121,7 @@ impl Agent for CodexAgent {
                 retry_after: Duration::from_secs(5),
             })?;
 
-        // Read all new lines into a buffer for two-pass processing
-        let mut parsed_lines: Vec<serde_json::Value> = Vec::new();
+        let mut events = Vec::new();
         let mut current_offset = start_offset;
         let mut line_number = 0;
         let mut line = String::new();
@@ -155,158 +153,14 @@ impl Agent for CodexAgent {
                     message: format!("Invalid JSON in {}: {}", path.display(), e),
                 })?;
 
-            parsed_lines.push(entry);
-        }
-
-        // Pass 1: Primary format processing
-        let mut events = Vec::new();
-        let mut model = None;
-
-        for entry in &parsed_lines {
-            let timestamp_opt = entry["timestamp"].as_str().and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .ok()
-                    .map(|dt| dt.timestamp() as u64)
-            });
-
-            let entry_type = entry["type"].as_str().unwrap_or("");
-            let payload = if entry["payload"].is_object() {
-                &entry["payload"]
-            } else {
-                entry
-            };
-
-            match entry_type {
-                "turn_context" => {
-                    if let Some(m) = payload["model"].as_str() {
-                        model = Some(m.to_string());
-                    }
-                }
-                "response_item" => {
-                    let response_type = payload["type"].as_str().unwrap_or("");
-                    match response_type {
-                        "message" => {
-                            let role = payload["role"].as_str().unwrap_or("");
-                            if let Some(content_array) = payload["content"].as_array() {
-                                match role {
-                                    "user" => {
-                                        let texts: Vec<&str> = content_array
-                                            .iter()
-                                            .filter(|item| {
-                                                item["type"].as_str() == Some("input_text")
-                                            })
-                                            .filter_map(|item| item["text"].as_str())
-                                            .collect();
-                                        let text = texts.join("\n");
-                                        if !text.trim().is_empty() {
-                                            let mut event = AgentTraceValues::new()
-                                                .event_type("user_message")
-                                                .prompt_text(text);
-                                            if let Some(ts) = timestamp_opt {
-                                                event = event.event_ts(ts);
-                                            }
-                                            events.push(event);
-                                        }
-                                    }
-                                    "assistant" => {
-                                        let texts: Vec<&str> = content_array
-                                            .iter()
-                                            .filter(|item| {
-                                                item["type"].as_str() == Some("output_text")
-                                            })
-                                            .filter_map(|item| item["text"].as_str())
-                                            .collect();
-                                        let text = texts.join("\n");
-                                        if !text.trim().is_empty() {
-                                            let mut event = AgentTraceValues::new()
-                                                .event_type("assistant_message")
-                                                .response_text(text);
-                                            if let Some(ts) = timestamp_opt {
-                                                event = event.event_ts(ts);
-                                            }
-                                            events.push(event);
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        "function_call" | "custom_tool_call" | "local_shell_call"
-                        | "web_search_call" => {
-                            let name = payload["name"].as_str().unwrap_or(response_type);
-                            let mut event = AgentTraceValues::new()
-                                .event_type("tool_use")
-                                .tool_name(name);
-                            if let Some(ts) = timestamp_opt {
-                                event = event.event_ts(ts);
-                            }
-                            events.push(event);
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Pass 2: Legacy fallback - if no events from primary format, try legacy event_msg format
-        if events.is_empty() {
-            for entry in &parsed_lines {
-                let timestamp_opt = entry["timestamp"].as_str().and_then(|s| {
-                    chrono::DateTime::parse_from_rfc3339(s)
-                        .ok()
-                        .map(|dt| dt.timestamp() as u64)
-                });
-
-                let entry_type = entry["type"].as_str().unwrap_or("");
-                if entry_type != "event_msg" {
-                    continue;
-                }
-
-                let payload = if entry["payload"].is_object() {
-                    &entry["payload"]
-                } else {
-                    entry
-                };
-
-                let payload_type = payload["type"].as_str().unwrap_or("");
-                match payload_type {
-                    "user_message" => {
-                        if let Some(message) = payload["message"].as_str()
-                            && !message.trim().is_empty()
-                        {
-                            let mut event = AgentTraceValues::new()
-                                .event_type("user_message")
-                                .prompt_text(message);
-                            if let Some(ts) = timestamp_opt {
-                                event = event.event_ts(ts);
-                            }
-                            events.push(event);
-                        }
-                    }
-                    "agent_message" => {
-                        if let Some(message) = payload["message"].as_str()
-                            && !message.trim().is_empty()
-                        {
-                            let mut event = AgentTraceValues::new()
-                                .event_type("assistant_message")
-                                .response_text(message);
-                            if let Some(ts) = timestamp_opt {
-                                event = event.event_ts(ts);
-                            }
-                            events.push(event);
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            // Push raw JSON entry
+            events.push(entry);
         }
 
         let new_watermark = Box::new(ByteOffsetWatermark::new(current_offset));
 
         Ok(TranscriptBatch {
             events,
-            model,
             new_watermark,
         })
     }
@@ -349,12 +203,16 @@ mod tests {
             .read_incremental(file.path(), watermark, "test")
             .unwrap();
 
-        assert_eq!(result.events.len(), 1);
-        assert_eq!(result.model, Some("gpt-4o".to_string()));
+        // Both JSONL lines are returned as raw JSON
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0]["type"], "turn_context");
+        assert_eq!(result.events[0]["payload"]["model"], "gpt-4o");
+        assert_eq!(result.events[1]["type"], "response_item");
+        assert_eq!(result.events[1]["payload"]["role"], "assistant");
     }
 
     #[test]
-    fn test_read_incremental_legacy_fallback() {
+    fn test_read_incremental_legacy_format() {
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -377,6 +235,10 @@ mod tests {
             .read_incremental(file.path(), watermark, "test")
             .unwrap();
 
+        // Both JSONL lines are returned as raw JSON
         assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0]["type"], "event_msg");
+        assert_eq!(result.events[0]["payload"]["type"], "user_message");
+        assert_eq!(result.events[1]["payload"]["type"], "agent_message");
     }
 }

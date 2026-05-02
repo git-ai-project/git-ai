@@ -194,30 +194,27 @@ fn test_windsurf_transcript_parser_basic() {
         .read_incremental(temp_file.path(), watermark, "test")
         .expect("Failed to parse Windsurf JSONL");
 
+    // 3 JSONL lines = 3 raw events
     assert_eq!(result.events.len(), 3);
-    assert!(result.model.is_none());
 
     let e0 = &result.events[0];
-    assert_eq!(e0.event_type, Some(Some("user_message".to_string())));
+    assert_eq!(e0["type"].as_str(), Some("user_input"));
     assert_eq!(
-        e0.prompt_text,
-        Some(Some("Add a hello world function".to_string()))
+        e0["user_input"]["user_response"].as_str(),
+        Some("Add a hello world function")
     );
 
     let e1 = &result.events[1];
-    assert_eq!(e1.event_type, Some(Some("assistant_message".to_string())));
+    assert_eq!(e1["type"].as_str(), Some("planner_response"));
     assert!(
-        e1.response_text
-            .as_ref()
-            .unwrap()
-            .as_ref()
+        e1["planner_response"]["response"]
+            .as_str()
             .unwrap()
             .contains("hello world")
     );
 
     let e2 = &result.events[2];
-    assert_eq!(e2.event_type, Some(Some("tool_use".to_string())));
-    assert_eq!(e2.tool_name, Some(Some("code_action".to_string())));
+    assert_eq!(e2["type"].as_str(), Some("code_action"));
 }
 
 #[test]
@@ -236,11 +233,10 @@ fn test_windsurf_transcript_parser_skips_empty_content() {
         .read_incremental(temp_file.path(), watermark, "test")
         .expect("Failed to parse Windsurf JSONL");
 
-    assert_eq!(result.events.len(), 1);
-    assert_eq!(
-        result.events[0].event_type,
-        Some(Some("assistant_message".to_string()))
-    );
+    // Both JSONL lines are returned as raw events
+    assert_eq!(result.events.len(), 2);
+    assert_eq!(result.events[0]["type"].as_str(), Some("user_input"));
+    assert_eq!(result.events[1]["type"].as_str(), Some("planner_response"));
 }
 
 #[test]
@@ -282,7 +278,6 @@ fn test_windsurf_transcript_parser_empty_file() {
         .expect("Failed to parse empty JSONL");
 
     assert!(result.events.is_empty());
-    assert!(result.model.is_none());
 }
 
 #[test]
@@ -294,53 +289,65 @@ fn test_windsurf_transcript_parser_real_fixture() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Failed to parse real Windsurf JSONL fixture");
 
-    assert!(result.model.is_none());
     assert!(!result.events.is_empty());
 
+    // Check for user_input events
     let user_msgs: Vec<_> = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
+        .filter(|e| e["type"].as_str() == Some("user_input"))
         .collect();
     assert!(
         !user_msgs.is_empty(),
-        "Should have at least one user message"
+        "Should have at least one user_input event"
     );
 
+    // Check for planner_response events
     let assistant_msgs: Vec<_> = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("assistant_message".to_string())))
+        .filter(|e| e["type"].as_str() == Some("planner_response"))
         .collect();
     assert!(
         !assistant_msgs.is_empty(),
-        "Should have at least one assistant message"
+        "Should have at least one planner_response event"
     );
 
+    // Check for tool-like events (code_action, view_file, run_command, etc.)
+    let tool_types = [
+        "code_action",
+        "view_file",
+        "run_command",
+        "find",
+        "grep_search",
+        "list_directory",
+    ];
     let tool_msgs: Vec<_> = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("tool_use".to_string())))
+        .filter(|e| tool_types.iter().any(|t| e["type"].as_str() == Some(t)))
         .collect();
     assert!(
         !tool_msgs.is_empty(),
-        "Should have at least one tool use message"
+        "Should have at least one tool-like event"
     );
 
-    let first_user_text = user_msgs[0].prompt_text.as_ref().unwrap().as_ref().unwrap();
+    // First user message should mention "song"
+    let first_user_text = user_msgs[0]["user_input"]["user_response"]
+        .as_str()
+        .expect("First user message should have text");
     assert!(
         first_user_text.contains("song"),
         "First user message should mention 'song'"
     );
 
-    let code_actions: Vec<_> = tool_msgs
+    // Check for code_action events specifically
+    let code_actions: Vec<_> = result
+        .events
         .iter()
-        .filter(|e| e.tool_name == Some(Some("code_action".to_string())))
+        .filter(|e| e["type"].as_str() == Some("code_action"))
         .collect();
-    assert!(
-        !code_actions.is_empty(),
-        "Should have code_action tool uses"
-    );
+    assert!(!code_actions.is_empty(), "Should have code_action events");
 }
 
 #[test]
@@ -352,31 +359,26 @@ fn test_windsurf_transcript_maps_all_tool_types() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Failed to parse Windsurf JSONL");
 
-    let tool_names: Vec<String> = result
+    // Collect all event types
+    let event_types: Vec<&str> = result
         .events
         .iter()
-        .filter_map(|e| {
-            if e.event_type == Some(Some("tool_use".to_string())) {
-                e.tool_name.as_ref().and_then(|opt| opt.clone())
-            } else {
-                None
-            }
-        })
+        .filter_map(|e| e["type"].as_str())
         .collect();
 
     assert!(
-        tool_names.contains(&"code_action".to_string()),
-        "Should map code_action"
+        event_types.contains(&"code_action"),
+        "Should have code_action events"
     );
     assert!(
-        tool_names.contains(&"view_file".to_string()),
-        "Should map view_file"
+        event_types.contains(&"view_file"),
+        "Should have view_file events"
     );
     assert!(
-        tool_names.contains(&"run_command".to_string()),
-        "Should map run_command"
+        event_types.contains(&"run_command"),
+        "Should have run_command events"
     );
-    assert!(tool_names.contains(&"find".to_string()), "Should map find");
+    assert!(event_types.contains(&"find"), "Should have find events");
 }
 
 // ============================================================================

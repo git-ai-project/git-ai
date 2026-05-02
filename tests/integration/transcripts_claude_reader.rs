@@ -26,39 +26,36 @@ fn test_claude_reader_with_fixture() {
         .read_incremental(&path, watermark, "test-session")
         .unwrap();
 
-    // Should have 3 events: user message, assistant text, tool use
+    // Should have 3 raw events (one per JSONL line)
     assert_eq!(result.events.len(), 3);
-    assert_eq!(result.model, Some("claude-sonnet-4".to_string()));
 
     // Event 0: User message
     let event0 = &result.events[0];
-    assert_eq!(event0.event_type, Some(Some("user_message".to_string())));
+    assert_eq!(event0["type"].as_str(), Some("user"));
     assert_eq!(
-        event0.prompt_text,
-        Some(Some("Write a hello world function".to_string()))
+        event0["message"]["content"].as_str(),
+        Some("Write a hello world function")
     );
-    assert!(event0.event_ts.is_some());
+    assert!(event0["timestamp"].as_str().is_some());
 
     // Event 1: Assistant text
     let event1 = &result.events[1];
+    assert_eq!(event1["type"].as_str(), Some("assistant"));
     assert_eq!(
-        event1.event_type,
-        Some(Some("assistant_message".to_string()))
-    );
-    assert_eq!(
-        event1.response_text,
-        Some(Some(
-            "I'll create a hello world function for you.".to_string()
-        ))
+        event1["message"]["content"][0]["text"].as_str(),
+        Some("I'll create a hello world function for you.")
     );
 
-    // Event 2: Tool use
+    // Event 2: Assistant with tool use
     let event2 = &result.events[2];
-    assert_eq!(event2.event_type, Some(Some("tool_use".to_string())));
-    assert_eq!(event2.tool_name, Some(Some("Write".to_string())));
+    assert_eq!(event2["type"].as_str(), Some("assistant"));
     assert_eq!(
-        event2.external_tool_use_id,
-        Some(Some("toolu_abc123".to_string()))
+        event2["message"]["content"][0]["name"].as_str(),
+        Some("Write")
+    );
+    assert_eq!(
+        event2["message"]["content"][0]["id"].as_str(),
+        Some("toolu_abc123")
     );
 }
 
@@ -108,8 +105,8 @@ fn test_claude_reader_watermark_resume() {
         .unwrap();
     assert_eq!(result2.events.len(), 1);
     assert_eq!(
-        result2.events[0].prompt_text,
-        Some(Some("Second message".to_string()))
+        result2.events[0]["message"]["content"].as_str(),
+        Some("Second message")
     );
 
     // Verify watermark advanced
@@ -180,13 +177,14 @@ fn test_claude_reader_thinking_blocks() {
         .unwrap();
 
     assert_eq!(result.events.len(), 1);
+    assert_eq!(result.events[0]["type"].as_str(), Some("assistant"));
     assert_eq!(
-        result.events[0].event_type,
-        Some(Some("assistant_thinking".to_string()))
+        result.events[0]["message"]["content"][0]["type"].as_str(),
+        Some("thinking")
     );
     assert_eq!(
-        result.events[0].response_text,
-        Some(Some("Let me think about this...".to_string()))
+        result.events[0]["message"]["content"][0]["thinking"].as_str(),
+        Some("Let me think about this...")
     );
 }
 
@@ -209,18 +207,18 @@ fn test_claude_reader_mixed_content() {
         .read_incremental(&file_path, watermark, "test-session")
         .unwrap();
 
-    // Should have 3 events: text, tool_use, text
-    assert_eq!(result.events.len(), 3);
-    assert_eq!(
-        result.events[0].event_type,
-        Some(Some("assistant_message".to_string()))
-    );
-    assert_eq!(
-        result.events[1].event_type,
-        Some(Some("tool_use".to_string()))
-    );
-    assert_eq!(
-        result.events[2].event_type,
-        Some(Some("assistant_message".to_string()))
-    );
+    // Should have 1 raw event (one JSONL line with mixed content blocks)
+    assert_eq!(result.events.len(), 1);
+    let event = &result.events[0];
+    assert_eq!(event["type"].as_str(), Some("assistant"));
+
+    let content = event["message"]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 3);
+    assert_eq!(content[0]["type"].as_str(), Some("text"));
+    assert_eq!(content[0]["text"].as_str(), Some("Here's the code:"));
+    assert_eq!(content[1]["type"].as_str(), Some("tool_use"));
+    assert_eq!(content[1]["name"].as_str(), Some("Write"));
+    assert_eq!(content[1]["id"].as_str(), Some("toolu_xyz"));
+    assert_eq!(content[2]["type"].as_str(), Some("text"));
+    assert_eq!(content[2]["text"].as_str(), Some("Done!"));
 }

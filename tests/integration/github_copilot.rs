@@ -33,7 +33,7 @@ fn copilot_session_parsing_stub() {
     assert!(result.is_ok());
     let batch = result.unwrap();
     assert!(batch.events.is_empty());
-    assert!(batch.model.is_none());
+    // TranscriptBatch no longer has a model field
 }
 
 #[test]
@@ -47,58 +47,37 @@ fn copilot_session_parsing_simple() {
     assert!(result.is_ok());
     let batch = result.unwrap();
 
-    // The session has 3 requests with user messages and tool use response items.
-    // Verify user messages are extracted
-    let user_events: Vec<_> = batch
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
-        .collect();
-    assert_eq!(user_events.len(), 3);
+    // Events are raw request objects from the Copilot session JSON's requests array.
+    // The session has 3 requests.
+    assert_eq!(batch.events.len(), 3);
+
+    // Verify user messages are in the raw request objects
     assert_eq!(
-        user_events[0].prompt_text,
-        Some(Some("What can you help me with?".to_string()))
+        batch.events[0]["message"]["text"],
+        "What can you help me with?"
     );
     assert_eq!(
-        user_events[1].prompt_text,
-        Some(Some("Change Bonjour World to hello world".to_string()))
+        batch.events[1]["message"]["text"],
+        "Change Bonjour World to hello world"
     );
     assert_eq!(
-        user_events[2].prompt_text,
-        Some(Some("Search for any other mentions of Bonjour".to_string()))
+        batch.events[2]["message"]["text"],
+        "Search for any other mentions of Bonjour"
     );
 
-    // Verify tool use events are extracted
-    let tool_events: Vec<_> = batch
+    // Verify tool use response items exist in raw request responses
+    let all_response_items: Vec<&serde_json::Value> = batch
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("tool_use".to_string())))
+        .flat_map(|req| {
+            req["response"]
+                .as_array()
+                .map_or(vec![], |a| a.iter().collect())
+        })
         .collect();
-    assert!(!tool_events.is_empty());
-    assert!(
-        tool_events
-            .iter()
-            .any(|e| e.tool_name == Some(Some("prepareToolInvocation".to_string())))
-    );
-    assert!(
-        tool_events
-            .iter()
-            .any(|e| e.tool_name == Some(Some("copilot_replaceString".to_string())))
-    );
-    assert!(
-        tool_events
-            .iter()
-            .any(|e| e.tool_name == Some(Some("textEditGroup".to_string())))
-    );
-    assert!(
-        tool_events
-            .iter()
-            .any(|e| e.tool_name == Some(Some("copilot_findTextInFiles".to_string())))
-    );
+    assert!(!all_response_items.is_empty());
 
-    // Model is extracted from inputState.selectedModel.identifier (not per-request modelId).
-    // The simple fixture doesn't have inputState, so model is None.
-    assert!(batch.model.is_none());
+    // The simple fixture doesn't have inputState, so no model info in raw data.
 }
 
 // NOTE: test_copilot_extracts_edited_filepaths, test_copilot_no_edited_filepaths_when_no_edits,
@@ -120,7 +99,7 @@ fn test_copilot_returns_empty_transcript_in_codespaces() {
     assert!(result.is_ok());
     let batch = result.unwrap();
     assert!(batch.events.is_empty());
-    assert!(batch.model.is_none());
+    // TranscriptBatch no longer has a model field
 
     unsafe {
         if let Some(original) = original_codespaces {
@@ -146,7 +125,7 @@ fn test_copilot_returns_empty_transcript_in_remote_containers() {
     assert!(result.is_ok());
     let batch = result.unwrap();
     assert!(batch.events.is_empty());
-    assert!(batch.model.is_none());
+    // TranscriptBatch no longer has a model field
 
     unsafe {
         if let Some(orig) = original {
@@ -457,7 +436,7 @@ fn copilot_session_plain_json_unaffected() {
     assert!(!batch.events.is_empty());
     // Model is extracted from inputState.selectedModel.identifier (not per-request modelId).
     // The simple fixture doesn't have inputState, so model is None.
-    assert!(batch.model.is_none());
+    // TranscriptBatch no longer has a model field
 }
 
 // ============================================================================
@@ -690,25 +669,27 @@ fn copilot_session_parsing_event_stream_jsonl() {
     assert!(result.is_ok());
     let batch = result.unwrap();
 
-    assert!(batch.model.is_none());
+    // TranscriptBatch no longer has a model field
     assert!(!batch.events.is_empty());
+    // Events are raw JSONL lines from the event stream.
+    // The fixture has 7 lines: session.start, user.message, assistant.message x3, tool.execution_start x2
     assert!(
-        batch
-            .events
-            .iter()
-            .any(|e| e.event_type == Some(Some("user_message".to_string())))
+        batch.events.iter().any(|e| e["type"] == "user.message"),
+        "Should have user.message events"
     );
     assert!(
         batch
             .events
             .iter()
-            .any(|e| e.event_type == Some(Some("assistant_message".to_string())))
+            .any(|e| e["type"] == "assistant.message"),
+        "Should have assistant.message events"
     );
     assert!(
         batch
             .events
             .iter()
-            .any(|e| e.event_type == Some(Some("tool_use".to_string())))
+            .any(|e| e["type"] == "tool.execution_start"),
+        "Should have tool.execution_start events"
     );
 }
 
@@ -727,7 +708,12 @@ fn copilot_session_event_stream_jsonl_model_hint_is_detected() {
     let result = agent.read_incremental(temp_file.path(), watermark, "test");
     assert!(result.is_ok());
     let batch = result.unwrap();
-    assert_eq!(batch.model, Some("copilot/gpt-4o".to_string()));
+    // Model is now in the raw event data, not on TranscriptBatch
+    let model = batch
+        .events
+        .iter()
+        .find_map(|e| e["data"]["modelId"].as_str());
+    assert_eq!(model, Some("copilot/gpt-4o"));
 }
 
 // ============================================================================

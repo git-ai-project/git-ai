@@ -18,60 +18,28 @@ fn test_parse_example_claude_code_jsonl_with_model() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Failed to parse JSONL");
 
-    // Verify we parsed some events
+    // Verify we parsed some events (one per JSONL line)
     assert!(!result.events.is_empty());
 
-    // Verify we extracted the model
-    assert!(result.model.is_some());
-    let model_name = result.model.unwrap();
+    // Model is embedded in assistant message events, not on TranscriptBatch.
+    // Find the first assistant event and check its model.
+    let first_assistant = result
+        .events
+        .iter()
+        .find(|e| e["type"].as_str() == Some("assistant"))
+        .expect("Should have at least one assistant event");
+    let model_name = first_assistant["message"]["model"]
+        .as_str()
+        .expect("Assistant event should have model");
     println!("Extracted model: {}", model_name);
-
-    // Based on the example file, we should get claude-sonnet-4-20250514
     assert_eq!(model_name, "claude-sonnet-4-20250514");
 
     // Print the parsed events for inspection
     println!("Parsed {} events:", result.events.len());
     for (i, event) in result.events.iter().enumerate() {
-        match event.event_type.as_ref().and_then(|v| v.as_deref()) {
-            Some("user_message") => {
-                let text = event
-                    .prompt_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: User: {}", i, text);
-            }
-            Some("assistant_message") => {
-                let text = event
-                    .response_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: Assistant: {}", i, text);
-            }
-            Some("tool_use") => {
-                let name = event
-                    .tool_name
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: ToolUse: {}", i, name);
-            }
-            Some("assistant_thinking") => {
-                let text = event
-                    .response_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: Thinking: {}", i, text);
-            }
-            Some(other) => {
-                println!("{}: {}", i, other);
-            }
-            None => {
-                println!("{}: (no event type)", i);
-            }
-        }
+        let event_type = event["type"].as_str().unwrap_or("unknown");
+        let role = event["message"]["role"].as_str().unwrap_or("");
+        println!("{}: type={}, role={}", i, event_type, role);
     }
 }
 
@@ -309,142 +277,137 @@ fn test_parse_claude_code_jsonl_with_thinking() {
     // Verify we parsed some events
     assert!(!result.events.is_empty());
 
-    // Verify we extracted the model
-    assert!(result.model.is_some());
-    let model_name = result.model.unwrap();
+    // Model is embedded in assistant events
+    let first_assistant = result
+        .events
+        .iter()
+        .find(|e| e["type"].as_str() == Some("assistant"))
+        .expect("Should have at least one assistant event");
+    let model_name = first_assistant["message"]["model"]
+        .as_str()
+        .expect("Assistant event should have model");
     println!("Extracted model: {}", model_name);
     assert_eq!(model_name, "claude-sonnet-4-5-20250929");
 
     // Print the parsed events for inspection
-    println!("Parsed {} events:", result.events.len());
+    println!("Parsed {} raw events:", result.events.len());
     for (i, event) in result.events.iter().enumerate() {
-        match event.event_type.as_ref().and_then(|v| v.as_deref()) {
-            Some("user_message") => {
-                let text = event
-                    .prompt_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!(
-                    "{}: User: {}",
-                    i,
-                    text.chars().take(100).collect::<String>()
-                )
-            }
-            Some("assistant_message") => {
-                let text = event
-                    .response_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!(
-                    "{}: Assistant: {}",
-                    i,
-                    text.chars().take(100).collect::<String>()
-                )
-            }
-            Some("tool_use") => {
-                let name = event
-                    .tool_name
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: ToolUse: {}", i, name)
-            }
-            Some("assistant_thinking") => {
-                let text = event
-                    .response_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!(
-                    "{}: Thinking: {}",
-                    i,
-                    text.chars().take(100).collect::<String>()
-                )
-            }
-            Some(other) => println!("{}: {}", i, other),
-            None => println!("{}: (no event type)", i),
-        }
+        let event_type = event["type"].as_str().unwrap_or("unknown");
+        let role = event["message"]["role"].as_str().unwrap_or("");
+        let content = event["message"]["content"].as_array();
+        let content_types: Vec<&str> = content
+            .map(|arr| arr.iter().filter_map(|c| c["type"].as_str()).collect())
+            .unwrap_or_default();
+        println!(
+            "{}: type={}, role={}, content_types={:?}",
+            i, event_type, role, content_types
+        );
     }
 
+    // The fixture has 10 lines:
+    // 0: summary (no message)
+    // 1: file-history-snapshot (no message)
+    // 2: user (content is a string, not array)
+    // 3: assistant with thinking content block
+    // 4: assistant with text content block
+    // 5: assistant with tool_use content block
+    // 6: file-history-snapshot (no message)
+    // 7: user with tool_result
+    // 8: assistant with thinking content block
+    // 9: assistant with text content block
     assert_eq!(
         result.events.len(),
-        6,
-        "Expected 6 events (1 user_message + 2 assistant_thinking + 2 assistant_message + 1 tool_use)"
+        10,
+        "Expected 10 raw events (one per JSONL line)"
     );
 
+    // Line 2 (index 2) is user message
     assert_eq!(
-        result.events[0]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("user_message"),
-        "First event should be user_message"
+        result.events[2]["type"].as_str(),
+        Some("user"),
+        "Third event should be user type"
     );
 
+    // Line 3 (index 3) is assistant with thinking
     assert_eq!(
-        result.events[1]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_thinking"),
-        "Second event should be assistant_thinking"
+        result.events[3]["type"].as_str(),
+        Some("assistant"),
+        "Fourth event should be assistant type"
     );
     {
-        let text = result.events[1]
-            .response_text
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
+        let content = result.events[3]["message"]["content"]
+            .as_array()
+            .expect("content should be array");
+        assert_eq!(
+            content[0]["type"].as_str(),
+            Some("thinking"),
+            "First content block should be thinking"
+        );
+        let thinking_text = content[0]["thinking"]
+            .as_str()
+            .expect("thinking block should have thinking text");
         assert!(
-            text.contains("add another"),
+            thinking_text.contains("add another"),
             "Thinking event should contain thinking content"
         );
     }
 
+    // Line 4 (index 4) is assistant with text
     assert_eq!(
-        result.events[2]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Third event should be assistant_message"
+        result.events[4]["type"].as_str(),
+        Some("assistant"),
+        "Fifth event should be assistant type"
+    );
+    assert_eq!(
+        result.events[4]["message"]["content"][0]["type"].as_str(),
+        Some("text"),
+        "Content block should be text"
     );
 
+    // Line 5 (index 5) is assistant with tool_use
     assert_eq!(
-        result.events[3]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("tool_use"),
-        "Fourth event should be tool_use"
+        result.events[5]["type"].as_str(),
+        Some("assistant"),
+        "Sixth event should be assistant type"
     );
     {
-        let name = result.events[3]
-            .tool_name
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
-        assert_eq!(name, "Edit", "Tool should be Edit");
+        let content = result.events[5]["message"]["content"]
+            .as_array()
+            .expect("content should be array");
+        assert_eq!(
+            content[0]["type"].as_str(),
+            Some("tool_use"),
+            "Content block should be tool_use"
+        );
+        assert_eq!(
+            content[0]["name"].as_str(),
+            Some("Edit"),
+            "Tool should be Edit"
+        );
     }
 
+    // Line 8 (index 8) is assistant with thinking (second thinking block)
     assert_eq!(
-        result.events[4]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_thinking"),
-        "Fifth event should be assistant_thinking"
+        result.events[8]["type"].as_str(),
+        Some("assistant"),
+        "Ninth event should be assistant type"
+    );
+    assert_eq!(
+        result.events[8]["message"]["content"][0]["type"].as_str(),
+        Some("thinking"),
+        "Content block should be thinking"
     );
 
+    // Line 9 (index 9) is assistant with text
     assert_eq!(
-        result.events[5]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Sixth event should be assistant_message"
+        result.events[9]["type"].as_str(),
+        Some("assistant"),
+        "Tenth event should be assistant type"
+    );
+    assert_eq!(
+        result.events[9]["message"]["content"][0]["type"].as_str(),
+        Some("text"),
+        "Content block should be text"
     );
 }
 
@@ -453,6 +416,9 @@ fn test_tool_results_are_not_parsed_as_user_messages() {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    // With raw JSON events, tool_result lines ARE included as raw events.
+    // The old behavior filtered them out at the AgentTraceValues level.
+    // Now we just get raw JSONL lines.
     let jsonl_content = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_123","type":"tool_result","content":"File created successfully"}]},"timestamp":"2025-01-01T00:00:00Z"}
 {"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"text","text":"Done!"}]},"timestamp":"2025-01-01T00:00:01Z"}"#;
 
@@ -466,26 +432,27 @@ fn test_tool_results_are_not_parsed_as_user_messages() {
         .read_incremental(temp_path, watermark, "test")
         .expect("Failed to parse JSONL");
 
+    // Both lines are returned as raw events
     assert_eq!(
         result.events.len(),
-        1,
-        "Tool results should not be parsed as user messages"
+        2,
+        "Both JSONL lines should be returned as raw events"
     );
 
     assert_eq!(
-        result.events[0]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Only event should be assistant_message"
+        result.events[0]["type"].as_str(),
+        Some("user"),
+        "First event should be user type"
+    );
+    assert_eq!(
+        result.events[1]["type"].as_str(),
+        Some("assistant"),
+        "Second event should be assistant type"
     );
     {
-        let text = result.events[0]
-            .response_text
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
+        let text = result.events[1]["message"]["content"][0]["text"]
+            .as_str()
+            .expect("Should have text");
         assert_eq!(text, "Done!");
     }
 }
@@ -511,33 +478,27 @@ fn test_user_text_content_blocks_are_parsed_correctly() {
     assert_eq!(
         result.events.len(),
         2,
-        "Should have user_message and assistant_message events"
+        "Should have 2 raw events (one per JSONL line)"
     );
 
+    // First event is user type
     assert_eq!(
-        result.events[0]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("user_message"),
-        "First event should be user_message"
+        result.events[0]["type"].as_str(),
+        Some("user"),
+        "First event should be user type"
     );
     {
-        let text = result.events[0]
-            .prompt_text
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
+        let text = result.events[0]["message"]["content"][0]["text"]
+            .as_str()
+            .expect("User message should have text");
         assert_eq!(text, "Hello, can you help me?");
     }
 
+    // Second event is assistant type
     assert_eq!(
-        result.events[1]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Second event should be assistant_message"
+        result.events[1]["type"].as_str(),
+        Some("assistant"),
+        "Second event should be assistant type"
     );
 }
 
@@ -681,160 +642,142 @@ fn test_parse_claude_code_jsonl_with_plan() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Failed to parse JSONL");
 
-    assert_eq!(result.model.unwrap(), "claude-sonnet-4-20250514");
-
-    println!("Parsed {} events:", result.events.len());
-    for (i, event) in result.events.iter().enumerate() {
-        match event.event_type.as_ref().and_then(|v| v.as_deref()) {
-            Some("user_message") => {
-                let text = event
-                    .prompt_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: User: {}", i, text.chars().take(80).collect::<String>())
-            }
-            Some("assistant_message") => {
-                let text = event
-                    .response_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!(
-                    "{}: Assistant: {}",
-                    i,
-                    text.chars().take(80).collect::<String>()
-                )
-            }
-            Some("tool_use") => {
-                let name = event
-                    .tool_name
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: ToolUse: {}", i, name)
-            }
-            Some("assistant_thinking") => {
-                let text = event
-                    .response_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!(
-                    "{}: Thinking: {}",
-                    i,
-                    text.chars().take(80).collect::<String>()
-                )
-            }
-            Some(other) => println!("{}: {}", i, other),
-            None => println!("{}: (no event type)", i),
-        }
-    }
-
-    // The new ClaudeAgent emits tool_use events for plan file writes/edits
-    // instead of separate Plan events. Plan extraction is now handled
-    // separately via is_plan_file_path and extract_plan_from_tool_use.
+    // Model is in assistant events
+    let first_assistant = result
+        .events
+        .iter()
+        .find(|e| e["type"].as_str() == Some("assistant"))
+        .expect("Should have at least one assistant event");
     assert_eq!(
-        result.events.len(),
-        7,
-        "Expected 7 events (1 user_message + 3 assistant_message + 3 tool_use)"
+        first_assistant["message"]["model"].as_str().unwrap(),
+        "claude-sonnet-4-20250514"
     );
 
-    // [0]: user_message asking about authentication
-    {
-        let event = &result.events[0];
-        assert_eq!(
-            event.event_type.as_ref().and_then(|v| v.as_deref()),
-            Some("user_message"),
-            "First event should be user_message"
+    // The fixture has 10 lines (raw events):
+    // 0: summary
+    // 1: user (asking about authentication)
+    // 2: assistant (text: "I'll create a plan...")
+    // 3: assistant (tool_use: Write to plan file)
+    // 4: user (tool_result)
+    // 5: assistant (text: "Now let me update...")
+    // 6: assistant (tool_use: Edit to plan file)
+    // 7: user (tool_result)
+    // 8: assistant (tool_use: Edit to main.rs - code edit)
+    // 9: assistant (text: "I've created the plan...")
+    println!("Parsed {} events:", result.events.len());
+    for (i, event) in result.events.iter().enumerate() {
+        let event_type = event["type"].as_str().unwrap_or("unknown");
+        let role = event["message"]["role"].as_str().unwrap_or("");
+        let content = event["message"]["content"].as_array();
+        let content_types: Vec<&str> = content
+            .map(|arr| arr.iter().filter_map(|c| c["type"].as_str()).collect())
+            .unwrap_or_default();
+        println!(
+            "{}: type={}, role={}, content_types={:?}",
+            i, event_type, role, content_types
         );
-        let text = event
-            .prompt_text
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
+    }
+
+    assert_eq!(
+        result.events.len(),
+        10,
+        "Expected 10 raw events (one per JSONL line)"
+    );
+
+    // [1]: user message asking about authentication
+    {
+        let event = &result.events[1];
+        assert_eq!(
+            event["type"].as_str(),
+            Some("user"),
+            "Second event should be user type"
+        );
+        // User message content is a plain string in this fixture
+        let content = event["message"]["content"]
+            .as_str()
+            .expect("User message should have string content");
         assert!(
-            text.contains("authentication"),
+            content.contains("authentication"),
             "User message should ask about authentication"
         );
     }
 
-    // [1]: assistant_message
+    // [2]: assistant message (text)
     assert_eq!(
-        result.events[1]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Second event should be assistant_message"
+        result.events[2]["type"].as_str(),
+        Some("assistant"),
+        "Third event should be assistant type"
     );
 
-    // [2]: tool_use (Write to plan file) - was previously Plan
+    // [3]: assistant with tool_use (Write to plan file)
     {
-        let event = &result.events[2];
+        let event = &result.events[3];
         assert_eq!(
-            event.event_type.as_ref().and_then(|v| v.as_deref()),
-            Some("tool_use"),
-            "Third event should be tool_use (plan Write)"
+            event["type"].as_str(),
+            Some("assistant"),
+            "Fourth event should be assistant type"
         );
-        let name = event
-            .tool_name
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
-        assert_eq!(name, "Write", "Should be a Write tool use for the plan");
+        let content = event["message"]["content"]
+            .as_array()
+            .expect("content should be array");
+        assert_eq!(content[0]["type"].as_str(), Some("tool_use"));
+        assert_eq!(
+            content[0]["name"].as_str(),
+            Some("Write"),
+            "Should be a Write tool use for the plan"
+        );
     }
 
-    // [3]: assistant_message
+    // [5]: assistant message (text)
     assert_eq!(
-        result.events[3]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Fourth event should be assistant_message"
+        result.events[5]["type"].as_str(),
+        Some("assistant"),
+        "Sixth event should be assistant type"
     );
 
-    // [4]: tool_use (Edit to plan file) - was previously Plan
+    // [6]: assistant with tool_use (Edit to plan file)
     {
-        let event = &result.events[4];
+        let event = &result.events[6];
         assert_eq!(
-            event.event_type.as_ref().and_then(|v| v.as_deref()),
-            Some("tool_use"),
-            "Fifth event should be tool_use (plan Edit)"
+            event["type"].as_str(),
+            Some("assistant"),
+            "Seventh event should be assistant type"
         );
-        let name = event
-            .tool_name
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
-        assert_eq!(name, "Edit", "Should be an Edit tool use for the plan");
+        let content = event["message"]["content"]
+            .as_array()
+            .expect("content should be array");
+        assert_eq!(content[0]["type"].as_str(), Some("tool_use"));
+        assert_eq!(
+            content[0]["name"].as_str(),
+            Some("Edit"),
+            "Should be an Edit tool use for the plan"
+        );
     }
 
-    // [5]: tool_use (Edit to main.rs - a code edit, not a plan)
+    // [8]: assistant with tool_use (Edit to main.rs - code edit)
     {
-        let event = &result.events[5];
+        let event = &result.events[8];
         assert_eq!(
-            event.event_type.as_ref().and_then(|v| v.as_deref()),
-            Some("tool_use"),
-            "Sixth event should be tool_use (code Edit)"
+            event["type"].as_str(),
+            Some("assistant"),
+            "Ninth event should be assistant type"
         );
-        let name = event
-            .tool_name
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
-        assert_eq!(name, "Edit", "Should be an Edit tool use for code");
+        let content = event["message"]["content"]
+            .as_array()
+            .expect("content should be array");
+        assert_eq!(content[0]["type"].as_str(), Some("tool_use"));
+        assert_eq!(
+            content[0]["name"].as_str(),
+            Some("Edit"),
+            "Should be an Edit tool use for code"
+        );
     }
 
-    // [6]: assistant_message
+    // [9]: assistant message (text)
     assert_eq!(
-        result.events[6]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Last event should be assistant_message"
+        result.events[9]["type"].as_str(),
+        Some("assistant"),
+        "Last event should be assistant type"
     );
 }
 
@@ -856,15 +799,19 @@ fn test_plan_write_emits_tool_use_event() {
         .unwrap();
 
     assert_eq!(result.events.len(), 1);
-    // The new ClaudeAgent emits tool_use events for plan file writes
     let event = &result.events[0];
+    // Raw event is the assistant JSONL line
+    assert_eq!(event["type"].as_str(), Some("assistant"));
+    let content = event["message"]["content"]
+        .as_array()
+        .expect("content should be array");
     assert_eq!(
-        event.event_type.as_ref().and_then(|v| v.as_deref()),
+        content[0]["type"].as_str(),
         Some("tool_use"),
-        "Plan write should be emitted as tool_use"
+        "Plan write should be a tool_use content block"
     );
     assert_eq!(
-        event.tool_name.as_ref().and_then(|v| v.as_deref()),
+        content[0]["name"].as_str(),
         Some("Write"),
         "Tool name should be Write"
     );
@@ -888,15 +835,18 @@ fn test_plan_edit_emits_tool_use_event() {
         .unwrap();
 
     assert_eq!(result.events.len(), 1);
-    // The new ClaudeAgent emits tool_use events for plan file edits
     let event = &result.events[0];
+    assert_eq!(event["type"].as_str(), Some("assistant"));
+    let content = event["message"]["content"]
+        .as_array()
+        .expect("content should be array");
     assert_eq!(
-        event.event_type.as_ref().and_then(|v| v.as_deref()),
+        content[0]["type"].as_str(),
         Some("tool_use"),
-        "Plan edit should be emitted as tool_use"
+        "Plan edit should be a tool_use content block"
     );
     assert_eq!(
-        event.tool_name.as_ref().and_then(|v| v.as_deref()),
+        content[0]["name"].as_str(),
         Some("Edit"),
         "Tool name should be Edit"
     );
@@ -921,15 +871,16 @@ fn test_non_plan_edit_remains_tool_use() {
 
     assert_eq!(result.events.len(), 1);
     let event = &result.events[0];
+    assert_eq!(event["type"].as_str(), Some("assistant"));
+    let content = event["message"]["content"]
+        .as_array()
+        .expect("content should be array");
     assert_eq!(
-        event.event_type.as_ref().and_then(|v| v.as_deref()),
+        content[0]["type"].as_str(),
         Some("tool_use"),
         "Non-plan Edit should be tool_use"
     );
-    assert_eq!(
-        event.tool_name.as_ref().and_then(|v| v.as_deref()),
-        Some("Edit"),
-    );
+    assert_eq!(content[0]["name"].as_str(), Some("Edit"));
 }
 
 #[test]
@@ -937,6 +888,7 @@ fn test_mixed_plan_and_code_edits_in_single_assistant_message() {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    // Single JSONL line with two tool_use content blocks
     let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"/home/user/.claude/plans/tender-watching-thompson.md","content":"# Plan\nStep 1"}},{"type":"tool_use","id":"toolu_2","name":"Write","input":{"file_path":"/home/user/project/src/lib.rs","content":"pub fn hello() {}"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
 
     let mut temp_file = NamedTempFile::new().unwrap();
@@ -949,30 +901,20 @@ fn test_mixed_plan_and_code_edits_in_single_assistant_message() {
         .read_incremental(temp_path, watermark, "test")
         .unwrap();
 
-    assert_eq!(result.events.len(), 2);
+    // Single JSONL line = single raw event
+    assert_eq!(result.events.len(), 1);
 
-    // Both are tool_use events in the new API (plan detection is separate)
-    let event0 = &result.events[0];
-    assert_eq!(
-        event0.event_type.as_ref().and_then(|v| v.as_deref()),
-        Some("tool_use"),
-        "First tool_use should be tool_use (plan Write)"
-    );
-    assert_eq!(
-        event0.tool_name.as_ref().and_then(|v| v.as_deref()),
-        Some("Write"),
-    );
+    // The single event has two tool_use content blocks
+    let content = result.events[0]["message"]["content"]
+        .as_array()
+        .expect("content should be array");
+    assert_eq!(content.len(), 2, "Should have 2 content blocks");
 
-    let event1 = &result.events[1];
-    assert_eq!(
-        event1.event_type.as_ref().and_then(|v| v.as_deref()),
-        Some("tool_use"),
-        "Second tool_use should be tool_use (code Write)"
-    );
-    assert_eq!(
-        event1.tool_name.as_ref().and_then(|v| v.as_deref()),
-        Some("Write"),
-    );
+    assert_eq!(content[0]["type"].as_str(), Some("tool_use"));
+    assert_eq!(content[0]["name"].as_str(), Some("Write"));
+
+    assert_eq!(content[1]["type"].as_str(), Some("tool_use"));
+    assert_eq!(content[1]["name"].as_str(), Some("Write"));
 }
 
 crate::reuse_tests_in_worktree!(

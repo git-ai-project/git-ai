@@ -5,7 +5,7 @@
 //! 2. **Periodic sweeps** (Low priority, every 30min) - agent-specific discovery of all sessions
 
 use crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle;
-use crate::metrics::{EventAttributes, record};
+use crate::metrics::{EventAttributes, SessionEventValues, record};
 use crate::transcripts::db::TranscriptsDatabase;
 use crate::transcripts::types::TranscriptError;
 use crate::transcripts::watermark::WatermarkType;
@@ -312,10 +312,10 @@ impl TranscriptWorker {
         let event_count = batch.events.len();
 
         // Emit events via metrics::record
-        for event_values in batch.events {
+        for raw_event in batch.events {
             let attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
                 .session_id(session.session_id.clone());
-            record(event_values, attrs);
+            record(SessionEventValues::new(raw_event), attrs);
         }
 
         // Update watermark and metadata

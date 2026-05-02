@@ -27,8 +27,12 @@ fn test_parse_example_gemini_json_with_model() {
 
     assert!(!result.events.is_empty());
 
-    assert!(result.model.is_some());
-    let model_name = result.model.unwrap();
+    // Model is now inside individual gemini message events, not on TranscriptBatch.
+    let model_name = result
+        .events
+        .iter()
+        .find_map(|e| e["model"].as_str())
+        .expect("Should find a model in gemini messages");
     assert_eq!(model_name, "gemini-2.5-flash");
 }
 
@@ -41,10 +45,11 @@ fn test_gemini_parses_user_messages() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .unwrap();
 
+    // Events are raw Gemini message objects. Filter by type.
     let user_messages: Vec<_> = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
+        .filter(|e| e["type"] == "user")
         .collect();
 
     assert_eq!(
@@ -53,14 +58,16 @@ fn test_gemini_parses_user_messages() {
         "Should have exactly one user message"
     );
 
-    let user_msg = user_messages[0];
-    if let Some(Some(ref text)) = user_msg.prompt_text {
-        assert!(text.contains("add another hello bob console log"));
-    } else {
-        panic!("Expected prompt_text on user message");
-    }
-    // 2025-12-06T18:25:18.042Z truncated to epoch seconds
-    assert_eq!(user_msg.event_ts, Some(Some(1765045518)));
+    let user_msg = &user_messages[0];
+    let text = user_msg["content"]
+        .as_str()
+        .expect("Expected content on user message");
+    assert!(text.contains("add another hello bob console log"));
+    // Verify timestamp is present in the raw event
+    assert_eq!(
+        user_msg["timestamp"], "2025-12-06T18:25:18.042Z",
+        "User message should have its raw timestamp"
+    );
 }
 
 #[test]
@@ -72,10 +79,11 @@ fn test_gemini_parses_assistant_messages() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .unwrap();
 
+    // Events are raw Gemini message objects. "gemini" type = assistant.
     let assistant_messages: Vec<_> = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("assistant_message".to_string())))
+        .filter(|e| e["type"] == "gemini")
         .collect();
 
     assert!(
@@ -83,11 +91,10 @@ fn test_gemini_parses_assistant_messages() {
         "Should have at least one assistant message"
     );
 
-    if let Some(Some(ref text)) = assistant_messages[0].response_text {
-        assert!(text.contains("I will add"));
-    } else {
-        panic!("Expected response_text on assistant message");
-    }
+    let text = assistant_messages[0]["content"]
+        .as_str()
+        .expect("Expected content on assistant message");
+    assert!(text.contains("I will add"));
 }
 
 #[test]
@@ -99,29 +106,34 @@ fn test_gemini_parses_tool_calls() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .unwrap();
 
-    let tool_uses: Vec<_> = result
+    // Events are raw Gemini messages. Tool calls are in the toolCalls array within gemini messages.
+    let tool_messages: Vec<_> = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("tool_use".to_string())))
-        .collect();
-
-    assert!(!tool_uses.is_empty(), "Should have at least one tool call");
-
-    for tool_use in &tool_uses {
-        if let Some(Some(ref name)) = tool_use.tool_name {
-            assert!(!name.is_empty());
-        } else {
-            panic!("Expected tool_name on tool_use event");
-        }
-    }
-
-    let replace_tools: Vec<_> = tool_uses
-        .iter()
-        .filter(|e| e.tool_name == Some(Some("replace".to_string())))
+        .filter(|e| {
+            e["type"] == "gemini" && e["toolCalls"].as_array().is_some_and(|a| !a.is_empty())
+        })
         .collect();
 
     assert!(
-        !replace_tools.is_empty(),
+        !tool_messages.is_empty(),
+        "Should have at least one message with tool calls"
+    );
+
+    // Collect all tool call names
+    let all_tool_names: Vec<&str> = tool_messages
+        .iter()
+        .flat_map(|msg| {
+            msg["toolCalls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|tc| tc["name"].as_str())
+        })
+        .collect();
+
+    assert!(
+        all_tool_names.contains(&"replace"),
         "Should have at least one 'replace' tool call"
     );
 }
@@ -135,23 +147,33 @@ fn test_gemini_parses_tool_call_args() {
         .read_incremental(fixture.as_path(), watermark, "test")
         .unwrap();
 
-    let replace_tool = result
+    // Events are raw Gemini messages. Find a message containing a "replace" tool call.
+    let replace_msg = result
         .events
         .iter()
-        .find(|e| e.tool_name == Some(Some("replace".to_string())))
-        .expect("Should find a replace tool call");
+        .find(|e| {
+            e["toolCalls"]
+                .as_array()
+                .is_some_and(|calls| calls.iter().any(|tc| tc["name"] == "replace"))
+        })
+        .expect("Should find a message with a replace tool call");
 
-    // The new API exposes tool_name but not tool input args.
-    // Verify the tool_use event has the expected tool_name.
+    // Verify the tool call has args
+    let replace_call = replace_msg["toolCalls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tc| tc["name"] == "replace")
+        .expect("Should find replace tool call in toolCalls array");
+
     assert_eq!(
-        replace_tool.tool_name,
-        Some(Some("replace".to_string())),
-        "Tool call should have tool_name 'replace'"
+        replace_call["name"], "replace",
+        "Tool call should have name 'replace'"
     );
-    assert_eq!(
-        replace_tool.event_type,
-        Some(Some("tool_use".to_string())),
-        "Event should be of type tool_use"
+    // Verify args are present
+    assert!(
+        !replace_call["args"].is_null(),
+        "Tool call should have args"
     );
 }
 
@@ -196,21 +218,20 @@ fn test_gemini_handles_empty_content() {
         .read_incremental(Path::new(temp_path), watermark, "test")
         .expect("Failed to parse Gemini JSON");
 
-    let user_count = result
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
-        .count();
+    // Events are raw Gemini messages. Count by type.
+    let user_count = result.events.iter().filter(|e| e["type"] == "user").count();
     let assistant_count = result
         .events
         .iter()
-        .filter(|e| e.event_type == Some(Some("assistant_message".to_string())))
+        .filter(|e| e["type"] == "gemini")
         .count();
 
     assert_eq!(user_count, 1);
-    // The new API emits events for all messages including those with empty content
+    // Raw events include all messages including those with empty content
     assert_eq!(assistant_count, 2);
-    assert_eq!(result.model, Some("gemini-2.5-flash".to_string()));
+    // Model is in the raw gemini message events
+    let model_name = result.events.iter().find_map(|e| e["model"].as_str());
+    assert_eq!(model_name, Some("gemini-2.5-flash"));
 }
 
 #[test]
@@ -238,7 +259,8 @@ fn test_gemini_skips_unknown_message_types() {
         .read_incremental(Path::new(temp_path), watermark, "test")
         .expect("Failed to parse Gemini JSON");
 
-    assert_eq!(result.events.len(), 2);
+    // Raw events include all messages from the array (no type filtering)
+    assert_eq!(result.events.len(), 4);
 }
 
 #[test]

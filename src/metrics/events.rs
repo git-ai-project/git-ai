@@ -1,9 +1,9 @@
 //! Event-specific value structs for metrics.
 
 use super::pos_encoded::{
-    PosEncoded, PosField, f64_to_json, sparse_get_f64, sparse_get_string, sparse_get_u32,
-    sparse_get_u64, sparse_get_vec_string, sparse_get_vec_u32, sparse_set, string_to_json,
-    u32_to_json, u64_to_json, vec_string_to_json, vec_u32_to_json,
+    PosEncoded, PosField, sparse_get_string, sparse_get_u32, sparse_get_u64, sparse_get_vec_string,
+    sparse_get_vec_u32, sparse_set, string_to_json, u32_to_json, u64_to_json, vec_string_to_json,
+    vec_u32_to_json,
 };
 use super::types::{EventValues, MetricEventId, SparseArray};
 
@@ -1075,268 +1075,48 @@ mod tests {
     }
 }
 
-/// Value positions for "agent_trace" event.
-pub mod agent_trace_pos {
-    pub const EVENT_TYPE: usize = 0; // String - "user_message", "assistant_message", "tool_use"
-    pub const EVENT_TS: usize = 1; // u64 - event timestamp (nullable)
-    pub const TOOL_USE_ID: usize = 2; // String - trace_id for this event (nullable)
-    pub const TOOL_NAME: usize = 3; // String - for tool_use events (nullable)
-    pub const PROMPT_TEXT: usize = 4; // String - user message text (nullable)
-    pub const RESPONSE_TEXT: usize = 5; // String - assistant message text (nullable)
-    pub const INPUT_TOKENS: usize = 6; // u64 - token usage (nullable)
-    pub const OUTPUT_TOKENS: usize = 7; // u64 - token usage (nullable)
-    pub const CACHE_READ_INPUT_TOKENS: usize = 8; // u64 - token usage (nullable)
-    pub const CACHE_CREATION_INPUT_TOKENS: usize = 9; // u64 - token usage (nullable)
-    pub const COST_USD: usize = 10; // f64 - cost in USD (nullable)
+/// Value positions for "session_event" event.
+pub mod session_event_pos {
+    pub const RAW_JSON: usize = 0;
 }
 
-/// Values for Event ID 5: agent_trace
+/// Values for Event ID 5: session_event
 ///
-/// Recorded for each event extracted from an AI agent transcript.
-/// Uses EventAttributes for session_id, trace_id, tool, model metadata.
-///
-/// **Fields:**
-/// | Position | Name | Type |
-/// |----------|------|------|
-/// | 0 | event_type | String |
-/// | 1 | event_ts | u64 (nullable) |
-/// | 2 | external_tool_use_id | String (nullable) |
-/// | 3 | tool_name | String (nullable) |
-/// | 4 | prompt_text | String (nullable) |
-/// | 5 | response_text | String (nullable) |
-/// | 6 | input_tokens | u64 (nullable) |
-/// | 7 | output_tokens | u64 (nullable) |
-/// | 8 | cache_read_input_tokens | u64 (nullable) |
-/// | 9 | cache_creation_input_tokens | u64 (nullable) |
-/// | 10 | cost_usd | f64 (nullable) |
+/// Each event is the raw JSON from the agent's transcript file, stored at position 0.
+/// Uses EventAttributes for session_id, trace_id, tool metadata.
 #[derive(Debug, Clone, Default)]
-pub struct AgentTraceValues {
-    pub event_type: PosField<String>,
-    pub event_ts: PosField<u64>,
-    pub external_tool_use_id: PosField<String>,
-    pub tool_name: PosField<String>,
-    pub prompt_text: PosField<String>,
-    pub response_text: PosField<String>,
-    pub input_tokens: PosField<u64>,
-    pub output_tokens: PosField<u64>,
-    pub cache_read_input_tokens: PosField<u64>,
-    pub cache_creation_input_tokens: PosField<u64>,
-    pub cost_usd: PosField<f64>,
+pub struct SessionEventValues {
+    pub raw_json: serde_json::Value,
 }
 
-impl AgentTraceValues {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn event_type(mut self, value: impl Into<String>) -> Self {
-        self.event_type = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn event_type_null(mut self) -> Self {
-        self.event_type = Some(None);
-        self
-    }
-
-    pub fn event_ts(mut self, value: u64) -> Self {
-        self.event_ts = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn event_ts_null(mut self) -> Self {
-        self.event_ts = Some(None);
-        self
-    }
-
-    pub fn external_tool_use_id(mut self, value: impl Into<String>) -> Self {
-        self.external_tool_use_id = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn external_tool_use_id_null(mut self) -> Self {
-        self.external_tool_use_id = Some(None);
-        self
-    }
-
-    pub fn tool_name(mut self, value: impl Into<String>) -> Self {
-        self.tool_name = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn tool_name_null(mut self) -> Self {
-        self.tool_name = Some(None);
-        self
-    }
-
-    pub fn prompt_text(mut self, value: impl Into<String>) -> Self {
-        self.prompt_text = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn prompt_text_null(mut self) -> Self {
-        self.prompt_text = Some(None);
-        self
-    }
-
-    pub fn response_text(mut self, value: impl Into<String>) -> Self {
-        self.response_text = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn response_text_null(mut self) -> Self {
-        self.response_text = Some(None);
-        self
-    }
-
-    pub fn input_tokens(mut self, value: u64) -> Self {
-        self.input_tokens = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn input_tokens_null(mut self) -> Self {
-        self.input_tokens = Some(None);
-        self
-    }
-
-    pub fn output_tokens(mut self, value: u64) -> Self {
-        self.output_tokens = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn output_tokens_null(mut self) -> Self {
-        self.output_tokens = Some(None);
-        self
-    }
-
-    pub fn cache_read_input_tokens(mut self, value: u64) -> Self {
-        self.cache_read_input_tokens = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn cache_read_input_tokens_null(mut self) -> Self {
-        self.cache_read_input_tokens = Some(None);
-        self
-    }
-
-    pub fn cache_creation_input_tokens(mut self, value: u64) -> Self {
-        self.cache_creation_input_tokens = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn cache_creation_input_tokens_null(mut self) -> Self {
-        self.cache_creation_input_tokens = Some(None);
-        self
-    }
-
-    pub fn cost_usd(mut self, value: f64) -> Self {
-        self.cost_usd = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn cost_usd_null(mut self) -> Self {
-        self.cost_usd = Some(None);
-        self
+impl SessionEventValues {
+    pub fn new(raw_json: serde_json::Value) -> Self {
+        Self { raw_json }
     }
 }
 
-impl PosEncoded for AgentTraceValues {
+impl PosEncoded for SessionEventValues {
     fn to_sparse(&self) -> SparseArray {
         let mut map = SparseArray::new();
-
-        sparse_set(
-            &mut map,
-            agent_trace_pos::EVENT_TYPE,
-            string_to_json(&self.event_type),
+        map.insert(
+            session_event_pos::RAW_JSON.to_string(),
+            self.raw_json.clone(),
         );
-        sparse_set(
-            &mut map,
-            agent_trace_pos::EVENT_TS,
-            u64_to_json(&self.event_ts),
-        );
-        sparse_set(
-            &mut map,
-            agent_trace_pos::TOOL_USE_ID,
-            string_to_json(&self.external_tool_use_id),
-        );
-        sparse_set(
-            &mut map,
-            agent_trace_pos::TOOL_NAME,
-            string_to_json(&self.tool_name),
-        );
-        sparse_set(
-            &mut map,
-            agent_trace_pos::PROMPT_TEXT,
-            string_to_json(&self.prompt_text),
-        );
-        sparse_set(
-            &mut map,
-            agent_trace_pos::RESPONSE_TEXT,
-            string_to_json(&self.response_text),
-        );
-        sparse_set(
-            &mut map,
-            agent_trace_pos::INPUT_TOKENS,
-            u64_to_json(&self.input_tokens),
-        );
-        sparse_set(
-            &mut map,
-            agent_trace_pos::OUTPUT_TOKENS,
-            u64_to_json(&self.output_tokens),
-        );
-        sparse_set(
-            &mut map,
-            agent_trace_pos::CACHE_READ_INPUT_TOKENS,
-            u64_to_json(&self.cache_read_input_tokens),
-        );
-        sparse_set(
-            &mut map,
-            agent_trace_pos::CACHE_CREATION_INPUT_TOKENS,
-            u64_to_json(&self.cache_creation_input_tokens),
-        );
-        sparse_set(
-            &mut map,
-            agent_trace_pos::COST_USD,
-            f64_to_json(&self.cost_usd),
-        );
-
         map
     }
 
     fn from_sparse(arr: &SparseArray) -> Self {
-        Self {
-            event_type: sparse_get_string(arr, agent_trace_pos::EVENT_TYPE),
-            event_ts: sparse_get_u64(arr, agent_trace_pos::EVENT_TS),
-            external_tool_use_id: sparse_get_string(arr, agent_trace_pos::TOOL_USE_ID),
-            tool_name: sparse_get_string(arr, agent_trace_pos::TOOL_NAME),
-            prompt_text: sparse_get_string(arr, agent_trace_pos::PROMPT_TEXT),
-            response_text: sparse_get_string(arr, agent_trace_pos::RESPONSE_TEXT),
-            input_tokens: sparse_get_u64(arr, agent_trace_pos::INPUT_TOKENS),
-            output_tokens: sparse_get_u64(arr, agent_trace_pos::OUTPUT_TOKENS),
-            cache_read_input_tokens: sparse_get_u64(arr, agent_trace_pos::CACHE_READ_INPUT_TOKENS),
-            cache_creation_input_tokens: sparse_get_u64(
-                arr,
-                agent_trace_pos::CACHE_CREATION_INPUT_TOKENS,
-            ),
-            cost_usd: sparse_get_f64(arr, agent_trace_pos::COST_USD),
-        }
+        let raw_json = arr
+            .get(&session_event_pos::RAW_JSON.to_string())
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        Self { raw_json }
     }
 }
 
-impl EventValues for AgentTraceValues {
+impl EventValues for SessionEventValues {
     fn event_id() -> MetricEventId {
-        MetricEventId::AgentTrace
+        MetricEventId::SessionEvent
     }
 
     fn to_sparse(&self) -> SparseArray {

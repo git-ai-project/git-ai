@@ -27,28 +27,40 @@ fn test_parse_codex_rollout_transcript() {
         !result.events.is_empty(),
         "Transcript should contain events"
     );
+
+    // Events are now raw JSONL entries from the codex transcript.
+    // The codex-session-simple.jsonl fixture has 5 lines:
+    //   session_meta, turn_context, response_item (user), response_item (function_call), response_item (assistant)
+    assert_eq!(result.events.len(), 5, "Should have 5 raw JSONL entries");
+
+    // Verify model is in the turn_context entry
+    let turn_context = result
+        .events
+        .iter()
+        .find(|e| e["type"] == "turn_context")
+        .expect("Should have a turn_context entry");
     assert_eq!(
-        result.model.as_deref(),
-        Some("gpt-5-codex"),
-        "Model should come from turn_context.model"
+        turn_context["payload"]["model"], "gpt-5-codex",
+        "Model should come from turn_context.payload.model"
     );
 
+    // Verify we have user, assistant, and function_call response_items
     let has_user = result
         .events
         .iter()
-        .any(|e| e.event_type == Some(Some("user_message".to_string())));
+        .any(|e| e["type"] == "response_item" && e["payload"]["role"] == "user");
     let has_assistant = result
         .events
         .iter()
-        .any(|e| e.event_type == Some(Some("assistant_message".to_string())));
-    let has_tool_use = result
+        .any(|e| e["type"] == "response_item" && e["payload"]["role"] == "assistant");
+    let has_function_call = result
         .events
         .iter()
-        .any(|e| e.event_type == Some(Some("tool_use".to_string())));
+        .any(|e| e["type"] == "response_item" && e["payload"]["type"] == "function_call");
 
     assert!(has_user, "Should parse user messages");
     assert!(has_assistant, "Should parse assistant messages");
-    assert!(has_tool_use, "Should parse function calls as tool uses");
+    assert!(has_function_call, "Should parse function calls");
 }
 
 #[test]

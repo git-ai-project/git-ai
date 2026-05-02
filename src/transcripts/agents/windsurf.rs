@@ -1,6 +1,5 @@
 //! Windsurf agent implementation with sweep discovery.
 
-use crate::metrics::events::AgentTraceValues;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -29,7 +28,6 @@ impl Agent for WindsurfAgent {
         watermark: Box<dyn WatermarkStrategy>,
         session_id: &str,
     ) -> Result<TranscriptBatch, TranscriptError> {
-        // Downcast watermark to ByteOffsetWatermark
         let byte_watermark = watermark
             .as_any()
             .downcast_ref::<ByteOffsetWatermark>()
@@ -42,7 +40,6 @@ impl Agent for WindsurfAgent {
 
         let start_offset = byte_watermark.0;
 
-        // Open file
         let file = File::open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 TranscriptError::Fatal {
@@ -62,7 +59,6 @@ impl Agent for WindsurfAgent {
 
         let mut reader = BufReader::new(file);
 
-        // Seek to watermark position
         reader
             .seek(SeekFrom::Start(start_offset))
             .map_err(|e| TranscriptError::Transient {
@@ -74,7 +70,6 @@ impl Agent for WindsurfAgent {
         let mut current_offset = start_offset;
         let mut line_number = 0;
 
-        // Read lines from watermark position
         let mut line = String::new();
         loop {
             line.clear();
@@ -87,107 +82,29 @@ impl Agent for WindsurfAgent {
                     })?;
 
             if bytes_read == 0 {
-                // EOF
                 break;
             }
 
             line_number += 1;
-
-            // Update offset before processing (so we skip this line on next read even if parsing fails)
             current_offset += bytes_read as u64;
 
-            // Skip empty lines
             if line.trim().is_empty() {
                 continue;
             }
 
-            // Parse JSONL entry
             let entry: serde_json::Value =
                 serde_json::from_str(&line).map_err(|e| TranscriptError::Parse {
                     line: line_number,
                     message: format!("Invalid JSON in {}: {}", path.display(), e),
                 })?;
 
-            // Extract timestamp if available
-            let timestamp_opt = entry["timestamp"].as_str().and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .ok()
-                    .map(|dt| dt.timestamp() as u64)
-            });
-
-            // Get entry type and optional inner object matching the type name
-            let entry_type = match entry["type"].as_str() {
-                Some(t) => t,
-                None => continue,
-            };
-            let inner = entry.get(entry_type);
-
-            // Parse by entry type
-            match entry_type {
-                "user_input" => {
-                    if let Some(text) = inner.and_then(|obj| obj["user_response"].as_str())
-                        && !text.trim().is_empty()
-                    {
-                        let mut event = AgentTraceValues::new()
-                            .event_type("user_message")
-                            .prompt_text(text);
-
-                        if let Some(ts) = timestamp_opt {
-                            event = event.event_ts(ts);
-                        }
-
-                        events.push(event);
-                    }
-                }
-                "planner_response" => {
-                    if let Some(text) = inner.and_then(|obj| obj["response"].as_str())
-                        && !text.trim().is_empty()
-                    {
-                        let mut event = AgentTraceValues::new()
-                            .event_type("assistant_message")
-                            .response_text(text);
-
-                        if let Some(ts) = timestamp_opt {
-                            event = event.event_ts(ts);
-                        }
-
-                        events.push(event);
-                    }
-                }
-                "code_action" => {
-                    let mut event = AgentTraceValues::new()
-                        .event_type("tool_use")
-                        .tool_name("code_action");
-
-                    if let Some(ts) = timestamp_opt {
-                        event = event.event_ts(ts);
-                    }
-
-                    events.push(event);
-                }
-                "view_file" | "run_command" | "find" | "grep_search" | "list_directory"
-                | "list_resources" => {
-                    let mut event = AgentTraceValues::new()
-                        .event_type("tool_use")
-                        .tool_name(entry_type);
-
-                    if let Some(ts) = timestamp_opt {
-                        event = event.event_ts(ts);
-                    }
-
-                    events.push(event);
-                }
-                _ => {} // Skip all other types
-            }
+            events.push(entry);
         }
 
-        // Create new watermark with updated offset
         let new_watermark = Box::new(ByteOffsetWatermark::new(current_offset));
 
-        // Model is not available in Windsurf JSONL format
         Ok(TranscriptBatch {
             events,
-            model: None,
             new_watermark,
         })
     }
@@ -231,7 +148,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, None);
+        assert_eq!(result.events[0]["type"].as_str(), Some("user_input"));
+        assert_eq!(result.events[1]["type"].as_str(), Some("planner_response"));
     }
 
     #[test]
@@ -255,6 +173,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0]["type"].as_str(), Some("code_action"));
+        assert_eq!(result.events[1]["type"].as_str(), Some("run_command"));
     }
 
     #[test]

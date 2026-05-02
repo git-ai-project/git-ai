@@ -105,8 +105,6 @@ impl Agent for DroidAgent {
         watermark: Box<dyn WatermarkStrategy>,
         session_id: &str,
     ) -> Result<TranscriptBatch, TranscriptError> {
-        // Migrated from formats/droid.rs (will be removed in Phase 9)
-        use crate::metrics::events::AgentTraceValues;
         use std::fs::File;
         use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
@@ -200,13 +198,6 @@ impl Agent for DroidAgent {
             // Track record count for hybrid watermark
             record_count += 1;
 
-            // Extract timestamp
-            let timestamp_opt = entry["timestamp"].as_str().and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .ok()
-                    .map(|dt| dt.timestamp() as u64)
-            });
-
             // Update latest_timestamp for hybrid watermark
             if let Some(ts_str) = entry["timestamp"].as_str()
                 && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts_str)
@@ -217,117 +208,8 @@ impl Agent for DroidAgent {
                 }
             }
 
-            let message = &entry["message"];
-            let role = match message["role"].as_str() {
-                Some(r) => r,
-                None => continue,
-            };
-
-            // Extract events based on role
-            match role {
-                "user" => {
-                    // User message - extract text content
-                    let text = if let Some(content_array) = message["content"].as_array() {
-                        let mut texts = Vec::new();
-                        for item in content_array {
-                            // Skip tool_result items - those are system-generated responses
-                            if item["type"].as_str() == Some("tool_result") {
-                                continue;
-                            }
-                            if item["type"].as_str() == Some("text")
-                                && let Some(text) = item["text"].as_str()
-                                && !text.trim().is_empty()
-                            {
-                                texts.push(text.to_string());
-                            }
-                        }
-                        texts.join("\n")
-                    } else if let Some(content) = message["content"].as_str() {
-                        content.to_string()
-                    } else {
-                        String::new()
-                    };
-
-                    if !text.trim().is_empty() {
-                        let event = AgentTraceValues::new()
-                            .event_type("user_message")
-                            .prompt_text(text);
-
-                        let event = if let Some(ts) = timestamp_opt {
-                            event.event_ts(ts)
-                        } else {
-                            event
-                        };
-
-                        events.push(event);
-                    }
-                }
-                "assistant" => {
-                    // Assistant message - can contain text, thinking, and tool_use
-                    if let Some(content_array) = message["content"].as_array() {
-                        for item in content_array {
-                            match item["type"].as_str() {
-                                Some("text") => {
-                                    if let Some(text) = item["text"].as_str()
-                                        && !text.trim().is_empty()
-                                    {
-                                        let event = AgentTraceValues::new()
-                                            .event_type("assistant_message")
-                                            .response_text(text);
-
-                                        let event = if let Some(ts) = timestamp_opt {
-                                            event.event_ts(ts)
-                                        } else {
-                                            event
-                                        };
-
-                                        events.push(event);
-                                    }
-                                }
-                                Some("thinking") => {
-                                    if let Some(thinking) = item["thinking"].as_str()
-                                        && !thinking.trim().is_empty()
-                                    {
-                                        let event = AgentTraceValues::new()
-                                            .event_type("assistant_thinking")
-                                            .response_text(thinking);
-
-                                        let event = if let Some(ts) = timestamp_opt {
-                                            event.event_ts(ts)
-                                        } else {
-                                            event
-                                        };
-
-                                        events.push(event);
-                                    }
-                                }
-                                Some("tool_use") => {
-                                    if let Some(name) = item["name"].as_str() {
-                                        let tool_use_id =
-                                            item["id"].as_str().map(|s| s.to_string());
-
-                                        let mut event = AgentTraceValues::new()
-                                            .event_type("tool_use")
-                                            .tool_name(name);
-
-                                        if let Some(id) = tool_use_id {
-                                            event = event.external_tool_use_id(id);
-                                        }
-
-                                        if let Some(ts) = timestamp_opt {
-                                            event = event.event_ts(ts);
-                                        }
-
-                                        events.push(event);
-                                    }
-                                }
-                                _ => {} // Skip unknown content types
-                            }
-                        }
-                    }
-                }
-                _ => {} // Skip unknown roles
-            }
+            // Push raw JSON entry
+            events.push(entry);
         }
 
         // Create new hybrid watermark with updated offset, record count, and timestamp
@@ -337,10 +219,8 @@ impl Agent for DroidAgent {
             latest_timestamp,
         ));
 
-        // Droid doesn't store model in JSONL - it comes from .settings.json
         Ok(TranscriptBatch {
             events,
-            model: None,
             new_watermark,
         })
     }
@@ -391,7 +271,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, None); // Droid doesn't have model in JSONL
+
+        // Verify raw JSON events
+        assert_eq!(result.events[0]["type"], "message");
+        assert_eq!(result.events[0]["message"]["role"], "user");
+        assert_eq!(result.events[1]["type"], "message");
+        assert_eq!(result.events[1]["message"]["role"], "assistant");
 
         // Verify hybrid watermark was updated
         let new_watermark = result
