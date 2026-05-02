@@ -1702,6 +1702,23 @@ pub fn rewrite_authorship_after_rebase_v2(
                         });
                     }
                 }
+                // Also check current_attributions for h_-prefixed author IDs
+                // in this commit's changed files. During squash rebase the working
+                // log for the new commit's parent won't contain the original human
+                // checkpoints, but the reconstructed attributions from original
+                // notes will have the h_ entries.
+                for file_path in &changed_files_in_commit {
+                    if let Some((_, line_attrs)) = current_attributions.get(file_path) {
+                        for line_attr in line_attrs {
+                            if line_attr.author_id.starts_with("h_") {
+                                let hash = line_attr.author_id.clone();
+                                if let Some(record) = initial_humans.get(&hash) {
+                                    map.entry(hash).or_insert_with(|| record.clone());
+                                }
+                            }
+                        }
+                    }
+                }
                 map
             };
             // Per-commit-delta sessions: s_<id> entries for session-attributed lines in this commit.
