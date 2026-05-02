@@ -1132,6 +1132,11 @@ impl GitAuthorIdentity {
     pub fn name_or_unknown(&self) -> String {
         self.name.clone().unwrap_or_else(|| "unknown".to_string())
     }
+
+    /// Return the full identity (`"Name <email>"`) or fall back to name-only / `"unknown"`.
+    pub fn formatted_or_unknown(&self) -> String {
+        self.formatted().unwrap_or_else(|| "unknown".to_string())
+    }
 }
 
 /// Parse `git var GIT_COMMITTER_IDENT` output into name and email.
