@@ -143,7 +143,6 @@ pub fn is_interactive_terminal() -> bool {
     *IS_TERMINAL.get_or_init(|| std::io::stdin().is_terminal())
 }
 
-
 /// A cross-platform exclusive file lock.
 ///
 /// Holds an exclusive advisory lock (Unix) or exclusive-access file handle (Windows)

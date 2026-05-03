@@ -2599,8 +2599,31 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
                 (kind, result)
             }
             None => {
-                let result = build_human_replay_checkpoint_request(changed_files, dirty_files);
-                (CheckpointKind::Human, result)
+                // No bash inflight. If we're running inside a no-hooks background
+                // agent (Devin, Codex Cloud, etc.) the agent never fired its own
+                // checkpoints — attribute the entire commit to the detected tool
+                // instead of recording it as untracked human edits.
+                if let Some((_, mut ai_result)) =
+                    crate::authorship::background_agent::synthetic_ai_checkpoint_request_for_no_hooks_agent(
+                        std::path::PathBuf::from(&repo_workdir),
+                    )
+                {
+                    ai_result.file_paths = changed_files
+                        .into_iter()
+                        .map(std::path::PathBuf::from)
+                        .collect();
+                    ai_result.path_role = PreparedPathRole::Edited;
+                    ai_result.dirty_files = Some(
+                        dirty_files
+                            .into_iter()
+                            .map(|(k, v)| (std::path::PathBuf::from(k), v))
+                            .collect(),
+                    );
+                    (CheckpointKind::AiAgent, ai_result)
+                } else {
+                    let result = build_human_replay_checkpoint_request(changed_files, dirty_files);
+                    (CheckpointKind::Human, result)
+                }
             }
         };
 
