@@ -274,20 +274,12 @@ pub enum HookEvent {
 pub struct BashToolResult {
     /// The checkpoint action (unchanged from previous API).
     pub action: BashCheckpointAction,
-    /// If set, a captured checkpoint was prepared and needs submission by the handler.
-    pub captured_checkpoint: Option<CapturedCheckpointInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveBashSnapshotScan {
     has_inflight_snapshot: bool,
     latest_context: Option<InflightBashAgentContext>,
-}
-
-/// Info about a captured checkpoint prepared by the bash tool.
-pub struct CapturedCheckpointInfo {
-    pub capture_id: String,
-    pub repo_working_dir: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,20 +292,7 @@ pub struct InflightBashAgentContext {
 }
 
 impl InflightBashAgentContext {
-    pub fn into_checkpoint_request(self, repo_working_dir: PathBuf) -> CheckpointRequest {
-        CheckpointRequest {
-            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-            checkpoint_kind: CheckpointKind::AiAgent,
-            agent_id: Some(self.agent_id),
-            repo_working_dir,
-            file_paths: vec![],
-            path_role: crate::commands::checkpoint::PreparedPathRole::Edited,
-            dirty_files: None,
-            transcript_source: None,
-            metadata: self.agent_metadata.unwrap_or_default(),
-            captured_checkpoint_id: None,
-        }
-    }
+    // Removed: into_checkpoint_request() - no longer needed with new checkpoint system
 }
 
 fn scan_active_bash_snapshots(repo_root: &Path) -> ActiveBashSnapshotScan {
@@ -370,38 +349,22 @@ fn scan_active_bash_snapshots(repo_root: &Path) -> ActiveBashSnapshotScan {
     }
 }
 
-pub fn checkpoint_context_from_active_bash(
-    repo_root: &Path,
-    repo_working_dir: &str,
-) -> Option<(CheckpointKind, Option<CheckpointRequest>)> {
+pub fn checkpoint_kind_from_active_bash(repo_root: &Path) -> Option<CheckpointKind> {
     match scan_active_bash_snapshots(repo_root) {
         ActiveBashSnapshotScan {
-            latest_context: Some(active_context),
-            ..
-        } => {
-            tracing::debug!(
-                "active bash context: found {} session {} tool_use_id {}",
-                active_context.agent_id.tool,
-                active_context.session_id,
-                active_context.tool_use_id
-            );
-            Some((
-                CheckpointKind::AiAgent,
-                Some(active_context.into_checkpoint_request(PathBuf::from(repo_working_dir))),
-            ))
-        }
-        ActiveBashSnapshotScan {
             has_inflight_snapshot: true,
-            latest_context: None,
-        } => {
-            tracing::debug!("active bash context: falling back to unscoped AI checkpoint");
-            Some((CheckpointKind::AiAgent, None))
-        }
-        ActiveBashSnapshotScan {
-            has_inflight_snapshot: false,
-            latest_context: None,
-        } => None,
+            ..
+        } => Some(CheckpointKind::AiAgent),
+        _ => None,
     }
+}
+
+// Deprecated: use checkpoint_kind_from_active_bash instead
+pub fn checkpoint_context_from_active_bash(
+    repo_root: &Path,
+    _repo_working_dir: &str,
+) -> Option<(CheckpointKind, Option<CheckpointRequest>)> {
+    checkpoint_kind_from_active_bash(repo_root).map(|kind| (kind, None))
 }
 
 /// Per-agent tool classification.
@@ -1469,7 +1432,6 @@ fn handle_bash_pre_tool_use_internal(
             );
             return Ok(BashToolResult {
                 action: BashCheckpointAction::Fallback,
-                captured_checkpoint: None,
             });
         }};
     }
@@ -1516,7 +1478,6 @@ fn handle_bash_pre_tool_use_internal(
             // Don't fail the tool call; post-hook will use fallback path
             Ok(BashToolResult {
                 action: BashCheckpointAction::TakePreSnapshot,
-                captured_checkpoint: None,
             })
         }
     }
@@ -1580,7 +1541,6 @@ pub fn handle_bash_tool(
             );
             return Ok(BashToolResult {
                 action: BashCheckpointAction::Fallback,
-                captured_checkpoint: None,
             });
         }};
     }
@@ -1630,7 +1590,6 @@ pub fn handle_bash_tool(
                                 );
                                 Ok(BashToolResult {
                                     action: BashCheckpointAction::NoChanges,
-                                    captured_checkpoint: None,
                                 })
                             } else {
                                 let paths = diff_result.all_changed_paths();
@@ -1660,7 +1619,6 @@ pub fn handle_bash_tool(
                             tracing::debug!("Post-snapshot failed: {}; returning fallback", e);
                             Ok(BashToolResult {
                                 action: BashCheckpointAction::Fallback,
-                                captured_checkpoint: None,
                             })
                         }
                     }
@@ -1675,7 +1633,6 @@ pub fn handle_bash_tool(
                     );
                     Ok(BashToolResult {
                         action: BashCheckpointAction::Fallback,
-                        captured_checkpoint: None,
                     })
                 }
             }
