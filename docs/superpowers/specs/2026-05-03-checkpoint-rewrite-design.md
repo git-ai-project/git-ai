@@ -140,15 +140,9 @@ For bash events:
 
 **Bash session state**: in-memory `HashMap<(session_id, tool_use_id), BashSession>`. Handles `BashSessionStart`, `BashSessionEnd`, `BashSessionQuery`, `BashSnapshotQuery` control requests.
 
-### Pre-commit Hook
+### Pre-commit
 
-1. Run `git diff --cached --name-only` to get staged files, resolve to absolute paths.
-2. Send `BashSessionQuery { repo_work_dir }` to daemon to check for active bash session.
-3. If active session: use its `agent_id`, `CheckpointKind::AiAgent`. Otherwise: `CheckpointKind::Human`.
-4. For each staged file: read content, resolve `repo_work_dir` and `base_commit`, build `CheckpointFile`.
-5. Send `CheckpointRequest` to daemon via control socket. Fire and forget.
-
-No more calling `checkpoint::run()` directly. No more `checkpoint_context_from_active_bash`.
+`src/authorship/pre_commit.rs` (`pre_commit()` and `pre_commit_checkpoint_context()`) is dead code — no caller exists. The real pre-commit checkpoint logic lives in `sync_pre_commit_checkpoint_for_daemon_commit()` inside `daemon.rs`. Delete the dead module. The daemon-side function will be updated to work with the new types as part of the daemon rewrite (Layer 3).
 
 ## What Gets Deleted
 
@@ -176,8 +170,8 @@ No more calling `checkpoint::run()` directly. No more `checkpoint_context_from_a
 - Disk-based snapshot file I/O (write/read/cleanup of `bash-snapshots/*.json`)
 - `InflightBashAgentContext` serialization
 
-### Pre-commit
-- `pre_commit_checkpoint_context`
+### Pre-commit (dead code — delete entire module)
+- `src/authorship/pre_commit.rs` (`pre_commit()`, `pre_commit_checkpoint_context()`)
 
 ### Filesystem artifacts
 - `~/.git-ai/internal/async-checkpoint-blobs/` directory and all blob management
@@ -198,7 +192,7 @@ No more calling `checkpoint::run()` directly. No more `checkpoint_context_from_a
 1. **Types**: define new `CheckpointRequest`, `CheckpointFile`, `BaseCommit`, new control API types, bash session types. Old types coexist temporarily.
 2. **CLI**: rewrite `handle_checkpoint` to ~50 lines. Update orchestrator `execute_*` functions. Update `synthesize_hook_input_from_cli_args`.
 3. **Daemon**: update control API handler. Implement bash session in-memory state + 4 new handlers. Update `ingest_checkpoint_payload` and `apply_checkpoint_side_effect`. Move author identity and metrics here.
-4. **Pre-commit hook**: rewrite to assemble scoped requests from staged files, query daemon for bash context.
+4. **Dead code removal**: delete `src/authorship/pre_commit.rs` and its module declaration. Update `sync_pre_commit_checkpoint_for_daemon_commit()` in daemon.rs to work with new types.
 5. **Bash tool**: remove disk-based snapshot I/O. Pre-hook sends stat snapshot to daemon. Post-hook queries daemon for pre-snapshot, diffs, reads changed files. Remove `BashPreHookStrategy`.
 6. **Delete dead code**: all functions, types, and filesystem artifacts from the deletion list.
 7. **Fix tests**: update integration tests. Evaluate bash test failures for correctness vs band-aid issues around mtime grace periods.
