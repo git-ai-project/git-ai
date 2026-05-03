@@ -26,6 +26,8 @@ struct PiHookInput {
     #[serde(default)]
     edited_filepaths: Vec<String>,
     #[serde(default)]
+    dirty_files: Option<HashMap<String, String>>,
+    #[serde(default)]
     tool_use_id: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
@@ -94,6 +96,7 @@ impl AgentPreset for PiPreset {
             tool_name_raw,
             will_edit_filepaths,
             edited_filepaths,
+            dirty_files,
             tool_use_id,
             tool_input: _,
             tool_result: _,
@@ -159,6 +162,9 @@ impl AgentPreset for PiPreset {
             })
         };
 
+        let dirty =
+            dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
+
         let event = match hook_event {
             PiHookEvent::BeforeEdit => {
                 if will_edit_filepaths.is_empty() {
@@ -169,7 +175,7 @@ impl AgentPreset for PiPreset {
                 ParsedHookEvent::PreFileEdit(PreFileEdit {
                     context,
                     file_paths: will_edit_filepaths.into_iter().map(PathBuf::from).collect(),
-                    dirty_files: None,
+                    dirty_files: dirty,
                 })
             }
             PiHookEvent::AfterEdit => {
@@ -181,6 +187,7 @@ impl AgentPreset for PiPreset {
                 ParsedHookEvent::PostFileEdit(PostFileEdit {
                     context,
                     file_paths: edited_filepaths.into_iter().map(PathBuf::from).collect(),
+                    dirty_files: dirty,
                     transcript_source,
                 })
             }
@@ -239,6 +246,7 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/tmp/project/src/main.rs")]
                 );
+                assert!(e.dirty_files.is_some());
                 let metadata = &e.context.metadata;
                 assert_eq!(metadata.get("tool_name").map(String::as_str), Some("edit"));
                 assert_eq!(

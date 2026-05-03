@@ -1,5 +1,6 @@
 use crate::error::GitAiError;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub fn required_str<'a>(data: &'a Value, key: &str) -> Result<&'a str, GitAiError> {
@@ -83,6 +84,23 @@ pub fn file_paths_from_tool_input(data: &Value, cwd: &str) -> Vec<PathBuf> {
     }
 
     vec![]
+}
+
+pub fn dirty_files_from_value(data: &Value, cwd: &str) -> Option<HashMap<PathBuf, String>> {
+    let df = data.get("dirty_files")?;
+    let obj = df.as_object()?;
+    let mut result = HashMap::new();
+    for (key, value) in obj {
+        if let Some(content) = value.as_str() {
+            let path = resolve_absolute(key, cwd);
+            result.insert(path, content.to_string());
+        }
+    }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 pub fn string_array(data: &Value, key: &str) -> Option<Vec<String>> {
@@ -198,5 +216,21 @@ mod tests {
         let data = json!({"other": "value"});
         let result = optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_dirty_files_from_hook_data() {
+        let data = json!({
+            "dirty_files": {
+                "/home/user/file.txt": "old content"
+            }
+        });
+        let result = dirty_files_from_value(&data, "/home/user");
+        assert!(result.is_some());
+        let map = result.unwrap();
+        assert_eq!(
+            map.get(&PathBuf::from("/home/user/file.txt")).unwrap(),
+            "old content"
+        );
     }
 }

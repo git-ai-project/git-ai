@@ -1,6 +1,7 @@
 use super::parse;
 use super::{AgentPreset, ParsedHookEvent};
 use crate::error::GitAiError;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 mod cli;
@@ -66,6 +67,29 @@ pub(super) fn extract_session_id(data: &serde_json::Value) -> String {
     )
     .unwrap_or("unknown")
     .to_string()
+}
+
+pub(super) fn dirty_files_from_hook_data(
+    data: &serde_json::Value,
+    cwd: &str,
+) -> Option<HashMap<PathBuf, String>> {
+    let obj = data
+        .get("dirty_files")
+        .and_then(|v| v.as_object())
+        .or_else(|| data.get("dirtyFiles").and_then(|v| v.as_object()))?;
+
+    let mut result = HashMap::new();
+    for (key, value) in obj {
+        if let Some(content) = value.as_str() {
+            let path = parse::resolve_absolute(key, cwd);
+            result.insert(path, content.to_string());
+        }
+    }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Extract file paths from VS Code / CLI hook payload (tool_input + tool_response/tool_result).

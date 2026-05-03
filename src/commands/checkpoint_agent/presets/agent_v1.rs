@@ -13,10 +13,14 @@ enum AgentV1Payload {
     Human {
         repo_working_dir: String,
         will_edit_filepaths: Option<Vec<String>>,
+        #[serde(default)]
+        dirty_files: Option<HashMap<String, String>>,
     },
     AiAgent {
         repo_working_dir: String,
         edited_filepaths: Option<Vec<String>>,
+        #[serde(default)]
+        dirty_files: Option<HashMap<String, String>>,
         agent_name: String,
         model: String,
         conversation_id: String,
@@ -36,6 +40,7 @@ impl AgentPreset for AgentV1Preset {
             AgentV1Payload::Human {
                 repo_working_dir,
                 will_edit_filepaths,
+                dirty_files,
             } => {
                 let cwd = PathBuf::from(&repo_working_dir);
                 let file_paths = will_edit_filepaths
@@ -43,6 +48,8 @@ impl AgentPreset for AgentV1Preset {
                     .into_iter()
                     .map(|p| super::parse::resolve_absolute(&p, &repo_working_dir))
                     .collect();
+                let dirty = dirty_files
+                    .map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
                 ParsedHookEvent::PreFileEdit(PreFileEdit {
                     context: PresetContext {
                         agent_id: AgentId {
@@ -56,12 +63,13 @@ impl AgentPreset for AgentV1Preset {
                         metadata: HashMap::new(),
                     },
                     file_paths,
-                    dirty_files: None,
+                    dirty_files: dirty,
                 })
             }
             AgentV1Payload::AiAgent {
                 repo_working_dir,
                 edited_filepaths,
+                dirty_files,
                 agent_name,
                 model,
                 conversation_id,
@@ -72,6 +80,8 @@ impl AgentPreset for AgentV1Preset {
                     .into_iter()
                     .map(|p| super::parse::resolve_absolute(&p, &repo_working_dir))
                     .collect();
+                let dirty = dirty_files
+                    .map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
                 ParsedHookEvent::PostFileEdit(PostFileEdit {
                     context: PresetContext {
                         agent_id: AgentId {
@@ -85,6 +95,7 @@ impl AgentPreset for AgentV1Preset {
                         metadata: HashMap::new(),
                     },
                     file_paths,
+                    dirty_files: dirty,
                     transcript_source: None,
                 })
             }
@@ -122,6 +133,7 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
+                assert!(e.dirty_files.is_some());
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -167,6 +179,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert!(e.file_paths.is_empty());
+                assert!(e.dirty_files.is_none());
             }
             _ => panic!("Expected PreFileEdit"),
         }

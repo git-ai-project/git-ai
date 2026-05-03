@@ -39,6 +39,7 @@ impl AgentPreset for MockKnownHumanPreset {
             trace_id: trace_id.to_string(),
             cwd,
             file_paths,
+            dirty_files: None,
             editor_metadata: HashMap::new(),
         })])
     }

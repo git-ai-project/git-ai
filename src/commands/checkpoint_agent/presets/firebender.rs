@@ -23,6 +23,7 @@ struct FirebenderHookInput {
     tool_name: Option<String>,
     tool_input: Option<serde_json::Value>,
     completion_id: Option<String>,
+    dirty_files: Option<HashMap<String, String>>,
 }
 
 impl FirebenderPreset {
@@ -126,6 +127,7 @@ impl AgentPreset for FirebenderPreset {
             tool_name,
             tool_input,
             completion_id,
+            dirty_files,
         } = hook_input;
 
         // Legacy events that should be silently skipped
@@ -202,6 +204,9 @@ impl AgentPreset for FirebenderPreset {
             metadata: HashMap::new(),
         };
 
+        let dirty =
+            dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
+
         let event = match (hook_event_name.as_str(), is_bash) {
             ("preToolUse", true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
@@ -210,7 +215,7 @@ impl AgentPreset for FirebenderPreset {
             ("preToolUse", false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
-                dirty_files: None,
+                dirty_files: dirty,
             }),
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -220,6 +225,7 @@ impl AgentPreset for FirebenderPreset {
             (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
+                dirty_files: dirty,
                 transcript_source: None,
             }),
         };
@@ -406,6 +412,29 @@ mod tests {
             serde_json::Value::String("*** Update File: src/main.rs\n@@ content".to_string());
         let paths = FirebenderPreset::extract_file_paths(&tool_input).unwrap();
         assert_eq!(paths, vec!["src/main.rs"]);
+    }
+
+    #[test]
+    fn test_firebender_dirty_files() {
+        let input = json!({
+            "hook_event_name": "preToolUse",
+            "model": "claude-sonnet-4-5",
+            "repo_working_dir": "/home/user/project",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/main.rs"},
+            "completion_id": "comp-123",
+            "dirty_files": {
+                "/home/user/project/src/main.rs": "old content"
+            }
+        })
+        .to_string();
+        let events = FirebenderPreset.parse(&input, "t_test").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert!(e.dirty_files.is_some());
+            }
+            _ => panic!("Expected PreFileEdit"),
+        }
     }
 
     #[test]

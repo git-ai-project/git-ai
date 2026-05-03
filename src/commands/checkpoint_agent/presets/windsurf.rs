@@ -165,6 +165,7 @@ impl AgentPreset for WindsurfPreset {
             ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths: file_path,
+                dirty_files: None,
                 transcript_source,
             })
         };

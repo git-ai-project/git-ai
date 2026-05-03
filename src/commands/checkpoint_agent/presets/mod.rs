@@ -55,6 +55,7 @@ pub struct PreFileEdit {
 pub struct PostFileEdit {
     pub context: PresetContext,
     pub file_paths: Vec<PathBuf>,
+    pub dirty_files: Option<HashMap<PathBuf, String>>,
     pub transcript_source: Option<TranscriptSource>,
 }
 
@@ -63,6 +64,7 @@ pub struct KnownHumanEdit {
     pub trace_id: String,
     pub cwd: PathBuf,
     pub file_paths: Vec<PathBuf>,
+    pub dirty_files: Option<HashMap<PathBuf, String>>,
     pub editor_metadata: HashMap<String, String>,
 }
 

@@ -28,6 +28,8 @@ pub(super) fn parse_cli_hooks(
         )));
     }
 
+    let dirty_files = super::dirty_files_from_hook_data(data, cwd);
+
     let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
     let tool_result = data
         .get("tool_result")
@@ -97,7 +99,7 @@ pub(super) fn parse_cli_hooks(
             Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: extracted_paths,
-                dirty_files: None,
+                dirty_files,
             })])
         }
         ("PostToolUse", ToolClass::FileEdit) => {
@@ -110,6 +112,7 @@ pub(super) fn parse_cli_hooks(
             Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths: extracted_paths,
+                dirty_files,
                 transcript_source: None,
             })])
         }

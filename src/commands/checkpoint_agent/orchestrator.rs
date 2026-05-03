@@ -178,7 +178,14 @@ fn execute_post_file_edit(
     e: PostFileEdit,
     preset_name: &str,
 ) -> Result<Vec<CheckpointRequest>, GitAiError> {
-    let files = build_checkpoint_files(&e.file_paths)?;
+    let mut files = build_checkpoint_files(&e.file_paths)?;
+    if let Some(ref dirty) = e.dirty_files {
+        for f in &mut files {
+            if let Some(override_content) = dirty.get(&f.path) {
+                f.content = Some(override_content.clone());
+            }
+        }
+    }
     let checkpoint_kind = match preset_name {
         "ai_tab" => CheckpointKind::AiTab,
         _ => CheckpointKind::AiAgent,
@@ -195,7 +202,14 @@ fn execute_post_file_edit(
 }
 
 fn execute_known_human_edit(e: KnownHumanEdit) -> Result<Vec<CheckpointRequest>, GitAiError> {
-    let files = build_checkpoint_files(&e.file_paths)?;
+    let mut files = build_checkpoint_files(&e.file_paths)?;
+    if let Some(ref dirty) = e.dirty_files {
+        for f in &mut files {
+            if let Some(override_content) = dirty.get(&f.path) {
+                f.content = Some(override_content.clone());
+            }
+        }
+    }
     Ok(split_files_into_requests(
         files,
         e.trace_id,

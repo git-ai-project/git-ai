@@ -7,7 +7,7 @@ pub struct KnownHumanPreset;
 
 impl AgentPreset for KnownHumanPreset {
     fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
-        let (editor, editor_version, extension_version, cwd, file_paths) =
+        let (editor, editor_version, extension_version, cwd, file_paths, dirty_files) =
             if hook_input.is_empty() {
                 (
                     "unknown".to_string(),
@@ -15,6 +15,7 @@ impl AgentPreset for KnownHumanPreset {
                     "unknown".to_string(),
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                     vec![],
+                    None,
                 )
             } else {
                 let data: serde_json::Value = serde_json::from_str(hook_input)
@@ -43,7 +44,20 @@ impl AgentPreset for KnownHumanPreset {
                     })
                     .unwrap_or_default();
 
-                (editor, editor_version, extension_version, cwd, file_paths)
+                let dirty_files = data["dirty_files"].as_object().map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (PathBuf::from(k), s.to_string())))
+                        .collect::<HashMap<PathBuf, String>>()
+                });
+
+                (
+                    editor,
+                    editor_version,
+                    extension_version,
+                    cwd,
+                    file_paths,
+                    dirty_files,
+                )
             };
 
         let mut editor_metadata = HashMap::new();
@@ -55,6 +69,7 @@ impl AgentPreset for KnownHumanPreset {
             trace_id: trace_id.to_string(),
             cwd,
             file_paths,
+            dirty_files,
             editor_metadata,
         })])
     }
