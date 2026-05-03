@@ -3,11 +3,11 @@ use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint::PreparedPathRole;
 use crate::commands::checkpoint_agent::bash_tool::{self, HookEvent};
 use crate::commands::checkpoint_agent::presets::{
-    BashPreHookStrategy, KnownHumanEdit, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, TranscriptSource, UntrackedEdit,
+    KnownHumanEdit, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    TranscriptSource, UntrackedEdit,
 };
 use crate::error::GitAiError;
-use crate::git::repository::find_repository_for_file;
+use crate::git::repository::{find_repository_for_file, Repository};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -31,6 +31,53 @@ pub struct CheckpointRequest {
     pub metadata: HashMap<String, String>,
 }
 
+fn find_repository_for_file_paths(file_paths: &[PathBuf]) -> Result<Repository, GitAiError> {
+    let first_path = file_paths.first().ok_or_else(|| {
+        GitAiError::PresetError("No file paths provided for repo discovery".to_string())
+    })?;
+    find_repository_for_file(&first_path.to_string_lossy(), None)
+}
+
+fn find_repository_for_cwd(cwd: &std::path::Path) -> Result<Repository, GitAiError> {
+    find_repository_for_file(&cwd.to_string_lossy(), None)
+}
+
+fn validate_absolute_paths(paths: &[PathBuf]) -> Result<(), GitAiError> {
+    for path in paths {
+        if !path.is_absolute() {
+            return Err(GitAiError::Generic(format!(
+                "Checkpoint requires absolute file paths, got relative: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn build_checkpoint_files(
+    file_paths: &[PathBuf],
+    repo: &Repository,
+) -> Result<Vec<CheckpointFile>, GitAiError> {
+    validate_absolute_paths(file_paths)?;
+    let repo_work_dir = repo.workdir()?;
+    let base_commit_sha = repo.head()?.target()?;
+    let mut files = Vec::with_capacity(file_paths.len());
+    for path in file_paths {
+        let content = if path.exists() {
+            std::fs::read_to_string(path).unwrap_or_default()
+        } else {
+            String::new()
+        };
+        files.push(CheckpointFile {
+            path: path.clone(),
+            content,
+            repo_work_dir: repo_work_dir.clone(),
+            base_commit_sha: base_commit_sha.clone(),
+        });
+    }
+    Ok(files)
+}
+
 pub fn execute_preset_checkpoint(
     preset_name: &str,
     hook_input: &str,
@@ -44,19 +91,6 @@ pub fn execute_preset_checkpoint(
         .map(|event| execute_event(event, preset_name))
         .collect::<Result<Vec<_>, _>>()
         .map(|v| v.into_iter().flatten().collect())
-}
-
-fn resolve_repo_working_dir_from_file_paths(file_paths: &[PathBuf]) -> Result<PathBuf, GitAiError> {
-    let first_path = file_paths.first().ok_or_else(|| {
-        GitAiError::PresetError("No file paths provided for repo discovery".to_string())
-    })?;
-    let repo = find_repository_for_file(&first_path.to_string_lossy(), None)?;
-    repo.workdir()
-}
-
-fn resolve_repo_working_dir_from_cwd(cwd: &std::path::Path) -> Result<PathBuf, GitAiError> {
-    let repo = find_repository_for_file(&cwd.to_string_lossy(), None)?;
-    repo.workdir()
 }
 
 fn execute_event(
@@ -74,23 +108,21 @@ fn execute_event(
 }
 
 fn execute_pre_file_edit(e: PreFileEdit) -> Result<CheckpointRequest, GitAiError> {
-    let repo_working_dir = if !e.file_paths.is_empty() {
-        resolve_repo_working_dir_from_file_paths(&e.file_paths)?
+    let repo = if !e.file_paths.is_empty() {
+        find_repository_for_file_paths(&e.file_paths)?
     } else {
-        resolve_repo_working_dir_from_cwd(&e.context.cwd)?
+        find_repository_for_cwd(&e.context.cwd)?
     };
+    let files = build_checkpoint_files(&e.file_paths, &repo)?;
 
     Ok(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind: CheckpointKind::Human,
         agent_id: None,
-        repo_working_dir,
-        file_paths: e.file_paths,
+        files,
         path_role: PreparedPathRole::WillEdit,
-        dirty_files: e.dirty_files,
         transcript_source: None,
         metadata: e.context.metadata,
-        captured_checkpoint_id: None,
     })
 }
 
@@ -98,11 +130,12 @@ fn execute_post_file_edit(
     e: PostFileEdit,
     preset_name: &str,
 ) -> Result<CheckpointRequest, GitAiError> {
-    let repo_working_dir = if !e.file_paths.is_empty() {
-        resolve_repo_working_dir_from_file_paths(&e.file_paths)?
+    let repo = if !e.file_paths.is_empty() {
+        find_repository_for_file_paths(&e.file_paths)?
     } else {
-        resolve_repo_working_dir_from_cwd(&e.context.cwd)?
+        find_repository_for_cwd(&e.context.cwd)?
     };
+    let files = build_checkpoint_files(&e.file_paths, &repo)?;
 
     let checkpoint_kind = match preset_name {
         "ai_tab" => CheckpointKind::AiTab,
@@ -113,69 +146,63 @@ fn execute_post_file_edit(
         trace_id: e.context.trace_id,
         checkpoint_kind,
         agent_id: Some(e.context.agent_id),
-        repo_working_dir,
-        file_paths: e.file_paths,
+        files,
         path_role: PreparedPathRole::Edited,
-        dirty_files: e.dirty_files,
         transcript_source: e.transcript_source,
         metadata: e.context.metadata,
-        captured_checkpoint_id: None,
     })
 }
 
 fn execute_known_human_edit(e: KnownHumanEdit) -> Result<CheckpointRequest, GitAiError> {
-    let repo_working_dir = if !e.file_paths.is_empty() {
-        resolve_repo_working_dir_from_file_paths(&e.file_paths)?
+    let repo = if !e.file_paths.is_empty() {
+        find_repository_for_file_paths(&e.file_paths)?
     } else {
-        resolve_repo_working_dir_from_cwd(&e.cwd)?
+        find_repository_for_cwd(&e.cwd)?
     };
+    let files = build_checkpoint_files(&e.file_paths, &repo)?;
 
     Ok(CheckpointRequest {
         trace_id: e.trace_id,
         checkpoint_kind: CheckpointKind::KnownHuman,
         agent_id: None,
-        repo_working_dir,
-        file_paths: e.file_paths,
+        files,
         path_role: PreparedPathRole::Edited,
-        dirty_files: e.dirty_files,
         transcript_source: None,
         metadata: e.editor_metadata,
-        captured_checkpoint_id: None,
     })
 }
 
 fn execute_untracked_edit(e: UntrackedEdit) -> Result<CheckpointRequest, GitAiError> {
-    let repo_working_dir = if !e.file_paths.is_empty() {
-        resolve_repo_working_dir_from_file_paths(&e.file_paths)?
+    let repo = if !e.file_paths.is_empty() {
+        find_repository_for_file_paths(&e.file_paths)?
     } else {
-        resolve_repo_working_dir_from_cwd(&e.cwd)?
+        find_repository_for_cwd(&e.cwd)?
     };
+    let files = build_checkpoint_files(&e.file_paths, &repo)?;
 
     Ok(CheckpointRequest {
         trace_id: e.trace_id,
         checkpoint_kind: CheckpointKind::Human,
         agent_id: None,
-        repo_working_dir,
-        file_paths: e.file_paths,
+        files,
         path_role: PreparedPathRole::WillEdit,
-        dirty_files: None,
         transcript_source: None,
         metadata: HashMap::new(),
-        captured_checkpoint_id: None,
     })
 }
 
 fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointRequest>, GitAiError> {
-    let repo_working_dir = resolve_repo_working_dir_from_cwd(&e.context.cwd)?;
+    let repo = find_repository_for_cwd(&e.context.cwd)?;
+    let repo_work_dir = repo.workdir()?;
 
-    let captured_checkpoint_id = match bash_tool::handle_bash_pre_tool_use_with_context(
-        &repo_working_dir,
+    let _pre_result = match bash_tool::handle_bash_pre_tool_use_with_context(
+        &repo_work_dir,
         &e.context.session_id,
         &e.tool_use_id,
         &e.context.agent_id,
         Some(&e.context.metadata),
     ) {
-        Ok(result) => result.captured_checkpoint.map(|info| info.capture_id),
+        Ok(result) => result,
         Err(error) => {
             tracing::debug!(
                 "Bash pre-hook snapshot failed for {} session {}: {}",
@@ -183,69 +210,68 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointRequest>, Gi
                 e.context.session_id,
                 error
             );
-            None
+            return Ok(None);
         }
     };
 
-    match e.strategy {
-        BashPreHookStrategy::EmitHumanCheckpoint => Ok(Some(CheckpointRequest {
-            trace_id: e.context.trace_id,
-            checkpoint_kind: CheckpointKind::Human,
-            agent_id: None,
-            repo_working_dir,
-            file_paths: vec![],
-            path_role: PreparedPathRole::WillEdit,
-            dirty_files: None,
-            transcript_source: None,
-            metadata: e.context.metadata,
-            captured_checkpoint_id,
-        })),
-        BashPreHookStrategy::SnapshotOnly => Ok(None),
-    }
+    // Always emit a human checkpoint for the pre-hook
+    Ok(Some(CheckpointRequest {
+        trace_id: e.context.trace_id,
+        checkpoint_kind: CheckpointKind::Human,
+        agent_id: None,
+        files: vec![],
+        path_role: PreparedPathRole::WillEdit,
+        transcript_source: None,
+        metadata: e.context.metadata,
+    }))
 }
 
 fn execute_post_bash_call(e: PostBashCall) -> Result<CheckpointRequest, GitAiError> {
-    let repo_working_dir = resolve_repo_working_dir_from_cwd(&e.context.cwd)?;
+    let repo = find_repository_for_cwd(&e.context.cwd)?;
+    let repo_work_dir = repo.workdir()?;
 
     let bash_result = bash_tool::handle_bash_tool(
         HookEvent::PostToolUse,
-        &repo_working_dir,
+        &repo_work_dir,
         &e.context.session_id,
         &e.tool_use_id,
     );
 
-    let (file_paths, captured_checkpoint_id) = match &bash_result {
-        Ok(result) => {
-            let paths = match &result.action {
-                bash_tool::BashCheckpointAction::Checkpoint(paths) => {
-                    paths.iter().map(PathBuf::from).collect()
-                }
-                bash_tool::BashCheckpointAction::NoChanges => vec![],
-                bash_tool::BashCheckpointAction::Fallback => vec![],
-                bash_tool::BashCheckpointAction::TakePreSnapshot => vec![],
-            };
-            let cap_id = result
-                .captured_checkpoint
-                .as_ref()
-                .map(|info| info.capture_id.clone());
-            (paths, cap_id)
-        }
+    let file_paths: Vec<PathBuf> = match &bash_result {
+        Ok(result) => match &result.action {
+            bash_tool::BashCheckpointAction::Checkpoint(paths) => {
+                paths.iter().map(PathBuf::from).collect()
+            }
+            _ => vec![],
+        },
         Err(err) => {
             tracing::debug!("Bash tool post-hook error: {}", err);
-            (vec![], None)
+            vec![]
         }
     };
+
+    let base_commit_sha = repo.head()?.target()?;
+    let files: Vec<CheckpointFile> = file_paths
+        .iter()
+        .filter_map(|rel_path| {
+            let abs_path = repo_work_dir.join(rel_path);
+            let content = std::fs::read_to_string(&abs_path).ok()?;
+            Some(CheckpointFile {
+                path: abs_path,
+                content,
+                repo_work_dir: repo_work_dir.clone(),
+                base_commit_sha: base_commit_sha.clone(),
+            })
+        })
+        .collect();
 
     Ok(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind: CheckpointKind::AiAgent,
         agent_id: Some(e.context.agent_id),
-        repo_working_dir,
-        file_paths,
+        files,
         path_role: PreparedPathRole::Edited,
-        dirty_files: None,
         transcript_source: e.transcript_source,
         metadata: e.context.metadata,
-        captured_checkpoint_id,
     })
 }
