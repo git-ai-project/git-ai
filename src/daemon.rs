@@ -8199,14 +8199,6 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     sanitize_git_env_for_daemon();
     disable_trace2_for_daemon_process();
     config.ensure_parent_dirs()?;
-    if let Err(error) = crate::commands::checkpoint::prune_stale_captured_checkpoints(
-        Duration::from_secs(60 * 60 * 24),
-    ) {
-        tracing::warn!(
-            %error,
-            "stale captured checkpoint pruning failed"
-        );
-    }
     let _lock = DaemonLock::acquire(&config.lock_path)?;
     let _active_guard = DaemonProcessActiveGuard::enter();
     write_pid_metadata(&config)?;

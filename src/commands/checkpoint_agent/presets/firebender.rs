@@ -442,8 +442,7 @@ mod tests {
         .to_string();
         let events = FirebenderPreset.parse(&input, "t_test").unwrap();
         match &events[0] {
-            ParsedHookEvent::PreFileEdit(e) => {
-            }
+            ParsedHookEvent::PreFileEdit(_) => {}
             _ => panic!("Expected PreFileEdit"),
         }
     }
