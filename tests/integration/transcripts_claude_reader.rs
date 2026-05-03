@@ -103,16 +103,9 @@ fn test_claude_reader_handles_malformed_json() {
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent.read_incremental(&file_path, watermark, "test-session");
 
-    assert!(result.is_err());
-    if let Err(e) = result {
-        match e {
-            git_ai::transcripts::types::TranscriptError::Parse { line, message } => {
-                assert_eq!(line, 1);
-                assert!(message.contains("Invalid JSON"));
-            }
-            _ => panic!("Expected Parse error, got {:?}", e),
-        }
-    }
+    // Malformed JSON lines are skipped, not fatal errors
+    let batch = result.expect("malformed lines should be skipped, not cause errors");
+    assert_eq!(batch.events.len(), 0);
 }
 
 #[test]
