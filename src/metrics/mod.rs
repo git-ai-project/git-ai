@@ -53,16 +53,6 @@ pub fn record<V: EventValues>(values: V, attrs: EventAttributes) {
     crate::observability::log_metrics(vec![event]);
 }
 
-/// Record an event by consuming the values (avoids cloning large data).
-#[allow(dead_code)]
-pub fn record_owned<V: EventValues>(values: V, attrs: EventAttributes) {
-    if attrs.tool == Some(Some("mock_ai".to_string())) {
-        return;
-    }
-    let event = MetricEvent::from_values(values, attrs.to_sparse());
-    crate::observability::log_metrics(vec![event]);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
