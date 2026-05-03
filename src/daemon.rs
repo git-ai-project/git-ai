@@ -7433,10 +7433,11 @@ impl ActorDaemonCoordinator {
                 Box::new(crate::transcripts::watermark::RecordIndexWatermark::new(0))
                     as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
             }
-            crate::transcripts::watermark::WatermarkType::Timestamp => Box::new(
-                crate::transcripts::watermark::TimestampWatermark::new(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH),
-            )
-                as Box<dyn crate::transcripts::watermark::WatermarkStrategy>,
+            crate::transcripts::watermark::WatermarkType::Timestamp => {
+                Box::new(crate::transcripts::watermark::TimestampWatermark::new(
+                    chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                )) as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
+            }
             crate::transcripts::watermark::WatermarkType::Hybrid => Box::new(
                 crate::transcripts::watermark::HybridWatermark::new(0, 0, None),
             )
