@@ -509,7 +509,8 @@ fn test_codex_preset_invalid_json() {
 fn test_codex_preset_missing_session_id() {
     let preset = resolve_preset("codex").unwrap();
     let hook_input = json!({
-        "type": "agent-turn-complete",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "apply_patch",
         "transcript_path": "tests/fixtures/codex-session-simple.jsonl",
         "cwd": "/path"
     })
@@ -530,7 +531,9 @@ fn test_codex_preset_missing_session_id() {
 fn test_codex_preset_invalid_transcript_path() {
     let preset = resolve_preset("codex").unwrap();
     let hook_input = json!({
-        "type": "agent-turn-complete",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "apply_patch",
+        "tool_use_id": "patch-1",
         "session_id": "test-session-12345",
         "transcript_path": "/nonexistent/path/transcript.jsonl",
         "cwd": "/path"
