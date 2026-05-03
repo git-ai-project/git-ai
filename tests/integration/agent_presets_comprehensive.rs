@@ -123,8 +123,11 @@ fn test_claude_transcript_parsing_empty_file() {
     let temp_file = std::env::temp_dir().join("empty_claude.jsonl");
     fs::write(&temp_file, "").expect("Failed to write temp file");
 
-    let result =
-        ClaudeAgent.read_incremental(&temp_file, Box::new(ByteOffsetWatermark::new(0)), "test");
+    let result = ClaudeAgent::new().read_incremental(
+        &temp_file,
+        Box::new(ByteOffsetWatermark::new(0)),
+        "test",
+    );
 
     assert!(result.is_ok());
     let batch = result.unwrap();
@@ -139,8 +142,11 @@ fn test_claude_transcript_parsing_malformed_json() {
     let temp_file = std::env::temp_dir().join("malformed_claude.jsonl");
     fs::write(&temp_file, "{invalid json}\n").expect("Failed to write temp file");
 
-    let result =
-        ClaudeAgent.read_incremental(&temp_file, Box::new(ByteOffsetWatermark::new(0)), "test");
+    let result = ClaudeAgent::new().read_incremental(
+        &temp_file,
+        Box::new(ByteOffsetWatermark::new(0)),
+        "test",
+    );
 
     assert!(result.is_err());
     fs::remove_file(temp_file).ok();
@@ -156,8 +162,11 @@ fn test_claude_transcript_parsing_with_empty_lines() {
     "#;
     fs::write(&temp_file, content).expect("Failed to write temp file");
 
-    let result =
-        ClaudeAgent.read_incremental(&temp_file, Box::new(ByteOffsetWatermark::new(0)), "test");
+    let result = ClaudeAgent::new().read_incremental(
+        &temp_file,
+        Box::new(ByteOffsetWatermark::new(0)),
+        "test",
+    );
 
     assert!(result.is_ok());
     let batch = result.unwrap();
@@ -329,7 +338,7 @@ fn test_gemini_preset_beforetool_checkpoint() {
 
 #[test]
 fn test_gemini_transcript_parsing_invalid_path() {
-    let result = GeminiAgent.read_incremental(
+    let result = GeminiAgent::new().read_incremental(
         std::path::Path::new("/nonexistent/path.json"),
         Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH)),
         "test",
@@ -350,7 +359,7 @@ fn test_gemini_transcript_parsing_empty_messages() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let result = GeminiAgent.read_incremental(
+    let result = GeminiAgent::new().read_incremental(
         &temp_file,
         Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH)),
         "test",
@@ -372,7 +381,7 @@ fn test_gemini_transcript_parsing_missing_messages_field() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let result = GeminiAgent.read_incremental(
+    let result = GeminiAgent::new().read_incremental(
         &temp_file,
         Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH)),
         "test",
@@ -1017,7 +1026,7 @@ fn test_gemini_transcript_with_unknown_message_types() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let batch = GeminiAgent
+    let batch = GeminiAgent::new()
         .read_incremental(
             &temp_file,
             Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH)),
@@ -1038,7 +1047,7 @@ fn test_claude_transcript_with_tool_result_in_user_content() {
 {"type":"assistant","timestamp":"2025-01-01T00:00:01Z","message":{"model":"claude-3","content":[{"type":"text","text":"response"}]}}"#;
     fs::write(&temp_file, content).expect("Failed to write temp file");
 
-    let batch = ClaudeAgent
+    let batch = ClaudeAgent::new()
         .read_incremental(&temp_file, Box::new(ByteOffsetWatermark::new(0)), "test")
         .expect("Should parse successfully");
 
@@ -1067,7 +1076,7 @@ fn test_gemini_transcript_with_empty_tool_calls() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let batch = GeminiAgent
+    let batch = GeminiAgent::new()
         .read_incremental(
             &temp_file,
             Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH)),
@@ -1095,7 +1104,7 @@ fn test_gemini_transcript_tool_call_without_args() {
     });
     fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
 
-    let batch = GeminiAgent
+    let batch = GeminiAgent::new()
         .read_incremental(
             &temp_file,
             Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH)),

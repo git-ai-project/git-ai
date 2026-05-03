@@ -25,7 +25,7 @@ fn test_opencode_raw_event_fidelity() {
     let fixture = opencode_root.join("opencode.db");
     let session_id = "test-session-123";
 
-    let agent = OpenCodeAgent;
+    let agent = OpenCodeAgent::new();
     let watermark = Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
     let result = agent
         .read_incremental(&fixture, watermark, session_id)

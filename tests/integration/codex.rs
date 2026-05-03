@@ -17,7 +17,7 @@ fn parse_codex(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
 #[test]
 fn test_codex_raw_event_fidelity() {
     let fixture = fixture_path("codex-session-simple.jsonl");
-    let agent = CodexAgent;
+    let agent = CodexAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")

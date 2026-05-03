@@ -15,7 +15,7 @@ fn parse_continue(hook_input: &str) -> Result<Vec<ParsedHookEvent>, git_ai::erro
 #[test]
 fn test_continue_cli_raw_event_fidelity() {
     let fixture = fixture_path("continue-cli-session-simple.json");
-    let agent = ContinueAgent;
+    let agent = ContinueAgent::new();
     let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")

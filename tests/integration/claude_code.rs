@@ -12,7 +12,7 @@ use std::io::Write;
 #[test]
 fn test_claude_code_raw_event_fidelity() {
     let fixture = fixture_path("example-claude-code.jsonl");
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
@@ -253,7 +253,7 @@ fn test_claude_e2e_prefers_latest_checkpoint_for_prompts() {
 #[test]
 fn test_claude_code_thinking_raw_event_fidelity() {
     let fixture = fixture_path("claude-code-with-thinking.jsonl");
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
@@ -403,7 +403,7 @@ fn test_extract_plan_returns_none_for_empty_content() {
 #[test]
 fn test_claude_code_plan_raw_event_fidelity() {
     let fixture = fixture_path("claude-code-with-plan.jsonl");
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")

@@ -10,9 +10,20 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Gemini agent that discovers conversations from Gemini session storage.
-pub struct GeminiAgent;
+pub struct GeminiAgent {
+    batch_size: usize,
+}
 
 impl GeminiAgent {
+    pub fn new() -> Self {
+        Self { batch_size: 1000 }
+    }
+
+    #[cfg(test)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self { batch_size }
+    }
+
     /// Scan for Gemini session files in standard locations.
     ///
     /// Searches `~/.gemini/sessions/` recursively for `*.json` files.
@@ -54,7 +65,17 @@ impl GeminiAgent {
     }
 }
 
+impl Default for GeminiAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Agent for GeminiAgent {
+    fn batch_size_hint(&self) -> usize {
+        self.batch_size
+    }
+
     fn sweep_strategy(&self) -> SweepStrategy {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
@@ -185,11 +206,109 @@ mod tests {
 
     #[test]
     fn test_sweep_strategy() {
-        let agent = GeminiAgent;
+        let agent = GeminiAgent::new();
         assert_eq!(
             agent.sweep_strategy(),
             SweepStrategy::Periodic(Duration::from_secs(30 * 60))
         );
+    }
+
+    fn make_gemini_json(count: usize) -> String {
+        let messages: Vec<String> = (0..count)
+            .map(|i| {
+                format!(
+                    r#"{{"type":"user","id":{},"content":"msg-{}","timestamp":"2025-01-01T00:{:02}:00Z"}}"#,
+                    i, i, i
+                )
+            })
+            .collect();
+        format!(r#"{{"messages":[{}]}}"#, messages.join(","))
+    }
+
+    fn drain_all(
+        agent: &GeminiAgent,
+        path: &Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> =
+            Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_batch_resume_no_loss_or_repeat() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, make_gemini_json(5).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = GeminiAgent::with_batch_size(2);
+        let (events, _) = drain_all(&agent, file.path());
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events.iter().map(|e| e["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_append_one_record_after_full_read() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, make_gemini_json(3).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = GeminiAgent::with_batch_size(2);
+        let (all, wm) = drain_all(&agent, file.path());
+        assert_eq!(all.len(), 3);
+
+        // Rewrite with 4 messages (original 3 + 1 new with later timestamp)
+        std::fs::write(file.path(), make_gemini_json(4)).unwrap();
+
+        let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["id"].as_u64().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_append_several_records_after_full_read() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, make_gemini_json(3).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = GeminiAgent::with_batch_size(2);
+        let (_, mut wm) = drain_all(&agent, file.path());
+
+        // Rewrite with 6 messages
+        std::fs::write(file.path(), make_gemini_json(6)).unwrap();
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
     }
 
     #[test]
@@ -208,7 +327,7 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = GeminiAgent;
+        let agent = GeminiAgent::new();
         let watermark = Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
         let result = agent
             .read_incremental(file.path(), watermark, "test")
@@ -239,7 +358,7 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = GeminiAgent;
+        let agent = GeminiAgent::new();
         // Set watermark to after the first message
         let ts = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
             .unwrap()

@@ -184,7 +184,7 @@ fn test_windsurf_preset_invalid_json() {
 #[test]
 fn test_windsurf_raw_event_fidelity() {
     let fixture = crate::test_utils::fixture_path("windsurf-session-simple.jsonl");
-    let agent = WindsurfAgent;
+    let agent = WindsurfAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
@@ -212,7 +212,7 @@ fn test_windsurf_transcript_parser_handles_malformed_lines() {
     writeln!(temp_file, "not valid json at all").unwrap();
     writeln!(temp_file, r#"{{"planner_response":{{"response":"Hi there"}},"status":"done","type":"planner_response"}}"#).unwrap();
 
-    let agent = WindsurfAgent;
+    let agent = WindsurfAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent.read_incremental(temp_file.path(), watermark, "test");
 
@@ -233,7 +233,7 @@ fn test_windsurf_transcript_parser_handles_malformed_lines() {
 fn test_windsurf_transcript_parser_empty_file() {
     let temp_file = tempfile::NamedTempFile::new().unwrap();
 
-    let agent = WindsurfAgent;
+    let agent = WindsurfAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(temp_file.path(), watermark, "test")

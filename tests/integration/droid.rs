@@ -17,7 +17,7 @@ fn parse_droid(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
 #[test]
 fn test_droid_raw_event_fidelity() {
     let fixture = fixture_path("droid-session.jsonl");
-    let agent = DroidAgent;
+    let agent = DroidAgent::new();
     let watermark = Box::new(HybridWatermark::new(0, 0, None));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
