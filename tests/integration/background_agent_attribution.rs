@@ -20,6 +20,8 @@ fn test_no_hooks_background_agent_commit_attributed_to_ai() {
 
     fs::write(repo.path().join("seed.txt"), "seed line\n").unwrap();
     repo.stage_all_and_commit("seed").unwrap();
+    let mut seed_file = repo.filename("seed.txt");
+    seed_file.assert_committed_lines(crate::lines!["seed line".unattributed_human()]);
 
     fs::write(repo.path().join("cloud.txt"), "alpha\nbeta\ngamma\n").unwrap();
     repo.stage_all_and_commit_with_env("cloud agent edit", &[("GIT_AI_CLOUD_AGENT", "1")])
@@ -41,6 +43,8 @@ fn test_without_background_agent_env_lines_are_untracked() {
 
     fs::write(repo.path().join("seed.txt"), "seed line\n").unwrap();
     repo.stage_all_and_commit("seed").unwrap();
+    let mut seed_file = repo.filename("seed.txt");
+    seed_file.assert_committed_lines(crate::lines!["seed line".unattributed_human()]);
 
     fs::write(repo.path().join("plain.txt"), "alpha\nbeta\n").unwrap();
     repo.stage_all_and_commit("no agent").unwrap();
