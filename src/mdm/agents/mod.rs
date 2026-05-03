@@ -11,6 +11,8 @@ mod opencode;
 mod pi;
 mod vscode;
 mod windsurf;
+#[cfg(target_os = "macos")]
+mod xcode;
 
 pub use amp::AmpInstaller;
 pub use claude_code::ClaudeCodeInstaller;
@@ -25,6 +27,8 @@ pub use opencode::OpenCodeInstaller;
 pub use pi::PiInstaller;
 pub use vscode::VSCodeInstaller;
 pub use windsurf::WindsurfInstaller;
+#[cfg(target_os = "macos")]
+pub use xcode::XcodeInstaller;
 
 use super::hook_installer::HookInstaller;
 
@@ -44,5 +48,7 @@ pub fn get_all_installers() -> Vec<Box<dyn HookInstaller>> {
         Box::new(FirebenderInstaller),
         Box::new(JetBrainsInstaller),
         Box::new(WindsurfInstaller),
+        #[cfg(target_os = "macos")]
+        Box::new(XcodeInstaller),
     ]
 }
