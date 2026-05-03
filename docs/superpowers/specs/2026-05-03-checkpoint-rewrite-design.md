@@ -100,6 +100,7 @@ struct BashSession {
 - `dirty_files` field (everywhere)
 - `captured_checkpoint_id` field (everywhere)
 - `wait` field on `CheckpointRun`
+- `BashPreHookStrategy` enum (all agents now use explicit pre/post file edit events)
 
 ## Component Designs
 
@@ -128,7 +129,7 @@ The `execute_*` functions change to produce the new types:
 - Assemble `CheckpointFile` structs.
 
 For bash events:
-- `execute_pre_bash_call`: sends `BashSessionStart` to daemon (stat snapshot + agent context). If `EmitHumanCheckpoint` strategy, also queries watermarks from daemon, stats filesystem to find files modified since last watermark, reads their contents, and sends a scoped Human checkpoint for those files.
+- `execute_pre_bash_call`: sends `BashSessionStart` to daemon (stat snapshot + agent context). No checkpoint emission — all agents now send explicit pre/post file edit events, so the baseline is always established through those scoped checkpoints. `BashPreHookStrategy` is removed entirely.
 - `execute_post_bash_call`: sends `BashSnapshotQuery` to daemon to retrieve pre-snapshot, stats filesystem, diffs pre vs post, reads changed file contents, packs into `CheckpointFile` structs, signals `BashSessionEnd`.
 
 ### Daemon
@@ -198,6 +199,6 @@ No more calling `checkpoint::run()` directly. No more `checkpoint_context_from_a
 2. **CLI**: rewrite `handle_checkpoint` to ~50 lines. Update orchestrator `execute_*` functions. Update `synthesize_hook_input_from_cli_args`.
 3. **Daemon**: update control API handler. Implement bash session in-memory state + 4 new handlers. Update `ingest_checkpoint_payload` and `apply_checkpoint_side_effect`. Move author identity and metrics here.
 4. **Pre-commit hook**: rewrite to assemble scoped requests from staged files, query daemon for bash context.
-5. **Bash tool**: remove disk-based snapshot I/O. Pre-hook sends to daemon. Post-hook queries daemon. Pre-bash `EmitHumanCheckpoint` does filesystem scan.
+5. **Bash tool**: remove disk-based snapshot I/O. Pre-hook sends stat snapshot to daemon. Post-hook queries daemon for pre-snapshot, diffs, reads changed files. Remove `BashPreHookStrategy`.
 6. **Delete dead code**: all functions, types, and filesystem artifacts from the deletion list.
 7. **Fix tests**: update integration tests. Evaluate bash test failures for correctness vs band-aid issues around mtime grace periods.
