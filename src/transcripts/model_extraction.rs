@@ -10,11 +10,10 @@ pub fn extract_model(
     session_id: Option<&str>,
 ) -> Result<Option<String>, TranscriptError> {
     match format {
-        TranscriptFormat::ClaudeJsonl | TranscriptFormat::CopilotEventStreamJsonl => {
-            extract_model_from_jsonl_tail(path)
-        }
+        TranscriptFormat::ClaudeJsonl
+        | TranscriptFormat::CopilotEventStreamJsonl
+        | TranscriptFormat::GeminiJsonl => extract_model_from_jsonl_tail(path),
         TranscriptFormat::CopilotSessionJson => extract_model_from_copilot_session_json(path),
-        TranscriptFormat::GeminiJson => extract_model_from_gemini_json(path),
         TranscriptFormat::AmpThreadJson => extract_model_from_amp_thread_json(path),
         TranscriptFormat::OpenCodeSqlite => extract_model_from_opencode_sqlite(path, session_id),
         // Droid uses extract_model_from_droid_settings() with the settings path instead
@@ -112,28 +111,6 @@ fn extract_model_from_copilot_session_json(path: &Path) -> Result<Option<String>
                     .and_then(|v| v.as_str())
                     .map(String::from)
             })
-        });
-
-    Ok(model)
-}
-
-fn extract_model_from_gemini_json(path: &Path) -> Result<Option<String>, TranscriptError> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Ok(None),
-    };
-
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return Ok(None),
-    };
-
-    let model = json
-        .get("messages")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| {
-            arr.iter()
-                .find_map(|msg| msg.get("model").and_then(|v| v.as_str()).map(String::from))
         });
 
     Ok(model)
@@ -261,8 +238,8 @@ mod tests {
 
     #[test]
     fn test_extract_model_gemini() {
-        let path = fixture_path("gemini-session-simple.json");
-        let result = extract_model(&path, TranscriptFormat::GeminiJson, None).unwrap();
+        let path = fixture_path("gemini-session-simple.jsonl");
+        let result = extract_model(&path, TranscriptFormat::GeminiJsonl, None).unwrap();
         assert_eq!(result, Some("gemini-2.5-flash".to_string()));
     }
 

@@ -33,7 +33,7 @@ impl AgentPreset for GeminiPreset {
                 id: session_id.clone(),
                 model: crate::transcripts::model_extraction::extract_model(
                     Path::new(transcript_path),
-                    crate::transcripts::sweep::TranscriptFormat::GeminiJson,
+                    crate::transcripts::sweep::TranscriptFormat::GeminiJsonl,
                     None,
                 )
                 .ok()
@@ -48,7 +48,7 @@ impl AgentPreset for GeminiPreset {
 
         let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(transcript_path),
-            format: TranscriptFormat::GeminiJson,
+            format: TranscriptFormat::GeminiJsonl,
             session_id: context.session_id.clone(),
             external_thread_id: None,
         });
@@ -139,7 +139,7 @@ mod tests {
                 assert!(matches!(
                     e.transcript_source,
                     Some(TranscriptSource {
-                        format: TranscriptFormat::GeminiJson,
+                        format: TranscriptFormat::GeminiJsonl,
                         ..
                     })
                 ));
