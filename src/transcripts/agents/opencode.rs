@@ -11,7 +11,20 @@ use std::path::Path;
 use std::time::Duration;
 
 /// OpenCode agent that reads from an OpenCode SQLite database.
-pub struct OpenCodeAgent;
+pub struct OpenCodeAgent {
+    batch_size: usize,
+}
+
+impl OpenCodeAgent {
+    pub fn new() -> Self {
+        Self { batch_size: 1000 }
+    }
+
+    #[cfg(test)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self { batch_size }
+    }
+}
 
 fn open_sqlite_readonly(path: &Path) -> Result<Connection, TranscriptError> {
     let conn =
@@ -174,7 +187,17 @@ fn read_parts_for_messages(
     Ok(parts_by_message)
 }
 
+impl Default for OpenCodeAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Agent for OpenCodeAgent {
+    fn batch_size_hint(&self) -> usize {
+        self.batch_size
+    }
+
     fn sweep_strategy(&self) -> SweepStrategy {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
@@ -254,11 +277,181 @@ mod tests {
 
     #[test]
     fn test_sweep_strategy() {
-        let agent = OpenCodeAgent;
+        let agent = OpenCodeAgent::new();
         assert_eq!(
             agent.sweep_strategy(),
             SweepStrategy::Periodic(Duration::from_secs(30 * 60))
         );
+    }
+
+    fn create_test_db(path: &std::path::Path, message_count: usize) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        for i in 0..message_count {
+            let ts = 1000 + (i as i64) * 1000;
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    format!("msg-{}", i),
+                    "test-session",
+                    ts,
+                    ts,
+                    format!(r#"{{"role":"user","id":{}}}"#, i),
+                ],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    format!("prt-{}", i),
+                    format!("msg-{}", i),
+                    "test-session",
+                    ts + 1,
+                    ts + 1,
+                    format!(r#"{{"type":"text","text":"part-{}"}}"#, i),
+                ],
+            ).unwrap();
+        }
+    }
+
+    fn drain_all(
+        agent: &OpenCodeAgent,
+        path: &std::path::Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        use chrono::{DateTime, Utc};
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> =
+            Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test-session").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_batch_resume_no_loss_or_repeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path, 5);
+
+        let agent = OpenCodeAgent::with_batch_size(2);
+        let (events, _) = drain_all(&agent, &db_path);
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events
+            .iter()
+            .map(|e| e["message"]["data"]["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_append_one_record_after_full_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path, 3);
+
+        let agent = OpenCodeAgent::with_batch_size(2);
+        let (all, wm) = drain_all(&agent, &db_path);
+        assert_eq!(all.len(), 3);
+
+        // Insert one more record with a later timestamp
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let ts = 1000 + 3 * 1000i64;
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["msg-3", "test-session", ts, ts, r#"{"role":"user","id":3}"#],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params!["prt-3", "msg-3", "test-session", ts+1, ts+1, r#"{"type":"text","text":"part-3"}"#],
+        ).unwrap();
+        drop(conn);
+
+        let batch = agent
+            .read_incremental(&db_path, wm, "test-session")
+            .unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(
+            batch.events[0]["message"]["data"]["id"].as_u64().unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn test_append_several_records_after_full_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path, 3);
+
+        let agent = OpenCodeAgent::with_batch_size(2);
+        let (_, mut wm) = drain_all(&agent, &db_path);
+
+        // Insert 3 more records
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for i in 3..6usize {
+            let ts = 1000 + (i as i64) * 1000;
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    format!("msg-{}", i),
+                    "test-session",
+                    ts, ts,
+                    format!(r#"{{"role":"user","id":{}}}"#, i),
+                ],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    format!("prt-{}", i),
+                    format!("msg-{}", i),
+                    "test-session",
+                    ts+1, ts+1,
+                    format!(r#"{{"type":"text","text":"part-{}"}}"#, i),
+                ],
+            ).unwrap();
+        }
+        drop(conn);
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent
+                .read_incremental(&db_path, wm, "test-session")
+                .unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["message"]["data"]["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
     }
 
     #[test]

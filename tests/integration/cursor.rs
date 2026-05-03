@@ -17,7 +17,7 @@ fn parse_cursor(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
 #[test]
 fn test_cursor_raw_event_fidelity() {
     let fixture = fixture_path("cursor-session-simple.jsonl");
-    let agent = CursorAgent;
+    let agent = CursorAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
@@ -41,7 +41,7 @@ fn test_cursor_jsonl_empty_file() {
     let temp_file = NamedTempFile::new().expect("Should create temp file");
     let _ = temp_file.as_file().sync_all();
 
-    let agent = CursorAgent;
+    let agent = CursorAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(temp_file.path(), watermark, "test")
@@ -72,7 +72,7 @@ fn test_cursor_jsonl_malformed_lines_error() {
     .unwrap();
     temp_file.flush().unwrap();
 
-    let agent = CursorAgent;
+    let agent = CursorAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent.read_incremental(temp_file.path(), watermark, "test");
 

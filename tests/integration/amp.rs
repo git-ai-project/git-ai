@@ -23,7 +23,7 @@ fn amp_simple_thread_fixture_path() -> PathBuf {
 fn test_amp_raw_event_fidelity() {
     let thread_path = amp_threads_fixture_path().join(format!("{}.json", AMP_THINKING_THREAD_ID));
 
-    let agent = AmpAgent;
+    let agent = AmpAgent::new();
     let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent
         .read_incremental(&thread_path, watermark, "test")
@@ -42,7 +42,7 @@ fn test_amp_raw_event_fidelity() {
 fn test_amp_raw_event_fidelity_with_thinking() {
     let thread_path = amp_simple_thread_fixture_path();
 
-    let agent = AmpAgent;
+    let agent = AmpAgent::new();
     let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent
         .read_incremental(&thread_path, watermark, "test")

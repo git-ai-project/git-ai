@@ -17,7 +17,7 @@ fn parse_gemini(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
 #[test]
 fn test_gemini_raw_event_fidelity() {
     let fixture = fixture_path("gemini-session-simple.json");
-    let agent = GeminiAgent;
+    let agent = GeminiAgent::new();
     let watermark = Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")

@@ -9,9 +9,20 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Amp agent that discovers conversations from Amp thread JSON files.
-pub struct AmpAgent;
+pub struct AmpAgent {
+    batch_size: usize,
+}
 
 impl AmpAgent {
+    pub fn new() -> Self {
+        Self { batch_size: 1000 }
+    }
+
+    #[cfg(test)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self { batch_size }
+    }
+
     /// Returns the path to Amp thread files.
     ///
     /// Checks `GIT_AI_AMP_THREADS_PATH` env var first, then falls back to
@@ -57,7 +68,17 @@ impl AmpAgent {
     }
 }
 
+impl Default for AmpAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Agent for AmpAgent {
+    fn batch_size_hint(&self) -> usize {
+        self.batch_size
+    }
+
     fn sweep_strategy(&self) -> SweepStrategy {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
@@ -198,11 +219,109 @@ mod tests {
 
     #[test]
     fn test_sweep_strategy() {
-        let agent = AmpAgent;
+        let agent = AmpAgent::new();
         assert_eq!(
             agent.sweep_strategy(),
             SweepStrategy::Periodic(Duration::from_secs(30 * 60))
         );
+    }
+
+    fn make_amp_json(message_count: usize) -> String {
+        let messages: Vec<String> = (0..message_count)
+            .map(|i| {
+                format!(
+                    r#"{{"role":"user","id":{},"content":[{{"type":"text","text":"msg-{}"}}]}}"#,
+                    i, i
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"id":"thread-test","messages":[{}]}}"#,
+            messages.join(",")
+        )
+    }
+
+    fn drain_all(
+        agent: &AmpAgent,
+        path: &Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> = Box::new(RecordIndexWatermark::new(0));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_batch_resume_no_loss_or_repeat() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, make_amp_json(5).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = AmpAgent::with_batch_size(2);
+        let (events, _) = drain_all(&agent, file.path());
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events.iter().map(|e| e["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_append_one_record_after_full_read() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, make_amp_json(3).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = AmpAgent::with_batch_size(2);
+        let (all, wm) = drain_all(&agent, file.path());
+        assert_eq!(all.len(), 3);
+
+        std::fs::write(file.path(), make_amp_json(4)).unwrap();
+
+        let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["id"].as_u64().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_append_several_records_after_full_read() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, make_amp_json(3).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = AmpAgent::with_batch_size(2);
+        let (_, mut wm) = drain_all(&agent, file.path());
+
+        std::fs::write(file.path(), make_amp_json(6)).unwrap();
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
     }
 
     #[test]
@@ -230,7 +349,7 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = AmpAgent;
+        let agent = AmpAgent::new();
         let watermark = Box::new(RecordIndexWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test")
@@ -262,7 +381,7 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = AmpAgent;
+        let agent = AmpAgent::new();
         let watermark = Box::new(RecordIndexWatermark::new(1));
         let result = agent
             .read_incremental(file.path(), watermark, "test")
@@ -295,7 +414,7 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = AmpAgent;
+        let agent = AmpAgent::new();
         let watermark = Box::new(RecordIndexWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test")

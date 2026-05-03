@@ -23,7 +23,7 @@ fn ensure_clean_env() {
 fn test_copilot_session_json_raw_event_fidelity() {
     ensure_clean_env();
     let fixture = fixture_path("copilot_session_simple.json");
-    let agent = CopilotAgent;
+    let agent = CopilotAgent::new();
     let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
@@ -40,7 +40,7 @@ fn test_copilot_session_json_raw_event_fidelity() {
 fn test_copilot_event_stream_raw_event_fidelity() {
     ensure_clean_env();
     let fixture = fixture_path("copilot_session_event_stream.jsonl");
-    let agent = CopilotAgent;
+    let agent = CopilotAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
@@ -66,7 +66,7 @@ fn test_copilot_returns_empty_transcript_in_codespaces() {
     }
 
     let fixture = fixture_path("copilot_session_simple.json");
-    let agent = CopilotAgent;
+    let agent = CopilotAgent::new();
     let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent.read_incremental(fixture.as_path(), watermark, "test");
     assert!(result.is_ok());
@@ -91,7 +91,7 @@ fn test_copilot_returns_empty_transcript_in_remote_containers() {
     }
 
     let fixture = fixture_path("copilot_session_simple.json");
-    let agent = CopilotAgent;
+    let agent = CopilotAgent::new();
     let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent.read_incremental(fixture.as_path(), watermark, "test");
     assert!(result.is_ok());

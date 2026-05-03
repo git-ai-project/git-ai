@@ -86,7 +86,7 @@ fn test_watermark_integration() {
     drop(file);
 
     // Read from start
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark1 = Box::new(ByteOffsetWatermark::new(0));
     let result1 = agent
         .read_incremental(&transcript_file, watermark1, "s_test")

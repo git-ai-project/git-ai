@@ -19,7 +19,7 @@ fn fixture_path(name: &str) -> PathBuf {
 #[test]
 fn test_claude_reader_raw_event_fidelity() {
     let path = fixture_path("claude_simple.jsonl");
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(&path, watermark, "test-session")
@@ -51,7 +51,7 @@ fn test_claude_reader_watermark_resume() {
     drop(file);
 
     // Read from start
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark1 = Box::new(ByteOffsetWatermark::new(0));
     let result1 = agent
         .read_incremental(&file_path, watermark1, "test-session")
@@ -99,7 +99,7 @@ fn test_claude_reader_handles_malformed_json() {
     writeln!(file, "{{invalid json syntax}}").unwrap();
     file.flush().unwrap();
 
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent.read_incremental(&file_path, watermark, "test-session");
 
@@ -118,7 +118,7 @@ fn test_claude_reader_handles_malformed_json() {
 #[test]
 fn test_claude_reader_file_not_found() {
     let path = PathBuf::from("/nonexistent/transcript.jsonl");
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent.read_incremental(&path, watermark, "test-session");
 

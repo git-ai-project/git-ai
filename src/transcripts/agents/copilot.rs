@@ -11,9 +11,20 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// GitHub Copilot agent that discovers conversations from Copilot storage.
-pub struct CopilotAgent;
+pub struct CopilotAgent {
+    batch_size: usize,
+}
 
 impl CopilotAgent {
+    pub fn new() -> Self {
+        Self { batch_size: 1000 }
+    }
+
+    #[cfg(test)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self { batch_size }
+    }
+
     /// Scan for Copilot transcript files in standard locations.
     ///
     /// Discovers BOTH session.json files and .jsonl event streams.
@@ -68,7 +79,17 @@ impl CopilotAgent {
     }
 }
 
+impl Default for CopilotAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Agent for CopilotAgent {
+    fn batch_size_hint(&self) -> usize {
+        self.batch_size
+    }
+
     fn sweep_strategy(&self) -> SweepStrategy {
         // Poll every 30 minutes for new Copilot transcripts
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
@@ -330,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_sweep_strategy() {
-        let agent = CopilotAgent;
+        let agent = CopilotAgent::new();
         assert_eq!(
             agent.sweep_strategy(),
             SweepStrategy::Periodic(Duration::from_secs(30 * 60))
@@ -350,6 +371,214 @@ mod tests {
             CopilotAgent::determine_format(&jsonl_path),
             TranscriptFormat::CopilotEventStreamJsonl
         );
+    }
+
+    // -- Event stream (JSONL / ByteOffset) batch-resume tests --
+
+    fn make_event_stream_line(i: usize) -> String {
+        format!(
+            r#"{{"type":"user.message","id":{},"data":{{"content":"msg-{}"}},"timestamp":"2025-01-01T00:00:{:02}Z"}}"#,
+            i, i, i
+        )
+    }
+
+    fn drain_event_stream(
+        agent: &CopilotAgent,
+        path: &Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> = Box::new(ByteOffsetWatermark::new(0));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_event_stream_batch_resume_no_loss_or_repeat() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::with_suffix(".jsonl").unwrap();
+        for i in 0..5 {
+            writeln!(file, "{}", make_event_stream_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = CopilotAgent::with_batch_size(2);
+        let (events, _) = drain_event_stream(&agent, file.path());
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events.iter().map(|e| e["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_event_stream_append_one_after_full_read() {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::with_suffix(".jsonl").unwrap();
+        for i in 0..3 {
+            writeln!(file, "{}", make_event_stream_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = CopilotAgent::with_batch_size(2);
+        let (all, wm) = drain_event_stream(&agent, file.path());
+        assert_eq!(all.len(), 3);
+
+        let mut f = OpenOptions::new().append(true).open(file.path()).unwrap();
+        writeln!(f, "{}", make_event_stream_line(3)).unwrap();
+        f.flush().unwrap();
+
+        let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["id"].as_u64().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_event_stream_append_several_after_full_read() {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::with_suffix(".jsonl").unwrap();
+        for i in 0..3 {
+            writeln!(file, "{}", make_event_stream_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = CopilotAgent::with_batch_size(2);
+        let (_, mut wm) = drain_event_stream(&agent, file.path());
+
+        let mut f = OpenOptions::new().append(true).open(file.path()).unwrap();
+        for i in 3..6 {
+            writeln!(f, "{}", make_event_stream_line(i)).unwrap();
+        }
+        f.flush().unwrap();
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
+    }
+
+    // -- Session JSON (RecordIndex) batch-resume tests --
+
+    fn make_session_json(request_count: usize) -> String {
+        let requests: Vec<String> = (0..request_count)
+            .map(|i| {
+                format!(
+                    r#"{{"id":{},"message":{{"text":"msg-{}"}},"response":[{{"kind":"markdownContent","value":"reply-{}"}}]}}"#,
+                    i, i, i
+                )
+            })
+            .collect();
+        format!(r#"{{"requests":[{}]}}"#, requests.join(","))
+    }
+
+    fn drain_session_json(
+        agent: &CopilotAgent,
+        path: &Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> = Box::new(RecordIndexWatermark::new(0));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_session_json_batch_resume_no_loss_or_repeat() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::with_suffix(".json").unwrap();
+        std::io::Write::write_all(&mut file, make_session_json(5).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = CopilotAgent::with_batch_size(2);
+        let (events, _) = drain_session_json(&agent, file.path());
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events.iter().map(|e| e["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_session_json_append_one_after_full_read() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::with_suffix(".json").unwrap();
+        std::io::Write::write_all(&mut file, make_session_json(3).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = CopilotAgent::with_batch_size(2);
+        let (all, wm) = drain_session_json(&agent, file.path());
+        assert_eq!(all.len(), 3);
+
+        // Rewrite file with 4 requests (simulating append in JSON format)
+        std::fs::write(file.path(), make_session_json(4)).unwrap();
+
+        let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["id"].as_u64().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_session_json_append_several_after_full_read() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::with_suffix(".json").unwrap();
+        std::io::Write::write_all(&mut file, make_session_json(3).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = CopilotAgent::with_batch_size(2);
+        let (_, mut wm) = drain_session_json(&agent, file.path());
+
+        // Rewrite file with 6 requests
+        std::fs::write(file.path(), make_session_json(6)).unwrap();
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
     }
 
     #[test]
@@ -375,7 +604,7 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = CopilotAgent;
+        let agent = CopilotAgent::new();
         let watermark = Box::new(RecordIndexWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test-session")
@@ -406,7 +635,7 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let agent = CopilotAgent;
+        let agent = CopilotAgent::new();
         let watermark = Box::new(ByteOffsetWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test-session")
