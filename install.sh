@@ -334,22 +334,8 @@ success "You can now run 'git-ai' from your terminal"
 INSTALLED_VERSION=$(${INSTALL_DIR}/git-ai --version 2>&1 || echo "unknown")
 echo "Installed git-ai ${INSTALLED_VERSION}"
 
-# Login user with install token if provided
-NEED_LOGIN=false
-if [ -n "${INSTALL_NONCE:-}" ] && [ -n "${API_BASE:-}" ]; then
-    if ! ${INSTALL_DIR}/git-ai exchange-nonce; then
-        NEED_LOGIN=true
-    fi
-fi
-
-echo "Setting up IDE/agent hooks..."
-if ! ${INSTALL_DIR}/git-ai install-hooks; then
-    warn "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."
-else
-    success "Successfully set up IDE/agent hooks"
-fi
-
 # Write JSON config at ~/.git-ai/config.json (only if it doesn't exist)
+# This must happen before install-hooks so that resolve_git_path can find git_path.
 CONFIG_DIR="$HOME/.git-ai"
 CONFIG_JSON_PATH="$CONFIG_DIR/config.json"
 mkdir -p "$CONFIG_DIR"
@@ -365,6 +351,21 @@ if [ ! -f "$CONFIG_JSON_PATH" ]; then
 }
 EOF
     mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
+fi
+
+# Login user with install token if provided
+NEED_LOGIN=false
+if [ -n "${INSTALL_NONCE:-}" ] && [ -n "${API_BASE:-}" ]; then
+    if ! ${INSTALL_DIR}/git-ai exchange-nonce; then
+        NEED_LOGIN=true
+    fi
+fi
+
+echo "Setting up IDE/agent hooks..."
+if ! ${INSTALL_DIR}/git-ai install-hooks; then
+    warn "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."
+else
+    success "Successfully set up IDE/agent hooks"
 fi
 
 # Add to PATH in all detected shell configurations
