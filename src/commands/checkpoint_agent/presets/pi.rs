@@ -169,6 +169,7 @@ impl AgentPreset for PiPreset {
                 ParsedHookEvent::PreFileEdit(PreFileEdit {
                     context,
                     file_paths: will_edit_filepaths.into_iter().map(PathBuf::from).collect(),
+                    content_overrides: HashMap::new(),
                 })
             }
             PiHookEvent::AfterEdit => {

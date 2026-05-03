@@ -210,6 +210,7 @@ impl AgentPreset for FirebenderPreset {
             ("preToolUse", false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
+                content_overrides: HashMap::new(),
             }),
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,

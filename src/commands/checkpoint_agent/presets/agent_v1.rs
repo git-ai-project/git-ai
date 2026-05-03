@@ -41,7 +41,7 @@ impl AgentPreset for AgentV1Preset {
                 let file_paths = will_edit_filepaths
                     .unwrap_or_default()
                     .into_iter()
-                    .map(PathBuf::from)
+                    .map(|p| super::parse::resolve_absolute(&p, &repo_working_dir))
                     .collect();
                 ParsedHookEvent::PreFileEdit(PreFileEdit {
                     context: PresetContext {
@@ -56,6 +56,7 @@ impl AgentPreset for AgentV1Preset {
                         metadata: HashMap::new(),
                     },
                     file_paths,
+                    content_overrides: HashMap::new(),
                 })
             }
             AgentV1Payload::AiAgent {
@@ -69,7 +70,7 @@ impl AgentPreset for AgentV1Preset {
                 let file_paths = edited_filepaths
                     .unwrap_or_default()
                     .into_iter()
-                    .map(PathBuf::from)
+                    .map(|p| super::parse::resolve_absolute(&p, &repo_working_dir))
                     .collect();
                 ParsedHookEvent::PostFileEdit(PostFileEdit {
                     context: PresetContext {

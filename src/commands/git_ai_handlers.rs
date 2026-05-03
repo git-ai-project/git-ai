@@ -319,23 +319,28 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
-    if args.is_empty()
-        || crate::commands::checkpoint_agent::presets::resolve_preset(args[0].as_str()).is_err()
+    let (preset_name, file_args): (&str, &[String]) = if args.is_empty() {
+        ("human", &[])
+    } else if args[0] == "--" {
+        ("human", &args[1..])
+    } else if crate::commands::checkpoint_agent::presets::resolve_preset(args[0].as_str()).is_err()
     {
         eprintln!("Usage: git-ai checkpoint <preset> [--hook-input <json|stdin>] [files...]");
         std::process::exit(0);
-    }
+    } else {
+        (args[0].as_str(), &args[1..])
+    };
 
-    let effective_hook_input = hook_input
-        .unwrap_or_else(|| synthesize_hook_input_from_cli_args(args[0].as_str(), &args[1..]));
+    let effective_hook_input =
+        hook_input.unwrap_or_else(|| synthesize_hook_input_from_cli_args(preset_name, file_args));
 
     let requests = match crate::commands::checkpoint_agent::orchestrator::execute_preset_checkpoint(
-        args[0].as_str(),
+        preset_name,
         &effective_hook_input,
     ) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("{} preset error: {}", args[0], e);
+            eprintln!("{} preset error: {}", preset_name, e);
             std::process::exit(0);
         }
     };
@@ -876,7 +881,7 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
     match preset_name {
         "human" | "mock_ai" | "mock_known_human" => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let paths: Vec<String> = remaining_args
+            let mut paths: Vec<String> = remaining_args
                 .iter()
                 .filter(|a| !a.starts_with("--"))
                 .map(|s| {
@@ -888,6 +893,9 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
                     }
                 })
                 .collect();
+            if paths.is_empty() {
+                paths = discover_dirty_files_from_status(&cwd);
+            }
             serde_json::json!({
                 "file_paths": paths,
                 "cwd": cwd.to_string_lossy(),
@@ -951,6 +959,36 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
         }
         _ => String::new(),
     }
+}
+
+fn discover_dirty_files_from_status(cwd: &std::path::Path) -> Vec<String> {
+    let output = std::process::Command::new(crate::config::Config::get().git_cmd())
+        .args(["status", "--porcelain", "-uall"])
+        .current_dir(cwd)
+        .output()
+        .ok();
+    let Some(output) = output else {
+        return vec![];
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let file = line[3..].trim();
+            if file.is_empty() {
+                return None;
+            }
+            let p = std::path::Path::new(file);
+            if p.is_absolute() {
+                Some(file.to_string())
+            } else {
+                Some(cwd.join(p).to_string_lossy().to_string())
+            }
+        })
+        .collect()
 }
 
 /// Exit mirroring the child's termination status, re-raising the original

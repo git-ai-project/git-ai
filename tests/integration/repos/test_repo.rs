@@ -1503,6 +1503,16 @@ impl TestRepo {
             .unwrap_or_else(|| DaemonProcess::trace_socket_path_for_home(&self.test_home))
     }
 
+    pub(crate) fn set_daemon_env_for_in_process(&self) {
+        unsafe {
+            std::env::set_var("GIT_AI_DAEMON_HOME", self.daemon_home_path());
+            std::env::set_var(
+                "GIT_AI_DAEMON_CONTROL_SOCKET",
+                self.daemon_control_socket_path(),
+            );
+        }
+    }
+
     pub(crate) fn config_patch_json(&self) -> Option<String> {
         self.config_patch
             .as_ref()

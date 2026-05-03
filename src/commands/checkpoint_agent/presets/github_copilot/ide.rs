@@ -65,6 +65,7 @@ pub(super) fn parse_legacy_extension_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: will_edit_filepaths,
+            content_overrides: HashMap::new(),
         })]);
     }
 
@@ -252,9 +253,14 @@ pub(super) fn parse_vscode_native_hooks(
                 ));
             }
 
+            let content_overrides: HashMap<PathBuf, String> = extracted_paths
+                .iter()
+                .map(|p| (p.clone(), String::new()))
+                .collect();
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: extracted_paths,
+                content_overrides,
             })]);
         }
 
@@ -268,6 +274,7 @@ pub(super) fn parse_vscode_native_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: extracted_paths,
+            content_overrides: HashMap::new(),
         })]);
     }
 
@@ -799,7 +806,6 @@ mod tests {
         assert!(matches!(events[0], ParsedHookEvent::PostFileEdit(_)));
     }
 
-    #[test]
     #[test]
     fn test_copilot_native_workspace_storage_format() {
         let input = json!({

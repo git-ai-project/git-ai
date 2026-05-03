@@ -48,6 +48,7 @@ const HOOK_TIMEOUT_MS: u64 = 4000;
 std::thread_local! {
     static TEST_WALK_TIMEOUT_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static TEST_HOOK_TIMEOUT_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static TEST_DAEMON_SOCKET: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Return the walk timeout, honouring any test-time thread-local override.
@@ -82,11 +83,35 @@ pub fn set_hook_timeout_ms_for_test(ms: u64) {
     TEST_HOOK_TIMEOUT_MS.with(|c| c.set(Some(ms)));
 }
 
-/// Clear all test-time timeout overrides for the current thread.
+/// Override the daemon control socket path for the current thread.
+/// This avoids process-global env vars that race in parallel tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_daemon_socket_for_test(path: std::path::PathBuf) {
+    TEST_DAEMON_SOCKET.with(|c| c.borrow_mut().replace(path));
+}
+
+/// Clear test-time timeout overrides for the current thread.
+/// Does NOT clear the daemon socket override — that is managed separately
+/// via `set_daemon_socket_for_test`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_timeout_overrides_for_test() {
     TEST_WALK_TIMEOUT_MS.with(|c| c.set(None));
     TEST_HOOK_TIMEOUT_MS.with(|c| c.set(None));
+}
+
+/// Resolve the daemon control socket path, preferring the thread-local test
+/// override over the env-based `DaemonConfig`.
+fn effective_daemon_socket() -> Option<std::path::PathBuf> {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        let tl = TEST_DAEMON_SOCKET.with(|c| c.borrow().clone());
+        if tl.is_some() {
+            return tl;
+        }
+    }
+    DaemonConfig::from_env_or_default_paths()
+        .ok()
+        .map(|c| c.control_socket_path)
 }
 
 /// Grace window in nanoseconds for low-resolution filesystem mtime comparison.
@@ -776,21 +801,15 @@ pub struct DaemonWatermarks {
 }
 
 fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
-    let config = DaemonConfig::from_env_or_default_paths().ok()?;
-    // Fast-exit when the socket file does not exist — avoids the connect
-    // timeout on every hook call when no daemon is running.
-    if !config.control_socket_path.exists() {
+    let socket = effective_daemon_socket()?;
+    if !socket.exists() {
         return None;
     }
     let request = ControlRequest::SnapshotWatermarks {
         repo_working_dir: repo_working_dir.to_string(),
     };
-    let response = send_control_request_with_timeout(
-        &config.control_socket_path,
-        &request,
-        Duration::from_millis(500),
-    )
-    .ok()?;
+    let response =
+        send_control_request_with_timeout(&socket, &request, Duration::from_millis(500)).ok()?;
 
     if !response.ok {
         tracing::debug!(
@@ -801,6 +820,10 @@ fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
     }
 
     // The daemon returns `{ "watermarks": {...}, "worktree_watermark": <u128|null> }`.
+    // If both are empty/null, the daemon has no watermark data for this repo
+    // yet (freshly registered family) — return None so snapshot() skips
+    // watermark filtering entirely rather than falling through to the
+    // git_index_mtime_ns proxy.
     let data = response.data?;
     let per_file: HashMap<String, u128> = data
         .get("watermarks")
@@ -809,6 +832,9 @@ fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
     let worktree: Option<u128> = data
         .get("worktree_watermark")
         .and_then(|v| serde_json::from_value(v.clone()).ok());
+    if per_file.is_empty() && worktree.is_none() {
+        return None;
+    }
     Some(DaemonWatermarks { per_file, worktree })
 }
 
@@ -821,20 +847,16 @@ fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
 /// Returns `None` if the daemon is not running, the session is not found,
 /// or any communication error occurs.
 fn query_daemon_bash_snapshot(session_id: &str, tool_use_id: &str) -> Option<StatSnapshot> {
-    let config = DaemonConfig::from_env_or_default_paths().ok()?;
-    if !config.control_socket_path.exists() {
+    let socket = effective_daemon_socket()?;
+    if !socket.exists() {
         return None;
     }
     let request = ControlRequest::BashSnapshotQuery {
         session_id: session_id.to_string(),
         tool_use_id: tool_use_id.to_string(),
     };
-    let response = send_control_request_with_timeout(
-        &config.control_socket_path,
-        &request,
-        Duration::from_millis(500),
-    )
-    .ok()?;
+    let response =
+        send_control_request_with_timeout(&socket, &request, Duration::from_millis(500)).ok()?;
 
     if !response.ok {
         tracing::debug!(
@@ -851,21 +873,18 @@ fn query_daemon_bash_snapshot(session_id: &str, tool_use_id: &str) -> Option<Sta
 
 /// Signal the daemon that a bash session has ended.
 fn signal_daemon_bash_session_end(session_id: &str, tool_use_id: &str) {
-    let Ok(config) = DaemonConfig::from_env_or_default_paths() else {
+    let Some(socket) = effective_daemon_socket() else {
         return;
     };
-    if !config.control_socket_path.exists() {
+    if !socket.exists() {
         return;
     }
     let request = ControlRequest::BashSessionEnd {
         session_id: session_id.to_string(),
         tool_use_id: tool_use_id.to_string(),
     };
-    if let Err(e) = send_control_request_with_timeout(
-        &config.control_socket_path,
-        &request,
-        Duration::from_millis(500),
-    ) {
+    if let Err(e) = send_control_request_with_timeout(&socket, &request, Duration::from_millis(500))
+    {
         tracing::debug!("Failed to signal bash session end: {}", e);
     }
 }
@@ -890,7 +909,9 @@ pub fn handle_bash_pre_tool_use_with_context(
     let wm = query_daemon_watermarks(&repo_working_dir);
     let snap = snapshot(repo_root, session_id, tool_use_id, wm.as_ref())?;
 
-    let daemon_config = DaemonConfig::from_env_or_default_paths()?;
+    let socket = effective_daemon_socket().ok_or_else(|| {
+        GitAiError::Generic("no daemon socket available for BashSessionStart".into())
+    })?;
 
     let request = ControlRequest::BashSessionStart {
         repo_work_dir: repo_working_dir,
@@ -901,7 +922,7 @@ pub fn handle_bash_pre_tool_use_with_context(
         stat_snapshot: Box::new(snap),
     };
 
-    send_control_request(&daemon_config.control_socket_path, &request)?;
+    send_control_request(&socket, &request)?;
 
     Ok(BashToolResult {
         action: BashCheckpointAction::TakePreSnapshot,
@@ -964,8 +985,7 @@ pub fn handle_bash_tool(
                 Ok(snap) => {
                     // Send to daemon; if daemon is unavailable, still return
                     // TakePreSnapshot so the caller knows a pre-hook ran.
-                    let daemon_config = DaemonConfig::from_env_or_default_paths().ok();
-                    if let Some(config) = daemon_config {
+                    if let Some(socket) = effective_daemon_socket() {
                         let request = ControlRequest::BashSessionStart {
                             repo_work_dir: repo_working_dir,
                             session_id: session_id.to_string(),
@@ -978,8 +998,7 @@ pub fn handle_bash_tool(
                             metadata: HashMap::new(),
                             stat_snapshot: Box::new(snap),
                         };
-                        if let Err(e) = send_control_request(&config.control_socket_path, &request)
-                        {
+                        if let Err(e) = send_control_request(&socket, &request) {
                             tracing::debug!("Failed to send BashSessionStart to daemon: {}", e);
                         }
                     }

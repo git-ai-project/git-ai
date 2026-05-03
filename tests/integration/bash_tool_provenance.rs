@@ -8,13 +8,9 @@
 //! commands.
 
 use crate::repos::test_repo::TestRepo;
-#[cfg(unix)]
-use git_ai::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash;
-#[cfg(unix)]
-use git_ai::commands::checkpoint_agent::bash_tool::handle_bash_pre_tool_use_with_context;
 use git_ai::commands::checkpoint_agent::bash_tool::{
     BashCheckpointAction, BashToolResult, HookEvent, diff, git_status_fallback, handle_bash_tool,
-    snapshot,
+    set_daemon_socket_for_test, snapshot,
 };
 use std::fs;
 use std::process::Command;
@@ -45,6 +41,7 @@ fn add_and_commit(repo: &TestRepo, rel_path: &str, contents: &str, message: &str
 
 /// Canonical repo root path (resolves /tmp -> /private/tmp on macOS).
 fn repo_root(repo: &TestRepo) -> std::path::PathBuf {
+    set_daemon_socket_for_test(repo.daemon_control_socket_path());
     repo.canonical_path()
 }
 
@@ -1682,88 +1679,8 @@ exit 0
     assert_checkpoint_contains(&post_action, "build-stamp.txt");
 }
 
-#[cfg(unix)]
-#[test]
-fn test_bash_provenance_precommit_hook_with_agent_context_attribution() {
-    // Scenario: Same as the formatter test, but uses handle_bash_pre_tool_use_with_context
-    // to set up proper AI agent context. Verifies that checkpoint_context_from_active_bash
-    // returns AiAgent while the pre-snapshot is active (which is the case during
-    // the pre-commit hook execution).
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-    add_and_commit(&repo, "init.txt", "seed", "initial commit");
-
-    install_pre_commit_hook(
-        &repo,
-        r#"#!/bin/sh
-for f in $(git diff --cached --name-only --diff-filter=ACM -- '*.py'); do
-    echo '# agent-formatted' >> "$f"
-done
-exit 0
-"#,
-    );
-
-    // Set up pre-snapshot WITH agent context (simulating a real AI agent session)
-    let agent_id = git_ai::authorship::working_log::AgentId {
-        tool: "claude".to_string(),
-        id: "test-session-1".to_string(),
-        model: "opus-4".to_string(),
-    };
-    let pre_action =
-        handle_bash_pre_tool_use_with_context(&root, "agent-sess", "agent-t1", &agent_id, None)
-            .expect("PreToolUse with context should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
-
-    // Verify that checkpoint_context_from_active_bash finds the active context
-    // (this is what the pre-commit hook would see during commit execution)
-    let repo_working_dir = root.to_string_lossy().to_string();
-    let context = checkpoint_context_from_active_bash(&root, &repo_working_dir);
-    assert!(
-        context.is_some(),
-        "checkpoint_context_from_active_bash should find active bash snapshot"
-    );
-    let (kind, agent_run) = context.unwrap();
-    assert_eq!(
-        kind,
-        git_ai::authorship::working_log::CheckpointKind::AiAgent,
-        "checkpoint kind should be AiAgent"
-    );
-    let agent_run = agent_run.expect("should have agent run result with context");
-    let agent_id = agent_run
-        .agent_id
-        .as_ref()
-        .expect("AI checkpoint should have agent_id");
-    assert_eq!(agent_id.tool, "claude");
-    assert_eq!(agent_id.id, "test-session-1");
-    assert_eq!(agent_id.model, "opus-4");
-
-    // Now run the actual commit with hooks
-    write_file(&repo, "module.py", "import os\n");
-    run_git_with_hooks(&repo, &["add", "module.py"]);
-
-    let commit_output = run_git_with_hooks(&repo, &["commit", "-m", "add module"]);
-    assert!(
-        commit_output.status.success(),
-        "git commit should succeed: {}",
-        String::from_utf8_lossy(&commit_output.stderr)
-    );
-
-    // Verify formatter ran
-    let content = fs::read_to_string(repo.path().join("module.py")).unwrap();
-    assert!(
-        content.contains("# agent-formatted"),
-        "formatter should have modified module.py; got: {:?}",
-        content
-    );
-
-    // Post-snapshot should detect the change
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "agent-sess", "agent-t1")
-        .expect("PostToolUse should succeed");
-    assert_checkpoint_contains(&post_action, "module.py");
-}
+// test_bash_provenance_precommit_hook_with_agent_context_attribution was removed:
+// checkpoint_context_from_active_bash has been deleted from the codebase.
 
 #[cfg(unix)]
 #[test]

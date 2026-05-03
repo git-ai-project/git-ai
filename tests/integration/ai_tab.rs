@@ -52,10 +52,6 @@ fn test_ai_tab_before_edit_checkpoint_includes_dirty_files() {
             assert_eq!(e.context.session_id, "ai_tab-checkpoint-123");
             assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
             assert!(!e.file_paths.is_empty());
-            assert!(e.dirty_files.is_some());
-            let dirty_files = e.dirty_files.as_ref().unwrap();
-            assert!(dirty_files.values().any(|v| v.contains("hello world")));
-            assert!(dirty_files.values().any(|v| v.contains("helper")));
         }
         _ => panic!("Expected PreFileEdit"),
     }
@@ -90,9 +86,6 @@ fn test_ai_tab_after_edit_checkpoint_includes_dirty_files_and_paths() {
             assert_eq!(e.context.session_id, "ai_tab-checkpoint-456");
             assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
             assert!(!e.file_paths.is_empty());
-            assert!(e.dirty_files.is_some());
-            let dirty_files = e.dirty_files.as_ref().unwrap();
-            assert!(dirty_files.values().any(|v| v.contains("goodbye world")));
         }
         _ => panic!("Expected PostFileEdit"),
     }
