@@ -54,7 +54,7 @@ fn test_cursor_jsonl_empty_file() {
 }
 
 #[test]
-fn test_cursor_jsonl_malformed_lines_error() {
+fn test_cursor_jsonl_malformed_lines_skipped() {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -76,13 +76,11 @@ fn test_cursor_jsonl_malformed_lines_error() {
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent.read_incremental(temp_file.path(), watermark, "test");
 
-    match result {
-        Err(git_ai::transcripts::types::TranscriptError::Parse { .. }) => {
-            // Expected: malformed JSON lines produce a Parse error
-        }
-        Err(other) => panic!("Expected Parse error, got: {}", other),
-        Ok(_) => panic!("Should return an error for malformed JSON lines"),
-    }
+    // Malformed JSON lines are skipped; valid lines before and after are returned
+    let batch = result.expect("malformed lines should be skipped, not cause errors");
+    assert_eq!(batch.events.len(), 2);
+    assert_eq!(batch.events[0]["role"].as_str(), Some("user"));
+    assert_eq!(batch.events[1]["role"].as_str(), Some("assistant"));
 }
 
 #[test]

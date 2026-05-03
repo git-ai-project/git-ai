@@ -220,10 +220,7 @@ impl TranscriptWorker {
         let now = std::time::Instant::now();
         let mut i = 0;
         while i < self.delayed_tasks.len() {
-            if self.delayed_tasks[i]
-                .next_retry_at
-                .is_none_or(|t| now >= t)
-            {
+            if self.delayed_tasks[i].next_retry_at.is_none_or(|t| now >= t) {
                 let task = self.delayed_tasks.swap_remove(i);
                 self.priority_queue.push(task);
             } else {
