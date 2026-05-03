@@ -1,16 +1,30 @@
+use crate::commands::checkpoint_agent::bash_tool::{InflightBashAgentContext, StatEntry};
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::daemon::domain::RepoContext;
 use crate::metrics::MetricEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum ControlRequest {
     #[serde(rename = "checkpoint.run")]
     CheckpointRun {
-        request: Box<CheckpointRunRequest>,
-        wait: Option<bool>,
+        request: Box<CheckpointRequest>,
+    },
+    #[serde(rename = "bash.begin_invocation")]
+    BashBeginInvocation {
+        repo_working_dir: String,
+        invocation_id: String,
+        agent_context: InflightBashAgentContext,
+        stat_snapshot: BashStatSnapshot,
+    },
+    #[serde(rename = "bash.complete_invocation")]
+    BashCompleteInvocation {
+        repo_working_dir: String,
+        invocation_id: String,
     },
     #[serde(rename = "status.family")]
     StatusFamily { repo_working_dir: String },
@@ -37,50 +51,13 @@ pub enum ControlRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "request_type", rename_all = "snake_case")]
-pub enum CheckpointRunRequest {
-    Live(Box<LiveCheckpointRunRequest>),
-    Captured(CapturedCheckpointRunRequest),
-}
-
-impl CheckpointRunRequest {
-    pub fn repo_working_dir(&self) -> &str {
-        match self {
-            Self::Live(request) => &request.repo_working_dir,
-            Self::Captured(request) => &request.repo_working_dir,
-        }
-    }
-
-    pub fn is_pre_commit(&self) -> bool {
-        match self {
-            Self::Live(request) => request.is_pre_commit.unwrap_or(false),
-            Self::Captured(_) => false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct LiveCheckpointRunRequest {
+pub struct BashStatSnapshot {
+    pub entries: HashMap<PathBuf, StatEntry>,
+    pub repo_root: PathBuf,
     #[serde(default)]
-    pub repo_working_dir: String,
+    pub effective_worktree_wm: Option<u128>,
     #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub author: Option<String>,
-    #[serde(default)]
-    pub quiet: Option<bool>,
-    #[serde(default)]
-    pub is_pre_commit: Option<bool>,
-    #[serde(default)]
-    pub checkpoint_request: Option<CheckpointRequest>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CapturedCheckpointRunRequest {
-    #[serde(default)]
-    pub repo_working_dir: String,
-    #[serde(default)]
-    pub capture_id: String,
+    pub per_file_wm: HashMap<String, u128>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

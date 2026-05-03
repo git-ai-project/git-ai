@@ -13,17 +13,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointFile {
+    pub path: PathBuf,
+    pub content: String,
+    pub repo_work_dir: PathBuf,
+    pub base_commit_sha: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointRequest {
     pub trace_id: String,
     pub checkpoint_kind: CheckpointKind,
     pub agent_id: Option<AgentId>,
-    pub repo_working_dir: PathBuf,
-    pub file_paths: Vec<PathBuf>,
+    pub files: Vec<CheckpointFile>,
     pub path_role: PreparedPathRole,
-    pub dirty_files: Option<HashMap<PathBuf, String>>,
     pub transcript_source: Option<TranscriptSource>,
     pub metadata: HashMap<String, String>,
-    pub captured_checkpoint_id: Option<String>,
 }
 
 pub fn execute_preset_checkpoint(

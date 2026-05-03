@@ -259,6 +259,13 @@ pub struct WatermarkState {
     pub per_worktree: HashMap<String, u128>,
 }
 
+#[derive(Debug, Clone)]
+pub struct BashInvocation {
+    pub agent_context: crate::commands::checkpoint_agent::bash_tool::InflightBashAgentContext,
+    pub stat_snapshot: crate::daemon::control_api::BashStatSnapshot,
+    pub stored_at: std::time::Instant,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FamilyState {
     pub family_key: FamilyKey,
@@ -268,6 +275,8 @@ pub struct FamilyState {
     pub applied_seq: u64,
     #[serde(default)]
     pub watermarks: WatermarkState,
+    #[serde(skip)]
+    pub bash_invocations: HashMap<String, BashInvocation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

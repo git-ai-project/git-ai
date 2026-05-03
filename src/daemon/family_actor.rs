@@ -1,7 +1,8 @@
+use crate::commands::checkpoint_agent::bash_tool::InflightBashAgentContext;
 use crate::daemon::analyzers::AnalyzerRegistry;
 use crate::daemon::domain::{
-    AppliedCommand, ApplyAck, FamilyKey, FamilyState, FamilyStatus, NormalizedCommand,
-    WatermarkState,
+    AppliedCommand, ApplyAck, BashInvocation, FamilyKey, FamilyState, FamilyStatus,
+    NormalizedCommand, WatermarkState,
 };
 use crate::daemon::reducer;
 use crate::error::GitAiError;
@@ -17,6 +18,10 @@ pub enum FamilyMsg {
     Status(oneshot::Sender<Result<FamilyStatus, GitAiError>>),
     GetWatermarks(oneshot::Sender<Result<WatermarkState, GitAiError>>),
     UpdateWatermarks(WatermarkState),
+    StoreBashInvocation(String, BashInvocation),
+    ConsumeBashInvocation(String, oneshot::Sender<Result<Option<BashInvocation>, GitAiError>>),
+    GetActiveBashContext(oneshot::Sender<Option<InflightBashAgentContext>>),
+    EvictStaleBashInvocations,
     Shutdown,
 }
 
@@ -78,6 +83,61 @@ impl FamilyActorHandle {
             })
     }
 
+    pub async fn store_bash_invocation(
+        &self,
+        id: String,
+        invocation: BashInvocation,
+    ) -> Result<(), GitAiError> {
+        self.tx
+            .send(FamilyMsg::StoreBashInvocation(id, invocation))
+            .await
+            .map_err(|_| {
+                GitAiError::Generic(
+                    "family actor store_bash_invocation send failed".to_string(),
+                )
+            })
+    }
+
+    pub async fn consume_bash_invocation(
+        &self,
+        id: String,
+    ) -> Result<Option<BashInvocation>, GitAiError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(FamilyMsg::ConsumeBashInvocation(id, tx))
+            .await
+            .map_err(|_| {
+                GitAiError::Generic(
+                    "family actor consume_bash_invocation send failed".to_string(),
+                )
+            })?;
+        rx.await.map_err(|_| {
+            GitAiError::Generic(
+                "family actor consume_bash_invocation receive failed".to_string(),
+            )
+        })?
+    }
+
+    pub async fn get_active_bash_context(&self) -> Option<InflightBashAgentContext> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(FamilyMsg::GetActiveBashContext(tx))
+            .await
+            .ok()?;
+        rx.await.ok()?
+    }
+
+    pub async fn evict_stale_bash_invocations(&self) -> Result<(), GitAiError> {
+        self.tx
+            .send(FamilyMsg::EvictStaleBashInvocations)
+            .await
+            .map_err(|_| {
+                GitAiError::Generic(
+                    "family actor evict_stale_bash_invocations send failed".to_string(),
+                )
+            })
+    }
+
     pub async fn shutdown(&self) -> Result<(), GitAiError> {
         self.tx
             .send(FamilyMsg::Shutdown)
@@ -102,6 +162,7 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
             last_error: None,
             applied_seq: 0,
             watermarks: WatermarkState::default(),
+            bash_invocations: HashMap::new(),
         };
 
         while let Some(msg) = rx.recv().await {
@@ -146,6 +207,31 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                             state.watermarks.per_file.retain(|_, file_ts| *file_ts > ts);
                         }
                     }
+                }
+                FamilyMsg::StoreBashInvocation(id, invocation) => {
+                    state.bash_invocations.insert(id, invocation);
+                }
+                FamilyMsg::ConsumeBashInvocation(id, respond_to) => {
+                    let result = state.bash_invocations.remove(&id);
+                    let _ = respond_to.send(Ok(result));
+                }
+                FamilyMsg::GetActiveBashContext(respond_to) => {
+                    let now = std::time::Instant::now();
+                    let stale_threshold = std::time::Duration::from_secs(300);
+                    let most_recent = state
+                        .bash_invocations
+                        .values()
+                        .filter(|inv| now.duration_since(inv.stored_at) < stale_threshold)
+                        .max_by_key(|inv| inv.stored_at)
+                        .map(|inv| inv.agent_context.clone());
+                    let _ = respond_to.send(most_recent);
+                }
+                FamilyMsg::EvictStaleBashInvocations => {
+                    let now = std::time::Instant::now();
+                    let stale_threshold = std::time::Duration::from_secs(300);
+                    state
+                        .bash_invocations
+                        .retain(|_, inv| now.duration_since(inv.stored_at) < stale_threshold);
                 }
                 FamilyMsg::Shutdown => break,
             }
