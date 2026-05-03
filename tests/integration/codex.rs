@@ -35,49 +35,14 @@ fn test_codex_raw_event_fidelity() {
 }
 
 #[test]
-fn test_codex_preset_legacy_hook_input() {
-    let fixture = fixture_path("codex-session-simple.jsonl");
-    let hook_input = json!({
-        "type": "agent-turn-complete",
-        "thread-id": "019c4b43-1451-7af3-be4c-5576369bf1ba",
-        "turn-id": "turn-1",
-        "cwd": "/Users/test/projects/git-ai",
-        "input-messages": ["Refactor src/main.rs"],
-        "last-assistant-message": "Done.",
-        "transcript_path": fixture.to_str().unwrap()
-    })
-    .to_string();
-
-    let events = parse_codex(&hook_input).expect("Codex preset should run");
-
-    assert_eq!(events.len(), 1);
-    match &events[0] {
-        ParsedHookEvent::PostFileEdit(e) => {
-            assert_eq!(e.context.agent_id.tool, "codex");
-            assert_eq!(
-                e.context.agent_id.id, "019c4b43-1451-7af3-be4c-5576369bf1ba",
-                "Legacy thread-id should map to agent id"
-            );
-            assert_eq!(
-                e.context.cwd.to_string_lossy(),
-                "/Users/test/projects/git-ai"
-            );
-            assert!(e.transcript_source.is_some());
-            assert!(
-                e.context.metadata.contains_key("transcript_path"),
-                "transcript_path should be persisted for commit-time resync"
-            );
-        }
-        _ => panic!("Expected PostFileEdit"),
-    }
-}
-
-#[test]
 fn test_codex_preset_structured_hook_input() {
     let fixture = fixture_path("codex-session-simple.jsonl");
     let hook_input = json!({
         "session_id": "session-abc-123",
         "cwd": "/Users/test/projects/git-ai",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "apply_patch",
+        "tool_use_id": "patch-1",
         "triggered_at": "2026-02-11T05:53:33Z",
         "hook_event": {
             "event_type": "after_agent",
@@ -221,75 +186,6 @@ fn test_find_rollout_path_for_session_in_home() {
         .expect("rollout should be found");
 
     assert_eq!(resolved, rollout_path);
-}
-
-#[test]
-fn test_codex_e2e_commit_resync_uses_latest_rollout() {
-    use crate::repos::test_repo::TestRepo;
-
-    let mut repo = TestRepo::new();
-    repo.patch_git_ai_config(|patch| {
-        patch.exclude_prompts_in_repositories = Some(vec![]);
-    });
-
-    let repo_root = repo.canonical_path();
-    let src_dir = repo_root.join("src");
-    fs::create_dir_all(&src_dir).unwrap();
-    let file_path = src_dir.join("main.rs");
-    fs::write(&file_path, "fn main() {}\n").unwrap();
-    repo.stage_all_and_commit("Initial commit").unwrap();
-
-    let simple_fixture = fixture_path("codex-session-simple.jsonl");
-    let updated_fixture = fixture_path("codex-session-updated.jsonl");
-    let transcript_path = repo_root.join("codex-rollout.jsonl");
-    let thread_id = format!("codex-e2e-{}", repo_root.to_string_lossy());
-    fs::copy(&simple_fixture, &transcript_path).unwrap();
-
-    let hook_input = json!({
-        "type": "agent-turn-complete",
-        "thread-id": thread_id,
-        "turn-id": "turn-1",
-        "cwd": repo_root.to_string_lossy().to_string(),
-        "input-messages": ["Refactor src/main.rs"],
-        "last-assistant-message": "Done.",
-        "transcript_path": transcript_path.to_string_lossy().to_string()
-    })
-    .to_string();
-
-    fs::write(
-        &file_path,
-        "fn greet() { println!(\"hello\"); }\nfn main() { greet(); }\n",
-    )
-    .unwrap();
-    repo.git_ai(&["checkpoint", "codex", "--hook-input", &hook_input])
-        .expect("checkpoint should succeed");
-
-    fs::copy(&updated_fixture, &transcript_path).unwrap();
-
-    let commit = repo
-        .stage_all_and_commit("Apply codex refactor")
-        .expect("commit should succeed");
-
-    assert_eq!(
-        commit.authorship_log.metadata.sessions.len(),
-        1,
-        "Expected one session record"
-    );
-
-    let session = commit
-        .authorship_log
-        .metadata
-        .sessions
-        .values()
-        .next()
-        .expect("Session record should exist");
-
-    assert_eq!(session.agent_id.tool, "codex");
-    assert_eq!(
-        session.agent_id.model, "unknown",
-        "Session record model comes from preset AgentId"
-    );
-    // Note: Messages field has been removed from SessionRecord
 }
 
 #[test]
@@ -1165,13 +1061,11 @@ fn test_codex_e2e_apply_patch_preserves_human_lines() {
 
 crate::reuse_tests_in_worktree!(
     test_codex_raw_event_fidelity,
-    test_codex_preset_legacy_hook_input,
     test_codex_preset_structured_hook_input,
     test_codex_preset_bash_pre_tool_use_skips_checkpoint_after_capturing_snapshot,
     test_codex_preset_bash_pre_tool_use_supports_camel_case_hook_event_name,
     test_codex_preset_bash_post_tool_use_detects_changed_files,
     test_find_rollout_path_for_session_in_home,
-    test_codex_e2e_commit_resync_uses_latest_rollout,
     test_codex_commit_inside_bash_inflight_is_attributed_to_codex,
     test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai,
     test_codex_file_edit_then_bash_pretooluse_does_not_steal_ai_commit_attribution,

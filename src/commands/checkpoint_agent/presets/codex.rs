@@ -14,7 +14,7 @@ pub struct CodexPreset;
 
 impl CodexPreset {
     fn session_id_from_hook_data(data: &serde_json::Value) -> Result<String, GitAiError> {
-        // Try session_id, thread_id (underscore), and thread-id (hyphen, used by agent-turn-complete)
+        // Try session_id, thread_id (underscore), and thread-id (hyphen)
         parse::optional_str_multi(data, &["session_id", "thread_id"])
             .or_else(|| data.get("thread-id").and_then(|v| v.as_str()))
             .or_else(|| {
@@ -186,14 +186,6 @@ impl AgentPreset for CodexPreset {
                     )));
                 }
             }
-            Some("Stop") | Some("agent-turn-complete") | None => {
-                ParsedHookEvent::PostFileEdit(PostFileEdit {
-                    context,
-                    file_paths: vec![],
-                    dirty_files: None,
-                    transcript_source,
-                })
-            }
             _ => {
                 return Err(GitAiError::PresetError(format!(
                     "Unsupported Codex hook_event_name: {}",
@@ -309,21 +301,6 @@ mod tests {
         .to_string();
         let result = CodexPreset.parse(&input, "t_test123456789a");
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_codex_stop_event() {
-        let input = json!({
-            "cwd": "/home/user/project",
-            "hook_event_name": "Stop",
-            "session_id": "codex-sess-1",
-            "transcript_path": "/home/user/.codex/sessions/test.jsonl"
-        })
-        .to_string();
-        let events = CodexPreset.parse(&input, "t_test123456789a").unwrap();
-
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], ParsedHookEvent::PostFileEdit(_)));
     }
 
     #[test]
