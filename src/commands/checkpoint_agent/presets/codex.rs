@@ -182,6 +182,14 @@ impl AgentPreset for CodexPreset {
                     )));
                 }
             }
+            Some("Stop") | Some("agent-turn-complete") | None => {
+                ParsedHookEvent::PostFileEdit(PostFileEdit {
+                    context,
+                    file_paths: vec![],
+                    dirty_files: None,
+                    transcript_source,
+                })
+            }
             _ => {
                 return Err(GitAiError::PresetError(format!(
                     "Unsupported Codex hook_event_name: {}",

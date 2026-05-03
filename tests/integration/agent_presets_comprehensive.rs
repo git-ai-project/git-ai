@@ -147,7 +147,9 @@ fn test_claude_transcript_parsing_malformed_json() {
         "test",
     );
 
-    assert!(result.is_err());
+    // Malformed JSON lines are skipped, not fatal errors
+    let batch = result.expect("malformed lines should be skipped, not cause errors");
+    assert_eq!(batch.events.len(), 0);
     fs::remove_file(temp_file).ok();
 }
 
@@ -379,11 +381,9 @@ fn test_gemini_transcript_parsing_invalid_json_line() {
         "test",
     );
 
-    assert!(result.is_err());
-    match result {
-        Err(git_ai::transcripts::TranscriptError::Parse { .. }) => {}
-        _ => panic!("Expected Parse error for invalid JSON line"),
-    }
+    // Malformed JSON lines are skipped, not fatal errors
+    let batch = result.expect("malformed lines should be skipped, not cause errors");
+    assert_eq!(batch.events.len(), 0);
 
     fs::remove_file(temp_file).ok();
 }
