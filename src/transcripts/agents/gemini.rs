@@ -105,8 +105,7 @@ impl Agent for GeminiAgent {
 
         let watermark_timestamp = ts_watermark.0;
 
-        // Read the entire file
-        let content = std::fs::read_to_string(path).map_err(|e| {
+        let file = fs::File::open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 TranscriptError::Fatal {
                     message: format!("Transcript file not found: {}", path.display()),
@@ -123,48 +122,52 @@ impl Agent for GeminiAgent {
             }
         })?;
 
-        // Parse the JSON
-        let parsed: serde_json::Value =
-            serde_json::from_str(&content).map_err(|e| TranscriptError::Parse {
+        let reader = std::io::BufReader::new(file);
+        let mut parsed: serde_json::Value =
+            serde_json::from_reader(reader).map_err(|e| TranscriptError::Parse {
                 line: 0,
                 message: format!("Invalid JSON in {}: {}", path.display(), e),
             })?;
 
-        // Get messages array
-        let messages = parsed
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| TranscriptError::Fatal {
-                message: format!(
-                    "Missing 'messages' array in Gemini session file: {}",
-                    path.display()
-                ),
-            })?;
+        let messages = match parsed
+            .as_object_mut()
+            .and_then(|obj| obj.remove("messages"))
+        {
+            Some(serde_json::Value::Array(arr)) => arr,
+            _ => {
+                return Err(TranscriptError::Fatal {
+                    message: format!(
+                        "Missing 'messages' array in Gemini session file: {}",
+                        path.display()
+                    ),
+                });
+            }
+        };
 
-        let mut events = Vec::new();
+        let batch_limit = self.batch_size_hint();
+        let mut events = Vec::with_capacity(batch_limit);
         let mut max_timestamp = watermark_timestamp;
 
         for message in messages {
-            // Parse timestamp if available
             let parsed_dt = message
                 .get("timestamp")
                 .and_then(|v| v.as_str())
                 .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
                 .map(|dt| dt.with_timezone(&Utc));
 
-            // Filter by watermark: only emit events with timestamp strictly greater than watermark.
-            // Events without a parseable timestamp are always emitted (not filtered).
             if let Some(dt) = parsed_dt {
                 if dt <= watermark_timestamp {
                     continue;
                 }
-                // Update max timestamp
                 if dt > max_timestamp {
                     max_timestamp = dt;
                 }
             }
 
-            events.push(message.clone());
+            events.push(message);
+            if events.len() >= batch_limit {
+                break;
+            }
         }
 
         let new_watermark = Box::new(TimestampWatermark::new(max_timestamp));

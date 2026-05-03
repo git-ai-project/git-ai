@@ -1123,6 +1123,12 @@ impl EventValues for SessionEventValues {
         PosEncoded::to_sparse(self)
     }
 
+    fn into_sparse(self) -> SparseArray {
+        let mut map = SparseArray::new();
+        map.insert(session_event_pos::RAW_JSON.to_string(), self.raw_json);
+        map
+    }
+
     fn from_sparse(arr: &SparseArray) -> Self {
         PosEncoded::from_sparse(arr)
     }

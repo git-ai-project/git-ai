@@ -3,7 +3,7 @@ use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_prese
 use git_ai::error::GitAiError;
 use git_ai::transcripts::agent::Agent;
 use git_ai::transcripts::agents::CopilotAgent;
-use git_ai::transcripts::watermark::ByteOffsetWatermark;
+use git_ai::transcripts::watermark::{ByteOffsetWatermark, RecordIndexWatermark};
 use serde_json::json;
 use std::{fs, io::Write};
 
@@ -24,7 +24,7 @@ fn test_copilot_session_json_raw_event_fidelity() {
     ensure_clean_env();
     let fixture = fixture_path("copilot_session_simple.json");
     let agent = CopilotAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Should parse copilot session JSON");
@@ -67,7 +67,7 @@ fn test_copilot_returns_empty_transcript_in_codespaces() {
 
     let fixture = fixture_path("copilot_session_simple.json");
     let agent = CopilotAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent.read_incremental(fixture.as_path(), watermark, "test");
     assert!(result.is_ok());
     let batch = result.unwrap();
@@ -92,7 +92,7 @@ fn test_copilot_returns_empty_transcript_in_remote_containers() {
 
     let fixture = fixture_path("copilot_session_simple.json");
     let agent = CopilotAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent.read_incremental(fixture.as_path(), watermark, "test");
     assert!(result.is_ok());
     let batch = result.unwrap();

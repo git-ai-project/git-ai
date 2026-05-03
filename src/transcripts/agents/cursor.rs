@@ -130,7 +130,8 @@ impl Agent for CursorAgent {
                 retry_after: std::time::Duration::from_secs(5),
             })?;
 
-        let mut events = Vec::new();
+        let batch_limit = self.batch_size_hint();
+        let mut events = Vec::with_capacity(batch_limit);
         let mut current_offset = start_offset;
         let mut line_number = 0;
 
@@ -163,6 +164,9 @@ impl Agent for CursorAgent {
                 })?;
 
             events.push(entry);
+            if events.len() >= batch_limit {
+                break;
+            }
         }
 
         let new_watermark = Box::new(ByteOffsetWatermark::new(current_offset));

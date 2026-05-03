@@ -98,8 +98,7 @@ impl Agent for ContinueAgent {
 
         let already_processed = record_watermark.0;
 
-        // Read the entire file
-        let content = std::fs::read_to_string(path).map_err(|e| {
+        let file = std::fs::File::open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 TranscriptError::Fatal {
                     message: format!("Transcript file not found: {}", path.display()),
@@ -116,37 +115,36 @@ impl Agent for ContinueAgent {
             }
         })?;
 
-        // Parse JSON
-        let parsed: serde_json::Value =
-            serde_json::from_str(&content).map_err(|e| TranscriptError::Parse {
+        let reader = std::io::BufReader::new(file);
+        let mut parsed: serde_json::Value =
+            serde_json::from_reader(reader).map_err(|e| TranscriptError::Parse {
                 line: 0,
                 message: format!("Invalid JSON in {}: {}", path.display(), e),
             })?;
 
-        // Get the history array (fatal if missing)
-        let history = parsed
-            .get("history")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| TranscriptError::Fatal {
-                message: format!(
-                    "Missing 'history' array in Continue transcript: {}",
-                    path.display()
-                ),
-            })?;
-
-        let total_history_length = history.len() as u64;
-
-        // Skip already-processed entries (exactly-once guarantee)
-        let new_entries = if already_processed as usize >= history.len() {
-            &[][..]
-        } else {
-            &history[already_processed as usize..]
+        let history = match parsed.as_object_mut().and_then(|obj| obj.remove("history")) {
+            Some(serde_json::Value::Array(arr)) => arr,
+            _ => {
+                return Err(TranscriptError::Fatal {
+                    message: format!(
+                        "Missing 'history' array in Continue transcript: {}",
+                        path.display()
+                    ),
+                });
+            }
         };
 
-        let events: Vec<serde_json::Value> = new_entries.to_vec();
+        let batch_limit = self.batch_size_hint();
 
-        // New watermark = total history length
-        let new_watermark = Box::new(RecordIndexWatermark::new(total_history_length));
+        let events: Vec<serde_json::Value> = history
+            .into_iter()
+            .skip(already_processed as usize)
+            .take(batch_limit)
+            .collect();
+
+        let new_watermark = Box::new(RecordIndexWatermark::new(
+            already_processed + events.len() as u64,
+        ));
 
         Ok(TranscriptBatch {
             events,
