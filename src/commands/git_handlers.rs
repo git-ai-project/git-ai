@@ -126,6 +126,26 @@ pub fn handle_git(args: &[String]) {
     // processes the atexit trace event and starts the wrapper state timeout.
     send_wrapper_pre_state_to_daemon(&invocation_id, worktree.as_deref(), &pre_state);
 
+    // When committing inside a no-hooks background agent (Devin, Codex Cloud,
+    // etc.) the agent never fires its own checkpoints, so the working log is
+    // empty and the daemon would attribute every line as untracked human.
+    // Fire a synthetic AI pre-commit checkpoint here from the wrapper — its
+    // process inherits the agent's env vars, while the long-lived daemon may
+    // not. The daemon's own commit-replay then sees this AI checkpoint and
+    // produces correct attribution.
+    if parsed.command.as_deref() == Some("commit")
+        && let Some(repo) = repository.as_ref()
+        && matches!(
+            crate::authorship::background_agent::detect_background_agent(),
+            crate::authorship::background_agent::BackgroundAgent::BackgroundAgentNoHooks { .. }
+        )
+    {
+        let default_author = repo.git_author_identity().formatted_or_unknown();
+        if let Err(e) = crate::authorship::pre_commit::pre_commit(repo, default_author) {
+            tracing::debug!("pre-commit synthetic AI checkpoint failed: {}", e);
+        }
+    }
+
     let exit_status = proxy_to_git(args, false, Some(&invocation_id));
 
     let post_state = worktree
