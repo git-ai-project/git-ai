@@ -8,13 +8,12 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::commands::checkpoint_agent::bash_tool::{
     Agent, BashCheckpointAction, HookEvent, StatDiffResult, StatEntry, StatFileType, StatSnapshot,
-    ToolClass, build_gitignore, classify_tool, cleanup_stale_snapshots, diff, git_status_fallback,
-    handle_bash_tool, load_and_consume_snapshot, normalize_path, save_snapshot, snapshot,
+    ToolClass, build_gitignore, classify_tool, diff, git_status_fallback, handle_bash_tool,
+    normalize_path, set_daemon_socket_for_test, snapshot,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -42,6 +41,7 @@ fn add_and_commit(repo: &TestRepo, rel_path: &str, contents: &str, message: &str
 
 /// Canonical repo root path (resolves /tmp -> /private/tmp on macOS).
 fn repo_root(repo: &TestRepo) -> std::path::PathBuf {
+    set_daemon_socket_for_test(repo.daemon_control_socket_path());
     repo.canonical_path()
 }
 
@@ -822,17 +822,8 @@ fn test_git_status_fallback_clean_repo() {
 // cleanup_stale_snapshots
 // ===========================================================================
 
-#[test]
-fn test_cleanup_stale_snapshots_does_not_error_on_empty() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-
-    // Make an initial commit so .git directory is valid
-    add_and_commit(&repo, "init.txt", "init", "initial");
-
-    // Should not error even when there are no snapshots
-    cleanup_stale_snapshots(&root).expect("cleanup_stale_snapshots should succeed on empty dir");
-}
+// test_cleanup_stale_snapshots_does_not_error_on_empty was removed:
+// cleanup_stale_snapshots has been deleted from the codebase.
 
 // ===========================================================================
 // normalize_path consistency
@@ -1065,136 +1056,19 @@ fn test_snapshot_nested_gitignore_excludes_matching_new_files() {
 // Snapshot save/load round-trip and snapshot consumption
 // ===========================================================================
 
-#[test]
-fn test_snapshot_save_load_round_trip() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
+// test_snapshot_save_load_round_trip was removed:
+// save_snapshot and load_and_consume_snapshot have been deleted from the codebase.
 
-    add_and_commit(&repo, "tracked.txt", "content", "initial");
-
-    let snap = snapshot(&root, "rt-sess", "rt-tool", None).expect("snapshot should succeed");
-    let entry_count = snap.entries.len();
-    let key = snap.invocation_key.clone();
-
-    save_snapshot(&snap).expect("save_snapshot should succeed");
-
-    // Load and consume — should get the snapshot back
-    let loaded = load_and_consume_snapshot(&root, &key)
-        .expect("load should succeed")
-        .expect("snapshot should exist");
-    assert_eq!(loaded.entries.len(), entry_count);
-    assert_eq!(loaded.invocation_key, key);
-
-    // Second load — should return None (consumed)
-    let second = load_and_consume_snapshot(&root, &key).expect("load should succeed");
-    assert!(
-        second.is_none(),
-        "snapshot should be consumed after first load"
-    );
-}
-
-#[test]
-fn test_gitignore_filtering_through_save_load_round_trip() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-
-    add_and_commit(&repo, ".gitignore", "*.log\n", "add gitignore");
-    add_and_commit(&repo, "base.txt", "base", "initial");
-
-    // Use handle_bash_tool to go through save/load path
-    handle_bash_tool(HookEvent::PreToolUse, &root, "gi-rt", "gi-t1")
-        .expect("PreToolUse should succeed");
-
-    // Create both ignored and non-ignored files
-    write_file(&repo, "output.log", "log data");
-    write_file(&repo, "result.txt", "result data");
-
-    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "gi-rt", "gi-t1")
-        .expect("PostToolUse should succeed");
-
-    match &action.action {
-        BashCheckpointAction::Checkpoint(paths) => {
-            assert!(
-                paths.iter().any(|p| p.contains("result.txt")),
-                "result.txt should be in checkpoint; got {:?}",
-                paths
-            );
-            assert!(
-                !paths.iter().any(|p| p.contains("output.log")),
-                "output.log should be excluded by gitignore after round-trip; got {:?}",
-                paths
-            );
-        }
-        BashCheckpointAction::NoChanges => {
-            panic!("Expected Checkpoint, got NoChanges");
-        }
-        _ => panic!("Expected Checkpoint"),
-    }
-}
+// test_gitignore_filtering_through_save_load_round_trip was removed:
+// save_snapshot and load_and_consume_snapshot have been deleted from the codebase.
+// Gitignore filtering is still tested via the snapshot/diff tests above.
 
 // ===========================================================================
 // Stale snapshot cleanup — actually removes old snapshots
 // ===========================================================================
 
-#[test]
-fn test_cleanup_stale_snapshots_removes_old_files() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-    add_and_commit(&repo, "init.txt", "init", "initial");
-
-    // Save a snapshot
-    let snap = snapshot(&root, "stale-sess", "stale-t1", None).expect("snapshot should succeed");
-    save_snapshot(&snap).expect("save should succeed");
-
-    // Manually backdate the snapshot file to be older than SNAPSHOT_STALE_SECS
-    let git_dir = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(&root)
-        .output()
-        .expect("git rev-parse should succeed");
-    let git_dir_str = String::from_utf8_lossy(&git_dir.stdout).trim().to_string();
-    let cache_dir = root.join(&git_dir_str).join("ai").join("bash_snapshots");
-
-    // Find the snapshot file and backdate it
-    let entries: Vec<_> = fs::read_dir(&cache_dir)
-        .expect("cache dir should exist")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .collect();
-    assert!(
-        !entries.is_empty(),
-        "should have at least one snapshot file"
-    );
-
-    for entry in &entries {
-        // Set mtime to 10 minutes ago (well past 300s stale threshold)
-        let ten_min_ago = SystemTime::now() - Duration::from_secs(600);
-        filetime::set_file_mtime(
-            entry.path(),
-            filetime::FileTime::from_system_time(ten_min_ago),
-        )
-        .unwrap_or_else(|_| {
-            // filetime crate may not be available; use touch -t as fallback
-            let _ = Command::new("touch")
-                .args(["-t", "202001010000", &entry.path().display().to_string()])
-                .output();
-        });
-    }
-
-    cleanup_stale_snapshots(&root).expect("cleanup should succeed");
-
-    // Verify the files are gone
-    let remaining: Vec<_> = fs::read_dir(&cache_dir)
-        .expect("cache dir should exist")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .collect();
-    assert!(
-        remaining.is_empty(),
-        "stale snapshot files should be removed; found {:?}",
-        remaining.iter().map(|e| e.path()).collect::<Vec<_>>()
-    );
-}
+// test_cleanup_stale_snapshots_removes_old_files was removed:
+// cleanup_stale_snapshots and save_snapshot have been deleted from the codebase.
 
 // ===========================================================================
 // diff with gitignore=None passes all new files through
@@ -1210,7 +1084,6 @@ fn test_diff_no_gitignore_includes_all_new_files() {
         repo_root: PathBuf::from("/tmp"),
         effective_worktree_wm: None,
         per_file_wm: HashMap::new(),
-        inflight_agent_context: None,
     };
 
     let mut post_entries = HashMap::new();
@@ -1246,7 +1119,6 @@ fn test_diff_no_gitignore_includes_all_new_files() {
         repo_root: PathBuf::from("/tmp"),
         effective_worktree_wm: None,
         per_file_wm: HashMap::new(),
-        inflight_agent_context: None,
     };
 
     let result = diff(&pre, &post);

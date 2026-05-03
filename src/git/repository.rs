@@ -2141,6 +2141,21 @@ impl Repository {
         Ok(staged_blobs)
     }
 
+    pub fn get_unmerged_paths(&self) -> Result<HashSet<PathBuf>, GitAiError> {
+        let object_hash = repository_object_hash_kind_for_path_no_git_exec(self.path())?;
+        let index_path = self.path().join("index");
+        let index = gix_index::File::at(index_path, object_hash, true, Default::default())
+            .map_err(|err| GitAiError::GixError(err.to_string()))?;
+
+        let mut unmerged = HashSet::new();
+        for entry in index.entries() {
+            if entry.stage() != Stage::Unconflicted {
+                unmerged.insert(self.workdir.join(entry.path(&index).to_string()));
+            }
+        }
+        Ok(unmerged)
+    }
+
     /// List all files changed in a commit
     /// Returns a HashSet of file paths relative to the repository root
     pub fn list_commit_files(

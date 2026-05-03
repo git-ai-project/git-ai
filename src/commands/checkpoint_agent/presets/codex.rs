@@ -1,8 +1,8 @@
 use super::opencode::OpenCodePreset;
 use super::parse;
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
@@ -142,13 +142,12 @@ impl AgentPreset for CodexPreset {
                     ParsedHookEvent::PreBashCall(PreBashCall {
                         context,
                         tool_use_id: tool_use_id.to_string(),
-                        strategy: BashPreHookStrategy::SnapshotOnly,
                     })
                 } else if is_file_edit {
                     ParsedHookEvent::PreFileEdit(PreFileEdit {
                         context,
                         file_paths: vec![],
-                        dirty_files: None,
+                        content_overrides: HashMap::new(),
                     })
                 } else {
                     return Err(GitAiError::PresetError(format!(
@@ -176,7 +175,6 @@ impl AgentPreset for CodexPreset {
                     ParsedHookEvent::PostFileEdit(PostFileEdit {
                         context,
                         file_paths,
-                        dirty_files: None,
                         transcript_source,
                     })
                 } else {
@@ -224,7 +222,6 @@ mod tests {
                 assert_eq!(e.context.session_id, "codex-sess-1");
                 assert_eq!(e.context.agent_id.model, "o3");
                 assert_eq!(e.tool_use_id, "tu-1");
-                assert_eq!(e.strategy, BashPreHookStrategy::SnapshotOnly);
             }
             _ => panic!("Expected PreBashCall"),
         }

@@ -1,6 +1,6 @@
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
@@ -25,8 +25,6 @@ struct PiHookInput {
     will_edit_filepaths: Vec<String>,
     #[serde(default)]
     edited_filepaths: Vec<String>,
-    #[serde(default)]
-    dirty_files: Option<HashMap<String, String>>,
     #[serde(default)]
     tool_use_id: Option<String>,
     #[serde(default)]
@@ -96,7 +94,6 @@ impl AgentPreset for PiPreset {
             tool_name_raw,
             will_edit_filepaths,
             edited_filepaths,
-            dirty_files,
             tool_use_id,
             tool_input: _,
             tool_result: _,
@@ -127,9 +124,6 @@ impl AgentPreset for PiPreset {
         } else {
             model_stripped
         };
-
-        let dirty =
-            dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
 
         // Build agent metadata
         let mut metadata = HashMap::new();
@@ -175,7 +169,7 @@ impl AgentPreset for PiPreset {
                 ParsedHookEvent::PreFileEdit(PreFileEdit {
                     context,
                     file_paths: will_edit_filepaths.into_iter().map(PathBuf::from).collect(),
-                    dirty_files: dirty,
+                    content_overrides: HashMap::new(),
                 })
             }
             PiHookEvent::AfterEdit => {
@@ -187,14 +181,12 @@ impl AgentPreset for PiPreset {
                 ParsedHookEvent::PostFileEdit(PostFileEdit {
                     context,
                     file_paths: edited_filepaths.into_iter().map(PathBuf::from).collect(),
-                    dirty_files: dirty,
                     transcript_source,
                 })
             }
             PiHookEvent::BeforeCommand => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
-                strategy: BashPreHookStrategy::EmitHumanCheckpoint,
             }),
             PiHookEvent::AfterCommand => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -247,7 +239,6 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/tmp/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_some());
                 let metadata = &e.context.metadata;
                 assert_eq!(metadata.get("tool_name").map(String::as_str), Some("edit"));
                 assert_eq!(
@@ -313,7 +304,6 @@ mod tests {
                 assert_eq!(e.context.agent_id.tool, "pi");
                 assert_eq!(e.context.session_id, "pi-sess-789");
                 assert_eq!(e.tool_use_id, "tu-abc123");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }

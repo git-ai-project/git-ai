@@ -14,7 +14,8 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::commands::checkpoint_agent::bash_tool::{
     BashCheckpointAction, HookEvent, handle_bash_tool, reset_timeout_overrides_for_test,
-    set_hook_timeout_ms_for_test, set_walk_timeout_ms_for_test, snapshot,
+    set_daemon_socket_for_test, set_hook_timeout_ms_for_test, set_walk_timeout_ms_for_test,
+    snapshot,
 };
 use std::fs;
 
@@ -23,6 +24,7 @@ use std::fs;
 // ---------------------------------------------------------------------------
 
 fn repo_root(repo: &TestRepo) -> std::path::PathBuf {
+    set_daemon_socket_for_test(repo.daemon_control_socket_path());
     repo.canonical_path()
 }
 

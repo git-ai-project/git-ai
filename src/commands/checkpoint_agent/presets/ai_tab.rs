@@ -63,21 +63,18 @@ impl AgentPreset for AiTabPreset {
             metadata: HashMap::from([("tool".to_string(), tool)]),
         };
 
-        let dirty_files = parse::dirty_files_from_value(&data, cwd);
-
         let event = if hook_event == "before_edit" {
             let file_paths = parse::pathbuf_array(&data, "will_edit_filepaths", cwd);
             ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
-                dirty_files,
+                content_overrides: HashMap::new(),
             })
         } else {
             let file_paths = parse::pathbuf_array(&data, "edited_filepaths", cwd);
             ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
-                dirty_files,
                 transcript_source: None,
             })
         };
@@ -118,7 +115,6 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_some());
                 assert_eq!(
                     e.context.metadata.get("tool").map(String::as_str),
                     Some("supermaven")
