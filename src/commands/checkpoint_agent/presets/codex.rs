@@ -1,9 +1,9 @@
+use super::opencode::OpenCodePreset;
 use super::parse;
 use super::{
     AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
     PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
 };
-use super::opencode::OpenCodePreset;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
@@ -49,7 +49,9 @@ impl CodexPreset {
     }
 
     fn extract_filepaths_from_tool_response(hook_data: &serde_json::Value) -> Vec<PathBuf> {
-        let Some(tool_response) = hook_data.get("tool_response") else { return vec![]; };
+        let Some(tool_response) = hook_data.get("tool_response") else {
+            return vec![];
+        };
         let output = if let Some(raw) = tool_response.as_str() {
             serde_json::from_str::<serde_json::Value>(raw)
                 .ok()
@@ -97,8 +99,8 @@ impl AgentPreset for CodexPreset {
         let session_id = Self::session_id_from_hook_data(&data)?;
         let hook_event = parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
         let tool_name = parse::optional_str_multi(&data, &["tool_name", "toolName"]);
-        let tool_use_id = parse::optional_str_multi(&data, &["tool_use_id", "toolUseId"])
-            .unwrap_or("bash");
+        let tool_use_id =
+            parse::optional_str_multi(&data, &["tool_use_id", "toolUseId"]).unwrap_or("bash");
 
         let tool_class = tool_name
             .map(|n| bash_tool::classify_tool(Agent::Codex, n))
@@ -166,7 +168,8 @@ impl AgentPreset for CodexPreset {
                     })
                 } else if is_file_edit {
                     let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
-                    let mut file_paths = OpenCodePreset::extract_filepaths_from_tool_input(tool_input, &cwd);
+                    let mut file_paths =
+                        OpenCodePreset::extract_filepaths_from_tool_input(tool_input, cwd);
 
                     if file_paths.is_empty() {
                         file_paths = Self::extract_filepaths_from_tool_response(&data);

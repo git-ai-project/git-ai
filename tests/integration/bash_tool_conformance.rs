@@ -629,7 +629,10 @@ fn test_classify_tool_opencode() {
 #[test]
 fn test_classify_tool_codex() {
     assert_eq!(classify_tool(Agent::Codex, "Bash"), ToolClass::Bash);
-    assert_eq!(classify_tool(Agent::Codex, "apply_patch"), ToolClass::FileEdit);
+    assert_eq!(
+        classify_tool(Agent::Codex, "apply_patch"),
+        ToolClass::FileEdit
+    );
     assert_eq!(classify_tool(Agent::Codex, "unknown"), ToolClass::Skip);
 }
 
