@@ -1079,9 +1079,25 @@ impl AttributionTracker {
                     let is_whitespace_only = data_is_whitespace(diff.data());
                     let contains_newline = diff.data().contains(&b'\n');
                     let is_formatting_pair = prev_whitespace_delete && is_whitespace_only;
-                    #[allow(clippy::if_same_then_else)]
-                    let (author_id, attribution_ts) = if contains_newline {
+                    let (author_id, attribution_ts) = if contains_newline && is_substantive_insert
+                    {
+                        // New substantive line content — attribute to current author
                         (current_author.to_string(), ts)
+                    } else if contains_newline && !is_substantive_insert {
+                        // Line re-inserted with only formatting/whitespace changes (e.g. by a
+                        // code formatter like `mvn spotless:apply`).  Preserve the original
+                        // attribution instead of crediting the human author.
+                        if let Some(attr) = find_attribution_for_insertion(
+                            old_attributions,
+                            old_pos,
+                            &mut insertion_attr_cursor,
+                        ) {
+                            (attr.author_id.clone(), attr.ts)
+                        } else if let Some(attr) = new_attributions.last() {
+                            (attr.author_id.clone(), attr.ts)
+                        } else {
+                            (current_author.to_string(), ts)
+                        }
                     } else if is_substantive_insert {
                         (current_author.to_string(), ts)
                     } else if is_formatting_pair {
