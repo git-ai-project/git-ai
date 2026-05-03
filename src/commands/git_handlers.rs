@@ -140,7 +140,7 @@ pub fn handle_git(args: &[String]) {
             crate::authorship::background_agent::BackgroundAgent::BackgroundAgentNoHooks { .. }
         )
     {
-        let default_author = repo.git_author_identity().name_or_unknown();
+        let default_author = repo.git_author_identity().formatted_or_unknown();
         if let Err(e) = crate::authorship::pre_commit::pre_commit(repo, default_author) {
             tracing::debug!("pre-commit synthetic AI checkpoint failed: {}", e);
         }
