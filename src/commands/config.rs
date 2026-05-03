@@ -85,51 +85,51 @@ fn resolve_path_to_remotes(path: &str) -> Result<Vec<String>, String> {
 }
 
 fn print_config_help() {
-    eprintln!("git-ai config - View and manage git-ai configuration");
-    eprintln!();
-    eprintln!("Usage:");
-    eprintln!("  git-ai config                Show all config as formatted JSON");
-    eprintln!("  git-ai config <key>          Show specific config value");
-    eprintln!("  git-ai config set <key> <value>          Set a config value");
-    eprintln!("  git-ai config set <key> <value> --add    Add to array (extends existing)");
-    eprintln!("  git-ai config --add <key> <value>        Add to array or upsert into object");
-    eprintln!("  git-ai config unset <key>    Remove config value (reverts to default)");
-    eprintln!();
-    eprintln!("Configuration Keys:");
-    eprintln!("  git_path                     Path to git binary");
-    eprintln!("  exclude_prompts_in_repositories  Repos to exclude prompts from (array)");
-    eprintln!("  allow_repositories           Allowed repos (array)");
-    eprintln!("  exclude_repositories         Excluded repos (array)");
-    eprintln!("  telemetry_oss                OSS telemetry setting (on/off)");
-    eprintln!("  telemetry_enterprise_dsn     Enterprise telemetry DSN");
-    eprintln!("  disable_version_checks       Disable version checks (bool)");
-    eprintln!("  disable_auto_updates         Disable auto updates (bool)");
-    eprintln!("  update_channel               Update channel (latest/next)");
-    eprintln!("  feature_flags                Feature flags (object)");
-    eprintln!("  api_key                      API key for X-API-Key header");
-    eprintln!("  prompt_storage               Prompt storage mode (default/notes/local)");
-    eprintln!("  include_prompts_in_repositories  Repos to include for prompt storage (array)");
-    eprintln!("  default_prompt_storage       Fallback storage mode for non-included repos");
-    eprintln!("  quiet                        Suppress chart output after commits (bool)");
-    eprintln!("  git_ai_hooks                 Hook name -> shell commands map (object)");
-    eprintln!();
-    eprintln!("Repository Patterns:");
-    eprintln!("  For exclude/allow/exclude_prompts_in_repositories, you can provide:");
-    eprintln!("    - A glob pattern: \"*\", \"https://github.com/org/*\"");
-    eprintln!("    - A URL/git protocol: \"git@github.com:org/repo.git\"");
-    eprintln!("    - A file path: \".\" or \"/path/to/repo\" (resolves to repo's remotes)");
-    eprintln!();
-    eprintln!("Examples:");
-    eprintln!("  git-ai config exclude_repositories");
-    eprintln!("  git-ai config set disable_auto_updates true");
-    eprintln!("  git-ai config set exclude_repositories \"private/*\"");
-    eprintln!("  git-ai config set exclude_repositories .         # Uses current repo's remotes");
-    eprintln!("  git-ai config --add exclude_repositories \"temp/*\"");
-    eprintln!("  git-ai config --add allow_repositories ~/projects/my-repo");
-    eprintln!("  git-ai config --add feature_flags.my_flag true");
-    eprintln!("  git-ai config --add git_ai_hooks.post_notes_updated \"./my-hook.sh\"");
-    eprintln!("  git-ai config unset exclude_repositories");
-    eprintln!();
+    println!("git-ai config - View and manage git-ai configuration");
+    println!();
+    println!("Usage:");
+    println!("  git-ai config                Show all config as formatted JSON");
+    println!("  git-ai config <key>          Show specific config value");
+    println!("  git-ai config set <key> <value>          Set a config value");
+    println!("  git-ai config set <key> <value> --add    Add to array (extends existing)");
+    println!("  git-ai config --add <key> <value>        Add to array or upsert into object");
+    println!("  git-ai config unset <key>    Remove config value (reverts to default)");
+    println!();
+    println!("Configuration Keys:");
+    println!("  git_path                     Path to git binary");
+    println!("  exclude_prompts_in_repositories  Repos to exclude prompts from (array)");
+    println!("  allow_repositories           Allowed repos (array)");
+    println!("  exclude_repositories         Excluded repos (array)");
+    println!("  telemetry_oss                OSS telemetry setting (on/off)");
+    println!("  telemetry_enterprise_dsn     Enterprise telemetry DSN");
+    println!("  disable_version_checks       Disable version checks (bool)");
+    println!("  disable_auto_updates         Disable auto updates (bool)");
+    println!("  update_channel               Update channel (latest/next)");
+    println!("  feature_flags                Feature flags (object)");
+    println!("  api_key                      API key for X-API-Key header");
+    println!("  prompt_storage               Prompt storage mode (default/notes/local)");
+    println!("  include_prompts_in_repositories  Repos to include for prompt storage (array)");
+    println!("  default_prompt_storage       Fallback storage mode for non-included repos");
+    println!("  quiet                        Suppress chart output after commits (bool)");
+    println!("  git_ai_hooks                 Hook name -> shell commands map (object)");
+    println!();
+    println!("Repository Patterns:");
+    println!("  For exclude/allow/exclude_prompts_in_repositories, you can provide:");
+    println!("    - A glob pattern: \"*\", \"https://github.com/org/*\"");
+    println!("    - A URL/git protocol: \"git@github.com:org/repo.git\"");
+    println!("    - A file path: \".\" or \"/path/to/repo\" (resolves to repo's remotes)");
+    println!();
+    println!("Examples:");
+    println!("  git-ai config exclude_repositories");
+    println!("  git-ai config set disable_auto_updates true");
+    println!("  git-ai config set exclude_repositories \"private/*\"");
+    println!("  git-ai config set exclude_repositories .         # Uses current repo's remotes");
+    println!("  git-ai config --add exclude_repositories \"temp/*\"");
+    println!("  git-ai config --add allow_repositories ~/projects/my-repo");
+    println!("  git-ai config --add feature_flags.my_flag true");
+    println!("  git-ai config --add git_ai_hooks.post_notes_updated \"./my-hook.sh\"");
+    println!("  git-ai config unset exclude_repositories");
+    println!();
     std::process::exit(0);
 }
 
@@ -448,7 +448,7 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
             "git_path" => {
                 file_config.git_path = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
-                eprintln!("[git_path]: {}", value);
+                println!("[git_path]: {}", value);
             }
             "exclude_prompts_in_repositories" => {
                 let added = set_repository_array_field(
@@ -480,24 +480,24 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
             "telemetry_oss" => {
                 file_config.telemetry_oss = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
-                eprintln!("[telemetry_oss]: {}", value);
+                println!("[telemetry_oss]: {}", value);
             }
             "telemetry_enterprise_dsn" => {
                 file_config.telemetry_enterprise_dsn = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
-                eprintln!("[telemetry_enterprise_dsn]: {}", value);
+                println!("[telemetry_enterprise_dsn]: {}", value);
             }
             "disable_version_checks" => {
                 let bool_value = parse_bool(value)?;
                 file_config.disable_version_checks = Some(bool_value);
                 crate::config::save_file_config(&file_config)?;
-                eprintln!("[disable_version_checks]: {}", bool_value);
+                println!("[disable_version_checks]: {}", bool_value);
             }
             "disable_auto_updates" => {
                 let bool_value = parse_bool(value)?;
                 file_config.disable_auto_updates = Some(bool_value);
                 crate::config::save_file_config(&file_config)?;
-                eprintln!("[disable_auto_updates]: {}", bool_value);
+                println!("[disable_auto_updates]: {}", bool_value);
             }
             "update_channel" => {
                 // Validate update channel
@@ -508,7 +508,7 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 }
                 file_config.update_channel = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
-                eprintln!("[update_channel]: {}", value);
+                println!("[update_channel]: {}", value);
             }
             "feature_flags" => {
                 if add_mode {
@@ -522,19 +522,19 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 }
                 file_config.feature_flags = Some(json_value);
                 crate::config::save_file_config(&file_config)?;
-                eprintln!("[feature_flags]: {}", value);
+                println!("[feature_flags]: {}", value);
             }
             "api_key" => {
                 file_config.api_key = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
                 let masked = mask_api_key(value);
-                eprintln!("[api_key]: {}", masked);
+                println!("[api_key]: {}", masked);
             }
             "prompt_storage" => {
                 validate_prompt_storage_value(value)?;
                 file_config.prompt_storage = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
-                eprintln!("[prompt_storage]: {}", value);
+                println!("[prompt_storage]: {}", value);
             }
             "include_prompts_in_repositories" => {
                 let resolved = resolve_repository_value(value)?;
@@ -553,20 +553,20 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 }
                 crate::config::save_file_config(&file_config)?;
                 for pattern in resolved {
-                    eprintln!("[include_prompts_in_repositories]: {}", pattern);
+                    println!("[include_prompts_in_repositories]: {}", pattern);
                 }
             }
             "default_prompt_storage" => {
                 validate_prompt_storage_value(value)?;
                 file_config.default_prompt_storage = Some(value.to_string());
                 crate::config::save_file_config(&file_config)?;
-                eprintln!("[default_prompt_storage]: {}", value);
+                println!("[default_prompt_storage]: {}", value);
             }
             "quiet" => {
                 let bool_value = parse_bool(value)?;
                 file_config.quiet = Some(bool_value);
                 crate::config::save_file_config(&file_config)?;
-                eprintln!("[quiet]: {}", bool_value);
+                println!("[quiet]: {}", bool_value);
             }
             "git_ai_hooks" => {
                 if add_mode {
@@ -574,7 +574,7 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
                 }
                 file_config.git_ai_hooks = Some(parse_git_ai_hooks_object(value)?);
                 crate::config::save_file_config(&file_config)?;
-                eprintln!("[git_ai_hooks]: {}", value);
+                println!("[git_ai_hooks]: {}", value);
             }
             _ => return Err(format!("Unknown config key: {}", key)),
         }
@@ -628,7 +628,7 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
 
         file_config.feature_flags = Some(flags);
         crate::config::save_file_config(&file_config)?;
-        eprintln!("+ [{}]: {}", nested_key, value);
+        println!("+ [{}]: {}", nested_key, value);
         return Ok(());
     }
 
@@ -651,7 +651,7 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
             file_config.git_ai_hooks = Some(hooks);
             crate::config::save_file_config(&file_config)?;
             for command in commands_to_add {
-                eprintln!("+ [{}.{}]: {}", key_path[0], hook_name, command);
+                println!("+ [{}.{}]: {}", key_path[0], hook_name, command);
             }
         } else {
             let commands = parse_hook_command_values(value)?;
@@ -659,7 +659,7 @@ fn set_config_value(key: &str, value: &str, add_mode: bool) -> Result<(), String
             file_config.git_ai_hooks = Some(hooks);
             crate::config::save_file_config(&file_config)?;
             for command in commands {
-                eprintln!("[{}.{}]: {}", key_path[0], hook_name, command);
+                println!("[{}.{}]: {}", key_path[0], hook_name, command);
             }
         }
 
@@ -680,7 +680,7 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                 let old_value = file_config.git_path.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
-                    eprintln!("- [git_path]: {}", v);
+                    println!("- [git_path]: {}", v);
                 }
             }
             "exclude_prompts_in_repositories" => {
@@ -708,84 +708,84 @@ fn unset_config_value(key: &str) -> Result<(), String> {
                 let old_value = file_config.telemetry_oss.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
-                    eprintln!("- [telemetry_oss]: {}", v);
+                    println!("- [telemetry_oss]: {}", v);
                 }
             }
             "telemetry_enterprise_dsn" => {
                 let old_value = file_config.telemetry_enterprise_dsn.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
-                    eprintln!("- [telemetry_enterprise_dsn]: {}", v);
+                    println!("- [telemetry_enterprise_dsn]: {}", v);
                 }
             }
             "disable_version_checks" => {
                 let old_value = file_config.disable_version_checks.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
-                    eprintln!("- [disable_version_checks]: {}", v);
+                    println!("- [disable_version_checks]: {}", v);
                 }
             }
             "disable_auto_updates" => {
                 let old_value = file_config.disable_auto_updates.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
-                    eprintln!("- [disable_auto_updates]: {}", v);
+                    println!("- [disable_auto_updates]: {}", v);
                 }
             }
             "update_channel" => {
                 let old_value = file_config.update_channel.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
-                    eprintln!("- [update_channel]: {}", v);
+                    println!("- [update_channel]: {}", v);
                 }
             }
             "feature_flags" => {
                 let old_value = file_config.feature_flags.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
-                    eprintln!("- [feature_flags]: {}", v);
+                    println!("- [feature_flags]: {}", v);
                 }
             }
             "api_key" => {
                 let old_value = file_config.api_key.take();
                 crate::config::save_file_config(&file_config)?;
                 if old_value.is_some() {
-                    eprintln!("- [api_key]: ****");
+                    println!("- [api_key]: ****");
                 }
             }
             "prompt_storage" => {
                 let old_value = file_config.prompt_storage.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
-                    eprintln!("- [prompt_storage]: {}", v);
+                    println!("- [prompt_storage]: {}", v);
                 }
             }
             "include_prompts_in_repositories" => {
                 let old_value = file_config.include_prompts_in_repositories.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
-                    eprintln!("- [include_prompts_in_repositories]: {:?}", v);
+                    println!("- [include_prompts_in_repositories]: {:?}", v);
                 }
             }
             "default_prompt_storage" => {
                 let old_value = file_config.default_prompt_storage.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
-                    eprintln!("- [default_prompt_storage]: {}", v);
+                    println!("- [default_prompt_storage]: {}", v);
                 }
             }
             "quiet" => {
                 let old_value = file_config.quiet.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
-                    eprintln!("- [quiet]: {}", v);
+                    println!("- [quiet]: {}", v);
                 }
             }
             "git_ai_hooks" => {
                 let old_value = file_config.git_ai_hooks.take();
                 crate::config::save_file_config(&file_config)?;
                 if let Some(v) = old_value {
-                    eprintln!("- [git_ai_hooks]: {:?}", v);
+                    println!("- [git_ai_hooks]: {:?}", v);
                 }
             }
             _ => return Err(format!("Unknown config key: {}", key)),
@@ -823,7 +823,7 @@ fn unset_config_value(key: &str) -> Result<(), String> {
             file_config.feature_flags = Some(flags);
             crate::config::save_file_config(&file_config)?;
             if let Some(v) = old_value {
-                eprintln!("- [{}]: {}", nested_key, v);
+                println!("- [{}]: {}", nested_key, v);
             }
         } else {
             // Deep nested key: feature_flags.parent.child...
@@ -841,7 +841,7 @@ fn unset_config_value(key: &str) -> Result<(), String> {
             file_config.feature_flags = Some(flags);
             crate::config::save_file_config(&file_config)?;
             if let Some(v) = old_value {
-                eprintln!("- [{}]: {}", nested_key, v);
+                println!("- [{}]: {}", nested_key, v);
             }
         }
 
@@ -870,7 +870,7 @@ fn unset_config_value(key: &str) -> Result<(), String> {
 
         if let Some(commands) = old_value {
             for command in commands {
-                eprintln!("- [{}]: {}", key, command);
+                println!("- [{}]: {}", key, command);
             }
         }
         return Ok(());
@@ -957,11 +957,11 @@ fn log_array_changes(items: &[String], add_mode: bool) {
     #[allow(clippy::if_same_then_else)]
     if add_mode {
         for item in items {
-            eprintln!("+ {}", item);
+            println!("+ {}", item);
         }
     } else {
         for item in items {
-            eprintln!("+ {}", item);
+            println!("+ {}", item);
         }
     }
 }
@@ -969,7 +969,7 @@ fn log_array_changes(items: &[String], add_mode: bool) {
 /// Log array removals with - prefix
 fn log_array_removals(items: &[String]) {
     for item in items {
-        eprintln!("- {}", item);
+        println!("- {}", item);
     }
 }
 
