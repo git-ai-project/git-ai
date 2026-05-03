@@ -4044,6 +4044,87 @@ fn spawn_daemon_with_env(repo: &TestRepo, extra_env: &[(&str, String)]) -> Child
     panic!("daemon did not become ready");
 }
 
+/// When the daemon exceeds its configured max uptime, it should restart and
+/// make a fresh control socket available.
+#[test]
+#[serial]
+fn daemon_max_uptime_restarts_and_recovers() {
+    let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
+
+    let mut child = spawn_daemon_with_env(
+        &repo,
+        &[
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "1".to_string()),
+            ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "5".to_string()),
+        ],
+    );
+
+    let original_pid = child.id();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(status) = child.try_wait().expect("failed to poll daemon") {
+            assert!(
+                status.success(),
+                "daemon should exit cleanly before restart, got: {}",
+                status
+            );
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("daemon did not exit within 30s after exceeding max uptime");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    let control_socket_path = daemon_control_socket_path(&repo);
+    let trace_socket_path = daemon_trace_socket_path(&repo);
+    let repo_workdir = repo_workdir_string(&repo);
+    let restarted_pid = loop {
+        if send_control_request(
+            &control_socket_path,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir.clone(),
+            },
+        )
+        .is_ok()
+            && local_socket_connects_with_timeout(&trace_socket_path, DAEMON_TEST_PROBE_TIMEOUT)
+                .is_ok()
+        {
+            let daemon_config = DaemonConfig::from_home(&repo.daemon_home_path());
+            let pid = read_daemon_pid(&daemon_config)
+                .expect("restarted daemon should publish pid metadata");
+            break pid;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("daemon did not restart within 30s after max uptime exit");
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+
+    assert_ne!(
+        restarted_pid, original_pid,
+        "daemon restart should produce a new process id"
+    );
+
+    let _ = send_control_request(&control_socket_path, &ControlRequest::Shutdown);
+    for _ in 0..200 {
+        if send_control_request(
+            &control_socket_path,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir.clone(),
+            },
+        )
+        .is_err()
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("restarted daemon did not shut down cleanly");
+}
+
 /// Config patch JSON that enables version checks and auto-updates (they
 /// default to disabled in non-OSS debug builds).
 fn update_enabled_config_patch() -> String {
@@ -4054,12 +4135,13 @@ fn update_enabled_config_patch() -> String {
     .to_string()
 }
 
-/// Verifies the daemon update check loop lifecycle: when a cached update is
-/// present and the check interval is short, the daemon should detect the
-/// pending update, request a graceful shutdown, and exit on its own.
+/// When a cached update causes the daemon to exit for self-update, a failed
+/// install attempt should not leave the background service down. Instead, the
+/// wrapper process should clear the stale update cache and bring the daemon
+/// back up.
 #[test]
 #[serial]
-fn daemon_update_check_loop_detects_cached_update_and_shuts_down() {
+fn daemon_update_check_loop_failed_install_recovers_service() {
     let repo = TestRepo::new_with_mode(GitTestMode::Wrapper);
 
     // Seed update cache with a pending update before starting the daemon.
@@ -4070,18 +4152,20 @@ fn daemon_update_check_loop_detects_cached_update_and_shuts_down() {
         &[
             ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "1".to_string()),
             ("GIT_AI_TEST_CONFIG_PATCH", update_enabled_config_patch()),
+            ("GIT_AI_API_BASE_URL", "http://127.0.0.1:1".to_string()),
         ],
     );
 
-    // The daemon should self-shutdown after detecting the cached update.
-    // With a 1-second interval the tick is clamped to 1s, so it should
-    // exit within a few seconds.
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let original_pid = child.id();
+
+    // The wrapper process should exit after the daemon chooses the update
+    // shutdown path and the follow-on install attempt fails.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         if let Some(status) = child.try_wait().expect("failed to poll daemon") {
             assert!(
                 status.success(),
-                "daemon should exit cleanly after update-triggered shutdown, got: {}",
+                "wrapper process should exit cleanly after failed self-update handoff, got: {}",
                 status
             );
             break;
@@ -4089,29 +4173,90 @@ fn daemon_update_check_loop_detects_cached_update_and_shuts_down() {
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("daemon did not self-shutdown within 15s after detecting cached update");
+            panic!("wrapper process did not exit within 30s after failed self-update handoff");
         }
         thread::sleep(Duration::from_millis(100));
     }
 
-    // Lock file should be released after clean shutdown.
-    let lock_path = daemon_lock_path(&repo);
-    assert!(
-        !lock_path.exists() || DaemonLock::acquire(&lock_path).is_ok(),
-        "daemon lock should be released after shutdown"
-    );
+    let control_socket_path = daemon_control_socket_path(&repo);
+    let trace_socket_path = daemon_trace_socket_path(&repo);
+    let repo_workdir = repo_workdir_string(&repo);
+    let daemon_config = DaemonConfig::from_home(&repo.daemon_home_path());
 
-    // Control socket should no longer be reachable.
-    assert!(
-        send_control_request(
-            &daemon_control_socket_path(&repo),
+    let restarted_pid = loop {
+        if send_control_request(
+            &control_socket_path,
             &ControlRequest::StatusFamily {
-                repo_working_dir: repo_workdir_string(&repo),
+                repo_working_dir: repo_workdir.clone(),
             },
         )
-        .is_err(),
-        "control socket should be closed after daemon exit"
+        .is_ok()
+            && local_socket_connects_with_timeout(&trace_socket_path, DAEMON_TEST_PROBE_TIMEOUT)
+                .is_ok()
+        {
+            let pid = read_daemon_pid(&daemon_config)
+                .expect("restarted daemon should publish pid metadata");
+            break pid;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("daemon did not recover within 30s after failed self-update");
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+
+    assert_ne!(
+        restarted_pid, original_pid,
+        "failed self-update recovery should produce a fresh daemon process"
     );
+
+    let cache_path = repo
+        .test_home_path()
+        .join(".git-ai")
+        .join("internal")
+        .join("update_check");
+    let cache: serde_json::Value =
+        serde_json::from_slice(&fs::read(cache_path).expect("failed to read update cache"))
+            .expect("failed to parse update cache");
+    assert!(
+        cache
+            .get("available_tag")
+            .is_some_and(serde_json::Value::is_null),
+        "failed self-update should clear cached available_tag"
+    );
+    assert!(
+        cache
+            .get("available_semver")
+            .is_some_and(serde_json::Value::is_null),
+        "failed self-update should clear cached available_semver"
+    );
+
+    thread::sleep(Duration::from_secs(2));
+    assert!(
+        send_control_request(
+            &control_socket_path,
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir.clone(),
+            },
+        )
+        .is_ok(),
+        "restarted daemon should remain available after failed self-update recovery"
+    );
+
+    let _ = send_control_request(&control_socket_path, &ControlRequest::Shutdown);
+    for _ in 0..200 {
+        if send_control_request(
+            &daemon_control_socket_path(&repo),
+            &ControlRequest::StatusFamily {
+                repo_working_dir: repo_workdir.clone(),
+            },
+        )
+        .is_err()
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("recovered daemon did not shut down cleanly");
 }
 
 /// When auto-updates are disabled via config, the daemon should NOT
