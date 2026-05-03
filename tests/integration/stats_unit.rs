@@ -410,13 +410,12 @@ fn test_accepted_lines_merge_commit() {
         PromptRecord {
             agent_id,
             human_author: None,
-            messages: vec![],
             total_additions: 5,
             total_deletions: 0,
             accepted_lines: 5,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -448,13 +447,12 @@ fn test_accepted_lines_no_matching_files() {
         PromptRecord {
             agent_id,
             human_author: None,
-            messages: vec![],
             total_additions: 3,
             total_deletions: 0,
             accepted_lines: 3,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -487,13 +485,12 @@ fn test_accepted_lines_basic_match() {
         PromptRecord {
             agent_id,
             human_author: None,
-            messages: vec![],
             total_additions: 3,
             total_deletions: 0,
             accepted_lines: 3,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -716,13 +713,12 @@ fn test_stats_from_authorship_log_mixed_cap() {
         PromptRecord {
             agent_id,
             human_author: None,
-            messages: vec![],
             total_additions: 50,
             total_deletions: 0,
             accepted_lines: 0,
             overriden_lines: 100, // Unrealistically high
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
