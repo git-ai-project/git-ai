@@ -7119,14 +7119,12 @@ impl ActorDaemonCoordinator {
                         tracing::warn!(session_id = %session_id, error = %e, "failed to ensure session exists");
                     }
 
-                    worker
-                        .notify_checkpoint(
-                            session_id,
-                            agent_type,
-                            trace_id,
-                            transcript_source.path.clone(),
-                        )
-                        .await;
+                    worker.notify_checkpoint(
+                        session_id,
+                        agent_type,
+                        trace_id,
+                        transcript_source.path.clone(),
+                    );
                 }
 
                 self.ingest_checkpoint_payload(*request).await
