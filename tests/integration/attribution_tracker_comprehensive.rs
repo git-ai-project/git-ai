@@ -1113,8 +1113,7 @@ fn test_attribution_with_checkpoint() {
     // Make working directory changes
     file.set_contents(crate::lines!["Initial".human(), "WIP AI".ai()]);
 
-    // Create checkpoint
-    let result = repo.git_ai(&["checkpoint"]);
+    let result = repo.git_ai(&["checkpoint", "mock_ai"]);
     assert!(result.is_ok());
 }
 

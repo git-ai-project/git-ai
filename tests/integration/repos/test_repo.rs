@@ -787,6 +787,7 @@ fn is_known_checkpoint_preset(arg: &str) -> bool {
             | "mock_ai"
             | "mock_known_human"
             | "known_human"
+            | "human"
             | "droid"
             | "agent-v1"
     )
@@ -798,10 +799,6 @@ fn normalize_test_git_ai_checkpoint_args(args: &[&str]) -> Vec<String> {
         .map(|arg| (*arg).to_string())
         .collect::<Vec<_>>();
     if git_ai_primary_command(args) != Some("checkpoint") || args.len() <= 1 {
-        return original;
-    }
-
-    if args.contains(&"--") {
         return original;
     }
 
@@ -822,7 +819,7 @@ fn normalize_test_git_ai_checkpoint_args(args: &[&str]) -> Vec<String> {
             }
             arg if is_known_checkpoint_preset(arg) => return original,
             _ => {
-                normalized.push("--".to_string());
+                normalized.push("human".to_string());
                 normalized.extend(args[i..].iter().map(|arg| (*arg).to_string()));
                 return normalized;
             }
@@ -3204,22 +3201,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_normalize_test_git_ai_checkpoint_args_inserts_separator_for_direct_file() {
+    fn test_normalize_test_git_ai_checkpoint_args_inserts_human_preset_for_direct_file() {
         assert_eq!(
             normalize_test_git_ai_checkpoint_args(&["checkpoint", "src/lib.rs"]),
-            vec!["checkpoint", "--", "src/lib.rs"]
+            vec!["checkpoint", "human", "src/lib.rs"]
         );
     }
 
     #[test]
-    fn test_normalize_test_git_ai_checkpoint_args_preserves_known_presets_and_separator() {
+    fn test_normalize_test_git_ai_checkpoint_args_preserves_known_presets() {
         assert_eq!(
             normalize_test_git_ai_checkpoint_args(&["checkpoint", "mock_ai", "src/lib.rs"]),
             vec!["checkpoint", "mock_ai", "src/lib.rs"]
-        );
-        assert_eq!(
-            normalize_test_git_ai_checkpoint_args(&["checkpoint", "--", "src/lib.rs"]),
-            vec!["checkpoint", "--", "src/lib.rs"]
         );
     }
 
@@ -3237,7 +3230,7 @@ mod tests {
                 "checkpoint",
                 "--hook-input",
                 "{\"cwd\":\"/tmp/repo\"}",
-                "--",
+                "human",
                 "src/lib.rs",
                 "src/main.rs",
             ]

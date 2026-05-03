@@ -1,3 +1,4 @@
+use super::parse;
 use super::{AgentPreset, ParsedHookEvent, PostFileEdit, PreFileEdit, PresetContext};
 use crate::authorship::working_log::AgentId;
 use crate::error::GitAiError;
@@ -41,7 +42,7 @@ impl AgentPreset for AgentV1Preset {
                 let file_paths = will_edit_filepaths
                     .unwrap_or_default()
                     .into_iter()
-                    .map(PathBuf::from)
+                    .map(|p| parse::resolve_absolute(&p, &repo_working_dir))
                     .collect();
                 ParsedHookEvent::PreFileEdit(PreFileEdit {
                     context: PresetContext {
@@ -69,7 +70,7 @@ impl AgentPreset for AgentV1Preset {
                 let file_paths = edited_filepaths
                     .unwrap_or_default()
                     .into_iter()
-                    .map(PathBuf::from)
+                    .map(|p| parse::resolve_absolute(&p, &repo_working_dir))
                     .collect();
                 ParsedHookEvent::PostFileEdit(PostFileEdit {
                     context: PresetContext {

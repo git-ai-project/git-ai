@@ -467,7 +467,7 @@ fn test_checkpoint_with_non_utf8_file() {
     let file_path = repo.path().join("gbk_file.txt");
     fs::write(&file_path, gbk_multiline()).unwrap();
 
-    let result = repo.git_ai(&["checkpoint"]);
+    let result = repo.git_ai(&["checkpoint", "human"]);
     assert!(
         result.is_ok(),
         "Checkpoint with non-UTF-8 file should not crash, got: {:?}",
@@ -486,7 +486,7 @@ fn test_checkpoint_ai_with_non_utf8_file_present() {
     let gbk_path = repo.path().join("legacy.txt");
     fs::write(&gbk_path, gbk_hello_world()).unwrap();
     repo.git(&["add", "-A"]).unwrap();
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
 
     let mut ai_file = repo.filename("generated.py");
     ai_file.set_contents(crate::lines!["print('hello')".ai(), "print('world')".ai()]);

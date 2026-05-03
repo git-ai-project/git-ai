@@ -105,12 +105,7 @@ fn test_build_scoped_human_agent_run_result_uses_current_changed_paths() {
     assert_eq!(scoped.path_role, PreparedPathRole::WillEdit);
     let file_paths: Vec<PathBuf> = scoped.files.iter().map(|f| f.path.clone()).collect();
     assert_eq!(file_paths, vec![PathBuf::from("tracked.txt")]);
-    assert!(
-        scoped
-            .files
-            .iter()
-            .all(|f| f.repo_work_dir == *repo.path())
-    );
+    assert!(scoped.files.iter().all(|f| f.repo_work_dir == *repo.path()));
 }
 
 #[test]

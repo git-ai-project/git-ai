@@ -12,6 +12,46 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+fn discover_dirty_files_in_repo(repo_work_dir: &std::path::Path) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain", "-uall"])
+        .current_dir(repo_work_dir)
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let status = &line[..2];
+            if status.starts_with('D') || status == " D" {
+                return None;
+            }
+            let path_part = &line[3..];
+            let path_part = if let Some(arrow_pos) = path_part.find(" -> ") {
+                &path_part[arrow_pos + 4..]
+            } else {
+                path_part
+            };
+            let abs = repo_work_dir.join(path_part);
+            if abs.exists() {
+                Some(abs.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn resolve_head_sha(repo: &Repository) -> String {
+    repo.head().and_then(|r| r.target()).unwrap_or_default()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointFile {
     pub path: PathBuf,
@@ -56,11 +96,11 @@ fn validate_absolute_paths(paths: &[PathBuf]) -> Result<(), GitAiError> {
 
 fn build_checkpoint_files(
     file_paths: &[PathBuf],
-    repo: &Repository,
+    default_repo: &Repository,
 ) -> Result<Vec<CheckpointFile>, GitAiError> {
     validate_absolute_paths(file_paths)?;
-    let repo_work_dir = repo.workdir()?;
-    let base_commit_sha = repo.head()?.target()?;
+    let default_work_dir = default_repo.workdir()?;
+    let default_sha = resolve_head_sha(default_repo);
     let mut files = Vec::with_capacity(file_paths.len());
     for path in file_paths {
         let content = if path.exists() {
@@ -68,11 +108,22 @@ fn build_checkpoint_files(
         } else {
             String::new()
         };
+        let (repo_work_dir, base_commit_sha) =
+            match find_repository_for_file(&path.to_string_lossy(), None) {
+                Ok(file_repo) => {
+                    let wd = file_repo
+                        .workdir()
+                        .unwrap_or_else(|_| default_work_dir.clone());
+                    let sha = resolve_head_sha(&file_repo);
+                    (wd, sha)
+                }
+                Err(_) => (default_work_dir.clone(), default_sha.clone()),
+            };
         files.push(CheckpointFile {
             path: path.clone(),
             content,
-            repo_work_dir: repo_work_dir.clone(),
-            base_commit_sha: base_commit_sha.clone(),
+            repo_work_dir,
+            base_commit_sha,
         });
     }
     Ok(files)
@@ -214,12 +265,18 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointRequest>, Gi
         }
     };
 
-    // Always emit a human checkpoint for the pre-hook
+    let dirty_paths = discover_dirty_files_in_repo(&repo_work_dir);
+    if dirty_paths.is_empty() {
+        return Ok(None);
+    }
+    let file_paths: Vec<PathBuf> = dirty_paths.into_iter().map(PathBuf::from).collect();
+    let files = build_checkpoint_files(&file_paths, &repo)?;
+
     Ok(Some(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind: CheckpointKind::Human,
         agent_id: None,
-        files: vec![],
+        files,
         path_role: PreparedPathRole::WillEdit,
         transcript_source: None,
         metadata: e.context.metadata,
@@ -250,7 +307,7 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<CheckpointRequest, GitAiErr
         }
     };
 
-    let base_commit_sha = repo.head()?.target()?;
+    let base_commit_sha = resolve_head_sha(&repo);
     let files: Vec<CheckpointFile> = file_paths
         .iter()
         .filter_map(|rel_path| {

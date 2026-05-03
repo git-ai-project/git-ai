@@ -323,6 +323,11 @@ fn handle_checkpoint(args: &[String]) {
         }
     };
 
+    let requests: Vec<_> = requests
+        .into_iter()
+        .filter(|r| !r.files.is_empty())
+        .collect();
+
     if requests.is_empty() {
         std::process::exit(0);
     }
@@ -846,13 +851,49 @@ fn handle_git_hooks(args: &[String]) {
     }
 }
 
+fn discover_dirty_files_in_cwd(cwd: &std::path::Path) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain", "-uall"])
+        .current_dir(cwd)
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 {
+                return None;
+            }
+            let status = &line[..2];
+            if status.starts_with('D') || status == " D" {
+                return None;
+            }
+            let path_part = &line[3..];
+            let path_part = if let Some(arrow_pos) = path_part.find(" -> ") {
+                &path_part[arrow_pos + 4..]
+            } else {
+                path_part
+            };
+            let abs = cwd.join(path_part);
+            if abs.exists() {
+                Some(abs.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Synthesize JSON hook_input from CLI args for mock/test presets that can be
 /// invoked without --hook-input.
 fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[String]) -> String {
     match preset_name {
         "human" | "mock_ai" | "mock_known_human" => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let paths: Vec<String> = remaining_args
+            let mut paths: Vec<String> = remaining_args
                 .iter()
                 .filter(|a| !a.starts_with("--"))
                 .map(|s| {
@@ -864,6 +905,9 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
                     }
                 })
                 .collect();
+            if paths.is_empty() {
+                paths = discover_dirty_files_in_cwd(&cwd);
+            }
             serde_json::json!({
                 "file_paths": paths,
                 "cwd": cwd.to_string_lossy(),

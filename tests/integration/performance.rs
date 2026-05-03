@@ -401,7 +401,7 @@ mod tests {
                 "Benchmarking checkpoint on {} files...",
                 files_to_re_edit.len()
             );
-            let mut final_checkpoint_args: Vec<&str> = vec!["checkpoint", "--"];
+            let mut final_checkpoint_args: Vec<&str> = vec!["checkpoint", "human"];
             let files_to_re_edit_refs: Vec<&str> =
                 files_to_re_edit.iter().map(|s| s.as_str()).collect();
             final_checkpoint_args.extend(files_to_re_edit_refs.iter());
