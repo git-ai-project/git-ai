@@ -1,0 +1,33 @@
+src/commands/checkpoint_agent/presets/github_copilot.rs
+  759815a68a4f7264 9,132-134,136-139,243-251,253-256
+src/commands/checkpoint_agent/presets/opencode.rs
+  759815a68a4f7264 280-283,285-289,294
+src/transcripts/model_extraction.rs
+  759815a68a4f7264 1-9,11-18,20-84,88-167,172-182,198-200,202-224,226-238,240-245,247-253,255-260,262-267,269-274,276-281,283-295,297-302,304-315,317-320
+src/commands/checkpoint_agent/presets/gemini.rs
+  759815a68a4f7264 10,34-36,38-41
+src/commands/checkpoint_agent/presets/amp.rs
+  759815a68a4f7264 304-309,311-315
+src/commands/checkpoint_agent/presets/claude.rs
+  759815a68a4f7264 10,72-74,76-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "6db5d92bd73cf628019803878d999ebee536098b",
+  "prompts": {
+    "759815a68a4f7264": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c9b8122a-6f33-4fcb-a981-7260b993c9a7",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Sasha Varlamov",
+      "messages": [],
+      "total_additions": 37,
+      "total_deletions": 19,
+      "accepted_lines": 35,
+      "overriden_lines": 0
+    }
+  }
+}
