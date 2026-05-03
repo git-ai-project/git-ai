@@ -34,6 +34,10 @@ impl SweepCoordinator {
                 "copilot".to_string(),
                 get_agent("copilot").expect("copilot agent registered"),
             ),
+            (
+                "codex".to_string(),
+                get_agent("codex").expect("codex agent registered"),
+            ),
         ];
 
         Self {
@@ -48,14 +52,24 @@ impl SweepCoordinator {
     pub fn run_sweep(&self) -> Result<Vec<SessionToProcess>, TranscriptError> {
         let mut sessions_to_process = Vec::new();
 
-        for (_agent_type, agent) in &self.agent_registry {
+        for (agent_type, agent) in &self.agent_registry {
             // Skip agents that don't support periodic sweeps
             if !matches!(agent.sweep_strategy(), SweepStrategy::Periodic(_)) {
                 continue;
             }
 
             // Discover all sessions for this agent
-            let discovered = agent.discover_sessions()?;
+            let discovered = match agent.discover_sessions() {
+                Ok(sessions) => sessions,
+                Err(e) => {
+                    tracing::error!(
+                        agent_type = %agent_type,
+                        error = %e,
+                        "agent discovery failed during sweep, skipping"
+                    );
+                    continue;
+                }
+            };
 
             for session in discovered {
                 // Check against transcripts-db

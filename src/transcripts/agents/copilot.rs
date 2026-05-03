@@ -317,11 +317,18 @@ fn read_event_stream(
             continue;
         }
 
-        let entry: serde_json::Value =
-            serde_json::from_str(&line).map_err(|e| TranscriptError::Parse {
-                line: line_number,
-                message: format!("Invalid JSON in {}: {}", path.display(), e),
-            })?;
+        let entry: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    line = line_number,
+                    path = %path.display(),
+                    error = %e,
+                    "skipping malformed JSON line"
+                );
+                continue;
+            }
+        };
 
         events.push(entry);
         if events.len() >= batch_limit {

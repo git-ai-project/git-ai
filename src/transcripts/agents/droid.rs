@@ -206,11 +206,18 @@ impl Agent for DroidAgent {
             }
 
             // Parse JSONL entry
-            let entry: serde_json::Value =
-                serde_json::from_str(&line).map_err(|e| TranscriptError::Parse {
-                    line: line_number,
-                    message: format!("Invalid JSON in {}: {}", path.display(), e),
-                })?;
+            let entry: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        line = line_number,
+                        path = %path.display(),
+                        error = %e,
+                        "skipping malformed JSON line"
+                    );
+                    continue;
+                }
+            };
 
             // Only process "message" entries; skip session_start, todo_state, etc.
             if entry["type"].as_str() != Some("message") {
