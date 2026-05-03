@@ -20,11 +20,6 @@ mod pi;
 mod windsurf;
 
 use crate::authorship::working_log::AgentId;
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BashPreHookStrategy {
-    EmitHumanCheckpoint,
-    SnapshotOnly,
-}
 use crate::error::GitAiError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -53,14 +48,12 @@ pub enum ParsedHookEvent {
 pub struct PreFileEdit {
     pub context: PresetContext,
     pub file_paths: Vec<PathBuf>,
-    pub dirty_files: Option<HashMap<PathBuf, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostFileEdit {
     pub context: PresetContext,
     pub file_paths: Vec<PathBuf>,
-    pub dirty_files: Option<HashMap<PathBuf, String>>,
     pub transcript_source: Option<TranscriptSource>,
 }
 
@@ -69,7 +62,6 @@ pub struct KnownHumanEdit {
     pub trace_id: String,
     pub cwd: PathBuf,
     pub file_paths: Vec<PathBuf>,
-    pub dirty_files: Option<HashMap<PathBuf, String>>,
     pub editor_metadata: HashMap<String, String>,
 }
 
@@ -84,7 +76,6 @@ pub struct UntrackedEdit {
 pub struct PreBashCall {
     pub context: PresetContext,
     pub tool_use_id: String,
-    pub strategy: BashPreHookStrategy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
