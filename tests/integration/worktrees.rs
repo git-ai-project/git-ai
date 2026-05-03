@@ -379,7 +379,7 @@ crate::worktree_test_wrappers! {
             .expect("write initial attributions");
 
         fs::write(repo.path().join("initial.txt"), "a\nb\n").expect("write file");
-        repo.git_ai(&["checkpoint"]).unwrap();
+        repo.git_ai(&["checkpoint", "human"]).unwrap();
         repo.stage_all_and_commit("commit initial attribution")
             .unwrap();
 

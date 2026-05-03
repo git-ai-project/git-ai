@@ -372,7 +372,7 @@ fn checkpoint_agent_v1(
 }
 
 fn checkpoint_human(repo: &TestRepo) {
-    repo.git_ai(&["checkpoint"])
+    repo.git_ai(&["checkpoint", "human"])
         .expect("human checkpoint should succeed");
 }
 

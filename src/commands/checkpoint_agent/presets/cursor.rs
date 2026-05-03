@@ -110,14 +110,14 @@ impl AgentPreset for CursorPreset {
             ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
-                dirty_files: None,
+                content_overrides: None,
             })
         } else {
             ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
-                dirty_files: None,
                 transcript_source,
+                content_overrides: None,
             })
         };
 
@@ -208,7 +208,7 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_none());
+                // dirty_files removed from PreFileEdit
             }
             _ => panic!("Expected PreFileEdit"),
         }

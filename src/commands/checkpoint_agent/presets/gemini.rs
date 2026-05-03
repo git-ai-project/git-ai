@@ -65,7 +65,7 @@ impl AgentPreset for GeminiPreset {
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
-                dirty_files: None,
+                content_overrides: None,
             }),
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -75,8 +75,8 @@ impl AgentPreset for GeminiPreset {
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
-                dirty_files: None,
                 transcript_source,
+                content_overrides: None,
             }),
         };
 
@@ -118,7 +118,7 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_none());
+                // dirty_files removed from PreFileEdit
             }
             _ => panic!("Expected PreFileEdit"),
         }

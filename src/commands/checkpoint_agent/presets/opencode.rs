@@ -310,7 +310,7 @@ impl AgentPreset for OpenCodePreset {
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
-                dirty_files: None,
+                content_overrides: None,
             }),
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -320,8 +320,8 @@ impl AgentPreset for OpenCodePreset {
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
-                dirty_files: None,
                 transcript_source,
+                content_overrides: None,
             }),
         };
 

@@ -8,12 +8,9 @@ use crate::authorship::ignore::{
     load_linguist_generated_patterns_from_path,
 };
 use crate::authorship::working_log::{AgentId, CheckpointKind};
-use crate::commands::checkpoint::prepare_captured_checkpoint;
-use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::daemon::control_api::ControlRequest;
 use crate::daemon::{DaemonConfig, send_control_request_with_timeout};
 use crate::error::GitAiError;
-use crate::git::find_repository_in_path;
 use crate::utils::normalize_to_posix;
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -96,18 +93,23 @@ pub fn reset_timeout_overrides_for_test() {
 }
 
 /// Grace window in nanoseconds for low-resolution filesystem mtime comparison.
+/// In test mode (GIT_AI_TEST_DB_PATH set), the grace window is 0 so that
+/// freshly-created files are always detected without artificial sleeps.
+fn mtime_grace_window_ns() -> u128 {
+    if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
+        || std::env::var_os("GITAI_TEST_DB_PATH").is_some()
+    {
+        return 0;
+    }
+    (MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000
+}
+#[allow(dead_code)]
 const MTIME_GRACE_WINDOW_NS: u128 = (MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000;
-
-/// Maximum number of stale files before skipping content capture.
-const MAX_STALE_FILES_FOR_CAPTURE: usize = 1000;
 
 /// Maximum number of files to track in a snapshot.  Repos larger than this
 /// skip the stat-diff system entirely (returning Fallback) to avoid adding
 /// seconds of latency to every Bash tool call.
 const MAX_TRACKED_FILES: usize = 50_000;
-
-/// Maximum file size for content capture (10 MB).
-const MAX_CAPTURE_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -274,20 +276,12 @@ pub enum HookEvent {
 pub struct BashToolResult {
     /// The checkpoint action (unchanged from previous API).
     pub action: BashCheckpointAction,
-    /// If set, a captured checkpoint was prepared and needs submission by the handler.
-    pub captured_checkpoint: Option<CapturedCheckpointInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveBashSnapshotScan {
     has_inflight_snapshot: bool,
     latest_context: Option<InflightBashAgentContext>,
-}
-
-/// Info about a captured checkpoint prepared by the bash tool.
-pub struct CapturedCheckpointInfo {
-    pub capture_id: String,
-    pub repo_working_dir: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,20 +294,7 @@ pub struct InflightBashAgentContext {
 }
 
 impl InflightBashAgentContext {
-    pub fn into_checkpoint_request(self, repo_working_dir: PathBuf) -> CheckpointRequest {
-        CheckpointRequest {
-            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-            checkpoint_kind: CheckpointKind::AiAgent,
-            agent_id: Some(self.agent_id),
-            repo_working_dir,
-            file_paths: vec![],
-            path_role: crate::commands::checkpoint::PreparedPathRole::Edited,
-            dirty_files: None,
-            transcript_source: None,
-            metadata: self.agent_metadata.unwrap_or_default(),
-            captured_checkpoint_id: None,
-        }
-    }
+    // Removed: into_checkpoint_request() - no longer needed with new checkpoint system
 }
 
 fn scan_active_bash_snapshots(repo_root: &Path) -> ActiveBashSnapshotScan {
@@ -370,37 +351,13 @@ fn scan_active_bash_snapshots(repo_root: &Path) -> ActiveBashSnapshotScan {
     }
 }
 
-pub fn checkpoint_context_from_active_bash(
-    repo_root: &Path,
-    repo_working_dir: &str,
-) -> Option<(CheckpointKind, Option<CheckpointRequest>)> {
+pub fn checkpoint_kind_from_active_bash(repo_root: &Path) -> Option<CheckpointKind> {
     match scan_active_bash_snapshots(repo_root) {
         ActiveBashSnapshotScan {
-            latest_context: Some(active_context),
-            ..
-        } => {
-            tracing::debug!(
-                "active bash context: found {} session {} tool_use_id {}",
-                active_context.agent_id.tool,
-                active_context.session_id,
-                active_context.tool_use_id
-            );
-            Some((
-                CheckpointKind::AiAgent,
-                Some(active_context.into_checkpoint_request(PathBuf::from(repo_working_dir))),
-            ))
-        }
-        ActiveBashSnapshotScan {
             has_inflight_snapshot: true,
-            latest_context: None,
-        } => {
-            tracing::debug!("active bash context: falling back to unscoped AI checkpoint");
-            Some((CheckpointKind::AiAgent, None))
-        }
-        ActiveBashSnapshotScan {
-            has_inflight_snapshot: false,
-            latest_context: None,
-        } => None,
+            ..
+        } => Some(CheckpointKind::AiAgent),
+        _ => None,
     }
 }
 
@@ -558,10 +515,11 @@ fn is_wm_covered(
     per_file_wm: &HashMap<String, u128>,
     posix_key: &str,
 ) -> bool {
+    let grace = mtime_grace_window_ns();
     if let Some(&file_wm) = per_file_wm.get(posix_key) {
-        return mtime_ns <= file_wm + MTIME_GRACE_WINDOW_NS;
+        return mtime_ns <= file_wm + grace;
     }
-    effective_wm.is_some_and(|ewm| mtime_ns <= ewm + MTIME_GRACE_WINDOW_NS)
+    effective_wm.is_some_and(|ewm| mtime_ns <= ewm + grace)
 }
 
 // ---------------------------------------------------------------------------
@@ -993,51 +951,6 @@ fn system_time_to_nanos(t: SystemTime) -> u128 {
         .as_nanos()
 }
 
-/// Read file contents for captured checkpoint, skipping binary/large/unreadable files.
-fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<String, String> {
-    use std::io::Read;
-    let mut contents = HashMap::new();
-    for rel_path in file_paths {
-        let abs_path = repo_root.join(rel_path);
-        let mut file = match fs::File::open(&abs_path) {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::debug!(
-                    "Skipping unreadable file for capture: {}: {}",
-                    rel_path.display(),
-                    e
-                );
-                continue;
-            }
-        };
-        if let Ok(meta) = file.metadata()
-            && meta.len() > MAX_CAPTURE_FILE_SIZE
-        {
-            tracing::debug!(
-                "Skipping large file for capture: {} ({} bytes)",
-                rel_path.display(),
-                meta.len()
-            );
-            continue;
-        }
-        let mut content = String::new();
-        match file.read_to_string(&mut content) {
-            Ok(_) => {
-                let key = normalize_to_posix(&rel_path.to_string_lossy());
-                contents.insert(key, content);
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "Skipping non-UTF8/unreadable file for capture: {}: {}",
-                    rel_path.display(),
-                    e
-                );
-            }
-        }
-    }
-    contents
-}
-
 // ---------------------------------------------------------------------------
 // Daemon watermark query + stale file detection
 // ---------------------------------------------------------------------------
@@ -1091,244 +1004,6 @@ fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
         .get("worktree_watermark")
         .and_then(|v| serde_json::from_value(v.clone()).ok());
     Some(DaemonWatermarks { per_file, worktree })
-}
-
-/// Find files in the snapshot that are stale (modified since the last baseline).
-///
-/// Because `snapshot()` already filters out wm-covered files, every entry in
-/// `snapshot.entries` is a candidate.  We still apply the per-file (Tier 1)
-/// check for precision: a file that passed the coarser worktree-wm filter may
-/// still be within the grace window of its own more-recent per-file watermark.
-///
-/// Three-tier logic per entry:
-/// 1. Per-file watermark → stale if `mtime > file_wm + GRACE`.
-/// 2. Worktree watermark (real or cold-start proxy) → all entries already
-///    passed this threshold via the snapshot filter; push unconditionally.
-/// 3. Neither watermark → no baseline, skip (cold-start with no index mtime).
-fn find_stale_files(snapshot: &StatSnapshot) -> Vec<PathBuf> {
-    let mut stale = Vec::new();
-    for (rel_path, entry) in &snapshot.entries {
-        if !entry.exists {
-            continue;
-        }
-        let Some(mtime) = entry.mtime else {
-            continue;
-        };
-        let mtime_ns = system_time_to_nanos(mtime);
-        let posix_key = normalize_to_posix(&rel_path.to_string_lossy());
-
-        if let Some(&file_wm) = snapshot.per_file_wm.get(&posix_key) {
-            // Tier 1: precise per-file watermark — may be tighter than the
-            // effective worktree wm used for snapshot filtering.
-            if mtime_ns > file_wm + MTIME_GRACE_WINDOW_NS {
-                stale.push(rel_path.clone());
-            }
-        } else if snapshot.effective_worktree_wm.is_some() {
-            // Tier 2: entry passed the worktree-wm snapshot filter, so by
-            // definition mtime > effective_wm + GRACE → stale.
-            stale.push(rel_path.clone());
-        }
-        // Tier 3: no watermark at all → no baseline, skip.
-    }
-    stale.sort();
-    stale
-}
-
-// ---------------------------------------------------------------------------
-// Pre/post hook captured-checkpoint helpers
-// ---------------------------------------------------------------------------
-
-/// Attempt to prepare a captured checkpoint during the pre-hook.
-///
-/// Uses watermarks already embedded in the snapshot to identify stale files
-/// (modified since the last checkpoint), captures their contents, and prepares
-/// a captured checkpoint with `CheckpointKind::Human` and `will_edit_filepaths`.
-///
-/// Returns `None` on any failure or when no stale files are found, allowing
-/// the caller to proceed without a captured checkpoint.
-fn attempt_pre_hook_capture(
-    snap: &StatSnapshot,
-    repo_root: &Path,
-) -> Option<CapturedCheckpointInfo> {
-    let repo_working_dir = repo_root.to_string_lossy().to_string();
-
-    // Watermarks are already embedded in the snapshot (queried before snapshot
-    // was taken); no second daemon round-trip needed.
-    let stale_files = find_stale_files(snap);
-
-    if stale_files.is_empty() {
-        tracing::debug!("Pre-hook capture: no stale files found, skipping");
-        return None;
-    }
-    if stale_files.len() > MAX_STALE_FILES_FOR_CAPTURE {
-        tracing::debug!(
-            "Pre-hook capture: {} stale files exceeds limit of {}, skipping",
-            stale_files.len(),
-            MAX_STALE_FILES_FOR_CAPTURE,
-        );
-        return None;
-    }
-
-    let contents = capture_file_contents(repo_root, &stale_files);
-
-    let repo = match find_repository_in_path(&repo_working_dir) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::debug!("Pre-hook capture: failed to open repo: {}", e);
-            return None;
-        }
-    };
-
-    let checkpoint_request = CheckpointRequest {
-        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-        checkpoint_kind: CheckpointKind::Human,
-        agent_id: None,
-        repo_working_dir: PathBuf::from(repo_working_dir.clone()),
-        file_paths: stale_files
-            .iter()
-            .map(|p| PathBuf::from(crate::utils::normalize_to_posix(&p.to_string_lossy())))
-            .collect(),
-        path_role: crate::commands::checkpoint::PreparedPathRole::WillEdit,
-        dirty_files: Some(
-            contents
-                .into_iter()
-                .map(|(k, v)| (PathBuf::from(k), v))
-                .collect(),
-        ),
-        transcript_source: None,
-        metadata: HashMap::new(),
-        captured_checkpoint_id: None,
-    };
-
-    match prepare_captured_checkpoint(
-        &repo,
-        "bash-tool", // author
-        CheckpointKind::Human,
-        Some(&checkpoint_request),
-        false, // is_pre_commit
-        None,  // base_commit_override
-    ) {
-        Ok(Some(capture)) => {
-            tracing::debug!(
-                "Pre-hook captured checkpoint prepared: {} ({} files)",
-                capture.capture_id,
-                capture.file_count,
-            );
-            Some(CapturedCheckpointInfo {
-                capture_id: capture.capture_id,
-                repo_working_dir: capture.repo_working_dir,
-            })
-        }
-        Ok(None) => {
-            tracing::debug!("Pre-hook capture: prepare_captured_checkpoint returned None");
-            None
-        }
-        Err(e) => {
-            tracing::debug!(
-                "Pre-hook capture: prepare_captured_checkpoint failed: {}",
-                e
-            );
-            None
-        }
-    }
-}
-
-/// Attempt to prepare a captured checkpoint during the post-hook.
-///
-/// Captures the current contents of changed files and prepares a captured
-/// checkpoint with `CheckpointKind::AiAgent` and `edited_filepaths`.
-///
-/// Returns `None` on any failure, allowing the caller to proceed without a
-/// captured checkpoint (the stat-diff paths are still returned for the
-/// live checkpoint path).
-fn attempt_post_hook_capture(
-    repo_root: &Path,
-    changed_paths: &[String],
-) -> Option<CapturedCheckpointInfo> {
-    let repo_working_dir = repo_root.to_string_lossy().to_string();
-
-    // Exclude deleted files: they have no post-content to capture, and recording
-    // them as empty blobs would misrepresent deletions as "file was emptied".
-    // The Checkpoint action already carries all changed paths for attribution.
-    let (existing_paths, _deleted_paths): (Vec<&String>, Vec<&String>) = changed_paths
-        .iter()
-        .partition(|p| repo_root.join(p.as_str()).exists());
-
-    if existing_paths.is_empty() {
-        tracing::debug!("Post-hook capture: no existing changed files to capture, skipping");
-        return None;
-    }
-
-    let path_bufs: Vec<PathBuf> = existing_paths
-        .iter()
-        .map(|p| PathBuf::from(p.as_str()))
-        .collect();
-    let contents = capture_file_contents(repo_root, &path_bufs);
-
-    let repo = match find_repository_in_path(&repo_working_dir) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::debug!("Post-hook capture: failed to open repo: {}", e);
-            return None;
-        }
-    };
-
-    let checkpoint_request = CheckpointRequest {
-        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-        checkpoint_kind: CheckpointKind::AiAgent,
-        agent_id: Some(AgentId {
-            tool: "bash-tool".to_string(),
-            id: "post-hook".to_string(),
-            model: String::new(),
-        }),
-        repo_working_dir: PathBuf::from(repo_working_dir.clone()),
-        file_paths: existing_paths
-            .iter()
-            .map(|p| PathBuf::from(p.as_str()))
-            .collect(),
-        path_role: crate::commands::checkpoint::PreparedPathRole::Edited,
-        dirty_files: Some(
-            contents
-                .into_iter()
-                .map(|(k, v)| (PathBuf::from(k), v))
-                .collect(),
-        ),
-        transcript_source: None,
-        metadata: HashMap::new(),
-        captured_checkpoint_id: None,
-    };
-
-    match prepare_captured_checkpoint(
-        &repo,
-        "bash-tool", // author
-        CheckpointKind::AiAgent,
-        Some(&checkpoint_request),
-        false, // is_pre_commit
-        None,  // base_commit_override
-    ) {
-        Ok(Some(capture)) => {
-            tracing::debug!(
-                "Post-hook captured checkpoint prepared: {} ({} files)",
-                capture.capture_id,
-                capture.file_count,
-            );
-            Some(CapturedCheckpointInfo {
-                capture_id: capture.capture_id,
-                repo_working_dir: capture.repo_working_dir,
-            })
-        }
-        Ok(None) => {
-            tracing::debug!("Post-hook capture: prepare_captured_checkpoint returned None");
-            None
-        }
-        Err(e) => {
-            tracing::debug!(
-                "Post-hook capture: prepare_captured_checkpoint failed: {}",
-                e
-            );
-            None
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1469,7 +1144,6 @@ fn handle_bash_pre_tool_use_internal(
             );
             return Ok(BashToolResult {
                 action: BashCheckpointAction::Fallback,
-                captured_checkpoint: None,
             });
         }};
     }
@@ -1502,13 +1176,8 @@ fn handle_bash_pre_tool_use_internal(
                 hook_timeout_fallback!("pre-hook after snapshot");
             }
 
-            // Attempt watermark-based pre-hook content capture using
-            // the embedded watermarks (no second daemon query needed).
-            let captured_checkpoint = attempt_pre_hook_capture(&snap, repo_root);
-
             Ok(BashToolResult {
                 action: BashCheckpointAction::TakePreSnapshot,
-                captured_checkpoint,
             })
         }
         Err(e) => {
@@ -1516,7 +1185,6 @@ fn handle_bash_pre_tool_use_internal(
             // Don't fail the tool call; post-hook will use fallback path
             Ok(BashToolResult {
                 action: BashCheckpointAction::TakePreSnapshot,
-                captured_checkpoint: None,
             })
         }
     }
@@ -1580,7 +1248,6 @@ pub fn handle_bash_tool(
             );
             return Ok(BashToolResult {
                 action: BashCheckpointAction::Fallback,
-                captured_checkpoint: None,
             });
         }};
     }
@@ -1630,7 +1297,6 @@ pub fn handle_bash_tool(
                                 );
                                 Ok(BashToolResult {
                                     action: BashCheckpointAction::NoChanges,
-                                    captured_checkpoint: None,
                                 })
                             } else {
                                 let paths = diff_result.all_changed_paths();
@@ -1646,13 +1312,8 @@ pub fn handle_bash_tool(
                                     hook_timeout_fallback!("post-hook after snapshot");
                                 }
 
-                                // Attempt post-hook content capture for async checkpoint.
-                                let captured_checkpoint =
-                                    attempt_post_hook_capture(repo_root, &paths);
-
                                 Ok(BashToolResult {
                                     action: BashCheckpointAction::Checkpoint(paths),
-                                    captured_checkpoint,
                                 })
                             }
                         }
@@ -1660,7 +1321,6 @@ pub fn handle_bash_tool(
                             tracing::debug!("Post-snapshot failed: {}; returning fallback", e);
                             Ok(BashToolResult {
                                 action: BashCheckpointAction::Fallback,
-                                captured_checkpoint: None,
                             })
                         }
                     }
@@ -1675,7 +1335,6 @@ pub fn handle_bash_tool(
                     );
                     Ok(BashToolResult {
                         action: BashCheckpointAction::Fallback,
-                        captured_checkpoint: None,
                     })
                 }
             }
@@ -1948,200 +1607,6 @@ mod tests {
     #[test]
     fn test_system_time_to_nanos_epoch() {
         assert_eq!(system_time_to_nanos(SystemTime::UNIX_EPOCH), 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // find_stale_files tests
-    // -----------------------------------------------------------------------
-
-    /// Helper: build a minimal `StatSnapshot` with the given entries and
-    /// optional embedded watermarks.
-    fn make_snapshot_with_wm(
-        entries: HashMap<PathBuf, StatEntry>,
-        per_file_wm: HashMap<String, u128>,
-        effective_worktree_wm: Option<u128>,
-    ) -> StatSnapshot {
-        StatSnapshot {
-            entries,
-            taken_at: None,
-            invocation_key: "test:stale".to_string(),
-            repo_root: PathBuf::from("/tmp"),
-            effective_worktree_wm,
-            per_file_wm,
-            inflight_agent_context: None,
-        }
-    }
-
-    /// Shorthand: no watermarks (cold-start, no index mtime).
-    fn make_snapshot(entries: HashMap<PathBuf, StatEntry>) -> StatSnapshot {
-        make_snapshot_with_wm(entries, HashMap::new(), None)
-    }
-
-    /// Helper: build a `StatEntry` for a regular file with the given mtime.
-    fn make_entry(mtime_secs: u64, exists: bool) -> StatEntry {
-        let mtime = if exists {
-            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(mtime_secs))
-        } else {
-            None
-        };
-        StatEntry {
-            exists,
-            mtime,
-            ctime: mtime,
-            size: 100,
-            mode: 0o644,
-            file_type: StatFileType::Regular,
-        }
-    }
-
-    #[test]
-    fn test_find_stale_files_cold_start_excludes_unwatermarked_files() {
-        // On cold start (no per-file and no worktree watermark), files with no
-        // watermark are NOT returned by find_stale_files — they are simply skipped.
-        let mut entries = HashMap::new();
-        entries.insert(
-            normalize_path(Path::new("src/main.rs")),
-            make_entry(100, true),
-        );
-        let snapshot = make_snapshot(entries); // no embedded wm
-
-        let stale = find_stale_files(&snapshot);
-        assert!(
-            stale.is_empty(),
-            "cold-start: unwatermarked files are not returned (no baseline)"
-        );
-    }
-
-    #[test]
-    fn test_find_stale_files_uses_worktree_watermark_as_fallback() {
-        // File has no per-file watermark, but worktree watermark exists at 90s.
-        // File mtime is 100s → 10s beyond grace window → stale.
-        let mut entries = HashMap::new();
-        entries.insert(
-            normalize_path(Path::new("src/main.rs")),
-            make_entry(100, true),
-        );
-        let snapshot = make_snapshot_with_wm(
-            entries,
-            HashMap::new(),
-            Some(Duration::from_secs(90).as_nanos()),
-        );
-
-        let stale = find_stale_files(&snapshot);
-        assert_eq!(
-            stale.len(),
-            1,
-            "file modified after worktree watermark is stale"
-        );
-    }
-
-    #[test]
-    fn test_find_stale_files_worktree_watermark_within_grace() {
-        // File mtime=100s, worktree watermark=99s → within 2s grace → NOT stale.
-        // Note: this file would have been filtered from the snapshot by
-        // is_wm_covered in production; this test exercises the Tier-2 guard
-        // inside find_stale_files for robustness.
-        let mut entries = HashMap::new();
-        entries.insert(
-            normalize_path(Path::new("src/main.rs")),
-            make_entry(100, true),
-        );
-        let snapshot = make_snapshot_with_wm(
-            entries,
-            HashMap::new(),
-            Some(Duration::from_secs(99).as_nanos()),
-        );
-
-        // mtime 100s > effective_wm 99s, but find_stale_files pushes Tier-2
-        // entries unconditionally (coverage filter already checked).  The file
-        // is stale from find_stale_files' perspective even though the diff with
-        // an identical post-snapshot would report no change.
-        let stale = find_stale_files(&snapshot);
-        assert_eq!(stale.len(), 1, "entry that passed coverage filter is stale");
-    }
-
-    #[test]
-    fn test_find_stale_files_per_file_wins_over_worktree() {
-        // Per-file watermark (95s) is older than worktree watermark (98s).
-        // File mtime=100s → 5s beyond per-file watermark → stale.
-        let mut entries = HashMap::new();
-        let path = normalize_path(Path::new("src/lib.rs"));
-        entries.insert(path, make_entry(100, true));
-
-        let mut per_file = HashMap::new();
-        per_file.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
-        let snapshot =
-            make_snapshot_with_wm(entries, per_file, Some(Duration::from_secs(98).as_nanos()));
-
-        let stale = find_stale_files(&snapshot);
-        assert_eq!(stale.len(), 1);
-    }
-
-    #[test]
-    fn test_find_stale_files_within_grace_window() {
-        // File with mtime=100s, per-file watermark at 99s.
-        // Difference is 1s which is within the 2s grace window → NOT stale.
-        let mut entries = HashMap::new();
-        let path = normalize_path(Path::new("src/lib.rs"));
-        entries.insert(path, make_entry(100, true));
-
-        let mut per_file = HashMap::new();
-        per_file.insert("src/lib.rs".to_string(), Duration::from_secs(99).as_nanos());
-        let snapshot = make_snapshot_with_wm(entries, per_file, None);
-
-        let stale = find_stale_files(&snapshot);
-        assert!(
-            stale.is_empty(),
-            "file within grace window should not be stale"
-        );
-    }
-
-    #[test]
-    fn test_find_stale_files_beyond_grace_window() {
-        // File with mtime=100s, per-file watermark at 95s.
-        // Difference is 5s which exceeds the 2s grace window → stale.
-        let mut entries = HashMap::new();
-        let path = normalize_path(Path::new("src/lib.rs"));
-        entries.insert(path, make_entry(100, true));
-
-        let mut per_file = HashMap::new();
-        per_file.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
-        let snapshot = make_snapshot_with_wm(entries, per_file, None);
-
-        let stale = find_stale_files(&snapshot);
-        assert_eq!(stale.len(), 1, "file beyond grace window should be stale");
-    }
-
-    #[test]
-    fn test_find_stale_files_nonexistent_skipped() {
-        // File with exists=false should not appear in stale list regardless of watermarks.
-        let mut entries = HashMap::new();
-        entries.insert(normalize_path(Path::new("gone.rs")), make_entry(100, false));
-        let snapshot = make_snapshot_with_wm(entries, HashMap::new(), Some(0));
-
-        let stale = find_stale_files(&snapshot);
-        assert!(stale.is_empty(), "nonexistent file should not be stale");
-    }
-
-    // -----------------------------------------------------------------------
-    // capture_file_contents tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_capture_file_contents_reads_text_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("hello.txt");
-        fs::write(&file_path, "hello world").unwrap();
-
-        let contents = capture_file_contents(dir.path(), &[PathBuf::from("hello.txt")]);
-        assert_eq!(contents.get("hello.txt").unwrap(), "hello world",);
-    }
-
-    #[test]
-    fn test_capture_file_contents_skips_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let contents = capture_file_contents(dir.path(), &[PathBuf::from("nonexistent.txt")]);
-        assert!(contents.is_empty());
     }
 
     /// Verify that the sidecar mechanism correlates pre and post hooks when no unique

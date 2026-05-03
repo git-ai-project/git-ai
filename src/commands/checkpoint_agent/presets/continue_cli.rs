@@ -59,7 +59,7 @@ impl AgentPreset for ContinueCliPreset {
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
-                dirty_files: None,
+                content_overrides: None,
             }),
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -69,8 +69,8 @@ impl AgentPreset for ContinueCliPreset {
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
-                dirty_files: None,
                 transcript_source,
+                content_overrides: None,
             }),
         };
 

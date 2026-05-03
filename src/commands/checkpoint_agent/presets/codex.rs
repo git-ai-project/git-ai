@@ -94,7 +94,28 @@ impl AgentPreset for CodexPreset {
 
         let cwd = parse::required_str(&data, "cwd")?;
         let session_id = Self::session_id_from_hook_data(&data)?;
-        let hook_event = parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
+        let hook_event = parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"])
+            .or_else(|| {
+                // Structured format: hook_event.event_type
+                data.get("hook_event")
+                    .and_then(|v| v.get("event_type"))
+                    .and_then(|v| v.as_str())
+                    .map(|et| match et {
+                        "after_agent" => "PostToolUse",
+                        "before_agent" => "PreToolUse",
+                        other => other,
+                    })
+            })
+            .or_else(|| {
+                // Legacy format: type == "agent-turn-complete"
+                data.get("type").and_then(|v| v.as_str()).and_then(|t| {
+                    if t == "agent-turn-complete" {
+                        Some("PostToolUse")
+                    } else {
+                        None
+                    }
+                })
+            });
         let tool_name = parse::optional_str_multi(&data, &["tool_name", "toolName"]);
         let tool_use_id =
             parse::optional_str_multi(&data, &["tool_use_id", "toolUseId"]).unwrap_or("bash");
@@ -145,10 +166,13 @@ impl AgentPreset for CodexPreset {
                         strategy: BashPreHookStrategy::SnapshotOnly,
                     })
                 } else if is_file_edit {
+                    let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
+                    let file_paths =
+                        OpenCodePreset::extract_filepaths_from_tool_input(tool_input, cwd);
                     ParsedHookEvent::PreFileEdit(PreFileEdit {
                         context,
-                        file_paths: vec![],
-                        dirty_files: None,
+                        file_paths,
+                        content_overrides: None,
                     })
                 } else {
                     return Err(GitAiError::PresetError(format!(
@@ -176,8 +200,17 @@ impl AgentPreset for CodexPreset {
                     ParsedHookEvent::PostFileEdit(PostFileEdit {
                         context,
                         file_paths,
-                        dirty_files: None,
                         transcript_source,
+                        content_overrides: None,
+                    })
+                } else if tool_name.is_none() {
+                    // Legacy/structured format: no tool_name means agent turn complete
+                    let file_paths = super::resolve_dirty_file_paths(cwd);
+                    ParsedHookEvent::PostFileEdit(PostFileEdit {
+                        context,
+                        file_paths,
+                        transcript_source,
+                        content_overrides: None,
                     })
                 } else {
                     return Err(GitAiError::PresetError(format!(
@@ -185,6 +218,15 @@ impl AgentPreset for CodexPreset {
                         tool_name.unwrap_or("unknown")
                     )));
                 }
+            }
+            Some("Stop") | Some("agent-turn-complete") | None => {
+                let file_paths = super::resolve_dirty_file_paths(cwd);
+                ParsedHookEvent::PostFileEdit(PostFileEdit {
+                    context,
+                    file_paths,
+                    transcript_source,
+                    content_overrides: None,
+                })
             }
             _ => {
                 return Err(GitAiError::PresetError(format!(

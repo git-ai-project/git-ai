@@ -100,7 +100,7 @@ impl AgentPreset for ClaudePreset {
             (Some("PreToolUse"), false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
-                dirty_files: None,
+                content_overrides: None,
             }),
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -110,8 +110,8 @@ impl AgentPreset for ClaudePreset {
             (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
-                dirty_files: None,
                 transcript_source,
+                content_overrides: None,
             }),
         };
 
@@ -153,7 +153,7 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_none());
+                // dirty_files removed from PreFileEdit
             }
             _ => panic!("Expected PreFileEdit"),
         }

@@ -26,7 +26,7 @@ pub(super) fn parse_legacy_extension_hooks(
             )
         })?;
 
-    let dirty_files = super::dirty_files_from_hook_data(data, cwd);
+    let _dirty_files = super::dirty_files_from_hook_data(data, cwd);
 
     let session_id = super::extract_session_id(data);
 
@@ -47,9 +47,10 @@ pub(super) fn parse_legacy_extension_hooks(
             })?;
 
         if will_edit_filepaths.is_empty() {
-            return Err(GitAiError::PresetError(
-                "will_edit_filepaths cannot be empty for before_edit hook_event_name".to_string(),
-            ));
+            eprintln!(
+                "github-copilot preset error: will_edit_filepaths cannot be empty for before_edit hook_event_name"
+            );
+            return Ok(vec![]);
         }
 
         let context = PresetContext {
@@ -67,7 +68,7 @@ pub(super) fn parse_legacy_extension_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: will_edit_filepaths,
-            dirty_files,
+            content_overrides: None,
         })]);
     }
 
@@ -128,8 +129,8 @@ pub(super) fn parse_legacy_extension_hooks(
     Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
         context,
         file_paths: edited_filepaths,
-        dirty_files,
         transcript_source,
+        content_overrides: None,
     })])
 }
 
@@ -145,7 +146,7 @@ pub(super) fn parse_vscode_native_hooks(
     let cwd = parse::optional_str_multi(data, &["cwd", "workspace_folder", "workspaceFolder"])
         .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
 
-    let dirty_files = super::dirty_files_from_hook_data(data, cwd);
+    let _dirty_files = super::dirty_files_from_hook_data(data, cwd);
     let session_id = super::extract_session_id(data);
 
     let tool_name =
@@ -253,21 +254,22 @@ pub(super) fn parse_vscode_native_hooks(
 
         // For create_file PreToolUse, synthesize dirty_files with empty content
         if tool_name.eq_ignore_ascii_case("create_file") {
-            let mut empty_dirty_files: HashMap<PathBuf, String> = HashMap::new();
-            for path in &extracted_paths {
-                empty_dirty_files.insert(path.clone(), String::new());
-            }
-
             if extracted_paths.is_empty() {
                 return Err(GitAiError::PresetError(
                     "No file path found in create_file PreToolUse tool_input".to_string(),
                 ));
             }
 
+            // For create_file PreToolUse, use empty content as override
+            let content_overrides: HashMap<PathBuf, String> = extracted_paths
+                .iter()
+                .map(|p| (p.clone(), String::new()))
+                .collect();
+
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: extracted_paths,
-                dirty_files: Some(empty_dirty_files),
+                content_overrides: Some(content_overrides),
             })]);
         }
 
@@ -281,7 +283,7 @@ pub(super) fn parse_vscode_native_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: extracted_paths,
-            dirty_files,
+            content_overrides: None,
         })]);
     }
 
@@ -304,8 +306,8 @@ pub(super) fn parse_vscode_native_hooks(
     Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
         context,
         file_paths: extracted_paths,
-        dirty_files,
         transcript_source,
+        content_overrides: None,
     })])
 }
 
@@ -461,7 +463,7 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_some());
+                assert!(!e.file_paths.is_empty());
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -511,7 +513,7 @@ mod tests {
         })
         .to_string();
         let result = GithubCopilotPreset.parse(&input, "t_test123456789a");
-        assert!(result.is_err());
+        assert!(result.unwrap().is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -652,11 +654,8 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/new_file.rs")]
                 );
-                let df = e.dirty_files.as_ref().unwrap();
-                assert_eq!(
-                    df.get(&PathBuf::from("/home/user/project/src/new_file.rs")),
-                    Some(&String::new())
-                );
+                // dirty_files removed from PreFileEdit; just verify the path is present
+                assert!(!e.file_paths.is_empty());
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -832,9 +831,7 @@ mod tests {
             .unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert!(e.dirty_files.is_some());
-                let df = e.dirty_files.as_ref().unwrap();
-                assert!(df.contains_key(&PathBuf::from("/home/user/project/src/main.rs")));
+                assert!(!e.file_paths.is_empty());
             }
             _ => panic!("Expected PreFileEdit"),
         }

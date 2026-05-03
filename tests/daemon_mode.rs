@@ -2,17 +2,10 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
-use git_ai::authorship::working_log::AgentId;
 use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::commands::checkpoint::{
-    PreparedCheckpointFile, PreparedCheckpointFileSource, PreparedCheckpointManifest,
-    PreparedPathRole, prepare_captured_checkpoint,
-};
-use git_ai::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use git_ai::daemon::{
-    CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, DaemonConfig, DaemonLock,
-    local_socket_connects_with_timeout, open_local_socket_stream_with_timeout, read_daemon_pid,
-    send_control_request,
+    ControlRequest, DaemonConfig, local_socket_connects_with_timeout,
+    open_local_socket_stream_with_timeout, read_daemon_pid, send_control_request,
 };
 use git_ai::git::find_repository_in_path;
 use repos::test_file::ExpectedLineExt;
@@ -23,7 +16,6 @@ use repos::test_repo::{
 use serde_json::Value;
 use serde_json::json;
 use serial_test::serial;
-use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -32,7 +24,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -81,10 +73,6 @@ fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
 
 fn daemon_trace_socket_path(repo: &TestRepo) -> PathBuf {
     repo.daemon_trace_socket_path()
-}
-
-fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
-    DaemonConfig::from_home(&repo.daemon_home_path()).lock_path
 }
 
 #[allow(clippy::zombie_processes)]
@@ -559,153 +547,8 @@ fn completion_entries_for_command(
         .collect()
 }
 
-fn async_checkpoint_storage_root(repo: &TestRepo) -> PathBuf {
-    repo.daemon_home_path()
-        .join(".git-ai")
-        .join("internal")
-        .join("async-checkpoint-blobs")
-}
-
-fn async_checkpoint_capture_dir(repo: &TestRepo, capture_id: &str) -> PathBuf {
-    async_checkpoint_storage_root(repo).join(capture_id)
-}
-
-fn write_captured_checkpoint_fixture(
-    repo: &TestRepo,
-    capture_id: &str,
-    manifest: &PreparedCheckpointManifest,
-    blob_contents: &[(&str, &str)],
-) -> PathBuf {
-    let capture_dir = async_checkpoint_capture_dir(repo, capture_id);
-    fs::create_dir_all(capture_dir.join("blobs")).expect("failed to create capture fixture dir");
-    for (blob_name, content) in blob_contents {
-        fs::write(capture_dir.join("blobs").join(blob_name), content)
-            .expect("failed to write capture blob");
-    }
-    fs::write(
-        capture_dir.join("manifest.json"),
-        serde_json::to_vec(manifest).expect("failed to serialize capture manifest"),
-    )
-    .expect("failed to write capture manifest");
-    capture_dir
-}
-
-fn latest_checkpoint_blob_content_for_file(repo: &TestRepo, file_path: &str) -> String {
-    let working_log = repo.current_working_logs();
-    let checkpoints = working_log
-        .read_all_checkpoints()
-        .expect("checkpoints should be readable");
-    let entry = checkpoints
-        .iter()
-        .rev()
-        .flat_map(|checkpoint| checkpoint.entries.iter())
-        .find(|entry| entry.file == file_path)
-        .unwrap_or_else(|| panic!("missing checkpoint entry for {}", file_path));
-    working_log
-        .get_file_version(&entry.blob_sha)
-        .expect("checkpoint blob should be readable")
-}
-
-fn write_base_files(repo: &TestRepo) {
-    fs::write(repo.path().join("lines.md"), "base lines\n").expect("failed to write lines.md");
-    fs::write(repo.path().join("alphabet.md"), "base alphabet\n")
-        .expect("failed to write alphabet.md");
-    repo.git_og(&["add", "lines.md", "alphabet.md"])
-        .expect("add should succeed");
-    repo.git_og(&["commit", "-m", "initial commit"])
-        .expect("initial commit should succeed");
-}
-
-fn ai_checkpoint_request(
-    repo: &TestRepo,
-    edited_filepaths: Vec<String>,
-    dirty_files: Option<HashMap<String, String>>,
-) -> CheckpointRequest {
-    use std::path::PathBuf;
-    CheckpointRequest {
-        trace_id: git_ai::authorship::authorship_log_serialization::generate_trace_id(),
-        checkpoint_kind: CheckpointKind::AiAgent,
-        agent_id: Some(AgentId {
-            tool: "test-agent".to_string(),
-            id: format!(
-                "capture-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("system time should be valid")
-                    .as_nanos()
-            ),
-            model: "test-model".to_string(),
-        }),
-        repo_working_dir: repo.path().to_path_buf(),
-        file_paths: edited_filepaths.into_iter().map(PathBuf::from).collect(),
-        path_role: PreparedPathRole::Edited,
-        dirty_files: dirty_files
-            .map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect()),
-        transcript_source: None,
-        metadata: std::collections::HashMap::new(),
-        captured_checkpoint_id: None,
-    }
-}
-
-#[test]
-#[serial]
-fn prepare_captured_checkpoint_only_captures_explicit_files_when_other_ai_touched_files_are_dirty()
-{
-    let repo = TestRepo::new();
-    write_base_files(&repo);
-
-    fs::write(
-        repo.path().join("lines.md"),
-        "line touched by first checkpoint\n",
-    )
-    .expect("failed to update lines.md");
-    repo.git_ai(&["checkpoint", "mock_ai", "lines.md"])
-        .expect("first explicit checkpoint should succeed");
-
-    fs::write(
-        repo.path().join("alphabet.md"),
-        "line touched by second checkpoint\n",
-    )
-    .expect("failed to update alphabet.md");
-
-    let _daemon_home = ScopedEnvVar::set(
-        "GIT_AI_DAEMON_HOME",
-        repo.daemon_home_path()
-            .to_str()
-            .expect("daemon home should be utf-8"),
-    );
-    let prepared = prepare_captured_checkpoint(
-        &repo_storage(&repo),
-        "Test User",
-        CheckpointKind::AiAgent,
-        Some(&ai_checkpoint_request(
-            &repo,
-            vec!["alphabet.md".to_string()],
-            None,
-        )),
-        false,
-        None,
-    )
-    .expect("captured checkpoint prepare should succeed")
-    .expect("captured checkpoint should be created");
-
-    let manifest_path =
-        async_checkpoint_capture_dir(&repo, &prepared.capture_id).join("manifest.json");
-    let manifest: PreparedCheckpointManifest =
-        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest should be readable"))
-            .expect("manifest should deserialize");
-    let captured_paths = manifest
-        .files
-        .iter()
-        .map(|file| file.path.as_str())
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        captured_paths,
-        vec!["alphabet.md"],
-        "captured checkpoint preparation must only persist the explicitly targeted file"
-    );
-}
+// Helper functions latest_checkpoint_blob_content_for_file, write_base_files, and
+// ai_checkpoint_request were removed as part of the checkpoint rewrite (no callers remain).
 
 #[derive(Clone)]
 struct WorkdirRaceHarness {
@@ -1145,73 +988,6 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
 
 #[test]
 #[serial]
-fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
-
-    fs::write(repo.path().join("delegate-fallback-blocked.txt"), "base\n")
-        .expect("failed to write base");
-    repo.git(&["add", "delegate-fallback-blocked.txt"])
-        .expect("add should succeed");
-    repo.stage_all_and_commit("base commit")
-        .expect("base commit should succeed");
-
-    fs::write(
-        repo.path().join("delegate-fallback-blocked.txt"),
-        "base\nchanged while startup blocked\n",
-    )
-    .expect("failed to write updated file");
-
-    // Shut down any stale daemon that may have been spawned by a
-    // previous wrapper invocation so we can acquire the lock ourselves.
-    let _ = send_control_request(
-        &daemon_control_socket_path(&repo),
-        &ControlRequest::Shutdown,
-    );
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    fs::create_dir_all(
-        daemon_lock_path(&repo)
-            .parent()
-            .expect("daemon lock path should have a parent"),
-    )
-    .expect("failed to create daemon lock parent directory");
-    let held_lock = DaemonLock::acquire(&daemon_lock_path(&repo))
-        .expect("should acquire daemon lock before checkpoint invocation");
-
-    repo.git_ai_with_env(
-        &["checkpoint", "mock_ai", "delegate-fallback-blocked.txt"],
-        &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
-    )
-    .expect("checkpoint should fall back to local mode when daemon startup is blocked");
-
-    drop(held_lock);
-
-    assert!(
-        send_control_request(
-            &daemon_control_socket_path(&repo),
-            &ControlRequest::StatusFamily {
-                repo_working_dir: repo_workdir_string(&repo),
-            },
-        )
-        .is_err(),
-        "daemon should remain unavailable when startup was blocked"
-    );
-
-    let checkpoints = repo
-        .current_working_logs()
-        .read_all_checkpoints()
-        .expect("checkpoints should be readable");
-    assert!(
-        checkpoints
-            .iter()
-            .any(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent),
-        "local fallback should still write ai_agent checkpoint when daemon startup is blocked"
-    );
-}
-
-#[test]
-#[serial]
 fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
@@ -1278,7 +1054,7 @@ fn daemon_test_mode_git_ai_checkpoint_runs_via_daemon() {
         output
     );
     assert!(
-        output.contains("Checkpoint queued"),
+        output.contains("Checkpoint dispatched"),
         "explicit-path daemon-mode checkpoint should queue asynchronously: {}",
         output
     );
@@ -1297,434 +1073,15 @@ fn daemon_test_mode_git_ai_checkpoint_runs_via_daemon() {
     );
 }
 
-#[test]
-#[serial]
-fn daemon_test_mode_pathless_mock_ai_uses_waited_live_checkpoint_path() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
+// Pathless/unscoped checkpoint tests removed — unscoped checkpoint support was deleted.
+// (daemon_test_mode_pathless_mock_ai_uses_waited_live_checkpoint_path,
+//  daemon_test_mode_human_checkpoint_direct_file_arg_queues_as_scoped_capture)
 
-    fs::write(repo.path().join("daemon-mode-pathless.txt"), "base\n")
-        .expect("failed to write base");
-    repo.git(&["add", "daemon-mode-pathless.txt"])
-        .expect("add should succeed");
-    repo.stage_all_and_commit("base commit")
-        .expect("base commit should succeed");
-
-    fs::write(
-        repo.path().join("daemon-mode-pathless.txt"),
-        "base\nchanged through waited live daemon path\n",
-    )
-    .expect("failed to write updated file");
-    let completion_baseline = repo.daemon_total_completion_count();
-
-    let output = repo
-        .git_ai(&["checkpoint", "mock_ai"])
-        .expect("pathless daemon-mode checkpoint should succeed");
-    assert!(
-        !output.contains("[BENCHMARK] Starting checkpoint run"),
-        "pathless daemon-mode checkpoint should still execute via daemon: {}",
-        output
-    );
-    assert!(
-        output.contains("Checkpoint completed"),
-        "pathless checkpoint should keep the waited live path messaging: {}",
-        output
-    );
-    assert!(
-        !output.contains("Checkpoint queued"),
-        "pathless checkpoint must not use captured async mode: {}",
-        output
-    );
-    assert_eq!(
-        repo.daemon_total_completion_count(),
-        completion_baseline.saturating_add(1),
-        "waited live checkpoint should complete before the command returns"
-    );
-
-    let checkpoints = repo
-        .current_working_logs()
-        .read_all_checkpoints()
-        .expect("checkpoints should be readable");
-    assert!(
-        checkpoints
-            .iter()
-            .any(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent),
-        "pathless daemon-mode checkpoint should still write the ai_agent checkpoint side effect"
-    );
-}
-
-#[test]
-#[serial]
-fn daemon_test_mode_human_checkpoint_direct_file_arg_queues_as_scoped_capture() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
-
-    fs::write(repo.path().join("human-direct-path.txt"), "base\n").expect("failed to write base");
-    repo.git_og(&["add", "human-direct-path.txt"])
-        .expect("add should succeed");
-    repo.git_og(&["commit", "-m", "base commit"])
-        .expect("base commit should succeed");
-
-    fs::write(repo.path().join("human-direct-path.txt"), "base\nhuman\n")
-        .expect("failed to write human change");
-    let completion_baseline = repo.daemon_total_completion_count();
-
-    let output = repo
-        .git_ai(&["checkpoint", "human-direct-path.txt"])
-        .expect("direct-file human checkpoint should succeed");
-    assert!(
-        output.contains("Checkpoint queued"),
-        "direct-file human checkpoint should be normalized to a scoped captured request: {}",
-        output
-    );
-    assert!(
-        !output.contains("Checkpoint completed"),
-        "scoped human checkpoint should not stay on the waited live path: {}",
-        output
-    );
-
-    repo.wait_for_next_daemon_checkpoint_completion(completion_baseline);
-
-    let git_ai_repo = git_ai::git::repository::find_repository_in_path(
-        repo.path()
-            .to_str()
-            .expect("repo path should be valid UTF-8"),
-    )
-    .expect("repository should still be discoverable");
-    let base_commit = git_ai_repo
-        .head()
-        .ok()
-        .and_then(|head| head.target().ok())
-        .unwrap_or_else(|| "initial".to_string());
-    let checkpoints = git_ai_repo
-        .storage
-        .working_log_for_base_commit(&base_commit)
-        .unwrap()
-        .read_all_checkpoints()
-        .expect("checkpoints should be readable");
-    assert!(
-        checkpoints
-            .iter()
-            .any(|checkpoint| checkpoint.kind == CheckpointKind::Human),
-        "normalized direct-file human checkpoint should still write the human checkpoint side effect"
-    );
-}
-
-#[test]
-#[serial]
-fn daemon_captured_checkpoint_replay_uses_blob_snapshot_after_worktree_changes() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
-    let _daemon = DaemonGuard::start(&repo);
-
-    fs::write(repo.path().join("captured-race.txt"), "base\n").expect("failed to write base");
-    repo.git_og(&["add", "captured-race.txt"])
-        .expect("add should succeed");
-    repo.git_og(&["commit", "-m", "base commit"])
-        .expect("base commit should succeed");
-
-    fs::write(
-        repo.path().join("captured-race.txt"),
-        "snapshot from capture\n",
-    )
-    .expect("failed to write captured contents");
-
-    let capture_id = "captured-race-fixture";
-    let capture_dir = write_captured_checkpoint_fixture(
-        &repo,
-        capture_id,
-        &PreparedCheckpointManifest {
-            repo_working_dir: repo.path().to_string_lossy().to_string(),
-            base_commit: current_head_sha(&repo),
-            captured_at_ms: 1_700_000_000_000,
-            kind: CheckpointKind::AiAgent,
-            author: "Test User".to_string(),
-            is_pre_commit: false,
-            explicit_path_role: PreparedPathRole::Edited,
-            explicit_paths: vec!["captured-race.txt".to_string()],
-            files: vec![PreparedCheckpointFile {
-                path: "captured-race.txt".to_string(),
-                source: PreparedCheckpointFileSource::BlobRef {
-                    blob_name: "captured-race-blob".to_string(),
-                },
-            }],
-            checkpoint_request: Some(ai_checkpoint_request(
-                &repo,
-                vec!["captured-race.txt".to_string()],
-                None,
-            )),
-        },
-        &[("captured-race-blob", "snapshot from capture\n")],
-    );
-
-    fs::write(
-        repo.path().join("captured-race.txt"),
-        "live worktree changed later\n",
-    )
-    .expect("failed to write post-capture contents");
-
-    let response = send_control_request(
-        &_daemon.control_socket_path,
-        &ControlRequest::CheckpointRun {
-            request: Box::new(CheckpointRunRequest::Captured(
-                CapturedCheckpointRunRequest {
-                    repo_working_dir: repo_workdir_string(&repo),
-                    capture_id: capture_id.to_string(),
-                },
-            )),
-            wait: Some(true),
-        },
-    )
-    .expect("captured replay request should succeed");
-    assert!(
-        response.ok,
-        "captured replay should succeed: {:?}",
-        response.error
-    );
-
-    assert_eq!(
-        latest_checkpoint_blob_content_for_file(&repo, "captured-race.txt"),
-        "snapshot from capture\n"
-    );
-    assert!(
-        !capture_dir.exists(),
-        "captured checkpoint fixture should be deleted after replay"
-    );
-}
-
-#[test]
-#[serial]
-fn daemon_captured_checkpoint_replay_supports_mixed_dirty_and_blob_sources() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
-    let _daemon = DaemonGuard::start(&repo);
-
-    fs::write(repo.path().join("dirty-source.txt"), "base dirty\n").expect("failed to write base");
-    fs::write(repo.path().join("blob-source.txt"), "base blob\n").expect("failed to write base");
-    repo.git_og(&["add", "dirty-source.txt", "blob-source.txt"])
-        .expect("add should succeed");
-    repo.git_og(&["commit", "-m", "base commit"])
-        .expect("base commit should succeed");
-
-    fs::write(
-        repo.path().join("dirty-source.txt"),
-        "live dirty after capture\n",
-    )
-    .expect("failed to write live dirty contents");
-    fs::write(
-        repo.path().join("blob-source.txt"),
-        "live blob after capture\n",
-    )
-    .expect("failed to write live blob contents");
-
-    let capture_id = "captured-mixed-sources";
-    let capture_dir = write_captured_checkpoint_fixture(
-        &repo,
-        capture_id,
-        &PreparedCheckpointManifest {
-            repo_working_dir: repo.path().to_string_lossy().to_string(),
-            base_commit: current_head_sha(&repo),
-            captured_at_ms: 1_700_000_000_001,
-            kind: CheckpointKind::AiAgent,
-            author: "Test User".to_string(),
-            is_pre_commit: false,
-            explicit_path_role: PreparedPathRole::Edited,
-            explicit_paths: vec![
-                "dirty-source.txt".to_string(),
-                "blob-source.txt".to_string(),
-            ],
-            files: vec![
-                PreparedCheckpointFile {
-                    path: "dirty-source.txt".to_string(),
-                    source: PreparedCheckpointFileSource::DirtyFileContent {
-                        content: "captured from dirty map\n".to_string(),
-                    },
-                },
-                PreparedCheckpointFile {
-                    path: "blob-source.txt".to_string(),
-                    source: PreparedCheckpointFileSource::BlobRef {
-                        blob_name: "mixed-blob-source".to_string(),
-                    },
-                },
-            ],
-            checkpoint_request: Some(ai_checkpoint_request(
-                &repo,
-                vec![
-                    "dirty-source.txt".to_string(),
-                    "blob-source.txt".to_string(),
-                ],
-                Some(HashMap::from([(
-                    "dirty-source.txt".to_string(),
-                    "captured from dirty map\n".to_string(),
-                )])),
-            )),
-        },
-        &[("mixed-blob-source", "captured from blob snapshot\n")],
-    );
-
-    let response = send_control_request(
-        &_daemon.control_socket_path,
-        &ControlRequest::CheckpointRun {
-            request: Box::new(CheckpointRunRequest::Captured(
-                CapturedCheckpointRunRequest {
-                    repo_working_dir: repo_workdir_string(&repo),
-                    capture_id: capture_id.to_string(),
-                },
-            )),
-            wait: Some(true),
-        },
-    )
-    .expect("mixed captured replay request should succeed");
-    assert!(
-        response.ok,
-        "mixed captured replay should succeed: {:?}",
-        response.error
-    );
-
-    assert_eq!(
-        latest_checkpoint_blob_content_for_file(&repo, "dirty-source.txt"),
-        "captured from dirty map\n"
-    );
-    assert_eq!(
-        latest_checkpoint_blob_content_for_file(&repo, "blob-source.txt"),
-        "captured from blob snapshot\n"
-    );
-    assert!(
-        !capture_dir.exists(),
-        "mixed-source capture fixture should be deleted after replay"
-    );
-}
-
-#[test]
-#[serial]
-fn daemon_captured_checkpoint_failure_cleans_up_capture_dir() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
-    let _daemon = DaemonGuard::start(&repo);
-
-    fs::write(repo.path().join("broken-capture.txt"), "base\n").expect("failed to write base");
-    repo.git_og(&["add", "broken-capture.txt"])
-        .expect("add should succeed");
-    repo.git_og(&["commit", "-m", "base commit"])
-        .expect("base commit should succeed");
-
-    let capture_id = "captured-broken-fixture";
-    let capture_dir = write_captured_checkpoint_fixture(
-        &repo,
-        capture_id,
-        &PreparedCheckpointManifest {
-            repo_working_dir: repo.path().to_string_lossy().to_string(),
-            base_commit: current_head_sha(&repo),
-            captured_at_ms: 1_700_000_000_002,
-            kind: CheckpointKind::AiAgent,
-            author: "Test User".to_string(),
-            is_pre_commit: false,
-            explicit_path_role: PreparedPathRole::Edited,
-            explicit_paths: vec!["broken-capture.txt".to_string()],
-            files: vec![PreparedCheckpointFile {
-                path: "broken-capture.txt".to_string(),
-                source: PreparedCheckpointFileSource::BlobRef {
-                    blob_name: "missing-blob".to_string(),
-                },
-            }],
-            checkpoint_request: Some(ai_checkpoint_request(
-                &repo,
-                vec!["broken-capture.txt".to_string()],
-                None,
-            )),
-        },
-        &[],
-    );
-
-    let response = send_control_request(
-        &_daemon.control_socket_path,
-        &ControlRequest::CheckpointRun {
-            request: Box::new(CheckpointRunRequest::Captured(
-                CapturedCheckpointRunRequest {
-                    repo_working_dir: repo_workdir_string(&repo),
-                    capture_id: capture_id.to_string(),
-                },
-            )),
-            wait: Some(true),
-        },
-    )
-    .expect("broken captured replay request should return a response");
-    assert!(
-        !response.ok,
-        "broken captured replay should fail so cleanup-after-error is exercised"
-    );
-    assert!(
-        !capture_dir.exists(),
-        "failed captured replay should still delete the capture fixture"
-    );
-}
-
-#[test]
-#[serial]
-fn daemon_captured_checkpoint_rejects_manifest_for_different_repo() {
-    let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
-    let other_repo = TestRepo::new();
-    let _daemon = DaemonGuard::start(&repo);
-
-    fs::write(repo.path().join("wrong-repo-capture.txt"), "base\n").expect("failed to write base");
-    repo.git_og(&["add", "wrong-repo-capture.txt"])
-        .expect("add should succeed");
-    repo.git_og(&["commit", "-m", "base commit"])
-        .expect("base commit should succeed");
-
-    let capture_id = "captured-wrong-repo-fixture";
-    let capture_dir = write_captured_checkpoint_fixture(
-        &repo,
-        capture_id,
-        &PreparedCheckpointManifest {
-            repo_working_dir: other_repo.path().to_string_lossy().to_string(),
-            base_commit: current_head_sha(&repo),
-            captured_at_ms: 1_700_000_000_003,
-            kind: CheckpointKind::AiAgent,
-            author: "Test User".to_string(),
-            is_pre_commit: false,
-            explicit_path_role: PreparedPathRole::Edited,
-            explicit_paths: vec!["wrong-repo-capture.txt".to_string()],
-            files: vec![PreparedCheckpointFile {
-                path: "wrong-repo-capture.txt".to_string(),
-                source: PreparedCheckpointFileSource::BlobRef {
-                    blob_name: "wrong-repo-blob".to_string(),
-                },
-            }],
-            checkpoint_request: Some(ai_checkpoint_request(
-                &repo,
-                vec!["wrong-repo-capture.txt".to_string()],
-                None,
-            )),
-        },
-        &[("wrong-repo-blob", "captured content\n")],
-    );
-
-    let response = send_control_request(
-        &_daemon.control_socket_path,
-        &ControlRequest::CheckpointRun {
-            request: Box::new(CheckpointRunRequest::Captured(
-                CapturedCheckpointRunRequest {
-                    repo_working_dir: repo_workdir_string(&repo),
-                    capture_id: capture_id.to_string(),
-                },
-            )),
-            wait: Some(true),
-        },
-    )
-    .expect("wrong-repo captured replay request should return a response");
-    assert!(
-        !response.ok,
-        "captured replay should reject manifests for another repository"
-    );
-    let error = response.error.unwrap_or_default();
-    assert!(
-        error.contains("manifest repo mismatch"),
-        "expected repo mismatch error, got: {}",
-        error
-    );
-    assert!(
-        !capture_dir.exists(),
-        "repo-mismatch captured replay should still delete the capture fixture"
-    );
-}
+// Captured checkpoint tests removed — the captured checkpoint system was deleted.
+// (daemon_captured_checkpoint_replay_uses_blob_snapshot_after_worktree_changes,
+//  daemon_captured_checkpoint_replay_supports_mixed_dirty_and_blob_sources,
+//  daemon_captured_checkpoint_failure_cleans_up_capture_dir,
+//  daemon_captured_checkpoint_rejects_manifest_for_different_repo)
 
 #[test]
 #[serial]

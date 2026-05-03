@@ -122,7 +122,7 @@ fn test_checkpoint_exits_successfully() {
     let file_path = repo.path().join("test.txt");
     fs::write(&file_path, "# Test file\n").unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
 }
 
 // ---------------------------------------------------------------------------

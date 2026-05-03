@@ -793,7 +793,7 @@ impl<'a> TestFile<'a> {
             }
             AuthorType::UnattributedHuman => {
                 self.repo
-                    .git_ai(&["checkpoint", "--", relative_path.as_str()])
+                    .git_ai(&["checkpoint", "human", relative_path.as_str()])
             }
         };
         result.unwrap();

@@ -53,15 +53,17 @@ pub enum ParsedHookEvent {
 pub struct PreFileEdit {
     pub context: PresetContext,
     pub file_paths: Vec<PathBuf>,
-    pub dirty_files: Option<HashMap<PathBuf, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_overrides: Option<HashMap<PathBuf, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostFileEdit {
     pub context: PresetContext,
     pub file_paths: Vec<PathBuf>,
-    pub dirty_files: Option<HashMap<PathBuf, String>>,
     pub transcript_source: Option<TranscriptSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_overrides: Option<HashMap<PathBuf, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +71,6 @@ pub struct KnownHumanEdit {
     pub trace_id: String,
     pub cwd: PathBuf,
     pub file_paths: Vec<PathBuf>,
-    pub dirty_files: Option<HashMap<PathBuf, String>>,
     pub editor_metadata: HashMap<String, String>,
 }
 
@@ -145,6 +146,27 @@ impl TranscriptFormat {
 
 pub trait AgentPreset {
     fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError>;
+}
+
+pub fn resolve_dirty_file_paths(cwd: &str) -> Vec<PathBuf> {
+    let cwd_path = PathBuf::from(cwd);
+    let repo = match crate::git::repository::find_repository_for_file(cwd, None) {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+    let repo_workdir = repo.workdir().unwrap_or(cwd_path);
+    repo.get_staged_and_unstaged_filenames()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| {
+            let pb = PathBuf::from(&p);
+            if pb.is_absolute() {
+                pb
+            } else {
+                repo_workdir.join(pb)
+            }
+        })
+        .collect()
 }
 
 pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
