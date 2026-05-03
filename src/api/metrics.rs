@@ -100,7 +100,7 @@ pub fn upload_metrics_with_retry(
 
 /// Metrics API endpoints
 impl ApiClient {
-    /// Upload metrics batch to the server (max 250 events)
+    /// Upload metrics batch to the server (max 1000 events)
     ///
     /// # Arguments
     /// * `batch` - The metrics batch to upload

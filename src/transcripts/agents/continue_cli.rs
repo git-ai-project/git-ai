@@ -1,6 +1,5 @@
 //! Continue CLI agent implementation with sweep discovery.
 
-use crate::metrics::events::AgentTraceValues;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -13,9 +12,20 @@ use std::time::Duration;
 /// Uses `RecordIndexWatermark` because the format has no timestamps at all.
 /// We track how many history entries we've already processed and skip that
 /// many on re-read.
-pub struct ContinueAgent;
+pub struct ContinueAgent {
+    batch_size: usize,
+}
 
 impl ContinueAgent {
+    pub fn new() -> Self {
+        Self { batch_size: 1000 }
+    }
+
+    #[cfg(test)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self { batch_size }
+    }
+
     /// Scan for Continue session files in `~/.continue/sessions/**/*.json`.
     fn scan_session_files() -> Vec<PathBuf> {
         let mut paths = Vec::new();
@@ -48,7 +58,17 @@ impl ContinueAgent {
     }
 }
 
+impl Default for ContinueAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Agent for ContinueAgent {
+    fn batch_size_hint(&self) -> usize {
+        self.batch_size
+    }
+
     fn sweep_strategy(&self) -> SweepStrategy {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
@@ -99,8 +119,7 @@ impl Agent for ContinueAgent {
 
         let already_processed = record_watermark.0;
 
-        // Read the entire file
-        let content = std::fs::read_to_string(path).map_err(|e| {
+        let file = std::fs::File::open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 TranscriptError::Fatal {
                     message: format!("Transcript file not found: {}", path.display()),
@@ -117,124 +136,39 @@ impl Agent for ContinueAgent {
             }
         })?;
 
-        // Parse JSON
-        let parsed: serde_json::Value =
-            serde_json::from_str(&content).map_err(|e| TranscriptError::Parse {
+        let reader = std::io::BufReader::new(file);
+        let mut parsed: serde_json::Value =
+            serde_json::from_reader(reader).map_err(|e| TranscriptError::Parse {
                 line: 0,
                 message: format!("Invalid JSON in {}: {}", path.display(), e),
             })?;
 
-        // Get the history array (fatal if missing)
-        let history = parsed
-            .get("history")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| TranscriptError::Fatal {
-                message: format!(
-                    "Missing 'history' array in Continue transcript: {}",
-                    path.display()
-                ),
-            })?;
-
-        let total_history_length = history.len() as u64;
-
-        // Skip already-processed entries (exactly-once guarantee)
-        let new_entries = if already_processed as usize >= history.len() {
-            &[][..]
-        } else {
-            &history[already_processed as usize..]
+        let history = match parsed.as_object_mut().and_then(|obj| obj.remove("history")) {
+            Some(serde_json::Value::Array(arr)) => arr,
+            _ => {
+                return Err(TranscriptError::Fatal {
+                    message: format!(
+                        "Missing 'history' array in Continue transcript: {}",
+                        path.display()
+                    ),
+                });
+            }
         };
 
-        let mut events = Vec::new();
+        let batch_limit = self.batch_size_hint();
 
-        for history_item in new_entries {
-            let message = history_item.get("message");
-            let role = message.and_then(|m| m.get("role")).and_then(|v| v.as_str());
+        let events: Vec<serde_json::Value> = history
+            .into_iter()
+            .skip(already_processed as usize)
+            .take(batch_limit)
+            .collect();
 
-            match role {
-                Some("user") => {
-                    // User message: content is a string
-                    if let Some(text) = message
-                        .and_then(|m| m.get("content"))
-                        .and_then(|v| v.as_str())
-                    {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            let event = AgentTraceValues::new()
-                                .event_type("user_message")
-                                .prompt_text(trimmed);
-
-                            events.push(event);
-                        }
-                    }
-                }
-                Some("assistant") => {
-                    // Assistant message: content can be String or Array
-                    if let Some(content) = message.and_then(|m| m.get("content")) {
-                        match content {
-                            serde_json::Value::String(text) => {
-                                let trimmed = text.trim();
-                                if !trimmed.is_empty() {
-                                    let event = AgentTraceValues::new()
-                                        .event_type("assistant_message")
-                                        .response_text(trimmed);
-
-                                    events.push(event);
-                                }
-                            }
-                            serde_json::Value::Array(parts) => {
-                                for part in parts {
-                                    if let Some(text) = part.as_str() {
-                                        let trimmed = text.trim();
-                                        if !trimmed.is_empty() {
-                                            let event = AgentTraceValues::new()
-                                                .event_type("assistant_message")
-                                                .response_text(trimmed);
-
-                                            events.push(event);
-                                        }
-                                    } else if let Some(text) =
-                                        part.get("text").and_then(|v| v.as_str())
-                                    {
-                                        let trimmed = text.trim();
-                                        if !trimmed.is_empty() {
-                                            let event = AgentTraceValues::new()
-                                                .event_type("assistant_message")
-                                                .response_text(trimmed);
-
-                                            events.push(event);
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // Check contextItems on the history item (NOT the message)
-                    if let Some(context_items) =
-                        history_item.get("contextItems").and_then(|v| v.as_array())
-                    {
-                        for item in context_items {
-                            if let Some(name) = item.get("name").and_then(|v| v.as_str()) {
-                                let event = AgentTraceValues::new()
-                                    .event_type("tool_use")
-                                    .tool_name(name);
-
-                                events.push(event);
-                            }
-                        }
-                    }
-                }
-                _ => {} // Skip unknown roles
-            }
-        }
-
-        // New watermark = total history length
-        let new_watermark = Box::new(RecordIndexWatermark::new(total_history_length));
+        let new_watermark = Box::new(RecordIndexWatermark::new(
+            already_processed + events.len() as u64,
+        ));
 
         Ok(TranscriptBatch {
             events,
-            model: None,
             new_watermark,
         })
     }
@@ -246,11 +180,106 @@ mod tests {
 
     #[test]
     fn test_sweep_strategy() {
-        let agent = ContinueAgent;
+        let agent = ContinueAgent::new();
         assert_eq!(
             agent.sweep_strategy(),
             SweepStrategy::Periodic(Duration::from_secs(30 * 60))
         );
+    }
+
+    fn make_continue_json(count: usize) -> String {
+        let items: Vec<String> = (0..count)
+            .map(|i| {
+                format!(
+                    r#"{{"id":{},"message":{{"role":"user","content":"msg-{}"}}}}"#,
+                    i, i
+                )
+            })
+            .collect();
+        format!(r#"{{"history":[{}]}}"#, items.join(","))
+    }
+
+    fn drain_all(
+        agent: &ContinueAgent,
+        path: &Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> = Box::new(RecordIndexWatermark::new(0));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_batch_resume_no_loss_or_repeat() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, make_continue_json(5).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = ContinueAgent::with_batch_size(2);
+        let (events, _) = drain_all(&agent, file.path());
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events.iter().map(|e| e["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_append_one_record_after_full_read() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, make_continue_json(3).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = ContinueAgent::with_batch_size(2);
+        let (all, wm) = drain_all(&agent, file.path());
+        assert_eq!(all.len(), 3);
+
+        std::fs::write(file.path(), make_continue_json(4)).unwrap();
+
+        let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["id"].as_u64().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_append_several_records_after_full_read() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, make_continue_json(3).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = ContinueAgent::with_batch_size(2);
+        let (_, mut wm) = drain_all(&agent, file.path());
+
+        std::fs::write(file.path(), make_continue_json(6)).unwrap();
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
     }
 
     #[test]
@@ -269,14 +298,16 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = ContinueAgent;
+        let agent = ContinueAgent::new();
         let watermark = Box::new(RecordIndexWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test")
             .unwrap();
 
         assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, None);
+        // Raw history items are returned
+        assert_eq!(result.events[0]["message"]["role"], "user");
+        assert_eq!(result.events[1]["message"]["role"], "assistant");
     }
 
     #[test]
@@ -296,13 +327,14 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = ContinueAgent;
+        let agent = ContinueAgent::new();
         let watermark = Box::new(RecordIndexWatermark::new(2)); // Already processed 2
         let result = agent
             .read_incremental(file.path(), watermark, "test")
             .unwrap();
 
         assert_eq!(result.events.len(), 1); // Only the new message
+        assert_eq!(result.events[0]["message"]["content"], "New");
     }
 
     #[test]
@@ -325,13 +357,15 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = ContinueAgent;
+        let agent = ContinueAgent::new();
         let watermark = Box::new(RecordIndexWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test")
             .unwrap();
 
-        // assistant_message + tool_use
-        assert_eq!(result.events.len(), 2);
+        // One raw history item containing both message and contextItems
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0]["message"]["content"], "Let me check");
+        assert!(result.events[0]["contextItems"].is_array());
     }
 }

@@ -9,9 +9,20 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Droid agent that discovers conversations from Droid storage.
-pub struct DroidAgent;
+pub struct DroidAgent {
+    batch_size: usize,
+}
 
 impl DroidAgent {
+    pub fn new() -> Self {
+        Self { batch_size: 1000 }
+    }
+
+    #[cfg(test)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self { batch_size }
+    }
+
     /// Scan for Droid conversation files in standard locations.
     fn scan_conversation_files() -> Vec<PathBuf> {
         let mut paths = Vec::new();
@@ -64,7 +75,17 @@ impl DroidAgent {
     }
 }
 
+impl Default for DroidAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Agent for DroidAgent {
+    fn batch_size_hint(&self) -> usize {
+        self.batch_size
+    }
+
     fn sweep_strategy(&self) -> SweepStrategy {
         // Poll every 30 minutes for new Droid conversations
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
@@ -105,8 +126,6 @@ impl Agent for DroidAgent {
         watermark: Box<dyn WatermarkStrategy>,
         session_id: &str,
     ) -> Result<TranscriptBatch, TranscriptError> {
-        // Migrated from formats/droid.rs (will be removed in Phase 9)
-        use crate::metrics::events::AgentTraceValues;
         use std::fs::File;
         use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
@@ -152,7 +171,8 @@ impl Agent for DroidAgent {
                 retry_after: std::time::Duration::from_secs(5),
             })?;
 
-        let mut events = Vec::new();
+        let batch_limit = self.batch_size_hint();
+        let mut events = Vec::with_capacity(batch_limit);
         let mut current_offset = start_offset;
         let mut line_number = 0;
         let mut latest_timestamp: Option<chrono::DateTime<chrono::Utc>> =
@@ -200,13 +220,6 @@ impl Agent for DroidAgent {
             // Track record count for hybrid watermark
             record_count += 1;
 
-            // Extract timestamp
-            let timestamp_opt = entry["timestamp"].as_str().and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .ok()
-                    .map(|dt| dt.timestamp() as u64)
-            });
-
             // Update latest_timestamp for hybrid watermark
             if let Some(ts_str) = entry["timestamp"].as_str()
                 && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts_str)
@@ -217,116 +230,10 @@ impl Agent for DroidAgent {
                 }
             }
 
-            let message = &entry["message"];
-            let role = match message["role"].as_str() {
-                Some(r) => r,
-                None => continue,
-            };
-
-            // Extract events based on role
-            match role {
-                "user" => {
-                    // User message - extract text content
-                    let text = if let Some(content_array) = message["content"].as_array() {
-                        let mut texts = Vec::new();
-                        for item in content_array {
-                            // Skip tool_result items - those are system-generated responses
-                            if item["type"].as_str() == Some("tool_result") {
-                                continue;
-                            }
-                            if item["type"].as_str() == Some("text")
-                                && let Some(text) = item["text"].as_str()
-                                && !text.trim().is_empty()
-                            {
-                                texts.push(text.to_string());
-                            }
-                        }
-                        texts.join("\n")
-                    } else if let Some(content) = message["content"].as_str() {
-                        content.to_string()
-                    } else {
-                        String::new()
-                    };
-
-                    if !text.trim().is_empty() {
-                        let event = AgentTraceValues::new()
-                            .event_type("user_message")
-                            .prompt_text(text);
-
-                        let event = if let Some(ts) = timestamp_opt {
-                            event.event_ts(ts)
-                        } else {
-                            event
-                        };
-
-                        events.push(event);
-                    }
-                }
-                "assistant" => {
-                    // Assistant message - can contain text, thinking, and tool_use
-                    if let Some(content_array) = message["content"].as_array() {
-                        for item in content_array {
-                            match item["type"].as_str() {
-                                Some("text") => {
-                                    if let Some(text) = item["text"].as_str()
-                                        && !text.trim().is_empty()
-                                    {
-                                        let event = AgentTraceValues::new()
-                                            .event_type("assistant_message")
-                                            .response_text(text);
-
-                                        let event = if let Some(ts) = timestamp_opt {
-                                            event.event_ts(ts)
-                                        } else {
-                                            event
-                                        };
-
-                                        events.push(event);
-                                    }
-                                }
-                                Some("thinking") => {
-                                    if let Some(thinking) = item["thinking"].as_str()
-                                        && !thinking.trim().is_empty()
-                                    {
-                                        let event = AgentTraceValues::new()
-                                            .event_type("assistant_thinking")
-                                            .response_text(thinking);
-
-                                        let event = if let Some(ts) = timestamp_opt {
-                                            event.event_ts(ts)
-                                        } else {
-                                            event
-                                        };
-
-                                        events.push(event);
-                                    }
-                                }
-                                Some("tool_use") => {
-                                    if let Some(name) = item["name"].as_str() {
-                                        let tool_use_id =
-                                            item["id"].as_str().map(|s| s.to_string());
-
-                                        let mut event = AgentTraceValues::new()
-                                            .event_type("tool_use")
-                                            .tool_name(name);
-
-                                        if let Some(id) = tool_use_id {
-                                            event = event.external_tool_use_id(id);
-                                        }
-
-                                        if let Some(ts) = timestamp_opt {
-                                            event = event.event_ts(ts);
-                                        }
-
-                                        events.push(event);
-                                    }
-                                }
-                                _ => {} // Skip unknown content types
-                            }
-                        }
-                    }
-                }
-                _ => {} // Skip unknown roles
+            // Push raw JSON entry
+            events.push(entry);
+            if events.len() >= batch_limit {
+                break;
             }
         }
 
@@ -337,10 +244,8 @@ impl Agent for DroidAgent {
             latest_timestamp,
         ));
 
-        // Droid doesn't store model in JSONL - it comes from .settings.json
         Ok(TranscriptBatch {
             events,
-            model: None,
             new_watermark,
         })
     }
@@ -349,6 +254,113 @@ impl Agent for DroidAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_droid_line(i: usize) -> String {
+        format!(
+            r#"{{"type":"message","id":{},"timestamp":"2025-01-01T00:00:{:02}Z","message":{{"role":"user","content":[{{"type":"text","text":"msg-{}"}}]}}}}"#,
+            i, i, i
+        )
+    }
+
+    fn drain_all(
+        agent: &DroidAgent,
+        path: &Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> = Box::new(HybridWatermark::new(0, 0, None));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_batch_resume_no_loss_or_repeat() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        for i in 0..5 {
+            writeln!(file, "{}", make_droid_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = DroidAgent::with_batch_size(2);
+        let (events, _) = drain_all(&agent, file.path());
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events.iter().map(|e| e["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_append_one_record_after_full_read() {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        for i in 0..3 {
+            writeln!(file, "{}", make_droid_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = DroidAgent::with_batch_size(2);
+        let (all, wm) = drain_all(&agent, file.path());
+        assert_eq!(all.len(), 3);
+
+        let mut f = OpenOptions::new().append(true).open(file.path()).unwrap();
+        writeln!(f, "{}", make_droid_line(3)).unwrap();
+        f.flush().unwrap();
+
+        let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["id"].as_u64().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_append_several_records_after_full_read() {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        for i in 0..3 {
+            writeln!(file, "{}", make_droid_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = DroidAgent::with_batch_size(2);
+        let (_, mut wm) = drain_all(&agent, file.path());
+
+        let mut f = OpenOptions::new().append(true).open(file.path()).unwrap();
+        for i in 3..6 {
+            writeln!(f, "{}", make_droid_line(i)).unwrap();
+        }
+        f.flush().unwrap();
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
+    }
 
     #[test]
     fn test_extract_session_id() {
@@ -359,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_sweep_strategy() {
-        let agent = DroidAgent;
+        let agent = DroidAgent::new();
         assert_eq!(
             agent.sweep_strategy(),
             SweepStrategy::Periodic(Duration::from_secs(30 * 60))
@@ -384,14 +396,19 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let agent = DroidAgent;
+        let agent = DroidAgent::new();
         let watermark = Box::new(HybridWatermark::new(0, 0, None));
         let result = agent
             .read_incremental(file.path(), watermark, "test-session")
             .unwrap();
 
         assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, None); // Droid doesn't have model in JSONL
+
+        // Verify raw JSON events
+        assert_eq!(result.events[0]["type"], "message");
+        assert_eq!(result.events[0]["message"]["role"], "user");
+        assert_eq!(result.events[1]["type"], "message");
+        assert_eq!(result.events[1]["message"]["role"], "assistant");
 
         // Verify hybrid watermark was updated
         let new_watermark = result

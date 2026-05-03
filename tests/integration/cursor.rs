@@ -15,149 +15,23 @@ fn parse_cursor(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
 }
 
 #[test]
-fn test_cursor_jsonl_basic_parsing() {
+fn test_cursor_raw_event_fidelity() {
     let fixture = fixture_path("cursor-session-simple.jsonl");
-    let agent = CursorAgent;
+    let agent = CursorAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Should parse cursor JSONL");
 
-    assert_eq!(result.model, None, "Model should be None for Cursor JSONL");
-
-    let events = &result.events;
-    assert!(
-        !events.is_empty(),
-        "Should have parsed events from the fixture"
-    );
-
-    let user_count = events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
-        .count();
-    let assistant_count = events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("assistant_message".to_string())))
-        .count();
-    let tool_count = events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("tool_use".to_string())))
-        .count();
-
-    assert_eq!(user_count, 1, "Should have 1 user message");
-    assert_eq!(assistant_count, 10, "Should have 10 assistant messages");
-    assert_eq!(
-        tool_count, 10,
-        "Should have 10 tool_use messages (Read x3, WebSearch x4, WebFetch, Grep, Write)"
-    );
-}
-
-#[test]
-fn test_cursor_jsonl_user_query_tag_stripping() {
-    let fixture = fixture_path("cursor-session-simple.jsonl");
-    let agent = CursorAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Should parse cursor JSONL");
-
-    let first_user = result
-        .events
-        .iter()
-        .find(|e| e.event_type == Some(Some("user_message".to_string())))
-        .expect("Should have at least one user message");
-
-    let text = first_user
-        .prompt_text
-        .as_ref()
-        .and_then(|v| v.as_ref())
-        .expect("User message should have prompt_text");
-
-    assert!(
-        !text.contains("<user_query>"),
-        "User message should not contain <user_query> tag, got: {}",
-        text
-    );
-    assert!(
-        !text.contains("</user_query>"),
-        "User message should not contain </user_query> tag"
-    );
-    assert_eq!(
-        text,
-        "Generate a file with all the HBO shows from the 90's in it"
-    );
-}
-
-#[test]
-fn test_cursor_jsonl_tool_normalization() {
-    let fixture = fixture_path("cursor-session-simple.jsonl");
-    let agent = CursorAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Should parse cursor JSONL");
-
-    let tool_events: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("tool_use".to_string())))
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
         .collect();
 
-    let tool_names: Vec<&str> = tool_events
-        .iter()
-        .filter_map(|e| e.tool_name.as_ref().and_then(|v| v.as_deref()))
-        .collect();
-
-    assert!(
-        tool_names.contains(&"Write"),
-        "Should have a Write tool_use"
-    );
-    assert!(tool_names.contains(&"Read"), "Should have a Read tool_use");
-}
-
-#[test]
-fn test_cursor_jsonl_read_tool_full_args() {
-    let fixture = fixture_path("cursor-session-simple.jsonl");
-    let agent = CursorAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Should parse cursor JSONL");
-
-    let read_tool = result
-        .events
-        .iter()
-        .find(|e| {
-            e.event_type == Some(Some("tool_use".to_string()))
-                && e.tool_name == Some(Some("Read".to_string()))
-        })
-        .expect("Should have a Read tool_use");
-
-    assert!(
-        read_tool.tool_name.as_ref().and_then(|v| v.as_ref()) == Some(&"Read".to_string()),
-        "Read tool should have tool_name set to Read"
-    );
-}
-
-#[test]
-fn test_cursor_jsonl_preserves_text_content() {
-    let fixture = fixture_path("cursor-session-simple.jsonl");
-    let agent = CursorAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Should parse cursor JSONL");
-
-    let assistant_texts: Vec<&str> = result
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("assistant_message".to_string())))
-        .filter_map(|e| e.response_text.as_ref().and_then(|v| v.as_deref()))
-        .collect();
-    assert!(
-        assistant_texts.iter().any(|t| t.contains("HBO")),
-        "Should keep real content from assistant messages"
-    );
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -167,7 +41,7 @@ fn test_cursor_jsonl_empty_file() {
     let temp_file = NamedTempFile::new().expect("Should create temp file");
     let _ = temp_file.as_file().sync_all();
 
-    let agent = CursorAgent;
+    let agent = CursorAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(temp_file.path(), watermark, "test")
@@ -177,7 +51,6 @@ fn test_cursor_jsonl_empty_file() {
         result.events.is_empty(),
         "Empty file should produce empty events"
     );
-    assert_eq!(result.model, None);
 }
 
 #[test]
@@ -199,7 +72,7 @@ fn test_cursor_jsonl_malformed_lines_error() {
     .unwrap();
     temp_file.flush().unwrap();
 
-    let agent = CursorAgent;
+    let agent = CursorAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent.read_incremental(temp_file.path(), watermark, "test");
 
@@ -646,9 +519,7 @@ fn test_cursor_checkpoint_routes_nested_worktree_file_to_worktree_repo() {
 }
 
 crate::reuse_tests_in_worktree!(
-    test_cursor_jsonl_basic_parsing,
-    test_cursor_jsonl_user_query_tag_stripping,
-    test_cursor_jsonl_tool_normalization,
+    test_cursor_raw_event_fidelity,
     test_cursor_preset_multi_root_workspace_detection,
     test_cursor_preset_human_checkpoint_no_filepath,
     test_cursor_e2e_with_attribution,

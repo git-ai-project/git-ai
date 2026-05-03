@@ -1,79 +1,28 @@
 //! Amp agent implementation with sweep discovery.
 
-use crate::metrics::events::AgentTraceValues;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
 use crate::transcripts::watermark::{RecordIndexWatermark, WatermarkStrategy, WatermarkType};
-use chrono::DateTime;
-use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-#[derive(Debug, Deserialize)]
-struct AmpThread {
-    #[allow(dead_code)]
-    id: String,
-    #[serde(default)]
-    messages: Vec<AmpThreadMessage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AmpThreadMessage {
-    role: String,
-    #[serde(default)]
-    content: Vec<AmpThreadContent>,
-    #[serde(default)]
-    meta: Option<AmpMessageMeta>,
-    #[serde(default)]
-    usage: Option<AmpMessageUsage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AmpMessageMeta {
-    #[serde(rename = "sentAt")]
-    sent_at: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AmpMessageUsage {
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    timestamp: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum AmpThreadContent {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "thinking")]
-    Thinking { thinking: String },
-    #[serde(rename = "tool_use")]
-    ToolUse {
-        #[allow(dead_code)]
-        id: String,
-        name: String,
-        #[serde(default)]
-        #[allow(dead_code)]
-        input: serde_json::Value,
-    },
-    #[serde(rename = "tool_result")]
-    ToolResult {
-        #[serde(rename = "toolUseID")]
-        #[allow(dead_code)]
-        tool_use_id: String,
-    },
-    #[serde(other)]
-    Unknown,
-}
-
 /// Amp agent that discovers conversations from Amp thread JSON files.
-pub struct AmpAgent;
+pub struct AmpAgent {
+    batch_size: usize,
+}
 
 impl AmpAgent {
+    pub fn new() -> Self {
+        Self { batch_size: 1000 }
+    }
+
+    #[cfg(test)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self { batch_size }
+    }
+
     /// Returns the path to Amp thread files.
     ///
     /// Checks `GIT_AI_AMP_THREADS_PATH` env var first, then falls back to
@@ -119,7 +68,17 @@ impl AmpAgent {
     }
 }
 
+impl Default for AmpAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Agent for AmpAgent {
+    fn batch_size_hint(&self) -> usize {
+        self.batch_size
+    }
+
     fn sweep_strategy(&self) -> SweepStrategy {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
@@ -195,8 +154,7 @@ impl Agent for AmpAgent {
 
         let skip_count = record_watermark.0 as usize;
 
-        // Read and parse the JSON file
-        let content = fs::read_to_string(path).map_err(|e| {
+        let file = fs::File::open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 TranscriptError::Fatal {
                     message: format!("Transcript file not found: {}", path.display()),
@@ -213,113 +171,43 @@ impl Agent for AmpAgent {
             }
         })?;
 
-        let thread: AmpThread =
-            serde_json::from_str(&content).map_err(|e| TranscriptError::Parse {
+        let reader = std::io::BufReader::new(file);
+        let mut parsed: serde_json::Value =
+            serde_json::from_reader(reader).map_err(|e| TranscriptError::Parse {
                 line: 0,
                 message: format!("Invalid JSON in {}: {}", path.display(), e),
             })?;
 
-        let total_messages = thread.messages.len();
-        let mut events = Vec::new();
-        let mut model: Option<String> = None;
-
-        // Skip first `skip_count` messages (already processed)
-        for msg in thread.messages.iter().skip(skip_count) {
-            // Extract model from assistant messages' usage.model (first non-empty wins)
-            if model.is_none()
-                && msg.role == "assistant"
-                && let Some(ref usage) = msg.usage
-                && let Some(ref m) = usage.model
-                && !m.is_empty()
-            {
-                model = Some(m.clone());
+        let messages = match parsed
+            .as_object_mut()
+            .and_then(|obj| obj.remove("messages"))
+        {
+            Some(serde_json::Value::Array(arr)) => arr,
+            _ => {
+                return Err(TranscriptError::Fatal {
+                    message: format!(
+                        "Missing 'messages' array in Amp thread file: {}",
+                        path.display()
+                    ),
+                });
             }
+        };
 
-            // Compute timestamp
-            let timestamp_opt: Option<u64> = match msg.role.as_str() {
-                "user" => msg.meta.as_ref().and_then(|meta| {
-                    meta.sent_at.and_then(|ms| {
-                        DateTime::from_timestamp_millis(ms).map(|dt| dt.timestamp() as u64)
-                    })
-                }),
-                "assistant" => msg.usage.as_ref().and_then(|usage| {
-                    usage.timestamp.as_ref().and_then(|ts| {
-                        DateTime::parse_from_rfc3339(ts)
-                            .ok()
-                            .map(|dt| dt.timestamp() as u64)
-                    })
-                }),
-                _ => None,
-            };
+        let batch_limit = self.batch_size_hint();
 
-            // Process each content item
-            for content_item in &msg.content {
-                match content_item {
-                    AmpThreadContent::Text { text } => {
-                        if text.trim().is_empty() {
-                            continue;
-                        }
-                        let event = match msg.role.as_str() {
-                            "user" => {
-                                let e = AgentTraceValues::new()
-                                    .event_type("user_message")
-                                    .prompt_text(text);
-                                if let Some(ts) = timestamp_opt {
-                                    e.event_ts(ts)
-                                } else {
-                                    e
-                                }
-                            }
-                            "assistant" => {
-                                let e = AgentTraceValues::new()
-                                    .event_type("assistant_message")
-                                    .response_text(text);
-                                if let Some(ts) = timestamp_opt {
-                                    e.event_ts(ts)
-                                } else {
-                                    e
-                                }
-                            }
-                            _ => continue,
-                        };
-                        events.push(event);
-                    }
-                    AmpThreadContent::Thinking { thinking } => {
-                        if msg.role == "assistant" && !thinking.trim().is_empty() {
-                            let event = AgentTraceValues::new()
-                                .event_type("assistant_thinking")
-                                .response_text(thinking);
-                            let event = if let Some(ts) = timestamp_opt {
-                                event.event_ts(ts)
-                            } else {
-                                event
-                            };
-                            events.push(event);
-                        }
-                    }
-                    AmpThreadContent::ToolUse { name, .. } => {
-                        if msg.role == "assistant" {
-                            let event = AgentTraceValues::new()
-                                .event_type("tool_use")
-                                .tool_name(name);
-                            let event = if let Some(ts) = timestamp_opt {
-                                event.event_ts(ts)
-                            } else {
-                                event
-                            };
-                            events.push(event);
-                        }
-                    }
-                    AmpThreadContent::ToolResult { .. } | AmpThreadContent::Unknown => {}
-                }
-            }
-        }
+        // Skip first `skip_count` messages (already processed), take up to batch_limit
+        let events: Vec<serde_json::Value> = messages
+            .into_iter()
+            .skip(skip_count)
+            .take(batch_limit)
+            .collect();
 
-        let new_watermark = Box::new(RecordIndexWatermark::new(total_messages as u64));
+        let new_watermark = Box::new(RecordIndexWatermark::new(
+            (skip_count + events.len()) as u64,
+        ));
 
         Ok(TranscriptBatch {
             events,
-            model,
             new_watermark,
         })
     }
@@ -331,11 +219,109 @@ mod tests {
 
     #[test]
     fn test_sweep_strategy() {
-        let agent = AmpAgent;
+        let agent = AmpAgent::new();
         assert_eq!(
             agent.sweep_strategy(),
             SweepStrategy::Periodic(Duration::from_secs(30 * 60))
         );
+    }
+
+    fn make_amp_json(message_count: usize) -> String {
+        let messages: Vec<String> = (0..message_count)
+            .map(|i| {
+                format!(
+                    r#"{{"role":"user","id":{},"content":[{{"type":"text","text":"msg-{}"}}]}}"#,
+                    i, i
+                )
+            })
+            .collect();
+        format!(
+            r#"{{"id":"thread-test","messages":[{}]}}"#,
+            messages.join(",")
+        )
+    }
+
+    fn drain_all(
+        agent: &AmpAgent,
+        path: &Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> = Box::new(RecordIndexWatermark::new(0));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_batch_resume_no_loss_or_repeat() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, make_amp_json(5).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = AmpAgent::with_batch_size(2);
+        let (events, _) = drain_all(&agent, file.path());
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events.iter().map(|e| e["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_append_one_record_after_full_read() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, make_amp_json(3).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = AmpAgent::with_batch_size(2);
+        let (all, wm) = drain_all(&agent, file.path());
+        assert_eq!(all.len(), 3);
+
+        std::fs::write(file.path(), make_amp_json(4)).unwrap();
+
+        let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["id"].as_u64().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_append_several_records_after_full_read() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut file, make_amp_json(3).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = AmpAgent::with_batch_size(2);
+        let (_, mut wm) = drain_all(&agent, file.path());
+
+        std::fs::write(file.path(), make_amp_json(6)).unwrap();
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
     }
 
     #[test]
@@ -363,14 +349,19 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = AmpAgent;
+        let agent = AmpAgent::new();
         let watermark = Box::new(RecordIndexWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test")
             .unwrap();
 
         assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, Some("claude-sonnet-4-20250514".to_string()));
+        assert_eq!(result.events[0]["role"], "user");
+        assert_eq!(result.events[1]["role"], "assistant");
+        assert_eq!(
+            result.events[1]["usage"]["model"],
+            "claude-sonnet-4-20250514"
+        );
     }
 
     #[test]
@@ -390,13 +381,14 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = AmpAgent;
+        let agent = AmpAgent::new();
         let watermark = Box::new(RecordIndexWatermark::new(1));
         let result = agent
             .read_incremental(file.path(), watermark, "test")
             .unwrap();
 
         assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0]["content"][0]["text"], "New");
     }
 
     #[test]
@@ -422,12 +414,19 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = AmpAgent;
+        let agent = AmpAgent::new();
         let watermark = Box::new(RecordIndexWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test")
             .unwrap();
 
-        assert_eq!(result.events.len(), 3); // thinking + text + tool_use
+        // One raw message containing all content items
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0]["role"], "assistant");
+        let content = result.events[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 3);
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[2]["type"], "tool_use");
     }
 }

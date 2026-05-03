@@ -182,65 +182,23 @@ fn test_windsurf_preset_invalid_json() {
 // ============================================================================
 
 #[test]
-fn test_windsurf_transcript_parser_basic() {
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    writeln!(temp_file, r#"{{"status":"done","type":"user_input","user_input":{{"user_response":"Add a hello world function"}}}}"#).unwrap();
-    writeln!(temp_file, r#"{{"planner_response":{{"response":"I'll create a hello world function for you."}},"status":"done","type":"planner_response"}}"#).unwrap();
-    writeln!(temp_file, r#"{{"code_action":{{"path":"file:///src/main.rs","new_content":"fn hello() {{ println!(\"Hello!\"); }}"}},"status":"done","type":"code_action"}}"#).unwrap();
-
-    let agent = WindsurfAgent;
+fn test_windsurf_raw_event_fidelity() {
+    let fixture = crate::test_utils::fixture_path("windsurf-session-simple.jsonl");
+    let agent = WindsurfAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
-        .read_incremental(temp_file.path(), watermark, "test")
-        .expect("Failed to parse Windsurf JSONL");
+        .read_incremental(fixture.as_path(), watermark, "test")
+        .expect("Should parse windsurf JSONL");
 
-    assert_eq!(result.events.len(), 3);
-    assert!(result.model.is_none());
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
 
-    let e0 = &result.events[0];
-    assert_eq!(e0.event_type, Some(Some("user_message".to_string())));
-    assert_eq!(
-        e0.prompt_text,
-        Some(Some("Add a hello world function".to_string()))
-    );
-
-    let e1 = &result.events[1];
-    assert_eq!(e1.event_type, Some(Some("assistant_message".to_string())));
-    assert!(
-        e1.response_text
-            .as_ref()
-            .unwrap()
-            .as_ref()
-            .unwrap()
-            .contains("hello world")
-    );
-
-    let e2 = &result.events[2];
-    assert_eq!(e2.event_type, Some(Some("tool_use".to_string())));
-    assert_eq!(e2.tool_name, Some(Some("code_action".to_string())));
-}
-
-#[test]
-fn test_windsurf_transcript_parser_skips_empty_content() {
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    writeln!(
-        temp_file,
-        r#"{{"status":"done","type":"user_input","user_input":{{"user_response":""}}}}"#
-    )
-    .unwrap();
-    writeln!(temp_file, r#"{{"planner_response":{{"response":"Real response"}},"status":"done","type":"planner_response"}}"#).unwrap();
-
-    let agent = WindsurfAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_file.path(), watermark, "test")
-        .expect("Failed to parse Windsurf JSONL");
-
-    assert_eq!(result.events.len(), 1);
-    assert_eq!(
-        result.events[0].event_type,
-        Some(Some("assistant_message".to_string()))
-    );
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -254,7 +212,7 @@ fn test_windsurf_transcript_parser_handles_malformed_lines() {
     writeln!(temp_file, "not valid json at all").unwrap();
     writeln!(temp_file, r#"{{"planner_response":{{"response":"Hi there"}},"status":"done","type":"planner_response"}}"#).unwrap();
 
-    let agent = WindsurfAgent;
+    let agent = WindsurfAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent.read_incremental(temp_file.path(), watermark, "test");
 
@@ -275,108 +233,13 @@ fn test_windsurf_transcript_parser_handles_malformed_lines() {
 fn test_windsurf_transcript_parser_empty_file() {
     let temp_file = tempfile::NamedTempFile::new().unwrap();
 
-    let agent = WindsurfAgent;
+    let agent = WindsurfAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(temp_file.path(), watermark, "test")
         .expect("Failed to parse empty JSONL");
 
     assert!(result.events.is_empty());
-    assert!(result.model.is_none());
-}
-
-#[test]
-fn test_windsurf_transcript_parser_real_fixture() {
-    let fixture = crate::test_utils::fixture_path("windsurf-session-simple.jsonl");
-    let agent = WindsurfAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Failed to parse real Windsurf JSONL fixture");
-
-    assert!(result.model.is_none());
-    assert!(!result.events.is_empty());
-
-    let user_msgs: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
-        .collect();
-    assert!(
-        !user_msgs.is_empty(),
-        "Should have at least one user message"
-    );
-
-    let assistant_msgs: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("assistant_message".to_string())))
-        .collect();
-    assert!(
-        !assistant_msgs.is_empty(),
-        "Should have at least one assistant message"
-    );
-
-    let tool_msgs: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("tool_use".to_string())))
-        .collect();
-    assert!(
-        !tool_msgs.is_empty(),
-        "Should have at least one tool use message"
-    );
-
-    let first_user_text = user_msgs[0].prompt_text.as_ref().unwrap().as_ref().unwrap();
-    assert!(
-        first_user_text.contains("song"),
-        "First user message should mention 'song'"
-    );
-
-    let code_actions: Vec<_> = tool_msgs
-        .iter()
-        .filter(|e| e.tool_name == Some(Some("code_action".to_string())))
-        .collect();
-    assert!(
-        !code_actions.is_empty(),
-        "Should have code_action tool uses"
-    );
-}
-
-#[test]
-fn test_windsurf_transcript_maps_all_tool_types() {
-    let fixture = crate::test_utils::fixture_path("windsurf-session-simple.jsonl");
-    let agent = WindsurfAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Failed to parse Windsurf JSONL");
-
-    let tool_names: Vec<String> = result
-        .events
-        .iter()
-        .filter_map(|e| {
-            if e.event_type == Some(Some("tool_use".to_string())) {
-                e.tool_name.as_ref().and_then(|opt| opt.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    assert!(
-        tool_names.contains(&"code_action".to_string()),
-        "Should map code_action"
-    );
-    assert!(
-        tool_names.contains(&"view_file".to_string()),
-        "Should map view_file"
-    );
-    assert!(
-        tool_names.contains(&"run_command".to_string()),
-        "Should map run_command"
-    );
-    assert!(tool_names.contains(&"find".to_string()), "Should map find");
 }
 
 // ============================================================================

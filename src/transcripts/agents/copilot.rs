@@ -3,15 +3,28 @@
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
-use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy, WatermarkType};
+use crate::transcripts::watermark::{
+    ByteOffsetWatermark, RecordIndexWatermark, WatermarkStrategy, WatermarkType,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// GitHub Copilot agent that discovers conversations from Copilot storage.
-pub struct CopilotAgent;
+pub struct CopilotAgent {
+    batch_size: usize,
+}
 
 impl CopilotAgent {
+    pub fn new() -> Self {
+        Self { batch_size: 1000 }
+    }
+
+    #[cfg(test)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self { batch_size }
+    }
+
     /// Scan for Copilot transcript files in standard locations.
     ///
     /// Discovers BOTH session.json files and .jsonl event streams.
@@ -66,7 +79,17 @@ impl CopilotAgent {
     }
 }
 
+impl Default for CopilotAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Agent for CopilotAgent {
+    fn batch_size_hint(&self) -> usize {
+        self.batch_size
+    }
+
     fn sweep_strategy(&self) -> SweepStrategy {
         // Poll every 30 minutes for new Copilot transcripts
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
@@ -84,15 +107,28 @@ impl Agent for CopilotAgent {
             // Determine format from file extension (no I/O, just checking path)
             let format = Self::determine_format(&path);
 
-            // Don't parse file content here - just filesystem scanning.
-            // Model will be extracted later during first read_incremental() if needed.
+            // JSONL event streams use byte offset (seekable); session JSON uses
+            // record index (count of processed requests).
+            let (watermark_type, initial_watermark): (WatermarkType, Box<dyn WatermarkStrategy>) =
+                if format == TranscriptFormat::CopilotEventStreamJsonl {
+                    (
+                        WatermarkType::ByteOffset,
+                        Box::new(ByteOffsetWatermark::new(0)),
+                    )
+                } else {
+                    (
+                        WatermarkType::RecordIndex,
+                        Box::new(RecordIndexWatermark::new(0)),
+                    )
+                };
+
             let session = DiscoveredSession {
                 session_id,
                 agent_type: "copilot".to_string(),
                 transcript_path: path,
                 transcript_format: format,
-                watermark_type: WatermarkType::ByteOffset,
-                initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
+                watermark_type,
+                initial_watermark,
                 model: None,
                 tool: Some("GitHub Copilot".to_string()),
                 external_thread_id: None,
@@ -112,10 +148,11 @@ impl Agent for CopilotAgent {
     ) -> Result<TranscriptBatch, TranscriptError> {
         // Migrated from formats/copilot.rs (will be removed in Phase 9)
         // Determine which reader to use based on file extension
+        let batch_limit = self.batch_size_hint();
         if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-            read_event_stream(path, watermark, session_id)
+            read_event_stream(path, watermark, session_id, batch_limit)
         } else {
-            read_session_json(path, watermark, session_id)
+            read_session_json(path, watermark, session_id, batch_limit)
         }
     }
 }
@@ -125,19 +162,19 @@ fn read_session_json(
     path: &Path,
     watermark: Box<dyn WatermarkStrategy>,
     session_id: &str,
+    batch_limit: usize,
 ) -> Result<TranscriptBatch, TranscriptError> {
-    use crate::metrics::events::AgentTraceValues;
-
-    // Downcast watermark to ByteOffsetWatermark
-    let byte_watermark = watermark
+    let record_watermark = watermark
         .as_any()
-        .downcast_ref::<ByteOffsetWatermark>()
+        .downcast_ref::<RecordIndexWatermark>()
         .ok_or_else(|| TranscriptError::Fatal {
             message: format!(
-                "Copilot session reader requires ByteOffsetWatermark, got incompatible type for session {}",
+                "Copilot session reader requires RecordIndexWatermark, got incompatible type for session {}",
                 session_id
             ),
         })?;
+
+    let skip_count = record_watermark.0 as usize;
 
     // Check if running in Codespaces or Remote Containers - if so, return empty transcript
     let is_codespaces = std::env::var("CODESPACES").ok().as_deref() == Some("true");
@@ -146,13 +183,11 @@ fn read_session_json(
     if is_codespaces || is_remote_containers {
         return Ok(TranscriptBatch {
             events: Vec::new(),
-            model: None,
             new_watermark: watermark,
         });
     }
 
-    // Read the entire file
-    let content = std::fs::read_to_string(path).map_err(|e| {
+    let file = std::fs::File::open(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             TranscriptError::Fatal {
                 message: format!("Transcript file not found: {}", path.display()),
@@ -169,139 +204,38 @@ fn read_session_json(
         }
     })?;
 
-    // If we already read this content (watermark at end), return empty batch
-    if byte_watermark.0 >= content.len() as u64 {
-        return Ok(TranscriptBatch {
-            events: Vec::new(),
-            model: None,
-            new_watermark: watermark,
-        });
-    }
-
-    // Parse the JSON
-    let session_json: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| TranscriptError::Parse {
+    let reader = std::io::BufReader::new(file);
+    let mut session_json: serde_json::Value =
+        serde_json::from_reader(reader).map_err(|e| TranscriptError::Parse {
             line: 0,
             message: format!("Invalid JSON in {}: {}", path.display(), e),
         })?;
 
-    // Check if this looks like an event stream format (should use read_event_stream instead)
-    if looks_like_event_stream(&session_json) {
-        return read_event_stream(path, Box::new(ByteOffsetWatermark::new(0)), session_id);
-    }
-
-    // Extract the requests array
-    let requests = session_json
-        .get("requests")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| TranscriptError::Parse {
-            line: 0,
-            message: "requests array not found in Copilot session JSON".to_string(),
-        })?;
-
-    // Extract session-level model
-    let model = session_json
-        .get("inputState")
-        .and_then(|is| is.get("selectedModel"))
-        .and_then(|sm| sm.get("identifier"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let mut events = Vec::new();
-
-    for request in requests {
-        // Parse the user timestamp
-        let user_ts_opt = request
-            .get("timestamp")
-            .and_then(|v| v.as_i64())
-            .and_then(|ms| {
-                chrono::TimeZone::timestamp_millis_opt(&chrono::Utc, ms)
-                    .single()
-                    .map(|dt| dt.timestamp() as u64)
+    let requests = match session_json
+        .as_object_mut()
+        .and_then(|obj| obj.remove("requests"))
+    {
+        Some(serde_json::Value::Array(arr)) => arr,
+        _ => {
+            return Err(TranscriptError::Parse {
+                line: 0,
+                message: "requests array not found in Copilot session JSON".to_string(),
             });
-
-        // Add the user's message
-        if let Some(user_text) = request
-            .get("message")
-            .and_then(|m| m.get("text"))
-            .and_then(|v| v.as_str())
-        {
-            let trimmed = user_text.trim();
-            if !trimmed.is_empty() {
-                let event = AgentTraceValues::new()
-                    .event_type("user_message")
-                    .prompt_text(trimmed);
-
-                let event = if let Some(ts) = user_ts_opt {
-                    event.event_ts(ts)
-                } else {
-                    event
-                };
-
-                events.push(event);
-            }
         }
+    };
 
-        // Process assistant response items
-        if let Some(response_items) = request.get("response").and_then(|v| v.as_array()) {
-            for item in response_items {
-                // Handle different kinds of response items
-                if let Some(kind) = item.get("kind").and_then(|v| v.as_str()) {
-                    match kind {
-                        "markdownContent" => {
-                            if let Some(text) = item.get("value").and_then(|v| v.as_str())
-                                && !text.trim().is_empty()
-                            {
-                                let event = AgentTraceValues::new()
-                                    .event_type("assistant_message")
-                                    .response_text(text);
+    let events: Vec<serde_json::Value> = requests
+        .into_iter()
+        .skip(skip_count)
+        .take(batch_limit)
+        .collect();
 
-                                let event = if let Some(ts) = user_ts_opt {
-                                    event.event_ts(ts)
-                                } else {
-                                    event
-                                };
-
-                                events.push(event);
-                            }
-                        }
-                        "toolInvocationSerialized" => {
-                            if let Some(tool_name) = item.get("toolId").and_then(|v| v.as_str()) {
-                                let mut event = AgentTraceValues::new()
-                                    .event_type("tool_use")
-                                    .tool_name(tool_name);
-
-                                if let Some(ts) = user_ts_opt {
-                                    event = event.event_ts(ts);
-                                }
-
-                                events.push(event);
-                            }
-                        }
-                        "textEditGroup" | "prepareToolInvocation" => {
-                            let mut event = AgentTraceValues::new()
-                                .event_type("tool_use")
-                                .tool_name(kind);
-
-                            if let Some(ts) = user_ts_opt {
-                                event = event.event_ts(ts);
-                            }
-
-                            events.push(event);
-                        }
-                        _ => {} // Skip other kinds
-                    }
-                }
-            }
-        }
-    }
-
-    // Update watermark to end of file
-    let new_watermark = Box::new(ByteOffsetWatermark::new(content.len() as u64));
+    let new_watermark = Box::new(RecordIndexWatermark::new(
+        (skip_count + events.len()) as u64,
+    ));
 
     Ok(TranscriptBatch {
         events,
-        model,
         new_watermark,
     })
 }
@@ -311,8 +245,8 @@ fn read_event_stream(
     path: &Path,
     watermark: Box<dyn WatermarkStrategy>,
     session_id: &str,
+    batch_limit: usize,
 ) -> Result<TranscriptBatch, TranscriptError> {
-    use crate::metrics::events::AgentTraceValues;
     use std::fs::File;
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
@@ -357,8 +291,7 @@ fn read_event_stream(
             retry_after: std::time::Duration::from_secs(5),
         })?;
 
-    let mut events = Vec::new();
-    let mut model = None;
+    let mut events = Vec::with_capacity(batch_limit);
     let mut current_offset = start_offset;
     let mut line_number = 0;
 
@@ -374,141 +307,25 @@ fn read_event_stream(
             })?;
 
         if bytes_read == 0 {
-            // EOF
             break;
         }
 
         line_number += 1;
-
-        // Update offset before processing
         current_offset += bytes_read as u64;
 
-        // Skip empty lines
         if line.trim().is_empty() {
             continue;
         }
 
-        // Parse JSONL entry
-        let event: serde_json::Value =
+        let entry: serde_json::Value =
             serde_json::from_str(&line).map_err(|e| TranscriptError::Parse {
                 line: line_number,
                 message: format!("Invalid JSON in {}: {}", path.display(), e),
             })?;
 
-        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let data = event.get("data");
-
-        // Extract timestamp
-        let timestamp_opt = event
-            .get("timestamp")
-            .and_then(|v| v.as_str())
-            .and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .ok()
-                    .map(|dt| dt.timestamp() as u64)
-            });
-
-        // Try to extract model if we haven't found it yet
-        if model.is_none()
-            && let Some(d) = data
-        {
-            model = extract_model_hint(d);
-        }
-
-        // Process events based on type
-        match event_type {
-            "user.message" => {
-                if let Some(text) = data
-                    .and_then(|d| d.get("content"))
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    let event = AgentTraceValues::new()
-                        .event_type("user_message")
-                        .prompt_text(text);
-
-                    let event = if let Some(ts) = timestamp_opt {
-                        event.event_ts(ts)
-                    } else {
-                        event
-                    };
-
-                    events.push(event);
-                }
-            }
-            "assistant.message" => {
-                // Extract visible content or reasoning text
-                let assistant_text = data
-                    .and_then(|d| d.get("content"))
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .or_else(|| {
-                        data.and_then(|d| d.get("reasoningText"))
-                            .and_then(|v| v.as_str())
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string)
-                    });
-
-                if let Some(text) = assistant_text {
-                    let event = AgentTraceValues::new()
-                        .event_type("assistant_message")
-                        .response_text(text);
-
-                    let event = if let Some(ts) = timestamp_opt {
-                        event.event_ts(ts)
-                    } else {
-                        event
-                    };
-
-                    events.push(event);
-                }
-
-                // Extract tool requests
-                if let Some(tool_requests) = data
-                    .and_then(|d| d.get("toolRequests"))
-                    .and_then(|v| v.as_array())
-                {
-                    for request in tool_requests {
-                        let name = request
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("tool")
-                            .to_string();
-
-                        let mut event = AgentTraceValues::new()
-                            .event_type("tool_use")
-                            .tool_name(&name);
-
-                        if let Some(ts) = timestamp_opt {
-                            event = event.event_ts(ts);
-                        }
-
-                        events.push(event);
-                    }
-                }
-            }
-            "tool.execution_start" => {
-                let name = data
-                    .and_then(|d| d.get("toolName"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("tool")
-                    .to_string();
-
-                let mut event = AgentTraceValues::new()
-                    .event_type("tool_use")
-                    .tool_name(&name);
-
-                if let Some(ts) = timestamp_opt {
-                    event = event.event_ts(ts);
-                }
-
-                events.push(event);
-            }
-            _ => {} // Skip other event types
+        events.push(entry);
+        if events.len() >= batch_limit {
+            break;
         }
     }
 
@@ -517,68 +334,8 @@ fn read_event_stream(
 
     Ok(TranscriptBatch {
         events,
-        model,
         new_watermark,
     })
-}
-
-/// Check if a parsed JSON looks like a Copilot event stream format.
-fn looks_like_event_stream(parsed: &serde_json::Value) -> bool {
-    parsed
-        .get("type")
-        .and_then(|v| v.as_str())
-        .map(|event_type| {
-            parsed.get("data").map(|v| v.is_object()).unwrap_or(false)
-                && parsed.get("kind").is_none()
-                && (event_type.starts_with("session.")
-                    || event_type.starts_with("assistant.")
-                    || event_type.starts_with("user.")
-                    || event_type.starts_with("tool."))
-        })
-        .unwrap_or(false)
-}
-
-/// Extract model hint from Copilot data.
-fn extract_model_hint(value: &serde_json::Value) -> Option<String> {
-    match value {
-        serde_json::Value::Object(map) => {
-            // Check for direct model fields
-            if let Some(model_id) = map.get("modelId").and_then(|v| v.as_str())
-                && model_id.starts_with("copilot/")
-            {
-                return Some(model_id.to_string());
-            }
-            if let Some(model) = map.get("model").and_then(|v| v.as_str())
-                && model.starts_with("copilot/")
-            {
-                return Some(model.to_string());
-            }
-            if let Some(identifier) = map
-                .get("selectedModel")
-                .and_then(|v| v.get("identifier"))
-                .and_then(|v| v.as_str())
-                && identifier.starts_with("copilot/")
-            {
-                return Some(identifier.to_string());
-            }
-            // Recursively search nested objects
-            for val in map.values() {
-                if let Some(found) = extract_model_hint(val) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        serde_json::Value::Array(arr) => arr.iter().find_map(extract_model_hint),
-        serde_json::Value::String(s) => {
-            if s.starts_with("copilot/") {
-                Some(s.to_string())
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -594,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_sweep_strategy() {
-        let agent = CopilotAgent;
+        let agent = CopilotAgent::new();
         assert_eq!(
             agent.sweep_strategy(),
             SweepStrategy::Periodic(Duration::from_secs(30 * 60))
@@ -614,6 +371,214 @@ mod tests {
             CopilotAgent::determine_format(&jsonl_path),
             TranscriptFormat::CopilotEventStreamJsonl
         );
+    }
+
+    // -- Event stream (JSONL / ByteOffset) batch-resume tests --
+
+    fn make_event_stream_line(i: usize) -> String {
+        format!(
+            r#"{{"type":"user.message","id":{},"data":{{"content":"msg-{}"}},"timestamp":"2025-01-01T00:00:{:02}Z"}}"#,
+            i, i, i
+        )
+    }
+
+    fn drain_event_stream(
+        agent: &CopilotAgent,
+        path: &Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> = Box::new(ByteOffsetWatermark::new(0));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_event_stream_batch_resume_no_loss_or_repeat() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::with_suffix(".jsonl").unwrap();
+        for i in 0..5 {
+            writeln!(file, "{}", make_event_stream_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = CopilotAgent::with_batch_size(2);
+        let (events, _) = drain_event_stream(&agent, file.path());
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events.iter().map(|e| e["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_event_stream_append_one_after_full_read() {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::with_suffix(".jsonl").unwrap();
+        for i in 0..3 {
+            writeln!(file, "{}", make_event_stream_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = CopilotAgent::with_batch_size(2);
+        let (all, wm) = drain_event_stream(&agent, file.path());
+        assert_eq!(all.len(), 3);
+
+        let mut f = OpenOptions::new().append(true).open(file.path()).unwrap();
+        writeln!(f, "{}", make_event_stream_line(3)).unwrap();
+        f.flush().unwrap();
+
+        let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["id"].as_u64().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_event_stream_append_several_after_full_read() {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::with_suffix(".jsonl").unwrap();
+        for i in 0..3 {
+            writeln!(file, "{}", make_event_stream_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = CopilotAgent::with_batch_size(2);
+        let (_, mut wm) = drain_event_stream(&agent, file.path());
+
+        let mut f = OpenOptions::new().append(true).open(file.path()).unwrap();
+        for i in 3..6 {
+            writeln!(f, "{}", make_event_stream_line(i)).unwrap();
+        }
+        f.flush().unwrap();
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
+    }
+
+    // -- Session JSON (RecordIndex) batch-resume tests --
+
+    fn make_session_json(request_count: usize) -> String {
+        let requests: Vec<String> = (0..request_count)
+            .map(|i| {
+                format!(
+                    r#"{{"id":{},"message":{{"text":"msg-{}"}},"response":[{{"kind":"markdownContent","value":"reply-{}"}}]}}"#,
+                    i, i, i
+                )
+            })
+            .collect();
+        format!(r#"{{"requests":[{}]}}"#, requests.join(","))
+    }
+
+    fn drain_session_json(
+        agent: &CopilotAgent,
+        path: &Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> = Box::new(RecordIndexWatermark::new(0));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_session_json_batch_resume_no_loss_or_repeat() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::with_suffix(".json").unwrap();
+        std::io::Write::write_all(&mut file, make_session_json(5).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = CopilotAgent::with_batch_size(2);
+        let (events, _) = drain_session_json(&agent, file.path());
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events.iter().map(|e| e["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_session_json_append_one_after_full_read() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::with_suffix(".json").unwrap();
+        std::io::Write::write_all(&mut file, make_session_json(3).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = CopilotAgent::with_batch_size(2);
+        let (all, wm) = drain_session_json(&agent, file.path());
+        assert_eq!(all.len(), 3);
+
+        // Rewrite file with 4 requests (simulating append in JSON format)
+        std::fs::write(file.path(), make_session_json(4)).unwrap();
+
+        let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["id"].as_u64().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_session_json_append_several_after_full_read() {
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::with_suffix(".json").unwrap();
+        std::io::Write::write_all(&mut file, make_session_json(3).as_bytes()).unwrap();
+        std::io::Write::flush(&mut file).unwrap();
+
+        let agent = CopilotAgent::with_batch_size(2);
+        let (_, mut wm) = drain_session_json(&agent, file.path());
+
+        // Rewrite file with 6 requests
+        std::fs::write(file.path(), make_session_json(6)).unwrap();
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
     }
 
     #[test]
@@ -639,14 +604,16 @@ mod tests {
         write!(file, "{}", json).unwrap();
         file.flush().unwrap();
 
-        let agent = CopilotAgent;
-        let watermark = Box::new(ByteOffsetWatermark::new(0));
+        let agent = CopilotAgent::new();
+        let watermark = Box::new(RecordIndexWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test-session")
             .unwrap();
 
-        assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, Some("copilot/gpt-4".to_string()));
+        // Each request object is returned as a raw JSON event
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0]["message"]["text"], "Hello");
+        assert_eq!(result.events[0]["response"][0]["kind"], "markdownContent");
     }
 
     #[test]
@@ -668,13 +635,17 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let agent = CopilotAgent;
+        let agent = CopilotAgent::new();
         let watermark = Box::new(ByteOffsetWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test-session")
             .unwrap();
 
+        // Both JSONL lines are returned as raw JSON
         assert_eq!(result.events.len(), 2);
-        assert_eq!(result.model, Some("copilot/gpt-4".to_string()));
+        assert_eq!(result.events[0]["type"], "user.message");
+        assert_eq!(result.events[0]["data"]["content"], "Hello");
+        assert_eq!(result.events[1]["type"], "assistant.message");
+        assert_eq!(result.events[1]["data"]["modelId"], "copilot/gpt-4");
     }
 }

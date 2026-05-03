@@ -111,7 +111,7 @@ pub struct TranscriptSource {
 pub enum TranscriptFormat {
     ClaudeJsonl,
     ContinueJson,
-    GeminiJson,
+    GeminiJsonl,
     WindsurfJsonl,
     CodexJsonl,
     CursorJsonl,

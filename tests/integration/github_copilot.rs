@@ -3,7 +3,7 @@ use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_prese
 use git_ai::error::GitAiError;
 use git_ai::transcripts::agent::Agent;
 use git_ai::transcripts::agents::CopilotAgent;
-use git_ai::transcripts::watermark::ByteOffsetWatermark;
+use git_ai::transcripts::watermark::{ByteOffsetWatermark, RecordIndexWatermark};
 use serde_json::json;
 use std::{fs, io::Write};
 
@@ -20,90 +20,42 @@ fn ensure_clean_env() {
 }
 
 #[test]
-fn copilot_session_parsing_stub() {
+fn test_copilot_session_json_raw_event_fidelity() {
     ensure_clean_env();
-    let sample = r#"{"requests": []}"#;
+    let fixture = fixture_path("copilot_session_simple.json");
+    let agent = CopilotAgent::new();
+    let watermark = Box::new(RecordIndexWatermark::new(0));
+    let result = agent
+        .read_incremental(fixture.as_path(), watermark, "test")
+        .expect("Should parse copilot session JSON");
 
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fixture).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["requests"].as_array().unwrap().clone();
 
-    let agent = CopilotAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent.read_incremental(temp_file.path(), watermark, "test");
-    assert!(result.is_ok());
-    let batch = result.unwrap();
-    assert!(batch.events.is_empty());
-    assert!(batch.model.is_none());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
-fn copilot_session_parsing_simple() {
+fn test_copilot_event_stream_raw_event_fidelity() {
     ensure_clean_env();
-    let fixture = fixture_path("copilot_session_simple.json");
-
-    let agent = CopilotAgent;
+    let fixture = fixture_path("copilot_session_event_stream.jsonl");
+    let agent = CopilotAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent.read_incremental(fixture.as_path(), watermark, "test");
-    assert!(result.is_ok());
-    let batch = result.unwrap();
+    let result = agent
+        .read_incremental(fixture.as_path(), watermark, "test")
+        .expect("Should parse copilot event stream JSONL");
 
-    // The session has 3 requests with user messages and tool use response items.
-    // Verify user messages are extracted
-    let user_events: Vec<_> = batch
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(user_events.len(), 3);
-    assert_eq!(
-        user_events[0].prompt_text,
-        Some(Some("What can you help me with?".to_string()))
-    );
-    assert_eq!(
-        user_events[1].prompt_text,
-        Some(Some("Change Bonjour World to hello world".to_string()))
-    );
-    assert_eq!(
-        user_events[2].prompt_text,
-        Some(Some("Search for any other mentions of Bonjour".to_string()))
-    );
 
-    // Verify tool use events are extracted
-    let tool_events: Vec<_> = batch
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("tool_use".to_string())))
-        .collect();
-    assert!(!tool_events.is_empty());
-    assert!(
-        tool_events
-            .iter()
-            .any(|e| e.tool_name == Some(Some("prepareToolInvocation".to_string())))
-    );
-    assert!(
-        tool_events
-            .iter()
-            .any(|e| e.tool_name == Some(Some("copilot_replaceString".to_string())))
-    );
-    assert!(
-        tool_events
-            .iter()
-            .any(|e| e.tool_name == Some(Some("textEditGroup".to_string())))
-    );
-    assert!(
-        tool_events
-            .iter()
-            .any(|e| e.tool_name == Some(Some("copilot_findTextInFiles".to_string())))
-    );
-
-    // Model is extracted from inputState.selectedModel.identifier (not per-request modelId).
-    // The simple fixture doesn't have inputState, so model is None.
-    assert!(batch.model.is_none());
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
-
-// NOTE: test_copilot_extracts_edited_filepaths, test_copilot_no_edited_filepaths_when_no_edits,
-// and test_copilot_deduplicates_edited_filepaths were removed because the new CopilotAgent API
-// (read_incremental) does not return edited filepaths.
 
 #[test]
 #[serial_test::serial]
@@ -114,13 +66,12 @@ fn test_copilot_returns_empty_transcript_in_codespaces() {
     }
 
     let fixture = fixture_path("copilot_session_simple.json");
-    let agent = CopilotAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let agent = CopilotAgent::new();
+    let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent.read_incremental(fixture.as_path(), watermark, "test");
     assert!(result.is_ok());
     let batch = result.unwrap();
     assert!(batch.events.is_empty());
-    assert!(batch.model.is_none());
 
     unsafe {
         if let Some(original) = original_codespaces {
@@ -140,13 +91,12 @@ fn test_copilot_returns_empty_transcript_in_remote_containers() {
     }
 
     let fixture = fixture_path("copilot_session_simple.json");
-    let agent = CopilotAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let agent = CopilotAgent::new();
+    let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent.read_incremental(fixture.as_path(), watermark, "test");
     assert!(result.is_ok());
     let batch = result.unwrap();
     assert!(batch.events.is_empty());
-    assert!(batch.model.is_none());
 
     unsafe {
         if let Some(orig) = original {
@@ -445,21 +395,6 @@ fn test_copilot_after_edit_with_jsonl_session() {
 // copilot_session_jsonl_scalar_patch_applied were removed because the new CopilotAgent API
 // does not support the kind:0/kind:1 JSONL snapshot+patch protocol.
 
-#[test]
-fn copilot_session_plain_json_unaffected() {
-    ensure_clean_env();
-    let fixture = fixture_path("copilot_session_simple.json");
-    let agent = CopilotAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent.read_incremental(fixture.as_path(), watermark, "test");
-    assert!(result.is_ok());
-    let batch = result.unwrap();
-    assert!(!batch.events.is_empty());
-    // Model is extracted from inputState.selectedModel.identifier (not per-request modelId).
-    // The simple fixture doesn't have inputState, so model is None.
-    assert!(batch.model.is_none());
-}
-
 // ============================================================================
 // VS Code PreToolUse / PostToolUse tests
 // ============================================================================
@@ -678,56 +613,6 @@ fn test_copilot_preset_vscode_claude_transcript_path_is_rejected() {
             .to_string()
             .contains("Claude transcript path")
     );
-}
-
-#[test]
-fn copilot_session_parsing_event_stream_jsonl() {
-    ensure_clean_env();
-    let fixture = fixture_path("copilot_session_event_stream.jsonl");
-    let agent = CopilotAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent.read_incremental(fixture.as_path(), watermark, "test");
-    assert!(result.is_ok());
-    let batch = result.unwrap();
-
-    assert!(batch.model.is_none());
-    assert!(!batch.events.is_empty());
-    assert!(
-        batch
-            .events
-            .iter()
-            .any(|e| e.event_type == Some(Some("user_message".to_string())))
-    );
-    assert!(
-        batch
-            .events
-            .iter()
-            .any(|e| e.event_type == Some(Some("assistant_message".to_string())))
-    );
-    assert!(
-        batch
-            .events
-            .iter()
-            .any(|e| e.event_type == Some(Some("tool_use".to_string())))
-    );
-}
-
-#[test]
-fn copilot_session_event_stream_jsonl_model_hint_is_detected() {
-    ensure_clean_env();
-    let sample = r#"{"type":"session.start","data":{"sessionId":"event-session-2","modelId":"copilot/gpt-4o"},"id":"evt-1","timestamp":"2026-02-14T03:02:25.825Z","parentId":null}
-{"type":"user.message","data":{"content":"hello"},"id":"evt-2","timestamp":"2026-02-14T03:02:26.000Z","parentId":"evt-1"}
-{"type":"assistant.message","data":{"content":"hi"},"id":"evt-3","timestamp":"2026-02-14T03:02:27.000Z","parentId":"evt-2"}"#;
-
-    let mut temp_file = tempfile::NamedTempFile::with_suffix(".jsonl").unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
-    let agent = CopilotAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent.read_incremental(temp_file.path(), watermark, "test");
-    assert!(result.is_ok());
-    let batch = result.unwrap();
-    assert_eq!(batch.model, Some("copilot/gpt-4o".to_string()));
 }
 
 // ============================================================================

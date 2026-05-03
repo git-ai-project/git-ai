@@ -1,0 +1,4 @@
+{"parentUuid":"root","isSidechain":false,"message":{"content":"Write a hello world function","type":"human"},"type":"user","uuid":"msg-1","timestamp":"2026-04-19T18:05:00.000Z","userType":"external","cwd":"/tmp","sessionId":"sess-1","version":"2.1.114"}
+{"parentUuid":"msg-1","isSidechain":false,"message":{"model":"claude-opus-4-6","id":"msg_bdrk_01","type":"message","role":"assistant","content":[{"type":"text","text":"Here is a hello world function."}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":27}},"type":"assistant","uuid":"msg-2","timestamp":"2026-04-19T18:05:01.000Z","userType":"external","cwd":"/tmp","sessionId":"sess-1","version":"2.1.114"}
+{"type":"last-prompt","lastPrompt":"Write a hello world function","sessionId":"sess-1"}
+{"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"sess-1"}

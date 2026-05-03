@@ -17,49 +17,22 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 #[test]
-fn test_claude_reader_with_fixture() {
+fn test_claude_reader_raw_event_fidelity() {
     let path = fixture_path("claude_simple.jsonl");
+    let agent = ClaudeAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
-
-    let agent = ClaudeAgent;
     let result = agent
         .read_incremental(&path, watermark, "test-session")
         .unwrap();
 
-    // Should have 3 events: user message, assistant text, tool use
-    assert_eq!(result.events.len(), 3);
-    assert_eq!(result.model, Some("claude-sonnet-4".to_string()));
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
 
-    // Event 0: User message
-    let event0 = &result.events[0];
-    assert_eq!(event0.event_type, Some(Some("user_message".to_string())));
-    assert_eq!(
-        event0.prompt_text,
-        Some(Some("Write a hello world function".to_string()))
-    );
-    assert!(event0.event_ts.is_some());
-
-    // Event 1: Assistant text
-    let event1 = &result.events[1];
-    assert_eq!(
-        event1.event_type,
-        Some(Some("assistant_message".to_string()))
-    );
-    assert_eq!(
-        event1.response_text,
-        Some(Some(
-            "I'll create a hello world function for you.".to_string()
-        ))
-    );
-
-    // Event 2: Tool use
-    let event2 = &result.events[2];
-    assert_eq!(event2.event_type, Some(Some("tool_use".to_string())));
-    assert_eq!(event2.tool_name, Some(Some("Write".to_string())));
-    assert_eq!(
-        event2.external_tool_use_id,
-        Some(Some("toolu_abc123".to_string()))
-    );
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -78,7 +51,7 @@ fn test_claude_reader_watermark_resume() {
     drop(file);
 
     // Read from start
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark1 = Box::new(ByteOffsetWatermark::new(0));
     let result1 = agent
         .read_incremental(&file_path, watermark1, "test-session")
@@ -108,8 +81,8 @@ fn test_claude_reader_watermark_resume() {
         .unwrap();
     assert_eq!(result2.events.len(), 1);
     assert_eq!(
-        result2.events[0].prompt_text,
-        Some(Some("Second message".to_string()))
+        result2.events[0]["message"]["content"].as_str(),
+        Some("Second message")
     );
 
     // Verify watermark advanced
@@ -126,7 +99,7 @@ fn test_claude_reader_handles_malformed_json() {
     writeln!(file, "{{invalid json syntax}}").unwrap();
     file.flush().unwrap();
 
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent.read_incremental(&file_path, watermark, "test-session");
 
@@ -145,7 +118,7 @@ fn test_claude_reader_handles_malformed_json() {
 #[test]
 fn test_claude_reader_file_not_found() {
     let path = PathBuf::from("/nonexistent/transcript.jsonl");
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent.read_incremental(&path, watermark, "test-session");
 
@@ -158,69 +131,4 @@ fn test_claude_reader_file_not_found() {
             _ => panic!("Expected Fatal error, got {:?}", e),
         }
     }
-}
-
-#[test]
-fn test_claude_reader_thinking_blocks() {
-    let temp_dir = TempDir::new().unwrap();
-    let file_path = temp_dir.path().join("thinking.jsonl");
-
-    let mut file = File::create(&file_path).unwrap();
-    writeln!(
-        file,
-        r#"{{"type":"assistant","message":{{"content":[{{"type":"thinking","thinking":"Let me think about this..."}}],"model":"claude-sonnet-4"}},"timestamp":"2025-01-01T00:00:00Z"}}"#
-    )
-    .unwrap();
-    file.flush().unwrap();
-
-    let agent = ClaudeAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(&file_path, watermark, "test-session")
-        .unwrap();
-
-    assert_eq!(result.events.len(), 1);
-    assert_eq!(
-        result.events[0].event_type,
-        Some(Some("assistant_thinking".to_string()))
-    );
-    assert_eq!(
-        result.events[0].response_text,
-        Some(Some("Let me think about this...".to_string()))
-    );
-}
-
-#[test]
-fn test_claude_reader_mixed_content() {
-    let temp_dir = TempDir::new().unwrap();
-    let file_path = temp_dir.path().join("mixed.jsonl");
-
-    let mut file = File::create(&file_path).unwrap();
-    writeln!(
-        file,
-        r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Here's the code:"}},{{"type":"tool_use","name":"Write","id":"toolu_xyz"}},{{"type":"text","text":"Done!"}}],"model":"claude-sonnet-4"}},"timestamp":"2025-01-01T00:00:00Z"}}"#
-    )
-    .unwrap();
-    file.flush().unwrap();
-
-    let agent = ClaudeAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(&file_path, watermark, "test-session")
-        .unwrap();
-
-    // Should have 3 events: text, tool_use, text
-    assert_eq!(result.events.len(), 3);
-    assert_eq!(
-        result.events[0].event_type,
-        Some(Some("assistant_message".to_string()))
-    );
-    assert_eq!(
-        result.events[1].event_type,
-        Some(Some("tool_use".to_string()))
-    );
-    assert_eq!(
-        result.events[2].event_type,
-        Some(Some("assistant_message".to_string()))
-    );
 }

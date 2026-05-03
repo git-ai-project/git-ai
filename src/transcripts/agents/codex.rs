@@ -1,6 +1,5 @@
 //! Codex agent implementation with sweep discovery.
 
-use crate::metrics::events::AgentTraceValues;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -11,9 +10,20 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Codex agent that reads Codex JSONL transcript files.
-pub struct CodexAgent;
+pub struct CodexAgent {
+    batch_size: usize,
+}
 
 impl CodexAgent {
+    pub fn new() -> Self {
+        Self { batch_size: 1000 }
+    }
+
+    #[cfg(test)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self { batch_size }
+    }
+
     /// Search for a rollout file matching the given session ID in the Codex home directory.
     ///
     /// Looks in both `sessions` and `archived_sessions` subdirectories for files
@@ -65,7 +75,17 @@ impl CodexAgent {
     }
 }
 
+impl Default for CodexAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Agent for CodexAgent {
+    fn batch_size_hint(&self) -> usize {
+        self.batch_size
+    }
+
     fn sweep_strategy(&self) -> SweepStrategy {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
@@ -122,8 +142,8 @@ impl Agent for CodexAgent {
                 retry_after: Duration::from_secs(5),
             })?;
 
-        // Read all new lines into a buffer for two-pass processing
-        let mut parsed_lines: Vec<serde_json::Value> = Vec::new();
+        let batch_limit = self.batch_size_hint();
+        let mut events = Vec::with_capacity(batch_limit);
         let mut current_offset = start_offset;
         let mut line_number = 0;
         let mut line = String::new();
@@ -155,150 +175,9 @@ impl Agent for CodexAgent {
                     message: format!("Invalid JSON in {}: {}", path.display(), e),
                 })?;
 
-            parsed_lines.push(entry);
-        }
-
-        // Pass 1: Primary format processing
-        let mut events = Vec::new();
-        let mut model = None;
-
-        for entry in &parsed_lines {
-            let timestamp_opt = entry["timestamp"].as_str().and_then(|s| {
-                chrono::DateTime::parse_from_rfc3339(s)
-                    .ok()
-                    .map(|dt| dt.timestamp() as u64)
-            });
-
-            let entry_type = entry["type"].as_str().unwrap_or("");
-            let payload = if entry["payload"].is_object() {
-                &entry["payload"]
-            } else {
-                entry
-            };
-
-            match entry_type {
-                "turn_context" => {
-                    if let Some(m) = payload["model"].as_str() {
-                        model = Some(m.to_string());
-                    }
-                }
-                "response_item" => {
-                    let response_type = payload["type"].as_str().unwrap_or("");
-                    match response_type {
-                        "message" => {
-                            let role = payload["role"].as_str().unwrap_or("");
-                            if let Some(content_array) = payload["content"].as_array() {
-                                match role {
-                                    "user" => {
-                                        let texts: Vec<&str> = content_array
-                                            .iter()
-                                            .filter(|item| {
-                                                item["type"].as_str() == Some("input_text")
-                                            })
-                                            .filter_map(|item| item["text"].as_str())
-                                            .collect();
-                                        let text = texts.join("\n");
-                                        if !text.trim().is_empty() {
-                                            let mut event = AgentTraceValues::new()
-                                                .event_type("user_message")
-                                                .prompt_text(text);
-                                            if let Some(ts) = timestamp_opt {
-                                                event = event.event_ts(ts);
-                                            }
-                                            events.push(event);
-                                        }
-                                    }
-                                    "assistant" => {
-                                        let texts: Vec<&str> = content_array
-                                            .iter()
-                                            .filter(|item| {
-                                                item["type"].as_str() == Some("output_text")
-                                            })
-                                            .filter_map(|item| item["text"].as_str())
-                                            .collect();
-                                        let text = texts.join("\n");
-                                        if !text.trim().is_empty() {
-                                            let mut event = AgentTraceValues::new()
-                                                .event_type("assistant_message")
-                                                .response_text(text);
-                                            if let Some(ts) = timestamp_opt {
-                                                event = event.event_ts(ts);
-                                            }
-                                            events.push(event);
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        "function_call" | "custom_tool_call" | "local_shell_call"
-                        | "web_search_call" => {
-                            let name = payload["name"].as_str().unwrap_or(response_type);
-                            let mut event = AgentTraceValues::new()
-                                .event_type("tool_use")
-                                .tool_name(name);
-                            if let Some(ts) = timestamp_opt {
-                                event = event.event_ts(ts);
-                            }
-                            events.push(event);
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Pass 2: Legacy fallback - if no events from primary format, try legacy event_msg format
-        if events.is_empty() {
-            for entry in &parsed_lines {
-                let timestamp_opt = entry["timestamp"].as_str().and_then(|s| {
-                    chrono::DateTime::parse_from_rfc3339(s)
-                        .ok()
-                        .map(|dt| dt.timestamp() as u64)
-                });
-
-                let entry_type = entry["type"].as_str().unwrap_or("");
-                if entry_type != "event_msg" {
-                    continue;
-                }
-
-                let payload = if entry["payload"].is_object() {
-                    &entry["payload"]
-                } else {
-                    entry
-                };
-
-                let payload_type = payload["type"].as_str().unwrap_or("");
-                match payload_type {
-                    "user_message" => {
-                        if let Some(message) = payload["message"].as_str()
-                            && !message.trim().is_empty()
-                        {
-                            let mut event = AgentTraceValues::new()
-                                .event_type("user_message")
-                                .prompt_text(message);
-                            if let Some(ts) = timestamp_opt {
-                                event = event.event_ts(ts);
-                            }
-                            events.push(event);
-                        }
-                    }
-                    "agent_message" => {
-                        if let Some(message) = payload["message"].as_str()
-                            && !message.trim().is_empty()
-                        {
-                            let mut event = AgentTraceValues::new()
-                                .event_type("assistant_message")
-                                .response_text(message);
-                            if let Some(ts) = timestamp_opt {
-                                event = event.event_ts(ts);
-                            }
-                            events.push(event);
-                        }
-                    }
-                    _ => {}
-                }
+            events.push(entry);
+            if events.len() >= batch_limit {
+                break;
             }
         }
 
@@ -306,7 +185,6 @@ impl Agent for CodexAgent {
 
         Ok(TranscriptBatch {
             events,
-            model,
             new_watermark,
         })
     }
@@ -318,11 +196,118 @@ mod tests {
 
     #[test]
     fn test_sweep_strategy() {
-        let agent = CodexAgent;
+        let agent = CodexAgent::new();
         assert_eq!(
             agent.sweep_strategy(),
             SweepStrategy::Periodic(Duration::from_secs(30 * 60))
         );
+    }
+
+    fn make_jsonl_line(i: usize) -> String {
+        format!(
+            r#"{{"type":"response_item","id":{},"payload":{{"type":"message","role":"assistant","content":[{{"type":"output_text","text":"msg-{}"}}]}}}}"#,
+            i, i
+        )
+    }
+
+    fn drain_all(
+        agent: &CodexAgent,
+        path: &Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> = Box::new(ByteOffsetWatermark::new(0));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_batch_resume_no_loss_or_repeat() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        for i in 0..5 {
+            writeln!(file, "{}", make_jsonl_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = CodexAgent::with_batch_size(2);
+        let (events, _) = drain_all(&agent, file.path());
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events.iter().map(|e| e["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_append_one_record_after_full_read() {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        for i in 0..3 {
+            writeln!(file, "{}", make_jsonl_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = CodexAgent::with_batch_size(2);
+        let (all, wm) = drain_all(&agent, file.path());
+        assert_eq!(all.len(), 3);
+
+        let mut f = OpenOptions::new().append(true).open(file.path()).unwrap();
+        writeln!(f, "{}", make_jsonl_line(3)).unwrap();
+        f.flush().unwrap();
+
+        let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["id"].as_u64().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_append_several_records_after_full_read() {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        for i in 0..3 {
+            writeln!(file, "{}", make_jsonl_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = CodexAgent::with_batch_size(2);
+        let (_, mut wm) = drain_all(&agent, file.path());
+
+        let mut f = OpenOptions::new().append(true).open(file.path()).unwrap();
+        for i in 3..6 {
+            writeln!(f, "{}", make_jsonl_line(i)).unwrap();
+        }
+        f.flush().unwrap();
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
     }
 
     #[test]
@@ -343,18 +328,22 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let agent = CodexAgent;
+        let agent = CodexAgent::new();
         let watermark = Box::new(ByteOffsetWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test")
             .unwrap();
 
-        assert_eq!(result.events.len(), 1);
-        assert_eq!(result.model, Some("gpt-4o".to_string()));
+        // Both JSONL lines are returned as raw JSON
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0]["type"], "turn_context");
+        assert_eq!(result.events[0]["payload"]["model"], "gpt-4o");
+        assert_eq!(result.events[1]["type"], "response_item");
+        assert_eq!(result.events[1]["payload"]["role"], "assistant");
     }
 
     #[test]
-    fn test_read_incremental_legacy_fallback() {
+    fn test_read_incremental_legacy_format() {
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -371,12 +360,16 @@ mod tests {
         .unwrap();
         file.flush().unwrap();
 
-        let agent = CodexAgent;
+        let agent = CodexAgent::new();
         let watermark = Box::new(ByteOffsetWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test")
             .unwrap();
 
+        // Both JSONL lines are returned as raw JSON
         assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0]["type"], "event_msg");
+        assert_eq!(result.events[0]["payload"]["type"], "user_message");
+        assert_eq!(result.events[1]["payload"]["type"], "agent_message");
     }
 }

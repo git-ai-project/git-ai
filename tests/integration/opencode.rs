@@ -14,74 +14,122 @@ fn opencode_sqlite_fixture_path() -> std::path::PathBuf {
 }
 
 #[test]
-fn test_parse_opencode_sqlite_transcript() {
+fn test_opencode_raw_event_fidelity() {
     use chrono::{DateTime, Utc};
     use git_ai::transcripts::agent::Agent;
     use git_ai::transcripts::agents::OpenCodeAgent;
     use git_ai::transcripts::watermark::TimestampWatermark;
+    use rusqlite::{Connection, OpenFlags};
 
     let opencode_root = opencode_sqlite_fixture_path();
-    let db_path = opencode_root.join("opencode.db");
+    let fixture = opencode_root.join("opencode.db");
     let session_id = "test-session-123";
 
-    let agent = OpenCodeAgent;
+    let agent = OpenCodeAgent::new();
     let watermark = Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
     let result = agent
-        .read_incremental(&db_path, watermark, session_id)
+        .read_incremental(&fixture, watermark, session_id)
         .unwrap();
 
-    assert!(
-        !result.events.is_empty(),
-        "Transcript should contain events"
-    );
-    assert_eq!(
-        result.model.as_deref(),
-        Some("openai/gpt-5"),
-        "Model should come from sqlite assistant message metadata"
-    );
+    // Independently query the SQLite DB to construct the same expected events.
+    let conn = Connection::open_with_flags(&fixture, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
 
-    // First event should be a user_message
-    let first = &result.events[0];
-    assert_eq!(
-        first.event_type,
-        Some(Some("user_message".to_string())),
-        "First event should be from user"
-    );
-    assert!(
-        first
-            .prompt_text
-            .as_ref()
-            .and_then(|v| v.as_ref())
-            .map(|t| t.contains("sqlite transcript data"))
-            .unwrap_or(false),
-        "Expected sqlite fixture user text"
-    );
+    let watermark_millis = DateTime::<Utc>::UNIX_EPOCH.timestamp_millis();
 
-    // Should have an assistant_message event
-    let has_assistant = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("assistant_message".to_string())));
-    assert!(has_assistant, "Should have assistant message events");
-
-    // Should have a tool_use event
-    let has_tool_use = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("tool_use".to_string())));
-    assert!(has_tool_use, "Should have tool_use events");
-
-    // Check tool_use event has tool_name
-    let tool_event = result
-        .events
-        .iter()
-        .find(|e| e.event_type == Some(Some("tool_use".to_string())))
+    // Read full message rows for this session with time_updated > watermark (same filter as the agent)
+    let mut msg_stmt = conn
+        .prepare(
+            "SELECT id, session_id, time_created, time_updated, data FROM message \
+             WHERE session_id = ? AND time_updated > ? \
+             ORDER BY time_updated ASC, id ASC",
+        )
         .unwrap();
-    assert_eq!(
-        tool_event.tool_name,
-        Some(Some("edit".to_string())),
-        "Tool name should be 'edit'"
-    );
+    let messages: Vec<(String, serde_json::Value)> = msg_stmt
+        .query_map(rusqlite::params![session_id, watermark_millis], |row| {
+            let id: String = row.get(0)?;
+            let row_session_id: String = row.get(1)?;
+            let time_created: i64 = row.get(2)?;
+            let time_updated: i64 = row.get(3)?;
+            let data: String = row.get(4)?;
+            Ok((id, row_session_id, time_created, time_updated, data))
+        })
+        .unwrap()
+        .map(|r| {
+            let (id, row_session_id, time_created, time_updated, data) = r.unwrap();
+            let parsed_data: serde_json::Value = serde_json::from_str(&data).unwrap();
+            let row_json = json!({
+                "id": id,
+                "session_id": row_session_id,
+                "time_created": time_created,
+                "time_updated": time_updated,
+                "data": parsed_data,
+            });
+            (id, row_json)
+        })
+        .collect();
+
+    // Read parts only for matched messages via IN-subquery (same query as the agent)
+    let mut part_stmt = conn
+        .prepare(
+            "SELECT id, message_id, session_id, time_created, time_updated, data FROM part \
+             WHERE message_id IN ( \
+                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? \
+             ) \
+             ORDER BY message_id ASC, time_updated ASC, id ASC",
+        )
+        .unwrap();
+    let parts_rows: Vec<(String, serde_json::Value)> = part_stmt
+        .query_map(rusqlite::params![session_id, watermark_millis], |row| {
+            let id: String = row.get(0)?;
+            let message_id: String = row.get(1)?;
+            let row_session_id: String = row.get(2)?;
+            let time_created: i64 = row.get(3)?;
+            let time_updated: i64 = row.get(4)?;
+            let data: String = row.get(5)?;
+            Ok((
+                id,
+                message_id,
+                row_session_id,
+                time_created,
+                time_updated,
+                data,
+            ))
+        })
+        .unwrap()
+        .map(|r| {
+            let (id, message_id, row_session_id, time_created, time_updated, data) = r.unwrap();
+            let parsed_data: serde_json::Value = serde_json::from_str(&data).unwrap();
+            let row_json = json!({
+                "id": id,
+                "message_id": message_id,
+                "session_id": row_session_id,
+                "time_created": time_created,
+                "time_updated": time_updated,
+                "data": parsed_data,
+            });
+            (message_id, row_json)
+        })
+        .collect();
+
+    let mut parts_by_msg: std::collections::HashMap<String, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
+    for (msg_id, row_json) in parts_rows {
+        parts_by_msg.entry(msg_id).or_default().push(row_json);
+    }
+
+    let expected: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|(id, row_json)| {
+            if let Some(parts) = parts_by_msg.get(id) {
+                json!({"message": row_json, "parts": parts})
+            } else {
+                json!({"message": row_json})
+            }
+        })
+        .collect();
+
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -170,8 +218,8 @@ fn test_opencode_preset_posttooluse_returns_ai_checkpoint() {
             );
             assert_eq!(e.context.agent_id.tool, "opencode");
             assert_eq!(e.context.agent_id.id, "test-session-123");
-            // Model is lazily resolved from transcript, so at parse time it's "unknown"
-            assert_eq!(e.context.agent_id.model, "unknown");
+            // Model is extracted from the OpenCode SQLite fixture at parse time
+            assert_eq!(e.context.agent_id.model, "gpt-5");
         }
         _ => panic!("Expected PostFileEdit for PostToolUse"),
     }
@@ -388,9 +436,9 @@ fn test_opencode_e2e_checkpoint_and_commit() {
         "Agent tool should be opencode"
     );
     assert_eq!(
-        session_record.agent_id.model, "unknown",
-        "Session record model comes from preset AgentId"
+        session_record.agent_id.model, "gpt-5",
+        "Session record model should be extracted from OpenCode SQLite fixture"
     );
 }
 
-crate::reuse_tests_in_worktree!(test_parse_opencode_sqlite_transcript,);
+crate::reuse_tests_in_worktree!(test_opencode_raw_event_fidelity,);
