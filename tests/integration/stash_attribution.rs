@@ -1094,6 +1094,8 @@ fn test_stash_pop_conflict_preserves_ai_attribution_without_new_checkpoint() {
         "ai addition 2".ai(),
         "ai addition 3".ai(),
     ]);
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.txt"])
+        .expect("checkpoint should succeed");
 
     // Stash the AI changes
     repo.git(&["stash", "push", "-m", "ai-changes"])
