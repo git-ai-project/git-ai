@@ -7,7 +7,7 @@ use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct DroidPreset;
 
@@ -124,6 +124,14 @@ impl AgentPreset for DroidPreset {
             .to_string();
 
         // Build metadata
+        let extracted_model =
+            crate::transcripts::model_extraction::extract_model_from_droid_settings(Path::new(
+                &resolved_settings_path,
+            ))
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "unknown".to_string());
+
         let mut metadata = HashMap::new();
         metadata.insert(
             "transcript_path".to_string(),
@@ -138,7 +146,7 @@ impl AgentPreset for DroidPreset {
             agent_id: AgentId {
                 tool: "droid".to_string(),
                 id: session_id.clone(),
-                model: "unknown".to_string(),
+                model: extracted_model,
             },
             session_id,
             trace_id: trace_id.to_string(),
@@ -146,10 +154,11 @@ impl AgentPreset for DroidPreset {
             metadata,
         };
 
-        let transcript_source = Some(TranscriptSource::Path {
+        let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(&resolved_transcript_path),
             format: TranscriptFormat::DroidJsonl,
-            session_id: None,
+            session_id: context.session_id.clone(),
+            external_thread_id: Some(context.session_id.clone()),
         });
 
         // PreToolUse
@@ -253,13 +262,10 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource::Path {
-                        format: TranscriptFormat::DroidJsonl,
-                        ..
-                    })
-                ));
+                assert!(e.transcript_source.is_some());
+                if let Some(ts) = &e.transcript_source {
+                    assert_eq!(ts.format, TranscriptFormat::DroidJsonl);
+                }
             }
             _ => panic!("Expected PostFileEdit"),
         }
@@ -289,13 +295,10 @@ mod tests {
             ParsedHookEvent::PostBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "droid");
                 assert_eq!(e.tool_use_id, "tu-1");
-                assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource::Path {
-                        format: TranscriptFormat::DroidJsonl,
-                        ..
-                    })
-                ));
+                assert!(e.transcript_source.is_some());
+                if let Some(ts) = &e.transcript_source {
+                    assert_eq!(ts.format, TranscriptFormat::DroidJsonl);
+                }
             }
             _ => panic!("Expected PostBashCall"),
         }

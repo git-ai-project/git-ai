@@ -301,7 +301,18 @@ impl AgentPreset for AmpPreset {
             agent_id: AgentId {
                 tool: "amp".to_string(),
                 id: session_id.clone(),
-                model: "unknown".to_string(), // model resolved later from transcript
+                model: resolved_transcript_path
+                    .as_ref()
+                    .and_then(|tp| {
+                        crate::transcripts::model_extraction::extract_model(
+                            tp,
+                            crate::transcripts::sweep::TranscriptFormat::AmpThreadJson,
+                            None,
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .unwrap_or_else(|| "unknown".to_string()),
             },
             session_id,
             trace_id: trace_id.to_string(),
@@ -309,10 +320,11 @@ impl AgentPreset for AmpPreset {
             metadata,
         };
 
-        let transcript_source = resolved_transcript_path.map(|path| TranscriptSource::Path {
+        let transcript_source = resolved_transcript_path.map(|path| TranscriptSource {
             path,
             format: TranscriptFormat::AmpThreadJson,
-            session_id: None,
+            session_id: context.session_id.clone(),
+            external_thread_id: None,
         });
 
         let event = match (is_pre, is_bash) {

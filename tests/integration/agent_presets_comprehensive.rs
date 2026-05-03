@@ -1,9 +1,10 @@
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
-use git_ai::commands::checkpoint_agent::transcript_readers;
 use git_ai::error::GitAiError;
+use git_ai::transcripts::agent::Agent;
+use git_ai::transcripts::agents::{ClaudeAgent, GeminiAgent};
+use git_ai::transcripts::watermark::ByteOffsetWatermark;
 use serde_json::json;
 use std::fs;
-use std::path::Path;
 
 // ==============================================================================
 // ClaudePreset Error Cases
@@ -121,12 +122,16 @@ fn test_claude_transcript_parsing_empty_file() {
     let temp_file = std::env::temp_dir().join("empty_claude.jsonl");
     fs::write(&temp_file, "").expect("Failed to write temp file");
 
-    let result = transcript_readers::read_claude_jsonl(Path::new(temp_file.to_str().unwrap()));
+    let result = ClaudeAgent::new().read_incremental(
+        &temp_file,
+        Box::new(ByteOffsetWatermark::new(0)),
+        "test",
+    );
 
     assert!(result.is_ok());
-    let (transcript, model) = result.unwrap();
-    assert!(transcript.messages().is_empty());
-    assert!(model.is_none());
+    let batch = result.unwrap();
+    assert!(batch.events.is_empty());
+    // TranscriptBatch no longer has a model field
 
     fs::remove_file(temp_file).ok();
 }
@@ -136,9 +141,15 @@ fn test_claude_transcript_parsing_malformed_json() {
     let temp_file = std::env::temp_dir().join("malformed_claude.jsonl");
     fs::write(&temp_file, "{invalid json}\n").expect("Failed to write temp file");
 
-    let result = transcript_readers::read_claude_jsonl(Path::new(temp_file.to_str().unwrap()));
+    let result = ClaudeAgent::new().read_incremental(
+        &temp_file,
+        Box::new(ByteOffsetWatermark::new(0)),
+        "test",
+    );
 
-    assert!(result.is_err());
+    // Malformed JSON lines are skipped, not fatal errors
+    let batch = result.expect("malformed lines should be skipped, not cause errors");
+    assert_eq!(batch.events.len(), 0);
     fs::remove_file(temp_file).ok();
 }
 
@@ -152,12 +163,21 @@ fn test_claude_transcript_parsing_with_empty_lines() {
     "#;
     fs::write(&temp_file, content).expect("Failed to write temp file");
 
-    let result = transcript_readers::read_claude_jsonl(Path::new(temp_file.to_str().unwrap()));
+    let result = ClaudeAgent::new().read_incremental(
+        &temp_file,
+        Box::new(ByteOffsetWatermark::new(0)),
+        "test",
+    );
 
     assert!(result.is_ok());
-    let (transcript, model) = result.unwrap();
-    assert_eq!(transcript.messages().len(), 2);
-    assert_eq!(model, Some("claude-3".to_string()));
+    let batch = result.unwrap();
+    assert_eq!(batch.events.len(), 2);
+    // Model is in the raw event data, not on TranscriptBatch
+    let model = batch
+        .events
+        .iter()
+        .find_map(|e| e["message"]["model"].as_str());
+    assert_eq!(model, Some("claude-3"));
 
     fs::remove_file(temp_file).ok();
 }
@@ -234,7 +254,7 @@ fn test_gemini_preset_invalid_json() {
 fn test_gemini_preset_missing_session_id() {
     let preset = resolve_preset("gemini").unwrap();
     let hook_input = json!({
-        "transcript_path": "tests/fixtures/gemini-session-simple.json",
+        "transcript_path": "tests/fixtures/gemini-session-simple.jsonl",
         "cwd": "/path"
     })
     .to_string();
@@ -275,7 +295,7 @@ fn test_gemini_preset_missing_cwd() {
     let preset = resolve_preset("gemini").unwrap();
     let hook_input = json!({
         "session_id": "test-session",
-        "transcript_path": "tests/fixtures/gemini-session-simple.json"
+        "transcript_path": "tests/fixtures/gemini-session-simple.jsonl"
     })
     .to_string();
 
@@ -295,7 +315,7 @@ fn test_gemini_preset_beforetool_checkpoint() {
     let preset = resolve_preset("gemini").unwrap();
     let hook_input = json!({
         "session_id": "test-session",
-        "transcript_path": "tests/fixtures/gemini-session-simple.json",
+        "transcript_path": "tests/fixtures/gemini-session-simple.jsonl",
         "cwd": "/path",
         "hook_event_name": "BeforeTool",
         "tool_input": {
@@ -319,50 +339,51 @@ fn test_gemini_preset_beforetool_checkpoint() {
 
 #[test]
 fn test_gemini_transcript_parsing_invalid_path() {
-    let result = transcript_readers::read_gemini_json(Path::new("/nonexistent/path.json"));
+    let result = GeminiAgent::new().read_incremental(
+        std::path::Path::new("/nonexistent/path.jsonl"),
+        Box::new(ByteOffsetWatermark::new(0)),
+        "test",
+    );
 
     assert!(result.is_err());
     match result {
-        Err(GitAiError::IoError(_)) => {}
-        _ => panic!("Expected IoError"),
+        Err(git_ai::transcripts::TranscriptError::Fatal { .. }) => {}
+        _ => panic!("Expected Fatal error for nonexistent path"),
     }
 }
 
 #[test]
-fn test_gemini_transcript_parsing_empty_messages() {
-    let temp_file = std::env::temp_dir().join("gemini_empty_messages.json");
-    let content = json!({
-        "messages": []
-    });
-    fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
+fn test_gemini_transcript_parsing_empty_file() {
+    let temp_file = std::env::temp_dir().join("gemini_empty.jsonl");
+    fs::write(&temp_file, "").expect("Failed to write temp file");
 
-    let result = transcript_readers::read_gemini_json(Path::new(temp_file.to_str().unwrap()));
+    let result = GeminiAgent::new().read_incremental(
+        &temp_file,
+        Box::new(ByteOffsetWatermark::new(0)),
+        "test",
+    );
 
     assert!(result.is_ok());
-    let (transcript, model) = result.unwrap();
-    assert!(transcript.messages().is_empty());
-    assert!(model.is_none());
+    let batch = result.unwrap();
+    assert!(batch.events.is_empty());
 
     fs::remove_file(temp_file).ok();
 }
 
 #[test]
-fn test_gemini_transcript_parsing_missing_messages_field() {
-    let temp_file = std::env::temp_dir().join("gemini_no_messages.json");
-    let content = json!({
-        "other_field": "value"
-    });
-    fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
+fn test_gemini_transcript_parsing_invalid_json_line() {
+    let temp_file = std::env::temp_dir().join("gemini_invalid_line.jsonl");
+    fs::write(&temp_file, "this is not valid json\n").expect("Failed to write temp file");
 
-    let result = transcript_readers::read_gemini_json(Path::new(temp_file.to_str().unwrap()));
+    let result = GeminiAgent::new().read_incremental(
+        &temp_file,
+        Box::new(ByteOffsetWatermark::new(0)),
+        "test",
+    );
 
-    assert!(result.is_err());
-    match result {
-        Err(GitAiError::PresetError(msg)) => {
-            assert!(msg.contains("messages array not found"));
-        }
-        _ => panic!("Expected PresetError"),
-    }
+    // Malformed JSON lines are skipped, not fatal errors
+    let batch = result.expect("malformed lines should be skipped, not cause errors");
+    assert_eq!(batch.events.len(), 0);
 
     fs::remove_file(temp_file).ok();
 }
@@ -488,7 +509,8 @@ fn test_codex_preset_invalid_json() {
 fn test_codex_preset_missing_session_id() {
     let preset = resolve_preset("codex").unwrap();
     let hook_input = json!({
-        "type": "agent-turn-complete",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "apply_patch",
         "transcript_path": "tests/fixtures/codex-session-simple.jsonl",
         "cwd": "/path"
     })
@@ -509,7 +531,9 @@ fn test_codex_preset_missing_session_id() {
 fn test_codex_preset_invalid_transcript_path() {
     let preset = resolve_preset("codex").unwrap();
     let hook_input = json!({
-        "type": "agent-turn-complete",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "apply_patch",
+        "tool_use_id": "patch-1",
         "session_id": "test-session-12345",
         "transcript_path": "/nonexistent/path/transcript.jsonl",
         "cwd": "/path"
@@ -910,7 +934,7 @@ fn test_gemini_preset_with_tool_input_no_file_path() {
     let preset = resolve_preset("gemini").unwrap();
     let hook_input = json!({
         "session_id": "test",
-        "transcript_path": "tests/fixtures/gemini-session-simple.json",
+        "transcript_path": "tests/fixtures/gemini-session-simple.jsonl",
         "cwd": "/path",
         "tool_input": {
             "other": "value"
@@ -984,23 +1008,27 @@ fn test_claude_preset_with_unicode_in_path() {
 
 #[test]
 fn test_gemini_transcript_with_unknown_message_types() {
-    let temp_file = std::env::temp_dir().join("gemini_unknown_types.json");
-    let content = json!({
-        "messages": [
-            {"type": "user", "content": "test"},
-            {"type": "unknown_type", "content": "should be skipped"},
-            {"type": "info", "content": "should also be skipped"},
-            {"type": "gemini", "content": "response"}
-        ]
-    });
-    fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
+    use std::io::Write;
+    let temp_file = std::env::temp_dir().join("gemini_unknown_types.jsonl");
+    let mut f = fs::File::create(&temp_file).unwrap();
+    writeln!(f, r#"{{"type":"user","content":"test"}}"#).unwrap();
+    writeln!(
+        f,
+        r#"{{"type":"unknown_type","content":"should still be included"}}"#
+    )
+    .unwrap();
+    writeln!(
+        f,
+        r#"{{"type":"info","content":"should also be included"}}"#
+    )
+    .unwrap();
+    writeln!(f, r#"{{"type":"gemini","content":"response"}}"#).unwrap();
 
-    let result = transcript_readers::read_gemini_json(Path::new(temp_file.to_str().unwrap()))
+    let batch = GeminiAgent::new()
+        .read_incremental(&temp_file, Box::new(ByteOffsetWatermark::new(0)), "test")
         .expect("Should parse successfully");
 
-    let (transcript, _) = result;
-    // Should only parse user and gemini messages
-    assert_eq!(transcript.messages().len(), 2);
+    assert_eq!(batch.events.len(), 4);
 
     fs::remove_file(temp_file).ok();
 }
@@ -1012,70 +1040,58 @@ fn test_claude_transcript_with_tool_result_in_user_content() {
 {"type":"assistant","timestamp":"2025-01-01T00:00:01Z","message":{"model":"claude-3","content":[{"type":"text","text":"response"}]}}"#;
     fs::write(&temp_file, content).expect("Failed to write temp file");
 
-    let result = transcript_readers::read_claude_jsonl(Path::new(temp_file.to_str().unwrap()))
+    let batch = ClaudeAgent::new()
+        .read_incremental(&temp_file, Box::new(ByteOffsetWatermark::new(0)), "test")
         .expect("Should parse successfully");
 
-    let (transcript, _) = result;
-    // Should skip tool_result but include the text content
-    let user_messages: Vec<_> = transcript
-        .messages()
+    // Events are raw JSONL entries. The user entry is a single event.
+    let user_events: Vec<_> = batch
+        .events
         .iter()
-        .filter(|m| matches!(m, git_ai::authorship::transcript::Message::User { .. }))
+        .filter(|e| e["type"] == "user")
         .collect();
-    assert_eq!(user_messages.len(), 1);
+    assert_eq!(user_events.len(), 1);
 
     fs::remove_file(temp_file).ok();
 }
 
 #[test]
 fn test_gemini_transcript_with_empty_tool_calls() {
-    let temp_file = std::env::temp_dir().join("gemini_empty_tools.json");
-    let content = json!({
-        "messages": [
-            {
-                "type": "gemini",
-                "content": "test",
-                "toolCalls": []
-            }
-        ]
-    });
-    fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
+    use std::io::Write;
+    let temp_file = std::env::temp_dir().join("gemini_empty_tools.jsonl");
+    let mut f = fs::File::create(&temp_file).unwrap();
+    writeln!(f, r#"{{"type":"gemini","content":"test","toolCalls":[]}}"#).unwrap();
 
-    let result = transcript_readers::read_gemini_json(Path::new(temp_file.to_str().unwrap()))
+    let batch = GeminiAgent::new()
+        .read_incremental(&temp_file, Box::new(ByteOffsetWatermark::new(0)), "test")
         .expect("Should parse successfully");
 
-    let (transcript, _) = result;
-    assert_eq!(transcript.messages().len(), 1);
+    assert_eq!(batch.events.len(), 1);
 
     fs::remove_file(temp_file).ok();
 }
 
 #[test]
 fn test_gemini_transcript_tool_call_without_args() {
-    let temp_file = std::env::temp_dir().join("gemini_tool_no_args.json");
-    let content = json!({
-        "messages": [
-            {
-                "type": "gemini",
-                "toolCalls": [
-                    {"name": "read_file"}
-                ]
-            }
-        ]
-    });
-    fs::write(&temp_file, content.to_string()).expect("Failed to write temp file");
+    use std::io::Write;
+    let temp_file = std::env::temp_dir().join("gemini_tool_no_args.jsonl");
+    let mut f = fs::File::create(&temp_file).unwrap();
+    writeln!(
+        f,
+        r#"{{"type":"gemini","toolCalls":[{{"name":"read_file"}}]}}"#
+    )
+    .unwrap();
 
-    let result = transcript_readers::read_gemini_json(Path::new(temp_file.to_str().unwrap()))
+    let batch = GeminiAgent::new()
+        .read_incremental(&temp_file, Box::new(ByteOffsetWatermark::new(0)), "test")
         .expect("Should parse successfully");
 
-    let (transcript, _) = result;
-    // Tool call should still be added with empty args object
-    let tool_uses: Vec<_> = transcript
-        .messages()
+    let tool_messages: Vec<_> = batch
+        .events
         .iter()
-        .filter(|m| matches!(m, git_ai::authorship::transcript::Message::ToolUse { .. }))
+        .filter(|e| e["toolCalls"].as_array().is_some_and(|a| !a.is_empty()))
         .collect();
-    assert_eq!(tool_uses.len(), 1);
+    assert_eq!(tool_messages.len(), 1);
 
     fs::remove_file(temp_file).ok();
 }

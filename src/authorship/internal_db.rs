@@ -1,3 +1,6 @@
+// DEPRECATED: The internal DB is deprecated and in the process of being removed.
+// It has been superseded by use-case-specific databases.
+
 use crate::error::GitAiError;
 use dirs;
 use rusqlite::{Connection, params};

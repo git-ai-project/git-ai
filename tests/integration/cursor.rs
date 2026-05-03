@@ -2,8 +2,10 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::{TestRepo, real_git_executable};
 use crate::test_utils::fixture_path;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
-use git_ai::commands::checkpoint_agent::transcript_readers;
 use git_ai::error::GitAiError;
+use git_ai::transcripts::agent::Agent;
+use git_ai::transcripts::agents::CursorAgent;
+use git_ai::transcripts::watermark::ByteOffsetWatermark;
 use std::path::PathBuf;
 
 const TEST_CONVERSATION_ID: &str = "de751938-f32b-4441-8239-a31d60aa4cf0";
@@ -13,160 +15,23 @@ fn parse_cursor(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
 }
 
 #[test]
-fn test_cursor_jsonl_basic_parsing() {
+fn test_cursor_raw_event_fidelity() {
     let fixture = fixture_path("cursor-session-simple.jsonl");
-    let (transcript, model) = transcript_readers::read_cursor_jsonl(fixture.as_path())
+    let agent = CursorAgent::new();
+    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let result = agent
+        .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Should parse cursor JSONL");
 
-    assert_eq!(model, None, "Model should be None for Cursor JSONL");
-
-    let messages = transcript.messages();
-    assert!(
-        !messages.is_empty(),
-        "Should have parsed messages from the fixture"
-    );
-
-    let user_count = messages
-        .iter()
-        .filter(|m| matches!(m, git_ai::authorship::transcript::Message::User { .. }))
-        .count();
-    let assistant_count = messages
-        .iter()
-        .filter(|m| matches!(m, git_ai::authorship::transcript::Message::Assistant { .. }))
-        .count();
-    let tool_count = messages
-        .iter()
-        .filter(|m| matches!(m, git_ai::authorship::transcript::Message::ToolUse { .. }))
-        .count();
-
-    assert_eq!(user_count, 1, "Should have 1 user message");
-    assert_eq!(assistant_count, 10, "Should have 10 assistant messages");
-    assert_eq!(
-        tool_count, 10,
-        "Should have 10 tool_use messages (Read x3, WebSearch x4, WebFetch, Grep, Write)"
-    );
-}
-
-#[test]
-fn test_cursor_jsonl_user_query_tag_stripping() {
-    let fixture = fixture_path("cursor-session-simple.jsonl");
-    let (transcript, _) = transcript_readers::read_cursor_jsonl(fixture.as_path())
-        .expect("Should parse cursor JSONL");
-
-    let messages = transcript.messages();
-    let first_user = messages
-        .iter()
-        .find(|m| matches!(m, git_ai::authorship::transcript::Message::User { .. }))
-        .expect("Should have at least one user message");
-
-    if let git_ai::authorship::transcript::Message::User { text, .. } = first_user {
-        assert!(
-            !text.contains("<user_query>"),
-            "User message should not contain <user_query> tag, got: {}",
-            text
-        );
-        assert!(
-            !text.contains("</user_query>"),
-            "User message should not contain </user_query> tag"
-        );
-        assert_eq!(
-            text,
-            "Generate a file with all the HBO shows from the 90's in it"
-        );
-    }
-}
-
-#[test]
-fn test_cursor_jsonl_tool_normalization() {
-    let fixture = fixture_path("cursor-session-simple.jsonl");
-    let (transcript, _) = transcript_readers::read_cursor_jsonl(fixture.as_path())
-        .expect("Should parse cursor JSONL");
-
-    let messages = transcript.messages();
-    let tool_messages: Vec<_> = messages
-        .iter()
-        .filter_map(|m| match m {
-            git_ai::authorship::transcript::Message::ToolUse { name, input, .. } => {
-                Some((name.as_str(), input))
-            }
-            _ => None,
-        })
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
         .collect();
 
-    let write_tool = tool_messages
-        .iter()
-        .find(|(name, _)| *name == "Write")
-        .expect("Should have a Write tool_use");
-    assert!(
-        write_tool.1.get("file_path").is_some(),
-        "Write tool should have file_path (normalized from path)"
-    );
-    assert!(
-        write_tool.1.get("content").is_none(),
-        "Write tool should have content stripped (edit tool)"
-    );
-    assert!(
-        write_tool.1.get("contents").is_none(),
-        "Write tool should not have original 'contents' field"
-    );
-
-    let read_tool = tool_messages
-        .iter()
-        .find(|(name, _)| *name == "Read")
-        .expect("Should have a Read tool_use");
-    assert!(
-        read_tool.1.get("file_path").is_some(),
-        "Read tool should have file_path (normalized from path)"
-    );
-    assert!(
-        read_tool.1.get("path").is_none(),
-        "Read tool should not have original 'path' field"
-    );
-}
-
-#[test]
-fn test_cursor_jsonl_read_tool_full_args() {
-    let fixture = fixture_path("cursor-session-simple.jsonl");
-    let (transcript, _) = transcript_readers::read_cursor_jsonl(fixture.as_path())
-        .expect("Should parse cursor JSONL");
-
-    let messages = transcript.messages();
-    let read_tool = messages
-        .iter()
-        .find_map(|m| match m {
-            git_ai::authorship::transcript::Message::ToolUse { name, input, .. }
-                if name == "Read" =>
-            {
-                Some(input)
-            }
-            _ => None,
-        })
-        .expect("Should have a Read tool_use");
-
-    assert!(
-        read_tool.get("file_path").is_some(),
-        "Read tool should have file_path (normalized from path)"
-    );
-}
-
-#[test]
-fn test_cursor_jsonl_preserves_text_content() {
-    let fixture = fixture_path("cursor-session-simple.jsonl");
-    let (transcript, _) = transcript_readers::read_cursor_jsonl(fixture.as_path())
-        .expect("Should parse cursor JSONL");
-
-    let assistant_messages: Vec<_> = transcript
-        .messages()
-        .iter()
-        .filter_map(|m| match m {
-            git_ai::authorship::transcript::Message::Assistant { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        assistant_messages.iter().any(|t| t.contains("HBO")),
-        "Should keep real content from assistant messages"
-    );
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -176,14 +41,16 @@ fn test_cursor_jsonl_empty_file() {
     let temp_file = NamedTempFile::new().expect("Should create temp file");
     let _ = temp_file.as_file().sync_all();
 
-    let (transcript, model) =
-        transcript_readers::read_cursor_jsonl(temp_file.path()).expect("Should handle empty file");
+    let agent = CursorAgent::new();
+    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let result = agent
+        .read_incremental(temp_file.path(), watermark, "test")
+        .expect("Should handle empty file");
 
     assert!(
-        transcript.messages().is_empty(),
-        "Empty file should produce empty transcript"
+        result.events.is_empty(),
+        "Empty file should produce empty events"
     );
-    assert_eq!(model, None);
 }
 
 #[test]
@@ -205,14 +72,15 @@ fn test_cursor_jsonl_malformed_lines_skipped() {
     .unwrap();
     temp_file.flush().unwrap();
 
-    let (transcript, _) = transcript_readers::read_cursor_jsonl(temp_file.path())
-        .expect("Should handle malformed lines");
+    let agent = CursorAgent::new();
+    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let result = agent.read_incremental(temp_file.path(), watermark, "test");
 
-    assert_eq!(
-        transcript.messages().len(),
-        2,
-        "Should have parsed 2 valid messages, skipping malformed line"
-    );
+    // Malformed JSON lines are skipped; valid lines before and after are returned
+    let batch = result.expect("malformed lines should be skipped, not cause errors");
+    assert_eq!(batch.events.len(), 2);
+    assert_eq!(batch.events[0]["role"].as_str(), Some("user"));
+    assert_eq!(batch.events[1]["role"].as_str(), Some("assistant"));
 }
 
 #[test]
@@ -649,9 +517,7 @@ fn test_cursor_checkpoint_routes_nested_worktree_file_to_worktree_repo() {
 }
 
 crate::reuse_tests_in_worktree!(
-    test_cursor_jsonl_basic_parsing,
-    test_cursor_jsonl_user_query_tag_stripping,
-    test_cursor_jsonl_tool_normalization,
+    test_cursor_raw_event_fidelity,
     test_cursor_preset_multi_root_workspace_detection,
     test_cursor_preset_human_checkpoint_no_filepath,
     test_cursor_e2e_with_attribution,

@@ -109,10 +109,11 @@ impl AgentPreset for WindsurfPreset {
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.clone())]),
         };
 
-        let transcript_source = Some(TranscriptSource::Path {
+        let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(&transcript_path),
             format: TranscriptFormat::WindsurfJsonl,
-            session_id: None,
+            session_id: context.session_id.clone(),
+            external_thread_id: None,
         });
 
         let is_bash = matches!(
@@ -234,7 +235,7 @@ mod tests {
                 );
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
+                    Some(TranscriptSource {
                         format: TranscriptFormat::WindsurfJsonl,
                         ..
                     })

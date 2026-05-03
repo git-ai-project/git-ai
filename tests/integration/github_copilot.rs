@@ -1,10 +1,10 @@
 use crate::test_utils::{fixture_path, load_fixture};
-use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
-use git_ai::commands::checkpoint_agent::transcript_readers;
 use git_ai::error::GitAiError;
+use git_ai::transcripts::agent::Agent;
+use git_ai::transcripts::agents::CopilotAgent;
+use git_ai::transcripts::watermark::{ByteOffsetWatermark, RecordIndexWatermark};
 use serde_json::json;
-use std::path::Path;
 use std::{fs, io::Write};
 
 fn parse_copilot(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
@@ -20,146 +20,41 @@ fn ensure_clean_env() {
 }
 
 #[test]
-fn copilot_session_parsing_stub() {
-    ensure_clean_env();
-    let sample = r#"{"requests": []}"#;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-    let temp_path = temp_file.path().to_str().unwrap();
-
-    let result = transcript_readers::read_copilot_session_json(Path::new(temp_path));
-    assert!(result.is_ok());
-    let (tx, model, edited_filepaths) = result.unwrap();
-    assert!(tx.messages.is_empty());
-    assert!(model.is_none());
-    assert!(edited_filepaths.is_some());
-    assert_eq!(edited_filepaths.unwrap().len(), 0);
-}
-
-#[test]
-fn copilot_session_parsing_simple() {
+fn test_copilot_session_json_raw_event_fidelity() {
     ensure_clean_env();
     let fixture = fixture_path("copilot_session_simple.json");
-    let fixture_str = fixture.to_str().unwrap();
+    let agent = CopilotAgent::new();
+    let watermark = Box::new(RecordIndexWatermark::new(0));
+    let result = agent
+        .read_incremental(fixture.as_path(), watermark, "test")
+        .expect("Should parse copilot session JSON");
 
-    let result = transcript_readers::read_copilot_session_json(Path::new(fixture_str));
-    assert!(result.is_ok());
-    let (tx, model, _edited_filepaths) = result.unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fixture).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["requests"].as_array().unwrap().clone();
 
-    let expected_messages = vec![
-        Message::User {
-            text: "What can you help me with?".to_string(),
-            timestamp: Some("2025-10-07T13:51:13.835+00:00".to_string()),
-        },
-        Message::Assistant {
-            text: "I'm GitHub Copilot, and I can help you with a wide range of programming and development tasks! Based on your current workspace, I can see you have a TypeScript project with an @/Users/svarlamov/projects/testing-git/index.ts file that prints \"Bonjour\" and numbers 1-10.\n\nHere are some ways I can assist you:\n\n## Code Development\n- **Write, edit, and refactor code** in various languages (TypeScript, JavaScript, Python, Java, C#, Go, Rust, and many more)\n- **Debug and fix issues** in your existing code\n- **Add new features** or modify existing functionality\n- **Optimize performance** and improve code quality\n\n## Project Management\n- **Set up new projects** and workspaces from scratch\n- **Configure build systems** and development environments\n- **Manage dependencies** and package installations\n- **Create and modify configuration files**\n\n## Git and Version Control\n- **Commit changes** and manage your Git workflow\n- **Create branches** and handle merges\n- **View git history** and resolve conflicts\n- **Work with pull requests** and issues\n\n## Development Tools\n- **Run terminal commands** and scripts\n- **Install and configure VS Code extensions**\n- **Set up debugging configurations**\n- **Work with databases** (PostgreSQL support available)\n\n## Documentation and Testing\n- **Write documentation** and README files\n- **Create and run tests**\n- **Generate code comments** and API documentation\n\nFor your current TypeScript project, I could help you:\n- Add error handling and input validation\n- Convert it to a proper CLI tool with argument parsing\n- Add TypeScript configurations and build scripts\n- Set up testing frameworks\n- Add more sophisticated functionality\n\nWhat specific task would you like help with today?".to_string(),
-            timestamp: Some("2025-10-07T13:51:26.196+00:00".to_string()),
-        },
-        Message::User {
-            text: "Change Bonjour World to hello world".to_string(),
-            timestamp: Some("2025-10-07T13:51:41.282+00:00".to_string()),
-        },
-        Message::ToolUse {
-            name: "prepareToolInvocation".to_string(),
-            input: json!({ "kind": "prepareToolInvocation", "toolName": "copilot_replaceString" }),
-            timestamp: None,
-        },
-        Message::ToolUse {
-            name: "copilot_replaceString".to_string(),
-            input: serde_json::Value::String("Using \"Replace String in File\"".to_string()),
-            timestamp: None,
-        },
-        Message::ToolUse {
-            name: "textEditGroup".to_string(),
-            input: json!({
-                "done": true,
-                "edits": [[{ "range": { "endColumn": 30, "endLineNumber": 10, "startColumn": 1, "startLineNumber": 5 }, "text": "// Print numbers 1 through 10\nfor (let i = 1; i <= 10; i++) {\n\tconsole.log(i);\n}\n\nconsole.log('hello world');" }], []],
-                "kind": "textEditGroup",
-                "uri": { "$mid": 1, "external": "file:///Users/svarlamov/projects/testing-git/index.ts", "fsPath": "/Users/svarlamov/projects/testing-git/index.ts", "path": "/Users/svarlamov/projects/testing-git/index.ts", "scheme": "file" }
-            }),
-            timestamp: None,
-        },
-        Message::Assistant {
-            text: "I'll change \"Bonjour World\" to \"hello world\" in your selected text. ``` @/Users/svarlamov/projects/testing-git/index.ts ``` Done! I've changed \"Bonjour World\" to \"hello world\" in line 10 of your @/Users/svarlamov/projects/testing-git/index.ts file.".to_string(),
-            timestamp: Some("2025-10-07T13:51:50.791+00:00".to_string()),
-        },
-        Message::User {
-            text: "Search for any other mentions of Bonjour".to_string(),
-            timestamp: Some("2025-10-07T15:15:50.757+00:00".to_string()),
-        },
-        Message::ToolUse {
-            name: "prepareToolInvocation".to_string(),
-            input: json!({ "kind": "prepareToolInvocation", "toolName": "copilot_findTextInFiles" }),
-            timestamp: None,
-        },
-        Message::ToolUse {
-            name: "copilot_findTextInFiles".to_string(),
-            input: serde_json::Value::String("Searching text for `Bonjour`".to_string()),
-            timestamp: None,
-        },
-        Message::Assistant {
-            text: "I'll search for any other mentions of \"Bonjour\" in your workspace. I found one more mention of \"Bonjour\" in your code! It's on line 1 of @/Users/svarlamov/projects/testing-git/index.ts :\n\n```typescript\nconsole.log('Bonjour');\n```\n\nWould you like me to change this one to \"hello\" as well to make it consistent?".to_string(),
-            timestamp: Some("2025-10-07T15:15:59.544+00:00".to_string()),
-        },
-    ];
-
-    assert_eq!(tx.messages, expected_messages);
-    assert_eq!(model, Some("copilot/claude-sonnet-4".to_string()));
+    assert_eq!(result.events, expected);
 }
 
 #[test]
-fn test_copilot_extracts_edited_filepaths() {
+fn test_copilot_event_stream_raw_event_fidelity() {
     ensure_clean_env();
-    let fixture = fixture_path("copilot_session_simple.json");
-    let fixture_str = fixture.to_str().unwrap();
+    let fixture = fixture_path("copilot_session_event_stream.jsonl");
+    let agent = CopilotAgent::new();
+    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let result = agent
+        .read_incremental(fixture.as_path(), watermark, "test")
+        .expect("Should parse copilot event stream JSONL");
 
-    let result = transcript_readers::read_copilot_session_json(Path::new(fixture_str));
-    assert!(result.is_ok());
-    let (_tx, _model, edited_filepaths) = result.unwrap();
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
 
-    assert!(edited_filepaths.is_some());
-    let paths = edited_filepaths.unwrap();
-    assert_eq!(paths.len(), 1);
-    assert_eq!(paths[0], "/Users/svarlamov/projects/testing-git/index.ts");
-}
-
-#[test]
-fn test_copilot_no_edited_filepaths_when_no_edits() {
-    ensure_clean_env();
-    let sample = r##"{"requests": [{"timestamp": 1728308673835, "message": {"text": "What can you help me with?"}, "response": [{"kind": "markdown", "value": "I can help with code!"}], "modelId": "copilot/claude-sonnet-4"}]}"##;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-    let temp_path = temp_file.path().to_str().unwrap();
-
-    let result = transcript_readers::read_copilot_session_json(Path::new(temp_path));
-    assert!(result.is_ok());
-    let (_tx, _model, edited_filepaths) = result.unwrap();
-
-    assert!(edited_filepaths.is_some());
-    let paths = edited_filepaths.unwrap();
-    assert_eq!(paths.len(), 0);
-}
-
-#[test]
-fn test_copilot_deduplicates_edited_filepaths() {
-    ensure_clean_env();
-    let sample = r##"{"requests": [{"timestamp": 1728308673835, "message": {"text": "Edit the file"}, "response": [{"kind": "textEditGroup", "uri": {"fsPath": "/Users/test/file.ts"}}, {"kind": "textEditGroup", "uri": {"fsPath": "/Users/test/file.ts"}}, {"kind": "textEditGroup", "uri": {"fsPath": "/Users/test/other.ts"}}], "modelId": "copilot/claude-sonnet-4"}]}"##;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-    let temp_path = temp_file.path().to_str().unwrap();
-
-    let result = transcript_readers::read_copilot_session_json(Path::new(temp_path));
-    assert!(result.is_ok());
-    let (_tx, _model, edited_filepaths) = result.unwrap();
-
-    assert!(edited_filepaths.is_some());
-    let paths = edited_filepaths.unwrap();
-    assert_eq!(paths.len(), 2);
-    assert!(paths.contains(&"/Users/test/file.ts".to_string()));
-    assert!(paths.contains(&"/Users/test/other.ts".to_string()));
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -171,14 +66,12 @@ fn test_copilot_returns_empty_transcript_in_codespaces() {
     }
 
     let fixture = fixture_path("copilot_session_simple.json");
-    let result =
-        transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
+    let agent = CopilotAgent::new();
+    let watermark = Box::new(RecordIndexWatermark::new(0));
+    let result = agent.read_incremental(fixture.as_path(), watermark, "test");
     assert!(result.is_ok());
-    let (tx, model, edited_filepaths) = result.unwrap();
-    assert!(tx.messages.is_empty());
-    assert!(model.is_none());
-    assert!(edited_filepaths.is_some());
-    assert_eq!(edited_filepaths.unwrap().len(), 0);
+    let batch = result.unwrap();
+    assert!(batch.events.is_empty());
 
     unsafe {
         if let Some(original) = original_codespaces {
@@ -198,14 +91,12 @@ fn test_copilot_returns_empty_transcript_in_remote_containers() {
     }
 
     let fixture = fixture_path("copilot_session_simple.json");
-    let result =
-        transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
+    let agent = CopilotAgent::new();
+    let watermark = Box::new(RecordIndexWatermark::new(0));
+    let result = agent.read_incremental(fixture.as_path(), watermark, "test");
     assert!(result.is_ok());
-    let (tx, model, edited_filepaths) = result.unwrap();
-    assert!(tx.messages.is_empty());
-    assert!(model.is_none());
-    assert!(edited_filepaths.is_some());
-    assert_eq!(edited_filepaths.unwrap().len(), 0);
+    let batch = result.unwrap();
+    assert!(batch.events.is_empty());
 
     unsafe {
         if let Some(orig) = original {
@@ -461,48 +352,10 @@ fn test_copilot_preset_after_edit_snake_case() {
 // Tests for JSONL format support
 // ============================================================================
 
-#[test]
-fn copilot_session_parsing_jsonl_stub() {
-    ensure_clean_env();
-    let sample = r#"{"kind":0,"v":{"requests": []}}"#;
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-    let temp_path = temp_file.path().to_str().unwrap();
-
-    let result = transcript_readers::read_copilot_session_json(Path::new(temp_path));
-    assert!(result.is_ok());
-    let (tx, model, edited_filepaths) = result.unwrap();
-    assert!(tx.messages.is_empty());
-    assert!(model.is_none());
-    assert!(edited_filepaths.is_some());
-    assert_eq!(edited_filepaths.unwrap().len(), 0);
-}
-
-#[test]
-fn copilot_session_parsing_jsonl_simple() {
-    ensure_clean_env();
-    let fixture = fixture_path("copilot_session_simple.jsonl");
-    let result =
-        transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
-    assert!(result.is_ok());
-    let (tx, model, _) = result.unwrap();
-    assert!(!tx.messages.is_empty());
-    assert_eq!(model, Some("copilot/claude-sonnet-4".to_string()));
-}
-
-#[test]
-fn test_copilot_extracts_edited_filepaths_jsonl() {
-    ensure_clean_env();
-    let fixture = fixture_path("copilot_session_simple.jsonl");
-    let result =
-        transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
-    assert!(result.is_ok());
-    let (_, _, edited_filepaths) = result.unwrap();
-    assert!(edited_filepaths.is_some());
-    let paths = edited_filepaths.unwrap();
-    assert_eq!(paths.len(), 1);
-    assert_eq!(paths[0], "/Users/svarlamov/projects/testing-git/index.ts");
-}
+// NOTE: copilot_session_parsing_jsonl_stub, copilot_session_parsing_jsonl_simple,
+// and test_copilot_extracts_edited_filepaths_jsonl were removed because the new
+// CopilotAgent API does not support the kind:0/kind:1 JSONL snapshot+patch protocol,
+// and edited_filepaths are no longer returned by read_incremental.
 
 #[test]
 fn test_copilot_after_edit_with_jsonl_session() {
@@ -536,109 +389,11 @@ fn test_copilot_after_edit_with_jsonl_session() {
     }
 }
 
-#[test]
-fn copilot_session_parsing_multiline_jsonl() {
-    ensure_clean_env();
-    let fixture = fixture_path("copilot_session_multiline.jsonl");
-    let result =
-        transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
-    assert!(result.is_ok());
-    let (tx, model, edited_filepaths) = result.unwrap();
-
-    assert!(
-        tx.messages
-            .iter()
-            .any(|m| matches!(m, Message::User { text, .. } if text.contains("follow up message")))
-    );
-    assert!(tx.messages.iter().any(
-        |m| matches!(m, Message::Assistant { text, .. } if text.contains("7sadfh32u23gdaWF"))
-    ));
-    assert_eq!(model, Some("copilot/gpt-4o".to_string()));
-    assert!(edited_filepaths.is_some());
-    assert_eq!(edited_filepaths.unwrap().len(), 0);
-}
-
-#[test]
-fn copilot_session_jsonl_empty_snapshot_with_patch() {
-    ensure_clean_env();
-    let fixture = fixture_path("copilot_session_empty_then_patched.jsonl");
-    let result =
-        transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
-    assert!(result.is_ok());
-    let (tx, model, edited_filepaths) = result.unwrap();
-
-    assert!(
-        tx.messages
-            .iter()
-            .any(|m| matches!(m, Message::User { text, .. } if text.contains("meaning of life")))
-    );
-    assert!(
-        tx.messages
-            .iter()
-            .any(|m| matches!(m, Message::Assistant { text, .. } if text.contains("42")))
-    );
-    assert_eq!(model, Some("copilot/gpt-4o".to_string()));
-    assert!(edited_filepaths.is_some());
-    assert_eq!(edited_filepaths.unwrap().len(), 0);
-}
-
-#[test]
-fn copilot_session_jsonl_model_from_input_state_no_requests() {
-    ensure_clean_env();
-    let sample = r#"{"kind":0,"v":{"requests":[],"inputState":{"selectedModel":{"identifier":"copilot/claude-sonnet-4"}}}}"#;
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
-    let result = transcript_readers::read_copilot_session_json(temp_file.path());
-    assert!(result.is_ok());
-    let (tx, model, _) = result.unwrap();
-    assert!(tx.messages.is_empty());
-    assert_eq!(model, Some("copilot/claude-sonnet-4".to_string()));
-}
-
-#[test]
-fn copilot_session_jsonl_per_request_model_overrides_input_state() {
-    ensure_clean_env();
-    let sample = r#"{"kind":0,"v":{"requests":[{"requestId":"r1","timestamp":1000000,"message":{"text":"hi"},"response":[{"value":"hello"}],"modelId":"copilot/gpt-4o"}],"inputState":{"selectedModel":{"identifier":"copilot/claude-sonnet-4"}}}}"#;
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
-    let result = transcript_readers::read_copilot_session_json(temp_file.path());
-    assert!(result.is_ok());
-    let (_, model, _) = result.unwrap();
-    assert_eq!(model, Some("copilot/gpt-4o".to_string()));
-}
-
-#[test]
-fn copilot_session_jsonl_scalar_patch_applied() {
-    ensure_clean_env();
-    let sample = concat!(
-        r#"{"kind":0,"v":{"requests":[],"inputState":{"selectedModel":{"identifier":"copilot/old-model"}}}}"#,
-        "\n",
-        r#"{"kind":1,"k":["inputState","selectedModel","identifier"],"v":"copilot/new-model"}"#,
-    );
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
-    let result = transcript_readers::read_copilot_session_json(temp_file.path());
-    assert!(result.is_ok());
-    let (_, model, _) = result.unwrap();
-    assert_eq!(model, Some("copilot/new-model".to_string()));
-}
-
-#[test]
-fn copilot_session_plain_json_unaffected() {
-    ensure_clean_env();
-    let fixture = fixture_path("copilot_session_simple.json");
-    let result =
-        transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
-    assert!(result.is_ok());
-    let (tx, model, edited_filepaths) = result.unwrap();
-    assert!(!tx.messages.is_empty());
-    assert_eq!(model, Some("copilot/claude-sonnet-4".to_string()));
-    assert!(edited_filepaths.is_some());
-    assert_eq!(edited_filepaths.unwrap().len(), 1);
-}
+// NOTE: copilot_session_parsing_multiline_jsonl, copilot_session_jsonl_empty_snapshot_with_patch,
+// copilot_session_jsonl_model_from_input_state_no_requests,
+// copilot_session_jsonl_per_request_model_overrides_input_state, and
+// copilot_session_jsonl_scalar_patch_applied were removed because the new CopilotAgent API
+// does not support the kind:0/kind:1 JSONL snapshot+patch protocol.
 
 // ============================================================================
 // VS Code PreToolUse / PostToolUse tests
@@ -858,56 +613,6 @@ fn test_copilot_preset_vscode_claude_transcript_path_is_rejected() {
             .to_string()
             .contains("Claude transcript path")
     );
-}
-
-#[test]
-fn copilot_session_parsing_event_stream_jsonl() {
-    ensure_clean_env();
-    let fixture = fixture_path("copilot_session_event_stream.jsonl");
-    let result =
-        transcript_readers::read_copilot_session_json(Path::new(fixture.to_str().unwrap()));
-    assert!(result.is_ok());
-    let (tx, model, edited_filepaths) = result.unwrap();
-
-    assert!(model.is_none());
-    assert!(!tx.messages.is_empty());
-    assert!(
-        tx.messages
-            .iter()
-            .any(|m| matches!(m, Message::User { .. }))
-    );
-    assert!(
-        tx.messages
-            .iter()
-            .any(|m| matches!(m, Message::Assistant { .. }))
-    );
-    assert!(
-        tx.messages
-            .iter()
-            .any(|m| matches!(m, Message::ToolUse { .. }))
-    );
-
-    assert!(edited_filepaths.is_some());
-    assert_eq!(
-        edited_filepaths.unwrap(),
-        vec!["/Users/svarlamov/projects/testing-git-vscode-hooks/jokes.csv"]
-    );
-}
-
-#[test]
-fn copilot_session_event_stream_jsonl_model_hint_is_detected() {
-    ensure_clean_env();
-    let sample = r#"{"type":"session.start","data":{"sessionId":"event-session-2","modelId":"copilot/gpt-4o"},"id":"evt-1","timestamp":"2026-02-14T03:02:25.825Z","parentId":null}
-{"type":"user.message","data":{"content":"hello"},"id":"evt-2","timestamp":"2026-02-14T03:02:26.000Z","parentId":"evt-1"}
-{"type":"assistant.message","data":{"content":"hi"},"id":"evt-3","timestamp":"2026-02-14T03:02:27.000Z","parentId":"evt-2"}"#;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
-    let result = transcript_readers::read_copilot_session_json(temp_file.path());
-    assert!(result.is_ok());
-    let (_, model, _) = result.unwrap();
-    assert_eq!(model, Some("copilot/gpt-4o".to_string()));
 }
 
 // ============================================================================

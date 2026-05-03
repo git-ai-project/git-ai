@@ -1,226 +1,31 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use crate::test_utils::fixture_path;
-use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
-use git_ai::commands::checkpoint_agent::transcript_readers;
+use git_ai::transcripts::agent::Agent;
+use git_ai::transcripts::agents::ContinueAgent;
+use git_ai::transcripts::watermark::RecordIndexWatermark;
 use serde_json::json;
 use std::fs;
-use std::io::Write;
 
 fn parse_continue(hook_input: &str) -> Result<Vec<ParsedHookEvent>, git_ai::error::GitAiError> {
     resolve_preset("continue-cli")?.parse(hook_input, "t_test")
 }
 
 #[test]
-fn test_parse_example_continue_cli_json() {
+fn test_continue_cli_raw_event_fidelity() {
     let fixture = fixture_path("continue-cli-session-simple.json");
-    let transcript = transcript_readers::read_continue_json(fixture.as_path())
-        .expect("Failed to parse Continue CLI JSON");
+    let agent = ContinueAgent::new();
+    let watermark = Box::new(RecordIndexWatermark::new(0));
+    let result = agent
+        .read_incremental(fixture.as_path(), watermark, "test")
+        .expect("Should parse continue-cli session JSON");
 
-    assert!(!transcript.messages().is_empty());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fixture).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["history"].as_array().unwrap().clone();
 
-    println!("Parsed {} messages:", transcript.messages().len());
-    for (i, message) in transcript.messages().iter().enumerate() {
-        match message {
-            Message::User { text, .. } => println!("{}: User: {}", i, text),
-            Message::Assistant { text, .. } => println!("{}: Assistant: {}", i, text),
-            Message::ToolUse { name, input, .. } => {
-                println!("{}: ToolUse: {} with input: {:?}", i, name, input)
-            }
-            Message::Thinking { text, .. } => println!("{}: Thinking: {}", i, text),
-            Message::Plan { text, .. } => println!("{}: Plan: {}", i, text),
-        }
-    }
-}
-
-#[test]
-fn test_continue_cli_parses_user_messages() {
-    let fixture = fixture_path("continue-cli-session-simple.json");
-    let transcript = transcript_readers::read_continue_json(fixture.as_path())
-        .expect("Failed to parse Continue CLI JSON");
-
-    let user_messages: Vec<&Message> = transcript
-        .messages()
-        .iter()
-        .filter(|m| matches!(m, Message::User { .. }))
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        user_messages.len(),
-        1,
-        "Should have exactly one user message"
-    );
-
-    if let Message::User { text, .. } = user_messages[0] {
-        assert!(text.contains("Add another hello world line"));
-    }
-}
-
-#[test]
-fn test_continue_cli_parses_assistant_messages() {
-    let fixture = fixture_path("continue-cli-session-simple.json");
-    let transcript = transcript_readers::read_continue_json(fixture.as_path())
-        .expect("Failed to parse Continue CLI JSON");
-
-    let assistant_messages: Vec<&Message> = transcript
-        .messages()
-        .iter()
-        .filter(|m| matches!(m, Message::Assistant { .. }))
-        .collect();
-
-    assert!(
-        !assistant_messages.is_empty(),
-        "Should have at least one assistant message"
-    );
-
-    if let Message::Assistant { text, .. } = assistant_messages[0] {
-        assert!(text.contains("I'll read the file first"));
-    }
-}
-
-#[test]
-fn test_continue_cli_parses_tool_calls_from_context_items() {
-    // The read_continue_json reader extracts tool calls from contextItems, not from
-    // message.toolCalls. The simple fixture does not have contextItems with tool data,
-    // so we create a temp fixture that includes them.
-    let sample = r##"{
-        "sessionId": "test-session",
-        "title": "Test",
-        "workspaceDirectory": "/test",
-        "history": [
-            {
-                "message": { "role": "user", "content": "Read file" },
-                "contextItems": []
-            },
-            {
-                "message": { "role": "assistant", "content": "I'll read it" },
-                "contextItems": [
-                    {
-                        "name": "Read",
-                        "content": {"filepath": "/test/main.rs"}
-                    }
-                ]
-            }
-        ]
-    }"##;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-    let transcript = transcript_readers::read_continue_json(temp_file.path())
-        .expect("Failed to parse Continue CLI JSON");
-
-    let tool_uses: Vec<&Message> = transcript
-        .messages()
-        .iter()
-        .filter(|m| matches!(m, Message::ToolUse { .. }))
-        .collect();
-
-    assert!(!tool_uses.is_empty(), "Should have at least one tool call");
-
-    if let Message::ToolUse { name, input, .. } = tool_uses[0] {
-        assert_eq!(name, "Read");
-        assert!(input.is_object());
-    }
-}
-
-#[test]
-fn test_continue_cli_parses_tool_call_args_from_context_items() {
-    let sample = r##"{
-        "sessionId": "test-session",
-        "title": "Test",
-        "workspaceDirectory": "/test",
-        "history": [
-            {
-                "message": { "role": "assistant", "content": "Reading" },
-                "contextItems": [
-                    {
-                        "name": "Read",
-                        "content": {"filepath": "/test/main.rs"}
-                    }
-                ]
-            }
-        ]
-    }"##;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-    let transcript = transcript_readers::read_continue_json(temp_file.path())
-        .expect("Failed to parse Continue CLI JSON");
-
-    let read_tool = transcript
-        .messages()
-        .iter()
-        .find(|m| {
-            if let Message::ToolUse { name, .. } = m {
-                name == "Read"
-            } else {
-                false
-            }
-        })
-        .expect("Should find a Read tool call");
-
-    if let Message::ToolUse { input, .. } = read_tool
-        && let Some(args_obj) = input.as_object()
-    {
-        assert!(
-            args_obj.contains_key("filepath"),
-            "Tool call args should contain filepath"
-        );
-    }
-}
-
-#[test]
-fn test_continue_cli_handles_empty_content() {
-    let sample = r##"{
-        "sessionId": "test-session",
-        "title": "Test",
-        "workspaceDirectory": "/test",
-        "history": [
-            {
-                "message": {
-                    "role": "user",
-                    "content": "Hello"
-                },
-                "contextItems": []
-            },
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": ""
-                },
-                "contextItems": []
-            },
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "Response text"
-                },
-                "contextItems": []
-            }
-        ]
-    }"##;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-    let temp_path = temp_file.path();
-
-    let transcript = transcript_readers::read_continue_json(temp_path)
-        .expect("Failed to parse Continue CLI JSON");
-
-    let user_count = transcript
-        .messages()
-        .iter()
-        .filter(|m| matches!(m, Message::User { .. }))
-        .count();
-    let assistant_count = transcript
-        .messages()
-        .iter()
-        .filter(|m| matches!(m, Message::Assistant { .. }))
-        .count();
-
-    assert_eq!(user_count, 1);
-    assert_eq!(assistant_count, 1, "Should skip empty content");
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -675,12 +480,7 @@ fn test_continue_cli_e2e_preserves_model_on_commit() {
 }
 
 crate::reuse_tests_in_worktree!(
-    test_parse_example_continue_cli_json,
-    test_continue_cli_parses_user_messages,
-    test_continue_cli_parses_assistant_messages,
-    test_continue_cli_parses_tool_calls_from_context_items,
-    test_continue_cli_parses_tool_call_args_from_context_items,
-    test_continue_cli_handles_empty_content,
+    test_continue_cli_raw_event_fidelity,
     test_continue_cli_preset_extracts_model_from_hook_input,
     test_continue_cli_preset_defaults_to_unknown_model,
     test_continue_cli_preset_extracts_edited_filepath,

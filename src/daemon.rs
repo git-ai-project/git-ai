@@ -73,10 +73,12 @@ pub mod git_backend;
 pub mod global_actor;
 pub mod reducer;
 pub mod sentry_layer;
+pub mod sweep_coordinator;
 pub mod telemetry_handle;
 pub mod telemetry_worker;
 pub mod test_sync;
 pub mod trace_normalizer;
+pub mod transcript_worker;
 
 pub use control_api::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, ControlResponse,
@@ -3792,6 +3794,9 @@ pub struct ActorDaemonCoordinator {
     // exits via the shutdown select! arm instead of relying on channel closure.
     trace_ingest_tx: std::sync::OnceLock<mpsc::Sender<Value>>,
     telemetry_worker: Option<crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle>,
+    transcript_worker: Option<crate::daemon::transcript_worker::TranscriptWorkerHandle>,
+    transcript_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
+    transcripts_db: Option<Arc<crate::transcripts::db::TranscriptsDatabase>>,
     next_trace_ingest_seq: AtomicUsize,
     next_carryover_snapshot_id: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
@@ -3853,6 +3858,9 @@ impl ActorDaemonCoordinator {
             test_completion_log_lock: Mutex::new(()),
             trace_ingest_tx: std::sync::OnceLock::new(),
             telemetry_worker: None,
+            transcript_worker: None,
+            transcript_shutdown_notify: std::sync::OnceLock::new(),
+            transcripts_db: None,
             next_trace_ingest_seq: AtomicUsize::new(0),
             next_carryover_snapshot_id: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
@@ -3882,6 +3890,9 @@ impl ActorDaemonCoordinator {
         // The ingest worker exits via its select! shutdown arm (watching
         // shutdown_notify); we no longer rely on channel closure to stop it.
         self.shutdown_notify.notify_waiters();
+        if let Some(transcript_shutdown) = self.transcript_shutdown_notify.get() {
+            transcript_shutdown.notify_waiters();
+        }
         // Hold the condvar mutex so notify_all cannot race with the
         // check-then-wait sequence in daemon_update_check_loop.
         let _guard = self
@@ -5533,10 +5544,7 @@ impl ActorDaemonCoordinator {
                     next_ordinal: 1,
                     entries: BTreeMap::new(),
                 });
-            loop {
-                let Some(first_entry) = state.entries.first_entry() else {
-                    break;
-                };
+            while let Some(first_entry) = state.entries.first_entry() {
                 if matches!(first_entry.get(), FamilySequencerEntry::PendingRoot) {
                     break;
                 }
@@ -7266,6 +7274,48 @@ impl ActorDaemonCoordinator {
     async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
         let result = match request {
             ControlRequest::CheckpointRun { request, wait } => {
+                // Extract transcript notification before processing checkpoint
+                if let Some(worker) = &self.transcript_worker
+                    && let Some(checkpoint_request) = Self::extract_checkpoint_request(&request)
+                    && let Some(transcript_source) = &checkpoint_request.transcript_source
+                {
+                    let session_id = transcript_source.session_id.clone();
+
+                    // Extract agent type from agent_id.tool
+                    let agent_type = checkpoint_request
+                        .agent_id
+                        .as_ref()
+                        .map(|aid| aid.tool.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+
+                    let trace_id = checkpoint_request.trace_id.clone();
+
+                    // Ensure session exists in transcripts-db
+                    if let Some(db) = &self.transcripts_db
+                        && let Err(e) = Self::ensure_session_exists(
+                            db,
+                            &session_id,
+                            &agent_type,
+                            transcript_source,
+                            checkpoint_request.agent_id.as_ref(),
+                        )
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "failed to ensure session exists"
+                        );
+                    }
+
+                    // Notify worker for immediate processing
+                    worker.notify_checkpoint(
+                        session_id,
+                        agent_type,
+                        trace_id,
+                        transcript_source.path.clone(),
+                    );
+                }
+
                 self.ingest_checkpoint_payload(*request, wait.unwrap_or(false))
                     .await
             }
@@ -7324,6 +7374,83 @@ impl ActorDaemonCoordinator {
             Ok(response) => response,
             Err(error) => ControlResponse::err(error.to_string()),
         }
+    }
+
+    fn extract_checkpoint_request(
+        request: &CheckpointRunRequest,
+    ) -> Option<&crate::commands::checkpoint_agent::orchestrator::CheckpointRequest> {
+        match request {
+            CheckpointRunRequest::Live(live_req) => live_req.checkpoint_request.as_ref(),
+            CheckpointRunRequest::Captured(_) => None,
+        }
+    }
+
+    fn ensure_session_exists(
+        db: &crate::transcripts::db::TranscriptsDatabase,
+        session_id: &str,
+        agent_type: &str,
+        transcript_source: &crate::commands::checkpoint_agent::presets::TranscriptSource,
+        agent_id: Option<&crate::authorship::working_log::AgentId>,
+    ) -> Result<(), String> {
+        // Check if session exists
+        if db
+            .get_session(session_id)
+            .map_err(|e| e.to_string())?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        // Create new session record
+        let now = chrono::Utc::now().timestamp();
+
+        let watermark_type = transcript_source.format.watermark_type();
+
+        let initial_watermark = match watermark_type {
+            crate::transcripts::watermark::WatermarkType::ByteOffset => {
+                Box::new(crate::transcripts::watermark::ByteOffsetWatermark::new(0))
+                    as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
+            }
+            crate::transcripts::watermark::WatermarkType::RecordIndex => {
+                Box::new(crate::transcripts::watermark::RecordIndexWatermark::new(0))
+                    as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
+            }
+            crate::transcripts::watermark::WatermarkType::Timestamp => {
+                Box::new(crate::transcripts::watermark::TimestampWatermark::new(
+                    chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                )) as Box<dyn crate::transcripts::watermark::WatermarkStrategy>
+            }
+            crate::transcripts::watermark::WatermarkType::Hybrid => Box::new(
+                crate::transcripts::watermark::HybridWatermark::new(0, 0, None),
+            )
+                as Box<dyn crate::transcripts::watermark::WatermarkStrategy>,
+        };
+
+        // Extract model and tool from agent_id if available
+        let (model, tool) = agent_id
+            .map(|aid| (Some(aid.model.clone()), Some(aid.tool.clone())))
+            .unwrap_or((None, None));
+
+        let record = crate::transcripts::db::SessionRecord {
+            session_id: session_id.to_string(),
+            agent_type: agent_type.to_string(),
+            transcript_path: transcript_source.path.display().to_string(),
+            transcript_format: format!("{:?}", transcript_source.format),
+            watermark_type: format!("{:?}", watermark_type),
+            watermark_value: initial_watermark.serialize(),
+            model,
+            tool,
+            external_thread_id: transcript_source.external_thread_id.clone(),
+            first_seen_at: now,
+            last_processed_at: 0,
+            last_known_size: 0,
+            last_modified: None,
+            processing_errors: 0,
+            last_error: None,
+        };
+
+        db.insert_session(&record).map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     fn store_wrapper_state(
@@ -8140,10 +8267,35 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     remove_socket_if_exists(&config.control_socket_path)?;
 
     let mut coordinator_inner = ActorDaemonCoordinator::new();
+
     // Spawn the telemetry worker inside the daemon's tokio runtime.
     let telemetry_handle = crate::daemon::telemetry_worker::spawn_telemetry_worker();
     crate::daemon::telemetry_worker::set_daemon_internal_telemetry(telemetry_handle.clone());
-    coordinator_inner.telemetry_worker = Some(telemetry_handle);
+    coordinator_inner.telemetry_worker = Some(telemetry_handle.clone());
+
+    // Spawn the transcript worker BEFORE wrapping coordinator in Arc
+    let transcripts_db_path = config.internal_dir.join("transcripts-db");
+    match crate::transcripts::db::TranscriptsDatabase::open(&transcripts_db_path) {
+        Ok(transcripts_db) => {
+            let transcripts_db = std::sync::Arc::new(transcripts_db);
+            let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+            let transcript_handle = crate::daemon::transcript_worker::spawn_transcript_worker(
+                transcripts_db.clone(),
+                telemetry_handle.clone(),
+                shutdown_notify.clone(),
+            );
+            coordinator_inner.transcripts_db = Some(transcripts_db);
+            coordinator_inner.transcript_worker = Some(transcript_handle);
+            let _ = coordinator_inner
+                .transcript_shutdown_notify
+                .set(shutdown_notify);
+            tracing::info!("transcript worker spawned");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to open transcripts database, transcript worker not started");
+        }
+    }
+
     let coordinator = Arc::new(coordinator_inner);
     coordinator.start_trace_ingest_worker()?;
     let rt_handle = tokio::runtime::Handle::current();
@@ -8522,6 +8674,9 @@ pub fn send_control_request(
         control_request_response_timeout(request),
     )
 }
+
+#[cfg(test)]
+mod transcript_worker_tests;
 
 #[cfg(test)]
 mod tests {

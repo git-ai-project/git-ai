@@ -35,16 +35,17 @@ impl AgentPreset for ContinueCliPreset {
                     .unwrap_or("unknown")
                     .to_string(),
             },
-            session_id,
+            session_id: session_id.clone(),
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd),
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]),
         };
 
-        let transcript_source = Some(TranscriptSource::Path {
+        let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(transcript_path),
             format: TranscriptFormat::ContinueJson,
-            session_id: None,
+            session_id: session_id.clone(),
+            external_thread_id: Some(session_id.clone()),
         });
 
         let is_pre = hook_event == Some("PreToolUse");
@@ -124,13 +125,11 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "continue-cli");
-                assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource::Path {
-                        format: TranscriptFormat::ContinueJson,
-                        ..
-                    })
-                ));
+                assert!(e.transcript_source.is_some());
+                if let Some(ts) = &e.transcript_source {
+                    assert_eq!(ts.format, TranscriptFormat::ContinueJson);
+                    assert_eq!(ts.session_id, "cont-sess-1");
+                }
             }
             _ => panic!("Expected PostFileEdit"),
         }

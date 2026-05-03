@@ -95,21 +95,23 @@ pub struct PostBashCall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TranscriptSource {
-    Path {
-        path: PathBuf,
-        format: TranscriptFormat,
-        /// Extra context needed by some formats (e.g., session_id for OpenCode).
-        #[serde(default)]
-        session_id: Option<String>,
-    },
+pub struct TranscriptSource {
+    pub path: PathBuf,
+    pub format: TranscriptFormat,
+    /// Session ID for this transcript (used to query/create session in DB).
+    /// Defaults to empty string for backward compatibility.
+    #[serde(default)]
+    pub session_id: String,
+    /// External thread/conversation ID (agent-specific identifier).
+    #[serde(default)]
+    pub external_thread_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TranscriptFormat {
     ClaudeJsonl,
     ContinueJson,
-    GeminiJson,
+    GeminiJsonl,
     WindsurfJsonl,
     CodexJsonl,
     CursorJsonl,
@@ -118,8 +120,27 @@ pub enum TranscriptFormat {
     CopilotEventStreamJsonl,
     AmpThreadJson,
     OpenCodeSqlite,
-    OpenCodeLegacyJson,
     PiJsonl,
+}
+
+impl TranscriptFormat {
+    pub fn watermark_type(self) -> crate::transcripts::watermark::WatermarkType {
+        use crate::transcripts::watermark::WatermarkType;
+        match self {
+            Self::ClaudeJsonl
+            | Self::CursorJsonl
+            | Self::GeminiJsonl
+            | Self::WindsurfJsonl
+            | Self::CodexJsonl
+            | Self::PiJsonl
+            | Self::CopilotEventStreamJsonl => WatermarkType::ByteOffset,
+            Self::DroidJsonl => WatermarkType::Hybrid,
+            Self::CopilotSessionJson | Self::ContinueJson | Self::AmpThreadJson => {
+                WatermarkType::RecordIndex
+            }
+            Self::OpenCodeSqlite => WatermarkType::Timestamp,
+        }
+    }
 }
 
 pub trait AgentPreset {

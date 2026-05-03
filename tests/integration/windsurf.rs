@@ -1,13 +1,13 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
-use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
-use git_ai::commands::checkpoint_agent::transcript_readers;
 use git_ai::error::GitAiError;
+use git_ai::transcripts::agent::Agent;
+use git_ai::transcripts::agents::WindsurfAgent;
+use git_ai::transcripts::watermark::ByteOffsetWatermark;
 use serde_json::json;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
@@ -182,49 +182,23 @@ fn test_windsurf_preset_invalid_json() {
 // ============================================================================
 
 #[test]
-fn test_windsurf_transcript_parser_basic() {
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    writeln!(temp_file, r#"{{"status":"done","type":"user_input","user_input":{{"user_response":"Add a hello world function"}}}}"#).unwrap();
-    writeln!(temp_file, r#"{{"planner_response":{{"response":"I'll create a hello world function for you."}},"status":"done","type":"planner_response"}}"#).unwrap();
-    writeln!(temp_file, r#"{{"code_action":{{"path":"file:///src/main.rs","new_content":"fn hello() {{ println!(\"Hello!\"); }}"}},"status":"done","type":"code_action"}}"#).unwrap();
-    let temp_path = temp_file.path().to_str().unwrap();
+fn test_windsurf_raw_event_fidelity() {
+    let fixture = crate::test_utils::fixture_path("windsurf-session-simple.jsonl");
+    let agent = WindsurfAgent::new();
+    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let result = agent
+        .read_incremental(fixture.as_path(), watermark, "test")
+        .expect("Should parse windsurf JSONL");
 
-    let (transcript, model) = transcript_readers::read_windsurf_jsonl(Path::new(temp_path))
-        .expect("Failed to parse Windsurf JSONL");
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
 
-    assert_eq!(transcript.messages().len(), 3);
-    assert!(model.is_none());
-
-    assert!(
-        matches!(&transcript.messages()[0], Message::User { text, .. } if text == "Add a hello world function")
-    );
-    assert!(
-        matches!(&transcript.messages()[1], Message::Assistant { text, .. } if text.contains("hello world"))
-    );
-    assert!(
-        matches!(&transcript.messages()[2], Message::ToolUse { name, .. } if name == "code_action")
-    );
-}
-
-#[test]
-fn test_windsurf_transcript_parser_skips_empty_content() {
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    writeln!(
-        temp_file,
-        r#"{{"status":"done","type":"user_input","user_input":{{"user_response":""}}}}"#
-    )
-    .unwrap();
-    writeln!(temp_file, r#"{{"planner_response":{{"response":"Real response"}},"status":"done","type":"planner_response"}}"#).unwrap();
-    let temp_path = temp_file.path().to_str().unwrap();
-
-    let (transcript, _) = transcript_readers::read_windsurf_jsonl(Path::new(temp_path))
-        .expect("Failed to parse Windsurf JSONL");
-
-    assert_eq!(transcript.messages().len(), 1);
-    assert!(matches!(
-        &transcript.messages()[0],
-        Message::Assistant { .. }
-    ));
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -237,119 +211,29 @@ fn test_windsurf_transcript_parser_handles_malformed_lines() {
     .unwrap();
     writeln!(temp_file, "not valid json at all").unwrap();
     writeln!(temp_file, r#"{{"planner_response":{{"response":"Hi there"}},"status":"done","type":"planner_response"}}"#).unwrap();
-    let temp_path = temp_file.path().to_str().unwrap();
 
-    let (transcript, _) = transcript_readers::read_windsurf_jsonl(Path::new(temp_path))
-        .expect("Failed to parse Windsurf JSONL");
+    let agent = WindsurfAgent::new();
+    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let result = agent.read_incremental(temp_file.path(), watermark, "test");
 
-    assert_eq!(transcript.messages().len(), 2);
+    // Malformed JSON lines are skipped; valid lines before and after are returned
+    let batch = result.expect("malformed lines should be skipped, not cause errors");
+    assert_eq!(batch.events.len(), 2);
+    assert_eq!(batch.events[0]["type"].as_str(), Some("user_input"));
+    assert_eq!(batch.events[1]["type"].as_str(), Some("planner_response"));
 }
 
 #[test]
 fn test_windsurf_transcript_parser_empty_file() {
     let temp_file = tempfile::NamedTempFile::new().unwrap();
-    let temp_path = temp_file.path().to_str().unwrap();
 
-    let (transcript, model) = transcript_readers::read_windsurf_jsonl(Path::new(temp_path))
+    let agent = WindsurfAgent::new();
+    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let result = agent
+        .read_incremental(temp_file.path(), watermark, "test")
         .expect("Failed to parse empty JSONL");
 
-    assert!(transcript.messages().is_empty());
-    assert!(model.is_none());
-}
-
-#[test]
-fn test_windsurf_transcript_parser_real_fixture() {
-    let fixture = crate::test_utils::fixture_path("windsurf-session-simple.jsonl");
-    let (transcript, model) = transcript_readers::read_windsurf_jsonl(fixture.as_path())
-        .expect("Failed to parse real Windsurf JSONL fixture");
-
-    assert!(model.is_none());
-    assert!(!transcript.messages().is_empty());
-
-    let user_msgs: Vec<_> = transcript
-        .messages()
-        .iter()
-        .filter(|m| matches!(m, Message::User { .. }))
-        .collect();
-    assert!(
-        !user_msgs.is_empty(),
-        "Should have at least one user message"
-    );
-
-    let assistant_msgs: Vec<_> = transcript
-        .messages()
-        .iter()
-        .filter(|m| matches!(m, Message::Assistant { .. }))
-        .collect();
-    assert!(
-        !assistant_msgs.is_empty(),
-        "Should have at least one assistant message"
-    );
-
-    let tool_msgs: Vec<_> = transcript
-        .messages()
-        .iter()
-        .filter(|m| matches!(m, Message::ToolUse { .. }))
-        .collect();
-    assert!(
-        !tool_msgs.is_empty(),
-        "Should have at least one tool use message"
-    );
-
-    if let Message::User { text, .. } = user_msgs[0] {
-        assert!(
-            text.contains("song"),
-            "First user message should mention 'song'"
-        );
-    }
-
-    let code_actions: Vec<_> = tool_msgs
-        .iter()
-        .filter(|m| {
-            if let Message::ToolUse { name, .. } = m {
-                name == "code_action"
-            } else {
-                false
-            }
-        })
-        .collect();
-    assert!(
-        !code_actions.is_empty(),
-        "Should have code_action tool uses"
-    );
-}
-
-#[test]
-fn test_windsurf_transcript_maps_all_tool_types() {
-    let fixture = crate::test_utils::fixture_path("windsurf-session-simple.jsonl");
-    let (transcript, _) = transcript_readers::read_windsurf_jsonl(fixture.as_path())
-        .expect("Failed to parse Windsurf JSONL");
-
-    let tool_names: Vec<String> = transcript
-        .messages()
-        .iter()
-        .filter_map(|m| {
-            if let Message::ToolUse { name, .. } = m {
-                Some(name.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    assert!(
-        tool_names.contains(&"code_action".to_string()),
-        "Should map code_action"
-    );
-    assert!(
-        tool_names.contains(&"view_file".to_string()),
-        "Should map view_file"
-    );
-    assert!(
-        tool_names.contains(&"run_command".to_string()),
-        "Should map run_command"
-    );
-    assert!(tool_names.contains(&"find".to_string()), "Should map find");
+    assert!(result.events.is_empty());
 }
 
 // ============================================================================

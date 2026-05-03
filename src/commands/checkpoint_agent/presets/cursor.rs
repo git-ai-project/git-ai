@@ -91,18 +91,19 @@ impl AgentPreset for CursorPreset {
             agent_id: AgentId {
                 tool: "cursor".to_string(),
                 id: conversation_id.clone(),
-                model,
+                model: model.clone(),
             },
-            session_id: conversation_id,
+            session_id: conversation_id.clone(),
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(&cwd),
             metadata,
         };
 
-        let transcript_source = transcript_path.map(|tp| TranscriptSource::Path {
+        let transcript_source = transcript_path.map(|tp| TranscriptSource {
             path: PathBuf::from(tp),
             format: TranscriptFormat::CursorJsonl,
-            session_id: None,
+            session_id: conversation_id.clone(),
+            external_thread_id: Some(conversation_id.clone()),
         });
 
         let event = if hook_event_name == "preToolUse" {
@@ -225,13 +226,11 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(matches!(
-                    e.transcript_source,
-                    Some(TranscriptSource::Path {
-                        format: TranscriptFormat::CursorJsonl,
-                        ..
-                    })
-                ));
+                assert!(e.transcript_source.is_some());
+                if let Some(ts) = &e.transcript_source {
+                    assert_eq!(ts.format, TranscriptFormat::CursorJsonl);
+                    assert_eq!(ts.session_id, "conv-123");
+                }
             }
             _ => panic!("Expected PostFileEdit"),
         }

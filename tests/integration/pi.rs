@@ -75,6 +75,7 @@ fn append_assistant_message(session_path: &Path, provider: &str, model: &str, te
 }
 
 #[test]
+#[ignore] // DISABLED: transcript enrichment removed
 #[serial_test::serial]
 fn test_pi_before_edit_checkpoint_via_cli_creates_human_checkpoint() {
     let repo = TestRepo::new();
@@ -118,6 +119,7 @@ fn test_pi_before_edit_checkpoint_via_cli_creates_human_checkpoint() {
 }
 
 #[test]
+#[ignore] // DISABLED: transcript enrichment removed
 #[serial_test::serial]
 fn test_pi_after_edit_checkpoint_via_cli_creates_ai_checkpoint() {
     let repo = TestRepo::new();
@@ -177,6 +179,7 @@ fn test_pi_after_edit_checkpoint_via_cli_creates_ai_checkpoint() {
 }
 
 #[test]
+#[ignore] // DISABLED: transcript enrichment removed
 #[serial_test::serial]
 fn test_pi_post_commit_resyncs_latest_session_transcript() {
     let mut repo = TestRepo::new();

@@ -7,7 +7,7 @@ use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct GeminiPreset;
 
@@ -31,7 +31,14 @@ impl AgentPreset for GeminiPreset {
             agent_id: AgentId {
                 tool: "gemini".to_string(),
                 id: session_id.clone(),
-                model: "unknown".to_string(),
+                model: crate::transcripts::model_extraction::extract_model(
+                    Path::new(transcript_path),
+                    crate::transcripts::sweep::TranscriptFormat::GeminiJsonl,
+                    None,
+                )
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| "unknown".to_string()),
             },
             session_id,
             trace_id: trace_id.to_string(),
@@ -39,10 +46,11 @@ impl AgentPreset for GeminiPreset {
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]),
         };
 
-        let transcript_source = Some(TranscriptSource::Path {
+        let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(transcript_path),
-            format: TranscriptFormat::GeminiJson,
-            session_id: None,
+            format: TranscriptFormat::GeminiJsonl,
+            session_id: context.session_id.clone(),
+            external_thread_id: None,
         });
 
         // Gemini uses "BeforeTool" instead of "PreToolUse"
@@ -130,8 +138,8 @@ mod tests {
                 );
                 assert!(matches!(
                     e.transcript_source,
-                    Some(TranscriptSource::Path {
-                        format: TranscriptFormat::GeminiJson,
+                    Some(TranscriptSource {
+                        format: TranscriptFormat::GeminiJsonl,
                         ..
                     })
                 ));

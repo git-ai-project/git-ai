@@ -7,7 +7,6 @@ use crate::authorship::working_log::CheckpointKind;
 use crate::commands;
 use crate::commands::checkpoint::PreparedPathRole;
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
-use crate::commands::checkpoint_agent::transcript_readers;
 use crate::config;
 use crate::daemon::{
     CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, LiveCheckpointRunRequest,
@@ -212,10 +211,6 @@ pub fn handle_git_ai(args: &[String]) {
         "push-authorship-notes" | "push_authorship_notes" => {
             handle_push_authorship_notes_internal(&args[1..]);
         }
-        #[cfg(debug_assertions)]
-        "show-transcript" => {
-            handle_show_transcript(&args[1..]);
-        }
         _ => {
             println!("Unknown git-ai command: {}", args[0]);
             std::process::exit(1);
@@ -407,6 +402,8 @@ fn handle_checkpoint(args: &[String]) {
 
     // Emit agent_usage metric for every AI hook, regardless of whether a
     // file-edit checkpoint is created downstream.  The existing per-prompt
+    // Emit AgentUsage metrics for AI checkpoints
+    // session_id links this usage event to the AI agent conversation
     // throttle (`should_emit_agent_usage`) prevents duplicate events.
     if let Some(ref result) = checkpoint_request
         && result.checkpoint_kind.is_ai()
@@ -414,7 +411,13 @@ fn handle_checkpoint(args: &[String]) {
         && commands::checkpoint::should_emit_agent_usage(agent_id)
     {
         let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
+        // Generate session_id from agent_id + tool - uniquely identifies the conversation
+        let session_id = crate::authorship::authorship_log_serialization::generate_session_id(
+            &agent_id.id,
+            &agent_id.tool,
+        );
         let attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+            .session_id(session_id)
             .tool(&agent_id.tool)
             .model(&agent_id.model)
             .prompt_id(prompt_id)
@@ -1778,133 +1781,6 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
             .to_string()
         }
         _ => String::new(),
-    }
-}
-
-#[cfg(debug_assertions)]
-fn handle_show_transcript(args: &[String]) {
-    if args.len() < 2 {
-        eprintln!("Error: show-transcript requires agent name and path/id");
-        eprintln!("Usage: git-ai show-transcript <agent> <path|id>");
-        eprintln!(
-            "  Agents: claude, codex, gemini, continue-cli, github-copilot, cursor, amp, windsurf"
-        );
-        eprintln!("  For amp, provide conversation/thread id instead of path");
-        std::process::exit(1);
-    }
-
-    let agent_name = &args[0];
-    let path_or_id = &args[1];
-
-    let result: Result<
-        (crate::authorship::transcript::AiTranscript, Option<String>),
-        crate::error::GitAiError,
-    > = match agent_name.as_str() {
-        "claude" => match transcript_readers::read_claude_jsonl(std::path::Path::new(path_or_id)) {
-            Ok((transcript, model)) => Ok((transcript, model)),
-            Err(e) => {
-                eprintln!("Error loading Claude transcript: {}", e);
-                std::process::exit(1);
-            }
-        },
-        "codex" => match transcript_readers::read_codex_jsonl(std::path::Path::new(path_or_id)) {
-            Ok((transcript, model)) => Ok((transcript, model)),
-            Err(e) => {
-                eprintln!("Error loading Codex transcript: {}", e);
-                std::process::exit(1);
-            }
-        },
-        "gemini" => match transcript_readers::read_gemini_json(std::path::Path::new(path_or_id)) {
-            Ok((transcript, model)) => Ok((transcript, model)),
-            Err(e) => {
-                eprintln!("Error loading Gemini transcript: {}", e);
-                std::process::exit(1);
-            }
-        },
-        "windsurf" => {
-            match transcript_readers::read_windsurf_jsonl(std::path::Path::new(path_or_id)) {
-                Ok((transcript, model)) => Ok((transcript, model)),
-                Err(e) => {
-                    eprintln!("Error loading Windsurf transcript: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-        "continue-cli" => {
-            match transcript_readers::read_continue_json(std::path::Path::new(path_or_id)) {
-                Ok(transcript) => Ok((transcript, None)),
-                Err(e) => {
-                    eprintln!("Error loading Continue CLI transcript: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-        "github-copilot" => {
-            match transcript_readers::read_copilot_session_json(std::path::Path::new(path_or_id)) {
-                Ok((transcript, model, _file_paths)) => Ok((transcript, model)),
-                Err(e) => {
-                    eprintln!("Error loading GitHub Copilot transcript: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-        "cursor" => match transcript_readers::read_cursor_jsonl(std::path::Path::new(path_or_id)) {
-            Ok((transcript, model)) => Ok((transcript, model)),
-            Err(e) => {
-                eprintln!("Error loading Cursor transcript: {}", e);
-                std::process::exit(1);
-            }
-        },
-        "amp" => {
-            let path = std::path::Path::new(path_or_id);
-            let amp_result = if path.exists() {
-                transcript_readers::read_amp_thread_json(path)
-                    .map(|(transcript, model, _thread_id)| (transcript, model))
-            } else {
-                transcript_readers::read_amp_thread_by_id(path_or_id)
-            };
-
-            match amp_result {
-                Ok((transcript, model)) => Ok((transcript, model)),
-                Err(e) => {
-                    eprintln!("Error loading Amp transcript: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        }
-        _ => {
-            eprintln!("Error: Unknown agent '{}'", agent_name);
-            eprintln!(
-                "Supported agents: claude, codex, gemini, continue-cli, github-copilot, cursor, amp, windsurf"
-            );
-            std::process::exit(1);
-        }
-    };
-
-    match result {
-        Ok((transcript, model)) => {
-            // Serialize transcript to JSON
-            let transcript_json = match serde_json::to_string_pretty(&transcript) {
-                Ok(json) => json,
-                Err(e) => {
-                    eprintln!("Error serializing transcript: {}", e);
-                    std::process::exit(1);
-                }
-            };
-
-            // Print model and transcript
-            if let Some(model_name) = model {
-                println!("Model: {}", model_name);
-            } else {
-                println!("Model: (not available)");
-            }
-            println!("\nTranscript:");
-            println!("{}", transcript_json);
-        }
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
     }
 }
 

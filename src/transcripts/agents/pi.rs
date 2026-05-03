@@ -1,0 +1,354 @@
+//! Pi agent implementation with sweep discovery.
+
+use crate::transcripts::agent::Agent;
+use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
+use crate::transcripts::types::{TranscriptBatch, TranscriptError};
+use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::path::Path;
+use std::time::Duration;
+
+/// Pi agent that reads Pi JSONL session files.
+pub struct PiAgent {
+    batch_size: usize,
+}
+
+impl PiAgent {
+    pub fn new() -> Self {
+        Self { batch_size: 1000 }
+    }
+
+    #[cfg(test)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self { batch_size }
+    }
+}
+
+impl Default for PiAgent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Agent for PiAgent {
+    fn batch_size_hint(&self) -> usize {
+        self.batch_size
+    }
+
+    fn sweep_strategy(&self) -> SweepStrategy {
+        SweepStrategy::Periodic(Duration::from_secs(30 * 60))
+    }
+
+    fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, TranscriptError> {
+        // Discovery happens via presets, not filesystem scanning
+        Ok(Vec::new())
+    }
+
+    fn read_incremental(
+        &self,
+        path: &Path,
+        watermark: Box<dyn WatermarkStrategy>,
+        session_id: &str,
+    ) -> Result<TranscriptBatch, TranscriptError> {
+        let byte_watermark = watermark
+            .as_any()
+            .downcast_ref::<ByteOffsetWatermark>()
+            .ok_or_else(|| TranscriptError::Fatal {
+                message: format!(
+                    "Pi reader requires ByteOffsetWatermark, got incompatible type for session {}",
+                    session_id
+                ),
+            })?;
+
+        let start_offset = byte_watermark.0;
+
+        let file = File::open(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                TranscriptError::Fatal {
+                    message: format!("Transcript file not found: {}", path.display()),
+                }
+            } else if e.kind() == std::io::ErrorKind::PermissionDenied {
+                TranscriptError::Fatal {
+                    message: format!("Permission denied reading transcript: {}", path.display()),
+                }
+            } else {
+                TranscriptError::Transient {
+                    message: format!("Failed to open transcript file: {}", e),
+                    retry_after: Duration::from_secs(5),
+                }
+            }
+        })?;
+
+        let mut reader = BufReader::new(file);
+
+        reader
+            .seek(SeekFrom::Start(start_offset))
+            .map_err(|e| TranscriptError::Transient {
+                message: format!("Failed to seek to offset {}: {}", start_offset, e),
+                retry_after: Duration::from_secs(5),
+            })?;
+
+        let batch_limit = self.batch_size_hint();
+        let mut events = Vec::with_capacity(batch_limit);
+        let mut current_offset = start_offset;
+        let mut line_number = 0;
+
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let bytes_read =
+                reader
+                    .read_line(&mut line)
+                    .map_err(|e| TranscriptError::Transient {
+                        message: format!("I/O error reading line: {}", e),
+                        retry_after: Duration::from_secs(5),
+                    })?;
+
+            if bytes_read == 0 {
+                break;
+            }
+
+            line_number += 1;
+            current_offset += bytes_read as u64;
+
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let entry: serde_json::Value = match serde_json::from_str(&line) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        line = line_number,
+                        path = %path.display(),
+                        error = %e,
+                        "skipping malformed JSON line"
+                    );
+                    continue;
+                }
+            };
+
+            events.push(entry);
+            if events.len() >= batch_limit {
+                break;
+            }
+        }
+
+        let new_watermark = Box::new(ByteOffsetWatermark::new(current_offset));
+
+        Ok(TranscriptBatch {
+            events,
+            new_watermark,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sweep_strategy() {
+        let agent = PiAgent::new();
+        assert_eq!(
+            agent.sweep_strategy(),
+            SweepStrategy::Periodic(Duration::from_secs(30 * 60))
+        );
+    }
+
+    fn make_jsonl_line(i: usize) -> String {
+        format!(
+            r#"{{"type":"message","id":{},"message":{{"role":"user","content":"msg-{}"}}}}"#,
+            i, i
+        )
+    }
+
+    fn drain_all(
+        agent: &PiAgent,
+        path: &Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> = Box::new(ByteOffsetWatermark::new(0));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_batch_resume_no_loss_or_repeat() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        for i in 0..5 {
+            writeln!(file, "{}", make_jsonl_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = PiAgent::with_batch_size(2);
+        let (events, _) = drain_all(&agent, file.path());
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events.iter().map(|e| e["id"].as_u64().unwrap()).collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_append_one_record_after_full_read() {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        for i in 0..3 {
+            writeln!(file, "{}", make_jsonl_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = PiAgent::with_batch_size(2);
+        let (all, wm) = drain_all(&agent, file.path());
+        assert_eq!(all.len(), 3);
+
+        let mut f = OpenOptions::new().append(true).open(file.path()).unwrap();
+        writeln!(f, "{}", make_jsonl_line(3)).unwrap();
+        f.flush().unwrap();
+
+        let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0]["id"].as_u64().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_append_several_records_after_full_read() {
+        use std::fs::OpenOptions;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        for i in 0..3 {
+            writeln!(file, "{}", make_jsonl_line(i)).unwrap();
+        }
+        file.flush().unwrap();
+
+        let agent = PiAgent::with_batch_size(2);
+        let (_, mut wm) = drain_all(&agent, file.path());
+
+        let mut f = OpenOptions::new().append(true).open(file.path()).unwrap();
+        for i in 3..6 {
+            writeln!(f, "{}", make_jsonl_line(i)).unwrap();
+        }
+        f.flush().unwrap();
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent.read_incremental(file.path(), wm, "test").unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn test_read_incremental_basic() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, r#"{{"type":"session","id":"s1"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"message","message":{{"role":"user","content":"Hello","timestamp":1704067200000}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"message","message":{{"role":"assistant","content":[{{"type":"text","text":"Hi"}}],"model":"claude-sonnet-4-20250514"}}}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let agent = PiAgent::new();
+        let watermark = Box::new(ByteOffsetWatermark::new(0));
+        let result = agent
+            .read_incremental(file.path(), watermark, "test")
+            .unwrap();
+
+        assert_eq!(result.events.len(), 3);
+        assert_eq!(result.events[0]["type"].as_str(), Some("session"));
+        assert_eq!(result.events[1]["type"].as_str(), Some("message"));
+        assert_eq!(result.events[1]["message"]["role"].as_str(), Some("user"));
+        assert_eq!(
+            result.events[2]["message"]["role"].as_str(),
+            Some("assistant")
+        );
+    }
+
+    #[test]
+    fn test_read_incremental_resumes_from_offset() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        let first_line = r#"{"type":"session","id":"s1"}"#;
+        writeln!(file, "{}", first_line).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"message","message":{{"role":"user","content":"Hello"}}}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let agent = PiAgent::new();
+        // Set offset past the first line to simulate resuming
+        let offset = (first_line.len() + 1) as u64;
+        let watermark = Box::new(ByteOffsetWatermark::new(offset));
+        let result = agent
+            .read_incremental(file.path(), watermark, "test")
+            .unwrap();
+
+        assert_eq!(result.events.len(), 1);
+        assert_eq!(result.events[0]["type"].as_str(), Some("message"));
+    }
+
+    #[test]
+    fn test_read_incremental_thinking_and_tool_call() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, r#"{{"type":"session","id":"s1"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"message","message":{{"role":"assistant","content":[{{"type":"thinking","thinking":"hmm"}},{{"type":"toolCall","name":"bash","arguments":{{}}}}]}}}}"#
+        )
+        .unwrap();
+        file.flush().unwrap();
+
+        let agent = PiAgent::new();
+        let watermark = Box::new(ByteOffsetWatermark::new(0));
+        let result = agent
+            .read_incremental(file.path(), watermark, "test")
+            .unwrap();
+
+        // Raw: session header + the message entry (both content blocks in single JSON line)
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0]["type"].as_str(), Some("session"));
+        assert_eq!(result.events[1]["type"].as_str(), Some("message"));
+    }
+}

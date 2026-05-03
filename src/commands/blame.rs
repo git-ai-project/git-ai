@@ -1236,10 +1236,8 @@ fn overlay_ai_authorship(
     }
 
     // Collect all authorship logs we've seen (for JSON output to find other files)
-    let mut authorship_logs: Vec<AuthorshipLog> = commit_authorship_cache
-        .into_iter()
-        .filter_map(|(_, log)| log)
-        .collect();
+    let mut authorship_logs: Vec<AuthorshipLog> =
+        commit_authorship_cache.into_values().flatten().collect();
     authorship_logs.extend(simulated_authorship_logs.into_values());
 
     // Convert HashSet to Vec and sort for deterministic output

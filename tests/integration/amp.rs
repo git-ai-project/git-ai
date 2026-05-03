@@ -1,9 +1,8 @@
 use crate::test_utils::fixture_path;
-use git_ai::authorship::transcript::Message;
-use git_ai::commands::checkpoint_agent::presets::{
-    ParsedHookEvent, TranscriptSource, resolve_preset,
-};
-use git_ai::commands::checkpoint_agent::transcript_readers;
+use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
+use git_ai::transcripts::agent::Agent;
+use git_ai::transcripts::agents::AmpAgent;
+use git_ai::transcripts::watermark::RecordIndexWatermark;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -21,57 +20,41 @@ fn amp_simple_thread_fixture_path() -> PathBuf {
 }
 
 #[test]
-fn test_parse_amp_thread_transcript() {
-    let thread_path = amp_simple_thread_fixture_path();
+fn test_amp_raw_event_fidelity() {
+    let thread_path = amp_threads_fixture_path().join(format!("{}.json", AMP_THINKING_THREAD_ID));
 
-    let (transcript, model, thread_id) = transcript_readers::read_amp_thread_json(&thread_path)
+    let agent = AmpAgent::new();
+    let watermark = Box::new(RecordIndexWatermark::new(0));
+    let result = agent
+        .read_incremental(&thread_path, watermark, "test")
         .expect("Failed to parse Amp thread JSON");
 
-    assert_eq!(thread_id, AMP_SIMPLE_THREAD_ID);
-    assert_eq!(model.as_deref(), Some("claude-opus-4-6"));
-    assert!(!transcript.messages().is_empty());
+    // Independently parse the fixture and extract the messages array.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&thread_path).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["messages"].as_array().unwrap().clone();
 
-    let has_user = transcript
-        .messages()
-        .iter()
-        .any(|m| matches!(m, Message::User { .. }));
-    let has_assistant = transcript
-        .messages()
-        .iter()
-        .any(|m| matches!(m, Message::Assistant { .. }));
-    let has_tool_use = transcript
-        .messages()
-        .iter()
-        .any(|m| matches!(m, Message::ToolUse { .. }));
-
-    assert!(has_user, "Expected at least one user message");
-    assert!(has_assistant, "Expected at least one assistant message");
-    assert!(has_tool_use, "Expected at least one tool use message");
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
-fn test_parse_amp_thread_with_thinking_blocks() {
-    let thread_path = amp_threads_fixture_path().join(format!("{}.json", AMP_THINKING_THREAD_ID));
+fn test_amp_raw_event_fidelity_with_thinking() {
+    let thread_path = amp_simple_thread_fixture_path();
 
-    let (transcript, model, thread_id) = transcript_readers::read_amp_thread_json(&thread_path)
+    let agent = AmpAgent::new();
+    let watermark = Box::new(RecordIndexWatermark::new(0));
+    let result = agent
+        .read_incremental(&thread_path, watermark, "test")
         .expect("Failed to parse Amp thread JSON");
 
-    assert_eq!(thread_id, AMP_THINKING_THREAD_ID);
-    assert_eq!(model.as_deref(), Some("claude-opus-4-6"));
+    // Independently parse the fixture and extract the messages array.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&thread_path).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["messages"].as_array().unwrap().clone();
 
-    let contains_thinking_text = transcript
-        .messages()
-        .iter()
-        .filter_map(|message| match message {
-            Message::Assistant { text, .. } => Some(text),
-            _ => None,
-        })
-        .any(|text| text.contains("create a plan"));
-
-    assert!(
-        contains_thinking_text,
-        "Assistant transcript should include converted thinking blocks"
-    );
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -150,8 +133,8 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
         ParsedHookEvent::PostFileEdit(e) => {
             assert_eq!(e.context.agent_id.tool, "amp");
             assert_eq!(e.context.agent_id.id, AMP_SIMPLE_THREAD_ID);
-            // Model is lazily resolved from transcript, so at parse time it's "unknown"
-            assert_eq!(e.context.agent_id.model, "unknown");
+            // Model is extracted from the resolved Amp thread fixture file
+            assert_eq!(e.context.agent_id.model, "claude-opus-4-6");
             assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
             assert_eq!(
                 e.file_paths,
@@ -159,9 +142,11 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
             );
             // Transcript should be a path reference (lazy loading)
             assert!(e.transcript_source.is_some());
-            let transcript_path_str = match e.transcript_source.as_ref().unwrap() {
-                TranscriptSource::Path { path, .. } => path.to_string_lossy().to_string(),
-            };
+            let transcript_path_str = e
+                .transcript_source
+                .as_ref()
+                .map(|ts| ts.path.to_string_lossy().to_string())
+                .unwrap();
             assert!(
                 transcript_path_str.ends_with(&format!("{}.json", AMP_SIMPLE_THREAD_ID)),
                 "transcript_path should point to the matched Amp thread file"
@@ -376,3 +361,8 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+crate::reuse_tests_in_worktree!(
+    test_amp_raw_event_fidelity,
+    test_amp_raw_event_fidelity_with_thinking,
+);

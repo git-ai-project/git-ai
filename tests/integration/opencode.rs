@@ -1,7 +1,5 @@
 use crate::test_utils::fixture_path;
-use git_ai::authorship::transcript::Message;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
-use git_ai::commands::checkpoint_agent::transcript_readers;
 use git_ai::error::GitAiError;
 use serde_json::json;
 use std::fs;
@@ -11,198 +9,133 @@ fn parse_opencode(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> 
     resolve_preset("opencode")?.parse(hook_input, "t_test")
 }
 
-fn opencode_storage_fixture_path() -> std::path::PathBuf {
-    fixture_path("opencode-storage")
-}
-
 fn opencode_sqlite_fixture_path() -> std::path::PathBuf {
     fixture_path("opencode-sqlite")
 }
 
-fn opencode_sqlite_empty_fixture_path() -> std::path::PathBuf {
-    fixture_path("opencode-sqlite-empty")
-}
-
 #[test]
-fn test_parse_opencode_storage_transcript() {
-    let storage_path = opencode_storage_fixture_path();
-    let session_id = "test-session-123";
+fn test_opencode_raw_event_fidelity() {
+    use chrono::{DateTime, Utc};
+    use git_ai::transcripts::agent::Agent;
+    use git_ai::transcripts::agents::OpenCodeAgent;
+    use git_ai::transcripts::watermark::TimestampWatermark;
+    use rusqlite::{Connection, OpenFlags};
 
-    let (transcript, model) =
-        transcript_readers::read_opencode_from_storage(&storage_path, session_id)
-            .expect("Failed to parse OpenCode storage");
-
-    assert!(
-        !transcript.messages().is_empty(),
-        "Transcript should contain messages"
-    );
-
-    assert!(
-        model.is_some(),
-        "Model should be extracted from assistant message"
-    );
-    assert_eq!(
-        model.unwrap(),
-        "anthropic/claude-3-5-sonnet-20241022",
-        "Model should be provider/model format"
-    );
-
-    let has_user = transcript
-        .messages()
-        .iter()
-        .any(|m| matches!(m, Message::User { .. }));
-    let has_assistant = transcript
-        .messages()
-        .iter()
-        .any(|m| matches!(m, Message::Assistant { .. }));
-    let has_tool_use = transcript
-        .messages()
-        .iter()
-        .any(|m| matches!(m, Message::ToolUse { .. }));
-
-    assert!(has_user, "Should have user messages");
-    assert!(has_assistant, "Should have assistant messages");
-    assert!(has_tool_use, "Should have tool_use messages");
-}
-
-#[test]
-fn test_parse_opencode_sqlite_transcript() {
     let opencode_root = opencode_sqlite_fixture_path();
+    let fixture = opencode_root.join("opencode.db");
     let session_id = "test-session-123";
 
-    let (transcript, model) =
-        transcript_readers::read_opencode_from_storage(&opencode_root, session_id)
-            .expect("Failed to parse OpenCode sqlite storage");
+    let agent = OpenCodeAgent::new();
+    let watermark = Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
+    let result = agent
+        .read_incremental(&fixture, watermark, session_id)
+        .unwrap();
 
-    assert!(
-        !transcript.messages().is_empty(),
-        "Transcript should contain messages"
-    );
-    assert_eq!(
-        model.as_deref(),
-        Some("openai/gpt-5"),
-        "Model should come from sqlite assistant message metadata"
-    );
+    // Independently query the SQLite DB to construct the same expected events.
+    let conn = Connection::open_with_flags(&fixture, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
 
-    assert!(
-        matches!(transcript.messages()[0], Message::User { .. }),
-        "First message should be from user"
-    );
-    if let Message::User { text, .. } = &transcript.messages()[0] {
-        assert!(
-            text.contains("sqlite transcript data"),
-            "Expected sqlite fixture user text"
-        );
+    let watermark_millis = DateTime::<Utc>::UNIX_EPOCH.timestamp_millis();
+
+    // Read full message rows for this session with time_updated > watermark (same filter as the agent)
+    let mut msg_stmt = conn
+        .prepare(
+            "SELECT id, session_id, time_created, time_updated, data FROM message \
+             WHERE session_id = ? AND time_updated > ? \
+             ORDER BY time_updated ASC, id ASC",
+        )
+        .unwrap();
+    let messages: Vec<(String, serde_json::Value)> = msg_stmt
+        .query_map(rusqlite::params![session_id, watermark_millis], |row| {
+            let id: String = row.get(0)?;
+            let row_session_id: String = row.get(1)?;
+            let time_created: i64 = row.get(2)?;
+            let time_updated: i64 = row.get(3)?;
+            let data: String = row.get(4)?;
+            Ok((id, row_session_id, time_created, time_updated, data))
+        })
+        .unwrap()
+        .map(|r| {
+            let (id, row_session_id, time_created, time_updated, data) = r.unwrap();
+            let parsed_data: serde_json::Value = serde_json::from_str(&data).unwrap();
+            let row_json = json!({
+                "id": id,
+                "session_id": row_session_id,
+                "time_created": time_created,
+                "time_updated": time_updated,
+                "data": parsed_data,
+            });
+            (id, row_json)
+        })
+        .collect();
+
+    // Read parts only for matched messages via IN-subquery (same query as the agent)
+    let mut part_stmt = conn
+        .prepare(
+            "SELECT id, message_id, session_id, time_created, time_updated, data FROM part \
+             WHERE message_id IN ( \
+                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? \
+             ) \
+             ORDER BY message_id ASC, time_updated ASC, id ASC",
+        )
+        .unwrap();
+    let parts_rows: Vec<(String, serde_json::Value)> = part_stmt
+        .query_map(rusqlite::params![session_id, watermark_millis], |row| {
+            let id: String = row.get(0)?;
+            let message_id: String = row.get(1)?;
+            let row_session_id: String = row.get(2)?;
+            let time_created: i64 = row.get(3)?;
+            let time_updated: i64 = row.get(4)?;
+            let data: String = row.get(5)?;
+            Ok((
+                id,
+                message_id,
+                row_session_id,
+                time_created,
+                time_updated,
+                data,
+            ))
+        })
+        .unwrap()
+        .map(|r| {
+            let (id, message_id, row_session_id, time_created, time_updated, data) = r.unwrap();
+            let parsed_data: serde_json::Value = serde_json::from_str(&data).unwrap();
+            let row_json = json!({
+                "id": id,
+                "message_id": message_id,
+                "session_id": row_session_id,
+                "time_created": time_created,
+                "time_updated": time_updated,
+                "data": parsed_data,
+            });
+            (message_id, row_json)
+        })
+        .collect();
+
+    let mut parts_by_msg: std::collections::HashMap<String, Vec<serde_json::Value>> =
+        std::collections::HashMap::new();
+    for (msg_id, row_json) in parts_rows {
+        parts_by_msg.entry(msg_id).or_default().push(row_json);
     }
-}
 
-#[test]
-fn test_opencode_sqlite_takes_precedence_over_legacy_storage() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let opencode_root = temp_dir.path();
-
-    let sqlite_db = opencode_sqlite_fixture_path().join("opencode.db");
-    fs::copy(&sqlite_db, opencode_root.join("opencode.db")).unwrap();
-
-    let legacy_storage = opencode_storage_fixture_path();
-    copy_dir_all(&legacy_storage, &opencode_root.join("storage")).unwrap();
-
-    let (transcript, model) =
-        transcript_readers::read_opencode_from_storage(opencode_root, "test-session-123")
-            .expect("Should parse from sqlite first");
-
-    assert_eq!(model.as_deref(), Some("openai/gpt-5"));
-    if let Message::User { text, .. } = &transcript.messages()[0] {
-        assert!(
-            text.contains("sqlite transcript data"),
-            "sqlite transcript should win over legacy storage"
-        );
-        assert!(
-            !text.contains("Update the comment"),
-            "legacy transcript should not be used when sqlite has data"
-        );
-    }
-}
-
-#[test]
-fn test_opencode_sqlite_falls_back_to_legacy_storage_when_sqlite_empty() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let opencode_root = temp_dir.path();
-
-    let sqlite_db = opencode_sqlite_empty_fixture_path().join("opencode.db");
-    fs::copy(&sqlite_db, opencode_root.join("opencode.db")).unwrap();
-
-    let legacy_storage = opencode_storage_fixture_path();
-    copy_dir_all(&legacy_storage, &opencode_root.join("storage")).unwrap();
-
-    let (transcript, model) =
-        transcript_readers::read_opencode_from_storage(opencode_root, "test-session-123")
-            .expect("Should fallback to legacy storage when sqlite has no session data");
-
-    assert_eq!(
-        model.as_deref(),
-        Some("anthropic/claude-3-5-sonnet-20241022")
-    );
-    if let Message::User { text, .. } = &transcript.messages()[0] {
-        assert!(
-            text.contains("Update the comment"),
-            "Should fallback to legacy fixture transcript"
-        );
-    }
-}
-
-#[test]
-fn test_opencode_transcript_message_order() {
-    let storage_path = opencode_storage_fixture_path();
-    let session_id = "test-session-123";
-
-    let (transcript, _) = transcript_readers::read_opencode_from_storage(&storage_path, session_id)
-        .expect("Failed to parse OpenCode storage");
-
-    assert!(
-        matches!(transcript.messages()[0], Message::User { .. }),
-        "First message should be from user"
-    );
-
-    if let Message::User { text, .. } = &transcript.messages()[0] {
-        assert!(
-            text.contains("Update the comment"),
-            "User message should contain expected text"
-        );
-    }
-}
-
-#[test]
-fn test_opencode_transcript_timestamps_are_rfc3339() {
-    let storage_path = opencode_storage_fixture_path();
-    let session_id = "test-session-123";
-
-    let (transcript, _) = transcript_readers::read_opencode_from_storage(&storage_path, session_id)
-        .expect("Failed to parse OpenCode storage");
-
-    for message in transcript.messages() {
-        match message {
-            Message::User { timestamp, .. }
-            | Message::Assistant { timestamp, .. }
-            | Message::ToolUse { timestamp, .. }
-            | Message::Thinking { timestamp, .. }
-            | Message::Plan { timestamp, .. } => {
-                if let Some(ts) = timestamp {
-                    assert!(
-                        ts.contains("T") && (ts.contains("+") || ts.ends_with("Z")),
-                        "Timestamp should be RFC3339 format, got: {}",
-                        ts
-                    );
-                }
+    let expected: Vec<serde_json::Value> = messages
+        .iter()
+        .map(|(id, row_json)| {
+            if let Some(parts) = parts_by_msg.get(id) {
+                json!({"message": row_json, "parts": parts})
+            } else {
+                json!({"message": row_json})
             }
-        }
-    }
+        })
+        .collect();
+
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
 #[serial_test::serial]
 fn test_opencode_preset_pretooluse_returns_human_checkpoint() {
-    let storage_path = opencode_storage_fixture_path();
+    let storage_path = opencode_sqlite_fixture_path();
 
     let hook_input = json!({
         "hook_event_name": "PreToolUse",
@@ -245,7 +178,7 @@ fn test_opencode_preset_pretooluse_returns_human_checkpoint() {
 #[test]
 #[serial_test::serial]
 fn test_opencode_preset_posttooluse_returns_ai_checkpoint() {
-    let storage_path = opencode_storage_fixture_path();
+    let storage_path = opencode_sqlite_fixture_path();
 
     let hook_input = json!({
         "hook_event_name": "PostToolUse",
@@ -285,8 +218,8 @@ fn test_opencode_preset_posttooluse_returns_ai_checkpoint() {
             );
             assert_eq!(e.context.agent_id.tool, "opencode");
             assert_eq!(e.context.agent_id.id, "test-session-123");
-            // Model is lazily resolved from transcript, so at parse time it's "unknown"
-            assert_eq!(e.context.agent_id.model, "unknown");
+            // Model is extracted from the OpenCode SQLite fixture at parse time
+            assert_eq!(e.context.agent_id.model, "gpt-5");
         }
         _ => panic!("Expected PostFileEdit for PostToolUse"),
     }
@@ -295,7 +228,7 @@ fn test_opencode_preset_posttooluse_returns_ai_checkpoint() {
 #[test]
 #[serial_test::serial]
 fn test_opencode_preset_stores_session_id_in_metadata() {
-    let storage_path = opencode_storage_fixture_path();
+    let storage_path = opencode_sqlite_fixture_path();
 
     let hook_input = json!({
         "hook_event_name": "PostToolUse",
@@ -336,7 +269,7 @@ fn test_opencode_preset_stores_session_id_in_metadata() {
 #[test]
 #[serial_test::serial]
 fn test_opencode_preset_sets_repo_working_dir() {
-    let storage_path = opencode_storage_fixture_path();
+    let storage_path = opencode_sqlite_fixture_path();
 
     let hook_input = json!({
         "hook_event_name": "PostToolUse",
@@ -371,72 +304,9 @@ fn test_opencode_preset_sets_repo_working_dir() {
 }
 
 #[test]
-fn test_opencode_empty_session_returns_empty_transcript() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage_path = temp_dir.path();
-    let session_id = "empty-session";
-
-    let message_dir = storage_path.join("message").join(session_id);
-    fs::create_dir_all(&message_dir).unwrap();
-
-    let (transcript, model) =
-        transcript_readers::read_opencode_from_storage(storage_path, session_id)
-            .expect("Should handle empty session");
-
-    assert!(
-        transcript.messages().is_empty(),
-        "Empty session should produce empty transcript"
-    );
-    assert!(model.is_none(), "Empty session should have no model");
-}
-
-#[test]
-fn test_opencode_nonexistent_session_returns_empty_transcript() {
-    let storage_path = opencode_storage_fixture_path();
-    let session_id = "nonexistent-session";
-
-    let (transcript, model) =
-        transcript_readers::read_opencode_from_storage(&storage_path, session_id)
-            .expect("Should handle nonexistent session");
-
-    assert!(
-        transcript.messages().is_empty(),
-        "Nonexistent session should produce empty transcript"
-    );
-    assert!(model.is_none(), "Nonexistent session should have no model");
-}
-
-#[test]
-fn test_opencode_tool_use_only_from_assistant() {
-    let storage_path = opencode_storage_fixture_path();
-    let session_id = "test-session-123";
-
-    let (transcript, _) = transcript_readers::read_opencode_from_storage(&storage_path, session_id)
-        .expect("Failed to parse OpenCode storage");
-
-    let tool_uses: Vec<_> = transcript
-        .messages()
-        .iter()
-        .filter(|m| matches!(m, Message::ToolUse { .. }))
-        .collect();
-
-    assert!(!tool_uses.is_empty(), "Should have tool use messages");
-
-    if let Message::ToolUse { name, input, .. } = tool_uses[0] {
-        assert_eq!(name, "edit", "Tool name should be 'edit'");
-        assert!(
-            input.get("filePath").is_some(),
-            "Tool input should contain filePath"
-        );
-    } else {
-        panic!("Expected ToolUse message");
-    }
-}
-
-#[test]
 #[serial_test::serial]
 fn test_opencode_preset_extracts_apply_patch_paths() {
-    let storage_path = opencode_storage_fixture_path();
+    let storage_path = opencode_sqlite_fixture_path();
 
     let patch_text = "*** Begin Patch\n*** Update File: src/main.ts\n@@\n-old\n+new\n*** End Patch";
     let hook_input = json!({
@@ -503,8 +373,9 @@ fn test_opencode_e2e_checkpoint_and_commit() {
     let temp_storage = tempfile::tempdir().unwrap();
     let storage_path = temp_storage.path();
 
-    let fixture_storage = opencode_storage_fixture_path();
-    copy_dir_all(&fixture_storage, storage_path).unwrap();
+    // Copy the sqlite fixture's opencode.db to the temp storage directory
+    let fixture_db = opencode_sqlite_fixture_path().join("opencode.db");
+    fs::copy(&fixture_db, storage_path.join("opencode.db")).unwrap();
 
     unsafe {
         std::env::set_var(
@@ -565,33 +436,9 @@ fn test_opencode_e2e_checkpoint_and_commit() {
         "Agent tool should be opencode"
     );
     assert_eq!(
-        session_record.agent_id.model, "anthropic/claude-3-5-sonnet-20241022",
-        "Model should match fixture"
+        session_record.agent_id.model, "gpt-5",
+        "Session record model should be extracted from OpenCode SQLite fixture"
     );
 }
 
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dst.join(entry.file_name()))?;
-        } else {
-            fs::copy(entry.path(), dst.join(entry.file_name()))?;
-        }
-    }
-    Ok(())
-}
-
-crate::reuse_tests_in_worktree!(
-    test_parse_opencode_storage_transcript,
-    test_parse_opencode_sqlite_transcript,
-    test_opencode_sqlite_takes_precedence_over_legacy_storage,
-    test_opencode_sqlite_falls_back_to_legacy_storage_when_sqlite_empty,
-    test_opencode_transcript_message_order,
-    test_opencode_transcript_timestamps_are_rfc3339,
-    test_opencode_empty_session_returns_empty_transcript,
-    test_opencode_nonexistent_session_returns_empty_transcript,
-    test_opencode_tool_use_only_from_assistant,
-);
+crate::reuse_tests_in_worktree!(test_opencode_raw_event_fidelity,);

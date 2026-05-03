@@ -122,7 +122,14 @@ fn build_checkpoint_attrs(
     base_commit: &str,
     agent_id: Option<&AgentId>,
 ) -> crate::metrics::EventAttributes {
+    // Extract session_id from agent_id if available
+    let session_id = agent_id
+        .as_ref()
+        .map(|aid| generate_session_id(&aid.id, &aid.tool))
+        .unwrap_or_default();
+
     let mut attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+        .session_id(session_id)
         .base_commit_sha(base_commit);
 
     // Add AI-specific attributes
@@ -851,6 +858,8 @@ fn execute_resolved_checkpoint(
         hash_compute_start.elapsed()
     );
 
+    // Generate trace_id for this checkpoint - links all metrics events from this checkpoint together
+    // This allows server-side analysis of multi-file edits, tool invocations, and checkpoint chains
     let trace_id = generate_trace_id();
 
     let entries_start = Instant::now();
@@ -932,11 +941,24 @@ fn execute_resolved_checkpoint(
         );
         checkpoints.push(checkpoint.clone());
 
-        let attrs =
+        let mut attrs =
             build_checkpoint_attrs(repo, &resolved.base_commit, checkpoint.agent_id.as_ref());
 
+        // Add trace_id to attributes - links all checkpoint events together
+        if let Some(ref tid) = checkpoint.trace_id {
+            attrs = attrs.trace_id(tid);
+        }
+
+        // Extract tool_use_id from metadata if available
+        // tool_use_id tracks specific tool invocations (e.g., bash tool calls from AI agents)
+        // Allows linking checkpoint events to the exact tool use that triggered them
+        let tool_use_id = checkpoint_request
+            .as_ref()
+            .and_then(|cr| cr.metadata.get("tool_use_id"))
+            .map(|s| s.as_str());
+
         for (entry, file_stat) in entries.iter().zip(file_stats.iter()) {
-            let values = crate::metrics::CheckpointValues::new()
+            let mut values = crate::metrics::CheckpointValues::new()
                 .checkpoint_ts(checkpoint.timestamp)
                 .kind(checkpoint.kind.to_str().to_string())
                 .file_path(entry.file.clone())
@@ -944,6 +966,12 @@ fn execute_resolved_checkpoint(
                 .lines_deleted(file_stat.deletions)
                 .lines_added_sloc(file_stat.additions_sloc)
                 .lines_deleted_sloc(file_stat.deletions_sloc);
+
+            // Add tool_use_id if available
+            if let Some(tuid) = tool_use_id {
+                values = values.external_tool_use_id(tuid);
+            }
+
             let file_attrs = attrs.clone().author(&checkpoint.author);
             crate::metrics::record(values, file_attrs);
         }

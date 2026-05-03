@@ -24,7 +24,7 @@ struct OpenCodeHookInput {
 }
 
 impl OpenCodePreset {
-    fn extract_filepaths_from_tool_input(
+    pub(crate) fn extract_filepaths_from_tool_input(
         tool_input: Option<&serde_json::Value>,
         cwd: &str,
     ) -> Vec<PathBuf> {
@@ -154,29 +154,14 @@ impl OpenCodePreset {
         let db_path = Self::resolve_sqlite_db_path(&opencode_path);
         if let Some(db_path) = db_path {
             return Some((
-                TranscriptSource::Path {
+                TranscriptSource {
                     path: db_path,
                     format: TranscriptFormat::OpenCodeSqlite,
-                    session_id: Some(session_id.to_string()),
+                    session_id: session_id.to_string(),
+                    external_thread_id: Some(session_id.to_string()),
                 },
                 opencode_path,
             ));
-        }
-
-        // Fall back to legacy JSON storage
-        let storage_path = Self::resolve_legacy_storage_path(&opencode_path);
-        if let Some(storage_path) = storage_path {
-            let session_dir = storage_path.join("message").join(session_id);
-            if session_dir.exists() {
-                return Some((
-                    TranscriptSource::Path {
-                        path: storage_path,
-                        format: TranscriptFormat::OpenCodeLegacyJson,
-                        session_id: Some(session_id.to_string()),
-                    },
-                    opencode_path,
-                ));
-            }
         }
 
         None
@@ -255,37 +240,6 @@ impl OpenCodePreset {
 
         None
     }
-
-    fn resolve_legacy_storage_path(path: &Path) -> Option<PathBuf> {
-        if path.is_file() {
-            if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name == "opencode.db")
-            {
-                let storage = path.parent()?.join("storage");
-                if storage.exists() {
-                    return Some(storage);
-                }
-            }
-            return None;
-        }
-
-        if !path.is_dir() {
-            return None;
-        }
-
-        if path.join("message").exists() || path.join("part").exists() {
-            return Some(path.to_path_buf());
-        }
-
-        let nested_storage = path.join("storage");
-        if nested_storage.exists() {
-            return Some(nested_storage);
-        }
-
-        None
-    }
 }
 
 impl AgentPreset for OpenCodePreset {
@@ -323,11 +277,21 @@ impl AgentPreset for OpenCodePreset {
         // Resolve transcript source
         let transcript_result = Self::resolve_transcript_source(&session_id);
 
+        let extracted_model = transcript_result.as_ref().and_then(|(ts, _)| {
+            crate::transcripts::model_extraction::extract_model(
+                &ts.path,
+                crate::transcripts::sweep::TranscriptFormat::OpenCodeSqlite,
+                Some(session_id.as_str()),
+            )
+            .ok()
+            .flatten()
+        });
+
         let context = PresetContext {
             agent_id: AgentId {
                 tool: "opencode".to_string(),
                 id: session_id.clone(),
-                model: "unknown".to_string(), // model resolved later from transcript
+                model: extracted_model.unwrap_or_else(|| "unknown".to_string()),
             },
             session_id,
             trace_id: trace_id.to_string(),
