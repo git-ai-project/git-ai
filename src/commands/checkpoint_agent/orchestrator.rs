@@ -186,18 +186,65 @@ fn execute_untracked_edit(e: UntrackedEdit) -> Result<CheckpointRequest, GitAiEr
     })
 }
 
-fn execute_pre_bash_call(_e: PreBashCall) -> Result<Option<CheckpointRequest>, GitAiError> {
-    // Will be rewritten in Task 8 to send BashSessionStart to daemon
-    Ok(None)
+fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointRequest>, GitAiError> {
+    use crate::commands::checkpoint_agent::bash_tool;
+
+    let repo = discover_repository_in_path_no_git_exec(e.context.cwd.as_path())?;
+    let repo_work_dir = repo.workdir()?;
+
+    match bash_tool::handle_bash_pre_tool_use_with_context(
+        &repo_work_dir,
+        &e.context.session_id,
+        &e.tool_use_id,
+        &e.context.agent_id,
+        Some(&e.context.metadata),
+    ) {
+        Ok(_) => Ok(None),
+        Err(error) => {
+            tracing::debug!(
+                "Bash pre-hook snapshot failed for {} session {}: {}",
+                e.context.agent_id.tool,
+                e.context.session_id,
+                error
+            );
+            Ok(None)
+        }
+    }
 }
 
 fn execute_post_bash_call(e: PostBashCall) -> Result<CheckpointRequest, GitAiError> {
-    // Will be rewritten in Task 8 to query daemon for pre-snapshot + do stat diff
+    use crate::commands::checkpoint_agent::bash_tool;
+
+    let repo = discover_repository_in_path_no_git_exec(e.context.cwd.as_path())?;
+    let repo_work_dir = repo.workdir()?;
+
+    let bash_result = bash_tool::handle_bash_tool(
+        bash_tool::HookEvent::PostToolUse,
+        &repo_work_dir,
+        &e.context.session_id,
+        &e.tool_use_id,
+    );
+
+    let file_paths: Vec<PathBuf> = match &bash_result {
+        Ok(result) => match &result.action {
+            bash_tool::BashCheckpointAction::Checkpoint(paths) => {
+                paths.iter().map(|p| repo_work_dir.join(p)).collect()
+            }
+            _ => vec![],
+        },
+        Err(err) => {
+            tracing::debug!("Bash tool post-hook error: {}", err);
+            vec![]
+        }
+    };
+
+    let files = build_checkpoint_files(&file_paths)?;
+
     Ok(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind: CheckpointKind::AiAgent,
         agent_id: Some(e.context.agent_id),
-        files: vec![],
+        files,
         path_role: PreparedPathRole::Edited,
         transcript_source: e.transcript_source,
         metadata: e.context.metadata,
