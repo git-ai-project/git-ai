@@ -228,7 +228,6 @@ impl Agent for ClaudeAgent {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,5 +448,4 @@ mod tests {
             .collect();
         assert_eq!(ids, vec![3, 4, 5]);
     }
-
 }
