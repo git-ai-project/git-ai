@@ -36,9 +36,6 @@ const WALK_TIMEOUT_MS: u64 = 1500;
 /// at any checkpoint, the hook returns Fallback immediately.
 const HOOK_TIMEOUT_MS: u64 = 4000;
 
-/// Pre-snapshots older than this are garbage-collected (seconds).
-const SNAPSHOT_STALE_SECS: u64 = 300;
-
 // ---------------------------------------------------------------------------
 // Test-only timeout overrides (thread-local so parallel tests don't interfere)
 // ---------------------------------------------------------------------------
@@ -95,16 +92,10 @@ pub fn reset_timeout_overrides_for_test() {
 /// Grace window in nanoseconds for low-resolution filesystem mtime comparison.
 const MTIME_GRACE_WINDOW_NS: u128 = (MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000;
 
-/// Maximum number of stale files before skipping content capture.
-const MAX_STALE_FILES_FOR_CAPTURE: usize = 1000;
-
 /// Maximum number of files to track in a snapshot.  Repos larger than this
 /// skip the stat-diff system entirely (returning Fallback) to avoid adding
 /// seconds of latency to every Bash tool call.
 const MAX_TRACKED_FILES: usize = 50_000;
-
-/// Maximum file size for content capture (10 MB).
-const MAX_CAPTURE_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -687,11 +678,6 @@ pub fn diff(pre: &StatSnapshot, post: &StatSnapshot) -> StatDiffResult {
     result
 }
 
-/// Sanitize an invocation key for use as a filename.
-fn sanitize_key(key: &str) -> String {
-    key.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
-}
-
 // ---------------------------------------------------------------------------
 // Git status fallback
 // ---------------------------------------------------------------------------
@@ -771,51 +757,6 @@ fn system_time_to_nanos(t: SystemTime) -> u128 {
         .as_nanos()
 }
 
-/// Read file contents for captured checkpoint, skipping binary/large/unreadable files.
-fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<String, String> {
-    use std::io::Read;
-    let mut contents = HashMap::new();
-    for rel_path in file_paths {
-        let abs_path = repo_root.join(rel_path);
-        let mut file = match fs::File::open(&abs_path) {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::debug!(
-                    "Skipping unreadable file for capture: {}: {}",
-                    rel_path.display(),
-                    e
-                );
-                continue;
-            }
-        };
-        if let Ok(meta) = file.metadata()
-            && meta.len() > MAX_CAPTURE_FILE_SIZE
-        {
-            tracing::debug!(
-                "Skipping large file for capture: {} ({} bytes)",
-                rel_path.display(),
-                meta.len()
-            );
-            continue;
-        }
-        let mut content = String::new();
-        match file.read_to_string(&mut content) {
-            Ok(_) => {
-                let key = normalize_to_posix(&rel_path.to_string_lossy());
-                contents.insert(key, content);
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "Skipping non-UTF8/unreadable file for capture: {}: {}",
-                    rel_path.display(),
-                    e
-                );
-            }
-        }
-    }
-    contents
-}
-
 // ---------------------------------------------------------------------------
 // Daemon watermark query + stale file detection
 // ---------------------------------------------------------------------------
@@ -869,47 +810,6 @@ fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
         .get("worktree_watermark")
         .and_then(|v| serde_json::from_value(v.clone()).ok());
     Some(DaemonWatermarks { per_file, worktree })
-}
-
-/// Find files in the snapshot that are stale (modified since the last baseline).
-///
-/// Because `snapshot()` already filters out wm-covered files, every entry in
-/// `snapshot.entries` is a candidate.  We still apply the per-file (Tier 1)
-/// check for precision: a file that passed the coarser worktree-wm filter may
-/// still be within the grace window of its own more-recent per-file watermark.
-///
-/// Three-tier logic per entry:
-/// 1. Per-file watermark → stale if `mtime > file_wm + GRACE`.
-/// 2. Worktree watermark (real or cold-start proxy) → all entries already
-///    passed this threshold via the snapshot filter; push unconditionally.
-/// 3. Neither watermark → no baseline, skip (cold-start with no index mtime).
-fn find_stale_files(snapshot: &StatSnapshot) -> Vec<PathBuf> {
-    let mut stale = Vec::new();
-    for (rel_path, entry) in &snapshot.entries {
-        if !entry.exists {
-            continue;
-        }
-        let Some(mtime) = entry.mtime else {
-            continue;
-        };
-        let mtime_ns = system_time_to_nanos(mtime);
-        let posix_key = normalize_to_posix(&rel_path.to_string_lossy());
-
-        if let Some(&file_wm) = snapshot.per_file_wm.get(&posix_key) {
-            // Tier 1: precise per-file watermark — may be tighter than the
-            // effective worktree wm used for snapshot filtering.
-            if mtime_ns > file_wm + MTIME_GRACE_WINDOW_NS {
-                stale.push(rel_path.clone());
-            }
-        } else if snapshot.effective_worktree_wm.is_some() {
-            // Tier 2: entry passed the worktree-wm snapshot filter, so by
-            // definition mtime > effective_wm + GRACE → stale.
-            stale.push(rel_path.clone());
-        }
-        // Tier 3: no watermark at all → no baseline, skip.
-    }
-    stale.sort();
-    stale
 }
 
 // ---------------------------------------------------------------------------
@@ -1406,13 +1306,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_key() {
-        assert_eq!(sanitize_key("session:tool"), "session_tool");
-        assert_eq!(sanitize_key("a/b\\c"), "a_b_c");
-        assert_eq!(sanitize_key("normal_key"), "normal_key");
-    }
-
-    #[test]
     fn test_stat_diff_result_all_changed_paths() {
         let result = StatDiffResult {
             created: vec![PathBuf::from("new.txt")],
@@ -1437,199 +1330,6 @@ mod tests {
     #[test]
     fn test_system_time_to_nanos_epoch() {
         assert_eq!(system_time_to_nanos(SystemTime::UNIX_EPOCH), 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // find_stale_files tests
-    // -----------------------------------------------------------------------
-
-    /// Helper: build a minimal `StatSnapshot` with the given entries and
-    /// optional embedded watermarks.
-    fn make_snapshot_with_wm(
-        entries: HashMap<PathBuf, StatEntry>,
-        per_file_wm: HashMap<String, u128>,
-        effective_worktree_wm: Option<u128>,
-    ) -> StatSnapshot {
-        StatSnapshot {
-            entries,
-            taken_at: None,
-            invocation_key: "test:stale".to_string(),
-            repo_root: PathBuf::from("/tmp"),
-            effective_worktree_wm,
-            per_file_wm,
-        }
-    }
-
-    /// Shorthand: no watermarks (cold-start, no index mtime).
-    fn make_snapshot(entries: HashMap<PathBuf, StatEntry>) -> StatSnapshot {
-        make_snapshot_with_wm(entries, HashMap::new(), None)
-    }
-
-    /// Helper: build a `StatEntry` for a regular file with the given mtime.
-    fn make_entry(mtime_secs: u64, exists: bool) -> StatEntry {
-        let mtime = if exists {
-            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(mtime_secs))
-        } else {
-            None
-        };
-        StatEntry {
-            exists,
-            mtime,
-            ctime: mtime,
-            size: 100,
-            mode: 0o644,
-            file_type: StatFileType::Regular,
-        }
-    }
-
-    #[test]
-    fn test_find_stale_files_cold_start_excludes_unwatermarked_files() {
-        // On cold start (no per-file and no worktree watermark), files with no
-        // watermark are NOT returned by find_stale_files — they are simply skipped.
-        let mut entries = HashMap::new();
-        entries.insert(
-            normalize_path(Path::new("src/main.rs")),
-            make_entry(100, true),
-        );
-        let snapshot = make_snapshot(entries); // no embedded wm
-
-        let stale = find_stale_files(&snapshot);
-        assert!(
-            stale.is_empty(),
-            "cold-start: unwatermarked files are not returned (no baseline)"
-        );
-    }
-
-    #[test]
-    fn test_find_stale_files_uses_worktree_watermark_as_fallback() {
-        // File has no per-file watermark, but worktree watermark exists at 90s.
-        // File mtime is 100s → 10s beyond grace window → stale.
-        let mut entries = HashMap::new();
-        entries.insert(
-            normalize_path(Path::new("src/main.rs")),
-            make_entry(100, true),
-        );
-        let snapshot = make_snapshot_with_wm(
-            entries,
-            HashMap::new(),
-            Some(Duration::from_secs(90).as_nanos()),
-        );
-
-        let stale = find_stale_files(&snapshot);
-        assert_eq!(
-            stale.len(),
-            1,
-            "file modified after worktree watermark is stale"
-        );
-    }
-
-    #[test]
-    fn test_find_stale_files_worktree_watermark_within_grace() {
-        // File mtime=100s, worktree watermark=99s → within 2s grace → NOT stale.
-        // Note: this file would have been filtered from the snapshot by
-        // is_wm_covered in production; this test exercises the Tier-2 guard
-        // inside find_stale_files for robustness.
-        let mut entries = HashMap::new();
-        entries.insert(
-            normalize_path(Path::new("src/main.rs")),
-            make_entry(100, true),
-        );
-        let snapshot = make_snapshot_with_wm(
-            entries,
-            HashMap::new(),
-            Some(Duration::from_secs(99).as_nanos()),
-        );
-
-        // mtime 100s > effective_wm 99s, but find_stale_files pushes Tier-2
-        // entries unconditionally (coverage filter already checked).  The file
-        // is stale from find_stale_files' perspective even though the diff with
-        // an identical post-snapshot would report no change.
-        let stale = find_stale_files(&snapshot);
-        assert_eq!(stale.len(), 1, "entry that passed coverage filter is stale");
-    }
-
-    #[test]
-    fn test_find_stale_files_per_file_wins_over_worktree() {
-        // Per-file watermark (95s) is older than worktree watermark (98s).
-        // File mtime=100s → 5s beyond per-file watermark → stale.
-        let mut entries = HashMap::new();
-        let path = normalize_path(Path::new("src/lib.rs"));
-        entries.insert(path, make_entry(100, true));
-
-        let mut per_file = HashMap::new();
-        per_file.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
-        let snapshot =
-            make_snapshot_with_wm(entries, per_file, Some(Duration::from_secs(98).as_nanos()));
-
-        let stale = find_stale_files(&snapshot);
-        assert_eq!(stale.len(), 1);
-    }
-
-    #[test]
-    fn test_find_stale_files_within_grace_window() {
-        // File with mtime=100s, per-file watermark at 99s.
-        // Difference is 1s which is within the 2s grace window → NOT stale.
-        let mut entries = HashMap::new();
-        let path = normalize_path(Path::new("src/lib.rs"));
-        entries.insert(path, make_entry(100, true));
-
-        let mut per_file = HashMap::new();
-        per_file.insert("src/lib.rs".to_string(), Duration::from_secs(99).as_nanos());
-        let snapshot = make_snapshot_with_wm(entries, per_file, None);
-
-        let stale = find_stale_files(&snapshot);
-        assert!(
-            stale.is_empty(),
-            "file within grace window should not be stale"
-        );
-    }
-
-    #[test]
-    fn test_find_stale_files_beyond_grace_window() {
-        // File with mtime=100s, per-file watermark at 95s.
-        // Difference is 5s which exceeds the 2s grace window → stale.
-        let mut entries = HashMap::new();
-        let path = normalize_path(Path::new("src/lib.rs"));
-        entries.insert(path, make_entry(100, true));
-
-        let mut per_file = HashMap::new();
-        per_file.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
-        let snapshot = make_snapshot_with_wm(entries, per_file, None);
-
-        let stale = find_stale_files(&snapshot);
-        assert_eq!(stale.len(), 1, "file beyond grace window should be stale");
-    }
-
-    #[test]
-    fn test_find_stale_files_nonexistent_skipped() {
-        // File with exists=false should not appear in stale list regardless of watermarks.
-        let mut entries = HashMap::new();
-        entries.insert(normalize_path(Path::new("gone.rs")), make_entry(100, false));
-        let snapshot = make_snapshot_with_wm(entries, HashMap::new(), Some(0));
-
-        let stale = find_stale_files(&snapshot);
-        assert!(stale.is_empty(), "nonexistent file should not be stale");
-    }
-
-    // -----------------------------------------------------------------------
-    // capture_file_contents tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_capture_file_contents_reads_text_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("hello.txt");
-        fs::write(&file_path, "hello world").unwrap();
-
-        let contents = capture_file_contents(dir.path(), &[PathBuf::from("hello.txt")]);
-        assert_eq!(contents.get("hello.txt").unwrap(), "hello world",);
-    }
-
-    #[test]
-    fn test_capture_file_contents_skips_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let contents = capture_file_contents(dir.path(), &[PathBuf::from("nonexistent.txt")]);
-        assert!(contents.is_empty());
     }
 
     // -----------------------------------------------------------------------
