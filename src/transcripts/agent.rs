@@ -41,6 +41,20 @@ pub trait Agent: Send + Sync {
     ) -> Result<TranscriptBatch, TranscriptError>;
 }
 
+const ALL_AGENT_TYPES: &[&str] = &[
+    "claude",
+    "cursor",
+    "droid",
+    "copilot",
+    "gemini",
+    "continue-cli",
+    "windsurf",
+    "codex",
+    "amp",
+    "opencode",
+    "pi",
+];
+
 /// Get an agent implementation by type name.
 ///
 /// Returns None for agents without sweep/read support (e.g., "human", "mock_ai").
@@ -59,4 +73,12 @@ pub fn get_agent(agent_type: &str) -> Option<Box<dyn Agent>> {
         "pi" => Some(Box::new(super::agents::PiAgent::new())),
         _ => None,
     }
+}
+
+/// Get all registered agents as (type_name, agent) pairs.
+pub fn get_all_agents() -> Vec<(String, Box<dyn Agent>)> {
+    ALL_AGENT_TYPES
+        .iter()
+        .filter_map(|&name| get_agent(name).map(|agent| (name.to_string(), agent)))
+        .collect()
 }

@@ -1,6 +1,6 @@
 // src/daemon/sweep_coordinator.rs
 
-use crate::transcripts::agent::{Agent, get_agent};
+use crate::transcripts::agent::{Agent, get_all_agents};
 use crate::transcripts::db::{SessionRecord, TranscriptsDatabase};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::TranscriptError;
@@ -16,33 +16,9 @@ pub struct SweepCoordinator {
 
 impl SweepCoordinator {
     pub fn new(transcripts_db: Arc<TranscriptsDatabase>) -> Self {
-        // Initialize with all agents that have sweep support
-        let agent_registry = vec![
-            (
-                "claude".to_string(),
-                get_agent("claude").expect("claude agent registered"),
-            ),
-            (
-                "cursor".to_string(),
-                get_agent("cursor").expect("cursor agent registered"),
-            ),
-            (
-                "droid".to_string(),
-                get_agent("droid").expect("droid agent registered"),
-            ),
-            (
-                "copilot".to_string(),
-                get_agent("copilot").expect("copilot agent registered"),
-            ),
-            (
-                "codex".to_string(),
-                get_agent("codex").expect("codex agent registered"),
-            ),
-        ];
-
         Self {
             transcripts_db,
-            agent_registry,
+            agent_registry: get_all_agents(),
         }
     }
 
