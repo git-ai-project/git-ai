@@ -32,7 +32,7 @@ use crate::{
     },
     authorship::working_log::CheckpointKind,
     commands::checkpoint::PreparedPathRole,
-    commands::checkpoint_agent::orchestrator::CheckpointRequest,
+    commands::checkpoint_agent::orchestrator::{CheckpointRequest, CheckpointFileEntry},
     commands::hooks::{push_hooks, stash_hooks},
 };
 #[cfg(not(windows))]
@@ -81,8 +81,7 @@ pub mod trace_normalizer;
 pub mod transcript_worker;
 
 pub use control_api::{
-    CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, ControlResponse,
-    FamilyStatus, LiveCheckpointRunRequest, TelemetryEnvelope,
+    ControlRequest, ControlResponse, FamilyStatus, TelemetryEnvelope,
 };
 
 const PID_META_FILE: &str = "daemon.pid.json";
@@ -1787,28 +1786,6 @@ fn filter_commit_replay_files(
     (selected_files, selected_dirty_files)
 }
 
-fn build_human_replay_checkpoint_request(
-    files: Vec<String>,
-    dirty_files: HashMap<String, String>,
-) -> CheckpointRequest {
-    CheckpointRequest {
-        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-        checkpoint_kind: CheckpointKind::Human,
-        agent_id: None,
-        repo_working_dir: std::path::PathBuf::new(), // Will be overridden by caller
-        file_paths: files.into_iter().map(std::path::PathBuf::from).collect(),
-        path_role: PreparedPathRole::WillEdit,
-        dirty_files: Some(
-            dirty_files
-                .into_iter()
-                .map(|(k, v)| (std::path::PathBuf::from(k), v))
-                .collect(),
-        ),
-        transcript_source: None,
-        metadata: std::collections::HashMap::new(),
-        captured_checkpoint_id: None,
-    }
-}
 
 fn family_key_for_repository(repo: &Repository) -> String {
     repo.common_dir()
@@ -2518,7 +2495,7 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         // full committed diff so those files also receive attribution.
         if crate::commands::checkpoint_agent::bash_tool::has_active_bash_inflight(repo_root)
             && let Ok(full_diff) =
-                committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)
+                crate::authorship::rebase_authorship::committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)
         {
             for (path, content) in full_diff {
                 dirty.entry(path).or_insert(content);
@@ -2526,14 +2503,24 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         }
         dirty
     } else {
-        committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)?
+        crate::authorship::rebase_authorship::committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)?
     };
 
     let changed_files = commit_replay_files_from_snapshot(&dirty_files);
     if changed_files.is_empty() {
         return Ok(());
     }
+
+    // Pre-filtering: check working log for AI history and skip if none
     let working_log = repo.storage.working_log_for_base_commit(&base_commit)?;
+    let has_ai_history = working_log
+        .read_all_checkpoints()
+        .map(|checkpoints| checkpoints.iter().any(|c| c.kind.is_ai()))
+        .unwrap_or(false);
+    if !has_ai_history {
+        return Ok(());
+    }
+
     let (changed_files, dirty_files) =
         filter_commit_replay_files(&working_log, changed_files, dirty_files);
     if changed_files.is_empty() {
@@ -2545,48 +2532,39 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     // writing a synthetic Human checkpoint.  Bash snapshot files are written at
     // PreToolUse time and live for 300 s, so they are always present on disk when
     // the daemon processes the trace2 commit event (typically < 1 s later).
-    let (checkpoint_kind, replay_checkpoint_request) =
-        match crate::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash(
-            repo_root,
-            &repo_workdir,
-        ) {
-            Some((kind, Some(mut ai_result))) => {
-                // Bash in flight with full context — attribute committed files to the AI agent.
-                ai_result.file_paths = changed_files
-                    .into_iter()
-                    .map(std::path::PathBuf::from)
-                    .collect();
-                ai_result.path_role = PreparedPathRole::Edited;
-                ai_result.dirty_files = Some(
-                    dirty_files
-                        .into_iter()
-                        .map(|(k, v)| (std::path::PathBuf::from(k), v))
-                        .collect(),
-                );
-                (kind, ai_result)
-            }
-            Some((kind, None)) => {
-                // Bash in flight but no context details — use AI kind with daemon agent_id.
-                let mut result = build_human_replay_checkpoint_request(vec![], HashMap::new());
-                result.checkpoint_kind = kind;
-                result.file_paths = changed_files
-                    .into_iter()
-                    .map(std::path::PathBuf::from)
-                    .collect();
-                result.path_role = PreparedPathRole::Edited;
-                result.dirty_files = Some(
-                    dirty_files
-                        .into_iter()
-                        .map(|(k, v)| (std::path::PathBuf::from(k), v))
-                        .collect(),
-                );
-                (kind, result)
-            }
-            None => {
-                let result = build_human_replay_checkpoint_request(changed_files, dirty_files);
-                (CheckpointKind::Human, result)
-            }
-        };
+    let checkpoint_kind =
+        crate::commands::checkpoint_agent::bash_tool::checkpoint_kind_from_active_bash(repo_root)
+            .unwrap_or(CheckpointKind::Human);
+
+    // Build CheckpointFileEntry from file paths and content
+    let repo_work_dir = std::path::PathBuf::from(&repo_workdir);
+    let file_entries: Vec<crate::commands::checkpoint_agent::orchestrator::CheckpointFileEntry> =
+        changed_files
+            .into_iter()
+            .filter_map(|path| {
+                let content = dirty_files.get(&path)?.clone();
+                Some(crate::commands::checkpoint_agent::orchestrator::CheckpointFileEntry {
+                    path: std::path::PathBuf::from(&path),
+                    content,
+                    repo_work_dir: repo_work_dir.clone(),
+                    base_commit_sha: base_commit.to_string(),
+                })
+            })
+            .collect();
+
+    if file_entries.is_empty() {
+        return Ok(());
+    }
+
+    let replay_checkpoint_request = CheckpointRequest {
+        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+        checkpoint_kind,
+        agent_id: None,
+        files: file_entries,
+        path_role: PreparedPathRole::Edited,
+        transcript_source: None,
+        metadata: std::collections::HashMap::new(),
+    };
 
     crate::commands::checkpoint::run_with_base_commit_override_with_policy(
         repo,

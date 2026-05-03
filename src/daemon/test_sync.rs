@@ -1,4 +1,4 @@
-use crate::daemon::CheckpointRunRequest;
+use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::repository::config_get_str_for_path_no_git_exec;
 use std::collections::HashSet;

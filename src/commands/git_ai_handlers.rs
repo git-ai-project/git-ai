@@ -9,7 +9,7 @@ use crate::commands::checkpoint::PreparedPathRole;
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::config;
 use crate::daemon::{
-    CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, LiveCheckpointRunRequest,
+    ControlRequest,
     send_control_request,
 };
 use crate::git::find_repository;
