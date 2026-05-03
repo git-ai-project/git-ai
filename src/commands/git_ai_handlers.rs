@@ -358,6 +358,25 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
+    // Check repository allowlist before sending to daemon
+    {
+        let config = config::Config::get();
+        let mut checked_repos = std::collections::HashSet::new();
+        for request in &requests {
+            for file in &request.files {
+                if checked_repos.insert(file.repo_work_dir.clone())
+                    && let Ok(repo) = find_repository_in_path(&file.repo_work_dir.to_string_lossy())
+                    && !config.is_allowed_repository(&Some(repo))
+                {
+                    eprintln!(
+                        "Skipping checkpoint because repository is excluded or not in allow_repositories list"
+                    );
+                    std::process::exit(0);
+                }
+            }
+        }
+    }
+
     let is_test = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
         || std::env::var_os("GITAI_TEST_DB_PATH").is_some();
     let daemon_timeout = if cfg!(windows) || is_test {
@@ -962,6 +981,11 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
 }
 
 fn discover_dirty_files_from_status(cwd: &std::path::Path) -> Vec<String> {
+    let repo_root = crate::git::repository::discover_repository_in_path_no_git_exec(cwd)
+        .ok()
+        .and_then(|r| r.workdir().ok())
+        .unwrap_or_else(|| cwd.to_path_buf());
+
     let output = std::process::Command::new(crate::config::Config::get().git_cmd())
         .args(["status", "--porcelain", "-uall"])
         .current_dir(cwd)
@@ -977,15 +1001,19 @@ fn discover_dirty_files_from_status(cwd: &std::path::Path) -> Vec<String> {
             if line.len() < 4 {
                 return None;
             }
-            let file = line[3..].trim();
+            let mut file = line[3..].trim();
             if file.is_empty() {
                 return None;
+            }
+            // Renames show as "old_name -> new_name"; take only the new name
+            if let Some(arrow_pos) = file.find(" -> ") {
+                file = &file[arrow_pos + 4..];
             }
             let p = std::path::Path::new(file);
             if p.is_absolute() {
                 Some(file.to_string())
             } else {
-                Some(cwd.join(p).to_string_lossy().to_string())
+                Some(repo_root.join(p).to_string_lossy().to_string())
             }
         })
         .collect()

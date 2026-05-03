@@ -49,8 +49,36 @@ struct PreviousFileState {
 
 use crate::authorship::working_log::AgentId;
 
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
+const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
+
 #[cfg(not(any(test, feature = "test-support")))]
 const KNOWN_HUMAN_MIN_SECS_AFTER_AI: u64 = 1;
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) fn should_emit_agent_usage(agent_id: &AgentId) -> bool {
+    let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
+    let now_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let Ok(db) = crate::metrics::db::MetricsDatabase::global() else {
+        return true;
+    };
+    let Ok(mut db_lock) = db.lock() else {
+        return true;
+    };
+
+    db_lock
+        .should_emit_agent_usage(&prompt_id, now_ts, AGENT_USAGE_MIN_INTERVAL_SECS)
+        .unwrap_or(true)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn should_emit_agent_usage(_agent_id: &AgentId) -> bool {
+    false
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

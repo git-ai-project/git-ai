@@ -1357,6 +1357,30 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
         return Ok(());
     }
 
+    if request.checkpoint_kind.is_ai()
+        && let Some(ref agent_id) = request.agent_id
+        && crate::commands::checkpoint::should_emit_agent_usage(agent_id)
+    {
+        let prompt_id = crate::authorship::authorship_log_serialization::generate_short_hash(
+            &agent_id.id,
+            &agent_id.tool,
+        );
+        let session_id = crate::authorship::authorship_log_serialization::generate_session_id(
+            &agent_id.id,
+            &agent_id.tool,
+        );
+        let attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+            .session_id(session_id)
+            .tool(&agent_id.tool)
+            .model(&agent_id.model)
+            .prompt_id(prompt_id)
+            .external_prompt_id(&agent_id.id)
+            .custom_attributes_map(crate::config::Config::fresh().custom_attributes());
+
+        let values = crate::metrics::AgentUsageValues::new();
+        crate::metrics::record(values, attrs);
+    }
+
     let repo_work_dir = &request.files[0].repo_work_dir;
     let repo = find_repository_in_path(&repo_work_dir.to_string_lossy())?;
     let author = repo.git_author_identity().formatted_or_unknown();
