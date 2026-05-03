@@ -213,7 +213,8 @@ mod tests {
                     vec![PathBuf::from("/Users/a/project/very_fun.md")]
                 );
                 assert_eq!(
-                    e.content_overrides.get(&PathBuf::from("/Users/a/project/very_fun.md")),
+                    e.content_overrides
+                        .get(&PathBuf::from("/Users/a/project/very_fun.md")),
                     Some(&String::new())
                 );
             }
