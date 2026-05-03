@@ -56,7 +56,7 @@ impl AgentPreset for AgentV1Preset {
                         metadata: HashMap::new(),
                     },
                     file_paths,
-                    content_overrides: HashMap::new(),
+                    dirty_files: None,
                 })
             }
             AgentV1Payload::AiAgent {

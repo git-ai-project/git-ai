@@ -48,8 +48,7 @@ pub enum ParsedHookEvent {
 pub struct PreFileEdit {
     pub context: PresetContext,
     pub file_paths: Vec<PathBuf>,
-    #[serde(default)]
-    pub content_overrides: HashMap<PathBuf, String>,
+    pub dirty_files: Option<HashMap<PathBuf, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
