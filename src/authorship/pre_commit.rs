@@ -1,3 +1,4 @@
+use crate::authorship::background_agent::synthetic_ai_checkpoint_request_for_no_hooks_agent;
 use crate::authorship::working_log::CheckpointKind;
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::error::GitAiError;
@@ -33,6 +34,13 @@ fn pre_commit_checkpoint_context(repo: &Repository) -> (CheckpointKind, Option<C
     {
         tracing::debug!("pre-commit: using active bash context for AI checkpoint");
         return (checkpoint_kind, agent_run_result);
+    }
+
+    if let Some((_, request)) =
+        synthetic_ai_checkpoint_request_for_no_hooks_agent(repo_root.to_path_buf())
+    {
+        tracing::debug!("pre-commit: detected no-hooks background agent, attributing commit to AI");
+        return (CheckpointKind::AiAgent, Some(request));
     }
 
     tracing::debug!("pre-commit: no active inflight bash agent context, using human checkpoint");
