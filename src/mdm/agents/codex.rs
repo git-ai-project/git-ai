@@ -1,7 +1,8 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
+    MIN_CODEX_VERSION, binary_exists, generate_diff, get_binary_version, home_dir,
+    is_git_ai_checkpoint_command, parse_version, version_meets_requirement, write_atomic,
 };
 use serde_json::{Value as JsonValue, json};
 use std::fs;
@@ -21,6 +22,19 @@ impl CodexInstaller {
 
     fn hooks_path() -> PathBuf {
         home_dir().join(".codex").join("hooks.json")
+    }
+
+    fn validate_codex_version(version_str: &str) -> Result<(), GitAiError> {
+        if let Some(version) = parse_version(version_str)
+            && !version_meets_requirement(version, MIN_CODEX_VERSION)
+        {
+            return Err(GitAiError::Generic(format!(
+                "Codex version {}.{} detected, but minimum version {}.{} is required for apply_patch hooks",
+                version.0, version.1, MIN_CODEX_VERSION.0, MIN_CODEX_VERSION.1
+            )));
+        }
+
+        Ok(())
     }
 
     fn desired_command(binary_path: &Path) -> String {
@@ -397,6 +411,10 @@ impl HookInstaller for CodexInstaller {
             });
         }
 
+        if has_binary && let Ok(version_str) = get_binary_version("codex") {
+            Self::validate_codex_version(&version_str)?;
+        }
+
         let config_path = Self::config_path();
         let hooks_path = Self::hooks_path();
         let config = if config_path.exists() {
@@ -637,6 +655,19 @@ mod tests {
         ];
 
         assert!(!CodexInstaller::is_git_ai_codex_notify_args(&args));
+    }
+
+    #[test]
+    fn test_validate_codex_version_requires_apply_patch_hook_support() {
+        assert!(CodexInstaller::validate_codex_version("codex-cli 0.124.0").is_ok());
+        assert!(CodexInstaller::validate_codex_version("codex-cli 0.125.0").is_ok());
+
+        let error = CodexInstaller::validate_codex_version("codex-cli 0.123.0")
+            .expect_err("old Codex versions should be rejected");
+        assert!(
+            error.to_string().contains("minimum version 0.124"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

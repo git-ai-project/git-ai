@@ -457,9 +457,7 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             _ => ToolClass::Skip,
         },
         Agent::Codex => match tool_name {
-            // Codex currently only emits usable PreToolUse/PostToolUse hooks for Bash.
-            // File edits like `apply_patch` are still attributed via the turn-level Stop hook.
-            // TODO: classify Codex file-edit tools here once Codex ships file-edit tool hooks.
+            "apply_patch" => ToolClass::FileEdit,
             "Bash" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
@@ -1923,6 +1921,13 @@ mod tests {
         assert_eq!(classify_tool(Agent::OpenCode, "edit"), ToolClass::FileEdit);
         assert_eq!(classify_tool(Agent::OpenCode, "bash"), ToolClass::Bash);
         assert_eq!(classify_tool(Agent::OpenCode, "shell"), ToolClass::Bash);
+
+        // Codex
+        assert_eq!(
+            classify_tool(Agent::Codex, "apply_patch"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(classify_tool(Agent::Codex, "Bash"), ToolClass::Bash);
     }
 
     #[test]

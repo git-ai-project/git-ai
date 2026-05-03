@@ -1159,6 +1159,49 @@ pub(crate) fn load_captured_checkpoint_manifest(
     Ok(serde_json::from_str(&manifest)?)
 }
 
+pub(crate) fn pending_captured_checkpoint_manifests() -> Vec<PreparedCheckpointManifest> {
+    let Ok(storage_dir) = async_checkpoint_storage_dir() else {
+        return Vec::new();
+    };
+    if !storage_dir.exists() {
+        return Vec::new();
+    }
+
+    let Ok(entries) = fs::read_dir(storage_dir) else {
+        return Vec::new();
+    };
+
+    let mut manifests = Vec::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        let manifest_path = entry.path().join("manifest.json");
+        let Ok(data) = fs::read(&manifest_path) else {
+            continue;
+        };
+        match serde_json::from_slice::<PreparedCheckpointManifest>(&data) {
+            Ok(manifest) => manifests.push(manifest),
+            Err(error) => {
+                tracing::debug!(
+                    "failed parsing pending captured checkpoint manifest {}: {}",
+                    manifest_path.display(),
+                    error
+                );
+            }
+        }
+    }
+
+    manifests
+}
+
 fn validate_captured_checkpoint_manifest_repo(
     repo: &Repository,
     manifest: &PreparedCheckpointManifest,

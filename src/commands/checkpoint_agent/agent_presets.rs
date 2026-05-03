@@ -7,7 +7,7 @@ use crate::{
         self, Agent, BashCheckpointAction, HookEvent, ToolClass,
     },
     error::GitAiError,
-    git::repository::find_repository_for_file,
+    git::repository::{find_repository_for_file, find_repository_in_path},
     observability::log_error,
     utils::normalize_to_posix,
 };
@@ -1527,6 +1527,9 @@ impl ContinueCliPreset {
 
 pub struct CodexPreset;
 
+const CODEX_SCOPED_FILE_EDIT_CHECKPOINT_META: &str = "codex_scoped_file_edit_checkpoint";
+const CODEX_TURN_ID_META: &str = "codex_turn_id";
+
 impl AgentCheckpointPreset for CodexPreset {
     fn run(&self, flags: AgentCheckpointFlags) -> Result<AgentRunResult, GitAiError> {
         let stdin_json = flags.hook_input.ok_or_else(|| {
@@ -1544,6 +1547,59 @@ impl AgentCheckpointPreset for CodexPreset {
             .get("cwd")
             .and_then(|v| v.as_str())
             .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
+
+        let stdin_model = hook_data
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let hook_event_name = hook_data
+            .get("hook_event_name")
+            .or_else(|| hook_data.get("hookEventName"))
+            .and_then(|v| v.as_str());
+        let tool_name = hook_data
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()));
+        let tool_class = tool_name
+            .map(|name| bash_tool::classify_tool(Agent::Codex, name))
+            .unwrap_or(ToolClass::Skip);
+        let is_bash_tool = tool_class == ToolClass::Bash;
+        let is_file_edit_tool = tool_class == ToolClass::FileEdit;
+
+        if hook_event_name == Some("PreToolUse") && is_file_edit_tool {
+            let agent_id = AgentId {
+                tool: "codex".to_string(),
+                id: session_id,
+                model: stdin_model.unwrap_or_else(|| "unknown".to_string()),
+            };
+
+            return Ok(AgentRunResult {
+                agent_id,
+                agent_metadata: None,
+                checkpoint_kind: CheckpointKind::Human,
+                transcript: None,
+                repo_working_dir: Some(cwd.to_string()),
+                edited_filepaths: None,
+                will_edit_filepaths: CodexPreset::extract_filepaths_from_tool_input(&hook_data),
+                dirty_files: None,
+                captured_checkpoint_id: None,
+            });
+        }
+
+        let turn_id = CodexPreset::turn_id_from_hook_data(&hook_data);
+        if hook_event_name == Some("Stop")
+            && CodexPreset::has_scoped_file_edit_checkpoint_for_turn(
+                cwd,
+                &session_id,
+                turn_id.as_deref(),
+            )
+        {
+            return Err(GitAiError::PresetError(
+                "Skipping Codex Stop checkpoint; scoped file-edit checkpoint already recorded for this turn."
+                    .to_string(),
+            ));
+        }
 
         let transcript_path = hook_data
             .get("transcript_path")
@@ -1569,7 +1625,7 @@ impl AgentCheckpointPreset for CodexPreset {
                 },
             );
 
-        let (transcript, model) = if let Some(path) = transcript_path.as_deref() {
+        let (transcript, rollout_model) = if let Some(path) = transcript_path.as_deref() {
             match CodexPreset::transcript_and_model_from_codex_rollout_jsonl(path) {
                 Ok((transcript, model)) => (transcript, model),
                 Err(e) => {
@@ -1590,18 +1646,6 @@ impl AgentCheckpointPreset for CodexPreset {
             );
             (AiTranscript::new(), Some("unknown".to_string()))
         };
-
-        let hook_event_name = hook_data
-            .get("hook_event_name")
-            .or_else(|| hook_data.get("hookEventName"))
-            .and_then(|v| v.as_str());
-        let tool_name = hook_data
-            .get("tool_name")
-            .and_then(|v| v.as_str())
-            .or_else(|| hook_data.get("toolName").and_then(|v| v.as_str()));
-        let is_bash_tool = tool_name
-            .map(|name| bash_tool::classify_tool(Agent::Codex, name) == ToolClass::Bash)
-            .unwrap_or(false);
         let tool_use_id = hook_data
             .get("tool_use_id")
             .or_else(|| hook_data.get("toolUseId"))
@@ -1611,10 +1655,12 @@ impl AgentCheckpointPreset for CodexPreset {
         let agent_id = AgentId {
             tool: "codex".to_string(),
             id: session_id.clone(),
-            model: model.unwrap_or_else(|| "unknown".to_string()),
+            model: stdin_model
+                .or(rollout_model)
+                .unwrap_or_else(|| "unknown".to_string()),
         };
 
-        let agent_metadata =
+        let mut agent_metadata =
             transcript_path.map(|path| HashMap::from([("transcript_path".to_string(), path)]));
 
         match hook_event_name {
@@ -1649,6 +1695,31 @@ impl AgentCheckpointPreset for CodexPreset {
                 ));
             }
             Some("PostToolUse") => {
+                if is_file_edit_tool {
+                    let edited_filepaths =
+                        CodexPreset::extract_filepaths_from_tool_input(&hook_data).or_else(|| {
+                            CodexPreset::extract_filepaths_from_tool_response(&hook_data)
+                        });
+                    if edited_filepaths.is_some() {
+                        CodexPreset::mark_scoped_file_edit_metadata(
+                            &mut agent_metadata,
+                            &hook_data,
+                        );
+                    }
+
+                    return Ok(AgentRunResult {
+                        agent_id,
+                        agent_metadata,
+                        checkpoint_kind: CheckpointKind::AiAgent,
+                        transcript: Some(transcript),
+                        repo_working_dir: Some(cwd.to_string()),
+                        edited_filepaths,
+                        will_edit_filepaths: None,
+                        dirty_files: None,
+                        captured_checkpoint_id: None,
+                    });
+                }
+
                 if !is_bash_tool {
                     return Err(GitAiError::PresetError(format!(
                         "Skipping Codex PostToolUse for unsupported tool {}",
@@ -1728,6 +1799,203 @@ impl CodexPreset {
                     .and_then(|v| v.as_str())
             })
             .map(|s| s.to_string())
+    }
+
+    fn turn_id_from_hook_data(hook_data: &serde_json::Value) -> Option<String> {
+        hook_data
+            .get("turn_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| hook_data.get("turnId").and_then(|v| v.as_str()))
+            .or_else(|| hook_data.get("turn-id").and_then(|v| v.as_str()))
+            .or_else(|| {
+                hook_data
+                    .get("hook_event")
+                    .and_then(|ev| ev.get("turn_id"))
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| {
+                hook_data
+                    .get("hook_event")
+                    .and_then(|ev| ev.get("turn-id"))
+                    .and_then(|v| v.as_str())
+            })
+            .map(|s| s.to_string())
+    }
+
+    fn mark_scoped_file_edit_metadata(
+        agent_metadata: &mut Option<HashMap<String, String>>,
+        hook_data: &serde_json::Value,
+    ) {
+        let metadata = agent_metadata.get_or_insert_with(HashMap::new);
+        metadata.insert(
+            CODEX_SCOPED_FILE_EDIT_CHECKPOINT_META.to_string(),
+            "true".to_string(),
+        );
+
+        if let Some(turn_id) = Self::turn_id_from_hook_data(hook_data) {
+            metadata.insert(CODEX_TURN_ID_META.to_string(), turn_id);
+        }
+    }
+
+    fn has_scoped_file_edit_checkpoint_for_turn(
+        cwd: &str,
+        session_id: &str,
+        turn_id: Option<&str>,
+    ) -> bool {
+        let Some(turn_id) = turn_id else {
+            return false;
+        };
+        let Ok(repo) = find_repository_in_path(cwd) else {
+            return false;
+        };
+        let repo_workdir = repo.workdir().ok();
+
+        if let Some(repo_workdir) = repo_workdir.as_deref()
+            && Self::has_pending_scoped_file_edit_checkpoint_for_turn(
+                repo_workdir,
+                session_id,
+                turn_id,
+            )
+        {
+            return true;
+        }
+
+        let base_commit = repo
+            .head()
+            .and_then(|head| head.target())
+            .unwrap_or_else(|_| "initial".to_string());
+        let Ok(working_log) = repo.storage.working_log_for_base_commit(&base_commit) else {
+            return false;
+        };
+        let Ok(checkpoints) = working_log.read_all_checkpoints() else {
+            return false;
+        };
+
+        checkpoints.iter().rev().any(|checkpoint| {
+            checkpoint.kind == CheckpointKind::AiAgent
+                && !checkpoint.entries.is_empty()
+                && Self::agent_id_matches_codex_session(checkpoint.agent_id.as_ref(), session_id)
+                && Self::metadata_matches_scoped_file_edit_turn(
+                    checkpoint.agent_metadata.as_ref(),
+                    turn_id,
+                )
+        })
+    }
+
+    fn has_pending_scoped_file_edit_checkpoint_for_turn(
+        repo_workdir: &Path,
+        session_id: &str,
+        turn_id: &str,
+    ) -> bool {
+        let repo_workdir = repo_workdir
+            .canonicalize()
+            .unwrap_or_else(|_| repo_workdir.to_path_buf());
+        crate::commands::checkpoint::pending_captured_checkpoint_manifests()
+            .into_iter()
+            .any(|manifest| {
+                if manifest.kind != CheckpointKind::AiAgent || manifest.files.is_empty() {
+                    return false;
+                }
+
+                let manifest_repo = Path::new(&manifest.repo_working_dir)
+                    .canonicalize()
+                    .unwrap_or_else(|_| PathBuf::from(&manifest.repo_working_dir));
+
+                manifest_repo == repo_workdir
+                    && manifest.agent_run_result.as_ref().is_some_and(|result| {
+                        Self::agent_id_matches_codex_session(Some(&result.agent_id), session_id)
+                            && Self::metadata_matches_scoped_file_edit_turn(
+                                result.agent_metadata.as_ref(),
+                                turn_id,
+                            )
+                    })
+            })
+    }
+
+    fn agent_id_matches_codex_session(agent_id: Option<&AgentId>, session_id: &str) -> bool {
+        agent_id.is_some_and(|agent_id| agent_id.tool == "codex" && agent_id.id == session_id)
+    }
+
+    fn metadata_matches_scoped_file_edit_turn(
+        metadata: Option<&HashMap<String, String>>,
+        turn_id: &str,
+    ) -> bool {
+        metadata.is_some_and(|metadata| {
+            metadata
+                .get(CODEX_SCOPED_FILE_EDIT_CHECKPOINT_META)
+                .is_some_and(|value| value == "true")
+                && metadata
+                    .get(CODEX_TURN_ID_META)
+                    .is_some_and(|checkpoint_turn_id| checkpoint_turn_id == turn_id)
+        })
+    }
+
+    fn extract_filepaths_from_tool_input(hook_data: &serde_json::Value) -> Option<Vec<String>> {
+        let tool_input = hook_data
+            .get("tool_input")
+            .or_else(|| hook_data.get("toolInput"))?;
+
+        let mut paths = Vec::new();
+        if let Some(command) = tool_input.get("command").and_then(|v| v.as_str()) {
+            Self::collect_apply_patch_paths_from_text(command, &mut paths);
+        }
+
+        if paths.is_empty() { None } else { Some(paths) }
+    }
+
+    fn extract_filepaths_from_tool_response(hook_data: &serde_json::Value) -> Option<Vec<String>> {
+        let tool_response = hook_data.get("tool_response")?;
+        let output = if let Some(raw) = tool_response.as_str() {
+            serde_json::from_str::<serde_json::Value>(raw)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("output")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| raw.to_string())
+        } else {
+            tool_response
+                .get("output")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())?
+        };
+
+        let mut paths = Vec::new();
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.len() > 2
+                && trimmed.as_bytes()[1] == b' '
+                && matches!(trimmed.as_bytes()[0], b'A' | b'M' | b'D' | b'R' | b'U')
+            {
+                Self::push_unique_path(&mut paths, &trimmed[2..]);
+            }
+        }
+
+        if paths.is_empty() { None } else { Some(paths) }
+    }
+
+    fn collect_apply_patch_paths_from_text(raw: &str, out: &mut Vec<String>) {
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            let maybe_path = trimmed
+                .strip_prefix("*** Update File: ")
+                .or_else(|| trimmed.strip_prefix("*** Add File: "))
+                .or_else(|| trimmed.strip_prefix("*** Delete File: "))
+                .or_else(|| trimmed.strip_prefix("*** Move to: "));
+
+            if let Some(path) = maybe_path {
+                Self::push_unique_path(out, path);
+            }
+        }
+    }
+
+    fn push_unique_path(out: &mut Vec<String>, path: &str) {
+        let path = path.trim();
+        if !path.is_empty() && !out.iter().any(|existing| existing == path) {
+            out.push(path.to_string());
+        }
     }
 
     pub fn codex_home_dir() -> PathBuf {
