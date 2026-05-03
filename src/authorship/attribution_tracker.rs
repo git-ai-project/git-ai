@@ -1322,7 +1322,6 @@ fn tokenize_non_whitespace(
     }
 
     let mut tokens = Vec::new();
-    let mut line = starting_line;
 
     let mut i = start;
     while i < end {
@@ -1332,11 +1331,8 @@ fn tokenize_non_whitespace(
         };
         let ch_len = ch.len_utf8();
 
-        // Skip whitespace (track newlines for line counting)
+        // Skip whitespace
         if ch.is_whitespace() {
-            if ch == '\n' {
-                line += 1;
-            }
             i += ch_len;
             continue;
         }
@@ -1370,10 +1366,6 @@ fn tokenize_non_whitespace(
                 };
                 let str_ch_len = str_ch.len_utf8();
                 lexeme.push(str_ch);
-
-                if str_ch == '\n' {
-                    line += 1;
-                }
 
                 if escaped {
                     escaped = false;

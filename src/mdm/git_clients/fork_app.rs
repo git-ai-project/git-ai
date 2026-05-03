@@ -25,10 +25,8 @@ use std::path::PathBuf;
 const FORK_BUNDLE_ID: &str = "com.DanPristupov.Fork";
 
 /// Git instance type values for Fork
-#[allow(dead_code)]
 mod git_instance_type {
     pub const SYSTEM: i32 = 0;
-    pub const BUNDLED: i32 = 1;
     pub const CUSTOM: i32 = 2;
 }
 
