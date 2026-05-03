@@ -65,7 +65,7 @@ pub(super) fn parse_legacy_extension_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: will_edit_filepaths,
-            content_overrides: HashMap::new(),
+            dirty_files: None,
         })]);
     }
 
@@ -253,14 +253,14 @@ pub(super) fn parse_vscode_native_hooks(
                 ));
             }
 
-            let content_overrides: HashMap<PathBuf, String> = extracted_paths
+            let dirty_files: HashMap<PathBuf, String> = extracted_paths
                 .iter()
                 .map(|p| (p.clone(), String::new()))
                 .collect();
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: extracted_paths,
-                content_overrides,
+                dirty_files: Some(dirty_files),
             })]);
         }
 
@@ -274,7 +274,7 @@ pub(super) fn parse_vscode_native_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: extracted_paths,
-            content_overrides: HashMap::new(),
+            dirty_files: None,
         })]);
     }
 
@@ -643,7 +643,9 @@ mod tests {
                     vec![PathBuf::from("/home/user/project/src/new_file.rs")]
                 );
                 assert_eq!(
-                    e.content_overrides
+                    e.dirty_files
+                        .as_ref()
+                        .unwrap()
                         .get(&PathBuf::from("/home/user/project/src/new_file.rs")),
                     Some(&String::new())
                 );

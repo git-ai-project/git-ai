@@ -78,14 +78,14 @@ pub(super) fn parse_cli_hooks(
                         "No path in CopilotCLI create tool_input".to_string(),
                     ));
                 }
-                let content_overrides: HashMap<PathBuf, String> = extracted_paths
+                let dirty_files: HashMap<PathBuf, String> = extracted_paths
                     .iter()
                     .map(|p| (p.clone(), String::new()))
                     .collect();
                 return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                     context,
                     file_paths: extracted_paths,
-                    content_overrides,
+                    dirty_files: Some(dirty_files),
                 })]);
             }
             if extracted_paths.is_empty() {
@@ -97,7 +97,7 @@ pub(super) fn parse_cli_hooks(
             Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: extracted_paths,
-                content_overrides: HashMap::new(),
+                dirty_files: None,
             })])
         }
         ("PostToolUse", ToolClass::FileEdit) => {
@@ -213,7 +213,9 @@ mod tests {
                     vec![PathBuf::from("/Users/a/project/very_fun.md")]
                 );
                 assert_eq!(
-                    e.content_overrides
+                    e.dirty_files
+                        .as_ref()
+                        .unwrap()
                         .get(&PathBuf::from("/Users/a/project/very_fun.md")),
                     Some(&String::new())
                 );

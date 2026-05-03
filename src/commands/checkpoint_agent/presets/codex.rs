@@ -147,7 +147,7 @@ impl AgentPreset for CodexPreset {
                     ParsedHookEvent::PreFileEdit(PreFileEdit {
                         context,
                         file_paths: vec![],
-                        content_overrides: HashMap::new(),
+                        dirty_files: None,
                     })
                 } else {
                     return Err(GitAiError::PresetError(format!(

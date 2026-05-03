@@ -156,9 +156,9 @@ fn split_files_into_requests(
 
 fn execute_pre_file_edit(e: PreFileEdit) -> Result<Vec<CheckpointRequest>, GitAiError> {
     let mut files = build_checkpoint_files(&e.file_paths)?;
-    if !e.content_overrides.is_empty() {
+    if let Some(ref dirty) = e.dirty_files {
         for f in &mut files {
-            if let Some(override_content) = e.content_overrides.get(&f.path) {
+            if let Some(override_content) = dirty.get(&f.path) {
                 f.content = Some(override_content.clone());
             }
         }

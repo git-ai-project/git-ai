@@ -335,7 +335,7 @@ impl AgentPreset for AmpPreset {
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
-                content_overrides: HashMap::new(),
+                dirty_files: None,
             }),
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
