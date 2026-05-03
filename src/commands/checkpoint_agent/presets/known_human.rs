@@ -43,13 +43,7 @@ impl AgentPreset for KnownHumanPreset {
                     })
                     .unwrap_or_default();
 
-                (
-                    editor,
-                    editor_version,
-                    extension_version,
-                    cwd,
-                    file_paths,
-                )
+                (editor, editor_version, extension_version, cwd, file_paths)
             };
 
         let mut editor_metadata = HashMap::new();

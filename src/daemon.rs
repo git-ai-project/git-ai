@@ -1780,18 +1780,19 @@ fn build_human_replay_checkpoint_request(
     let base_commit = crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial;
     let repo_work_dir_path = std::path::PathBuf::from(repo_work_dir);
 
-    let checkpoint_files: Vec<crate::commands::checkpoint_agent::orchestrator::CheckpointFile> = files
-        .into_iter()
-        .map(|path| {
-            let content = dirty_files.get(&path).cloned();
-            crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
-                path: std::path::PathBuf::from(&path),
-                content,
-                repo_work_dir: repo_work_dir_path.clone(),
-                base_commit: base_commit.clone(),
-            }
-        })
-        .collect();
+    let checkpoint_files: Vec<crate::commands::checkpoint_agent::orchestrator::CheckpointFile> =
+        files
+            .into_iter()
+            .map(|path| {
+                let content = dirty_files.get(&path).cloned();
+                crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
+                    path: std::path::PathBuf::from(&path),
+                    content,
+                    repo_work_dir: repo_work_dir_path.clone(),
+                    base_commit: base_commit.clone(),
+                }
+            })
+            .collect();
 
     CheckpointRequest {
         trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
@@ -5551,7 +5552,9 @@ impl ActorDaemonCoordinator {
                     request,
                     respond_to,
                 } => {
-                    let repo_wd = request.files.first()
+                    let repo_wd = request
+                        .files
+                        .first()
                         .map(|f| f.repo_work_dir.to_string_lossy().to_string())
                         .unwrap_or_default();
                     let checkpoint_file_paths: Vec<String> = request
@@ -5567,12 +5570,12 @@ impl ActorDaemonCoordinator {
                     let checkpoint_request = {
                         let future = async {
                             if !repo_wd.is_empty() {
-                                let ack = self
-                                    .coordinator
-                                    .apply_checkpoint(Path::new(&repo_wd))
-                                    .await;
+                                let ack =
+                                    self.coordinator.apply_checkpoint(Path::new(&repo_wd)).await;
                                 match ack {
-                                    Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
+                                    Ok(ack) => {
+                                        apply_checkpoint_side_effect(*request).map(|_| ack.seq)
+                                    }
                                     Err(error) => Err(error),
                                 }
                             } else {
@@ -7117,7 +7120,12 @@ impl ActorDaemonCoordinator {
                     }
 
                     worker
-                        .notify_checkpoint(session_id, agent_type, trace_id, transcript_source.path.clone())
+                        .notify_checkpoint(
+                            session_id,
+                            agent_type,
+                            trace_id,
+                            transcript_source.path.clone(),
+                        )
                         .await;
                 }
 
@@ -7180,7 +7188,14 @@ impl ActorDaemonCoordinator {
                 stat_snapshot,
             } => {
                 let mut state = self.bash_sessions.lock().unwrap();
-                state.start_session(session_id, tool_use_id, repo_work_dir, agent_id, metadata, stat_snapshot);
+                state.start_session(
+                    session_id,
+                    tool_use_id,
+                    repo_work_dir,
+                    agent_id,
+                    metadata,
+                    *stat_snapshot,
+                );
                 Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::BashSessionEnd {
@@ -7201,7 +7216,8 @@ impl ActorDaemonCoordinator {
                             session_id: None,
                             tool_use_id: None,
                             metadata: Some(session.metadata.clone()),
-                        }).ok();
+                        })
+                        .ok();
                         ControlResponse::ok(None, data)
                     }
                     None => {
@@ -7211,7 +7227,8 @@ impl ActorDaemonCoordinator {
                             session_id: None,
                             tool_use_id: None,
                             metadata: None,
-                        }).ok();
+                        })
+                        .ok();
                         ControlResponse::ok(None, data)
                     }
                 };
@@ -7227,14 +7244,16 @@ impl ActorDaemonCoordinator {
                         let data = serde_json::to_value(BashSnapshotQueryResponse {
                             found: true,
                             stat_snapshot: Some(snapshot.clone()),
-                        }).ok();
+                        })
+                        .ok();
                         ControlResponse::ok(None, data)
                     }
                     None => {
                         let data = serde_json::to_value(BashSnapshotQueryResponse {
                             found: false,
                             stat_snapshot: None,
-                        }).ok();
+                        })
+                        .ok();
                         ControlResponse::ok(None, data)
                     }
                 };
