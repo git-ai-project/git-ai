@@ -61,8 +61,12 @@ pub fn parse_version(version_str: &str) -> Option<(u32, u32)> {
             continue;
         }
 
-        let Ok(major) = parts[0].parse::<u32>() else { continue; };
-        let Ok(minor) = parts[1].parse::<u32>() else { continue; };
+        let Ok(major) = parts[0].parse::<u32>() else {
+            continue;
+        };
+        let Ok(minor) = parts[1].parse::<u32>() else {
+            continue;
+        };
 
         return Some((major, minor));
     }
