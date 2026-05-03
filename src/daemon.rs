@@ -2498,30 +2498,49 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         return Ok(());
     }
 
-    // Pre-filtering: check working log for AI history and skip if none
+    // Check for active bash inflight sessions — if a bash tool is in-flight when
+    // the commit lands, attribute the committed files to that AI agent rather than
+    // writing a synthetic Human checkpoint.
+    let bash_context =
+        crate::commands::checkpoint_agent::bash_tool::latest_inflight_bash_agent_context(repo_root);
+    let has_bash_inflight = bash_context.is_some();
+
+    let checkpoint_kind = if has_bash_inflight {
+        CheckpointKind::AiAgent
+    } else {
+        CheckpointKind::Human
+    };
+
+    let agent_id = bash_context.map(|ctx| ctx.agent_id);
+
+    // Check working log for existing AI checkpoint history or INITIAL attributions
+    // (e.g. from stash restore)
     let working_log = repo.storage.working_log_for_base_commit(&base_commit)?;
     let has_ai_history = working_log
         .read_all_checkpoints()
         .map(|checkpoints| checkpoints.iter().any(|c| c.kind.is_ai()))
         .unwrap_or(false);
-    if !has_ai_history {
+    let has_initial_attributions = !working_log.read_initial_attributions().files.is_empty();
+
+    if !has_bash_inflight && !has_ai_history && !has_initial_attributions {
         return Ok(());
     }
 
-    let (changed_files, dirty_files) =
-        filter_commit_replay_files(&working_log, changed_files, dirty_files);
-    if changed_files.is_empty() {
-        return Ok(());
-    }
-
-    // Mirror the wrapper-mode pre-commit hook: if a bash tool is in-flight when
-    // the commit lands, attribute the committed files to that AI agent rather than
-    // writing a synthetic Human checkpoint.  Bash snapshot files are written at
-    // PreToolUse time and live for 300 s, so they are always present on disk when
-    // the daemon processes the trace2 commit event (typically < 1 s later).
-    let checkpoint_kind =
-        crate::commands::checkpoint_agent::bash_tool::checkpoint_kind_from_active_bash(repo_root)
-            .unwrap_or(CheckpointKind::Human);
+    // When bash is inflight with no prior AI checkpoints, skip content-matching filter
+    // — we must re-process all committed files as AI.
+    // When bash is inflight WITH AI history, the working log already has correct
+    // attributions so we use the normal replay path with content filtering.
+    let bash_needs_full_attribution =
+        has_bash_inflight && !has_ai_history && !has_initial_attributions;
+    let (changed_files, dirty_files) = if bash_needs_full_attribution {
+        (changed_files, dirty_files)
+    } else {
+        let (cf, df) = filter_commit_replay_files(&working_log, changed_files, dirty_files);
+        if cf.is_empty() {
+            return Ok(());
+        }
+        (cf, df)
+    };
 
     // Build CheckpointFileEntry from file paths and content
     let repo_work_dir = std::path::PathBuf::from(&repo_workdir);
@@ -2545,24 +2564,74 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         return Ok(());
     }
 
-    let replay_checkpoint_request = CheckpointRequest {
-        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-        checkpoint_kind,
-        agent_id: None,
-        files: file_entries,
-        path_role: PreparedPathRole::Edited,
-        transcript_source: None,
-        metadata: std::collections::HashMap::new(),
-    };
+    if bash_needs_full_attribution {
+        // Bash inflight with no prior AI checkpoints: clear working log and run a
+        // two-phase checkpoint (empty → committed) so ALL lines are attributed to AI.
+        let _ = repo
+            .storage
+            .delete_working_log_for_base_commit(&base_commit);
 
-    crate::commands::checkpoint::run(
-        repo,
-        author,
-        checkpoint_kind,
-        true,
-        Some(replay_checkpoint_request),
-    )
-    .map(|_| ())
+        let empty_entries: Vec<
+            crate::commands::checkpoint_agent::orchestrator::CheckpointFileEntry,
+        > = file_entries
+            .iter()
+            .map(
+                |f| crate::commands::checkpoint_agent::orchestrator::CheckpointFileEntry {
+                    path: f.path.clone(),
+                    content: String::new(),
+                    repo_work_dir: f.repo_work_dir.clone(),
+                    base_commit_sha: f.base_commit_sha.clone(),
+                },
+            )
+            .collect();
+
+        let pre_request = CheckpointRequest {
+            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+            checkpoint_kind: CheckpointKind::Human,
+            agent_id: None,
+            files: empty_entries,
+            path_role: PreparedPathRole::WillEdit,
+            transcript_source: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        crate::commands::checkpoint::run(
+            repo,
+            author,
+            CheckpointKind::Human,
+            true,
+            Some(pre_request),
+        )?;
+
+        let post_request = CheckpointRequest {
+            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+            checkpoint_kind,
+            agent_id,
+            files: file_entries,
+            path_role: PreparedPathRole::Edited,
+            transcript_source: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        crate::commands::checkpoint::run(repo, author, checkpoint_kind, true, Some(post_request))
+            .map(|_| ())
+    } else {
+        let replay_checkpoint_request = CheckpointRequest {
+            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+            checkpoint_kind,
+            agent_id,
+            files: file_entries,
+            path_role: PreparedPathRole::Edited,
+            transcript_source: None,
+            metadata: std::collections::HashMap::new(),
+        };
+        crate::commands::checkpoint::run(
+            repo,
+            author,
+            checkpoint_kind,
+            true,
+            Some(replay_checkpoint_request),
+        )
+        .map(|_| ())
+    }
 }
 
 fn apply_rewrite_side_effect(

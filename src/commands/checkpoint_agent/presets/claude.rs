@@ -100,6 +100,7 @@ impl AgentPreset for ClaudePreset {
             (Some("PreToolUse"), false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
+                content_overrides: None,
             }),
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -110,6 +111,7 @@ impl AgentPreset for ClaudePreset {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
                 transcript_source,
+                content_overrides: None,
             }),
         };
 

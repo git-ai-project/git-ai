@@ -143,7 +143,7 @@ fn test_chinese_reflow_preserves_ai() {
 
     let file_path = repo.path().join("reflow.txt");
     fs::write(&file_path, "调用(\n  参数一,\n  参数二,\n  参数三\n)").unwrap();
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human reflow").unwrap();
 
     file.assert_lines_and_blame(crate::lines![

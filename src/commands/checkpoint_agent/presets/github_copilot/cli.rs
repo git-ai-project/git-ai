@@ -29,7 +29,7 @@ pub(super) fn parse_cli_hooks(
         )));
     }
 
-    let dirty_files = super::dirty_files_from_hook_data(data, cwd);
+    let content_overrides = super::dirty_files_from_hook_data(data, cwd);
     let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
     let tool_result = data
         .get("tool_result")
@@ -88,7 +88,7 @@ pub(super) fn parse_cli_hooks(
                 return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                     context,
                     file_paths: extracted_paths,
-                    dirty_files: Some(empty),
+                    content_overrides: Some(empty),
                 })]);
             }
             if extracted_paths.is_empty() {
@@ -100,7 +100,7 @@ pub(super) fn parse_cli_hooks(
             Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: extracted_paths,
-                dirty_files,
+                content_overrides,
             })])
         }
         ("PostToolUse", ToolClass::FileEdit) => {
@@ -113,7 +113,7 @@ pub(super) fn parse_cli_hooks(
             Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths: extracted_paths,
-                dirty_files,
+                content_overrides,
                 transcript_source: None,
             })])
         }
@@ -217,9 +217,9 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/Users/a/project/very_fun.md")]
                 );
-                let df = e.dirty_files.as_ref().unwrap();
+                let co = e.content_overrides.as_ref().unwrap();
                 assert_eq!(
-                    df.get(&PathBuf::from("/Users/a/project/very_fun.md")),
+                    co.get(&PathBuf::from("/Users/a/project/very_fun.md")),
                     Some(&String::new())
                 );
             }

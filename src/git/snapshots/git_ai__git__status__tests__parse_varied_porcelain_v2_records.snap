@@ -85,7 +85,7 @@ expression: entries
         orig_path: None,
     },
     StatusEntry {
-        path: "1 2 3 some unmerged/path.txt",
+        path: "some unmerged/path.txt",
         staged: Unmerged,
         unstaged: Unmerged,
         kind: Unmerged,

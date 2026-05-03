@@ -214,6 +214,7 @@ impl AgentPreset for FirebenderPreset {
             ("preToolUse", false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
+                content_overrides: None,
             }),
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -224,6 +225,7 @@ impl AgentPreset for FirebenderPreset {
                 context,
                 file_paths,
                 transcript_source: None,
+                content_overrides: None,
             }),
         };
 

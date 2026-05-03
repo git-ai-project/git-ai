@@ -1114,7 +1114,7 @@ fn test_attribution_with_checkpoint() {
     file.set_contents(crate::lines!["Initial".human(), "WIP AI".ai()]);
 
     // Create checkpoint
-    let result = repo.git_ai(&["checkpoint"]);
+    let result = repo.git_ai(&["checkpoint", "human"]);
     assert!(result.is_ok());
 }
 

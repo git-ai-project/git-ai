@@ -154,6 +154,7 @@ impl AgentPreset for WindsurfPreset {
             ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: file_path,
+                content_overrides: None,
             })
         } else {
             let file_path = tool_info
@@ -166,6 +167,7 @@ impl AgentPreset for WindsurfPreset {
                 context,
                 file_paths: file_path,
                 transcript_source,
+                content_overrides: None,
             })
         };
 

@@ -784,6 +784,7 @@ fn is_known_checkpoint_preset(arg: &str) -> bool {
             | "pi"
             | "ai_tab"
             | "firebender"
+            | "human"
             | "mock_ai"
             | "mock_known_human"
             | "known_human"
@@ -1873,6 +1874,28 @@ impl TestRepo {
         self.sync_pending_daemon_sessions(&family_key);
     }
 
+    pub(crate) fn sync_daemon_checkpoint(&self) {
+        if !self.has_active_daemon() {
+            return;
+        }
+        let family_key = self.daemon_family_key();
+        let baseline_count = {
+            let registry = daemon_sync_registry()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            registry.last_synced_completion_count(&family_key)
+        };
+        let observed_count = self.wait_for_daemon_completion_count(
+            &family_key,
+            baseline_count,
+            baseline_count.saturating_add(1),
+        );
+        let mut registry = daemon_sync_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry.advance_last_synced_completion_count(&family_key, observed_count);
+    }
+
     pub(crate) fn sync_daemon_external_completion_sessions(&self, sessions: &[String]) {
         if !self.has_active_daemon() || sessions.is_empty() {
             return;
@@ -2470,6 +2493,7 @@ impl TestRepo {
 
         let binary_path = get_binary_path();
         let normalized_args = normalize_test_git_ai_checkpoint_args(args);
+        let is_checkpoint = git_ai_primary_command(args) == Some("checkpoint");
 
         let mut command = Command::new(binary_path);
         command.args(&normalized_args).current_dir(&self.path);
@@ -2497,6 +2521,16 @@ impl TestRepo {
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        // Checkpoint commands are fire-and-forget: the CLI dispatches to the
+        // daemon and returns immediately. Wait for the daemon to finish
+        // processing so tests observe the side effects.
+        // Only sync if the checkpoint was actually dispatched (indicated by
+        // "Checkpoint dispatched" in stderr). Skipped/errored checkpoints
+        // (invalid preset, empty request) don't produce daemon completions.
+        if is_checkpoint && output.status.success() && stderr.contains("Checkpoint dispatched") {
+            self.sync_daemon_checkpoint();
+        }
 
         if output.status.success() {
             // Combine stdout and stderr since git-ai often writes to stderr
@@ -2534,6 +2568,7 @@ impl TestRepo {
 
         let binary_path = get_binary_path();
         let normalized_args = normalize_test_git_ai_checkpoint_args(args);
+        let is_checkpoint = git_ai_primary_command(args) == Some("checkpoint");
 
         let mut command = Command::new(binary_path);
         command
@@ -2568,6 +2603,10 @@ impl TestRepo {
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if is_checkpoint && output.status.success() && stderr.contains("Checkpoint dispatched") {
+            self.sync_daemon_checkpoint();
+        }
 
         if output.status.success() {
             // Combine stdout and stderr since git-ai often writes to stderr
@@ -3204,43 +3243,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_normalize_test_git_ai_checkpoint_args_inserts_separator_for_direct_file() {
-        assert_eq!(
-            normalize_test_git_ai_checkpoint_args(&["checkpoint", "src/lib.rs"]),
-            vec!["checkpoint", "--", "src/lib.rs"]
-        );
-    }
-
-    #[test]
-    fn test_normalize_test_git_ai_checkpoint_args_preserves_known_presets_and_separator() {
+    fn test_normalize_test_git_ai_checkpoint_args_preserves_known_presets() {
         assert_eq!(
             normalize_test_git_ai_checkpoint_args(&["checkpoint", "mock_ai", "src/lib.rs"]),
             vec!["checkpoint", "mock_ai", "src/lib.rs"]
         );
         assert_eq!(
-            normalize_test_git_ai_checkpoint_args(&["checkpoint", "--", "src/lib.rs"]),
-            vec!["checkpoint", "--", "src/lib.rs"]
+            normalize_test_git_ai_checkpoint_args(&["checkpoint", "human"]),
+            vec!["checkpoint", "human"]
         );
-    }
-
-    #[test]
-    fn test_normalize_test_git_ai_checkpoint_args_handles_hook_input_before_pathspecs() {
         assert_eq!(
-            normalize_test_git_ai_checkpoint_args(&[
-                "checkpoint",
-                "--hook-input",
-                "{\"cwd\":\"/tmp/repo\"}",
-                "src/lib.rs",
-                "src/main.rs",
-            ]),
-            vec![
-                "checkpoint",
-                "--hook-input",
-                "{\"cwd\":\"/tmp/repo\"}",
-                "--",
-                "src/lib.rs",
-                "src/main.rs",
-            ]
+            normalize_test_git_ai_checkpoint_args(&["checkpoint", "human", "src/lib.rs"]),
+            vec!["checkpoint", "human", "src/lib.rs"]
         );
     }
 

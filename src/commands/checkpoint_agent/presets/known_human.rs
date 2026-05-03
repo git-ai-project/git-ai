@@ -38,7 +38,11 @@ impl AgentPreset for KnownHumanPreset {
                     .as_array()
                     .map(|arr| {
                         arr.iter()
-                            .filter_map(|x| x.as_str().map(PathBuf::from))
+                            .filter_map(|x| x.as_str())
+                            .map(|p| {
+                                let pb = PathBuf::from(p);
+                                if pb.is_absolute() { pb } else { cwd.join(pb) }
+                            })
                             .collect()
                     })
                     .unwrap_or_default();

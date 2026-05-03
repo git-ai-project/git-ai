@@ -27,7 +27,7 @@ impl Calculator {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial calculator implementation")
         .unwrap();
 
@@ -91,7 +91,7 @@ impl Calculator {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds overflow check to add")
         .unwrap();
 
@@ -178,7 +178,7 @@ pub async fn get_user(Path(id): Path<u32>) -> Json<User> {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Add get_user endpoint").unwrap();
 
     // AI adds POST endpoint
@@ -223,7 +223,7 @@ pub async fn create_user(Json(payload): Json<CreateUser>) -> Result<Json<User>, 
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds validation").unwrap();
 
     // AI adds UPDATE and DELETE endpoints
@@ -291,7 +291,7 @@ pub async fn delete_user(Path(id): Path<u32>) -> Json<()> {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human refactors error handling")
         .unwrap();
 
@@ -342,7 +342,7 @@ fn test_addition() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial test").unwrap();
 
     // AI adds more test cases
@@ -391,7 +391,7 @@ fn test_multiplication() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds module wrapper")
         .unwrap();
 
@@ -458,7 +458,7 @@ fn test_multiplication() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds edge case test")
         .unwrap();
 
@@ -513,7 +513,7 @@ port = 8080
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial config").unwrap();
 
     // AI adds database config
@@ -551,7 +551,7 @@ max_connections = 10
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds comments and changes port")
         .unwrap();
 
@@ -613,7 +613,7 @@ fn test_realistic_jsx_component_development() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial Button component")
         .unwrap();
 
@@ -651,7 +651,7 @@ fn test_realistic_jsx_component_development() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds variant styling")
         .unwrap();
 
@@ -722,7 +722,7 @@ fn test_realistic_class_with_multiple_methods() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial UserManager class")
         .unwrap();
 
@@ -780,7 +780,7 @@ fn test_realistic_class_with_multiple_methods() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds validation to addUser")
         .unwrap();
 
@@ -865,7 +865,7 @@ fn test_realistic_class_with_multiple_methods() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds getAllUsers and getUserCount")
         .unwrap();
 
@@ -927,7 +927,7 @@ fn test_realistic_middleware_chain_development() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial logger middleware")
         .unwrap();
 
@@ -973,7 +973,7 @@ export function authMiddleware(req, res, next) {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds timestamps to logger")
         .unwrap();
 
@@ -1052,7 +1052,7 @@ export function errorHandlerMiddleware(err, req, res, next) {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds error handler")
         .unwrap();
 
@@ -1112,7 +1112,7 @@ CREATE TABLE users (
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial migration").unwrap();
 
     // AI adds indexes and constraints
@@ -1151,7 +1151,7 @@ CREATE INDEX idx_users_email ON users(email);
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds created_at").unwrap();
 
     // AI adds posts table with foreign key
@@ -1246,7 +1246,7 @@ pub fn validate_input(data: &str) -> bool {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial API with legacy functions")
         .unwrap();
 
@@ -1294,7 +1294,7 @@ pub fn validate_input(data: &str) -> bool {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds batch processing and improves validation")
         .unwrap();
 
@@ -1366,7 +1366,7 @@ fn test_realistic_formatting_and_whitespace_changes() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial compact config").unwrap();
 
     // AI reformats with better spacing and adds docstrings
@@ -1414,7 +1414,7 @@ fn test_realistic_formatting_and_whitespace_changes() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds database config")
         .unwrap();
 
@@ -1506,7 +1506,7 @@ pub fn get_user(id: i32) -> Option<User> {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial user model and schema")
         .unwrap();
 
@@ -1585,7 +1585,7 @@ pub fn get_user_by_email(email: &str) -> Option<User> {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Human adds email validation")
         .unwrap();
 

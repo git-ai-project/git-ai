@@ -33,6 +33,13 @@ pub struct CheckpointRequest {
 }
 
 fn build_file_entries(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFileEntry>, GitAiError> {
+    build_file_entries_with_content(file_paths, None)
+}
+
+fn build_file_entries_with_content(
+    file_paths: &[PathBuf],
+    content_overrides: Option<&HashMap<PathBuf, String>>,
+) -> Result<Vec<CheckpointFileEntry>, GitAiError> {
     if file_paths.is_empty() {
         return Ok(vec![]);
     }
@@ -60,7 +67,15 @@ fn build_file_entries(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFileEntry>
             })
             .clone();
 
-        let content = fs::read_to_string(path).unwrap_or_default();
+        let content = if let Some(c) = content_overrides.and_then(|o| o.get(path).cloned()) {
+            c
+        } else {
+            match fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(_) if path.exists() => continue, // binary file — skip
+                Err(_) => String::new(),             // deleted file
+            }
+        };
         entries.push(CheckpointFileEntry {
             path: path.clone(),
             content,
@@ -91,18 +106,21 @@ fn execute_event(
     preset_name: &str,
 ) -> Result<Option<CheckpointRequest>, GitAiError> {
     match event {
-        ParsedHookEvent::PreFileEdit(e) => execute_pre_file_edit(e).map(Some),
-        ParsedHookEvent::PostFileEdit(e) => execute_post_file_edit(e, preset_name).map(Some),
+        ParsedHookEvent::PreFileEdit(e) => execute_pre_file_edit(e),
+        ParsedHookEvent::PostFileEdit(e) => execute_post_file_edit(e, preset_name),
         ParsedHookEvent::PreBashCall(e) => execute_pre_bash_call(e),
-        ParsedHookEvent::PostBashCall(e) => execute_post_bash_call(e).map(Some),
-        ParsedHookEvent::KnownHumanEdit(e) => execute_known_human_edit(e).map(Some),
-        ParsedHookEvent::UntrackedEdit(e) => execute_untracked_edit(e).map(Some),
+        ParsedHookEvent::PostBashCall(e) => execute_post_bash_call(e),
+        ParsedHookEvent::KnownHumanEdit(e) => execute_known_human_edit(e),
+        ParsedHookEvent::UntrackedEdit(e) => execute_untracked_edit(e),
     }
 }
 
-fn execute_pre_file_edit(e: PreFileEdit) -> Result<CheckpointRequest, GitAiError> {
-    let files = build_file_entries(&e.file_paths)?;
-    Ok(CheckpointRequest {
+fn execute_pre_file_edit(e: PreFileEdit) -> Result<Option<CheckpointRequest>, GitAiError> {
+    let files = build_file_entries_with_content(&e.file_paths, e.content_overrides.as_ref())?;
+    if files.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind: CheckpointKind::Human,
         agent_id: None,
@@ -110,19 +128,22 @@ fn execute_pre_file_edit(e: PreFileEdit) -> Result<CheckpointRequest, GitAiError
         path_role: PreparedPathRole::WillEdit,
         transcript_source: None,
         metadata: e.context.metadata,
-    })
+    }))
 }
 
 fn execute_post_file_edit(
     e: PostFileEdit,
     preset_name: &str,
-) -> Result<CheckpointRequest, GitAiError> {
-    let files = build_file_entries(&e.file_paths)?;
+) -> Result<Option<CheckpointRequest>, GitAiError> {
+    let files = build_file_entries_with_content(&e.file_paths, e.content_overrides.as_ref())?;
+    if files.is_empty() {
+        return Ok(None);
+    }
     let checkpoint_kind = match preset_name {
         "ai_tab" => CheckpointKind::AiTab,
         _ => CheckpointKind::AiAgent,
     };
-    Ok(CheckpointRequest {
+    Ok(Some(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind,
         agent_id: Some(e.context.agent_id),
@@ -130,12 +151,15 @@ fn execute_post_file_edit(
         path_role: PreparedPathRole::Edited,
         transcript_source: e.transcript_source,
         metadata: e.context.metadata,
-    })
+    }))
 }
 
-fn execute_known_human_edit(e: KnownHumanEdit) -> Result<CheckpointRequest, GitAiError> {
+fn execute_known_human_edit(e: KnownHumanEdit) -> Result<Option<CheckpointRequest>, GitAiError> {
     let files = build_file_entries(&e.file_paths)?;
-    Ok(CheckpointRequest {
+    if files.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(CheckpointRequest {
         trace_id: e.trace_id,
         checkpoint_kind: CheckpointKind::KnownHuman,
         agent_id: None,
@@ -143,12 +167,15 @@ fn execute_known_human_edit(e: KnownHumanEdit) -> Result<CheckpointRequest, GitA
         path_role: PreparedPathRole::Edited,
         transcript_source: None,
         metadata: e.editor_metadata,
-    })
+    }))
 }
 
-fn execute_untracked_edit(e: UntrackedEdit) -> Result<CheckpointRequest, GitAiError> {
+fn execute_untracked_edit(e: UntrackedEdit) -> Result<Option<CheckpointRequest>, GitAiError> {
     let files = build_file_entries(&e.file_paths)?;
-    Ok(CheckpointRequest {
+    if files.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(CheckpointRequest {
         trace_id: e.trace_id,
         checkpoint_kind: CheckpointKind::Human,
         agent_id: None,
@@ -156,7 +183,7 @@ fn execute_untracked_edit(e: UntrackedEdit) -> Result<CheckpointRequest, GitAiEr
         path_role: PreparedPathRole::WillEdit,
         transcript_source: None,
         metadata: HashMap::new(),
-    })
+    }))
 }
 
 fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointRequest>, GitAiError> {
@@ -215,7 +242,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Option<CheckpointRequest>, Gi
     }
 }
 
-fn execute_post_bash_call(e: PostBashCall) -> Result<CheckpointRequest, GitAiError> {
+fn execute_post_bash_call(e: PostBashCall) -> Result<Option<CheckpointRequest>, GitAiError> {
     let repo = find_repository_for_file(&e.context.cwd.to_string_lossy(), None)?;
     let repo_working_dir = repo.workdir()?;
 
@@ -248,8 +275,11 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<CheckpointRequest, GitAiErr
     };
 
     let files = build_file_entries(&file_paths)?;
+    if files.is_empty() {
+        return Ok(None);
+    }
 
-    Ok(CheckpointRequest {
+    Ok(Some(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind: CheckpointKind::AiAgent,
         agent_id: Some(e.context.agent_id),
@@ -257,5 +287,5 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<CheckpointRequest, GitAiErr
         path_role: PreparedPathRole::Edited,
         transcript_source: e.transcript_source,
         metadata: e.context.metadata,
-    })
+    }))
 }

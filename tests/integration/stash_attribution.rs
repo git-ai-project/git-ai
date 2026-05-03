@@ -1094,8 +1094,6 @@ fn test_stash_pop_conflict_preserves_ai_attribution_without_new_checkpoint() {
         "ai addition 2".ai(),
         "ai addition 3".ai(),
     ]);
-    repo.git_ai(&["checkpoint", "mock_ai"])
-        .expect("checkpoint should succeed");
 
     // Stash the AI changes
     repo.git(&["stash", "push", "-m", "ai-changes"])
@@ -1109,7 +1107,7 @@ fn test_stash_pop_conflict_preserves_ai_attribution_without_new_checkpoint() {
     )
     .expect("write should succeed");
     repo.git(&["add", "-A"]).expect("add should succeed");
-    repo.git_ai(&["checkpoint", "--"])
+    repo.git_ai(&["checkpoint", "human"])
         .expect("human checkpoint should succeed");
     repo.stage_all_and_commit("human conflicting edit")
         .expect("commit should succeed");

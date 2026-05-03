@@ -110,12 +110,14 @@ impl AgentPreset for CursorPreset {
             ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
+                content_overrides: None,
             })
         } else {
             ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
                 transcript_source,
+                content_overrides: None,
             })
         };
 

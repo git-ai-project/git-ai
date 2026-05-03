@@ -73,7 +73,7 @@ fn test_initial_only_no_blame_data() {
         .expect("write file should succeed");
 
     // Run checkpoint - should use INITIAL attributions since there's no blame data
-    repo.git_ai(&["checkpoint"])
+    repo.git_ai(&["checkpoint", "human"])
         .expect("checkpoint should succeed");
 
     // Commit and verify
@@ -161,7 +161,7 @@ fn test_initial_wins_overlaps() {
         .expect("write file should succeed");
 
     // Run checkpoint
-    repo.git_ai(&["checkpoint"])
+    repo.git_ai(&["checkpoint", "human"])
         .expect("checkpoint should succeed");
 
     // Commit
@@ -365,7 +365,7 @@ fn test_initial_attributions_in_subsequent_checkpoint() {
     // Create fileA.txt and make checkpoint #1 (human checkpoint, no INITIAL)
     std::fs::write(repo.path().join("fileA.txt"), "content in file A\n")
         .expect("write file should succeed");
-    repo.git_ai(&["checkpoint"])
+    repo.git_ai(&["checkpoint", "human"])
         .expect("checkpoint #1 should succeed");
 
     // Get the working log for current HEAD
@@ -412,7 +412,7 @@ fn test_initial_attributions_in_subsequent_checkpoint() {
     .expect("write file should succeed");
 
     // Make checkpoint #2 - this should use INITIAL attributions for fileB
-    repo.git_ai(&["checkpoint"])
+    repo.git_ai(&["checkpoint", "human"])
         .expect("checkpoint #2 should succeed");
 
     // Commit and verify

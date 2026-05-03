@@ -71,7 +71,7 @@ crate::subdir_test_variants! {
     repo.git(&["add", "src/main.rs", "LICENSE"]).unwrap();
 
     // Create human checkpoint
-    repo.git_ai(&["checkpoint"]).unwrap(); // Human checkpoint for LICENSE
+    repo.git_ai(&["checkpoint", "human"]).unwrap(); // Human checkpoint for LICENSE
 
     // Commit (not using -C flag)
     // git-ai should automatically find the repository root

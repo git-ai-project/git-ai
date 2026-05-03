@@ -323,7 +323,7 @@ fn handle_checkpoint(args: &[String]) {
         || crate::commands::checkpoint_agent::presets::resolve_preset(args[0].as_str()).is_err()
     {
         eprintln!("Error: checkpoint requires a valid preset name as the first argument");
-        std::process::exit(0);
+        std::process::exit(1);
     }
 
     let preset_name = args[0].as_str();
@@ -338,7 +338,7 @@ fn handle_checkpoint(args: &[String]) {
             Ok(results) => results,
             Err(e) => {
                 eprintln!("{} preset error: {}", preset_name, e);
-                std::process::exit(0);
+                std::process::exit(1);
             }
         };
 
@@ -905,7 +905,7 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
     match preset_name {
         "human" | "mock_ai" | "mock_known_human" => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            let paths: Vec<String> = remaining_args
+            let mut paths: Vec<String> = remaining_args
                 .iter()
                 .filter(|a| !a.starts_with("--"))
                 .map(|s| {
@@ -917,6 +917,25 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
                     }
                 })
                 .collect();
+            if paths.is_empty()
+                && let Ok(repo) =
+                    crate::git::repository::find_repository_for_file(&cwd.to_string_lossy(), None)
+            {
+                let repo_workdir = repo.workdir().unwrap_or_else(|_| cwd.clone());
+                if let Ok(dirty) = repo.get_staged_and_unstaged_filenames() {
+                    paths = dirty
+                        .into_iter()
+                        .map(|p| {
+                            let pb = std::path::PathBuf::from(&p);
+                            if pb.is_absolute() {
+                                p
+                            } else {
+                                repo_workdir.join(pb).to_string_lossy().to_string()
+                            }
+                        })
+                        .collect();
+                }
+            }
             serde_json::json!({
                 "file_paths": paths,
                 "cwd": cwd.to_string_lossy(),

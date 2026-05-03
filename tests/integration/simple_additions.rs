@@ -1120,7 +1120,7 @@ fn test_ai_deletion_with_human_checkpoint_in_same_commit() {
 
     fs::write(&file_path, "Base Line 1\nBase Line 2\nBase Line 3").unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
 
     fs::write(
         &file_path,
@@ -1219,7 +1219,7 @@ fn test_large_ai_readme_rewrite_with_no_data_bug() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial README").unwrap();
 
     // Second commit: AI completely rewrites the README (exact content from the diff)
@@ -1512,7 +1512,7 @@ fn test_deletion_within_a_single_line_attribution() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial commit with old constructor")
         .unwrap();
 
@@ -1568,7 +1568,7 @@ fn test_deletion_of_multiple_lines_by_ai() {
     )
     .unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial commit with old constructor")
         .unwrap();
 
@@ -1681,7 +1681,7 @@ fn test_multi_file_batch_commits_modifications() {
     fs::write(&file_a_path, "Original content A\n").unwrap();
     fs::write(&file_b_path, "Original content B\n").unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial commit with both files")
         .unwrap();
 
@@ -1726,7 +1726,7 @@ fn test_ai_edits_file_with_spaces_in_filename() {
     // Initial commit: Create file with spaces in name
     fs::write(&file_path, "Line 1\nLine 2\nLine 3\n").unwrap();
 
-    repo.git_ai(&["checkpoint"]).unwrap();
+    repo.git_ai(&["checkpoint", "human"]).unwrap();
     repo.stage_all_and_commit("Initial commit with spaced filename")
         .unwrap();
 

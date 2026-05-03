@@ -336,6 +336,7 @@ impl AgentPreset for AmpPreset {
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
+                content_overrides: None,
             }),
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -346,6 +347,7 @@ impl AgentPreset for AmpPreset {
                 context,
                 file_paths,
                 transcript_source,
+                content_overrides: None,
             }),
         };
 

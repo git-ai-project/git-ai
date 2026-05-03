@@ -47,9 +47,10 @@ pub(super) fn parse_legacy_extension_hooks(
             })?;
 
         if will_edit_filepaths.is_empty() {
-            return Err(GitAiError::PresetError(
-                "will_edit_filepaths cannot be empty for before_edit hook_event_name".to_string(),
-            ));
+            eprintln!(
+                "github-copilot preset error: will_edit_filepaths cannot be empty for before_edit hook_event_name"
+            );
+            return Ok(vec![]);
         }
 
         let context = PresetContext {
@@ -67,6 +68,7 @@ pub(super) fn parse_legacy_extension_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: will_edit_filepaths,
+            content_overrides: None,
         })]);
     }
 
@@ -128,6 +130,7 @@ pub(super) fn parse_legacy_extension_hooks(
         context,
         file_paths: edited_filepaths,
         transcript_source,
+        content_overrides: None,
     })])
 }
 
@@ -251,20 +254,22 @@ pub(super) fn parse_vscode_native_hooks(
 
         // For create_file PreToolUse, synthesize dirty_files with empty content
         if tool_name.eq_ignore_ascii_case("create_file") {
-            let mut empty_dirty_files: HashMap<PathBuf, String> = HashMap::new();
-            for path in &extracted_paths {
-                empty_dirty_files.insert(path.clone(), String::new());
-            }
-
             if extracted_paths.is_empty() {
                 return Err(GitAiError::PresetError(
                     "No file path found in create_file PreToolUse tool_input".to_string(),
                 ));
             }
 
+            // For create_file PreToolUse, use empty content as override
+            let content_overrides: HashMap<PathBuf, String> = extracted_paths
+                .iter()
+                .map(|p| (p.clone(), String::new()))
+                .collect();
+
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: extracted_paths,
+                content_overrides: Some(content_overrides),
             })]);
         }
 
@@ -278,6 +283,7 @@ pub(super) fn parse_vscode_native_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: extracted_paths,
+            content_overrides: None,
         })]);
     }
 
@@ -301,6 +307,7 @@ pub(super) fn parse_vscode_native_hooks(
         context,
         file_paths: extracted_paths,
         transcript_source,
+        content_overrides: None,
     })])
 }
 
@@ -506,7 +513,7 @@ mod tests {
         })
         .to_string();
         let result = GithubCopilotPreset.parse(&input, "t_test123456789a");
-        assert!(result.is_err());
+        assert!(result.unwrap().is_empty());
     }
 
     // -----------------------------------------------------------------------

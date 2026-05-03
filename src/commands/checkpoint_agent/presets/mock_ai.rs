@@ -61,6 +61,7 @@ impl AgentPreset for MockAiPreset {
             context,
             file_paths,
             transcript_source: None,
+            content_overrides: None,
         })])
     }
 }

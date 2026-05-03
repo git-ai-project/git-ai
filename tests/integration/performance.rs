@@ -146,7 +146,7 @@ mod tests {
                 }
 
                 // Step 2: Run git-ai checkpoint
-                repo.git_ai(&["checkpoint", file_path])
+                repo.git_ai(&["checkpoint", "human", file_path])
                     .unwrap_or_else(|_| panic!("Should be able to checkpoint file: {}", file_path));
 
                 // Step 3: Insert "# AI Line" at the top of the file

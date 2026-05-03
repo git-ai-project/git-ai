@@ -28,7 +28,8 @@ fn ensure_isolated_process_home() {
 }
 ";
     fs::write(&file_path, initial_content).unwrap();
-    repo.git_ai(&["checkpoint", "--", "test_repo.rs"]).unwrap();
+    repo.git_ai(&["checkpoint", "human", "test_repo.rs"])
+        .unwrap();
     repo.stage_all_and_commit("Initial human implementation")
         .unwrap();
 
@@ -83,7 +84,8 @@ fn ensure_isolated_process_home() {
 }
 ";
     fs::write(&file_path, initial_content).unwrap();
-    repo.git_ai(&["checkpoint", "--", "test_repo.rs"]).unwrap();
+    repo.git_ai(&["checkpoint", "human", "test_repo.rs"])
+        .unwrap();
     repo.stage_all_and_commit("Initial human boilerplate")
         .unwrap();
 
@@ -116,7 +118,8 @@ fn ensure_isolated_process_home() {
 }
 ";
     fs::write(&file_path, human_reflowed_content).unwrap();
-    repo.git_ai(&["checkpoint", "--", "test_repo.rs"]).unwrap();
+    repo.git_ai(&["checkpoint", "human", "test_repo.rs"])
+        .unwrap();
     repo.stage_all_and_commit("Commit with AI content + human reflow")
         .unwrap();
 
@@ -154,7 +157,7 @@ fn test_human_reflow_of_ai_set_contents_retains_ai() {
     let placeholder = "||__AI LINE__ PENDING__||";
     fs::write(&file_path, placeholder).unwrap();
     repo.git(&["add", "-A"]).unwrap();
-    repo.git_ai(&["checkpoint", "--", "reflow.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "human", "reflow.txt"]).unwrap();
 
     //   Phase B: AI checkpoint with real content
     let ai_content = "调用(参数一, 参数二, 参数三)";
@@ -167,7 +170,7 @@ fn test_human_reflow_of_ai_set_contents_retains_ai() {
     // This is a human checkpoint in the SAME session (no commit between AI and human).
     let human_reflowed = "调用(\n  参数一,\n  参数二,\n  参数三\n)";
     fs::write(&file_path, human_reflowed).unwrap();
-    repo.git_ai(&["checkpoint", "--", "reflow.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "human", "reflow.txt"]).unwrap();
     repo.stage_all_and_commit("Commit with AI content + human reflow")
         .unwrap();
 
@@ -195,7 +198,8 @@ fn test_ai_reflow_of_human_content_one_to_many_lines_attributed_to_ai() {
     // Step 1: Human writes single-line content
     let human_content = "call(arg1, arg2, arg3)";
     fs::write(&file_path, human_content).unwrap();
-    repo.git_ai(&["checkpoint", "--", "reflow2.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "human", "reflow2.txt"])
+        .unwrap();
     repo.stage_all_and_commit("Initial human content").unwrap();
 
     // Step 2: AI reflows to multiple lines

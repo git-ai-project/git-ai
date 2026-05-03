@@ -219,7 +219,9 @@ fn parse_porcelain_v2(data: &[u8]) -> Result<Vec<StatusEntry>, GitAiError> {
             .ok_or_else(|| GitAiError::Generic("Unexpected empty porcelain v2 record".into()))?;
 
         match tag {
-            '1' | 'u' => {
+            '1' => {
+                // Porcelain v2 ordinary changed entry:
+                //   1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
                 let mut fields = record.splitn(9, ' ');
                 let _ = fields.next(); // tag
                 let xy = fields
@@ -234,7 +236,6 @@ fn parse_porcelain_v2(data: &[u8]) -> Result<Vec<StatusEntry>, GitAiError> {
                 let staged = StatusCode::from(xy.chars().next().unwrap());
                 let unstaged = StatusCode::from(xy.chars().nth(1).unwrap());
 
-                // skip submodule/metadata fields to capture path
                 for _ in 0..6 {
                     fields.next();
                 }
@@ -257,6 +258,42 @@ fn parse_porcelain_v2(data: &[u8]) -> Result<Vec<StatusEntry>, GitAiError> {
                     } else {
                         EntryKind::Ordinary
                     },
+                    orig_path: None,
+                });
+            }
+            'u' => {
+                // Porcelain v2 unmerged entry:
+                //   u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
+                let mut fields = record.splitn(11, ' ');
+                let _ = fields.next(); // tag
+                let xy = fields
+                    .next()
+                    .ok_or_else(|| GitAiError::Generic("Missing XY field".into()))?;
+                if xy.len() != 2 {
+                    return Err(GitAiError::Generic(format!(
+                        "Unexpected XY field length: {}",
+                        xy
+                    )));
+                }
+                let staged = StatusCode::from(xy.chars().next().unwrap());
+                let unstaged = StatusCode::from(xy.chars().nth(1).unwrap());
+
+                for _ in 0..8 {
+                    fields.next();
+                }
+
+                let path = nfc_path(
+                    fields
+                        .next()
+                        .ok_or_else(|| GitAiError::Generic("Missing path field".into()))?
+                        .to_string(),
+                );
+
+                entries.push(StatusEntry {
+                    path,
+                    staged,
+                    unstaged,
+                    kind: EntryKind::Unmerged,
                     orig_path: None,
                 });
             }
@@ -361,7 +398,7 @@ mod tests {
         raw.extend_from_slice(b"? assets/logo (1).svg\0");
         raw.extend_from_slice(b"? dir with spaces/file name [draft].md\0");
         raw.extend_from_slice(b"! target/.keep\0");
-        raw.extend_from_slice(b"u UU N... 100644 100644 100644 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee ffffffffffffffffffffffffffffffffffffffff 1 2 3 some unmerged/path.txt\0");
+        raw.extend_from_slice(b"u UU N... 100644 100644 100644 100644 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee ffffffffffffffffffffffffffffffffffffffff 1111111111111111111111111111111111111111 some unmerged/path.txt\0");
 
         let entries: Vec<StatusEntry> = parse_porcelain_v2(&raw).expect("parse succeeds");
 

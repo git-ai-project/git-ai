@@ -183,13 +183,7 @@ fn test_copilot_preset_before_edit_requires_non_empty_filepaths() {
     .to_string();
 
     let result = parse_copilot(&hook_input);
-    assert!(result.is_err());
-    assert!(
-        result
-            .unwrap_err()
-            .to_string()
-            .contains("will_edit_filepaths cannot be empty")
-    );
+    assert!(result.unwrap().is_empty());
 }
 
 #[test]
