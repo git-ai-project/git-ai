@@ -820,10 +820,7 @@ fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
 ///
 /// Returns `None` if the daemon is not running, the session is not found,
 /// or any communication error occurs.
-fn query_daemon_bash_snapshot(
-    session_id: &str,
-    tool_use_id: &str,
-) -> Option<StatSnapshot> {
+fn query_daemon_bash_snapshot(session_id: &str, tool_use_id: &str) -> Option<StatSnapshot> {
     let config = DaemonConfig::from_env_or_default_paths().ok()?;
     if !config.control_socket_path.exists() {
         return None;
@@ -848,8 +845,7 @@ fn query_daemon_bash_snapshot(
     }
 
     let data = response.data?;
-    let snapshot_response: BashSnapshotQueryResponse =
-        serde_json::from_value(data).ok()?;
+    let snapshot_response: BashSnapshotQueryResponse = serde_json::from_value(data).ok()?;
     snapshot_response.stat_snapshot
 }
 
@@ -902,7 +898,7 @@ pub fn handle_bash_pre_tool_use_with_context(
         tool_use_id: tool_use_id.to_string(),
         agent_id: agent_id.clone(),
         metadata: agent_metadata.cloned().unwrap_or_default(),
-        stat_snapshot: snap,
+        stat_snapshot: Box::new(snap),
     };
 
     send_control_request(&daemon_config.control_socket_path, &request)?;
@@ -980,10 +976,9 @@ pub fn handle_bash_tool(
                                 model: String::new(),
                             },
                             metadata: HashMap::new(),
-                            stat_snapshot: snap,
+                            stat_snapshot: Box::new(snap),
                         };
-                        if let Err(e) =
-                            send_control_request(&config.control_socket_path, &request)
+                        if let Err(e) = send_control_request(&config.control_socket_path, &request)
                         {
                             tracing::debug!("Failed to send BashSessionStart to daemon: {}", e);
                         }
@@ -1022,41 +1017,41 @@ pub fn handle_bash_tool(
                         } else {
                             None
                         };
-                    let result = match snapshot(repo_root, session_id, tool_use_id, post_wm.as_ref())
-                    {
-                        Ok(post) => {
-                            let diff_result = diff(&pre, &post);
+                    let result =
+                        match snapshot(repo_root, session_id, tool_use_id, post_wm.as_ref()) {
+                            Ok(post) => {
+                                let diff_result = diff(&pre, &post);
 
-                            if diff_result.is_empty() {
-                                tracing::debug!(
-                                    "Bash tool {}: no changes detected",
-                                    invocation_key
-                                );
-                                Ok(BashToolResult {
-                                    action: BashCheckpointAction::NoChanges,
-                                })
-                            } else {
-                                let paths = diff_result.all_changed_paths();
-                                tracing::debug!(
-                                    "Bash tool {}: {} files changed ({} created, {} modified)",
-                                    invocation_key,
-                                    paths.len(),
-                                    diff_result.created.len(),
-                                    diff_result.modified.len(),
-                                );
+                                if diff_result.is_empty() {
+                                    tracing::debug!(
+                                        "Bash tool {}: no changes detected",
+                                        invocation_key
+                                    );
+                                    Ok(BashToolResult {
+                                        action: BashCheckpointAction::NoChanges,
+                                    })
+                                } else {
+                                    let paths = diff_result.all_changed_paths();
+                                    tracing::debug!(
+                                        "Bash tool {}: {} files changed ({} created, {} modified)",
+                                        invocation_key,
+                                        paths.len(),
+                                        diff_result.created.len(),
+                                        diff_result.modified.len(),
+                                    );
 
+                                    Ok(BashToolResult {
+                                        action: BashCheckpointAction::Checkpoint(paths),
+                                    })
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!("Post-snapshot failed: {}; returning fallback", e);
                                 Ok(BashToolResult {
-                                    action: BashCheckpointAction::Checkpoint(paths),
+                                    action: BashCheckpointAction::Fallback,
                                 })
                             }
-                        }
-                        Err(e) => {
-                            tracing::debug!("Post-snapshot failed: {}; returning fallback", e);
-                            Ok(BashToolResult {
-                                action: BashCheckpointAction::Fallback,
-                            })
-                        }
-                    };
+                        };
 
                     // Signal end of bash session regardless of diff outcome
                     signal_daemon_bash_session_end(session_id, tool_use_id);
@@ -1427,5 +1422,4 @@ mod tests {
             "non-generated file in generated/ should not be ignored"
         );
     }
-
 }

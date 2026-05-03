@@ -2,8 +2,8 @@ use crate::authorship::authorship_log_serialization::generate_trace_id;
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint::PreparedPathRole;
 use crate::commands::checkpoint_agent::presets::{
-    KnownHumanEdit, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, TranscriptSource, UntrackedEdit,
+    KnownHumanEdit, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    TranscriptSource, UntrackedEdit,
 };
 use crate::error::GitAiError;
 use crate::git::repository::discover_repository_in_path_no_git_exec;

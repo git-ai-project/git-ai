@@ -11,9 +11,7 @@ use std::collections::HashMap;
 #[serde(tag = "method", content = "params")]
 pub enum ControlRequest {
     #[serde(rename = "checkpoint.run")]
-    CheckpointRun {
-        request: Box<CheckpointRequest>,
-    },
+    CheckpointRun { request: Box<CheckpointRequest> },
     #[serde(rename = "status.family")]
     StatusFamily { repo_working_dir: String },
     #[serde(rename = "telemetry.submit")]
@@ -41,7 +39,7 @@ pub enum ControlRequest {
         tool_use_id: String,
         agent_id: AgentId,
         metadata: HashMap<String, String>,
-        stat_snapshot: StatSnapshot,
+        stat_snapshot: Box<StatSnapshot>,
     },
     #[serde(rename = "bash_session.end")]
     BashSessionEnd {
@@ -49,9 +47,7 @@ pub enum ControlRequest {
         tool_use_id: String,
     },
     #[serde(rename = "bash_session.query")]
-    BashSessionQuery {
-        repo_work_dir: String,
-    },
+    BashSessionQuery { repo_work_dir: String },
     #[serde(rename = "bash_snapshot.query")]
     BashSnapshotQuery {
         session_id: String,

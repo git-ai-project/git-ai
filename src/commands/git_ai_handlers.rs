@@ -313,7 +313,9 @@ fn handle_checkpoint(args: &[String]) {
                     std::process::exit(0);
                 }
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
 
@@ -380,10 +382,9 @@ fn handle_checkpoint(args: &[String]) {
         let control_request = ControlRequest::CheckpointRun {
             request: Box::new(request),
         };
-        if let Err(e) = crate::daemon::send_control_request(
-            &config.control_socket_path,
-            &control_request,
-        ) {
+        if let Err(e) =
+            crate::daemon::send_control_request(&config.control_socket_path, &control_request)
+        {
             eprintln!("Failed to send checkpoint to daemon: {}", e);
             std::process::exit(1);
         }
@@ -874,8 +875,7 @@ fn handle_git_hooks(args: &[String]) {
 fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[String]) -> String {
     match preset_name {
         "human" | "mock_ai" | "mock_known_human" => {
-            let cwd = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let paths: Vec<String> = remaining_args
                 .iter()
                 .filter(|a| !a.starts_with("--"))
@@ -895,8 +895,7 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
             .to_string()
         }
         "known_human" => {
-            let cwd = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let mut editor = "unknown".to_string();
             let mut editor_version = "unknown".to_string();
             let mut extension_version = "unknown".to_string();

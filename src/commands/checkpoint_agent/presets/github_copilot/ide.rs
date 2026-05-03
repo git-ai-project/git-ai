@@ -26,7 +26,6 @@ pub(super) fn parse_legacy_extension_hooks(
             )
         })?;
 
-
     let session_id = super::extract_session_id(data);
 
     if hook_event_name == "before_edit" {
@@ -247,7 +246,6 @@ pub(super) fn parse_vscode_native_hooks(
         }
 
         if tool_name.eq_ignore_ascii_case("create_file") {
-
             if extracted_paths.is_empty() {
                 return Err(GitAiError::PresetError(
                     "No file path found in create_file PreToolUse tool_input".to_string(),
@@ -802,7 +800,6 @@ mod tests {
     }
 
     #[test]
-
     #[test]
     fn test_copilot_native_workspace_storage_format() {
         let input = json!({

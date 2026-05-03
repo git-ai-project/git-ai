@@ -199,5 +199,4 @@ mod tests {
         let result = optional_str_multi(&data, &["hook_event_name", "hookEventName"]);
         assert_eq!(result, None);
     }
-
 }

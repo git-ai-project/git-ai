@@ -43,7 +43,8 @@ impl BashSessionState {
     }
 
     pub fn end_session(&mut self, session_id: &str, tool_use_id: &str) -> Option<BashSession> {
-        self.sessions.remove(&(session_id.to_string(), tool_use_id.to_string()))
+        self.sessions
+            .remove(&(session_id.to_string(), tool_use_id.to_string()))
     }
 
     pub fn query_active_for_repo(&self, repo_work_dir: &str) -> Option<&BashSession> {
