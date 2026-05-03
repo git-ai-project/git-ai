@@ -1,7 +1,7 @@
-use super::parse;
-use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
+use super::super::parse;
+use super::super::{
+    BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::ToolClass;
@@ -10,37 +10,11 @@ use crate::transcripts::model_extraction;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub struct GithubCopilotPreset;
-
-impl AgentPreset for GithubCopilotPreset {
-    fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
-        let data: serde_json::Value = serde_json::from_str(hook_input)
-            .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
-
-        let hook_event_name =
-            parse::optional_str_multi(&data, &["hook_event_name", "hookEventName"])
-                .unwrap_or("after_edit");
-
-        if hook_event_name == "before_edit" || hook_event_name == "after_edit" {
-            return parse_legacy_extension_hooks(&data, hook_event_name, trace_id);
-        }
-
-        if hook_event_name == "PreToolUse" || hook_event_name == "PostToolUse" {
-            return parse_vscode_native_hooks(&data, hook_event_name, trace_id);
-        }
-
-        Err(GitAiError::PresetError(format!(
-            "Invalid hook_event_name: {}. Expected one of 'before_edit', 'after_edit', 'PreToolUse', or 'PostToolUse'",
-            hook_event_name
-        )))
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Legacy extension path (before_edit / after_edit)
 // ---------------------------------------------------------------------------
 
-fn parse_legacy_extension_hooks(
+pub(super) fn parse_legacy_extension_hooks(
     data: &serde_json::Value,
     hook_event_name: &str,
     trace_id: &str,
@@ -52,9 +26,9 @@ fn parse_legacy_extension_hooks(
             )
         })?;
 
-    let dirty_files = dirty_files_from_hook_data(data, cwd);
+    let dirty_files = super::dirty_files_from_hook_data(data, cwd);
 
-    let session_id = extract_session_id(data);
+    let session_id = super::extract_session_id(data);
 
     if hook_event_name == "before_edit" {
         let will_edit_filepaths = data
@@ -163,7 +137,7 @@ fn parse_legacy_extension_hooks(
 // VS Code native path (PreToolUse / PostToolUse)
 // ---------------------------------------------------------------------------
 
-fn parse_vscode_native_hooks(
+pub(super) fn parse_vscode_native_hooks(
     data: &serde_json::Value,
     hook_event_name: &str,
     trace_id: &str,
@@ -171,8 +145,8 @@ fn parse_vscode_native_hooks(
     let cwd = parse::optional_str_multi(data, &["cwd", "workspace_folder", "workspaceFolder"])
         .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
 
-    let dirty_files = dirty_files_from_hook_data(data, cwd);
-    let session_id = extract_session_id(data);
+    let dirty_files = super::dirty_files_from_hook_data(data, cwd);
+    let session_id = super::extract_session_id(data);
 
     let tool_name =
         parse::optional_str_multi(data, &["tool_name", "toolName"]).unwrap_or("unknown");
@@ -192,7 +166,7 @@ fn parse_vscode_native_hooks(
 
     // Extract file paths from tool_input and tool_response only (not session-level data)
     let extracted_paths =
-        extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, cwd);
+        super::extract_filepaths_from_vscode_hook_payload(tool_input, tool_response, cwd);
 
     let transcript_path = transcript_path_from_hook_data(data).map(|s| s.to_string());
 
@@ -336,45 +310,8 @@ fn parse_vscode_native_hooks(
 }
 
 // ---------------------------------------------------------------------------
-// Helper functions
+// IDE-specific helpers
 // ---------------------------------------------------------------------------
-
-fn extract_session_id(data: &serde_json::Value) -> String {
-    parse::optional_str_multi(
-        data,
-        &[
-            "chat_session_id",
-            "session_id",
-            "chatSessionId",
-            "sessionId",
-        ],
-    )
-    .unwrap_or("unknown")
-    .to_string()
-}
-
-fn dirty_files_from_hook_data(
-    data: &serde_json::Value,
-    cwd: &str,
-) -> Option<HashMap<PathBuf, String>> {
-    let obj = data
-        .get("dirty_files")
-        .and_then(|v| v.as_object())
-        .or_else(|| data.get("dirtyFiles").and_then(|v| v.as_object()))?;
-
-    let mut result = HashMap::new();
-    for (key, value) in obj {
-        if let Some(content) = value.as_str() {
-            let path = parse::resolve_absolute(key, cwd);
-            result.insert(path, content.to_string());
-        }
-    }
-    if result.is_empty() {
-        None
-    } else {
-        Some(result)
-    }
-}
 
 fn transcript_path_from_hook_data(data: &serde_json::Value) -> Option<&str> {
     parse::optional_str_multi(
@@ -469,84 +406,10 @@ fn classify_copilot_tool(tool_name: &str) -> ToolClass {
     }
 }
 
-/// Extract file paths from VS Code hook payload (tool_input + tool_response).
-/// Only paths from the current tool call are extracted — no session-level data.
-fn extract_filepaths_from_vscode_hook_payload(
-    tool_input: Option<&serde_json::Value>,
-    tool_response: Option<&serde_json::Value>,
-    cwd: &str,
-) -> Vec<PathBuf> {
-    let mut raw_paths = Vec::new();
-    if let Some(value) = tool_input {
-        collect_tool_paths(value, &mut raw_paths);
-    }
-    if let Some(value) = tool_response {
-        collect_tool_paths(value, &mut raw_paths);
-    }
-
-    let mut normalized_paths = Vec::new();
-    for raw in raw_paths {
-        if let Some(path) = normalize_hook_path(&raw, cwd) {
-            let pathbuf = PathBuf::from(&path);
-            if !normalized_paths.contains(&pathbuf) {
-                normalized_paths.push(pathbuf);
-            }
-        }
-    }
-    normalized_paths
-}
-
-/// Recursively collect path-like values from a JSON value.
-fn collect_tool_paths(value: &serde_json::Value, out: &mut Vec<String>) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (key, val) in map {
-                let key_lower = key.to_ascii_lowercase();
-                let is_single_path_key = key_lower == "file_path"
-                    || key_lower == "filepath"
-                    || key_lower == "path"
-                    || key_lower == "fspath";
-
-                let is_multi_path_key =
-                    key_lower == "files" || key_lower == "filepaths" || key_lower == "file_paths";
-
-                if is_single_path_key {
-                    if let Some(path) = val.as_str() {
-                        out.push(path.to_string());
-                    }
-                } else if is_multi_path_key {
-                    match val {
-                        serde_json::Value::String(path) => out.push(path.to_string()),
-                        serde_json::Value::Array(paths) => {
-                            for path_value in paths {
-                                if let Some(path) = path_value.as_str() {
-                                    out.push(path.to_string());
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                collect_tool_paths(val, out);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for item in arr {
-                collect_tool_paths(item, out);
-            }
-        }
-        serde_json::Value::String(s) => {
-            if s.starts_with("file://") {
-                out.push(s.to_string());
-            }
-            collect_apply_patch_paths_from_text(s, out);
-        }
-        _ => {}
-    }
-}
-
-/// Extract file paths from apply_patch text format.
-fn collect_apply_patch_paths_from_text(raw: &str, out: &mut Vec<String>) {
+/// Extract file paths from apply_patch text format. Called from the shared
+/// `collect_tool_paths` because apply_patch payloads embed paths in the patch
+/// text rather than in JSON keys.
+pub(super) fn collect_apply_patch_paths_from_text(raw: &str, out: &mut Vec<String>) {
     for line in raw.lines() {
         let trimmed = line.trim();
         let maybe_path = trimmed
@@ -564,39 +427,11 @@ fn collect_apply_patch_paths_from_text(raw: &str, out: &mut Vec<String>) {
     }
 }
 
-/// Normalize a raw path from a hook payload into a canonical absolute path string.
-fn normalize_hook_path(raw_path: &str, cwd: &str) -> Option<String> {
-    let trimmed = raw_path.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let path_without_scheme = trimmed
-        .strip_prefix("file://localhost")
-        .or_else(|| trimmed.strip_prefix("file://"))
-        .unwrap_or(trimmed);
-
-    let path = Path::new(path_without_scheme);
-    let joined = if path.is_absolute()
-        || path_without_scheme.starts_with("\\\\")
-        || path_without_scheme
-            .as_bytes()
-            .get(1)
-            .map(|b| *b == b':')
-            .unwrap_or(false)
-    {
-        PathBuf::from(path_without_scheme)
-    } else {
-        Path::new(cwd).join(path_without_scheme)
-    };
-
-    Some(joined.to_string_lossy().replace('\\', "/"))
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::super::AgentPreset;
+    use super::super::GithubCopilotPreset;
     use super::*;
-    use crate::commands::checkpoint_agent::presets::*;
     use serde_json::json;
 
     // -----------------------------------------------------------------------
@@ -817,7 +652,6 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/new_file.rs")]
                 );
-                // dirty_files should contain the path with empty content
                 let df = e.dirty_files.as_ref().unwrap();
                 assert_eq!(
                     df.get(&PathBuf::from("/home/user/project/src/new_file.rs")),
@@ -912,37 +746,6 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_tool_paths_basic() {
-        let value = json!({
-            "file_path": "/home/user/file.rs",
-            "content": "some code"
-        });
-        let mut paths = Vec::new();
-        collect_tool_paths(&value, &mut paths);
-        assert_eq!(paths, vec!["/home/user/file.rs"]);
-    }
-
-    #[test]
-    fn test_collect_tool_paths_nested() {
-        let value = json!({
-            "outer": {
-                "file_path": "/home/user/file.rs"
-            }
-        });
-        let mut paths = Vec::new();
-        collect_tool_paths(&value, &mut paths);
-        assert_eq!(paths, vec!["/home/user/file.rs"]);
-    }
-
-    #[test]
-    fn test_collect_tool_paths_file_uri() {
-        let value = json!("file:///home/user/file.rs");
-        let mut paths = Vec::new();
-        collect_tool_paths(&value, &mut paths);
-        assert_eq!(paths, vec!["file:///home/user/file.rs"]);
-    }
-
-    #[test]
     fn test_collect_apply_patch_paths() {
         let text = "*** Update File: /home/user/src/main.rs\n--- some diff ---\n*** Add File: /home/user/src/new.rs\n";
         let mut paths = Vec::new();
@@ -951,30 +754,6 @@ mod tests {
             paths,
             vec!["/home/user/src/main.rs", "/home/user/src/new.rs"]
         );
-    }
-
-    #[test]
-    fn test_normalize_hook_path_absolute() {
-        let result = normalize_hook_path("/home/user/file.rs", "/cwd");
-        assert_eq!(result, Some("/home/user/file.rs".to_string()));
-    }
-
-    #[test]
-    fn test_normalize_hook_path_relative() {
-        let result = normalize_hook_path("src/main.rs", "/home/user/project");
-        assert_eq!(result, Some("/home/user/project/src/main.rs".to_string()));
-    }
-
-    #[test]
-    fn test_normalize_hook_path_file_uri() {
-        let result = normalize_hook_path("file:///home/user/file.rs", "/cwd");
-        assert_eq!(result, Some("/home/user/file.rs".to_string()));
-    }
-
-    #[test]
-    fn test_normalize_hook_path_empty() {
-        assert_eq!(normalize_hook_path("", "/cwd"), None);
-        assert_eq!(normalize_hook_path("   ", "/cwd"), None);
     }
 
     #[test]
