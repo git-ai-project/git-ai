@@ -46,26 +46,6 @@ pub fn normalize_to_posix(path: &str) -> String {
     path.replace('\\', "/")
 }
 
-/// Returns true when async/daemon checkpoint delegation is enabled.
-///
-/// Checks the `async_mode` feature flag first, then falls back to the
-/// `GIT_AI_DAEMON_CHECKPOINT_DELEGATE` environment variable.  Used by both
-/// the main hook handler and the bash tool to skip capture work when the
-/// daemon will not be available to consume captured checkpoint files.
-pub fn checkpoint_delegation_enabled() -> bool {
-    if crate::config::Config::get().feature_flags().async_mode {
-        return true;
-    }
-    matches!(
-        std::env::var("GIT_AI_DAEMON_CHECKPOINT_DELEGATE")
-            .ok()
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    )
-}
-
 fn resolve_git_ai_exe_from_invocation_path(path: PathBuf) -> PathBuf {
     let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
 
@@ -462,12 +442,12 @@ mod tests {
     #[test]
     fn test_internal_git_ai_command_sets_skip_all_hooks_env() {
         let exe = PathBuf::from("/tmp/git-ai-test");
-        let cmd = internal_git_ai_command_with_exe(exe.clone(), "flush-cas");
+        let cmd = internal_git_ai_command_with_exe(exe.clone(), "status");
 
         assert_eq!(cmd.get_program(), exe.as_os_str());
         assert_eq!(
             cmd.get_args().collect::<Vec<_>>(),
-            vec![std::ffi::OsStr::new("flush-cas")]
+            vec![std::ffi::OsStr::new("status")]
         );
         assert!(
             cmd.get_envs().any(|(k, v)| {
@@ -484,7 +464,7 @@ mod tests {
         unsafe {
             std::env::set_var(key, "1");
         }
-        let spawned = spawn_internal_git_ai_subcommand("flush-cas", &[], key, &[]);
+        let spawned = spawn_internal_git_ai_subcommand("status", &[], key, &[]);
         unsafe {
             std::env::remove_var(key);
         }
@@ -496,7 +476,7 @@ mod tests {
 
     #[test]
     fn test_spawn_internal_git_ai_subcommand_requires_non_empty_guard_env() {
-        let spawned = spawn_internal_git_ai_subcommand("flush-cas", &[], "", &[]);
+        let spawned = spawn_internal_git_ai_subcommand("status", &[], "", &[]);
         assert!(!spawned, "spawn should be skipped when guard env is empty");
     }
 

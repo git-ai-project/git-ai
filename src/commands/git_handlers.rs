@@ -1,27 +1,8 @@
-use crate::authorship::virtual_attribution::VirtualAttributions;
-use crate::commands::git_hook_handlers::{
-    ENV_SKIP_MANAGED_HOOKS, has_repo_hook_state, resolve_previous_non_managed_hooks_path,
-};
-use crate::commands::hooks::checkout_hooks;
-use crate::commands::hooks::cherry_pick_hooks;
-use crate::commands::hooks::clone_hooks;
-use crate::commands::hooks::commit_hooks;
-use crate::commands::hooks::fetch_hooks;
-use crate::commands::hooks::merge_hooks;
-use crate::commands::hooks::push_hooks;
-use crate::commands::hooks::rebase_hooks;
-use crate::commands::hooks::reset_hooks;
-use crate::commands::hooks::stash_hooks;
-use crate::commands::hooks::switch_hooks;
-use crate::commands::hooks::update_ref_hooks;
+use crate::commands::git_hook_handlers::ENV_SKIP_MANAGED_HOOKS;
 use crate::config;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::find_repository;
-use crate::git::repository::{Repository, disable_internal_git_hooks};
-use crate::observability;
-use std::collections::HashSet;
-
-use crate::observability::wrapper_performance_targets::log_performance_target_if_violated;
+use crate::git::repository::Repository;
 #[cfg(windows)]
 use crate::utils::CREATE_NO_WINDOW;
 #[cfg(windows)]
@@ -35,26 +16,9 @@ use std::os::windows::process::CommandExt;
 use std::process::Command;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::time::Instant;
 
 #[cfg(unix)]
 static CHILD_PGID: AtomicI32 = AtomicI32::new(0);
-
-// Windows NTSTATUS for Ctrl+C interruption (STATUS_CONTROL_C_EXIT, 0xC000013A) from Windows API docs.
-#[cfg(windows)]
-const NTSTATUS_CONTROL_C_EXIT: u32 = 0xC000013A;
-
-/// Error type for hook panics
-#[derive(Debug)]
-struct HookPanicError(String);
-
-impl std::fmt::Display for HookPanicError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for HookPanicError {}
 
 #[cfg(unix)]
 extern "C" fn forward_signal_handler(sig: libc::c_int) {
@@ -88,227 +52,107 @@ fn uninstall_forwarding_handlers() {
     }
 }
 
-pub struct CommandHooksContext {
-    pub pre_commit_hook_result: Option<bool>,
-    pub rebase_original_head: Option<String>,
-    pub rebase_onto: Option<String>,
-    pub fetch_authorship_handle: Option<std::thread::JoinHandle<()>>,
-    pub stash_sha: Option<String>,
-    pub push_authorship_handle: Option<std::thread::JoinHandle<()>>,
-    /// VirtualAttributions captured before a pull --rebase --autostash operation.
-    /// Used to preserve uncommitted AI attributions that git's internal stash would lose.
-    pub stashed_va: Option<VirtualAttributions>,
-}
-
 pub fn handle_git(args: &[String]) {
     // If we're being invoked from a shell completion context, bypass git-ai logic
     // and delegate directly to the real git so existing completion scripts work.
     if in_shell_completion_context() {
         let orig_args: Vec<String> = std::env::args().skip(1).collect();
-        proxy_to_git(&orig_args, true, None, None);
+        proxy_to_git(&orig_args, true, None);
         return;
     }
 
-    // Async mode: wrapper should behave as a pure passthrough to git,
-    // but capture and send authoritative pre/post state to the daemon.
-    if config::Config::get().feature_flags().async_mode {
-        let parsed = parse_git_cli_args(args);
+    let parsed = parse_git_cli_args(args);
 
-        // Read-only invocations don't need wrapper state (the daemon fast-paths
-        // their trace events and never processes them through the normalizer).
-        // Skip the invocation_id so we can also suppress trace2 for them,
-        // avoiding unnecessary daemon work and wrapper_states memory leaks.
-        //
-        // Use is_definitely_read_only_invocation (not is_definitely_read_only_command)
-        // so that subcommand-gated read-only calls like `git stash list` and
-        // `git worktree list` are also suppressed — these account for thousands
-        // of Zed IDE invocations per session.
-        let is_read_only = {
-            let subcommand = parsed.command_args.first().map(String::as_str);
-            parsed.command.as_deref().is_some_and(|cmd| {
-                crate::git::command_classification::is_definitely_read_only_invocation(
-                    cmd, subcommand,
-                )
-            })
-        };
-
-        if is_read_only {
-            let exit_status = proxy_to_git(args, false, None, None);
-            exit_with_status(exit_status);
-        }
-
-        // Repo-creating commands (clone, init) have no meaningful pre/post
-        // repo state — the target repo doesn't exist yet. The wrapper would
-        // either capture nothing (clone from outside a repo) or the wrong
-        // repo (clone from inside a different repo). Skip the invocation_id
-        // so the daemon doesn't wait for wrapper state that never arrives or
-        // is misleading; trace2 events still flow normally (trace2 suppression
-        // requires *both* no invocation_id and a read-only command).
-        let is_repo_creating = parsed
-            .command
-            .as_deref()
-            .is_some_and(|cmd| matches!(cmd, "clone" | "init"));
-
-        if is_repo_creating {
-            let exit_status = proxy_to_git(args, false, None, None);
-            exit_with_status(exit_status);
-        }
-
-        // Initialize the daemon telemetry handle so we can send wrapper state
-        if let crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Failed(e) =
-            crate::daemon::telemetry_handle::init_daemon_telemetry_handle()
-        {
-            tracing::debug!("wrapper: daemon telemetry init failed: {}", e);
-        }
-
-        let repository = find_repository(&parsed.global_args).ok();
-        let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
-
-        let pre_state = worktree
-            .as_deref()
-            .and_then(crate::git::repo_state::read_head_state_for_worktree);
-        let invocation_id = uuid::Uuid::new_v4().to_string();
-
-        // Send pre-state BEFORE running git so it's available when the daemon
-        // processes the atexit trace event and starts the wrapper state timeout.
-        send_wrapper_pre_state_to_daemon(&invocation_id, worktree.as_deref(), &pre_state);
-
-        let exit_status = proxy_to_git(args, false, None, Some(&invocation_id));
-
-        let post_state = worktree
-            .as_deref()
-            .and_then(crate::git::repo_state::read_head_state_for_worktree);
-
-        send_wrapper_post_state_to_daemon(&invocation_id, worktree.as_deref(), &post_state);
-
-        // After a successful commit, wait briefly for the daemon to produce an
-        // authorship note so we can show stats inline (same UX as plain wrapper mode).
-        if exit_status.success()
-            && parsed.command.as_deref() == Some("commit")
-            && let Some(repo) = repository.as_ref()
-        {
-            maybe_show_async_post_commit_stats(&parsed, repo);
-        }
-
-        exit_with_status(exit_status);
-    }
-
-    let mut parsed_args = parse_git_cli_args(args);
-
-    let mut repository_option = find_repository(&parsed_args.global_args).ok();
-
-    let has_repo = repository_option.is_some();
-
-    let config = config::Config::get();
-
-    let skip_hooks = !config.is_allowed_repository(&repository_option);
-
-    if skip_hooks {
-        tracing::debug!(
-            "Skipping git-ai hooks because repository is excluded or not in allow_repositories list",
-        );
-    }
-
-    // Handle clone separately since repo doesn't exist before the command.
-    // Note: clone aliases (e.g., alias.cl = clone) won't trigger clone hooks because
-    // alias resolution requires a Repository object, which doesn't exist yet for clone.
-    if parsed_args.command.as_deref() == Some("clone") && !parsed_args.is_help && !skip_hooks {
-        let exit_status = proxy_to_git(&parsed_args.to_invocation_vec(), false, None, None);
-        if exit_status_was_interrupted(&exit_status) {
-            exit_with_status(exit_status);
-        }
-        clone_hooks::post_clone_hook(&parsed_args, exit_status);
-        exit_with_status(exit_status);
-    }
-
-    // run with hooks
-    let exit_status = if !parsed_args.is_help && has_repo && !skip_hooks {
-        let mut command_hooks_context = CommandHooksContext {
-            pre_commit_hook_result: None,
-            rebase_original_head: None,
-            rebase_onto: None,
-            fetch_authorship_handle: None,
-            stash_sha: None,
-            push_authorship_handle: None,
-            stashed_va: None,
-        };
-
-        let repository = repository_option.as_mut().unwrap();
-
-        if let Some(resolved) = resolve_alias_invocation(&parsed_args, repository) {
-            parsed_args = resolved;
-        }
-
-        let pre_command_start = Instant::now();
-        run_pre_command_hooks(&mut command_hooks_context, &mut parsed_args, repository);
-        let pre_command_duration = pre_command_start.elapsed();
-
-        let child_hooks_path_override =
-            resolve_child_git_hooks_path_override(&parsed_args, Some(repository));
-        let git_start = Instant::now();
-        let exit_status = proxy_to_git(
-            &parsed_args.to_invocation_vec(),
-            false,
-            child_hooks_path_override.as_deref(),
-            None,
-        );
-        if exit_status_was_interrupted(&exit_status) {
-            exit_with_status(exit_status);
-        }
-        let git_duration = git_start.elapsed();
-
-        let post_command_start = Instant::now();
-        run_post_command_hooks(
-            &mut command_hooks_context,
-            &parsed_args,
-            exit_status,
-            repository,
-        );
-        let post_command_duration = post_command_start.elapsed();
-
-        log_performance_target_if_violated(
-            parsed_args.command.as_deref().unwrap_or("unknown"),
-            pre_command_duration,
-            git_duration,
-            post_command_duration,
-        );
-
-        exit_status
-    } else {
-        // run without hooks
-        let child_hooks_path_override =
-            resolve_child_git_hooks_path_override(&parsed_args, repository_option.as_ref());
-        proxy_to_git(
-            &parsed_args.to_invocation_vec(),
-            false,
-            child_hooks_path_override.as_deref(),
-            None,
-        )
+    // Read-only invocations don't need wrapper state (the daemon fast-paths
+    // their trace events and never processes them through the normalizer).
+    // Skip the invocation_id so we can also suppress trace2 for them,
+    // avoiding unnecessary daemon work and wrapper_states memory leaks.
+    //
+    // Use is_definitely_read_only_invocation (not is_definitely_read_only_command)
+    // so that subcommand-gated read-only calls like `git stash list` and
+    // `git worktree list` are also suppressed — these account for thousands
+    // of Zed IDE invocations per session.
+    let is_read_only = {
+        let subcommand = parsed.command_args.first().map(String::as_str);
+        parsed.command.as_deref().is_some_and(|cmd| {
+            crate::git::command_classification::is_definitely_read_only_invocation(cmd, subcommand)
+        })
     };
+
+    if is_read_only {
+        let exit_status = proxy_to_git(args, false, None);
+        exit_with_status(exit_status);
+    }
+
+    // Repo-creating commands (clone, init) have no meaningful pre/post
+    // repo state — the target repo doesn't exist yet. The wrapper would
+    // either capture nothing (clone from outside a repo) or the wrong
+    // repo (clone from inside a different repo). Skip the invocation_id
+    // so the daemon doesn't wait for wrapper state that never arrives or
+    // is misleading; trace2 events still flow normally (trace2 suppression
+    // requires *both* no invocation_id and a read-only command).
+    let is_repo_creating = parsed
+        .command
+        .as_deref()
+        .is_some_and(|cmd| matches!(cmd, "clone" | "init"));
+
+    if is_repo_creating {
+        let exit_status = proxy_to_git(args, false, None);
+        exit_with_status(exit_status);
+    }
+
+    // Initialize the daemon telemetry handle so we can send wrapper state.
+    // If the daemon isn't available, fall back to a plain passthrough proxy
+    // (no invocation_id, no wrapper state, no extra GIT_* env vars).
+    let daemon_connected = matches!(
+        crate::daemon::telemetry_handle::init_daemon_telemetry_handle(),
+        crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Connected
+    );
+
+    if !daemon_connected {
+        let exit_status = proxy_to_git(args, false, None);
+        exit_with_status(exit_status);
+    }
+
+    let repository = find_repository(&parsed.global_args).ok();
+    let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
+
+    let pre_state = worktree
+        .as_deref()
+        .and_then(crate::git::repo_state::read_head_state_for_worktree);
+    let invocation_id = uuid::Uuid::new_v4().to_string();
+
+    // Send pre-state BEFORE running git so it's available when the daemon
+    // processes the atexit trace event and starts the wrapper state timeout.
+    send_wrapper_pre_state_to_daemon(&invocation_id, worktree.as_deref(), &pre_state);
+
+    let exit_status = proxy_to_git(args, false, Some(&invocation_id));
+
+    let post_state = worktree
+        .as_deref()
+        .and_then(crate::git::repo_state::read_head_state_for_worktree);
+
+    send_wrapper_post_state_to_daemon(&invocation_id, worktree.as_deref(), &post_state);
+
+    // After a successful commit, wait briefly for the daemon to produce an
+    // authorship note so we can show stats inline (same UX as plain wrapper mode).
+    if exit_status.success()
+        && parsed.command.as_deref() == Some("commit")
+        && let Some(repo) = repository.as_ref()
+    {
+        maybe_show_async_post_commit_stats(&parsed, repo);
+    }
+
     exit_with_status(exit_status);
 }
 
-/// Handle alias invocations
 #[cfg(feature = "test-support")]
 pub fn resolve_alias_invocation(
     parsed_args: &ParsedGitInvocation,
     repository: &Repository,
 ) -> Option<ParsedGitInvocation> {
-    resolve_alias_impl(parsed_args, repository)
-}
+    use std::collections::HashSet;
 
-#[cfg(not(feature = "test-support"))]
-fn resolve_alias_invocation(
-    parsed_args: &ParsedGitInvocation,
-    repository: &Repository,
-) -> Option<ParsedGitInvocation> {
-    resolve_alias_impl(parsed_args, repository)
-}
-
-fn resolve_alias_impl(
-    parsed_args: &ParsedGitInvocation,
-    repository: &Repository,
-) -> Option<ParsedGitInvocation> {
     let mut current = parsed_args.clone();
     let mut seen: HashSet<String> = HashSet::new();
 
@@ -333,19 +177,16 @@ fn resolve_alias_impl(
         let mut expanded_args = Vec::new();
         expanded_args.extend(current.global_args.iter().cloned());
         expanded_args.extend(alias_tokens);
-
-        // Append the original command args after the alias expansion
         expanded_args.extend(current.command_args.iter().cloned());
 
         current = parse_git_cli_args(&expanded_args);
     }
 }
 
-/// Parse alias value into tokens, respecting quotes and escapes
+#[cfg(feature = "test-support")]
 fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
     let trimmed = value.trim_start();
 
-    // If alias starts with '!', it's a shell command, currently proxy to git
     if trimmed.starts_with('!') {
         return None;
     }
@@ -357,14 +198,12 @@ fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
     let mut escaped = false;
 
     for ch in trimmed.chars() {
-        // handle escaped char
         if escaped {
             current.push(ch);
             escaped = false;
             continue;
         }
 
-        // inside single quotes
         if in_single {
             if ch == '\'' {
                 in_single = false;
@@ -374,7 +213,6 @@ fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
             continue;
         }
 
-        // inside double quotes
         if in_double {
             match ch {
                 '"' => in_double = false,
@@ -411,246 +249,6 @@ fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
     }
 
     Some(tokens)
-}
-
-fn run_pre_command_hooks(
-    command_hooks_context: &mut CommandHooksContext,
-    parsed_args: &mut ParsedGitInvocation,
-    repository: &mut Repository,
-) {
-    let _disable_hooks_guard = disable_internal_git_hooks();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Pre-command hooks
-        match parsed_args.command.as_deref() {
-            Some("commit") => {
-                command_hooks_context.pre_commit_hook_result = Some(
-                    commit_hooks::commit_pre_command_hook(parsed_args, repository),
-                );
-            }
-            Some("rebase") => {
-                rebase_hooks::pre_rebase_hook(parsed_args, repository, command_hooks_context);
-            }
-            Some("reset") => {
-                reset_hooks::pre_reset_hook(parsed_args, repository);
-            }
-            Some("cherry-pick") => {
-                cherry_pick_hooks::pre_cherry_pick_hook(
-                    parsed_args,
-                    repository,
-                    command_hooks_context,
-                );
-            }
-            Some("push") => {
-                command_hooks_context.push_authorship_handle =
-                    push_hooks::push_pre_command_hook(parsed_args, repository);
-            }
-            Some("pull") => {
-                fetch_hooks::pull_pre_command_hook(parsed_args, repository, command_hooks_context);
-            }
-            Some("stash") => {
-                let config = config::Config::get();
-
-                if config.feature_flags().rewrite_stash {
-                    stash_hooks::pre_stash_hook(parsed_args, repository, command_hooks_context);
-                }
-            }
-            Some("checkout") => {
-                checkout_hooks::pre_checkout_hook(parsed_args, repository, command_hooks_context);
-            }
-            Some("switch") => {
-                switch_hooks::pre_switch_hook(parsed_args, repository, command_hooks_context);
-            }
-            Some("update-ref") => {
-                update_ref_hooks::pre_update_ref_hook(
-                    parsed_args,
-                    repository,
-                    command_hooks_context,
-                );
-            }
-            _ => {}
-        }
-    }));
-
-    if let Err(panic_payload) = result {
-        let error_message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
-            format!("Panic in run_pre_command_hooks: {}", message)
-        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
-            format!("Panic in run_pre_command_hooks: {}", message)
-        } else {
-            "Panic in run_pre_command_hooks: unknown panic".to_string()
-        };
-
-        let command_name = parsed_args.command.as_deref().unwrap_or("unknown");
-        let context = serde_json::json!({
-            "function": "run_pre_command_hooks",
-            "command": command_name,
-            "args": parsed_args.to_invocation_vec(),
-        });
-
-        tracing::debug!("{}", error_message);
-        observability::log_error(&HookPanicError(error_message.clone()), Some(context));
-    }
-}
-
-fn run_post_command_hooks(
-    command_hooks_context: &mut CommandHooksContext,
-    parsed_args: &ParsedGitInvocation,
-    exit_status: std::process::ExitStatus,
-    repository: &mut Repository,
-) {
-    let _disable_hooks_guard = disable_internal_git_hooks();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // Post-command hooks
-        match parsed_args.command.as_deref() {
-            Some("commit") => commit_hooks::commit_post_command_hook(
-                parsed_args,
-                exit_status,
-                repository,
-                command_hooks_context,
-            ),
-            Some("pull") => fetch_hooks::pull_post_command_hook(
-                repository,
-                parsed_args,
-                exit_status,
-                command_hooks_context,
-            ),
-            Some("push") => push_hooks::push_post_command_hook(
-                repository,
-                parsed_args,
-                exit_status,
-                command_hooks_context,
-            ),
-            Some("reset") => reset_hooks::post_reset_hook(parsed_args, repository, exit_status),
-            Some("merge") => merge_hooks::post_merge_hook(parsed_args, exit_status, repository),
-            Some("rebase") => rebase_hooks::handle_rebase_post_command(
-                command_hooks_context,
-                parsed_args,
-                exit_status,
-                repository,
-            ),
-            Some("cherry-pick") => cherry_pick_hooks::post_cherry_pick_hook(
-                command_hooks_context,
-                parsed_args,
-                exit_status,
-                repository,
-            ),
-            Some("stash") => {
-                let config = config::Config::get();
-
-                if config.feature_flags().rewrite_stash {
-                    stash_hooks::post_stash_hook(
-                        command_hooks_context,
-                        parsed_args,
-                        repository,
-                        exit_status,
-                    );
-                }
-            }
-            Some("checkout") => {
-                checkout_hooks::post_checkout_hook(
-                    parsed_args,
-                    repository,
-                    exit_status,
-                    command_hooks_context,
-                );
-            }
-            Some("switch") => {
-                switch_hooks::post_switch_hook(
-                    parsed_args,
-                    repository,
-                    exit_status,
-                    command_hooks_context,
-                );
-            }
-            Some("update-ref") => {
-                update_ref_hooks::post_update_ref_hook(
-                    parsed_args,
-                    repository,
-                    exit_status,
-                    command_hooks_context,
-                );
-            }
-            _ => {}
-        }
-    }));
-
-    if let Err(panic_payload) = result {
-        let error_message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
-            format!("Panic in run_post_command_hooks: {}", message)
-        } else if let Some(message) = panic_payload.downcast_ref::<String>() {
-            format!("Panic in run_post_command_hooks: {}", message)
-        } else {
-            "Panic in run_post_command_hooks: unknown panic".to_string()
-        };
-
-        let command_name = parsed_args.command.as_deref().unwrap_or("unknown");
-        let exit_code = exit_status.code().unwrap_or(-1);
-        let context = serde_json::json!({
-            "function": "run_post_command_hooks",
-            "command": command_name,
-            "exit_code": exit_code,
-            "args": parsed_args.to_invocation_vec(),
-        });
-
-        tracing::debug!("{}", error_message);
-        observability::log_error(&HookPanicError(error_message.clone()), Some(context));
-    }
-}
-
-#[cfg(windows)]
-fn platform_null_hooks_path() -> &'static str {
-    "NUL"
-}
-
-#[cfg(not(windows))]
-fn platform_null_hooks_path() -> &'static str {
-    "/dev/null"
-}
-
-fn command_uses_managed_hooks(command: Option<&str>) -> bool {
-    matches!(
-        command,
-        Some(
-            "commit"
-                | "rebase"
-                | "cherry-pick"
-                | "reset"
-                | "stash"
-                | "merge"
-                | "checkout"
-                | "switch"
-                | "pull"
-                | "fetch"
-                | "push"
-                | "update-ref"
-        )
-    )
-}
-
-fn has_explicit_hooks_path_override(args: &[String]) -> bool {
-    args.windows(2)
-        .any(|pair| pair[0] == "-c" && pair[1].starts_with("core.hooksPath="))
-        || args.iter().any(|arg| {
-            arg.starts_with("-ccore.hooksPath=") || arg.starts_with("--config=core.hooksPath=")
-        })
-}
-
-fn resolve_child_git_hooks_path_override(
-    parsed_args: &ParsedGitInvocation,
-    repository: Option<&Repository>,
-) -> Option<String> {
-    if !command_uses_managed_hooks(parsed_args.command.as_deref()) {
-        return None;
-    }
-    if !has_repo_hook_state(repository) {
-        return None;
-    }
-
-    let hooks_path = resolve_previous_non_managed_hooks_path(repository)
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_else(|| platform_null_hooks_path().to_string());
-
-    Some(hooks_path)
 }
 
 /// In async (wrapper-to-daemon) mode, after a successful `git commit`, poll for
@@ -812,7 +410,6 @@ fn send_wrapper_post_state_to_daemon(
 fn proxy_to_git(
     args: &[String],
     exit_on_completion: bool,
-    child_hooks_path_override: Option<&str>,
     wrapper_invocation_id: Option<&str>,
 ) -> std::process::ExitStatus {
     // Suppress trace2 for read-only invocations to avoid hitting the daemon
@@ -843,19 +440,8 @@ fn proxy_to_git(
             let should_setpgid = !is_interactive;
 
             let mut cmd = Command::new(config::Config::get().git_cmd());
-            if let Some(hooks_path) = child_hooks_path_override
-                && !has_explicit_hooks_path_override(args)
-            {
-                cmd.arg("-c").arg(format!("core.hooksPath={}", hooks_path));
-            }
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
-            // Strip git-ai control vars so they don't leak into git subprocesses
-            // (e.g. alias scripts).  git-ai already consumed them; real git
-            // should not see them.  Notably, GIT_AI_ASYNC_MODE is read by the
-            // wrapper's FeatureFlags but must not appear inside alias scripts
-            // where tests like t0001-init.sh check for "no extra GIT_*" vars.
-            cmd.env_remove("GIT_AI_ASYNC_MODE");
             if suppress_trace2 {
                 cmd.env("GIT_TRACE2_EVENT", "0");
             }
@@ -882,14 +468,8 @@ fn proxy_to_git(
         #[cfg(not(unix))]
         {
             let mut cmd = Command::new(config::Config::get().git_cmd());
-            if let Some(hooks_path) = child_hooks_path_override
-                && !has_explicit_hooks_path_override(args)
-            {
-                cmd.arg("-c").arg(format!("core.hooksPath={}", hooks_path));
-            }
             cmd.args(args);
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
-            cmd.env_remove("GIT_AI_ASYNC_MODE");
             if suppress_trace2 {
                 cmd.env("GIT_TRACE2_EVENT", "0");
             }
@@ -995,22 +575,6 @@ fn exit_with_status(status: std::process::ExitStatus) -> ! {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-#[cfg(unix)]
-fn exit_status_was_interrupted(status: &std::process::ExitStatus) -> bool {
-    matches!(status.signal(), Some(libc::SIGINT))
-}
-
-#[cfg(windows)]
-fn exit_status_was_interrupted(status: &std::process::ExitStatus) -> bool {
-    // Reinterpret the signed exit code as u32 to compare against the NTSTATUS value.
-    status.code().map(|code| code as u32) == Some(NTSTATUS_CONTROL_C_EXIT)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn exit_status_was_interrupted(_status: &std::process::ExitStatus) -> bool {
-    false
-}
-
 // Detect if current process invocation is coming from shell completion machinery
 // (bash, zsh via bashcompinit). If so, we should proxy directly to the real git
 // without any extra behavior that could interfere with completion scripts.
@@ -1018,184 +582,4 @@ fn in_shell_completion_context() -> bool {
     std::env::var("COMP_LINE").is_ok()
         || std::env::var("COMP_POINT").is_ok()
         || std::env::var("COMP_TYPE").is_ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::parse_alias_tokens;
-    use super::{parse_git_cli_args, resolve_child_git_hooks_path_override};
-    use crate::git::find_repository_in_path;
-    use std::process::Command;
-    use tempfile::tempdir;
-
-    #[test]
-    fn parse_alias_tokens_empty_string() {
-        assert_eq!(parse_alias_tokens(""), Some(vec![]));
-    }
-
-    #[test]
-    fn parse_alias_tokens_whitespace_only() {
-        assert_eq!(parse_alias_tokens("  \t  "), Some(vec![]));
-    }
-
-    #[test]
-    fn parse_alias_tokens_shell_alias() {
-        assert_eq!(parse_alias_tokens("!echo hello"), None);
-    }
-
-    #[test]
-    fn parse_alias_tokens_shell_alias_with_leading_whitespace() {
-        assert_eq!(parse_alias_tokens("  !echo hello"), None);
-    }
-
-    #[test]
-    fn parse_alias_tokens_simple_tokens() {
-        assert_eq!(
-            parse_alias_tokens("commit -v"),
-            Some(vec!["commit".to_string(), "-v".to_string()])
-        );
-    }
-
-    #[test]
-    fn parse_alias_tokens_double_quotes() {
-        assert_eq!(
-            parse_alias_tokens(r#"log "--format=%H %s""#),
-            Some(vec!["log".to_string(), "--format=%H %s".to_string()])
-        );
-    }
-
-    #[test]
-    fn parse_alias_tokens_single_quotes() {
-        assert_eq!(
-            parse_alias_tokens("log '--format=%H %s'"),
-            Some(vec!["log".to_string(), "--format=%H %s".to_string()])
-        );
-    }
-
-    #[test]
-    fn parse_alias_tokens_mixed_adjacent_quotes() {
-        assert_eq!(
-            parse_alias_tokens("--pretty='format:%h %s'"),
-            Some(vec!["--pretty=format:%h %s".to_string()])
-        );
-    }
-
-    #[test]
-    fn parse_alias_tokens_unclosed_single_quote() {
-        assert_eq!(parse_alias_tokens("log 'unclosed"), None);
-    }
-
-    #[test]
-    fn parse_alias_tokens_unclosed_double_quote() {
-        assert_eq!(parse_alias_tokens("log \"unclosed"), None);
-    }
-
-    #[test]
-    fn parse_alias_tokens_escaped_char_outside_quotes() {
-        assert_eq!(
-            parse_alias_tokens(r"log \-\-oneline"),
-            Some(vec!["log".to_string(), "--oneline".to_string()])
-        );
-    }
-
-    #[test]
-    fn parse_alias_tokens_escaped_char_in_double_quotes() {
-        assert_eq!(
-            parse_alias_tokens(r#"log "--format=\"%H\"""#),
-            Some(vec!["log".to_string(), "--format=\"%H\"".to_string()])
-        );
-    }
-
-    #[test]
-    fn parse_alias_tokens_trailing_backslash() {
-        assert_eq!(
-            parse_alias_tokens("commit\\"),
-            Some(vec!["commit\\".to_string()])
-        );
-    }
-
-    #[test]
-    fn parse_alias_tokens_multiple_whitespace_between_tokens() {
-        assert_eq!(
-            parse_alias_tokens("log   --oneline   -5"),
-            Some(vec![
-                "log".to_string(),
-                "--oneline".to_string(),
-                "-5".to_string()
-            ])
-        );
-    }
-
-    #[test]
-    fn resolve_child_hooks_path_override_no_state_file_returns_none() {
-        let temp = tempdir().expect("tempdir should create");
-        let output = Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(temp.path())
-            .output()
-            .expect("git init should run");
-        assert!(
-            output.status.success(),
-            "git init failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let repo = find_repository_in_path(&temp.path().to_string_lossy())
-            .expect("repository should be discovered");
-        let parsed = parse_git_cli_args(&["commit".to_string()]);
-
-        assert_eq!(
-            resolve_child_git_hooks_path_override(&parsed, Some(&repo)),
-            None
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn exit_status_was_interrupted_on_sigint() {
-        let status = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("kill -s INT $$")
-            .status()
-            .expect("failed to run signal test");
-        assert!(super::exit_status_was_interrupted(&status));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn exit_status_was_interrupted_false_on_success() {
-        let status = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("exit 0")
-            .status()
-            .expect("failed to run success test");
-        assert!(!super::exit_status_was_interrupted(&status));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn exit_status_was_interrupted_on_windows_ctrl_c_code() {
-        // Simulate a Ctrl+C NTSTATUS exit code via cmd's exit value.
-        let status = std::process::Command::new("cmd")
-            .arg("/C")
-            .arg("exit")
-            .arg("/B")
-            .arg(super::NTSTATUS_CONTROL_C_EXIT.to_string())
-            .status()
-            .expect("failed to run ctrl+c status test");
-        assert!(super::exit_status_was_interrupted(&status));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn exit_status_was_interrupted_false_on_success_windows() {
-        let status = std::process::Command::new("cmd")
-            .arg("/C")
-            .arg("exit")
-            .arg("/B")
-            .arg("0")
-            .status()
-            .expect("failed to run success test");
-        assert!(!super::exit_status_was_interrupted(&status));
-    }
 }

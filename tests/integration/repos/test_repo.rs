@@ -11,7 +11,14 @@ use git_ai::feature_flags::FeatureFlags;
 use git_ai::git::cli_parser::{ParsedGitInvocation, extract_clone_target_directory};
 use git_ai::git::repo_storage::PersistedWorkingLog;
 use git_ai::git::repository as GitAiRepository;
-use git_ai::observability::wrapper_performance_targets::BenchmarkResult;
+// BenchmarkResult for performance testing
+#[derive(Debug, Clone)]
+pub struct BenchmarkResult {
+    pub total_duration: Duration,
+    pub git_duration: Duration,
+    pub post_command_duration: Duration,
+    pub pre_command_duration: Duration,
+}
 use insta::{Settings, assert_debug_snapshot};
 use rand::RngExt;
 use std::cell::Cell;
@@ -24,6 +31,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+#[cfg(windows)]
+use windows_sys::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE};
 
 use super::test_file::TestFile;
 
@@ -41,9 +59,6 @@ const DAEMON_TEST_TRACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitTestMode {
-    Wrapper,
-    Hooks,
-    Both,
     Daemon,
     WrapperDaemon,
 }
@@ -51,33 +66,29 @@ pub enum GitTestMode {
 impl GitTestMode {
     pub fn from_env() -> Self {
         let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
-            .unwrap_or_else(|_| "wrapper".to_string())
+            .unwrap_or_else(|_| "daemon".to_string())
             .to_lowercase();
         Self::from_mode_name(&mode)
     }
 
     pub fn from_mode_name(mode: &str) -> Self {
         match mode.to_lowercase().as_str() {
-            // Git core hooks have been sunset — "hooks" and "both" now
-            // fall through to Wrapper mode.
-            "hooks" | "both" | "wrapper+hooks" | "hooks+wrapper" => Self::Wrapper,
             "daemon" | "trace-daemon" | "pure-daemon" => Self::Daemon,
             "wrapper-daemon" => Self::WrapperDaemon,
-            _ => Self::Wrapper,
+            _ => Self::Daemon,
         }
     }
 
     pub fn uses_wrapper(self) -> bool {
-        matches!(self, Self::Wrapper | Self::Both | Self::WrapperDaemon)
+        matches!(self, Self::WrapperDaemon)
     }
 
     pub fn uses_hooks(self) -> bool {
-        // Git core hooks have been sunset.
         false
     }
 
     pub fn uses_daemon(self) -> bool {
-        matches!(self, Self::Daemon | Self::WrapperDaemon)
+        true
     }
 }
 
@@ -85,6 +96,9 @@ impl GitTestMode {
 pub enum DaemonTestScope {
     Shared,
     Dedicated,
+    /// Create a repo configured for daemon mode but do NOT auto-start a daemon.
+    /// Use this for tests that manually manage their own daemon lifecycle.
+    NoDaemon,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +110,89 @@ struct DaemonProcess {
     trace_socket_path: PathBuf,
     stderr_log_path: PathBuf,
 }
+
+#[cfg(windows)]
+struct TestDaemonJob {
+    handle: HANDLE,
+}
+
+#[cfg(windows)]
+impl TestDaemonJob {
+    fn new() -> Self {
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        assert!(
+            !handle.is_null(),
+            "failed to create Windows test daemon job object"
+        );
+
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &mut limits as *mut _ as *const _,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if ok == 0 {
+            unsafe {
+                CloseHandle(handle);
+            }
+            panic!("failed to configure Windows test daemon job object");
+        }
+
+        Self { handle }
+    }
+
+    fn assign_pid(&self, pid: u32) {
+        let process = unsafe { OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid) };
+        assert!(
+            !process.is_null(),
+            "failed to open daemon process {} for job assignment",
+            pid
+        );
+
+        let ok = unsafe { AssignProcessToJobObject(self.handle, process) };
+        unsafe {
+            CloseHandle(process);
+        }
+        assert_ne!(
+            ok, 0,
+            "failed to assign daemon process {} to Windows test daemon job",
+            pid
+        );
+    }
+}
+
+// Windows job handles are kernel object handles. We only share the stable handle
+// value and close it once from the OnceLock-owned wrapper at process teardown.
+#[cfg(windows)]
+unsafe impl Send for TestDaemonJob {}
+#[cfg(windows)]
+unsafe impl Sync for TestDaemonJob {}
+
+#[cfg(windows)]
+impl Drop for TestDaemonJob {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+static TEST_DAEMON_JOB: OnceLock<TestDaemonJob> = OnceLock::new();
+
+#[cfg(windows)]
+fn assign_daemon_to_test_job(pid: u32) {
+    TEST_DAEMON_JOB
+        .get_or_init(TestDaemonJob::new)
+        .assign_pid(pid);
+}
+
+#[cfg(not(windows))]
+fn assign_daemon_to_test_job(_pid: u32) {}
 
 impl DaemonProcess {
     fn control_socket_path_for_home(test_home: &Path) -> PathBuf {
@@ -149,6 +246,7 @@ impl DaemonProcess {
             .spawn()
             .expect("failed to spawn git-ai subprocess for test mode");
         let pid = child.id();
+        assign_daemon_to_test_job(pid);
 
         let daemon = Self {
             pid,
@@ -377,8 +475,8 @@ fn configure_test_home_env(command: &mut Command, test_home: &Path) {
     command.env("GIT_CONFIG_NOSYSTEM", "1");
     // Sanitize PATH: remove any directories that contain a git-ai wrapper.
     // Without this, git internals (which call `git` sub-processes via PATH) will
-    // hit the installed release git-ai binary, which has async_mode=true and
-    // spawns a background daemon for every invocation — causing a process storm.
+    // hit the installed release git-ai binary, which spawns a background daemon
+    // for every invocation — causing a process storm.
     #[cfg(not(windows))]
     if let Ok(path) = std::env::var("PATH") {
         let sanitized: Vec<&str> = path
@@ -907,15 +1005,9 @@ impl TestRepo {
     }
 
     fn apply_default_config_patch(&mut self) {
-        let git_mode = self.git_mode;
         self.patch_git_ai_config(|patch| {
             patch.exclude_prompts_in_repositories = Some(vec![]); // No exclusions = share everywhere
             patch.prompt_storage = Some("notes".to_string()); // Use notes mode for tests
-            if git_mode == GitTestMode::WrapperDaemon {
-                patch.feature_flags = Some(serde_json::json!({
-                    "async_mode": true
-                }));
-            }
         });
     }
 
@@ -1435,6 +1527,7 @@ impl TestRepo {
                 &self.test_home,
                 &self.test_db_path,
             )),
+            DaemonTestScope::NoDaemon => return,
         };
         self.test_db_path = daemon.test_db_path.clone();
         self.daemon_process = Some(daemon);
@@ -1703,7 +1796,7 @@ impl TestRepo {
     }
 
     pub(crate) fn record_daemon_family_expected_completion_session(&self, session: &str) {
-        if !self.git_mode.uses_daemon() {
+        if !self.has_active_daemon() {
             return;
         }
 
@@ -1719,7 +1812,7 @@ impl TestRepo {
         args: &mut Vec<String>,
         session: &str,
     ) {
-        if !self.git_mode.uses_daemon() {
+        if !self.has_active_daemon() {
             return;
         }
 
@@ -1772,7 +1865,7 @@ impl TestRepo {
     }
 
     pub(crate) fn sync_daemon_force(&self) {
-        if !self.git_mode.uses_daemon() {
+        if !self.has_active_daemon() {
             return;
         }
 
@@ -1781,7 +1874,7 @@ impl TestRepo {
     }
 
     pub(crate) fn sync_daemon_external_completion_sessions(&self, sessions: &[String]) {
-        if !self.git_mode.uses_daemon() || sessions.is_empty() {
+        if !self.has_active_daemon() || sessions.is_empty() {
             return;
         }
 
@@ -1792,7 +1885,7 @@ impl TestRepo {
     }
 
     fn sync_daemon_clone_target(&self, target_repo_path: &Path) {
-        if !self.git_mode.uses_daemon() {
+        if !self.has_active_daemon() {
             return;
         }
 
@@ -1867,7 +1960,7 @@ impl TestRepo {
         // Isolate all git + git-ai config reads from developer machine settings.
         configure_test_home_env(command, &self.test_home);
 
-        if self.git_mode.uses_daemon() {
+        if self.has_active_daemon() {
             command.env(
                 "GIT_TRACE2_EVENT",
                 DaemonConfig::trace2_event_target_for_path(&self.daemon_trace_socket_path()),
@@ -1911,7 +2004,7 @@ impl TestRepo {
             self.daemon_trace_socket_path(),
         );
 
-        if self.git_mode.uses_daemon() {
+        if self.has_active_daemon() {
             command.env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true");
         }
 
@@ -1962,6 +2055,10 @@ impl TestRepo {
 
     pub fn mode(&self) -> GitTestMode {
         self.git_mode
+    }
+
+    fn has_active_daemon(&self) -> bool {
+        self.git_mode.uses_daemon() && self.daemon_process.is_some()
     }
 
     pub fn sync_daemon(&self) {
@@ -2192,13 +2289,12 @@ impl TestRepo {
 
         let retry_limit = 8usize;
         let retry_delay = Duration::from_millis(50);
-        let command_affects_daemon = self.git_mode.uses_daemon()
+        let command_affects_daemon = self.has_active_daemon()
             && git_ai::daemon::test_sync::tracks_parsed_git_invocation_for_test_sync(
                 &tracked_invocation,
             );
         for attempt in 0..=retry_limit {
-            let daemon_command_pending = self.git_mode.uses_daemon()
-                && command_affects_daemon
+            let daemon_command_pending = command_affects_daemon
                 && !git_invocation_routes_to_clone_target(&tracked_invocation);
             let daemon_test_sync_session =
                 daemon_command_pending.then(new_daemon_test_sync_session_id);
@@ -2261,9 +2357,7 @@ impl TestRepo {
                     format!("{}{}", stdout, stderr)
                 };
                 if command_affects_daemon {
-                    if self.git_mode.uses_daemon()
-                        && git_invocation_routes_to_clone_target(&tracked_invocation)
-                    {
+                    if git_invocation_routes_to_clone_target(&tracked_invocation) {
                         let clone_cwd = canonical_working_dir
                             .as_deref()
                             .unwrap_or(self.path.as_path());
@@ -2850,8 +2944,8 @@ fn find_real_git_by_probe() -> String {
 /// The `OnceLock` guarantees the init runs exactly once even under parallel tests.
 ///
 /// After this call:
-/// - `~/.git-ai/config.json` in the isolated HOME has `git_path` → real git and
-///   `async_mode: false`, so no daemon auto-spawn from in-process Config::get() calls.
+/// - `~/.git-ai/config.json` in the isolated HOME has `git_path` → real git,
+///   so no daemon auto-spawn from in-process Config::get() calls.
 /// - `~/.gitconfig` is a minimal stub so plain git subprocesses don't fail.
 /// - Developer's real `~/.git-ai/`, `~/.claude/`, `~/.gitconfig` are unreachable.
 fn ensure_isolated_process_home() {
@@ -2871,14 +2965,14 @@ fn ensure_isolated_process_home() {
         // Probe for real git before we overwrite HOME
         let real_git = find_real_git_by_probe();
 
-        // Minimal ~/.git-ai/config.json: real git_path + async_mode=false
+        // Minimal ~/.git-ai/config.json: real git_path
         let git_ai_dir = home.join(".git-ai");
         fs::create_dir_all(&git_ai_dir).expect("create .git-ai dir");
         // Escape backslashes for JSON (relevant on Windows)
         let real_git_json = real_git.replace('\\', "\\\\");
         fs::write(
             git_ai_dir.join("config.json"),
-            format!(r#"{{"git_path":"{real_git_json}","feature_flags":{{"async_mode":false}}}}"#),
+            format!(r#"{{"git_path":"{real_git_json}"}}"#),
         )
         .expect("write test git-ai config");
 
@@ -2886,12 +2980,18 @@ fn ensure_isolated_process_home() {
         // HOME or PATH. The OnceLock ensures no concurrent env var writes.
         unsafe {
             std::env::set_var("HOME", &home);
+            #[cfg(windows)]
+            {
+                std::env::set_var("USERPROFILE", &home);
+                std::env::set_var("HOMEDRIVE", "");
+                std::env::set_var("HOMEPATH", "");
+            }
 
             // Sanitize the process-level PATH to remove git-ai wrapper directories.
             // This covers subprocess calls that don't go through configure_test_home_env
             // (e.g., template repo init, bare repo init, worktree setup), preventing
             // git internals from resolving `git` via PATH to the installed git-ai
-            // release binary (which has async_mode=true and would spawn daemons).
+            // release binary (which would spawn daemons).
             #[cfg(not(windows))]
             if let Ok(path) = std::env::var("PATH") {
                 let sanitized = path
@@ -3141,6 +3241,38 @@ mod tests {
                 "src/lib.rs",
                 "src/main.rs",
             ]
+        );
+    }
+
+    #[test]
+    fn test_isolated_process_home_controls_git_ai_internal_dir() {
+        ensure_isolated_process_home();
+
+        let home = PathBuf::from(std::env::var("HOME").expect("HOME should be isolated"));
+
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                std::env::var_os("USERPROFILE").map(PathBuf::from),
+                Some(home.clone()),
+                "Windows home lookup prefers USERPROFILE, so the test harness must isolate it"
+            );
+            assert_eq!(
+                std::env::var("HOMEDRIVE").unwrap_or_default(),
+                "",
+                "HOMEDRIVE should not point git-ai back at the real user profile"
+            );
+            assert_eq!(
+                std::env::var("HOMEPATH").unwrap_or_default(),
+                "",
+                "HOMEPATH should not point git-ai back at the real user profile"
+            );
+        }
+
+        assert_eq!(
+            git_ai::config::internal_dir_path().expect("internal dir should resolve"),
+            home.join(".git-ai").join("internal"),
+            "in-process git-ai config lookup must use the isolated test home"
         );
     }
 }

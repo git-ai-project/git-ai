@@ -1,6 +1,9 @@
-use crate::authorship::authorship_log::{Author, HumanRecord, LineRange, PromptRecord};
+use crate::authorship::authorship_log::{
+    Author, HumanRecord, LineRange, PromptRecord, SessionRecord,
+};
 use crate::authorship::working_log::CheckpointKind;
 use crate::git::repository::Repository;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -29,6 +32,8 @@ pub struct AuthorshipMetadata {
     pub prompts: BTreeMap<String, PromptRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub humans: BTreeMap<String, HumanRecord>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sessions: BTreeMap<String, SessionRecord>,
 }
 
 impl AuthorshipMetadata {
@@ -39,6 +44,7 @@ impl AuthorshipMetadata {
             base_commit_sha: String::new(),
             prompts: BTreeMap::new(),
             humans: BTreeMap::new(),
+            sessions: BTreeMap::new(),
         }
     }
 }
@@ -266,6 +272,36 @@ impl AuthorshipLog {
                     continue;
                 }
 
+                // s_-prefixed hashes are session attestations — route to sessions map
+                if entry.hash.starts_with("s_") {
+                    // Extract session key from "s_<14hex>::t_<14hex>" format
+                    let session_key = entry.hash.split("::").next().unwrap_or(&entry.hash);
+                    if let Some(session_record) = self.metadata.sessions.get(session_key) {
+                        // Create a PromptRecord-like structure from SessionRecord for compatibility
+                        // Note: sessions don't have message transcripts or detailed stats
+                        let prompt_record = PromptRecord {
+                            agent_id: session_record.agent_id.clone(),
+                            human_author: session_record.human_author.clone(),
+                            total_additions: 0, // Sessions don't track detailed stats
+                            total_deletions: 0,
+                            accepted_lines: 0,
+                            overriden_lines: 0,
+                            custom_attributes: session_record.custom_attributes.clone(),
+                            messages_url: None,
+                        };
+                        return Some((
+                            Author {
+                                username: session_record.agent_id.tool.clone(),
+                                email: String::new(),
+                            },
+                            Some(entry.hash.clone()), // Return full s_::t_ hash
+                            Some(prompt_record),
+                        ));
+                    }
+                    // Session hash not found locally — skip this entry
+                    continue;
+                }
+
                 // The hash corresponds to a prompt session short hash
                 if let Some(prompt_record) = self.metadata.prompts.get(&entry.hash) {
                     // Create author info from the prompt record
@@ -465,12 +501,7 @@ impl AuthorshipLog {
                 // TODO Fill in the LineStats
 
                 // Reconstruct transcript from messages
-                let mut transcript = crate::authorship::transcript::AiTranscript::new();
-                for message in &prompt_record.messages {
-                    transcript.add_message(message.clone());
-                }
-                ai_checkpoint.transcript = Some(transcript);
-
+                // Transcript no longer stored in checkpoints
                 checkpoints.push(ai_checkpoint);
             }
         }
@@ -672,6 +703,31 @@ pub fn generate_human_short_hash(author_identity: &str) -> String {
     format!("h_{}", &hex[..14])
 }
 
+/// Generate a session ID: "s_" + first 14 hex chars of SHA256(tool:agent_id) = 16 chars total.
+/// Uses the same hash base as `generate_short_hash` but with a prefix and shorter hash portion.
+/// The "s_" prefix distinguishes session IDs from legacy prompt hashes throughout the system.
+pub fn generate_session_id(agent_id: &str, tool: &str) -> String {
+    let combined = format!("{}:{}", tool, agent_id);
+    let mut hasher = Sha256::new();
+    hasher.update(combined.as_bytes());
+    let hex = format!("{:x}", hasher.finalize());
+    format!("s_{}", &hex[..14])
+}
+
+/// Generate a trace ID: "t_" + 14 random hex chars = 16 chars total.
+/// Unique per checkpoint call (not deterministic). Used for per-checkpoint granularity
+/// in attestation keys.
+pub fn generate_trace_id() -> String {
+    let mut rng = rand::rng();
+    let hex: String = (0..14)
+        .map(|_| {
+            let idx: u8 = rng.random_range(0..16);
+            char::from_digit(idx as u32, 16).unwrap()
+        })
+        .collect();
+    format!("t_{}", hex)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -806,13 +862,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
                 total_additions: 0,
                 total_deletions: 0,
                 accepted_lines: 0,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -874,13 +929,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
                 total_additions: 0,
                 total_deletions: 0,
                 accepted_lines: 0,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -927,13 +981,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
                 total_additions: 0,
                 total_deletions: 0,
                 accepted_lines: 0,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1107,13 +1160,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id: agent_id.clone(),
                 human_author: Some("alice@example.com".to_string()),
-                messages: transcript.messages().to_vec(),
                 total_additions: 15,
                 total_deletions: 3,
                 accepted_lines: 11,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1145,7 +1197,7 @@ mod tests {
         assert_eq!(ai_checkpoint.author, "ai");
         assert!(ai_checkpoint.agent_id.is_some());
         assert_eq!(ai_checkpoint.agent_id.as_ref().unwrap().tool, "cursor");
-        assert!(ai_checkpoint.transcript.is_some());
+        // Transcript field removed from Checkpoint
         assert_eq!(ai_checkpoint.entries.len(), 1);
         let ai_entry = &ai_checkpoint.entries[0];
         assert_eq!(ai_entry.file, "src/main.rs");
@@ -1279,13 +1331,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id: agent1,
                 human_author: Some("bob@example.com".to_string()),
-                messages: transcript1.messages().to_vec(),
                 total_additions: 10,
                 total_deletions: 0,
                 accepted_lines: 10,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1304,13 +1355,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id: agent2,
                 human_author: Some("bob@example.com".to_string()),
-                messages: transcript2.messages().to_vec(),
                 total_additions: 20,
                 total_deletions: 0,
                 accepted_lines: 20,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1436,13 +1486,12 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: transcript.messages().to_vec(),
                 total_additions: 5,
                 total_deletions: 0,
                 accepted_lines: 5,
                 overriden_lines: 0,
-                messages_url: None,
                 custom_attributes: None,
+                messages_url: None,
             },
         );
 
@@ -1489,4 +1538,34 @@ mod tests {
     // and cannot be unit-tested here without significant mocking infrastructure.
     // The h_-routing path (returning HumanRecord data instead of PromptRecord) is covered by
     // integration tests in the authorship integration test suite.
+
+    #[test]
+    fn test_generate_session_id() {
+        let id = generate_session_id("session_123", "cursor");
+        assert!(id.starts_with("s_"));
+        assert_eq!(id.len(), 16);
+        // Deterministic
+        assert_eq!(id, generate_session_id("session_123", "cursor"));
+        // Different inputs produce different output
+        assert_ne!(id, generate_session_id("session_456", "cursor"));
+    }
+
+    #[test]
+    fn test_generate_trace_id() {
+        let id = generate_trace_id();
+        assert!(id.starts_with("t_"));
+        assert_eq!(id.len(), 16);
+        // Random: two calls produce different output
+        assert_ne!(id, generate_trace_id());
+        // All chars after prefix are hex
+        assert!(id[2..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_session_id_uses_same_hash_base_as_prompt_id() {
+        let session = generate_session_id("session_123", "cursor");
+        let prompt = generate_short_hash("session_123", "cursor");
+        // The hex portion of session (after "s_") should be a prefix of the prompt hash
+        assert_eq!(&session[2..], &prompt[..14]);
+    }
 }

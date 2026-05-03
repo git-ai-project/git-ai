@@ -2,8 +2,8 @@
 
 use super::pos_encoded::{
     PosEncoded, PosField, sparse_get_string, sparse_get_u32, sparse_get_u64, sparse_get_vec_string,
-    sparse_get_vec_u32, sparse_get_vec_u64, sparse_set, string_to_json, u32_to_json, u64_to_json,
-    vec_string_to_json, vec_u32_to_json, vec_u64_to_json,
+    sparse_get_vec_u32, sparse_set, string_to_json, u32_to_json, u64_to_json, vec_string_to_json,
+    vec_u32_to_json,
 };
 use super::types::{EventValues, MetricEventId, SparseArray};
 
@@ -21,7 +21,7 @@ pub mod committed_pos {
     pub const AI_ACCEPTED: usize = 6;
     pub const TOTAL_AI_ADDITIONS: usize = 7;
     pub const TOTAL_AI_DELETIONS: usize = 8;
-    pub const TIME_WAITING_FOR_AI: usize = 9;
+    // Position 9 was time_waiting_for_ai (removed)
 
     // New scalar fields
     pub const FIRST_CHECKPOINT_TS: usize = 10; // u64 (null if no checkpoints)
@@ -44,12 +44,12 @@ pub mod committed_pos {
 /// | Position | Name | Type |
 /// |----------|------|------|
 /// | 3 | tool_model_pairs | `Vec<String>` |
-/// | 4 | mixed_additions | `Vec<u32>` |
+/// | 4 | (removed) | - |
 /// | 5 | ai_additions | `Vec<u32>` |
 /// | 6 | ai_accepted | `Vec<u32>` |
-/// | 7 | total_ai_additions | `Vec<u32>` |
-/// | 8 | total_ai_deletions | `Vec<u32>` |
-/// | 9 | time_waiting_for_ai | `Vec<u64>` |
+/// | 7 | (removed) | - |
+/// | 8 | (removed) | - |
+/// | 9 | (removed) | - |
 /// | 10 | first_checkpoint_ts | u64 |
 /// | 11 | commit_subject | String |
 /// | 12 | commit_body | String |
@@ -62,12 +62,8 @@ pub struct CommittedValues {
 
     // Array fields (parallel arrays)
     pub tool_model_pairs: PosField<Vec<String>>,
-    pub mixed_additions: PosField<Vec<u32>>,
     pub ai_additions: PosField<Vec<u32>>,
     pub ai_accepted: PosField<Vec<u32>>,
-    pub total_ai_additions: PosField<Vec<u32>>,
-    pub total_ai_deletions: PosField<Vec<u32>>,
-    pub time_waiting_for_ai: PosField<Vec<u64>>,
 
     // New scalar fields
     pub first_checkpoint_ts: PosField<u64>,
@@ -128,17 +124,6 @@ impl CommittedValues {
         self
     }
 
-    pub fn mixed_additions(mut self, value: Vec<u32>) -> Self {
-        self.mixed_additions = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn mixed_additions_null(mut self) -> Self {
-        self.mixed_additions = Some(None);
-        self
-    }
-
     pub fn ai_additions(mut self, value: Vec<u32>) -> Self {
         self.ai_additions = Some(Some(value));
         self
@@ -158,39 +143,6 @@ impl CommittedValues {
     #[allow(dead_code)]
     pub fn ai_accepted_null(mut self) -> Self {
         self.ai_accepted = Some(None);
-        self
-    }
-
-    pub fn total_ai_additions(mut self, value: Vec<u32>) -> Self {
-        self.total_ai_additions = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn total_ai_additions_null(mut self) -> Self {
-        self.total_ai_additions = Some(None);
-        self
-    }
-
-    pub fn total_ai_deletions(mut self, value: Vec<u32>) -> Self {
-        self.total_ai_deletions = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn total_ai_deletions_null(mut self) -> Self {
-        self.total_ai_deletions = Some(None);
-        self
-    }
-
-    pub fn time_waiting_for_ai(mut self, value: Vec<u64>) -> Self {
-        self.time_waiting_for_ai = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn time_waiting_for_ai_null(mut self) -> Self {
-        self.time_waiting_for_ai = Some(None);
         self
     }
 
@@ -256,11 +208,6 @@ impl PosEncoded for CommittedValues {
         );
         sparse_set(
             &mut map,
-            committed_pos::MIXED_ADDITIONS,
-            vec_u32_to_json(&self.mixed_additions),
-        );
-        sparse_set(
-            &mut map,
             committed_pos::AI_ADDITIONS,
             vec_u32_to_json(&self.ai_additions),
         );
@@ -268,21 +215,6 @@ impl PosEncoded for CommittedValues {
             &mut map,
             committed_pos::AI_ACCEPTED,
             vec_u32_to_json(&self.ai_accepted),
-        );
-        sparse_set(
-            &mut map,
-            committed_pos::TOTAL_AI_ADDITIONS,
-            vec_u32_to_json(&self.total_ai_additions),
-        );
-        sparse_set(
-            &mut map,
-            committed_pos::TOTAL_AI_DELETIONS,
-            vec_u32_to_json(&self.total_ai_deletions),
-        );
-        sparse_set(
-            &mut map,
-            committed_pos::TIME_WAITING_FOR_AI,
-            vec_u64_to_json(&self.time_waiting_for_ai),
         );
 
         // New scalar fields
@@ -314,12 +246,8 @@ impl PosEncoded for CommittedValues {
 
             // Array fields
             tool_model_pairs: sparse_get_vec_string(arr, committed_pos::TOOL_MODEL_PAIRS),
-            mixed_additions: sparse_get_vec_u32(arr, committed_pos::MIXED_ADDITIONS),
             ai_additions: sparse_get_vec_u32(arr, committed_pos::AI_ADDITIONS),
             ai_accepted: sparse_get_vec_u32(arr, committed_pos::AI_ACCEPTED),
-            total_ai_additions: sparse_get_vec_u32(arr, committed_pos::TOTAL_AI_ADDITIONS),
-            total_ai_deletions: sparse_get_vec_u32(arr, committed_pos::TOTAL_AI_DELETIONS),
-            time_waiting_for_ai: sparse_get_vec_u64(arr, committed_pos::TIME_WAITING_FOR_AI),
 
             // New scalar fields
             first_checkpoint_ts: sparse_get_u64(arr, committed_pos::FIRST_CHECKPOINT_TS),
@@ -677,12 +605,8 @@ mod tests {
             .git_diff_deleted_lines(20)
             .git_diff_added_lines(150)
             .tool_model_pairs(vec!["all".to_string(), "claude-code:claude-3".to_string()])
-            .mixed_additions(vec![30, 20])
             .ai_additions(vec![100, 70])
-            .ai_accepted(vec![80, 55])
-            .total_ai_additions(vec![120, 80])
-            .total_ai_deletions(vec![25, 15])
-            .time_waiting_for_ai(vec![5000, 3000]);
+            .ai_accepted(vec![80, 55]);
 
         assert_eq!(values.human_additions, Some(Some(50)));
         assert_eq!(
@@ -1000,38 +924,21 @@ mod tests {
     fn test_committed_values_with_all_arrays() {
         let values = CommittedValues::new()
             .tool_model_pairs(vec!["all".to_string(), "cursor:gpt-4".to_string()])
-            .mixed_additions(vec![10, 5])
             .ai_additions(vec![100, 50])
-            .ai_accepted(vec![80, 40])
-            .total_ai_additions(vec![120, 60])
-            .total_ai_deletions(vec![20, 10])
-            .time_waiting_for_ai(vec![5000, 3000]);
+            .ai_accepted(vec![80, 40]);
 
         assert_eq!(
             values.tool_model_pairs,
             Some(Some(vec!["all".to_string(), "cursor:gpt-4".to_string()]))
         );
-        assert_eq!(values.mixed_additions, Some(Some(vec![10, 5])));
         assert_eq!(values.ai_additions, Some(Some(vec![100, 50])));
         assert_eq!(values.ai_accepted, Some(Some(vec![80, 40])));
-        assert_eq!(values.total_ai_additions, Some(Some(vec![120, 60])));
-        assert_eq!(values.total_ai_deletions, Some(Some(vec![20, 10])));
-        assert_eq!(values.time_waiting_for_ai, Some(Some(vec![5000, 3000])));
     }
 
     #[test]
     fn test_committed_values_array_nulls() {
-        let values = CommittedValues::new()
-            .mixed_additions_null()
-            .ai_accepted_null()
-            .total_ai_additions_null()
-            .total_ai_deletions_null()
-            .time_waiting_for_ai_null();
+        let values = CommittedValues::new().ai_accepted_null();
 
-        assert_eq!(values.mixed_additions, Some(None));
         assert_eq!(values.ai_accepted, Some(None));
-        assert_eq!(values.total_ai_additions, Some(None));
-        assert_eq!(values.total_ai_deletions, Some(None));
-        assert_eq!(values.time_waiting_for_ai, Some(None));
     }
 }

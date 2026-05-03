@@ -2,7 +2,9 @@ use crate::authorship::attribution_tracker::{
     Attribution, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
 use crate::authorship::authorship_log::PromptRecord;
-use crate::authorship::authorship_log_serialization::generate_short_hash;
+use crate::authorship::authorship_log_serialization::{
+    generate_session_id, generate_short_hash, generate_trace_id,
+};
 use crate::authorship::ignore::{
     IgnoreMatcher, build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
@@ -12,7 +14,7 @@ use crate::authorship::imara_diff_utils::{
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
-use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
@@ -31,11 +33,12 @@ use unicode_normalization::UnicodeNormalization;
 
 /// Per-file line statistics (in-memory only, not persisted)
 #[derive(Debug, Clone, Default)]
-struct FileLineStats {
-    additions: u32,
-    deletions: u32,
-    additions_sloc: u32,
-    deletions_sloc: u32,
+#[doc(hidden)]
+pub struct FileLineStats {
+    pub additions: u32,
+    pub deletions: u32,
+    pub additions_sloc: u32,
+    pub deletions_sloc: u32,
 }
 
 /// Latest checkpoint state needed to process a file in the next checkpoint.
@@ -87,7 +90,7 @@ pub struct PreparedCheckpointManifest {
     pub explicit_paths: Vec<String>,
     pub files: Vec<PreparedCheckpointFile>,
     #[serde(default)]
-    pub agent_run_result: Option<AgentRunResult>,
+    pub checkpoint_request: Option<CheckpointRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,7 +109,8 @@ struct ResolvedCheckpointExecution {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BaseOverrideResolutionPolicy {
+#[doc(hidden)]
+pub enum BaseOverrideResolutionPolicy {
     AllowFallback,
     RequireExplicitSnapshot,
 }
@@ -181,40 +185,26 @@ pub(crate) fn should_emit_agent_usage(_agent_id: &AgentId) -> bool {
 }
 
 pub fn explicit_capture_target_paths(
-    kind: CheckpointKind,
-    agent_run_result: Option<&AgentRunResult>,
+    _kind: CheckpointKind,
+    checkpoint_request: Option<&CheckpointRequest>,
 ) -> Option<(PreparedPathRole, Vec<String>)> {
-    let result = agent_run_result?;
-    let (role, paths) = if kind == CheckpointKind::Human {
-        (
-            PreparedPathRole::WillEdit,
-            result.will_edit_filepaths.as_ref()?,
-        )
-    } else if kind == CheckpointKind::KnownHuman {
-        // KnownHuman can be pre-save (will_edit) or post-save (edited); prefer edited.
-        if let Some(paths) = result.edited_filepaths.as_ref() {
-            (PreparedPathRole::Edited, paths)
-        } else {
-            (
-                PreparedPathRole::WillEdit,
-                result.will_edit_filepaths.as_ref()?,
-            )
-        }
-    } else {
-        (PreparedPathRole::Edited, result.edited_filepaths.as_ref()?)
-    };
+    let result = checkpoint_request?;
+    if result.file_paths.is_empty() {
+        return None;
+    }
 
-    let filtered = paths
+    let paths: Vec<String> = result
+        .file_paths
         .iter()
-        .map(|path| path.trim())
-        .filter(|path| !path.is_empty())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
+        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
 
-    if filtered.is_empty() {
+    if paths.is_empty() {
         None
     } else {
-        Some((role, filtered))
+        Some((result.path_role, paths))
     }
 }
 
@@ -255,7 +245,8 @@ fn async_checkpoint_manifest_path(capture_id: &str) -> Result<PathBuf, GitAiErro
     Ok(async_checkpoint_capture_dir(capture_id)?.join("manifest.json"))
 }
 
-fn cleanup_failed_captured_checkpoint_prepare(
+#[doc(hidden)]
+pub fn cleanup_failed_captured_checkpoint_prepare(
     capture_dir: &std::path::Path,
     capture_id: &str,
     error: &GitAiError,
@@ -326,7 +317,7 @@ pub fn run(
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
-    agent_run_result: Option<AgentRunResult>,
+    checkpoint_request: Option<CheckpointRequest>,
     is_pre_commit: bool,
 ) -> Result<(usize, usize, usize), GitAiError> {
     run_with_base_commit_override(
@@ -334,7 +325,7 @@ pub fn run(
         author,
         kind,
         quiet,
-        agent_run_result,
+        checkpoint_request,
         is_pre_commit,
         None,
     )
@@ -346,7 +337,7 @@ pub fn run_with_base_commit_override(
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
-    agent_run_result: Option<AgentRunResult>,
+    checkpoint_request: Option<CheckpointRequest>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
 ) -> Result<(usize, usize, usize), GitAiError> {
@@ -355,7 +346,7 @@ pub fn run_with_base_commit_override(
         author,
         kind,
         quiet,
-        agent_run_result,
+        checkpoint_request,
         is_pre_commit,
         base_commit_override,
         BaseOverrideResolutionPolicy::AllowFallback,
@@ -363,12 +354,13 @@ pub fn run_with_base_commit_override(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_with_base_commit_override_with_policy(
+#[doc(hidden)]
+pub fn run_with_base_commit_override_with_policy(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
-    agent_run_result: Option<AgentRunResult>,
+    checkpoint_request: Option<CheckpointRequest>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
     base_override_resolution_policy: BaseOverrideResolutionPolicy,
@@ -378,7 +370,7 @@ pub(crate) fn run_with_base_commit_override_with_policy(
     let resolved = resolve_live_checkpoint_execution(
         repo,
         kind,
-        agent_run_result.as_ref(),
+        checkpoint_request.as_ref(),
         is_pre_commit,
         base_commit_override,
         base_override_resolution_policy,
@@ -396,19 +388,19 @@ pub(crate) fn run_with_base_commit_override_with_policy(
         author,
         kind,
         quiet,
-        agent_run_result,
+        checkpoint_request,
         is_pre_commit,
         resolved,
         checkpoint_start,
     )
 }
 
-fn filtered_pathspecs_for_agent_run_result(
+fn filtered_pathspecs_for_checkpoint_request(
     repo: &Repository,
     kind: CheckpointKind,
-    agent_run_result: Option<&AgentRunResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
 ) -> Option<Vec<String>> {
-    let (_, paths) = explicit_capture_target_paths(kind, agent_run_result)?;
+    let (_, paths) = explicit_capture_target_paths(kind, checkpoint_request)?;
     let repo_workdir = repo.workdir().ok()?;
 
     let filtered = paths
@@ -610,7 +602,7 @@ fn resolve_explicit_path_execution(
 fn resolve_live_checkpoint_execution(
     repo: &Repository,
     kind: CheckpointKind,
-    agent_run_result: Option<&AgentRunResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
     base_override_resolution_policy: BaseOverrideResolutionPolicy,
@@ -641,7 +633,7 @@ fn resolve_live_checkpoint_execution(
             .map(|files| files.is_empty())
             .unwrap_or(true);
         let has_initial_attributions = !working_log.read_initial_attributions().files.is_empty();
-        let has_explicit_ai_agent_context = kind.is_ai() && agent_run_result.is_some();
+        let has_explicit_ai_agent_context = kind.is_ai() && checkpoint_request.is_some();
 
         if has_no_ai_edits
             && !has_initial_attributions
@@ -653,8 +645,12 @@ fn resolve_live_checkpoint_execution(
         }
     }
 
-    if let Some(dirty_files) = agent_run_result.and_then(|result| result.dirty_files.clone()) {
-        working_log.set_dirty_files(Some(dirty_files));
+    if let Some(dirty_files) = checkpoint_request.and_then(|result| result.dirty_files.as_ref()) {
+        let string_dirty = dirty_files
+            .iter()
+            .map(|(k, v)| (k.to_string_lossy().to_string(), v.clone()))
+            .collect();
+        working_log.set_dirty_files(Some(string_dirty));
     }
 
     let ts = SystemTime::now()
@@ -662,9 +658,11 @@ fn resolve_live_checkpoint_execution(
         .unwrap_or_default()
         .as_millis();
 
-    let has_explicit_target_paths = explicit_capture_target_paths(kind, agent_run_result).is_some();
+    let has_explicit_target_paths =
+        explicit_capture_target_paths(kind, checkpoint_request).is_some();
     let pathspec_start = Instant::now();
-    let filtered_pathspec = filtered_pathspecs_for_agent_run_result(repo, kind, agent_run_result);
+    let filtered_pathspec =
+        filtered_pathspecs_for_checkpoint_request(repo, kind, checkpoint_request);
     tracing::debug!(
         "[BENCHMARK] Pathspec filtering took {:?}",
         pathspec_start.elapsed()
@@ -674,9 +672,16 @@ fn resolve_live_checkpoint_execution(
     // should be checkpointed. Re-running git status here turns daemon commit replay into a
     // full worktree scan on every commit, which is especially expensive on macOS runners.
     if base_commit_override.is_some() {
+        let dirty_files_for_override = checkpoint_request
+            .and_then(|result| result.dirty_files.as_ref())
+            .map(|df| {
+                df.iter()
+                    .map(|(k, v)| (k.to_string_lossy().to_string(), v.clone()))
+                    .collect::<HashMap<_, _>>()
+            });
         match (
             filtered_pathspec.as_ref(),
-            agent_run_result.and_then(|result| result.dirty_files.as_ref()),
+            dirty_files_for_override.as_ref(),
         ) {
             (Some(explicit_paths), Some(dirty_files)) => {
                 match resolve_base_override_dirty_file_execution(
@@ -778,7 +783,7 @@ fn execute_resolved_checkpoint(
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
-    agent_run_result: Option<AgentRunResult>,
+    checkpoint_request: Option<CheckpointRequest>,
     is_pre_commit: bool,
     resolved: ResolvedCheckpointExecution,
     checkpoint_start: Instant,
@@ -846,6 +851,8 @@ fn execute_resolved_checkpoint(
         hash_compute_start.elapsed()
     );
 
+    let trace_id = generate_trace_id();
+
     let entries_start = Instant::now();
     let (entries, file_stats) = smol::block_on(get_checkpoint_entries(
         kind,
@@ -855,10 +862,11 @@ fn execute_resolved_checkpoint(
         &resolved.files,
         &file_content_hashes,
         &checkpoints,
-        agent_run_result.as_ref(),
+        checkpoint_request.as_ref(),
         resolved.ts,
         is_pre_commit,
         Some(resolved.base_commit.as_str()),
+        trace_id.clone(),
     ))?;
     tracing::debug!(
         "[BENCHMARK] get_checkpoint_entries generated {} entries, took {:?}",
@@ -876,20 +884,29 @@ fn execute_resolved_checkpoint(
         );
         checkpoint.timestamp = (resolved.ts / 1000) as u64;
         checkpoint.line_stats = compute_line_stats(&file_stats)?;
+        checkpoint.trace_id = Some(trace_id.clone());
 
         if kind.is_ai() {
-            if let Some(agent_run) = &agent_run_result {
-                checkpoint.transcript = Some(agent_run.transcript.clone().unwrap_or_default());
-                checkpoint.agent_id = Some(agent_run.agent_id.clone());
-                checkpoint.agent_metadata = agent_run.agent_metadata.clone();
+            if let Some(cr) = &checkpoint_request {
+                checkpoint.agent_id = cr.agent_id.clone();
+                checkpoint.agent_metadata = if cr.metadata.is_empty() {
+                    None
+                } else {
+                    Some(cr.metadata.clone())
+                };
             }
         } else if kind == CheckpointKind::KnownHuman
-            && let Some(agent_run) = &agent_run_result
-            && let Some(meta) = &agent_run.agent_metadata
+            && let Some(cr) = &checkpoint_request
+            && !cr.metadata.is_empty()
         {
-            let editor = meta.get("kh_editor").cloned().unwrap_or_default();
-            let editor_version = meta.get("kh_editor_version").cloned().unwrap_or_default();
-            let extension_version = meta
+            let editor = cr.metadata.get("kh_editor").cloned().unwrap_or_default();
+            let editor_version = cr
+                .metadata
+                .get("kh_editor_version")
+                .cloned()
+                .unwrap_or_default();
+            let extension_version = cr
+                .metadata
                 .get("kh_extension_version")
                 .cloned()
                 .unwrap_or_default();
@@ -906,25 +923,6 @@ fn execute_resolved_checkpoint(
             "[BENCHMARK] Checkpoint creation took {:?}",
             checkpoint_create_start.elapsed()
         );
-
-        if kind.is_ai()
-            && checkpoint.agent_id.is_some()
-            && checkpoint.transcript.is_some()
-            && let Err(e) = upsert_checkpoint_prompt_to_db(
-                &checkpoint,
-                working_log.repo_workdir.to_string_lossy().to_string(),
-                None,
-            )
-        {
-            tracing::debug!("[Warning] Failed to upsert prompt to database: {}", e);
-            crate::observability::log_error(
-                &e,
-                Some(serde_json::json!({
-                    "operation": "checkpoint_prompt_upsert",
-                    "agent_tool": checkpoint.agent_id.as_ref().map(|a| a.tool.as_str())
-                })),
-            );
-        }
 
         let append_start = Instant::now();
         working_log.append_checkpoint(&checkpoint)?;
@@ -952,9 +950,10 @@ fn execute_resolved_checkpoint(
     }
 
     let agent_tool = if kind.is_ai()
-        && let Some(agent_run_result) = &agent_run_result
+        && let Some(cr) = &checkpoint_request
+        && let Some(aid) = &cr.agent_id
     {
-        Some(agent_run_result.agent_id.tool.as_str())
+        Some(aid.tool.as_str())
     } else {
         None
     };
@@ -1003,11 +1002,11 @@ pub fn prepare_captured_checkpoint(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
-    agent_run_result: Option<&AgentRunResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
 ) -> Result<Option<PreparedCheckpointCapture>, GitAiError> {
-    let Some((explicit_path_role, _)) = explicit_capture_target_paths(kind, agent_run_result)
+    let Some((explicit_path_role, _)) = explicit_capture_target_paths(kind, checkpoint_request)
     else {
         return Err(GitAiError::Generic(
             "captured checkpoint requires explicit edited_filepaths or will_edit_filepaths"
@@ -1018,7 +1017,7 @@ pub fn prepare_captured_checkpoint(
     let Some(resolved) = resolve_live_checkpoint_execution(
         repo,
         kind,
-        agent_run_result,
+        checkpoint_request,
         is_pre_commit,
         base_commit_override,
         BaseOverrideResolutionPolicy::AllowFallback,
@@ -1031,7 +1030,7 @@ pub fn prepare_captured_checkpoint(
         return Ok(None);
     }
 
-    let explicit_paths = filtered_pathspecs_for_agent_run_result(repo, kind, agent_run_result)
+    let explicit_paths = filtered_pathspecs_for_checkpoint_request(repo, kind, checkpoint_request)
         .ok_or_else(|| {
             GitAiError::Generic(
                 "captured checkpoint requires explicit in-repository target paths".to_string(),
@@ -1065,9 +1064,9 @@ pub fn prepare_captured_checkpoint(
             });
         }
 
-        let mut stored_agent_run_result = agent_run_result.cloned();
-        if let Some(agent_run_result) = stored_agent_run_result.as_mut() {
-            agent_run_result.dirty_files = None;
+        let mut stored_checkpoint_request = checkpoint_request.cloned();
+        if let Some(cr) = stored_checkpoint_request.as_mut() {
+            cr.dirty_files = None;
         }
 
         let manifest = PreparedCheckpointManifest {
@@ -1083,7 +1082,7 @@ pub fn prepare_captured_checkpoint(
             explicit_path_role,
             explicit_paths,
             files,
-            agent_run_result: stored_agent_run_result,
+            checkpoint_request: stored_checkpoint_request,
         };
         fs::write(
             async_checkpoint_manifest_path(&capture_id)?,
@@ -1107,13 +1106,13 @@ pub fn prepare_captured_checkpoint(
     }))
 }
 
-/// Patch the `agent_run_result` stored in a captured checkpoint manifest so that
+/// Patch the `checkpoint_request` stored in a captured checkpoint manifest so that
 /// it carries the real agent identity, transcript, and metadata instead of the
 /// synthetic placeholder written at bash-tool capture time.
 pub(crate) fn update_captured_checkpoint_agent_context(
     capture_id: &str,
     author: &str,
-    agent_run_result: Option<&AgentRunResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
 ) -> Result<(), GitAiError> {
     let manifest_path = async_checkpoint_manifest_path(capture_id)?;
     let mut manifest: PreparedCheckpointManifest =
@@ -1129,16 +1128,16 @@ pub(crate) fn update_captured_checkpoint_agent_context(
     manifest.author = author.to_string();
 
     // Merge real agent context while preserving capture-specific fields
-    // (edited_filepaths, will_edit_filepaths, dirty_files) from the original.
-    if let Some(real) = agent_run_result {
+    // (file_paths, path_role, dirty_files) from the original.
+    if let Some(real) = checkpoint_request {
         let mut updated = real.clone();
-        if let Some(existing) = &manifest.agent_run_result {
-            updated.edited_filepaths = existing.edited_filepaths.clone();
-            updated.will_edit_filepaths = existing.will_edit_filepaths.clone();
+        if let Some(existing) = &manifest.checkpoint_request {
+            updated.file_paths = existing.file_paths.clone();
+            updated.path_role = existing.path_role;
         }
         updated.dirty_files = None;
         updated.captured_checkpoint_id = None;
-        manifest.agent_run_result = Some(updated);
+        manifest.checkpoint_request = Some(updated);
     }
 
     fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
@@ -1227,7 +1226,7 @@ pub fn execute_captured_checkpoint(
         &manifest.author,
         manifest.kind,
         true,
-        manifest.agent_run_result,
+        manifest.checkpoint_request,
         manifest.is_pre_commit,
         resolved,
         checkpoint_start,
@@ -1574,7 +1573,8 @@ fn content_eq_normalized(a: &str, b: &str) -> bool {
     normalize_line_endings(a) == normalize_line_endings(b)
 }
 
-fn is_ai_author_id(author_id: &str) -> bool {
+#[doc(hidden)]
+pub fn is_ai_author_id(author_id: &str) -> bool {
     author_id != "human" && !author_id.starts_with("h_")
 }
 
@@ -1876,10 +1876,11 @@ async fn get_checkpoint_entries(
     files: &[String],
     file_content_hashes: &HashMap<String, String>,
     previous_checkpoints: &[Checkpoint],
-    agent_run_result: Option<&AgentRunResult>,
+    checkpoint_request: Option<&CheckpointRequest>,
     ts: u128,
     is_pre_commit: bool,
     head_commit_override: Option<&str>,
+    trace_id: String,
 ) -> Result<(Vec<WorkingLogEntry>, Vec<FileLineStats>), GitAiError> {
     let entries_fn_start = Instant::now();
 
@@ -1916,13 +1917,12 @@ async fn get_checkpoint_entries(
             crate::authorship::authorship_log_serialization::generate_human_short_hash(author)
         }
         _ => {
-            // AI kinds: use session hash
-            agent_run_result
-                .map(|result| {
-                    crate::authorship::authorship_log_serialization::generate_short_hash(
-                        &result.agent_id.id,
-                        &result.agent_id.tool,
-                    )
+            // AI kinds: compose session_id::trace_id
+            checkpoint_request
+                .and_then(|result| result.agent_id.as_ref())
+                .map(|aid| {
+                    let session_id = generate_session_id(&aid.id, &aid.tool);
+                    format!("{}::{}", session_id, trace_id)
                 })
                 .unwrap_or_else(|| kind.to_str())
         }
@@ -2142,7 +2142,8 @@ fn make_entry_for_file(
 }
 
 /// Compute line statistics for a single file by diffing previous and current content
-fn compute_file_line_stats(previous_content: &str, current_content: &str) -> FileLineStats {
+#[doc(hidden)]
+pub fn compute_file_line_stats(previous_content: &str, current_content: &str) -> FileLineStats {
     let mut stats = FileLineStats::default();
 
     // Use imara_diff to count line changes (matches git's diff algorithm)
@@ -2249,1296 +2250,5 @@ fn is_text_file_in_head(repo: &Repository, path: &str) -> bool {
             }
         }
         Err(_) => false,
-    }
-}
-
-/// Upsert a checkpoint prompt to the internal database
-fn upsert_checkpoint_prompt_to_db(
-    checkpoint: &Checkpoint,
-    workdir: String,
-    commit_sha: Option<String>,
-) -> Result<(), GitAiError> {
-    use crate::authorship::internal_db::{InternalDatabase, PromptDbRecord};
-
-    let record = PromptDbRecord::from_checkpoint(checkpoint, Some(workdir), commit_sha)
-        .ok_or_else(|| {
-            GitAiError::Generic("Failed to create prompt record from checkpoint".to_string())
-        })?;
-
-    let db = InternalDatabase::global()?;
-    let mut db_guard = db
-        .lock()
-        .map_err(|e| GitAiError::Generic(format!("Failed to lock database: {}", e)))?;
-
-    db_guard.upsert_prompt(&record)?;
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::authorship::transcript::AiTranscript;
-    use crate::authorship::working_log::AgentId;
-    use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
-    use crate::git::test_utils::TmpRepo;
-    use std::collections::HashMap;
-
-    fn test_agent_run_result(
-        checkpoint_kind: CheckpointKind,
-        edited_filepaths: Option<Vec<&str>>,
-        will_edit_filepaths: Option<Vec<&str>>,
-        dirty_files: Option<HashMap<&str, &str>>,
-    ) -> AgentRunResult {
-        AgentRunResult {
-            agent_id: AgentId {
-                tool: "test-agent".to_string(),
-                id: "test-capture".to_string(),
-                model: "test-model".to_string(),
-            },
-            agent_metadata: None,
-            checkpoint_kind,
-            transcript: Some(AiTranscript { messages: vec![] }),
-            repo_working_dir: None,
-            edited_filepaths: edited_filepaths.map(|paths| {
-                paths
-                    .into_iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            }),
-            will_edit_filepaths: will_edit_filepaths.map(|paths| {
-                paths
-                    .into_iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-            }),
-            dirty_files: dirty_files.map(|files| {
-                files
-                    .into_iter()
-                    .map(|(path, content)| (path.to_string(), content.to_string()))
-                    .collect()
-            }),
-            captured_checkpoint_id: None,
-        }
-    }
-
-    #[test]
-    fn test_explicit_capture_target_paths_accepts_non_empty_edited_filepaths() {
-        let agent_run_result = test_agent_run_result(
-            CheckpointKind::AiAgent,
-            Some(vec!["src/main.rs"]),
-            None,
-            None,
-        );
-
-        assert_eq!(
-            explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&agent_run_result)),
-            Some((PreparedPathRole::Edited, vec!["src/main.rs".to_string()]))
-        );
-    }
-
-    #[test]
-    fn test_explicit_capture_target_paths_accepts_non_empty_will_edit_filepaths() {
-        let agent_run_result =
-            test_agent_run_result(CheckpointKind::Human, None, Some(vec!["src/lib.rs"]), None);
-
-        assert_eq!(
-            explicit_capture_target_paths(CheckpointKind::Human, Some(&agent_run_result)),
-            Some((PreparedPathRole::WillEdit, vec!["src/lib.rs".to_string()]))
-        );
-    }
-
-    #[test]
-    fn test_explicit_capture_target_paths_rejects_dirty_files_without_explicit_paths() {
-        let agent_run_result = test_agent_run_result(
-            CheckpointKind::AiAgent,
-            None,
-            None,
-            Some(HashMap::from([("src/main.rs", "fn main() {}\n")])),
-        );
-
-        assert_eq!(
-            explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&agent_run_result)),
-            None
-        );
-    }
-
-    #[test]
-    fn test_explicit_capture_target_paths_known_human_uses_edited_filepaths() {
-        // KnownHuman post-save: edit already happened, uses edited_filepaths.
-        let agent_run_result = test_agent_run_result(
-            CheckpointKind::KnownHuman,
-            Some(vec!["src/foo.rs"]),
-            None,
-            None,
-        );
-
-        assert_eq!(
-            explicit_capture_target_paths(CheckpointKind::KnownHuman, Some(&agent_run_result)),
-            Some((PreparedPathRole::Edited, vec!["src/foo.rs".to_string()]))
-        );
-    }
-
-    #[test]
-    fn test_explicit_capture_target_paths_known_human_uses_will_edit_filepaths() {
-        // KnownHuman pre-save: edit hasn't happened yet, uses will_edit_filepaths.
-        // Regression: KnownHuman fell into the else branch which only reads edited_filepaths,
-        // returning None and silently disabling pathspec scoping for pre-save KnownHuman.
-        let agent_run_result = test_agent_run_result(
-            CheckpointKind::KnownHuman,
-            None,
-            Some(vec!["src/foo.rs"]),
-            None,
-        );
-
-        assert_eq!(
-            explicit_capture_target_paths(CheckpointKind::KnownHuman, Some(&agent_run_result)),
-            Some((PreparedPathRole::WillEdit, vec!["src/foo.rs".to_string()]))
-        );
-    }
-
-    #[test]
-    fn test_explicit_capture_target_paths_rejects_empty_explicit_lists() {
-        let human_result =
-            test_agent_run_result(CheckpointKind::Human, None, Some(vec!["", "   "]), None);
-        let ai_result =
-            test_agent_run_result(CheckpointKind::AiAgent, Some(vec!["", "   "]), None, None);
-
-        assert_eq!(
-            explicit_capture_target_paths(CheckpointKind::Human, Some(&human_result)),
-            None
-        );
-        assert_eq!(
-            explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&ai_result)),
-            None
-        );
-    }
-
-    #[test]
-    fn test_cleanup_failed_captured_checkpoint_prepare_removes_partial_capture_dir() {
-        let temp = tempfile::tempdir().expect("temp dir should be creatable");
-        let capture_dir = temp.path().join("capture-fixture");
-        std::fs::create_dir_all(capture_dir.join("blobs"))
-            .expect("partial capture directory should be creatable");
-        std::fs::write(capture_dir.join("blobs").join("partial-blob"), "partial")
-            .expect("partial blob should be creatable");
-
-        cleanup_failed_captured_checkpoint_prepare(
-            &capture_dir,
-            "capture-fixture",
-            &GitAiError::Generic("synthetic prepare failure".to_string()),
-        );
-
-        assert!(
-            !capture_dir.exists(),
-            "cleanup helper should remove partial capture directories"
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_with_staged_changes() {
-        // Create a repo with an initial commit
-        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
-
-        // Make changes to the file
-        file.append("New line added by user\n").unwrap();
-
-        // Note: TmpFile.append() automatically stages changes (see write_to_disk in test_utils)
-        // So at this point, the file has staged changes
-
-        // Run checkpoint - it should track the changes even though they're staged
-        let (entries_len, files_len, _checkpoints_len) =
-            tmp_repo.trigger_checkpoint_with_author("Aidan").unwrap();
-
-        // The bug: when changes are staged, entries_len is 0 instead of 1
-        assert_eq!(files_len, 1, "Should have 1 file with changes");
-        assert_eq!(
-            entries_len, 1,
-            "Should have 1 file entry in checkpoint (staged changes should be tracked)"
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_with_staged_changes_after_previous_checkpoint() {
-        // Create a repo with an initial commit
-        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
-
-        // Make first changes and checkpoint
-        file.append("First change\n").unwrap();
-        let (entries_len_1, files_len_1, _) =
-            tmp_repo.trigger_checkpoint_with_author("Aidan").unwrap();
-
-        assert_eq!(
-            files_len_1, 1,
-            "First checkpoint: should have 1 file with changes"
-        );
-        assert_eq!(
-            entries_len_1, 1,
-            "First checkpoint: should have 1 file entry"
-        );
-
-        // Make second changes - these are already staged by append()
-        file.append("Second change\n").unwrap();
-
-        // Run checkpoint again - it should track the staged changes even after a previous checkpoint
-        let (entries_len_2, files_len_2, _) =
-            tmp_repo.trigger_checkpoint_with_author("Aidan").unwrap();
-
-        assert_eq!(
-            files_len_2, 1,
-            "Second checkpoint: should have 1 file with changes"
-        );
-        assert_eq!(
-            entries_len_2, 1,
-            "Second checkpoint: should have 1 file entry in checkpoint (staged changes should be tracked)"
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_with_only_staged_no_unstaged_changes() {
-        use std::fs;
-
-        // Create a repo with an initial commit
-        let (tmp_repo, file, _) = TmpRepo::new_with_base_commit().unwrap();
-
-        // Get the file path
-        let file_path = file.path();
-        let filename = file.filename();
-
-        // Manually modify the file (bypassing TmpFile's automatic staging)
-        let mut content = fs::read_to_string(&file_path).unwrap();
-        content.push_str("New line for staging test\n");
-        fs::write(&file_path, &content).unwrap();
-
-        // Now manually stage it using git (this is what "git add" does)
-        tmp_repo.stage_file(filename).unwrap();
-
-        // At this point: HEAD has old content, index has new content, workdir has new content
-        // And unstaged should be "Unmodified" because workdir == index
-
-        // Now run checkpoint
-        let (entries_len, files_len, _checkpoints_len) =
-            tmp_repo.trigger_checkpoint_with_author("Aidan").unwrap();
-
-        // This should work: we should see 1 file with 1 entry
-        assert_eq!(files_len, 1, "Should detect 1 file with staged changes");
-        assert_eq!(
-            entries_len, 1,
-            "Should track the staged changes in checkpoint"
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_with_only_unstaged_changes_for_ai_without_pathspec() {
-        use std::fs;
-
-        // Create a repo with an initial commit
-        let (tmp_repo, file, _) = TmpRepo::new_with_base_commit().unwrap();
-
-        // Manually modify the file without staging it
-        let file_path = file.path();
-        let mut content = fs::read_to_string(&file_path).unwrap();
-        content.push_str("New unstaged AI line\n");
-        fs::write(&file_path, &content).unwrap();
-
-        // Trigger AI checkpoint without edited_filepaths (pathspec-less flow used by some agents)
-        let (entries_len, files_len, _checkpoints_len) = tmp_repo
-            .trigger_checkpoint_with_ai("Codex", Some("gpt-5-codex"), Some("codex"))
-            .unwrap();
-
-        assert_eq!(
-            files_len, 1,
-            "Should detect unstaged changes without pathspecs"
-        );
-        assert_eq!(
-            entries_len, 1,
-            "Should create an AI checkpoint entry for unstaged changes without pathspecs"
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
-        use crate::authorship::transcript::AiTranscript;
-        use crate::authorship::working_log::AgentId;
-        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
-        use std::collections::HashMap;
-        use std::fs;
-
-        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
-        let filename = file.filename().to_string();
-
-        file.update("line from commit A\n").unwrap();
-        tmp_repo.commit_with_message("commit A").unwrap();
-        let base_commit = tmp_repo.get_head_commit_sha().unwrap();
-
-        file.update("line from commit B\n").unwrap();
-        tmp_repo.commit_with_message("commit B").unwrap();
-
-        // Keep the worktree dirty so git status returns this file, but inject deterministic
-        // content from commit B via dirty_files.
-        fs::write(file.path(), "line from uncommitted edit\n").unwrap();
-
-        let mut dirty_files = HashMap::new();
-        dirty_files.insert(filename.clone(), "line from commit B\n".to_string());
-        let agent_run_result = AgentRunResult {
-            agent_id: AgentId {
-                tool: "mock_ai".to_string(),
-                id: "base-override-regression".to_string(),
-                model: "test".to_string(),
-            },
-            agent_metadata: None,
-            transcript: Some(AiTranscript { messages: vec![] }),
-            checkpoint_kind: CheckpointKind::AiAgent,
-            repo_working_dir: None,
-            edited_filepaths: Some(vec![filename]),
-            will_edit_filepaths: None,
-            dirty_files: Some(dirty_files),
-            captured_checkpoint_id: None,
-        };
-
-        let (entries_len, files_len, _) = run_with_base_commit_override_with_policy(
-            tmp_repo.gitai_repo(),
-            "mock-ai",
-            CheckpointKind::AiAgent,
-            true,
-            Some(agent_run_result),
-            false,
-            Some(base_commit.as_str()),
-            BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
-        )
-        .unwrap();
-
-        assert_eq!(
-            files_len, 1,
-            "Expected one tracked file for the checkpoint run"
-        );
-        assert_eq!(
-            entries_len, 1,
-            "When base override points to commit A, current content from commit B must produce an entry"
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_base_override_strict_rejects_missing_dirty_snapshot() {
-        use crate::authorship::transcript::AiTranscript;
-        use crate::authorship::working_log::AgentId;
-        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
-        use std::fs;
-
-        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
-        let filename = file.filename().to_string();
-
-        file.update("line from commit A\n").unwrap();
-        tmp_repo.commit_with_message("commit A").unwrap();
-        let base_commit = tmp_repo.get_head_commit_sha().unwrap();
-
-        file.update("line from commit B\n").unwrap();
-        tmp_repo.commit_with_message("commit B").unwrap();
-
-        // Keep the worktree dirty so the legacy fallback would succeed if it were used.
-        fs::write(file.path(), "line from uncommitted edit\n").unwrap();
-
-        let agent_run_result = AgentRunResult {
-            agent_id: AgentId {
-                tool: "mock_ai".to_string(),
-                id: "base-override-strict-missing-snapshot".to_string(),
-                model: "test".to_string(),
-            },
-            agent_metadata: None,
-            transcript: Some(AiTranscript { messages: vec![] }),
-            checkpoint_kind: CheckpointKind::AiAgent,
-            repo_working_dir: None,
-            edited_filepaths: Some(vec![filename.clone()]),
-            will_edit_filepaths: None,
-            dirty_files: None,
-            captured_checkpoint_id: None,
-        };
-
-        let error = run_with_base_commit_override_with_policy(
-            tmp_repo.gitai_repo(),
-            "mock-ai",
-            CheckpointKind::AiAgent,
-            true,
-            Some(agent_run_result),
-            false,
-            Some(base_commit.as_str()),
-            BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
-        )
-        .expect_err("strict base override should reject missing dirty snapshots");
-
-        assert!(
-            error.to_string().contains(
-                "requires explicit in-repository target paths and a matching dirty snapshot"
-            ),
-            "expected strict snapshot error, got: {}",
-            error
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_base_override_allow_fallback_scans_when_snapshot_missing() {
-        use crate::authorship::transcript::AiTranscript;
-        use crate::authorship::working_log::AgentId;
-        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
-        use std::fs;
-
-        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
-        let filename = file.filename().to_string();
-
-        file.update("line from commit A\n").unwrap();
-        tmp_repo.commit_with_message("commit A").unwrap();
-        let base_commit = tmp_repo.get_head_commit_sha().unwrap();
-
-        file.update("line from commit B\n").unwrap();
-        tmp_repo.commit_with_message("commit B").unwrap();
-
-        // Without a dirty snapshot the fallback path must rediscover the dirty file from the repo.
-        fs::write(file.path(), "line from uncommitted edit\n").unwrap();
-
-        let agent_run_result = AgentRunResult {
-            agent_id: AgentId {
-                tool: "mock_ai".to_string(),
-                id: "base-override-allow-fallback".to_string(),
-                model: "test".to_string(),
-            },
-            agent_metadata: None,
-            transcript: Some(AiTranscript { messages: vec![] }),
-            checkpoint_kind: CheckpointKind::AiAgent,
-            repo_working_dir: None,
-            edited_filepaths: Some(vec![filename]),
-            will_edit_filepaths: None,
-            dirty_files: None,
-            captured_checkpoint_id: None,
-        };
-
-        let (entries_len, files_len, _) = run_with_base_commit_override(
-            tmp_repo.gitai_repo(),
-            "mock-ai",
-            CheckpointKind::AiAgent,
-            true,
-            Some(agent_run_result),
-            false,
-            Some(base_commit.as_str()),
-        )
-        .expect("allow-fallback base override should still scan the repo");
-
-        assert_eq!(
-            files_len, 1,
-            "fallback path should rediscover the changed file"
-        );
-        assert_eq!(
-            entries_len, 1,
-            "fallback path should still produce checkpoint entries from the worktree scan"
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_skips_conflicted_files() {
-        // Create a repo with an initial commit
-        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
-
-        // Get the current branch name (whatever the default is)
-        let base_branch = tmp_repo.current_branch().unwrap();
-
-        // Create a branch and make different changes on each branch to create a conflict
-        tmp_repo.create_branch("feature-branch").unwrap();
-
-        // On feature branch, modify the file
-        file.append("Feature branch change\n").unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("FeatureUser")
-            .unwrap();
-        tmp_repo.commit_with_message("Feature commit").unwrap();
-
-        // Switch back to base branch and make conflicting changes
-        tmp_repo.switch_branch(&base_branch).unwrap();
-        file.append("Main branch change\n").unwrap();
-        tmp_repo.trigger_checkpoint_with_author("MainUser").unwrap();
-        tmp_repo.commit_with_message("Main commit").unwrap();
-
-        // Attempt to merge feature-branch into base branch - this should create a conflict
-        let has_conflicts = tmp_repo.merge_with_conflicts("feature-branch").unwrap();
-        assert!(has_conflicts, "Should have merge conflicts");
-
-        // Try to checkpoint while there are conflicts
-        let (entries_len, files_len, _) = tmp_repo.trigger_checkpoint_with_author("Human").unwrap();
-
-        // Checkpoint should skip conflicted files
-        assert_eq!(
-            files_len, 0,
-            "Should have 0 files (conflicted file should be skipped)"
-        );
-        assert_eq!(
-            entries_len, 0,
-            "Should have 0 entries (conflicted file should be skipped)"
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_with_paths_outside_repo() {
-        use crate::authorship::transcript::AiTranscript;
-        use crate::authorship::working_log::AgentId;
-        use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
-
-        // Create a repo with an initial commit
-        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
-
-        // Make changes to the file
-        file.append("New line added\n").unwrap();
-
-        // Create agent run result with paths outside the repo
-        let agent_run_result = AgentRunResult {
-            agent_id: AgentId {
-                tool: "test_tool".to_string(),
-                id: "test_session".to_string(),
-                model: "test_model".to_string(),
-            },
-            agent_metadata: None,
-            transcript: Some(AiTranscript { messages: vec![] }),
-            checkpoint_kind: CheckpointKind::AiAgent,
-            repo_working_dir: None,
-            edited_filepaths: Some(vec![
-                "/tmp/outside_file.txt".to_string(),
-                "../outside_parent.txt".to_string(),
-                file.filename().to_string(), // This one is valid
-            ]),
-            will_edit_filepaths: None,
-            dirty_files: None,
-            captured_checkpoint_id: None,
-        };
-
-        // Run checkpoint - should not crash even with paths outside repo
-        let result =
-            tmp_repo.trigger_checkpoint_with_agent_result("test_user", Some(agent_run_result));
-
-        // Should succeed without crashing
-        assert!(
-            result.is_ok(),
-            "Checkpoint should succeed even with paths outside repo: {:?}",
-            result.err()
-        );
-
-        let (entries_len, files_len, _) = result.unwrap();
-        // Should only process the valid file
-        assert_eq!(files_len, 1, "Should process 1 valid file");
-        assert_eq!(entries_len, 1, "Should create 1 entry");
-    }
-
-    #[test]
-    fn test_checkpoint_filters_external_paths_from_stored_checkpoints() {
-        use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
-
-        // Create a repo with an initial commit
-        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
-
-        // Get access to the working log storage
-        let repo =
-            crate::git::repository::find_repository_in_path(tmp_repo.path().to_str().unwrap())
-                .expect("Repository should exist");
-        let base_commit = repo
-            .head()
-            .ok()
-            .and_then(|head| head.target().ok())
-            .unwrap_or_else(|| "initial".to_string());
-
-        // Manually inject a checkpoint with an external file path (simulating the bug)
-        // This is what happens when a file outside the repo was tracked before the fix
-        let working_log = repo
-            .storage
-            .working_log_for_base_commit(&base_commit)
-            .unwrap();
-
-        let external_entry = WorkingLogEntry::new(
-            "/external/path/outside/repo.txt".to_string(),
-            "fake_sha_for_external".to_string(),
-            vec![],
-            vec![],
-        );
-
-        let fake_checkpoint = Checkpoint::new(
-            CheckpointKind::Human,
-            "fake_diff".to_string(),
-            "test_author".to_string(),
-            vec![external_entry],
-        );
-
-        // Store the checkpoint with external path
-        working_log
-            .append_checkpoint(&fake_checkpoint)
-            .expect("Should be able to append checkpoint");
-
-        // Now make actual changes to a file in the repo
-        file.append("New line for testing\n").unwrap();
-
-        // Run checkpoint - this should NOT crash even though there's an external path stored
-        // Previously this would fail with: "fatal: /external/path/outside/repo.txt is outside repository"
-        let result = tmp_repo.trigger_checkpoint_with_author("Human");
-
-        assert!(
-            result.is_ok(),
-            "Checkpoint should succeed even with external paths stored in previous checkpoints: {:?}",
-            result.err()
-        );
-
-        let (entries_len, files_len, _) = result.unwrap();
-        // Should only process the valid file in the repo
-        assert_eq!(
-            files_len, 1,
-            "Should process 1 valid file (external path should be filtered)"
-        );
-        assert_eq!(entries_len, 1, "Should create 1 entry for the in-repo file");
-    }
-
-    #[test]
-    fn test_checkpoint_works_after_conflict_resolution_maintains_authorship() {
-        // Create a repo with an initial commit
-        let (tmp_repo, mut file, _) = TmpRepo::new_with_base_commit().unwrap();
-
-        // Get the current branch name (whatever the default is)
-        let base_branch = tmp_repo.current_branch().unwrap();
-
-        // Checkpoint initial state to track the base authorship
-        let file_path = file.path();
-        let initial_content = std::fs::read_to_string(&file_path).unwrap();
-        println!("Initial content:\n{}", initial_content);
-
-        // Create a branch and make changes
-        tmp_repo.create_branch("feature-branch").unwrap();
-        file.append("Feature line 1\n").unwrap();
-        file.append("Feature line 2\n").unwrap();
-        tmp_repo.trigger_checkpoint_with_author("AI_Agent").unwrap();
-        tmp_repo.commit_with_message("Feature commit").unwrap();
-
-        // Switch back to base branch and make conflicting changes
-        tmp_repo.switch_branch(&base_branch).unwrap();
-        file.append("Main line 1\n").unwrap();
-        file.append("Main line 2\n").unwrap();
-        tmp_repo.trigger_checkpoint_with_author("Human").unwrap();
-        tmp_repo.commit_with_message("Main commit").unwrap();
-
-        // Attempt to merge feature-branch into base branch - this should create a conflict
-        let has_conflicts = tmp_repo.merge_with_conflicts("feature-branch").unwrap();
-        assert!(has_conflicts, "Should have merge conflicts");
-
-        // While there are conflicts, checkpoint should skip the file
-        let (entries_len_conflict, files_len_conflict, _) =
-            tmp_repo.trigger_checkpoint_with_author("Human").unwrap();
-        assert_eq!(
-            files_len_conflict, 0,
-            "Should skip conflicted files during conflict"
-        );
-        assert_eq!(
-            entries_len_conflict, 0,
-            "Should not create entries for conflicted files"
-        );
-
-        // Resolve the conflict by choosing "ours" (base branch)
-        tmp_repo.resolve_conflict(file.filename(), "ours").unwrap();
-
-        // Verify content to ensure the resolution was applied correctly
-        let resolved_content = std::fs::read_to_string(&file_path).unwrap();
-        println!("Resolved content after resolution:\n{}", resolved_content);
-        assert!(
-            resolved_content.contains("Main line 1"),
-            "Should contain base branch content (we chose 'ours')"
-        );
-        assert!(
-            resolved_content.contains("Main line 2"),
-            "Should contain base branch content (we chose 'ours')"
-        );
-        assert!(
-            !resolved_content.contains("Feature line 1"),
-            "Should not contain feature branch content (we chose 'ours')"
-        );
-
-        // After resolution, make additional changes to test that checkpointing works again
-        file.append("Post-resolution line 1\n").unwrap();
-        file.append("Post-resolution line 2\n").unwrap();
-
-        // Now checkpoint should work and track the new changes
-        let (entries_len_after, files_len_after, _) =
-            tmp_repo.trigger_checkpoint_with_author("Human").unwrap();
-
-        println!(
-            "After resolution and new changes: entries_len={}, files_len={}",
-            entries_len_after, files_len_after
-        );
-
-        // The file should be tracked with the new changes
-        assert_eq!(
-            files_len_after, 1,
-            "Should detect 1 file with new changes after conflict resolution"
-        );
-        assert_eq!(
-            entries_len_after, 1,
-            "Should create 1 entry for new changes after conflict resolution"
-        );
-    }
-
-    #[test]
-    fn test_known_human_checkpoint_without_ai_history_records_h_hash_attributions() {
-        let repo = TmpRepo::new().unwrap();
-        let mut file = repo.write_file("simple.txt", "one\n", true).unwrap();
-
-        repo.trigger_checkpoint_with_author("seed").unwrap();
-        repo.commit_with_message("seed commit").unwrap();
-
-        file.append("two\n").unwrap();
-        repo.trigger_checkpoint_with_author("human").unwrap();
-
-        let gitai_repo =
-            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
-                .expect("Repository should exist");
-        let base_commit = gitai_repo
-            .head()
-            .ok()
-            .and_then(|head| head.target().ok())
-            .unwrap_or_else(|| "initial".to_string());
-        let working_log = gitai_repo
-            .storage
-            .working_log_for_base_commit(&base_commit)
-            .unwrap();
-        let checkpoints = working_log.read_all_checkpoints().unwrap();
-        let latest = checkpoints.last().unwrap();
-        let entry = latest
-            .entries
-            .iter()
-            .find(|entry| entry.file == "simple.txt")
-            .unwrap();
-
-        // KnownHuman checkpoints always record h_<hash> line attributions, even with no AI history.
-        // This allows downstream stats to count these lines as human_additions.
-        assert!(
-            !entry.line_attributions.is_empty(),
-            "KnownHuman checkpoint should record line-level h_<hash> attributions"
-        );
-        assert!(
-            entry
-                .line_attributions
-                .iter()
-                .all(|la| la.author_id.starts_with("h_")),
-            "All line attributions should be h_<hash> IDs"
-        );
-        assert!(
-            latest.line_stats.additions > 0,
-            "KnownHuman checkpoint should record line stats"
-        );
-    }
-
-    #[test]
-    fn test_human_checkpoint_keeps_attributions_for_ai_touched_file() {
-        let (repo, mut lines_file, mut alphabet_file) = TmpRepo::new_with_base_commit().unwrap();
-
-        lines_file.append("ai change\n").unwrap();
-        repo.trigger_checkpoint_with_ai("mock_ai", None, None)
-            .unwrap();
-
-        lines_file.append("human after ai\n").unwrap();
-        alphabet_file.append("human only\n").unwrap();
-        repo.trigger_checkpoint_with_author("human").unwrap();
-
-        let gitai_repo =
-            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
-                .expect("Repository should exist");
-        let base_commit = gitai_repo
-            .head()
-            .ok()
-            .and_then(|head| head.target().ok())
-            .unwrap_or_else(|| "initial".to_string());
-        let working_log = gitai_repo
-            .storage
-            .working_log_for_base_commit(&base_commit)
-            .unwrap();
-        let checkpoints = working_log.read_all_checkpoints().unwrap();
-        let latest = checkpoints.last().unwrap();
-
-        let ai_touched_entry = latest
-            .entries
-            .iter()
-            .find(|entry| entry.file == "lines.md")
-            .unwrap();
-        assert!(
-            !ai_touched_entry.attributions.is_empty()
-                || !ai_touched_entry.line_attributions.is_empty(),
-            "AI-touched file should keep attribution tracking"
-        );
-
-        let human_only_entry = latest
-            .entries
-            .iter()
-            .find(|entry| entry.file == "alphabet.md")
-            .unwrap();
-        // KnownHuman checkpoints record h_<hash> attributions for all files, including
-        // files with no AI history. This ensures human lines are counted correctly in stats.
-        assert!(
-            !human_only_entry.line_attributions.is_empty(),
-            "KnownHuman checkpoint should record line attributions for human-only files"
-        );
-        assert!(
-            human_only_entry
-                .line_attributions
-                .iter()
-                .all(|la| la.author_id.starts_with("h_")),
-            "Human-only file attributions should all be h_<hash> IDs"
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_skips_default_ignored_files() {
-        let repo = TmpRepo::new().unwrap();
-        repo.write_file("README.md", "# repo\n", true).unwrap();
-        repo.commit_with_message("initial").unwrap();
-
-        std::fs::write(repo.path().join("README.md"), "# repo\n\nupdated\n").unwrap();
-        std::fs::write(repo.path().join("Cargo.lock"), "# lock\n# lock2\n").unwrap();
-
-        repo.trigger_checkpoint_with_author("human").unwrap();
-
-        let gitai_repo =
-            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
-                .expect("Repository should exist");
-        let base_commit = gitai_repo
-            .head()
-            .ok()
-            .and_then(|head| head.target().ok())
-            .unwrap_or_else(|| "initial".to_string());
-        let working_log = gitai_repo
-            .storage
-            .working_log_for_base_commit(&base_commit)
-            .unwrap();
-        let checkpoints = working_log.read_all_checkpoints().unwrap();
-        let latest = checkpoints.last().unwrap();
-
-        assert!(
-            latest.entries.iter().any(|entry| entry.file == "README.md"),
-            "Expected non-ignored source file to be checkpointed"
-        );
-        assert!(
-            latest
-                .entries
-                .iter()
-                .all(|entry| entry.file != "Cargo.lock"),
-            "Expected Cargo.lock to be filtered by default ignore patterns"
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_skips_linguist_generated_files_from_root_gitattributes() {
-        let repo = TmpRepo::new().unwrap();
-        repo.write_file("README.md", "# repo\n", true).unwrap();
-        repo.commit_with_message("initial").unwrap();
-
-        repo.write_file(".gitattributes", "generated/** linguist-generated\n", true)
-            .unwrap();
-        repo.commit_with_message("attrs").unwrap();
-
-        std::fs::create_dir_all(repo.path().join("generated")).unwrap();
-        std::fs::write(
-            repo.path().join("generated").join("api.generated.ts"),
-            "// generated\n// generated 2\n",
-        )
-        .unwrap();
-        repo.write_file("main.rs", "fn main() {}\n", false).unwrap();
-
-        repo.trigger_checkpoint_with_author("human").unwrap();
-
-        let gitai_repo =
-            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
-                .expect("Repository should exist");
-        let base_commit = gitai_repo
-            .head()
-            .ok()
-            .and_then(|head| head.target().ok())
-            .unwrap_or_else(|| "initial".to_string());
-        let working_log = gitai_repo
-            .storage
-            .working_log_for_base_commit(&base_commit)
-            .unwrap();
-        let checkpoints = working_log.read_all_checkpoints().unwrap();
-        let latest = checkpoints.last().unwrap();
-
-        assert!(
-            latest.entries.iter().any(|entry| entry.file == "main.rs"),
-            "Expected non-generated file to be checkpointed"
-        );
-        assert!(
-            latest
-                .entries
-                .iter()
-                .all(|entry| entry.file != "generated/api.generated.ts"),
-            "Expected linguist-generated file to be filtered via .gitattributes"
-        );
-    }
-
-    #[test]
-    fn test_compute_line_stats_ignores_whitespace_only_lines() {
-        let (tmp_repo, _lines_file, _alphabet_file) = TmpRepo::new_with_base_commit().unwrap();
-
-        let repo =
-            crate::git::repository::find_repository_in_path(tmp_repo.path().to_str().unwrap())
-                .expect("Repository should exist");
-
-        let base_commit = repo
-            .head()
-            .ok()
-            .and_then(|head| head.target().ok())
-            .unwrap_or_else(|| "initial".to_string());
-        let working_log = repo
-            .storage
-            .working_log_for_base_commit(&base_commit)
-            .unwrap();
-
-        let mut test_file = tmp_repo
-            .write_file("whitespace.txt", "Seed line\n", true)
-            .unwrap();
-
-        tmp_repo
-            .trigger_checkpoint_with_author("Setup")
-            .expect("Setup checkpoint should succeed");
-
-        test_file
-            .append("\n\n   \nVisible line one\n\n\t\nVisible line two\n  \n")
-            .unwrap();
-
-        tmp_repo
-            .trigger_checkpoint_with_author("Aidan")
-            .expect("First checkpoint should succeed");
-
-        let after_add_stats = working_log
-            .read_all_checkpoints()
-            .expect("Should read checkpoints after addition");
-        let after_add_last = after_add_stats
-            .last()
-            .expect("At least one checkpoint expected")
-            .line_stats
-            .clone();
-
-        assert_eq!(
-            after_add_last.additions, 8,
-            "Additions includes empty lines"
-        );
-        assert_eq!(after_add_last.deletions, 0, "No deletions expected yet");
-        assert_eq!(
-            after_add_last.additions_sloc, 2,
-            "Only visible lines counted"
-        );
-        assert_eq!(
-            after_add_last.deletions_sloc, 0,
-            "No deletions expected yet"
-        );
-
-        let cleaned_content = std::fs::read_to_string(test_file.path()).unwrap();
-        let cleaned_lines: Vec<&str> = cleaned_content
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .collect();
-        let cleaned_body = format!("{}\n", cleaned_lines.join("\n"));
-        test_file.update(&cleaned_body).unwrap();
-
-        tmp_repo
-            .trigger_checkpoint_with_author("Aidan")
-            .expect("Second checkpoint should succeed");
-
-        let after_delete_stats = working_log
-            .read_all_checkpoints()
-            .expect("Should read checkpoints after deletion");
-        let latest_stats = after_delete_stats
-            .last()
-            .expect("At least one checkpoint expected")
-            .line_stats
-            .clone();
-
-        assert_eq!(
-            latest_stats.additions, 0,
-            "No additions in cleanup checkpoint"
-        );
-        assert_eq!(latest_stats.deletions, 6, "Deletions includes empty lines");
-        assert_eq!(
-            latest_stats.additions_sloc, 0,
-            "No additions in cleanup checkpoint"
-        );
-        assert_eq!(
-            latest_stats.deletions_sloc, 0,
-            "Whitespace deletions ignored"
-        );
-    }
-
-    // ====================================================================
-    // CRLF / LF normalization tests for compute_file_line_stats
-    // ====================================================================
-
-    #[test]
-    fn test_compute_file_line_stats_crlf_to_lf_no_changes() {
-        // Same content, only line endings differ (CRLF → LF).
-        // Stats should show 0 additions and 0 deletions.
-        let old = "line1\r\nline2\r\nline3\r\n";
-        let new = "line1\nline2\nline3\n";
-
-        let stats = compute_file_line_stats(old, new);
-
-        assert_eq!(
-            stats.additions, 0,
-            "CRLF→LF with identical content should show 0 additions"
-        );
-        assert_eq!(
-            stats.deletions, 0,
-            "CRLF→LF with identical content should show 0 deletions"
-        );
-    }
-
-    #[test]
-    fn test_compute_file_line_stats_lf_to_crlf_no_changes() {
-        let old = "line1\nline2\nline3\n";
-        let new = "line1\r\nline2\r\nline3\r\n";
-
-        let stats = compute_file_line_stats(old, new);
-
-        assert_eq!(
-            stats.additions, 0,
-            "LF→CRLF with identical content should show 0 additions"
-        );
-        assert_eq!(
-            stats.deletions, 0,
-            "LF→CRLF with identical content should show 0 deletions"
-        );
-    }
-
-    #[test]
-    fn test_compute_file_line_stats_crlf_to_lf_with_additions() {
-        // Reproduces the user-reported bug: file with CRLF, AI adds lines with LF.
-        // Old: 3 CRLF lines. New: same 3 lines (LF) + 2 new lines.
-        // Should show exactly 2 additions and 0 deletions.
-        let old = "line1\r\nline2\r\nline3\r\n";
-        let new = "line1\nline2\nline3\nnew_a\nnew_b\n";
-
-        let stats = compute_file_line_stats(old, new);
-
-        assert_eq!(
-            stats.additions, 2,
-            "Should have exactly 2 additions (the new lines)"
-        );
-        assert_eq!(
-            stats.deletions, 0,
-            "Should have 0 deletions (no lines removed)"
-        );
-    }
-
-    #[test]
-    fn test_compute_file_line_stats_crlf_large_file_user_reported_bug() {
-        // Exact scenario from user report:
-        // 100-line CRLF file, AI adds 5 lines (with LF).
-        // Should show +5 -0, NOT +105 -100.
-        let mut old = String::new();
-        for i in 1..=100 {
-            old.push_str(&format!("line number {}\r\n", i));
-        }
-
-        let mut new = String::new();
-        for i in 1..=100 {
-            new.push_str(&format!("line number {}\n", i));
-        }
-        for i in 1..=5 {
-            new.push_str(&format!("new ai line {}\n", i));
-        }
-
-        let stats = compute_file_line_stats(&old, &new);
-
-        assert_eq!(
-            stats.additions, 5,
-            "Should have exactly 5 additions (AI-added lines), not {}",
-            stats.additions
-        );
-        assert_eq!(
-            stats.deletions, 0,
-            "Should have 0 deletions, not {}",
-            stats.deletions
-        );
-    }
-
-    // ====================================================================
-    // End-to-end CRLF test: blob has CRLF, working tree has LF
-    // Simulates the real-world scenario where git stores CRLF (or autocrlf
-    // converts on checkout) and an AI tool writes LF.
-    // ====================================================================
-
-    #[test]
-    fn test_checkpoint_crlf_blob_vs_lf_working_tree_stats_not_inflated() {
-        // Step 1: Create a repo and commit a file with CRLF line endings.
-        // On Linux without autocrlf, the blob stores CRLF verbatim.
-        let repo = TmpRepo::new().unwrap();
-        let crlf_content = "line1\r\nline2\r\nline3\r\nline4\r\nline5\r\n";
-        repo.write_file("test.txt", crlf_content, true).unwrap();
-        repo.commit_with_message("initial commit with CRLF")
-            .unwrap();
-
-        // Step 2: Overwrite the file with LF endings + one new line,
-        // simulating an AI tool that writes LF on a Windows repo.
-        let lf_content_with_addition = "line1\nline2\nline3\nline4\nline5\nnew_ai_line\n";
-        std::fs::write(repo.path().join("test.txt"), lf_content_with_addition).unwrap();
-
-        // Step 3: Run a checkpoint
-        repo.trigger_checkpoint_with_author("test-author").unwrap();
-
-        // Step 4: Read back checkpoint stats
-        let gitai_repo =
-            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
-                .expect("Repository should exist");
-        let base_commit = gitai_repo
-            .head()
-            .ok()
-            .and_then(|head| head.target().ok())
-            .unwrap_or_else(|| "initial".to_string());
-        let working_log = gitai_repo
-            .storage
-            .working_log_for_base_commit(&base_commit)
-            .unwrap();
-        let checkpoints = working_log.read_all_checkpoints().unwrap();
-        let latest = checkpoints
-            .last()
-            .expect("Should have at least one checkpoint");
-
-        // The key assertion: stats should reflect only the actual addition,
-        // NOT inflate every line because of CRLF→LF conversion.
-        assert_eq!(
-            latest.line_stats.additions, 1,
-            "Should have 1 addition (the new AI line), not {} (which would mean CRLF→LF inflated the count)",
-            latest.line_stats.additions
-        );
-        assert_eq!(
-            latest.line_stats.deletions, 0,
-            "Should have 0 deletions, not {} (which would mean CRLF→LF caused all old lines to appear deleted)",
-            latest.line_stats.deletions
-        );
-    }
-
-    #[test]
-    fn test_checkpoint_crlf_blob_vs_lf_working_tree_no_changes_skipped() {
-        // When the only difference is CRLF→LF (no actual content change),
-        // the checkpoint should skip the file entirely — content_eq_normalized
-        // detects they're equal and returns None.
-        let repo = TmpRepo::new().unwrap();
-        let crlf_content = "line1\r\nline2\r\nline3\r\n";
-        repo.write_file("test.txt", crlf_content, true).unwrap();
-        repo.commit_with_message("initial commit with CRLF")
-            .unwrap();
-
-        // Overwrite with LF-only — same text content, different line endings
-        let lf_content = "line1\nline2\nline3\n";
-        std::fs::write(repo.path().join("test.txt"), lf_content).unwrap();
-
-        repo.trigger_checkpoint_with_author("test-author").unwrap();
-
-        let gitai_repo =
-            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
-                .expect("Repository should exist");
-        let base_commit = gitai_repo
-            .head()
-            .ok()
-            .and_then(|head| head.target().ok())
-            .unwrap_or_else(|| "initial".to_string());
-        let working_log = gitai_repo
-            .storage
-            .working_log_for_base_commit(&base_commit)
-            .unwrap();
-        let checkpoints = working_log.read_all_checkpoints().unwrap();
-
-        // The checkpoint may be empty (no entries) or absent entirely,
-        // because content_eq_normalized correctly detected no real change.
-        if let Some(latest) = checkpoints.last() {
-            let test_entry = latest.entries.iter().find(|e| e.file == "test.txt");
-            assert!(
-                test_entry.is_none(),
-                "test.txt should be skipped when only line endings differ"
-            );
-        }
-        // If no checkpoints at all, that's also correct — nothing changed.
-    }
-
-    #[test]
-    fn test_checkpoint_stale_crlf_blob_causes_ai_reattribution() {
-        // Regression test for Devin review finding: when a CRLF-only change is
-        // skipped (preserving a stale CRLF blob), the NEXT AI checkpoint compares
-        // the stale CRLF blob against the LF working tree. Because
-        // capture_diff_slices sees "line\r\n" ≠ "line\n", ALL lines appear changed.
-        // With force_split=true in AI checkpoints, every "changed" line gets
-        // re-attributed to AI — even human-written lines.
-        //
-        // The fix: when content differs only in line endings, update the blob
-        // to LF (preserving attributions) so future diffs are LF-vs-LF.
-        let repo = TmpRepo::new().unwrap();
-        let crlf_initial = "human_line1\r\nhuman_line2\r\nhuman_line3\r\n";
-        repo.write_file("test.txt", crlf_initial, true).unwrap();
-        repo.commit_with_message("initial commit with CRLF")
-            .unwrap();
-
-        // Step 1: Human checkpoint on CRLF file → creates entry with CRLF blob
-        // (need to add a line so the checkpoint creates an entry)
-        let crlf_with_edit = "human_line1\r\nhuman_line2\r\nhuman_line3\r\nhuman_line4\r\n";
-        std::fs::write(repo.path().join("test.txt"), crlf_with_edit).unwrap();
-        repo.trigger_checkpoint_with_author("human-author").unwrap();
-
-        // Step 2: Convert file to LF (same content, only line endings change)
-        let lf_with_edit = "human_line1\nhuman_line2\nhuman_line3\nhuman_line4\n";
-        std::fs::write(repo.path().join("test.txt"), lf_with_edit).unwrap();
-        repo.trigger_checkpoint_with_author("human-author").unwrap();
-
-        // Step 3: AI adds one line (LF) → AI checkpoint
-        let lf_with_ai = "human_line1\nhuman_line2\nhuman_line3\nhuman_line4\nai_new_line\n";
-        std::fs::write(repo.path().join("test.txt"), lf_with_ai).unwrap();
-        repo.trigger_checkpoint_with_ai("Claude", None, None)
-            .unwrap();
-
-        // Read the AI checkpoint
-        let gitai_repo =
-            crate::git::repository::find_repository_in_path(repo.path().to_str().unwrap())
-                .expect("Repository should exist");
-        let base_commit = gitai_repo
-            .head()
-            .ok()
-            .and_then(|head| head.target().ok())
-            .unwrap_or_else(|| "initial".to_string());
-        let working_log = gitai_repo
-            .storage
-            .working_log_for_base_commit(&base_commit)
-            .unwrap();
-        let checkpoints = working_log.read_all_checkpoints().unwrap();
-
-        // Find the AI checkpoint entry for test.txt
-        let ai_checkpoint = checkpoints
-            .iter()
-            .rev()
-            .find(|cp| cp.kind.is_ai() && cp.entries.iter().any(|e| e.file == "test.txt"))
-            .expect("Should have an AI checkpoint with test.txt");
-        let test_entry = ai_checkpoint
-            .entries
-            .iter()
-            .find(|e| e.file == "test.txt")
-            .unwrap();
-
-        // The key assertion: the AI checkpoint should NOT attribute all lines to AI.
-        // Only the actually-added line should be AI-attributed.
-        let ai_line_attrs: Vec<_> = test_entry
-            .line_attributions
-            .iter()
-            .filter(|la| is_ai_author_id(&la.author_id))
-            .collect();
-
-        // Count total lines covered by AI attributions
-        let ai_line_count: u32 = ai_line_attrs
-            .iter()
-            .map(|la| la.end_line - la.start_line + 1)
-            .sum();
-
-        // AI should only attribute 1 line (the new ai_new_line), not all 5 lines.
-        // If the stale CRLF blob caused full re-attribution, ai_line_count would be 5.
-        assert!(
-            ai_line_count <= 2,
-            "AI should attribute at most 1-2 lines (the actual addition), \
-             but attributed {} lines — stale CRLF blob caused full re-attribution. \
-             AI attributions: {:?}, all attributions: {:?}",
-            ai_line_count,
-            ai_line_attrs,
-            test_entry.line_attributions
-        );
     }
 }

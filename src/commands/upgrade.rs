@@ -1780,4 +1780,64 @@ mod tests {
             Some(&cache)
         ));
     }
+
+    fn with_update_check_env(
+        cache_has_update: bool,
+        auto_updates_disabled: bool,
+        f: impl FnOnce(),
+    ) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        set_test_cache_dir(&temp_dir);
+
+        let mut cache = UpdateCache::new(UpdateChannel::Latest);
+        cache.last_checked_at = current_timestamp();
+        if cache_has_update {
+            cache.available_tag = Some("v99.99.99".to_string());
+            cache.available_semver = Some("99.99.99".to_string());
+        }
+        write_update_cache(&cache);
+
+        let patch = serde_json::json!({
+            "disable_version_checks": false,
+            "disable_auto_updates": auto_updates_disabled
+        })
+        .to_string();
+        unsafe { std::env::set_var("GIT_AI_TEST_CONFIG_PATCH", &patch) };
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+
+        unsafe { std::env::remove_var("GIT_AI_TEST_CONFIG_PATCH") };
+        clear_test_cache_dir();
+
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn check_for_update_available_returns_update_ready_when_cache_has_pending_update() {
+        with_update_check_env(true, false, || {
+            let result = check_for_update_available().unwrap();
+            assert_eq!(result, DaemonUpdateCheckResult::UpdateReady);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn check_for_update_available_returns_no_update_when_auto_updates_disabled() {
+        with_update_check_env(true, true, || {
+            let result = check_for_update_available().unwrap();
+            assert_eq!(result, DaemonUpdateCheckResult::NoUpdate);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn check_for_update_available_returns_no_update_when_cache_has_no_pending_update() {
+        with_update_check_env(false, false, || {
+            let result = check_for_update_available().unwrap();
+            assert_eq!(result, DaemonUpdateCheckResult::NoUpdate);
+        });
+    }
 }

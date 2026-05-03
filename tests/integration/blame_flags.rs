@@ -4,7 +4,6 @@ use git_ai::authorship::authorship_log::{LineRange, PromptRecord};
 use git_ai::authorship::authorship_log_serialization::{
     AttestationEntry, AuthorshipLog, FileAttestation,
 };
-use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::AgentId;
 use git_ai::commands::blame::GitAiBlameOptions;
 use git_ai::git::refs::notes_add;
@@ -1405,13 +1404,12 @@ fn test_blame_ai_human_author() {
         PromptRecord {
             agent_id: agent_id_1,
             human_author: Some("First <first@example.com>".to_string()),
-            messages: vec![Message::user("Add first line".to_string(), None)],
             total_additions: 1,
             total_deletions: 0,
             accepted_lines: 1,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -1427,13 +1425,12 @@ fn test_blame_ai_human_author() {
         PromptRecord {
             agent_id: agent_id_2,
             human_author: Some("Second <second@example.com>".to_string()),
-            messages: vec![Message::user("Add second line".to_string(), None)],
             total_additions: 1,
             total_deletions: 0,
             accepted_lines: 1,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 

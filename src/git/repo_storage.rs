@@ -1,5 +1,5 @@
 use crate::authorship::attribution_tracker::LineAttribution;
-use crate::authorship::authorship_log::{HumanRecord, PromptRecord};
+use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord};
 use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::working_log::{CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind};
 use crate::error::GitAiError;
@@ -25,6 +25,9 @@ pub struct InitialAttributions {
     /// Known human records: `h_<hash>` -> HumanRecord
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub humans: std::collections::BTreeMap<String, HumanRecord>,
+    /// Session records: `s_<session_id>` -> SessionRecord
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sessions: std::collections::BTreeMap<String, SessionRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +68,8 @@ impl RepoStorage {
         Ok(config)
     }
 
-    fn ensure_config_directory(&self) -> Result<(), GitAiError> {
+    #[doc(hidden)]
+    pub fn ensure_config_directory(&self) -> Result<(), GitAiError> {
         fs::create_dir_all(&self.ai_dir)?;
 
         // Create working_logs directory
@@ -141,9 +145,10 @@ impl RepoStorage {
     const OLD_WORKING_LOG_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
 
     /// Remove archived (`old-*`) working log directories whose `.archived_at`
-    /// timestamp is older than [`OLD_WORKING_LOG_RETENTION_SECS`].
+    /// timestamp is older than `OLD_WORKING_LOG_RETENTION_SECS`.
     /// Errors are intentionally swallowed so pruning never breaks the commit flow.
-    fn prune_expired_old_working_logs(&self) {
+    #[doc(hidden)]
+    pub fn prune_expired_old_working_logs(&self) {
         let now_secs = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
@@ -398,51 +403,7 @@ impl PersistedWorkingLog {
         // Tools that DON'T support refetch (transcript must be kept):
         // - "mock_ai" - test preset, transcript not stored externally
         // - Any other agent-v1 custom tools (detected by lack of tool-specific metadata)
-        let mut storage_checkpoint = checkpoint.clone();
-        let tool = checkpoint
-            .agent_id
-            .as_ref()
-            .map(|a| a.tool.as_str())
-            .unwrap_or("");
-        let metadata = &checkpoint.agent_metadata;
-
-        // Blacklist: tools that cannot refetch transcripts
-        let cannot_refetch = match tool {
-            "mock_ai" => true,
-            // human checkpoints have no transcript anyway
-            "human" => false,
-            // For other tools, check if they have the necessary metadata for refetching
-            // cursor can always refetch from its database
-            "cursor" => false,
-            // claude, codex, gemini, continue-cli, amp, windsurf, droid need transcript_path
-            "claude" | "codex" | "gemini" | "continue-cli" | "amp" | "windsurf" | "droid" => {
-                metadata
-                    .as_ref()
-                    .and_then(|m| m.get("transcript_path"))
-                    .is_none()
-            }
-            // opencode can always refetch from its session storage
-            "opencode" => false,
-            // pi needs session_path metadata for prompt refresh
-            "pi" => metadata
-                .as_ref()
-                .and_then(|m| m.get("session_path"))
-                .is_none(),
-            // github-copilot needs chat_session_path
-            "github-copilot" => metadata
-                .as_ref()
-                .and_then(|m| m.get("chat_session_path"))
-                .is_none(),
-            // Unknown tools (like custom agent-v1 tools) can't refetch
-            _ => true,
-        };
-
-        if !cannot_refetch {
-            storage_checkpoint.transcript = None;
-        }
-
-        // Add the new checkpoint
-        checkpoints.push(storage_checkpoint);
+        checkpoints.push(checkpoint.clone());
 
         // Prune char-level attributions from older checkpoints for the same files
         // Only the most recent checkpoint per file needs char-level precision
@@ -638,6 +599,7 @@ impl PersistedWorkingLog {
             prompts,
             file_blobs: HashMap::new(),
             humans: std::collections::BTreeMap::new(),
+            sessions: std::collections::BTreeMap::new(),
         })
     }
 
@@ -648,6 +610,7 @@ impl PersistedWorkingLog {
         prompts: HashMap<String, PromptRecord>,
         humans: std::collections::BTreeMap<String, HumanRecord>,
         file_contents: HashMap<String, String>,
+        sessions: std::collections::BTreeMap<String, SessionRecord>,
     ) -> Result<(), GitAiError> {
         let filtered: HashMap<String, Vec<LineAttribution>> = attributions
             .into_iter()
@@ -666,6 +629,7 @@ impl PersistedWorkingLog {
             prompts,
             file_blobs,
             humans,
+            sessions,
         })
     }
 
@@ -692,6 +656,7 @@ impl PersistedWorkingLog {
             prompts: initial.prompts,
             file_blobs,
             humans: initial.humans,
+            sessions: initial.sessions,
         };
 
         let json = serde_json::to_string_pretty(&initial_data)?;
@@ -765,651 +730,5 @@ impl PersistedWorkingLog {
                 InitialAttributions::default()
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    use crate::authorship::transcript::AiTranscript;
-    use crate::authorship::working_log::AgentId;
-    use crate::git::test_utils::TmpRepo;
-
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn test_ensure_config_directory_creates_structure() {
-        // Create a temporary repository
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-
-        // Create RepoStorage
-        let _repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-
-        // Verify .git/ai directory exists
-        let ai_dir = tmp_repo.repo().path().join("ai");
-        assert!(ai_dir.exists(), ".git/ai directory should exist");
-        assert!(ai_dir.is_dir(), ".git/ai should be a directory");
-
-        // Verify working_logs directory exists
-        let working_logs_dir = ai_dir.join("working_logs");
-        assert!(
-            working_logs_dir.exists(),
-            "working_logs directory should exist"
-        );
-        assert!(
-            working_logs_dir.is_dir(),
-            "working_logs should be a directory"
-        );
-
-        // Verify rewrite_log file exists and is empty
-        let rewrite_log_file = ai_dir.join("rewrite_log");
-        assert!(rewrite_log_file.exists(), "rewrite_log file should exist");
-        assert!(rewrite_log_file.is_file(), "rewrite_log should be a file");
-
-        let content = fs::read_to_string(&rewrite_log_file).expect("Failed to read rewrite_log");
-        assert_eq!(content, "", "rewrite_log should be empty by default");
-    }
-
-    #[test]
-    fn test_ensure_config_directory_handles_existing_files() {
-        // Create a temporary repository
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-
-        // Create RepoStorage
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-
-        // Add some content to rewrite_log
-        let rewrite_log_file = tmp_repo.repo().path().join("ai").join("rewrite_log");
-        fs::write(&rewrite_log_file, "existing content").expect("Failed to write to rewrite_log");
-
-        // Second call - should not overwrite existing file
-        repo_storage
-            .ensure_config_directory()
-            .expect("Failed to ensure config directory again");
-
-        // Verify the content is preserved
-        let content = fs::read_to_string(&rewrite_log_file).expect("Failed to read rewrite_log");
-        assert_eq!(
-            content, "existing content",
-            "Existing rewrite_log content should be preserved"
-        );
-
-        // Verify directories still exist
-        let ai_dir = tmp_repo.repo().path().join("ai");
-        let working_logs_dir = ai_dir.join("working_logs");
-        assert!(ai_dir.exists(), ".git/ai directory should still exist");
-        assert!(
-            working_logs_dir.exists(),
-            "working_logs directory should still exist"
-        );
-    }
-
-    #[test]
-    fn test_persisted_working_log_blob_storage() {
-        // Create a temporary repository
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-
-        // Create RepoStorage and PersistedWorkingLog
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-        let working_log = repo_storage
-            .working_log_for_base_commit("test-commit-sha")
-            .unwrap();
-
-        // Test persisting a file version
-        let content = "Hello, World!\nThis is a test file.";
-        let sha = working_log
-            .persist_file_version(content)
-            .expect("Failed to persist file version");
-
-        // Verify the SHA is not empty
-        assert!(!sha.is_empty(), "SHA should not be empty");
-
-        // Test retrieving the file version
-        let retrieved_content = working_log
-            .get_file_version(&sha)
-            .expect("Failed to get file version");
-
-        assert_eq!(
-            content, retrieved_content,
-            "Retrieved content should match original"
-        );
-
-        // Verify the blob file exists
-        let blob_path = working_log.dir.join("blobs").join(&sha);
-        assert!(blob_path.exists(), "Blob file should exist");
-        assert!(blob_path.is_file(), "Blob should be a file");
-
-        // Test persisting the same content again should return the same SHA
-        let sha2 = working_log
-            .persist_file_version(content)
-            .expect("Failed to persist file version again");
-
-        assert_eq!(sha, sha2, "Same content should produce same SHA");
-    }
-
-    #[test]
-    fn test_persisted_working_log_checkpoint_storage() {
-        use crate::authorship::working_log::CheckpointKind;
-
-        // Create a temporary repository
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-
-        // Create RepoStorage and PersistedWorkingLog
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-        let working_log = repo_storage
-            .working_log_for_base_commit("test-commit-sha")
-            .unwrap();
-
-        // Create a test checkpoint
-        let checkpoint = Checkpoint::new(
-            CheckpointKind::Human,
-            "test-diff".to_string(),
-            "test-author".to_string(),
-            vec![], // empty entries for simplicity
-        );
-
-        // Test appending checkpoint
-        working_log
-            .append_checkpoint(&checkpoint)
-            .expect("Failed to append checkpoint");
-
-        // Test reading all checkpoints
-        let checkpoints = working_log
-            .read_all_checkpoints()
-            .expect("Failed to read checkpoints");
-
-        assert_eq!(checkpoints.len(), 1, "Should have one checkpoint");
-        assert_eq!(checkpoints[0].author, "test-author");
-
-        // Verify the JSONL file exists
-        let checkpoints_file = working_log.dir.join("checkpoints.jsonl");
-        assert!(checkpoints_file.exists(), "Checkpoints file should exist");
-
-        // Test appending another checkpoint
-        let checkpoint2 = Checkpoint::new(
-            CheckpointKind::Human,
-            "test-diff-2".to_string(),
-            "test-author-2".to_string(),
-            vec![],
-        );
-
-        working_log
-            .append_checkpoint(&checkpoint2)
-            .expect("Failed to append second checkpoint");
-
-        let checkpoints = working_log
-            .read_all_checkpoints()
-            .expect("Failed to read checkpoints after second append");
-
-        assert_eq!(checkpoints.len(), 2, "Should have two checkpoints");
-        assert_eq!(checkpoints[1].author, "test-author-2");
-    }
-
-    #[test]
-    fn test_read_all_checkpoints_filters_incompatible_versions() {
-        use crate::authorship::working_log::CheckpointKind;
-
-        // Create a temporary repository
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-
-        // Create RepoStorage and PersistedWorkingLog
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-        let working_log = repo_storage
-            .working_log_for_base_commit("test-commit-sha")
-            .unwrap();
-
-        // Build three checkpoints: missing version, wrong version, and correct version
-        let base_checkpoint = Checkpoint::new(
-            CheckpointKind::Human,
-            "diff --git a/file b/file".to_string(),
-            "base-author".to_string(),
-            vec![],
-        );
-
-        let missing_version_json = {
-            let mut value = serde_json::to_value(&base_checkpoint).unwrap();
-            if let serde_json::Value::Object(ref mut map) = value {
-                map.remove("api_version");
-            }
-            serde_json::to_string(&value).unwrap()
-        };
-
-        let mut wrong_version_checkpoint = base_checkpoint.clone();
-        wrong_version_checkpoint.api_version = "checkpoint/0.9.0".to_string();
-        let wrong_version_json = serde_json::to_string(&wrong_version_checkpoint).unwrap();
-
-        let mut correct_checkpoint = base_checkpoint.clone();
-        correct_checkpoint.author = "correct-author".to_string();
-        let correct_json = serde_json::to_string(&correct_checkpoint).unwrap();
-
-        let checkpoints_file = working_log.dir.join("checkpoints.jsonl");
-        let combined = [missing_version_json, wrong_version_json, correct_json].join("\n");
-        fs::write(&checkpoints_file, combined).expect("Failed to write checkpoints.jsonl");
-
-        let checkpoints = working_log
-            .read_all_checkpoints()
-            .expect("Failed to read checkpoints");
-
-        assert_eq!(
-            checkpoints.len(),
-            1,
-            "Only the correct version should remain"
-        );
-        assert_eq!(checkpoints[0].author, "correct-author");
-        assert_eq!(checkpoints[0].api_version, CHECKPOINT_API_VERSION);
-    }
-
-    #[test]
-    fn test_persisted_working_log_reset() {
-        use crate::authorship::working_log::CheckpointKind;
-
-        // Create a temporary repository
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-
-        // Create RepoStorage and PersistedWorkingLog
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-        let working_log = repo_storage
-            .working_log_for_base_commit("test-commit-sha")
-            .unwrap();
-
-        // Add some blobs
-        let content = "Test content";
-        let sha = working_log
-            .persist_file_version(content)
-            .expect("Failed to persist file version");
-
-        // Add some checkpoints
-        let checkpoint = Checkpoint::new(
-            CheckpointKind::Human,
-            "test-diff".to_string(),
-            "test-author".to_string(),
-            vec![],
-        );
-        working_log
-            .append_checkpoint(&checkpoint)
-            .expect("Failed to append checkpoint");
-
-        // Verify they exist
-        assert!(working_log.dir.join("blobs").join(&sha).exists());
-        let checkpoints = working_log
-            .read_all_checkpoints()
-            .expect("Failed to read checkpoints");
-        assert_eq!(checkpoints.len(), 1);
-
-        // Reset the working log
-        working_log
-            .reset_working_log()
-            .expect("Failed to reset working log");
-
-        // Verify blobs are cleared
-        assert!(
-            !working_log.dir.join("blobs").exists(),
-            "Blobs directory should be removed"
-        );
-
-        // Verify checkpoints are cleared
-        let checkpoints = working_log
-            .read_all_checkpoints()
-            .expect("Failed to read checkpoints after reset");
-        assert_eq!(
-            checkpoints.len(),
-            0,
-            "Should have no checkpoints after reset"
-        );
-
-        // Verify checkpoints.jsonl exists but is empty
-        let checkpoints_file = working_log.dir.join("checkpoints.jsonl");
-        assert!(
-            checkpoints_file.exists(),
-            "Checkpoints file should still exist"
-        );
-        let content =
-            fs::read_to_string(&checkpoints_file).expect("Failed to read checkpoints file");
-        assert!(
-            content.trim().is_empty(),
-            "Checkpoints file should be empty"
-        );
-    }
-
-    #[test]
-    fn test_working_log_for_base_commit_creates_directory() {
-        // Create a temporary repository
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-
-        // Create RepoStorage
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-
-        // Create working log for a specific commit
-        let commit_sha = "abc123def456";
-        let working_log = repo_storage
-            .working_log_for_base_commit(commit_sha)
-            .unwrap();
-
-        // Verify the directory was created
-        assert!(
-            working_log.dir.exists(),
-            "Working log directory should exist"
-        );
-        assert!(
-            working_log.dir.is_dir(),
-            "Working log should be a directory"
-        );
-
-        // Verify it's in the correct location
-        let expected_path = tmp_repo
-            .repo()
-            .path()
-            .join("ai")
-            .join("working_logs")
-            .join(commit_sha);
-        assert_eq!(
-            working_log.dir, expected_path,
-            "Working log directory should be in correct location"
-        );
-    }
-
-    #[test]
-    fn test_write_initial_with_contents_persists_snapshot_blob() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-        let working_log = repo_storage
-            .working_log_for_base_commit("test-commit-sha")
-            .unwrap();
-
-        let mut attributions = HashMap::new();
-        attributions.insert(
-            "src/test.rs".to_string(),
-            vec![LineAttribution {
-                start_line: 1,
-                end_line: 1,
-                author_id: "ai-1".to_string(),
-                overrode: None,
-            }],
-        );
-        let mut contents = HashMap::new();
-        contents.insert("src/test.rs".to_string(), "fn main() {}\n".to_string());
-
-        working_log
-            .write_initial_attributions_with_contents(
-                attributions,
-                HashMap::new(),
-                std::collections::BTreeMap::new(),
-                contents,
-            )
-            .expect("write INITIAL with contents");
-
-        let initial = working_log.read_initial_attributions();
-        let blob_sha = initial
-            .file_blobs
-            .get("src/test.rs")
-            .expect("snapshot blob should exist");
-        let persisted = working_log
-            .get_file_version(blob_sha)
-            .expect("read snapshot blob");
-        assert_eq!(persisted, "fn main() {}\n");
-    }
-
-    #[test]
-    fn test_write_initial_empty_removes_existing_file() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-        let working_log = repo_storage
-            .working_log_for_base_commit("test-commit-sha")
-            .unwrap();
-
-        let mut attributions = HashMap::new();
-        attributions.insert(
-            "src/test.rs".to_string(),
-            vec![LineAttribution {
-                start_line: 1,
-                end_line: 1,
-                author_id: "ai-1".to_string(),
-                overrode: None,
-            }],
-        );
-        working_log
-            .write_initial_attributions(attributions, HashMap::new())
-            .expect("write INITIAL");
-        assert!(working_log.initial_file.exists(), "INITIAL should exist");
-
-        working_log
-            .write_initial(InitialAttributions::default())
-            .expect("clear INITIAL");
-        assert!(
-            !working_log.initial_file.exists(),
-            "INITIAL should be removed when empty"
-        );
-    }
-
-    #[test]
-    fn test_pi_transcript_refetch_requires_session_path_metadata() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-        let working_log = repo_storage
-            .working_log_for_base_commit("test-commit-sha")
-            .unwrap();
-
-        let mut checkpoint_with_session_path = Checkpoint::new(
-            CheckpointKind::AiAgent,
-            "diff".to_string(),
-            "author".to_string(),
-            vec![],
-        );
-        checkpoint_with_session_path.agent_id = Some(AgentId {
-            tool: "pi".to_string(),
-            id: "session-1".to_string(),
-            model: "anthropic/claude-sonnet-4-5".to_string(),
-        });
-        checkpoint_with_session_path.transcript = Some(AiTranscript::new());
-        checkpoint_with_session_path.agent_metadata = Some(HashMap::from([(
-            "session_path".to_string(),
-            "/tmp/pi-session.jsonl".to_string(),
-        )]));
-
-        working_log
-            .append_checkpoint(&checkpoint_with_session_path)
-            .expect("append checkpoint with session_path");
-
-        let checkpoints = working_log
-            .read_all_checkpoints()
-            .expect("read checkpoints with session_path");
-        assert!(
-            checkpoints[0].transcript.is_none(),
-            "Pi checkpoints with session_path should drop inline transcript"
-        );
-
-        let mut checkpoint_without_session_path = Checkpoint::new(
-            CheckpointKind::AiAgent,
-            "diff-2".to_string(),
-            "author".to_string(),
-            vec![],
-        );
-        checkpoint_without_session_path.agent_id = Some(AgentId {
-            tool: "pi".to_string(),
-            id: "session-2".to_string(),
-            model: "anthropic/claude-sonnet-4-5".to_string(),
-        });
-        checkpoint_without_session_path.transcript = Some(AiTranscript::new());
-        checkpoint_without_session_path.agent_metadata = Some(HashMap::new());
-
-        working_log
-            .append_checkpoint(&checkpoint_without_session_path)
-            .expect("append checkpoint without session_path");
-
-        let checkpoints = working_log
-            .read_all_checkpoints()
-            .expect("read checkpoints without session_path");
-        assert!(
-            checkpoints[1].transcript.is_some(),
-            "Pi checkpoints without session_path should keep inline transcript"
-        );
-    }
-
-    #[test]
-    fn test_delete_working_log_archives_to_old_sha() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-
-        let sha = "abc123";
-        // Create a working log directory with a dummy file
-        let wl_dir = repo_storage.working_logs.join(sha);
-        fs::create_dir_all(&wl_dir).unwrap();
-        fs::write(wl_dir.join("checkpoints.jsonl"), "").unwrap();
-
-        assert!(wl_dir.exists());
-
-        // Delete (archive) it
-        repo_storage
-            .delete_working_log_for_base_commit(sha)
-            .unwrap();
-
-        // Original directory should be gone
-        assert!(!wl_dir.exists());
-
-        // old-{sha} directory should exist
-        let old_dir = repo_storage.working_logs.join(format!("old-{}", sha));
-        assert!(old_dir.exists());
-        assert!(old_dir.is_dir());
-
-        // .archived_at marker should exist and contain a valid unix timestamp
-        let marker = old_dir.join(".archived_at");
-        assert!(marker.exists());
-        let ts: u64 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
-        assert!(ts > 0);
-    }
-
-    #[test]
-    fn test_delete_working_log_replaces_existing_old_dir() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-
-        let sha = "def456";
-
-        // Pre-create an old-{sha} directory with stale content
-        let old_dir = repo_storage.working_logs.join(format!("old-{}", sha));
-        fs::create_dir_all(&old_dir).unwrap();
-        fs::write(old_dir.join("stale.txt"), "stale").unwrap();
-
-        // Create the actual working log
-        let wl_dir = repo_storage.working_logs.join(sha);
-        fs::create_dir_all(&wl_dir).unwrap();
-        fs::write(wl_dir.join("checkpoints.jsonl"), "fresh").unwrap();
-
-        repo_storage
-            .delete_working_log_for_base_commit(sha)
-            .unwrap();
-
-        // old dir should now contain the new content, not the stale file
-        assert!(!old_dir.join("stale.txt").exists());
-        assert!(old_dir.join("checkpoints.jsonl").exists());
-    }
-
-    #[test]
-    fn test_prune_expired_old_working_logs_removes_expired() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-
-        // Create an old working log with an expired timestamp (8 days ago)
-        let expired_dir = repo_storage.working_logs.join("old-expired111");
-        fs::create_dir_all(&expired_dir).unwrap();
-        let eight_days_ago = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - (8 * 24 * 60 * 60);
-        fs::write(expired_dir.join(".archived_at"), eight_days_ago.to_string()).unwrap();
-
-        // Create an old working log with a fresh timestamp (1 day ago)
-        let fresh_dir = repo_storage.working_logs.join("old-fresh222");
-        fs::create_dir_all(&fresh_dir).unwrap();
-        let one_day_ago = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - (24 * 60 * 60);
-        fs::write(fresh_dir.join(".archived_at"), one_day_ago.to_string()).unwrap();
-
-        // Run pruning
-        repo_storage.prune_expired_old_working_logs();
-
-        // Expired dir should be gone
-        assert!(
-            !expired_dir.exists(),
-            "Expired old working log should be pruned"
-        );
-
-        // Fresh dir should still exist
-        assert!(
-            fresh_dir.exists(),
-            "Fresh old working log should be retained"
-        );
-    }
-
-    #[test]
-    fn test_prune_expired_old_working_logs_removes_missing_marker() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-
-        // Create an old working log with NO .archived_at marker
-        let no_marker_dir = repo_storage.working_logs.join("old-nomarker");
-        fs::create_dir_all(&no_marker_dir).unwrap();
-
-        repo_storage.prune_expired_old_working_logs();
-
-        // Should be pruned (missing marker treated as timestamp 0 -> expired)
-        assert!(
-            !no_marker_dir.exists(),
-            "Old working log without marker should be pruned"
-        );
-    }
-
-    #[test]
-    fn test_prune_does_not_touch_active_working_logs() {
-        let tmp_repo = TmpRepo::new().expect("Failed to create tmp repo");
-        let repo_storage =
-            RepoStorage::for_repo_path(tmp_repo.repo().path(), tmp_repo.repo().workdir().unwrap())
-                .unwrap();
-
-        // Create a regular (non-old-*) working log directory
-        let active_dir = repo_storage.working_logs.join("abc123active");
-        fs::create_dir_all(&active_dir).unwrap();
-        fs::write(active_dir.join("checkpoints.jsonl"), "data").unwrap();
-
-        repo_storage.prune_expired_old_working_logs();
-
-        // Active working log should be untouched
-        assert!(
-            active_dir.exists(),
-            "Active working logs should not be pruned"
-        );
     }
 }

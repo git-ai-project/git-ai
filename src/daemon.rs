@@ -31,7 +31,8 @@ use crate::{
         rewrite_authorship_if_needed,
     },
     authorship::working_log::CheckpointKind,
-    commands::checkpoint_agent::agent_presets::AgentRunResult,
+    commands::checkpoint::PreparedPathRole,
+    commands::checkpoint_agent::orchestrator::CheckpointRequest,
     commands::hooks::{push_hooks, stash_hooks},
 };
 #[cfg(not(windows))]
@@ -1357,18 +1358,23 @@ fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), Git
                 .kind
                 .as_deref()
                 .and_then(parse_checkpoint_kind)
-                .or_else(|| request.agent_run_result.as_ref().map(|r| r.checkpoint_kind))
+                .or_else(|| {
+                    request
+                        .checkpoint_request
+                        .as_ref()
+                        .map(|r| r.checkpoint_kind)
+                })
                 .unwrap_or(CheckpointKind::Human);
             let author = request
                 .author
-                .unwrap_or_else(|| repo.git_author_identity().name_or_unknown());
+                .unwrap_or_else(|| repo.git_author_identity().formatted_or_unknown());
 
             let _ = crate::commands::checkpoint::run(
                 &repo,
                 &author,
                 kind,
                 request.quiet.unwrap_or(true),
-                request.agent_run_result,
+                request.checkpoint_request,
                 request.is_pre_commit.unwrap_or(false),
             )?;
             Ok(())
@@ -1539,6 +1545,7 @@ fn remove_working_log_attributions_for_pathspecs(
             prompts: initial.prompts,
             file_blobs: filtered_blobs,
             humans: initial.humans,
+            sessions: initial.sessions,
         })?;
     }
 
@@ -1647,7 +1654,7 @@ fn apply_checkout_switch_working_log_side_effect(
                     &old_head,
                     &new_head,
                     clean_snapshot,
-                    Some(repo.git_author_identity().name_or_unknown()),
+                    Some(repo.git_author_identity().formatted_or_unknown()),
                 )?;
             }
             repo.storage.delete_working_log_for_base_commit(&old_head)?;
@@ -1794,23 +1801,25 @@ fn filter_commit_replay_files(
     (selected_files, selected_dirty_files)
 }
 
-fn build_human_replay_agent_result(
+fn build_human_replay_checkpoint_request(
     files: Vec<String>,
     dirty_files: HashMap<String, String>,
-) -> AgentRunResult {
-    AgentRunResult {
-        agent_id: crate::authorship::working_log::AgentId {
-            tool: "daemon".to_string(),
-            id: "daemon-commit-replay".to_string(),
-            model: "daemon".to_string(),
-        },
-        agent_metadata: None,
-        transcript: Some(crate::authorship::transcript::AiTranscript { messages: vec![] }),
+) -> CheckpointRequest {
+    CheckpointRequest {
+        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::Human,
-        repo_working_dir: None,
-        edited_filepaths: None,
-        will_edit_filepaths: Some(files),
-        dirty_files: Some(dirty_files),
+        agent_id: None,
+        repo_working_dir: std::path::PathBuf::new(), // Will be overridden by caller
+        file_paths: files.into_iter().map(std::path::PathBuf::from).collect(),
+        path_role: PreparedPathRole::WillEdit,
+        dirty_files: Some(
+            dirty_files
+                .into_iter()
+                .map(|(k, v)| (std::path::PathBuf::from(k), v))
+                .collect(),
+        ),
+        transcript_source: None,
+        metadata: std::collections::HashMap::new(),
         captured_checkpoint_id: None,
     }
 }
@@ -1847,7 +1856,7 @@ fn capture_recent_working_log_snapshot(
     repo: &Repository,
     base_commit: &str,
     human_author: Option<String>,
-) -> Result<Option<RecentWorkingLogSnapshot>, GitAiError> {
+) -> Result<Option<Box<RecentWorkingLogSnapshot>>, GitAiError> {
     if base_commit.trim().is_empty()
         || base_commit == "initial"
         || !working_log_has_tracked_state_for_base(repo, base_commit)
@@ -1862,19 +1871,21 @@ fn capture_recent_working_log_snapshot(
             human_author,
         )?;
     let initial = va.to_initial_working_log_only();
-    if initial.files.is_empty() && initial.prompts.is_empty() {
+    if initial.files.is_empty() && initial.prompts.is_empty() && initial.sessions.is_empty() {
         return Ok(None);
     }
 
-    Ok(Some(RecentWorkingLogSnapshot {
+    Ok(Some(Box::new(RecentWorkingLogSnapshot {
         file_contents: va.snapshot_contents_for_files(initial.files.keys()),
         files: initial.files,
         prompts: initial.prompts,
         humans: initial.humans,
-    }))
+        sessions: initial.sessions,
+    })))
 }
 
-fn restore_recent_working_log_snapshot(
+#[doc(hidden)]
+pub fn restore_recent_working_log_snapshot(
     repo: &Repository,
     base_commit: &str,
     snapshot: &RecentWorkingLogSnapshot,
@@ -1890,6 +1901,7 @@ fn restore_recent_working_log_snapshot(
             snapshot.prompts.clone(),
             snapshot.humans.clone(),
             snapshot.file_contents.clone(),
+            snapshot.sessions.clone(),
         )?;
     Ok(working_log_has_tracked_state_for_base(repo, base_commit))
 }
@@ -2547,36 +2559,45 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     // writing a synthetic Human checkpoint.  Bash snapshot files are written at
     // PreToolUse time and live for 300 s, so they are always present on disk when
     // the daemon processes the trace2 commit event (typically < 1 s later).
-    let (checkpoint_kind, replay_agent_result) =
+    let (checkpoint_kind, replay_checkpoint_request) =
         match crate::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash(
             repo_root,
             &repo_workdir,
         ) {
-            Some((kind, Some(ai_result))) => {
+            Some((kind, Some(mut ai_result))) => {
                 // Bash in flight with full context — attribute committed files to the AI agent.
-                // AiAgent checkpoints use `edited_filepaths` (not `will_edit_filepaths`) for the
-                // explicit path list, matching how `explicit_capture_target_paths` dispatches.
-                let result = AgentRunResult {
-                    edited_filepaths: Some(changed_files),
-                    dirty_files: Some(dirty_files),
-                    will_edit_filepaths: None,
-                    ..ai_result
-                };
-                (kind, result)
+                ai_result.file_paths = changed_files
+                    .into_iter()
+                    .map(std::path::PathBuf::from)
+                    .collect();
+                ai_result.path_role = PreparedPathRole::Edited;
+                ai_result.dirty_files = Some(
+                    dirty_files
+                        .into_iter()
+                        .map(|(k, v)| (std::path::PathBuf::from(k), v))
+                        .collect(),
+                );
+                (kind, ai_result)
             }
             Some((kind, None)) => {
                 // Bash in flight but no context details — use AI kind with daemon agent_id.
-                let result = AgentRunResult {
-                    edited_filepaths: Some(changed_files),
-                    dirty_files: Some(dirty_files),
-                    will_edit_filepaths: None,
-                    checkpoint_kind: kind,
-                    ..build_human_replay_agent_result(vec![], HashMap::new())
-                };
+                let mut result = build_human_replay_checkpoint_request(vec![], HashMap::new());
+                result.checkpoint_kind = kind;
+                result.file_paths = changed_files
+                    .into_iter()
+                    .map(std::path::PathBuf::from)
+                    .collect();
+                result.path_role = PreparedPathRole::Edited;
+                result.dirty_files = Some(
+                    dirty_files
+                        .into_iter()
+                        .map(|(k, v)| (std::path::PathBuf::from(k), v))
+                        .collect(),
+                );
                 (kind, result)
             }
             None => {
-                let result = build_human_replay_agent_result(changed_files, dirty_files);
+                let result = build_human_replay_checkpoint_request(changed_files, dirty_files);
                 (CheckpointKind::Human, result)
             }
         };
@@ -2586,7 +2607,7 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         author,
         checkpoint_kind,
         true,
-        Some(replay_agent_result),
+        Some(replay_checkpoint_request),
         base_commit != "initial",
         Some(base_commit.as_str()),
         crate::commands::checkpoint::BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
@@ -2603,7 +2624,7 @@ fn apply_rewrite_side_effect(
     reset_pathspecs: Option<&[String]>,
 ) -> Result<(), GitAiError> {
     let mut repo = find_repository_in_path(worktree)?;
-    let author = repo.git_author_identity().name_or_unknown();
+    let author = repo.git_author_identity().formatted_or_unknown();
     ensure_rewrite_prerequisites(
         coordinator,
         &repo,
@@ -3661,16 +3682,19 @@ struct PendingRootSlot {
 }
 
 #[derive(Debug, Clone, Default)]
-struct RecentWorkingLogSnapshot {
-    files: HashMap<String, Vec<crate::authorship::attribution_tracker::LineAttribution>>,
-    prompts: HashMap<String, crate::authorship::authorship_log::PromptRecord>,
-    file_contents: HashMap<String, String>,
-    humans: std::collections::BTreeMap<String, crate::authorship::authorship_log::HumanRecord>,
+#[doc(hidden)]
+pub struct RecentWorkingLogSnapshot {
+    pub files: HashMap<String, Vec<crate::authorship::attribution_tracker::LineAttribution>>,
+    pub prompts: HashMap<String, crate::authorship::authorship_log::PromptRecord>,
+    pub file_contents: HashMap<String, String>,
+    pub humans: std::collections::BTreeMap<String, crate::authorship::authorship_log::HumanRecord>,
+    pub sessions:
+        std::collections::BTreeMap<String, crate::authorship::authorship_log::SessionRecord>,
 }
 
 impl RecentWorkingLogSnapshot {
     fn is_empty(&self) -> bool {
-        self.files.is_empty() && self.prompts.is_empty()
+        self.files.is_empty() && self.prompts.is_empty() && self.sessions.is_empty()
     }
 }
 
@@ -3681,7 +3705,7 @@ enum RecentReplayPrerequisite {
         old_head: String,
         pathspecs: Vec<String>,
         final_state: Option<HashMap<String, String>>,
-        working_log_snapshot: Option<RecentWorkingLogSnapshot>,
+        working_log_snapshot: Option<Box<RecentWorkingLogSnapshot>>,
     },
     CheckoutSwitchRename {
         target_head: String,
@@ -5627,12 +5651,13 @@ impl ActorDaemonCoordinator {
                     let repo_wd = request.repo_working_dir().to_string();
                     let checkpoint_file_paths: Vec<String> = match request.as_ref() {
                         CheckpointRunRequest::Live(req) => req
-                            .agent_run_result
+                            .checkpoint_request
                             .as_ref()
-                            .and_then(|r| {
-                                r.edited_filepaths
-                                    .clone()
-                                    .or_else(|| r.will_edit_filepaths.clone())
+                            .map(|r| {
+                                r.file_paths
+                                    .iter()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .collect()
                             })
                             .unwrap_or_default(),
                         CheckpointRunRequest::Captured(req) => {
@@ -5659,7 +5684,7 @@ impl ActorDaemonCoordinator {
                     tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
                     let checkpoint_start = std::time::Instant::now();
                     // Wrap checkpoint processing in catch_unwind to recover from panics.
-                    let checkpoint_result = {
+                    let checkpoint_request = {
                         let future = async {
                             let ack = self
                                 .coordinator
@@ -5673,7 +5698,7 @@ impl ActorDaemonCoordinator {
                         let caught = std::panic::AssertUnwindSafe(future);
                         futures::FutureExt::catch_unwind(caught).await
                     };
-                    let mut result = match checkpoint_result {
+                    let mut result = match checkpoint_request {
                         Ok(inner) => inner,
                         Err(panic_payload) => {
                             let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>()
@@ -6690,7 +6715,15 @@ impl ActorDaemonCoordinator {
         let primary = cmd.primary_command.as_deref().unwrap_or("unknown");
         let is_write_op = matches!(
             primary,
-            "commit" | "rebase" | "merge" | "cherry-pick" | "am" | "stash" | "reset" | "push"
+            "commit"
+                | "rebase"
+                | "merge"
+                | "cherry-pick"
+                | "am"
+                | "stash"
+                | "reset"
+                | "push"
+                | "update-ref"
         );
         if is_write_op && cmd.exit_code == 0 {
             let repo_path = cmd
@@ -6782,7 +6815,7 @@ impl ActorDaemonCoordinator {
                         let carried_va = crate::authorship::virtual_attribution::VirtualAttributions::from_persisted_working_log(
                             repo.clone(),
                             old_head.clone(),
-                            Some(repo.git_author_identity().name_or_unknown()),
+                            Some(repo.git_author_identity().formatted_or_unknown()),
                         )?;
                         Some((new_head, carried_va, snapshot.clone()))
                     }
@@ -7017,6 +7050,45 @@ impl ActorDaemonCoordinator {
                 )?;
             }
         }
+
+        // Handle fast-forward update-ref: rename working log when the ref update
+        // is a fast-forward that affects the currently checked-out branch.
+        // Non-ancestor (rewrite) cases are already handled by
+        // rewrite_events_from_semantic_events() above.
+        if primary == "update-ref"
+            && let Some(worktree) = cmd.worktree.as_ref()
+        {
+            let current_branch = cmd.pre_repo.as_ref().and_then(|r| r.branch.clone());
+            for event in events {
+                if let crate::daemon::domain::SemanticEvent::RefUpdated {
+                    reference,
+                    old,
+                    new,
+                } = event
+                {
+                    if !reference.starts_with("refs/heads/")
+                        || !is_valid_oid(old)
+                        || is_zero_oid(old)
+                        || !is_valid_oid(new)
+                        || is_zero_oid(new)
+                        || old == new
+                    {
+                        continue;
+                    }
+                    let affects_checked_out_branch =
+                        current_branch.as_deref().is_some_and(|branch| {
+                            reference == &format!("refs/heads/{}", branch) || reference == branch
+                        });
+                    if affects_checked_out_branch
+                        && let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy())
+                        && repo_is_ancestor(&repo, old, new)
+                    {
+                        let _ = repo.storage.rename_working_log(old, new);
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -8526,7 +8598,7 @@ mod tests {
                     author: Some("test".to_string()),
                     quiet: Some(true),
                     is_pre_commit: Some(false),
-                    agent_run_result: None,
+                    checkpoint_request: None,
                 },
             ))),
             wait: Some(true),
@@ -8668,65 +8740,6 @@ mod tests {
             normalize_commit_carryover_snapshot(Some(&carryover), Some(&committed)).unwrap();
 
         assert_eq!(normalized.get("example.txt"), carryover.get("example.txt"));
-    }
-
-    #[test]
-    fn recent_working_log_snapshot_preserves_humans_on_restore() {
-        use crate::authorship::attribution_tracker::LineAttribution;
-        use crate::authorship::authorship_log::HumanRecord;
-        use crate::git::test_utils::TmpRepo;
-        use std::collections::BTreeMap;
-
-        let test_repo = TmpRepo::new().expect("Failed to create test repo");
-        let repo = test_repo.gitai_repo();
-
-        // Create a snapshot with KnownHuman attributions
-        let h_hash = "h_abc123";
-        let human_record = HumanRecord {
-            author: "Test User <test@example.com>".to_string(),
-        };
-
-        let file_path = "test.txt";
-        let line_attributions = vec![LineAttribution {
-            start_line: 1,
-            end_line: 1,
-            author_id: h_hash.to_string(),
-            overrode: None,
-        }];
-
-        let mut humans = BTreeMap::new();
-        humans.insert(h_hash.to_string(), human_record.clone());
-
-        let snapshot = RecentWorkingLogSnapshot {
-            files: HashMap::from([(file_path.to_string(), line_attributions.clone())]),
-            prompts: HashMap::new(),
-            file_contents: HashMap::from([(file_path.to_string(), "test line\n".to_string())]),
-            humans: humans.clone(),
-        };
-
-        // Restore the snapshot
-        let base_commit = "HEAD";
-        let restored = restore_recent_working_log_snapshot(repo, base_commit, &snapshot).unwrap();
-        assert!(restored, "Snapshot should be restored");
-
-        // Read back the INITIAL file and verify humans are present
-        let working_log = repo
-            .storage
-            .working_log_for_base_commit(base_commit)
-            .unwrap();
-        let initial = working_log.read_initial_attributions();
-
-        // Verify humans were restored
-        assert_eq!(
-            initial.humans.len(),
-            1,
-            "Should have one human record after restore"
-        );
-        assert_eq!(
-            initial.humans.get(h_hash),
-            Some(&human_record),
-            "Human record should match"
-        );
     }
 
     // -----------------------------------------------------------------------

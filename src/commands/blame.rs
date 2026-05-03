@@ -1,7 +1,6 @@
 use crate::auth::CredentialStore;
-use crate::authorship::authorship_log::{HumanRecord, PromptRecord};
+use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
-use crate::authorship::prompt_utils::enrich_prompt_messages;
 use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
 use crate::git::refs::get_reference_as_authorship_log_v3;
@@ -61,6 +60,8 @@ pub struct BlameHunk {
 pub struct BlameAnalysisResult {
     pub line_authors: HashMap<u32, String>,
     pub prompt_records: HashMap<String, PromptRecord>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub session_records: HashMap<String, SessionRecord>,
     pub blame_hunks: Vec<BlameHunk>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub humans: BTreeMap<String, HumanRecord>,
@@ -410,6 +411,7 @@ impl Repository {
         let (
             line_authors,
             prompt_records,
+            session_records,
             humans,
             authorship_logs,
             prompt_commits,
@@ -420,6 +422,7 @@ impl Repository {
             BlameAnalysisResult {
                 line_authors,
                 prompt_records,
+                session_records,
                 blame_hunks,
                 humans,
             },
@@ -549,6 +552,7 @@ impl Repository {
         let BlameAnalysisResult {
             line_authors,
             prompt_records,
+            session_records: _,
             blame_hunks: _,
             humans: _,
         } = analysis;
@@ -1034,6 +1038,7 @@ fn overlay_ai_authorship(
     (
         HashMap<u32, String>,
         HashMap<String, PromptRecord>,
+        HashMap<String, SessionRecord>,
         BTreeMap<String, HumanRecord>, // humans map
         Vec<AuthorshipLog>,
         HashMap<String, Vec<String>>,      // prompt_hash -> commit_shas
@@ -1043,6 +1048,7 @@ fn overlay_ai_authorship(
 > {
     let mut line_authors: HashMap<u32, String> = HashMap::new();
     let mut prompt_records: HashMap<String, PromptRecord> = HashMap::new();
+    let mut session_records: HashMap<String, SessionRecord> = HashMap::new();
     let mut humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
     // Track which commits contain each prompt hash
     let mut prompt_commits: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
@@ -1078,6 +1084,13 @@ fn overlay_ai_authorship(
                 humans
                     .entry(human_id.clone())
                     .or_insert_with(|| human_record.clone());
+            }
+
+            // Collect session records from this authorship log
+            for (session_id, session_record) in &authorship_log.metadata.sessions {
+                session_records
+                    .entry(session_id.clone())
+                    .or_insert_with(|| session_record.clone());
             }
 
             // Check each line in this hunk for AI authorship using compact schema
@@ -1242,6 +1255,7 @@ fn overlay_ai_authorship(
     Ok((
         line_authors,
         prompt_records,
+        session_records,
         humans,
         authorship_logs,
         prompt_commits_vec,
@@ -1363,12 +1377,8 @@ fn output_json_format(
     // Only include prompts that are actually referenced in lines
     let referenced_prompt_ids: std::collections::HashSet<&String> = lines_map.values().collect();
 
-    // Enrich prompts that have empty messages by falling back through storage layers
-    let mut enriched_prompts = prompt_records.clone();
-    enrich_prompt_messages(&mut enriched_prompts, &referenced_prompt_ids);
-
     // Create read models with other_files and commits populated
-    let filtered_prompts: HashMap<String, PromptRecordWithOtherFiles> = enriched_prompts
+    let filtered_prompts: HashMap<String, PromptRecordWithOtherFiles> = prompt_records
         .iter()
         .filter(|(k, _)| referenced_prompt_ids.contains(k))
         .map(|(k, v)| {
@@ -1840,39 +1850,6 @@ fn output_default_format(
         // Append git-like stats lines to output string
         let stats = "num read blob: 1\nnum get patch: 0\nnum commits: 0\n";
         output.push_str(stats);
-    }
-
-    // Append prompt dump for --show-prompt in non-interactive (piped) mode
-    if options.show_prompt && !io::stdout().is_terminal() {
-        let mut referenced_ids: std::collections::HashSet<&String> =
-            std::collections::HashSet::new();
-        for author in line_authors.values() {
-            if prompt_records.contains_key(author) {
-                referenced_ids.insert(author);
-            }
-        }
-
-        if !referenced_ids.is_empty() {
-            let mut enriched_prompts = prompt_records.clone();
-            enrich_prompt_messages(&mut enriched_prompts, &referenced_ids);
-
-            output.push_str("---\n");
-
-            let mut sorted_ids: Vec<&String> = referenced_ids.into_iter().collect();
-            sorted_ids.sort();
-
-            for id in sorted_ids {
-                let short_hash = &id[..7.min(id.len())];
-                output.push_str(&format!("Prompt [{}]\n", short_hash));
-                if let Some(prompt) = enriched_prompts.get(id) {
-                    let json = serde_json::to_string(&prompt.messages)
-                        .unwrap_or_else(|_| "[]".to_string());
-                    output.push_str(&json);
-                    output.push('\n');
-                }
-                output.push('\n');
-            }
-        }
     }
 
     // Output handling - respect pager environment variables

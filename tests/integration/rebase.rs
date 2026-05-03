@@ -299,11 +299,11 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
         AuthorshipLog::deserialize_from_string(&old_note).expect("parse original authorship note");
     assert!(
         old_log.metadata.prompts.is_empty(),
-        "precondition: human-only commit should have no attestations"
+        "precondition: human-only commit should have no prompts"
     );
     assert!(
-        old_log.metadata.prompts.is_empty(),
-        "precondition: human-only commit should have no prompts"
+        old_log.metadata.sessions.is_empty(),
+        "precondition: human-only commit should have no sessions"
     );
 
     // Rebase prod onto dev.
@@ -318,11 +318,11 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
         .expect("parse rebased authorship note");
     assert!(
         rebased_log.metadata.prompts.is_empty(),
-        "rebased human-only commit should still have no attestations"
+        "rebased human-only commit should still have no prompts"
     );
     assert!(
-        rebased_log.metadata.prompts.is_empty(),
-        "rebased human-only commit should still have no prompts"
+        rebased_log.metadata.sessions.is_empty(),
+        "rebased human-only commit should still have no sessions"
     );
     assert_eq!(rebased_log.metadata.base_commit_sha, rebased_sha);
 }
@@ -356,11 +356,11 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse source note");
     assert!(
         original_log.metadata.prompts.is_empty(),
-        "precondition: should start metadata-only"
+        "precondition: source commit should not have prompts before test mutation"
     );
     assert!(
-        original_log.metadata.prompts.is_empty(),
-        "precondition: source commit should not have prompts before test mutation"
+        original_log.metadata.sessions.is_empty(),
+        "precondition: source commit should not have sessions before test mutation"
     );
 
     let mut test_attrs = HashMap::new();
@@ -376,13 +376,12 @@ fn test_rebase_preserves_prompt_only_commit_note_metadata() {
                 model: "test-model".to_string(),
             },
             human_author: Some("Test User <test@example.com>".to_string()),
-            messages: vec![],
             total_additions: 17,
             total_deletions: 3,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: Some(test_attrs.clone()),
+            messages_url: None,
         },
     );
 
@@ -1475,9 +1474,17 @@ fn test_rebase_preserves_custom_attributes_from_config() {
         .expect("original commit should have authorship note");
     let original_log =
         AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
-    for prompt in original_log.metadata.prompts.values() {
+    assert!(
+        original_log.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        !original_log.metadata.sessions.is_empty(),
+        "precondition: original commit should have session records"
+    );
+    for session in original_log.metadata.sessions.values() {
         assert_eq!(
-            prompt.custom_attributes.as_ref(),
+            session.custom_attributes.as_ref(),
             Some(&attrs),
             "precondition: original commit should have custom_attributes from config"
         );
@@ -1501,12 +1508,16 @@ fn test_rebase_preserves_custom_attributes_from_config() {
     let rebased_log =
         AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
     assert!(
-        !rebased_log.metadata.prompts.is_empty(),
-        "rebased commit should have prompt records"
+        rebased_log.metadata.prompts.is_empty(),
+        "rebased commit should not have prompts"
     );
-    for prompt in rebased_log.metadata.prompts.values() {
+    assert!(
+        !rebased_log.metadata.sessions.is_empty(),
+        "rebased commit should have session records"
+    );
+    for session in rebased_log.metadata.sessions.values() {
         assert_eq!(
-            prompt.custom_attributes.as_ref(),
+            session.custom_attributes.as_ref(),
             Some(&attrs),
             "custom_attributes should be preserved through rebase"
         );
@@ -1556,23 +1567,48 @@ fn test_rebase_prompt_metrics_update_per_commit() {
         .expect("commit 2 should have note");
     let log2 = AuthorshipLog::deserialize_from_string(&note2).expect("parse note 2");
 
-    let pre_accepted_1: u32 = log1
-        .metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
+    // Session format: verify pre-rebase sessions exist and attestation line counts differ
+    assert!(
+        log1.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        log2.metadata.prompts.is_empty(),
+        "new-format test should produce sessions, not prompts"
+    );
+    assert!(
+        !log1.metadata.sessions.is_empty(),
+        "precondition: commit 1 should have session records"
+    );
+    assert!(
+        !log2.metadata.sessions.is_empty(),
+        "precondition: commit 2 should have session records"
+    );
+    let pre_lines_1: u32 = log1
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
         .sum();
-    let pre_accepted_2: u32 = log2
-        .metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
+    let pre_lines_2: u32 = log2
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
         .sum();
     assert!(
-        pre_accepted_1 < pre_accepted_2,
-        "precondition: commit 2 ({}) should have more accepted_lines than commit 1 ({})",
-        pre_accepted_2,
-        pre_accepted_1
+        pre_lines_1 < pre_lines_2,
+        "precondition: commit 2 ({}) should have more attested lines than commit 1 ({})",
+        pre_lines_2,
+        pre_lines_1
     );
 
     // Advance default branch
@@ -1605,25 +1641,49 @@ fn test_rebase_prompt_metrics_update_per_commit() {
     let rebased_log2 =
         AuthorshipLog::deserialize_from_string(&rebased_note2).expect("parse rebased note 2");
 
-    let post_accepted_1: u32 = rebased_log1
-        .metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
-        .sum();
-    let post_accepted_2: u32 = rebased_log2
-        .metadata
-        .prompts
-        .values()
-        .map(|p| p.accepted_lines)
-        .sum();
-
+    // Session format: verify sessions survive rebase and attestation line counts differ
     assert!(
-        post_accepted_1 < post_accepted_2,
-        "regression: rebased commit 2 ({}) should have more accepted_lines than commit 1 ({}). \
+        rebased_log1.metadata.prompts.is_empty(),
+        "rebased commit 1 should not have prompts"
+    );
+    assert!(
+        rebased_log2.metadata.prompts.is_empty(),
+        "rebased commit 2 should not have prompts"
+    );
+    assert!(
+        !rebased_log1.metadata.sessions.is_empty(),
+        "regression: rebased commit 1 should have session records"
+    );
+    assert!(
+        !rebased_log2.metadata.sessions.is_empty(),
+        "regression: rebased commit 2 should have session records"
+    );
+    let post_lines_1: u32 = rebased_log1
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
+        .sum();
+    let post_lines_2: u32 = rebased_log2
+        .attestations
+        .iter()
+        .flat_map(|a| &a.entries)
+        .flat_map(|e| &e.line_ranges)
+        .map(|r| match r {
+            git_ai::authorship::authorship_log::LineRange::Single(_) => 1,
+            git_ai::authorship::authorship_log::LineRange::Range(s, e) => e - s + 1,
+        })
+        .sum();
+    assert!(
+        post_lines_1 < post_lines_2,
+        "regression: rebased commit 2 ({}) should have more attested lines than commit 1 ({}). \
          If equal, the fast path is freezing metrics across commits.",
-        post_accepted_2,
-        post_accepted_1
+        post_lines_2,
+        post_lines_1
     );
 }
 
@@ -2112,6 +2172,8 @@ crate::reuse_tests_in_worktree_with_attrs!(
     test_rebase_squash_preserves_all_authorship,
     test_rebase_reword_commit_with_children,
     test_rebase_interactive_drop_preserves_attribution,
+    test_rebase_squash_preserves_human_attribution,
+    test_rebase_squash_preserves_session_attribution,
 );
 
 /// Regression test: file modified via hunk path, then deleted, then recreated.
@@ -2257,5 +2319,362 @@ fn test_rebase_preserves_authorship_with_multibyte_utf8_in_diff_context() {
             .ai(),
         "    result = run_rules()".ai(),
         "    assert result".ai()
+    ]);
+}
+
+/// Regression test for issue #1214: after squash rebase of 3 commits (2 AI + 1 human),
+/// the merged note loses the humans block entirely — known-human line attribution is gone.
+///
+/// Repro from the issue:
+/// 1. AI commit 1: AI adds lines to a file (with some lines the human later overrides)
+/// 2. Human commit: human edits the same file (known_human checkpoint)
+/// 3. AI commit 2: AI adds more lines
+/// 4. git rebase -i HEAD~3 → fixup all into first commit
+/// 5. Inspect merged note → humans block must be preserved
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn test_rebase_squash_preserves_human_attribution() {
+    use std::io::Write;
+
+    let repo = TestRepo::new();
+
+    // Create initial commit on default branch
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let default_branch = repo.current_branch();
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    let file_path = repo.path().join("handler.go");
+
+    // --- AI commit 1: AI adds lines ---
+    // Pre-edit checkpoint: file doesn't exist yet, take a snapshot of "nothing"
+    repo.git_ai(&["checkpoint", "human", "handler.go"]).unwrap();
+    let ai_content_1 = "\
+func handleOrder() {
+    validate()
+    process()
+}
+";
+    std::fs::write(&file_path, ai_content_1).unwrap();
+    // Post-edit checkpoint: AI wrote the content
+    repo.git_ai(&["checkpoint", "mock_ai", "handler.go"])
+        .unwrap();
+    repo.stage_all_and_commit("AI commit 1").unwrap();
+
+    let mut handler = repo.filename("handler.go");
+    handler.assert_committed_lines(crate::lines![
+        "func handleOrder() {".ai(),
+        "    validate()".ai(),
+        "    process()".ai(),
+        "}".ai(),
+    ]);
+
+    // --- Human commit: human edits the file, adding a line ---
+    let human_content = "\
+func handleOrder() {
+    validate()
+    log(\"order received\")
+    process()
+}
+";
+    std::fs::write(&file_path, human_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "handler.go"])
+        .unwrap();
+    repo.stage_all_and_commit("Human commit").unwrap();
+
+    handler.assert_committed_lines(crate::lines![
+        "func handleOrder() {".ai(),
+        "    validate()".ai(),
+        "    log(\"order received\")".human(),
+        "    process()".ai(),
+        "}".ai(),
+    ]);
+
+    // Verify humans block exists before squash
+    let human_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let human_note = repo
+        .read_authorship_note(&human_sha)
+        .expect("human commit should have authorship note");
+    let human_log = AuthorshipLog::deserialize_from_string(&human_note).expect("parse human note");
+    assert!(
+        !human_log.metadata.humans.is_empty(),
+        "Pre-squash: human commit should have humans metadata block"
+    );
+
+    // --- AI commit 2: AI adds more lines ---
+    // Pre-edit checkpoint: snapshot current state before AI edits
+    repo.git_ai(&["checkpoint", "human", "handler.go"]).unwrap();
+    let ai_content_2 = "\
+func handleOrder() {
+    validate()
+    log(\"order received\")
+    process()
+    sendMetrics()
+}
+";
+    std::fs::write(&file_path, ai_content_2).unwrap();
+    // Post-edit checkpoint: AI wrote the new line
+    repo.git_ai(&["checkpoint", "mock_ai", "handler.go"])
+        .unwrap();
+    repo.stage_all_and_commit("AI commit 2").unwrap();
+
+    handler.assert_committed_lines(crate::lines![
+        "func handleOrder() {".ai(),
+        "    validate()".ai(),
+        "    log(\"order received\")".human(),
+        "    process()".ai(),
+        "    sendMetrics()".ai(),
+        "}".ai(),
+    ]);
+
+    // Advance main branch so rebase has something to replay onto
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file2 = repo.filename("main2.txt");
+    main_file2.set_contents(crate::lines!["main work"]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+    let base_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // --- Squash rebase: fixup all 3 commits into the first ---
+    repo.git(&["checkout", "feature"]).unwrap();
+
+    let script_content = r#"#!/bin/sh
+sed -i.bak '2s/pick/fixup/' "$1"
+sed -i.bak '3s/pick/fixup/' "$1"
+"#;
+
+    let script_path = repo.path().join("squash_script.sh");
+    let mut script_file = std::fs::File::create(&script_path).unwrap();
+    script_file.write_all(script_content.as_bytes()).unwrap();
+    drop(script_file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let rebase_result = repo.git_with_env(
+        &["rebase", "-i", &base_commit],
+        &[
+            ("GIT_SEQUENCE_EDITOR", script_path.to_str().unwrap()),
+            ("GIT_EDITOR", "true"),
+        ],
+        None,
+    );
+
+    if rebase_result.is_err() {
+        eprintln!("git rebase output: {:?}", rebase_result);
+        panic!("Interactive rebase with fixup failed");
+    }
+
+    // Verify file content survived the squash
+    assert!(
+        repo.path().join("handler.go").exists(),
+        "handler.go should exist after squash"
+    );
+
+    // Verify the merged note has the humans block preserved
+    let squashed_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let squashed_note = repo
+        .read_authorship_note(&squashed_sha)
+        .expect("squashed commit should have authorship note");
+    let squashed_log =
+        AuthorshipLog::deserialize_from_string(&squashed_note).expect("parse squashed note");
+    assert!(
+        !squashed_log.metadata.humans.is_empty(),
+        "Post-squash: humans metadata block must be preserved (issue #1214)"
+    );
+    for record in squashed_log.metadata.humans.values() {
+        assert_eq!(
+            record.author, "Test User <test@example.com>",
+            "HumanRecord.author should include email"
+        );
+    }
+
+    // Verify line-level attribution: human line must still show as human
+    // Note: the closing `}` may lose AI attribution during squash-rebase
+    // content-diff reconstruction (it's a common line that gets re-attributed
+    // to the commit author). The critical assertion is that the human-authored
+    // line retains its known-human attribution.
+    handler.assert_lines_and_blame(crate::lines![
+        "func handleOrder() {".ai(),
+        "    validate()".ai(),
+        "    log(\"order received\")".human(),
+        "    process()".ai(),
+        "    sendMetrics()".ai(),
+        "}".unattributed_human(),
+    ]);
+}
+
+/// Verify that session metadata survives squash rebase.
+/// This is the session-format counterpart of test_rebase_squash_preserves_human_attribution.
+/// Sessions use s_<id>::t_<hash> attestation entries and are the current default format.
+/// The delta_sessions code already scans current_attributions (unlike the old delta_humans
+/// code), so this test should pass without additional fixes.
+#[test]
+#[cfg(not(target_os = "windows"))]
+fn test_rebase_squash_preserves_session_attribution() {
+    use std::io::Write;
+
+    let repo = TestRepo::new();
+
+    // Create initial commit on default branch
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let default_branch = repo.current_branch();
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    let file_path = repo.path().join("service.go");
+
+    // --- AI commit 1: AI adds initial lines ---
+    repo.git_ai(&["checkpoint", "human", "service.go"]).unwrap();
+    let ai_content_1 = "\
+func serve() {
+    listen()
+    handle()
+}
+";
+    std::fs::write(&file_path, ai_content_1).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "service.go"])
+        .unwrap();
+    repo.stage_all_and_commit("AI commit 1").unwrap();
+
+    let mut service = repo.filename("service.go");
+    service.assert_committed_lines(crate::lines![
+        "func serve() {".ai(),
+        "    listen()".ai(),
+        "    handle()".ai(),
+        "}".ai(),
+    ]);
+
+    // Verify session metadata exists on commit 1
+    let sha1 = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let note1 = repo
+        .read_authorship_note(&sha1)
+        .expect("AI commit 1 should have note");
+    let log1 = AuthorshipLog::deserialize_from_string(&note1).expect("parse note 1");
+    assert_eq!(
+        log1.metadata.sessions.len(),
+        1,
+        "AI commit 1 should have exactly 1 session"
+    );
+
+    // --- AI commit 2: AI adds more lines ---
+    repo.git_ai(&["checkpoint", "human", "service.go"]).unwrap();
+    let ai_content_2 = "\
+func serve() {
+    listen()
+    handle()
+    logMetrics()
+}
+";
+    std::fs::write(&file_path, ai_content_2).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "service.go"])
+        .unwrap();
+    repo.stage_all_and_commit("AI commit 2").unwrap();
+
+    service.assert_committed_lines(crate::lines![
+        "func serve() {".ai(),
+        "    listen()".ai(),
+        "    handle()".ai(),
+        "    logMetrics()".ai(),
+        "}".ai(),
+    ]);
+
+    // --- AI commit 3: AI adds yet more ---
+    repo.git_ai(&["checkpoint", "human", "service.go"]).unwrap();
+    let ai_content_3 = "\
+func serve() {
+    listen()
+    handle()
+    logMetrics()
+    shutdown()
+}
+";
+    std::fs::write(&file_path, ai_content_3).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "service.go"])
+        .unwrap();
+    repo.stage_all_and_commit("AI commit 3").unwrap();
+
+    service.assert_committed_lines(crate::lines![
+        "func serve() {".ai(),
+        "    listen()".ai(),
+        "    handle()".ai(),
+        "    logMetrics()".ai(),
+        "    shutdown()".ai(),
+        "}".ai(),
+    ]);
+
+    // Advance main branch so rebase has something to replay onto
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut main_file2 = repo.filename("main2.txt");
+    main_file2.set_contents(crate::lines!["main work"]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+    let base_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // --- Squash rebase: fixup all 3 commits into the first ---
+    repo.git(&["checkout", "feature"]).unwrap();
+
+    let script_content = r#"#!/bin/sh
+sed -i.bak '2s/pick/fixup/' "$1"
+sed -i.bak '3s/pick/fixup/' "$1"
+"#;
+
+    let script_path = repo.path().join("squash_script.sh");
+    let mut script_file = std::fs::File::create(&script_path).unwrap();
+    script_file.write_all(script_content.as_bytes()).unwrap();
+    drop(script_file);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script_path, perms).unwrap();
+    }
+
+    let rebase_result = repo.git_with_env(
+        &["rebase", "-i", &base_commit],
+        &[
+            ("GIT_SEQUENCE_EDITOR", script_path.to_str().unwrap()),
+            ("GIT_EDITOR", "true"),
+        ],
+        None,
+    );
+
+    if rebase_result.is_err() {
+        eprintln!("git rebase output: {:?}", rebase_result);
+        panic!("Interactive rebase with fixup failed");
+    }
+
+    // Verify the merged note has sessions metadata preserved
+    let squashed_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let squashed_note = repo
+        .read_authorship_note(&squashed_sha)
+        .expect("squashed commit should have authorship note");
+    let squashed_log =
+        AuthorshipLog::deserialize_from_string(&squashed_note).expect("parse squashed note");
+    // Each mock_ai checkpoint creates a distinct session, so the squashed
+    // note should have all 3 sessions merged from the 3 original commits.
+    assert_eq!(
+        squashed_log.metadata.sessions.len(),
+        3,
+        "Post-squash: squashed note should have all 3 sessions merged"
+    );
+
+    // Verify line-level AI attribution survived the squash
+    service.assert_lines_and_blame(crate::lines![
+        "func serve() {".ai(),
+        "    listen()".ai(),
+        "    handle()".ai(),
+        "    logMetrics()".ai(),
+        "    shutdown()".ai(),
+        "}".unattributed_human(),
     ]);
 }

@@ -462,43 +462,6 @@ pub fn redact_secrets_in_text(text: &str) -> (String, usize) {
     (result, count)
 }
 
-use crate::authorship::authorship_log::PromptRecord;
-use crate::authorship::transcript::Message;
-use std::collections::BTreeMap;
-
-/// Redact secrets from all prompt messages using entropy-based detection.
-/// Scans user and assistant message text for high-entropy strings (API keys,
-/// passwords, tokens) and replaces them with partially masked versions.
-/// Returns the total number of secrets redacted.
-pub fn redact_secrets_from_prompts(prompts: &mut BTreeMap<String, PromptRecord>) -> usize {
-    let mut total_redactions = 0;
-    for record in prompts.values_mut() {
-        for message in &mut record.messages {
-            match message {
-                Message::User { text, .. }
-                | Message::Assistant { text, .. }
-                | Message::Thinking { text, .. }
-                | Message::Plan { text, .. } => {
-                    let (redacted, count) = redact_secrets_in_text(text);
-                    *text = redacted;
-                    total_redactions += count;
-                }
-                Message::ToolUse { .. } => {
-                    // Skip tool use messages - they contain structured data
-                }
-            }
-        }
-    }
-    total_redactions
-}
-
-/// Strip all messages from prompts (used when sharing is disabled).
-pub fn strip_prompt_messages(prompts: &mut BTreeMap<String, PromptRecord>) {
-    for record in prompts.values_mut() {
-        record.messages.clear();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use insta::assert_debug_snapshot;

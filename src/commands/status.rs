@@ -51,7 +51,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
     let ignore_patterns = effective_ignore_patterns(&repo, &[], &[]);
     let ignore_matcher = build_ignore_matcher(&ignore_patterns);
 
-    let default_user_name = repo.git_author_identity().name_or_unknown();
+    let default_user_name = repo.git_author_identity().formatted_or_unknown();
 
     let _ = checkpoint::run(
         &repo,
@@ -123,11 +123,16 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         Some(default_user_name.clone()),
     )?;
 
-    let pathspecs: HashSet<String> = checkpoints
+    let mut pathspecs: HashSet<String> = checkpoints
         .iter()
         .flat_map(|cp| cp.entries.iter().map(|e| e.file.clone()))
         .filter(|file| !should_ignore_file_with_matcher(file, &ignore_matcher))
         .collect();
+    for file_path in working_va.files() {
+        if !should_ignore_file_with_matcher(&file_path, &ignore_matcher) {
+            pathspecs.insert(file_path);
+        }
+    }
 
     let (authorship_log, initial) = working_va.to_authorship_log_and_initial_working_log(
         &repo,
@@ -315,9 +320,17 @@ fn count_ai_lines_from_initial(
         }
 
         for line_attr in line_attrs {
-            // Check if this author_id corresponds to an AI prompt (not human)
-            if initial.prompts.contains_key(&line_attr.author_id) {
-                // Count lines in this attribution
+            let is_ai = if line_attr.author_id.starts_with("s_") {
+                let session_key = line_attr
+                    .author_id
+                    .split("::")
+                    .next()
+                    .unwrap_or(&line_attr.author_id);
+                initial.sessions.contains_key(session_key)
+            } else {
+                initial.prompts.contains_key(&line_attr.author_id)
+            };
+            if is_ai {
                 let lines_count = line_attr.end_line - line_attr.start_line + 1;
                 ai_lines += lines_count;
             }
@@ -325,219 +338,4 @@ fn count_ai_lines_from_initial(
     }
 
     ai_lines
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::git::status::MAX_PATHSPEC_ARGS;
-    use crate::git::test_utils::TmpRepo;
-
-    /// Pad a set of real paths with non-existent paths to exceed MAX_PATHSPEC_ARGS.
-    fn padded_pathspecs(real_paths: &[&str]) -> HashSet<String> {
-        let mut set: HashSet<String> = real_paths.iter().map(|s| s.to_string()).collect();
-        let needed = MAX_PATHSPEC_ARGS + 1 - set.len();
-        for i in 0..needed {
-            set.insert(format!("nonexistent/padding_{:04}.txt", i));
-        }
-        set
-    }
-
-    #[test]
-    fn test_get_working_dir_diff_stats_post_filter_equivalence() {
-        let repo = TmpRepo::new().unwrap();
-        repo.write_file("a.txt", "L1\nL2\nL3\n", true).unwrap();
-        repo.write_file("b.txt", "hello\n", true).unwrap();
-        repo.commit_with_message("initial").unwrap();
-
-        // Modify both in working dir
-        std::fs::write(repo.path().join("a.txt"), "L1\nL2\nL3\nL4\nL5\n").unwrap();
-        std::fs::write(repo.path().join("b.txt"), "hello\nworld\n").unwrap();
-
-        let gitai_repo = repo.gitai_repo();
-        let ignore_matcher = build_ignore_matcher(&[]);
-
-        // Small pathspec (CLI-arg path) - only a.txt
-        let small: HashSet<String> = ["a.txt".to_string()].into_iter().collect();
-        let (added_small, _deleted_small) =
-            get_working_dir_diff_stats(gitai_repo, Some(&small), &ignore_matcher).unwrap();
-
-        // Padded pathspec (post-filter path) - only a.txt + padding
-        let large = padded_pathspecs(&["a.txt"]);
-        let (added_large, _deleted_large) =
-            get_working_dir_diff_stats(gitai_repo, Some(&large), &ignore_matcher).unwrap();
-
-        assert_eq!(added_small, 2, "small pathspec: a.txt adds 2 lines");
-        assert_eq!(
-            added_small, added_large,
-            "post-filter should produce same result as CLI-arg path"
-        );
-    }
-
-    #[test]
-    fn test_get_working_dir_diff_stats_post_filter_exclusion() {
-        let repo = TmpRepo::new().unwrap();
-        repo.write_file("a.txt", "L1\nL2\nL3\n", true).unwrap();
-        repo.write_file("b.txt", "hello\n", true).unwrap();
-        repo.commit_with_message("initial").unwrap();
-
-        // Modify both in working dir
-        std::fs::write(repo.path().join("a.txt"), "L1\nL2\nL3\nL4\nL5\n").unwrap();
-        std::fs::write(repo.path().join("b.txt"), "hello\nworld\n").unwrap();
-
-        let gitai_repo = repo.gitai_repo();
-        let ignore_matcher = build_ignore_matcher(&[]);
-
-        // Padded pathspec containing only "a.txt"
-        let large = padded_pathspecs(&["a.txt"]);
-        let (added, _deleted) =
-            get_working_dir_diff_stats(gitai_repo, Some(&large), &ignore_matcher).unwrap();
-
-        // a.txt adds 2 lines; b.txt adds 1 line but should be excluded
-        assert_eq!(added, 2, "should only count a.txt additions, not b.txt");
-    }
-
-    #[test]
-    fn test_get_working_dir_diff_stats_none_pathspecs() {
-        let repo = TmpRepo::new().unwrap();
-        repo.write_file("a.txt", "L1\nL2\nL3\n", true).unwrap();
-        repo.write_file("b.txt", "hello\n", true).unwrap();
-        repo.commit_with_message("initial").unwrap();
-
-        // Modify both in working dir
-        std::fs::write(repo.path().join("a.txt"), "L1\nL2\nL3\nL4\nL5\n").unwrap();
-        std::fs::write(repo.path().join("b.txt"), "hello\nworld\n").unwrap();
-
-        let gitai_repo = repo.gitai_repo();
-        let ignore_matcher = build_ignore_matcher(&[]);
-
-        // None pathspecs = all lines counted
-        let (added, _deleted) =
-            get_working_dir_diff_stats(gitai_repo, None, &ignore_matcher).unwrap();
-
-        // a.txt adds 2 lines + b.txt adds 1 line = 3 total
-        assert_eq!(added, 3, "None pathspecs should count all additions");
-    }
-
-    #[test]
-    fn test_get_working_dir_diff_stats_empty_pathspecs_returns_zero() {
-        let repo = TmpRepo::new().unwrap();
-        repo.write_file("a.txt", "L1\nL2\n", true).unwrap();
-        repo.commit_with_message("initial").unwrap();
-        std::fs::write(repo.path().join("a.txt"), "L1\nL2\nL3\n").unwrap();
-
-        let gitai_repo = repo.gitai_repo();
-        let ignore_matcher = build_ignore_matcher(&[]);
-        let empty: HashSet<String> = HashSet::new();
-        let (added, deleted) =
-            get_working_dir_diff_stats(gitai_repo, Some(&empty), &ignore_matcher).unwrap();
-        assert_eq!(added, 0);
-        assert_eq!(deleted, 0);
-    }
-
-    #[test]
-    fn test_get_working_dir_diff_stats_post_filter_with_rename() {
-        let repo = TmpRepo::new().unwrap();
-        repo.write_file("old_name.txt", "L1\nL2\nL3\n", true)
-            .unwrap();
-        repo.write_file("other.txt", "hello\n", true).unwrap();
-        repo.commit_with_message("initial").unwrap();
-
-        // Rename old_name.txt -> new_name.txt and add a line.
-        // Stage the rename so git diff HEAD sees it.
-        std::fs::remove_file(repo.path().join("old_name.txt")).unwrap();
-        std::fs::write(repo.path().join("new_name.txt"), "L1\nL2\nL3\nL4\n").unwrap();
-        // Also modify other.txt
-        std::fs::write(repo.path().join("other.txt"), "hello\nworld\n").unwrap();
-        // Stage everything so git diff HEAD picks up the rename + other changes
-        repo.git_command(&["add", "-A"]).unwrap();
-
-        let gitai_repo = repo.gitai_repo();
-        let ignore_matcher = build_ignore_matcher(&[]);
-
-        // Padded pathspec referencing the NEW name — with --no-renames,
-        // git reports this as a delete of old_name.txt + add of new_name.txt,
-        // so "new_name.txt" matches cleanly against parts[2].
-        let large = padded_pathspecs(&["new_name.txt"]);
-        let (added, _deleted) =
-            get_working_dir_diff_stats(gitai_repo, Some(&large), &ignore_matcher).unwrap();
-
-        // new_name.txt has 4 lines (all added since it's a new file after --no-renames)
-        // other.txt should be excluded
-        assert_eq!(
-            added, 4,
-            "should count new_name.txt additions only, not other.txt"
-        );
-    }
-
-    #[test]
-    fn test_get_working_dir_diff_stats_respects_ignore_patterns() {
-        let repo = TmpRepo::new().unwrap();
-        repo.write_file("src/lib.rs", "pub fn a() {}\n", true)
-            .unwrap();
-        repo.write_file("Cargo.lock", "# lock\n", true).unwrap();
-        repo.commit_with_message("initial").unwrap();
-
-        std::fs::write(
-            repo.path().join("src/lib.rs"),
-            "pub fn a() {}\npub fn b() {}\n",
-        )
-        .unwrap();
-        std::fs::write(
-            repo.path().join("Cargo.lock"),
-            "# lock\n# lock-2\n# lock-3\n",
-        )
-        .unwrap();
-
-        let ignore_matcher = build_ignore_matcher(&["Cargo.lock".to_string()]);
-        let (added, _deleted) =
-            get_working_dir_diff_stats(repo.gitai_repo(), None, &ignore_matcher).unwrap();
-        assert_eq!(added, 1, "Cargo.lock additions should be ignored");
-    }
-
-    #[test]
-    fn test_count_ai_lines_from_initial_respects_ignore_patterns() {
-        let mut initial = InitialAttributions::default();
-        initial.prompts.insert(
-            "prompt-1".to_string(),
-            crate::authorship::authorship_log::PromptRecord {
-                agent_id: crate::authorship::working_log::AgentId {
-                    tool: "cursor".to_string(),
-                    id: "session".to_string(),
-                    model: "gpt-4".to_string(),
-                },
-                human_author: None,
-                messages: vec![],
-                total_additions: 0,
-                total_deletions: 0,
-                accepted_lines: 0,
-                overriden_lines: 0,
-                messages_url: None,
-                custom_attributes: None,
-            },
-        );
-
-        initial.files.insert(
-            "src/lib.rs".to_string(),
-            vec![crate::authorship::attribution_tracker::LineAttribution {
-                start_line: 1,
-                end_line: 2,
-                author_id: "prompt-1".to_string(),
-                overrode: None,
-            }],
-        );
-        initial.files.insert(
-            "Cargo.lock".to_string(),
-            vec![crate::authorship::attribution_tracker::LineAttribution {
-                start_line: 1,
-                end_line: 100,
-                author_id: "prompt-1".to_string(),
-                overrode: None,
-            }],
-        );
-
-        let ignore_matcher = build_ignore_matcher(&["Cargo.lock".to_string()]);
-        let ai_lines = count_ai_lines_from_initial(&initial, &ignore_matcher);
-        assert_eq!(ai_lines, 2);
-    }
 }

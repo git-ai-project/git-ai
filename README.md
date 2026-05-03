@@ -138,20 +138,14 @@ Calculates % AI-code, AI-lines generated vs committed, accepted rates, human ove
 ```json
 {
   "human_additions": 28,
-  "mixed_additions": 5,
   "ai_additions": 76,
   "ai_accepted": 47,
-  "total_ai_additions": 120,
-  "total_ai_deletions": 34,
-  "time_waiting_for_ai": 240,
+  "git_diff_deleted_lines": 34,
+  "git_diff_added_lines": 104,
   "tool_model_breakdown": {
     "claude_code/claude-sonnet-4-5-20250929": {
       "ai_additions": 76,
-      "mixed_additions": 5,
-      "ai_accepted": 47,
-      "total_ai_additions": 120,
-      "total_ai_deletions": 34,
-      "time_waiting_for_ai": 240
+      "ai_accepted": 47
     }
   }
 }

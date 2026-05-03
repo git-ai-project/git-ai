@@ -9,12 +9,12 @@ use crate::authorship::ignore::{
 };
 use crate::authorship::working_log::{AgentId, CheckpointKind};
 use crate::commands::checkpoint::prepare_captured_checkpoint;
-use crate::commands::checkpoint_agent::agent_presets::AgentRunResult;
+use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::daemon::control_api::ControlRequest;
 use crate::daemon::{DaemonConfig, send_control_request_with_timeout};
 use crate::error::GitAiError;
 use crate::git::find_repository_in_path;
-use crate::utils::{checkpoint_delegation_enabled, normalize_to_posix};
+use crate::utils::normalize_to_posix;
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
@@ -300,16 +300,17 @@ pub struct InflightBashAgentContext {
 }
 
 impl InflightBashAgentContext {
-    pub fn into_agent_run_result(self, repo_working_dir: String) -> AgentRunResult {
-        AgentRunResult {
-            agent_id: self.agent_id,
-            agent_metadata: self.agent_metadata,
+    pub fn into_checkpoint_request(self, repo_working_dir: PathBuf) -> CheckpointRequest {
+        CheckpointRequest {
+            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
-            transcript: None,
-            repo_working_dir: Some(repo_working_dir),
-            edited_filepaths: None,
-            will_edit_filepaths: None,
+            agent_id: Some(self.agent_id),
+            repo_working_dir,
+            file_paths: vec![],
+            path_role: crate::commands::checkpoint::PreparedPathRole::Edited,
             dirty_files: None,
+            transcript_source: None,
+            metadata: self.agent_metadata.unwrap_or_default(),
             captured_checkpoint_id: None,
         }
     }
@@ -372,7 +373,7 @@ fn scan_active_bash_snapshots(repo_root: &Path) -> ActiveBashSnapshotScan {
 pub fn checkpoint_context_from_active_bash(
     repo_root: &Path,
     repo_working_dir: &str,
-) -> Option<(CheckpointKind, Option<AgentRunResult>)> {
+) -> Option<(CheckpointKind, Option<CheckpointRequest>)> {
     match scan_active_bash_snapshots(repo_root) {
         ActiveBashSnapshotScan {
             latest_context: Some(active_context),
@@ -386,7 +387,7 @@ pub fn checkpoint_context_from_active_bash(
             );
             Some((
                 CheckpointKind::AiAgent,
-                Some(active_context.into_agent_run_result(repo_working_dir.to_string())),
+                Some(active_context.into_checkpoint_request(PathBuf::from(repo_working_dir))),
             ))
         }
         ActiveBashSnapshotScan {
@@ -1151,13 +1152,6 @@ fn attempt_pre_hook_capture(
     snap: &StatSnapshot,
     repo_root: &Path,
 ) -> Option<CapturedCheckpointInfo> {
-    if !checkpoint_delegation_enabled() {
-        tracing::debug!(
-            "Pre-hook capture: async checkpoint delegation not enabled, skipping capture"
-        );
-        return None;
-    }
-
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
     // Watermarks are already embedded in the snapshot (queried before snapshot
@@ -1187,24 +1181,24 @@ fn attempt_pre_hook_capture(
         }
     };
 
-    let stale_paths: Vec<String> = stale_files
-        .iter()
-        .map(|p| normalize_to_posix(&p.to_string_lossy()))
-        .collect();
-
-    let agent_run_result = AgentRunResult {
-        agent_id: AgentId {
-            tool: "bash-tool".to_string(),
-            id: "pre-hook".to_string(),
-            model: String::new(),
-        },
-        agent_metadata: None,
+    let checkpoint_request = CheckpointRequest {
+        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::Human,
-        transcript: None,
-        repo_working_dir: Some(repo_working_dir.clone()),
-        edited_filepaths: None,
-        will_edit_filepaths: Some(stale_paths),
-        dirty_files: Some(contents),
+        agent_id: None,
+        repo_working_dir: PathBuf::from(repo_working_dir.clone()),
+        file_paths: stale_files
+            .iter()
+            .map(|p| PathBuf::from(crate::utils::normalize_to_posix(&p.to_string_lossy())))
+            .collect(),
+        path_role: crate::commands::checkpoint::PreparedPathRole::WillEdit,
+        dirty_files: Some(
+            contents
+                .into_iter()
+                .map(|(k, v)| (PathBuf::from(k), v))
+                .collect(),
+        ),
+        transcript_source: None,
+        metadata: HashMap::new(),
         captured_checkpoint_id: None,
     };
 
@@ -1212,7 +1206,7 @@ fn attempt_pre_hook_capture(
         &repo,
         "bash-tool", // author
         CheckpointKind::Human,
-        Some(&agent_run_result),
+        Some(&checkpoint_request),
         false, // is_pre_commit
         None,  // base_commit_override
     ) {
@@ -1253,15 +1247,6 @@ fn attempt_post_hook_capture(
     repo_root: &Path,
     changed_paths: &[String],
 ) -> Option<CapturedCheckpointInfo> {
-    // Only attempt capture when delegation is enabled — captured checkpoint
-    // files are consumed by the daemon; without it they would accumulate.
-    if !checkpoint_delegation_enabled() {
-        tracing::debug!(
-            "Post-hook capture: async checkpoint delegation not enabled, skipping capture"
-        );
-        return None;
-    }
-
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
     // Exclude deleted files: they have no post-content to capture, and recording
@@ -1290,20 +1275,28 @@ fn attempt_post_hook_capture(
         }
     };
 
-    let existing_path_strings: Vec<String> = existing_paths.iter().map(|p| p.to_string()).collect();
-    let agent_run_result = AgentRunResult {
-        agent_id: AgentId {
+    let checkpoint_request = CheckpointRequest {
+        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+        checkpoint_kind: CheckpointKind::AiAgent,
+        agent_id: Some(AgentId {
             tool: "bash-tool".to_string(),
             id: "post-hook".to_string(),
             model: String::new(),
-        },
-        agent_metadata: None,
-        checkpoint_kind: CheckpointKind::AiAgent,
-        transcript: None,
-        repo_working_dir: Some(repo_working_dir.clone()),
-        edited_filepaths: Some(existing_path_strings),
-        will_edit_filepaths: None,
-        dirty_files: Some(contents),
+        }),
+        repo_working_dir: PathBuf::from(repo_working_dir.clone()),
+        file_paths: existing_paths
+            .iter()
+            .map(|p| PathBuf::from(p.as_str()))
+            .collect(),
+        path_role: crate::commands::checkpoint::PreparedPathRole::Edited,
+        dirty_files: Some(
+            contents
+                .into_iter()
+                .map(|(k, v)| (PathBuf::from(k), v))
+                .collect(),
+        ),
+        transcript_source: None,
+        metadata: HashMap::new(),
         captured_checkpoint_id: None,
     };
 
@@ -1311,7 +1304,7 @@ fn attempt_post_hook_capture(
         &repo,
         "bash-tool", // author
         CheckpointKind::AiAgent,
-        Some(&agent_run_result),
+        Some(&checkpoint_request),
         false, // is_pre_commit
         None,  // base_commit_override
     ) {

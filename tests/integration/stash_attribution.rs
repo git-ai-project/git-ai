@@ -43,8 +43,8 @@ fn test_stash_pop_with_ai_attribution() {
 
     // Check authorship log has AI prompts
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
 }
 
@@ -83,8 +83,8 @@ fn test_stash_apply_with_ai_attribution() {
 
     // Check authorship log has AI prompts
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
 }
 
@@ -128,8 +128,8 @@ fn test_stash_apply_named_reference() {
     file1.assert_lines_and_blame(vec!["first stash".ai()]);
 
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
 }
 
@@ -165,8 +165,8 @@ fn test_stash_pop_with_existing_stack_entries() {
 
     second.assert_lines_and_blame(vec!["second stash line".ai()]);
     assert!(
-        !first_pop_commit.authorship_log.metadata.prompts.is_empty(),
-        "expected AI prompts for first pop commit"
+        !first_pop_commit.authorship_log.metadata.sessions.is_empty(),
+        "expected sessions for first pop commit"
     );
 
     // Pop remaining stash entry and verify attribution still restores correctly.
@@ -178,8 +178,12 @@ fn test_stash_pop_with_existing_stack_entries() {
 
     first.assert_lines_and_blame(vec!["first stash line".ai()]);
     assert!(
-        !second_pop_commit.authorship_log.metadata.prompts.is_empty(),
-        "expected AI prompts for second pop commit"
+        !second_pop_commit
+            .authorship_log
+            .metadata
+            .sessions
+            .is_empty(),
+        "expected sessions for second pop commit"
     );
 }
 
@@ -231,8 +235,8 @@ fn test_stash_multiple_files() {
 
     // Check authorship log has the files
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
     assert_eq!(
         commit.authorship_log.attestations.len(),
@@ -287,8 +291,8 @@ fn test_stash_with_existing_initial_attributions() {
 
     // Should have both human and AI in authorship
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
 }
 
@@ -324,8 +328,8 @@ fn test_stash_pop_default_reference() {
     example.assert_lines_and_blame(vec!["AI content".ai()]);
 
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
 }
 
@@ -388,8 +392,8 @@ fn test_stash_mixed_human_and_ai() {
 
     // Authorship log should have AI prompts
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
 }
 
@@ -440,8 +444,8 @@ fn test_stash_push_with_pathspec_single_file() {
 
     // Should have AI prompts
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
 }
 
@@ -496,8 +500,8 @@ fn test_stash_push_with_pathspec_directory() {
     dir_file2.assert_lines_and_blame(vec!["src file2 line 1".ai()]);
 
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
 }
 
@@ -549,8 +553,8 @@ fn test_stash_push_multiple_pathspecs() {
     file3.assert_lines_and_blame(vec!["file3".ai()]);
 
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
 }
 
@@ -684,8 +688,8 @@ fn test_stash_mixed_staged_and_unstaged() {
 
     // Should have AI prompts
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
 }
 
@@ -731,8 +735,8 @@ fn test_stash_pop_onto_head_with_ai_changes() {
         "file2 line 3".ai(),
     ]);
     assert!(
-        !head_commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in HEAD commit"
+        !head_commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in HEAD commit"
     );
 
     // Pop the stash (file1 with AI attribution from stash)
@@ -836,8 +840,8 @@ fn test_stash_pop_across_branches() {
 
     // Should have AI prompts in authorship log
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
 }
 
@@ -940,8 +944,8 @@ fn test_stash_pop_across_branches_with_conflict() {
 
     // Should have AI prompts in authorship log
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log"
     );
 }
 
@@ -991,8 +995,8 @@ fn test_stash_apply_reset_apply_again() {
 
     // Check authorship log has AI prompts
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log after multiple apply/reset cycles"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log after multiple apply/reset cycles"
     );
 }
 
@@ -1057,8 +1061,8 @@ fn test_stash_branch_preserves_ai_attribution() {
 
     // Check authorship log has AI prompts
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log after stash branch"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log after stash branch"
     );
 }
 
@@ -1161,8 +1165,8 @@ fn test_stash_pop_conflict_preserves_ai_attribution_without_new_checkpoint() {
 
     // Check that AI prompts are present (from the stash attribution)
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected AI prompts in authorship log - stash attribution was lost due to conflict exit code"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected sessions in authorship log - stash attribution was lost due to conflict exit code"
     );
 }
 

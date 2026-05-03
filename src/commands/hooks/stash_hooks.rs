@@ -1,162 +1,7 @@
 use crate::authorship::virtual_attribution::VirtualAttributions;
-use crate::authorship::working_log::CheckpointKind;
-use crate::commands::git_handlers::CommandHooksContext;
-use crate::commands::hooks::commit_hooks::get_commit_default_author;
 use crate::error::GitAiError;
 use crate::git::cli_parser::ParsedGitInvocation;
 use crate::git::repository::{Repository, exec_git, exec_git_stdin};
-
-pub fn pre_stash_hook(
-    parsed_args: &ParsedGitInvocation,
-    repository: &mut Repository,
-    command_hooks_context: &mut CommandHooksContext,
-) {
-    // Check if this is a pop or apply command - we need to capture the stash SHA before Git deletes it
-    let subcommand = match parsed_args.pos_command(0) {
-        Some(cmd) => cmd,
-        None => return, // Implicit push, nothing to capture
-    };
-
-    if subcommand == "pop" || subcommand == "apply" || subcommand == "branch" {
-        // Capture the stash SHA BEFORE git runs (pop/branch will delete it)
-        // For "branch", the stash ref is the second positional arg:
-        //   git stash branch <branchname> [<stash>]
-        let stash_ref = if subcommand == "branch" {
-            parsed_args
-                .pos_command(2)
-                .unwrap_or_else(|| "stash@{0}".to_string())
-        } else {
-            parsed_args
-                .pos_command(1)
-                .unwrap_or_else(|| "stash@{0}".to_string())
-        };
-
-        if let Ok(stash_sha) = resolve_stash_to_sha(repository, &stash_ref) {
-            command_hooks_context.stash_sha = Some(stash_sha);
-            tracing::debug!("Pre-stash: captured stash SHA for {}", subcommand);
-        }
-    } else {
-        let _ = match crate::commands::checkpoint::run(
-            repository,
-            &get_commit_default_author(repository, &parsed_args.command_args),
-            CheckpointKind::Human,
-            true,
-            None,
-            true, // same optimizations as pre_commit.rs
-        ) {
-            Ok(result) => result,
-            Err(e) => {
-                tracing::debug!("Failed to run checkpoint: {}", e);
-                return;
-            }
-        };
-    }
-}
-
-pub fn post_stash_hook(
-    command_hooks_context: &CommandHooksContext,
-    parsed_args: &ParsedGitInvocation,
-    repository: &mut Repository,
-    exit_status: std::process::ExitStatus,
-) {
-    // Check what subcommand was used
-    let subcommand = match parsed_args.pos_command(0) {
-        Some(cmd) => cmd,
-        None => {
-            // No subcommand means implicit "push"
-            "push".to_string()
-        }
-    };
-
-    // For pop/apply/branch, don't bail on exit code 1 if it's a conflict
-    // (stash was partially applied). For other subcommands, bail on any failure.
-    if !exit_status.success() {
-        let is_restore_subcommand =
-            subcommand == "pop" || subcommand == "apply" || subcommand == "branch";
-        if is_restore_subcommand && has_stash_conflict(repository) {
-            tracing::debug!(
-                "Stash {} had conflicts, but will still restore attributions",
-                subcommand
-            );
-        } else {
-            tracing::debug!(
-                "Stash {} failed (non-conflict), skipping post-stash hook",
-                subcommand
-            );
-            return;
-        }
-    }
-
-    tracing::debug!("Post-stash: processing stash {}", subcommand);
-
-    // Handle different subcommands
-    if subcommand == "push" || subcommand == "save" {
-        // Extract pathspecs from command
-        let pathspecs = extract_stash_pathspecs(parsed_args);
-        let head_sha = match repository.head().and_then(|head| head.target()) {
-            Ok(head_sha) => head_sha.to_string(),
-            Err(e) => {
-                tracing::debug!("Failed to resolve HEAD after stash {}: {}", subcommand, e);
-                return;
-            }
-        };
-        let stash_sha = match resolve_stash_to_sha(repository, "stash@{0}") {
-            Ok(stash_sha) => stash_sha,
-            Err(e) => {
-                tracing::debug!("Failed to resolve created stash SHA: {}", e);
-                return;
-            }
-        };
-
-        // Stash was created - save authorship log as git note
-        if let Err(e) = save_stash_authorship_log(repository, &head_sha, &stash_sha, &pathspecs) {
-            tracing::debug!("Failed to save stash authorship log: {}", e);
-        }
-    } else if subcommand == "pop" || subcommand == "apply" || subcommand == "branch" {
-        // Stash was applied - restore attributions from git note
-        // Use the stash SHA we captured in pre-hook (before Git deleted it)
-        let stash_sha = match &command_hooks_context.stash_sha {
-            Some(sha) => sha.clone(),
-            None => {
-                tracing::debug!("No stash SHA captured in pre-hook, cannot restore attributions");
-                return;
-            }
-        };
-
-        tracing::debug!("Restoring attributions from stash SHA: {}", stash_sha);
-        let head_sha = match repository.head().and_then(|head| head.target()) {
-            Ok(head_sha) => head_sha.to_string(),
-            Err(e) => {
-                tracing::debug!("Failed to resolve HEAD after stash {}: {}", subcommand, e);
-                return;
-            }
-        };
-
-        if let Err(e) = restore_stash_attributions(repository, &head_sha, &stash_sha) {
-            tracing::debug!("Failed to restore stash attributions: {}", e);
-        }
-    }
-}
-
-/// Detect whether a stash pop/apply failure was due to a merge conflict.
-/// When `git stash pop` encounters a conflict, the working tree has unmerged entries.
-/// We check for this by looking at `git status --porcelain=v2` for unmerged ('u') entries.
-/// A conflict means the stash was partially applied (with conflict markers) and attribution
-/// should still be restored. A non-conflict failure means the stash was not applied at all.
-fn has_stash_conflict(repo: &Repository) -> bool {
-    let mut args = repo.global_args_for_exec();
-    args.push("status".to_string());
-    args.push("--porcelain=v2".to_string());
-
-    match exec_git(&args) {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // Unmerged entries start with 'u' in porcelain v2 format
-            stdout.lines().any(|line| line.starts_with("u "))
-        }
-        Err(_) => false,
-    }
-}
 
 /// Save the current working log as an authorship log in git notes (refs/notes/ai-stash)
 pub(crate) fn save_stash_authorship_log(
@@ -293,9 +138,10 @@ pub(crate) fn restore_stash_attributions(
         .collect();
 
     let initial_humans = authorship_log.metadata.humans.clone();
+    let initial_sessions = authorship_log.metadata.sessions.clone();
 
     // Write INITIAL attributions to working log
-    if !initial_files.is_empty() || !initial_prompts.is_empty() {
+    if !initial_files.is_empty() || !initial_prompts.is_empty() || !initial_sessions.is_empty() {
         let working_log = repo.storage.working_log_for_base_commit(head_sha)?;
         let initial_file_contents =
             load_stashed_file_contents(repo, stash_sha, initial_files.keys())?;
@@ -304,6 +150,7 @@ pub(crate) fn restore_stash_attributions(
             initial_prompts.clone(),
             initial_humans,
             initial_file_contents,
+            initial_sessions,
         )?;
 
         tracing::debug!(
@@ -379,27 +226,6 @@ fn read_stash_note(repo: &Repository, stash_sha: &str) -> Result<String, GitAiEr
 
     let content = std::str::from_utf8(&output.stdout)?;
     Ok(content.to_string())
-}
-
-/// Resolve a stash reference to its commit SHA
-fn resolve_stash_to_sha(repo: &Repository, stash_ref: &str) -> Result<String, GitAiError> {
-    let mut args = repo.global_args_for_exec();
-    args.push("rev-parse".to_string());
-    args.push(stash_ref.to_string());
-
-    let output = exec_git(&args)?;
-
-    if !output.status.success() {
-        return Err(GitAiError::Generic(format!(
-            "Failed to resolve stash reference '{}': git rev-parse exited with status {}",
-            stash_ref, output.status
-        )));
-    }
-
-    let stdout = std::str::from_utf8(&output.stdout)?;
-    let sha = stdout.trim().to_string();
-
-    Ok(sha)
 }
 
 /// Extract pathspecs from stash push/save command
@@ -524,60 +350,4 @@ fn delete_working_log_for_files(
     // The files were stashed, so we just remove them from the initial attributions
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::git::test_utils::TmpRepo;
-
-    #[test]
-    fn test_save_stash_note_roundtrip() {
-        let repo = TmpRepo::new().unwrap();
-        // Need at least one commit to attach notes to
-        repo.write_file("dummy.txt", "content\n", true).unwrap();
-        repo.commit_with_message("initial").unwrap();
-
-        let gitai_repo = repo.gitai_repo();
-
-        // Create a stash so we have a valid stash SHA
-        // Modify a file and stash it
-        std::fs::write(repo.path().join("dummy.txt"), "modified\n").unwrap();
-        repo.git_command(&["stash"]).unwrap();
-
-        let stash_sha = resolve_stash_to_sha(gitai_repo, "stash@{0}").unwrap();
-
-        // Save and read back
-        let content = "test content";
-        save_stash_note(gitai_repo, &stash_sha, content).unwrap();
-        let read_back = read_stash_note(gitai_repo, &stash_sha).unwrap();
-
-        assert_eq!(read_back.trim(), content, "roundtrip content should match");
-    }
-
-    #[test]
-    fn test_save_stash_note_large_content() {
-        let repo = TmpRepo::new().unwrap();
-        repo.write_file("dummy.txt", "content\n", true).unwrap();
-        repo.commit_with_message("initial").unwrap();
-
-        let gitai_repo = repo.gitai_repo();
-
-        // Modify a file and stash it
-        std::fs::write(repo.path().join("dummy.txt"), "modified\n").unwrap();
-        repo.git_command(&["stash"]).unwrap();
-
-        let stash_sha = resolve_stash_to_sha(gitai_repo, "stash@{0}").unwrap();
-
-        // 100KB string - this is the kind of content that triggered the original E2BIG bug
-        let large_content = "x".repeat(100_000);
-        save_stash_note(gitai_repo, &stash_sha, &large_content).unwrap();
-        let read_back = read_stash_note(gitai_repo, &stash_sha).unwrap();
-
-        assert_eq!(
-            read_back.trim(),
-            large_content,
-            "large content roundtrip should match"
-        );
-    }
 }

@@ -1,6 +1,5 @@
 use crate::authorship::attribution_tracker::{Attribution, LineAttribution};
 use crate::authorship::authorship_log_serialization::GIT_AI_VERSION;
-use crate::authorship::transcript::AiTranscript;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -124,7 +123,6 @@ pub struct Checkpoint {
     pub author: String,
     pub entries: Vec<WorkingLogEntry>,
     pub timestamp: u64,
-    pub transcript: Option<AiTranscript>,
     pub agent_id: Option<AgentId>,
     #[serde(default)]
     pub agent_metadata: Option<HashMap<String, String>>,
@@ -136,6 +134,8 @@ pub struct Checkpoint {
     pub git_ai_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub known_human_metadata: Option<KnownHumanMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
 }
 
 impl Checkpoint {
@@ -156,13 +156,13 @@ impl Checkpoint {
             author,
             entries,
             timestamp,
-            transcript: None,
             agent_id: None,
             agent_metadata: None,
             line_stats: CheckpointLineStats::default(),
             api_version: CHECKPOINT_API_VERSION.to_string(),
             git_ai_version: Some(GIT_AI_VERSION.to_string()),
             known_human_metadata: None,
+            trace_id: None,
         }
     }
 }
@@ -170,7 +170,6 @@ impl Checkpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authorship::transcript::Message;
 
     #[test]
     fn test_checkpoint_serialization() {
@@ -194,7 +193,7 @@ mod tests {
             .as_secs();
         assert!(checkpoint.timestamp > 0);
         assert!(checkpoint.timestamp <= current_time);
-        assert!(checkpoint.transcript.is_none());
+        // Transcript field removed from Checkpoint
         assert!(checkpoint.agent_id.is_none());
 
         let json = serde_json::to_string_pretty(&checkpoint).unwrap();
@@ -204,7 +203,7 @@ mod tests {
         assert_eq!(deserialized.entries[0].file, "src/xyz.rs");
         assert_eq!(deserialized.entries[0].blob_sha, "abc123def456");
         assert_eq!(deserialized.timestamp, checkpoint.timestamp);
-        assert!(deserialized.transcript.is_none());
+        // Transcript field removed from Checkpoint
         assert!(deserialized.agent_id.is_none());
     }
 
@@ -249,80 +248,6 @@ mod tests {
         assert_eq!(deserialized[0].diff, "");
         assert_eq!(deserialized[1].diff, "/refs/ai/working/xyz.patch");
         assert_eq!(deserialized[1].author, "user");
-    }
-
-    #[test]
-    fn test_checkpoint_with_transcript() {
-        let entry = WorkingLogEntry::new(
-            "src/xyz.rs".to_string(),
-            "test_sha".to_string(),
-            Vec::new(),
-            Vec::new(),
-        );
-
-        let user_message = Message::user(
-            "Please add error handling to this function".to_string(),
-            None,
-        );
-        let assistant_message =
-            Message::assistant("I'll add error handling to the function.".to_string(), None);
-
-        let mut transcript = AiTranscript::new();
-        transcript.add_message(user_message);
-        transcript.add_message(assistant_message);
-
-        let agent_id = AgentId {
-            tool: "cursor".to_string(),
-            model: "gpt-4o".to_string(),
-            id: "session-abc123".to_string(),
-        };
-
-        let mut checkpoint = Checkpoint::new(
-            CheckpointKind::AiAgent,
-            "".to_string(),
-            "claude".to_string(),
-            vec![entry],
-        );
-        checkpoint.transcript = Some(transcript);
-        checkpoint.agent_id = Some(agent_id);
-
-        assert!(checkpoint.transcript.is_some());
-        assert!(checkpoint.agent_id.is_some());
-
-        let transcript_data = checkpoint.transcript.as_ref().unwrap();
-        assert_eq!(transcript_data.messages().len(), 2);
-
-        // Check first message (user)
-        match &transcript_data.messages()[0] {
-            Message::User { text, .. } => {
-                assert_eq!(text, "Please add error handling to this function");
-            }
-            _ => panic!("Expected user message"),
-        }
-
-        // Check second message (assistant)
-        match &transcript_data.messages()[1] {
-            Message::Assistant { text, .. } => {
-                assert_eq!(text, "I'll add error handling to the function.");
-            }
-            _ => panic!("Expected assistant message"),
-        }
-
-        let agent_data = checkpoint.agent_id.as_ref().unwrap();
-        assert_eq!(agent_data.tool, "cursor");
-        assert_eq!(agent_data.id, "session-abc123");
-
-        let json = serde_json::to_string_pretty(&checkpoint).unwrap();
-        let deserialized: Checkpoint = serde_json::from_str(&json).unwrap();
-        assert!(deserialized.transcript.is_some());
-        assert!(deserialized.agent_id.is_some());
-
-        let deserialized_transcript = deserialized.transcript.as_ref().unwrap();
-        assert_eq!(deserialized_transcript.messages().len(), 2);
-
-        let deserialized_agent = deserialized.agent_id.as_ref().unwrap();
-        assert_eq!(deserialized_agent.tool, "cursor");
-        assert_eq!(deserialized_agent.id, "session-abc123");
     }
 
     #[test]
@@ -373,5 +298,39 @@ mod tests {
         assert_eq!(meta.editor, "vscode");
         assert_eq!(meta.editor_version, "1.85.0");
         assert_eq!(meta.extension_version, "0.4.1");
+    }
+
+    #[test]
+    fn test_checkpoint_trace_id_backwards_compat() {
+        // Old JSON without trace_id should deserialize with trace_id = None
+        let json = r#"{
+            "kind": "AiAgent",
+            "diff": "",
+            "author": "claude",
+            "entries": [],
+            "timestamp": 1234567890,
+            "transcript": null,
+            "agent_id": {"tool": "claude", "id": "sess1", "model": "opus"},
+            "line_stats": {"additions": 0, "deletions": 0, "additions_sloc": 0, "deletions_sloc": 0},
+            "api_version": "checkpoint/1.0.0"
+        }"#;
+        let checkpoint: Checkpoint = serde_json::from_str(json).unwrap();
+        assert_eq!(checkpoint.trace_id, None);
+
+        // New JSON with trace_id should deserialize correctly
+        let json_with_trace = r#"{
+            "kind": "AiAgent",
+            "diff": "",
+            "author": "claude",
+            "entries": [],
+            "timestamp": 1234567890,
+            "transcript": null,
+            "agent_id": {"tool": "claude", "id": "sess1", "model": "opus"},
+            "line_stats": {"additions": 0, "deletions": 0, "additions_sloc": 0, "deletions_sloc": 0},
+            "api_version": "checkpoint/1.0.0",
+            "trace_id": "t_abcdef01234567"
+        }"#;
+        let checkpoint: Checkpoint = serde_json::from_str(json_with_trace).unwrap();
+        assert_eq!(checkpoint.trace_id, Some("t_abcdef01234567".to_string()));
     }
 }

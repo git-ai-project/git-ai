@@ -1,5 +1,5 @@
 ---
-source: tests/stats.rs
+source: tests/integration/stats.rs
 expression: markdown
 ---
-"Stats powered by [Git AI](https://github.com/git-ai-project/git-ai)\n\n```text\n🧠 you    ███████░░░░░░░░░░░░░  33%\n🤝 mixed  ░░░░░░░███░░░░░░░░░░  17%\n🤖 ai     ░░░░░░░░░░██████████  50%\n```\n\n<details>\n<summary>More stats</summary>\n\n- 1.7 lines generated for every 1 accepted\n- 45 seconds waiting for AI \n\n</details>"
+"Stats powered by [Git AI](https://github.com/git-ai-project/git-ai)\n\n```text\n🧠 you    ███████░░░░░░░░░░░░░  33%\n🤖 ai     ░░░░░░░░░░██████████  50%\n```\n\n<details>\n<summary>More stats</summary>\n\n\n</details>"

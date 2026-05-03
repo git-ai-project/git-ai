@@ -20,7 +20,6 @@ task test CARGO_TEST_ARGS="--lib" # cargo-level flags (rare)
 
 # If the user explicitly asks for tests to be run in another mode (do not run test using these commands unless this test mode is explicitly asked for by the user)
 task test:wrapper-daemon
-task test:wrapper
 
 # Lint & Format
 task lint
@@ -79,7 +78,7 @@ Feature flags have separate debug/release defaults defined via the `define_featu
 
 ### Error handling
 
-`GitAiError` enum in `src/error.rs` -- not `thiserror`-based, uses manual `Display`/`From` impls. Variants: `GitCliError` (captures exit code + stderr + args), `IoError`, `JsonError`, `SqliteError`, `PresetError`, `Generic`, `GixError`. The `GitError(git2::Error)` variant only exists behind `#[cfg(feature = "test-support")]`.
+`GitAiError` enum in `src/error.rs` -- not `thiserror`-based, uses manual `Display`/`From` impls. Variants: `GitCliError` (captures exit code + stderr + args), `IoError`, `JsonError`, `SqliteError`, `PresetError`, `Generic`, `GixError`.
 
 ## Test Infrastructure
 
@@ -87,7 +86,7 @@ Feature flags have separate debug/release defaults defined via the `define_featu
 
 Tests create real git repositories. The test framework has three key files:
 
-- **`tests/repos/test_repo.rs`** -- `TestRepo` struct: creates temp git repos, runs git-ai commands as subprocess. Uses `get_binary_path()` which auto-compiles the binary with `--features test-support` via a `OnceLock`. Tests invoke the binary with `GIT_AI=git` env var to trigger git proxy mode.
+- **`tests/repos/test_repo.rs`** -- `TestRepo` struct: creates temp git repos, runs git-ai commands as subprocess. Uses `get_binary_path()` which auto-compiles the binary via a `OnceLock`. Tests invoke the binary with `GIT_AI=git` env var to trigger git proxy mode.
 
 - **`tests/repos/test_file.rs`** -- `TestFile` fluent API for setting file contents with attribution expectations. The `lines!` macro + `.ai()` / `.human()` trait methods create `ExpectedLine` vectors. `assert_lines_and_blame()` validates both content and AI/human attribution.
 
@@ -210,7 +209,7 @@ Uses `insta` crate. Snapshots live in `tests/snapshots/` and `tests/repos/snapsh
 ## Key Conventions
 
 - **Rust 2024 edition** with Rust 1.93.0 -- uses let-chains (`if let Some(x) = foo && condition`), which are stable in edition 2024.
-- **Git CLI over libgit2 in production**: All git operations use `std::process::Command` to call the real git binary. The `git2` crate is test-only (`test-support` feature). This is intentional -- the binary acts as a transparent git proxy.
+- **Git CLI only**: All git operations use `std::process::Command` to call the real git binary. The `git2`/libgit2 dependency has been fully removed. The binary acts as a transparent git proxy.
 - **`debug_log()`** for conditional debug output: prints `[git-ai]` prefixed messages to stderr when `cfg!(debug_assertions)` or `GIT_AI_DEBUG=1`. Set `GIT_AI_DEBUG=0` to suppress in debug builds.
 - **`GIT_AI_DEBUG_PERFORMANCE=1`** (or `=2` for JSON) enables performance timing output.
 - **Paths are POSIX-normalized**: `normalize_to_posix()` utility converts Windows backslashes. File paths in authorship logs and working logs always use forward slashes.
@@ -219,7 +218,7 @@ Uses `insta` crate. Snapshots live in `tests/snapshots/` and `tests/repos/snapsh
 
 ## Gotchas
 
-- **Test binary auto-compilation**: Integration tests trigger `cargo build --bin git-ai --features test-support` on first test run via `OnceLock`. If you change code and run tests, the test harness recompiles. This can cause confusion if you're debugging -- the test binary is always a debug build at `target/debug/git-ai`.
+- **Test binary auto-compilation**: Integration tests trigger `cargo build --bin git-ai` on first test run via `OnceLock`. If you change code and run tests, the test harness recompiles. This can cause confusion if you're debugging -- the test binary is always a debug build at `target/debug/git-ai`.
 
 - **argv[0] dispatch is load-bearing**: The binary's behavior is entirely determined by how it's invoked. In production, symlinking as `git` makes it a proxy. In tests, `GIT_AI=git` env var forces proxy mode (debug builds only). Breaking this dispatch breaks everything.
 
