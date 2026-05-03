@@ -643,7 +643,8 @@ mod tests {
                     vec![PathBuf::from("/home/user/project/src/new_file.rs")]
                 );
                 assert_eq!(
-                    e.content_overrides.get(&PathBuf::from("/home/user/project/src/new_file.rs")),
+                    e.content_overrides
+                        .get(&PathBuf::from("/home/user/project/src/new_file.rs")),
                     Some(&String::new())
                 );
             }

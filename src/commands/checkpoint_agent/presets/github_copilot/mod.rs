@@ -68,7 +68,6 @@ pub(super) fn extract_session_id(data: &serde_json::Value) -> String {
     .to_string()
 }
 
-
 /// Extract file paths from VS Code / CLI hook payload (tool_input + tool_response/tool_result).
 /// Only paths from the current tool call are extracted — no session-level data.
 pub(super) fn extract_filepaths_from_vscode_hook_payload(
