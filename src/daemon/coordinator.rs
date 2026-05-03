@@ -70,6 +70,27 @@ impl<B: GitBackend> Coordinator<B> {
         actor.status().await
     }
 
+    pub async fn store_bash_invocation_family(
+        &self,
+        repo_working_dir: &Path,
+        invocation_id: String,
+        invocation: crate::daemon::domain::BashInvocation,
+    ) -> Result<(), GitAiError> {
+        let family = self.backend.resolve_family(repo_working_dir)?;
+        let actor = self.get_or_create_family_actor(family).await;
+        actor.store_bash_invocation(invocation_id, invocation).await
+    }
+
+    pub async fn consume_bash_invocation_family(
+        &self,
+        repo_working_dir: &Path,
+        invocation_id: String,
+    ) -> Result<Option<crate::daemon::domain::BashInvocation>, GitAiError> {
+        let family = self.backend.resolve_family(repo_working_dir)?;
+        let actor = self.get_or_create_family_actor(family).await;
+        actor.consume_bash_invocation(invocation_id).await
+    }
+
     pub async fn shutdown(&self) -> Result<(), GitAiError> {
         let actors = {
             let map = self.families.lock().await;

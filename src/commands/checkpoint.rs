@@ -196,16 +196,16 @@ pub fn explicit_capture_target_paths(
     checkpoint_request: Option<&CheckpointRequest>,
 ) -> Option<(PreparedPathRole, Vec<String>)> {
     let result = checkpoint_request?;
-    if result.file_paths.is_empty() {
+    if result.files.is_empty() {
         return None;
     }
 
     let paths: Vec<String> = result
-        .file_paths
+        .files
         .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
+        .map(|f| f.path.to_string_lossy().to_string())
+        .map(|p: String| p.trim().to_string())
+        .filter(|p: &String| !p.is_empty())
         .collect();
 
     if paths.is_empty() {
@@ -318,14 +318,66 @@ pub fn prune_stale_captured_checkpoints(max_age: StdDuration) -> Result<(), GitA
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// New entry point: takes the unified `CheckpointRequest` and pre-resolved file refs.
 pub fn run(
+    repo: &Repository,
+    author: &str,
+    request: &CheckpointRequest,
+    files: &[&crate::commands::checkpoint_agent::orchestrator::CheckpointFile],
+) -> Result<(usize, usize, usize), GitAiError> {
+    let kind = request.checkpoint_kind;
+    let base_commit = files
+        .first()
+        .map(|f| f.base_commit_sha.as_str())
+        .filter(|s| !s.is_empty());
+
+    // Build the dirty_files map that the internal engine expects.
+    let dirty_files: Option<HashMap<PathBuf, String>> = if !files.is_empty() {
+        Some(
+            files
+                .iter()
+                .map(|f| (f.path.clone(), f.content.clone()))
+                .collect(),
+        )
+    } else {
+        None
+    };
+
+    // Construct an internal CheckpointRequest with the dirty files for the engine.
+    let internal_request = CheckpointRequest {
+        trace_id: request.trace_id.clone(),
+        checkpoint_kind: kind,
+        agent_id: request.agent_id.clone(),
+        files: request.files.clone(),
+        path_role: request.path_role,
+        transcript_source: request.transcript_source.clone(),
+        metadata: request.metadata.clone(),
+    };
+
+    run_internal(
+        repo,
+        author,
+        kind,
+        true, // quiet
+        Some(internal_request),
+        dirty_files,
+        false, // is_pre_commit
+        base_commit,
+    )
+}
+
+/// Legacy entry point preserved for internal callers (pre-commit replay, etc.)
+/// that still build their own request+dirty_files.
+#[allow(clippy::too_many_arguments)]
+fn run_internal(
     repo: &Repository,
     author: &str,
     kind: CheckpointKind,
     quiet: bool,
     checkpoint_request: Option<CheckpointRequest>,
+    dirty_files_override: Option<HashMap<PathBuf, String>>,
     is_pre_commit: bool,
+    base_commit_override: Option<&str>,
 ) -> Result<(usize, usize, usize), GitAiError> {
     run_with_base_commit_override(
         repo,
@@ -333,8 +385,9 @@ pub fn run(
         kind,
         quiet,
         checkpoint_request,
+        dirty_files_override,
         is_pre_commit,
-        None,
+        base_commit_override,
     )
 }
 
@@ -345,6 +398,7 @@ pub fn run_with_base_commit_override(
     kind: CheckpointKind,
     quiet: bool,
     checkpoint_request: Option<CheckpointRequest>,
+    dirty_files_override: Option<HashMap<PathBuf, String>>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
 ) -> Result<(usize, usize, usize), GitAiError> {
@@ -354,6 +408,7 @@ pub fn run_with_base_commit_override(
         kind,
         quiet,
         checkpoint_request,
+        dirty_files_override,
         is_pre_commit,
         base_commit_override,
         BaseOverrideResolutionPolicy::AllowFallback,
@@ -368,6 +423,7 @@ pub fn run_with_base_commit_override_with_policy(
     kind: CheckpointKind,
     quiet: bool,
     checkpoint_request: Option<CheckpointRequest>,
+    dirty_files_override: Option<HashMap<PathBuf, String>>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
     base_override_resolution_policy: BaseOverrideResolutionPolicy,
@@ -378,6 +434,7 @@ pub fn run_with_base_commit_override_with_policy(
         repo,
         kind,
         checkpoint_request.as_ref(),
+        dirty_files_override.as_ref(),
         is_pre_commit,
         base_commit_override,
         base_override_resolution_policy,
@@ -610,6 +667,7 @@ fn resolve_live_checkpoint_execution(
     repo: &Repository,
     kind: CheckpointKind,
     checkpoint_request: Option<&CheckpointRequest>,
+    dirty_files_override: Option<&HashMap<PathBuf, String>>,
     is_pre_commit: bool,
     base_commit_override: Option<&str>,
     base_override_resolution_policy: BaseOverrideResolutionPolicy,
@@ -652,7 +710,7 @@ fn resolve_live_checkpoint_execution(
         }
     }
 
-    if let Some(dirty_files) = checkpoint_request.and_then(|result| result.dirty_files.as_ref()) {
+    if let Some(dirty_files) = dirty_files_override {
         let string_dirty = dirty_files
             .iter()
             .map(|(k, v)| (k.to_string_lossy().to_string(), v.clone()))
@@ -679,13 +737,11 @@ fn resolve_live_checkpoint_execution(
     // should be checkpointed. Re-running git status here turns daemon commit replay into a
     // full worktree scan on every commit, which is especially expensive on macOS runners.
     if base_commit_override.is_some() {
-        let dirty_files_for_override = checkpoint_request
-            .and_then(|result| result.dirty_files.as_ref())
-            .map(|df| {
-                df.iter()
-                    .map(|(k, v)| (k.to_string_lossy().to_string(), v.clone()))
-                    .collect::<HashMap<_, _>>()
-            });
+        let dirty_files_for_override = dirty_files_override.map(|df| {
+            df.iter()
+                .map(|(k, v)| (k.to_string_lossy().to_string(), v.clone()))
+                .collect::<HashMap<_, _>>()
+        });
         match (
             filtered_pathspec.as_ref(),
             dirty_files_for_override.as_ref(),
@@ -1046,6 +1102,7 @@ pub fn prepare_captured_checkpoint(
         repo,
         kind,
         checkpoint_request,
+        None, // dirty_files_override
         is_pre_commit,
         base_commit_override,
         BaseOverrideResolutionPolicy::AllowFallback,
@@ -1092,10 +1149,7 @@ pub fn prepare_captured_checkpoint(
             });
         }
 
-        let mut stored_checkpoint_request = checkpoint_request.cloned();
-        if let Some(cr) = stored_checkpoint_request.as_mut() {
-            cr.dirty_files = None;
-        }
+        let stored_checkpoint_request = checkpoint_request.cloned();
 
         let manifest = PreparedCheckpointManifest {
             repo_working_dir: repo
@@ -1156,15 +1210,13 @@ pub(crate) fn update_captured_checkpoint_agent_context(
     manifest.author = author.to_string();
 
     // Merge real agent context while preserving capture-specific fields
-    // (file_paths, path_role, dirty_files) from the original.
+    // (files, path_role) from the original.
     if let Some(real) = checkpoint_request {
         let mut updated = real.clone();
         if let Some(existing) = &manifest.checkpoint_request {
-            updated.file_paths = existing.file_paths.clone();
+            updated.files = existing.files.clone();
             updated.path_role = existing.path_role;
         }
-        updated.dirty_files = None;
-        updated.captured_checkpoint_id = None;
         manifest.checkpoint_request = Some(updated);
     }
 

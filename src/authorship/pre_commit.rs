@@ -5,18 +5,23 @@ use crate::git::repository::Repository;
 pub fn pre_commit(repo: &Repository, default_author: String) -> Result<(), GitAiError> {
     let (checkpoint_kind, checkpoint_request) = pre_commit_checkpoint_context(repo);
 
-    let result: Result<(usize, usize, usize), GitAiError> = crate::commands::checkpoint::run(
-        repo,
-        &default_author,
-        checkpoint_kind,
-        true,
-        checkpoint_request,
-        true, // should skip if NO AI CHECKPOINTS
-    );
+    let result: Result<(usize, usize, usize), GitAiError> =
+        crate::commands::checkpoint::run_with_base_commit_override(
+            repo,
+            &default_author,
+            checkpoint_kind,
+            true,
+            checkpoint_request,
+            None, // dirty_files_override
+            true, // is_pre_commit — should skip if NO AI CHECKPOINTS
+            None, // base_commit_override
+        );
     result.map(|_| ())
 }
 
-fn pre_commit_checkpoint_context(repo: &Repository) -> (CheckpointKind, Option<CheckpointRequest>) {
+fn pre_commit_checkpoint_context(
+    repo: &Repository,
+) -> (CheckpointKind, Option<CheckpointRequest>) {
     let Ok(repo_workdir) = repo
         .workdir()
         .map(|path| path.to_string_lossy().to_string())

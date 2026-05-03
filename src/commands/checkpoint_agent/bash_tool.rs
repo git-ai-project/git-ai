@@ -300,18 +300,15 @@ pub struct InflightBashAgentContext {
 }
 
 impl InflightBashAgentContext {
-    pub fn into_checkpoint_request(self, repo_working_dir: PathBuf) -> CheckpointRequest {
+    pub fn into_checkpoint_request(self, _repo_working_dir: PathBuf) -> CheckpointRequest {
         CheckpointRequest {
             trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
             checkpoint_kind: CheckpointKind::AiAgent,
             agent_id: Some(self.agent_id),
-            repo_working_dir,
-            file_paths: vec![],
+            files: vec![],
             path_role: crate::commands::checkpoint::PreparedPathRole::Edited,
-            dirty_files: None,
             transcript_source: None,
             metadata: self.agent_metadata.unwrap_or_default(),
-            captured_checkpoint_id: None,
         }
     }
 }
@@ -1179,25 +1176,37 @@ fn attempt_pre_hook_capture(
         }
     };
 
+    let repo_root_path = repo_root.to_path_buf();
+    let base_commit_sha = repo
+        .head()
+        .ok()
+        .and_then(|h| h.target().ok())
+        .unwrap_or_else(|| "initial".to_string());
+
+    let checkpoint_files: Vec<crate::commands::checkpoint_agent::orchestrator::CheckpointFile> =
+        stale_files
+            .iter()
+            .filter_map(|p| {
+                let normalized =
+                    PathBuf::from(crate::utils::normalize_to_posix(&p.to_string_lossy()));
+                let content = contents.get(&normalized.to_string_lossy().to_string())?.clone();
+                Some(crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
+                    path: repo_root_path.join(&normalized),
+                    content,
+                    repo_work_dir: repo_root_path.clone(),
+                    base_commit_sha: base_commit_sha.clone(),
+                })
+            })
+            .collect();
+
     let checkpoint_request = CheckpointRequest {
         trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::Human,
         agent_id: None,
-        repo_working_dir: PathBuf::from(repo_working_dir.clone()),
-        file_paths: stale_files
-            .iter()
-            .map(|p| PathBuf::from(crate::utils::normalize_to_posix(&p.to_string_lossy())))
-            .collect(),
+        files: checkpoint_files,
         path_role: crate::commands::checkpoint::PreparedPathRole::WillEdit,
-        dirty_files: Some(
-            contents
-                .into_iter()
-                .map(|(k, v)| (PathBuf::from(k), v))
-                .collect(),
-        ),
         transcript_source: None,
         metadata: HashMap::new(),
-        captured_checkpoint_id: None,
     };
 
     match prepare_captured_checkpoint(
@@ -1273,6 +1282,27 @@ fn attempt_post_hook_capture(
         }
     };
 
+    let repo_root_path = repo_root.to_path_buf();
+    let base_commit_sha = repo
+        .head()
+        .ok()
+        .and_then(|h| h.target().ok())
+        .unwrap_or_else(|| "initial".to_string());
+
+    let checkpoint_files: Vec<crate::commands::checkpoint_agent::orchestrator::CheckpointFile> =
+        existing_paths
+            .iter()
+            .filter_map(|p| {
+                let content = contents.get(p.as_str())?.clone();
+                Some(crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
+                    path: repo_root_path.join(p.as_str()),
+                    content,
+                    repo_work_dir: repo_root_path.clone(),
+                    base_commit_sha: base_commit_sha.clone(),
+                })
+            })
+            .collect();
+
     let checkpoint_request = CheckpointRequest {
         trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::AiAgent,
@@ -1281,21 +1311,10 @@ fn attempt_post_hook_capture(
             id: "post-hook".to_string(),
             model: String::new(),
         }),
-        repo_working_dir: PathBuf::from(repo_working_dir.clone()),
-        file_paths: existing_paths
-            .iter()
-            .map(|p| PathBuf::from(p.as_str()))
-            .collect(),
+        files: checkpoint_files,
         path_role: crate::commands::checkpoint::PreparedPathRole::Edited,
-        dirty_files: Some(
-            contents
-                .into_iter()
-                .map(|(k, v)| (PathBuf::from(k), v))
-                .collect(),
-        ),
         transcript_source: None,
         metadata: HashMap::new(),
-        captured_checkpoint_id: None,
     };
 
     match prepare_captured_checkpoint(

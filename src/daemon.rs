@@ -32,7 +32,6 @@ use crate::{
     },
     authorship::working_log::CheckpointKind,
     commands::checkpoint::PreparedPathRole,
-    commands::checkpoint_agent::orchestrator::CheckpointRequest,
     commands::hooks::{push_hooks, stash_hooks},
 };
 #[cfg(not(windows))]
@@ -80,10 +79,7 @@ pub mod test_sync;
 pub mod trace_normalizer;
 pub mod transcript_worker;
 
-pub use control_api::{
-    CapturedCheckpointRunRequest, CheckpointRunRequest, ControlRequest, ControlResponse,
-    FamilyStatus, LiveCheckpointRunRequest, TelemetryEnvelope,
-};
+pub use control_api::{ControlRequest, ControlResponse, FamilyStatus, TelemetryEnvelope};
 
 const PID_META_FILE: &str = "daemon.pid.json";
 const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
@@ -1351,45 +1347,24 @@ fn daemon_reflog_delta_from_offsets(
     Ok(out)
 }
 
-fn apply_checkpoint_side_effect(request: CheckpointRunRequest) -> Result<(), GitAiError> {
-    match request {
-        CheckpointRunRequest::Live(request) => {
-            let repo = find_repository_in_path(&request.repo_working_dir)?;
+fn apply_checkpoint_side_effect(
+    request: &crate::commands::checkpoint_agent::orchestrator::CheckpointRequest,
+) -> Result<(), GitAiError> {
+    use crate::commands::checkpoint_agent::orchestrator::CheckpointFile;
 
-            let kind = request
-                .kind
-                .as_deref()
-                .and_then(parse_checkpoint_kind)
-                .or_else(|| {
-                    request
-                        .checkpoint_request
-                        .as_ref()
-                        .map(|r| r.checkpoint_kind)
-                })
-                .unwrap_or(CheckpointKind::Human);
-            let author = request
-                .author
-                .unwrap_or_else(|| repo.git_author_identity().formatted_or_unknown());
-
-            let _ = crate::commands::checkpoint::run(
-                &repo,
-                &author,
-                kind,
-                request.quiet.unwrap_or(true),
-                request.checkpoint_request,
-                request.is_pre_commit.unwrap_or(false),
-            )?;
-            Ok(())
-        }
-        CheckpointRunRequest::Captured(request) => {
-            let repo = find_repository_in_path(&request.repo_working_dir)?;
-            let _ = crate::commands::checkpoint::execute_captured_checkpoint(
-                &repo,
-                &request.capture_id,
-            )?;
-            Ok(())
-        }
+    let mut repos: HashMap<PathBuf, Vec<&CheckpointFile>> = HashMap::new();
+    for file in &request.files {
+        repos
+            .entry(file.repo_work_dir.clone())
+            .or_default()
+            .push(file);
     }
+    for (repo_work_dir, files) in repos {
+        let repo = find_repository_in_path(&repo_work_dir.to_string_lossy())?;
+        let author = repo.git_author_identity().formatted_or_unknown();
+        crate::commands::checkpoint::run(&repo, &author, request, &files)?;
+    }
+    Ok(())
 }
 
 fn compute_watermarks_from_stat(
@@ -1418,16 +1393,6 @@ fn compute_watermarks_from_stat(
         }
     }
     watermarks
-}
-
-fn parse_checkpoint_kind(value: &str) -> Option<CheckpointKind> {
-    match value {
-        "human" => Some(CheckpointKind::Human),
-        "ai_agent" => Some(CheckpointKind::AiAgent),
-        "ai_tab" => Some(CheckpointKind::AiTab),
-        "known_human" => Some(CheckpointKind::KnownHuman),
-        _ => None,
-    }
 }
 
 fn parsed_invocation_for_side_effect(
@@ -1806,23 +1771,32 @@ fn filter_commit_replay_files(
 fn build_human_replay_checkpoint_request(
     files: Vec<String>,
     dirty_files: HashMap<String, String>,
-) -> CheckpointRequest {
+    repo_work_dir: &Path,
+    base_commit_sha: &str,
+) -> crate::commands::checkpoint_agent::orchestrator::CheckpointRequest {
+    use crate::commands::checkpoint_agent::orchestrator::{CheckpointFile, CheckpointRequest};
+
+    let checkpoint_files: Vec<CheckpointFile> = files
+        .iter()
+        .map(|rel_path| {
+            let content = dirty_files.get(rel_path).cloned().unwrap_or_default();
+            CheckpointFile {
+                path: repo_work_dir.join(rel_path),
+                content,
+                repo_work_dir: repo_work_dir.to_path_buf(),
+                base_commit_sha: base_commit_sha.to_string(),
+            }
+        })
+        .collect();
+
     CheckpointRequest {
         trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
         checkpoint_kind: CheckpointKind::Human,
         agent_id: None,
-        repo_working_dir: std::path::PathBuf::new(), // Will be overridden by caller
-        file_paths: files.into_iter().map(std::path::PathBuf::from).collect(),
+        files: checkpoint_files,
         path_role: PreparedPathRole::WillEdit,
-        dirty_files: Some(
-            dirty_files
-                .into_iter()
-                .map(|(k, v)| (std::path::PathBuf::from(k), v))
-                .collect(),
-        ),
         transcript_source: None,
         metadata: std::collections::HashMap::new(),
-        captured_checkpoint_id: None,
     }
 }
 
@@ -2561,60 +2535,75 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     // writing a synthetic Human checkpoint.  Bash snapshot files are written at
     // PreToolUse time and live for 300 s, so they are always present on disk when
     // the daemon processes the trace2 commit event (typically < 1 s later).
-    let (checkpoint_kind, replay_checkpoint_request) =
+    let replay_checkpoint_request = {
+        use crate::commands::checkpoint_agent::orchestrator::{CheckpointFile, CheckpointRequest};
+
+        let make_checkpoint_files = |files: Vec<String>,
+                                     dirty: HashMap<String, String>,
+                                     rwd: &Path,
+                                     bcs: &str|
+         -> Vec<CheckpointFile> {
+            files
+                .iter()
+                .map(|rel_path| {
+                    let content = dirty.get(rel_path).cloned().unwrap_or_default();
+                    CheckpointFile {
+                        path: rwd.join(rel_path),
+                        content,
+                        repo_work_dir: rwd.to_path_buf(),
+                        base_commit_sha: bcs.to_string(),
+                    }
+                })
+                .collect()
+        };
+
         match crate::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash(
             repo_root,
             &repo_workdir,
         ) {
-            Some((kind, Some(mut ai_result))) => {
+            Some((kind, Some(ai_result))) => {
                 // Bash in flight with full context — attribute committed files to the AI agent.
-                ai_result.file_paths = changed_files
-                    .into_iter()
-                    .map(std::path::PathBuf::from)
-                    .collect();
-                ai_result.path_role = PreparedPathRole::Edited;
-                ai_result.dirty_files = Some(
-                    dirty_files
-                        .into_iter()
-                        .map(|(k, v)| (std::path::PathBuf::from(k), v))
-                        .collect(),
-                );
-                (kind, ai_result)
+                let checkpoint_files =
+                    make_checkpoint_files(changed_files, dirty_files, repo_root, &base_commit);
+                CheckpointRequest {
+                    trace_id: ai_result.trace_id.clone(),
+                    checkpoint_kind: kind,
+                    agent_id: ai_result.agent_id.clone(),
+                    files: checkpoint_files,
+                    path_role: PreparedPathRole::Edited,
+                    transcript_source: ai_result.transcript_source.clone(),
+                    metadata: ai_result.metadata.clone(),
+                }
             }
             Some((kind, None)) => {
-                // Bash in flight but no context details — use AI kind with daemon agent_id.
-                let mut result = build_human_replay_checkpoint_request(vec![], HashMap::new());
-                result.checkpoint_kind = kind;
-                result.file_paths = changed_files
-                    .into_iter()
-                    .map(std::path::PathBuf::from)
-                    .collect();
-                result.path_role = PreparedPathRole::Edited;
-                result.dirty_files = Some(
-                    dirty_files
-                        .into_iter()
-                        .map(|(k, v)| (std::path::PathBuf::from(k), v))
-                        .collect(),
-                );
-                (kind, result)
+                // Bash in flight but no context details — use AI kind.
+                let checkpoint_files =
+                    make_checkpoint_files(changed_files, dirty_files, repo_root, &base_commit);
+                CheckpointRequest {
+                    trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+                    checkpoint_kind: kind,
+                    agent_id: None,
+                    files: checkpoint_files,
+                    path_role: PreparedPathRole::Edited,
+                    transcript_source: None,
+                    metadata: std::collections::HashMap::new(),
+                }
             }
             None => {
-                let result = build_human_replay_checkpoint_request(changed_files, dirty_files);
-                (CheckpointKind::Human, result)
+                build_human_replay_checkpoint_request(
+                    changed_files,
+                    dirty_files,
+                    repo_root,
+                    &base_commit,
+                )
             }
-        };
+        }
+    };
 
-    crate::commands::checkpoint::run_with_base_commit_override_with_policy(
-        repo,
-        author,
-        checkpoint_kind,
-        true,
-        Some(replay_checkpoint_request),
-        base_commit != "initial",
-        Some(base_commit.as_str()),
-        crate::commands::checkpoint::BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
-    )
-    .map(|_| ())
+    let file_refs: Vec<&crate::commands::checkpoint_agent::orchestrator::CheckpointFile> =
+        replay_checkpoint_request.files.iter().collect();
+    crate::commands::checkpoint::run(repo, author, &replay_checkpoint_request, &file_refs)
+        .map(|_| ())
 }
 
 fn apply_rewrite_side_effect(
@@ -3659,7 +3648,7 @@ enum FamilySequencerEntry {
     PendingRoot,
     ReadyCommand(Box<crate::daemon::domain::NormalizedCommand>),
     Checkpoint {
-        request: Box<CheckpointRunRequest>,
+        request: Box<crate::commands::checkpoint_agent::orchestrator::CheckpointRequest>,
         respond_to: Option<oneshot::Sender<Result<u64, GitAiError>>>,
     },
     Canceled,
@@ -5488,7 +5477,7 @@ impl ActorDaemonCoordinator {
     async fn append_checkpoint_to_family_sequencer(
         &self,
         family: &str,
-        request: CheckpointRunRequest,
+        request: crate::commands::checkpoint_agent::orchestrator::CheckpointRequest,
         respond_to: Option<oneshot::Sender<Result<u64, GitAiError>>>,
     ) -> Result<(), GitAiError> {
         let exec_lock = self.side_effect_exec_lock(family)?;
@@ -5646,62 +5635,48 @@ impl ActorDaemonCoordinator {
                     request,
                     respond_to,
                 } => {
-                    let captured_checkpoint_id = match request.as_ref() {
-                        CheckpointRunRequest::Captured(request) => Some(request.capture_id.clone()),
-                        CheckpointRunRequest::Live(_) => None,
-                    };
-                    // Compute before the future consumes `request`.
-                    let repo_wd = request.repo_working_dir().to_string();
-                    let checkpoint_file_paths: Vec<String> = match request.as_ref() {
-                        CheckpointRunRequest::Live(req) => req
-                            .checkpoint_request
-                            .as_ref()
-                            .map(|r| {
-                                r.file_paths
-                                    .iter()
-                                    .map(|p| p.to_string_lossy().to_string())
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        CheckpointRunRequest::Captured(req) => {
-                            crate::commands::checkpoint::load_captured_checkpoint_manifest(
-                                &req.capture_id,
-                            )
-                            .ok()
-                            .map(|m| m.files.iter().map(|f| f.path.clone()).collect())
-                            .unwrap_or_default()
-                        }
-                    };
-                    // Extract kind before request is consumed by apply_checkpoint_side_effect.
-                    let is_live_human_checkpoint = matches!(
-                        request.as_ref(),
-                        CheckpointRunRequest::Live(req) if req.kind.as_deref() == Some("human")
-                    );
+                    // Compute repo working directory from the first file.
+                    let repo_wd = request
+                        .files
+                        .first()
+                        .map(|f| f.repo_work_dir.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let checkpoint_file_paths: Vec<String> = request
+                        .files
+                        .iter()
+                        .map(|f| {
+                            let rel = f
+                                .path
+                                .strip_prefix(&f.repo_work_dir)
+                                .unwrap_or(&f.path);
+                            crate::utils::normalize_to_posix(&rel.to_string_lossy())
+                        })
+                        .collect();
+                    let is_human_checkpoint =
+                        request.checkpoint_kind == CheckpointKind::Human;
                     let should_log_completion =
-                        crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync(&request);
-                    let checkpoint_kind_str: &str = match request.as_ref() {
-                        CheckpointRunRequest::Live(req) => req.kind.as_deref().unwrap_or("human"),
-                        CheckpointRunRequest::Captured(_) => "captured",
-                    };
-                    let checkpoint_kind_str = checkpoint_kind_str.to_string();
+                        crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync();
+                    let checkpoint_kind_str = request.checkpoint_kind.to_str().to_string();
                     tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
                     let checkpoint_start = std::time::Instant::now();
                     // Wrap checkpoint processing in catch_unwind to recover from panics.
-                    let checkpoint_request = {
+                    let checkpoint_result = {
                         let future = async {
                             let ack = self
                                 .coordinator
-                                .apply_checkpoint(Path::new(request.repo_working_dir()))
+                                .apply_checkpoint(Path::new(&repo_wd))
                                 .await;
                             match ack {
-                                Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
+                                Ok(ack) => {
+                                    apply_checkpoint_side_effect(&request).map(|_| ack.seq)
+                                }
                                 Err(error) => Err(error),
                             }
                         };
                         let caught = std::panic::AssertUnwindSafe(future);
                         futures::FutureExt::catch_unwind(caught).await
                     };
-                    let mut result = match checkpoint_request {
+                    let result = match checkpoint_result {
                         Ok(inner) => inner,
                         Err(panic_payload) => {
                             let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>()
@@ -5749,24 +5724,10 @@ impl ActorDaemonCoordinator {
                         } else {
                             std::collections::HashMap::new()
                         };
-                        // Advance the worktree watermark for every live Human checkpoint so
+                        // Advance the worktree watermark for every Human checkpoint so
                         // the bash tool pre-hook always has a baseline for files not covered
                         // by a per-file (scoped) watermark.
-                        //
-                        // Previously this was restricted to `checkpoint_file_paths.is_empty()`,
-                        // but bare-CLI `git-ai checkpoint` always populates file paths via
-                        // `get_all_files_for_mock_ai`, so the condition was never true and the
-                        // Tier-2 worktree watermark was never set. Removing that restriction
-                        // means the worktree baseline is always updated on Human checkpoints.
-                        //
-                        // Per-file (Tier 1) watermarks set above take precedence in
-                        // `find_stale_files`, so this does not cause false positives for
-                        // files already covered by a scoped checkpoint.
-                        // AiAgent checkpoints must NOT set the baseline (no guarantee all
-                        // human-edited files were captured). Captured checkpoints are always
-                        // scoped and never reach this branch.
-                        let is_full_human_checkpoint = is_live_human_checkpoint;
-                        let per_worktree = if is_full_human_checkpoint {
+                        let per_worktree = if is_human_checkpoint {
                             let now_ns = std::time::SystemTime::now()
                                 .duration_since(std::time::SystemTime::UNIX_EPOCH)
                                 .unwrap_or_default()
@@ -5786,22 +5747,6 @@ impl ActorDaemonCoordinator {
                                     },
                                 )
                                 .await;
-                        }
-                    }
-                    if let Some(capture_id) = captured_checkpoint_id
-                        && let Err(cleanup_error) =
-                            crate::commands::checkpoint::delete_captured_checkpoint(&capture_id)
-                    {
-                        if result.is_ok() {
-                            result = Err(cleanup_error);
-                        } else {
-                            tracing::debug!(
-                                %cleanup_error,
-                                %family,
-                                order,
-                                %capture_id,
-                                "captured checkpoint cleanup failed"
-                            );
                         }
                     }
                     if let Err(error) = &result {
@@ -7198,38 +7143,24 @@ impl ActorDaemonCoordinator {
 
     async fn ingest_checkpoint_payload(
         &self,
-        request: CheckpointRunRequest,
-        wait: bool,
+        request: crate::commands::checkpoint_agent::orchestrator::CheckpointRequest,
     ) -> Result<ControlResponse, GitAiError> {
-        let repo_working_dir = request.repo_working_dir().to_string();
+        let repo_working_dir = request
+            .files
+            .first()
+            .map(|f| f.repo_work_dir.to_string_lossy().to_string())
+            .unwrap_or_default();
         if repo_working_dir.trim().is_empty() {
             return Err(GitAiError::Generic(
-                "checkpoint request missing repo_working_dir".to_string(),
+                "checkpoint request has no files".to_string(),
             ));
         }
         let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
 
-        // Captured checkpoints carry their own file-state snapshot and do not
-        // depend on trace-ingest ordering, so we skip the potentially expensive
-        // wait.  Live checkpoints still need the daemon's view of the repo to be
-        // current, and wait=true callers explicitly asked to block.
-        let needs_trace_ingest_wait = wait || matches!(request, CheckpointRunRequest::Live(_));
-        if needs_trace_ingest_wait {
-            let ingest_high_watermark = self.trace_ingest_high_watermark();
-            if ingest_high_watermark > 0 {
-                self.wait_for_trace_ingest_processed_through(ingest_high_watermark)
-                    .await?;
-            }
-        }
-
-        if wait {
-            let (tx, rx) = oneshot::channel();
-            self.append_checkpoint_to_family_sequencer(&family.0, request, Some(tx))
+        let ingest_high_watermark = self.trace_ingest_high_watermark();
+        if ingest_high_watermark > 0 {
+            self.wait_for_trace_ingest_processed_through(ingest_high_watermark)
                 .await?;
-            let seq = rx.await.map_err(|_| {
-                GitAiError::Generic("checkpoint sequencer completion receive failed".to_string())
-            })??;
-            return Ok(ControlResponse::ok(Some(seq), None));
         }
 
         self.append_checkpoint_to_family_sequencer(&family.0, request, None)
@@ -7268,22 +7199,21 @@ impl ActorDaemonCoordinator {
 
     async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
         let result = match request {
-            ControlRequest::CheckpointRun { request, wait } => {
+            ControlRequest::CheckpointRun { request } => {
                 // Extract transcript notification before processing checkpoint
                 if let Some(worker) = &self.transcript_worker
-                    && let Some(checkpoint_request) = Self::extract_checkpoint_request(&request)
-                    && let Some(transcript_source) = &checkpoint_request.transcript_source
+                    && let Some(transcript_source) = &request.transcript_source
                 {
                     let session_id = transcript_source.session_id.clone();
 
                     // Extract agent type from agent_id.tool
-                    let agent_type = checkpoint_request
+                    let agent_type = request
                         .agent_id
                         .as_ref()
                         .map(|aid| aid.tool.clone())
                         .unwrap_or_else(|| "unknown".to_string());
 
-                    let trace_id = checkpoint_request.trace_id.clone();
+                    let trace_id = request.trace_id.clone();
 
                     // Ensure session exists in transcripts-db
                     if let Some(db) = &self.transcripts_db
@@ -7292,7 +7222,7 @@ impl ActorDaemonCoordinator {
                             &session_id,
                             &agent_type,
                             transcript_source,
-                            checkpoint_request.agent_id.as_ref(),
+                            request.agent_id.as_ref(),
                         )
                     {
                         tracing::warn!(
@@ -7313,8 +7243,54 @@ impl ActorDaemonCoordinator {
                         .await;
                 }
 
-                self.ingest_checkpoint_payload(*request, wait.unwrap_or(false))
+                self.ingest_checkpoint_payload(*request).await
+            }
+            ControlRequest::BashBeginInvocation {
+                repo_working_dir,
+                invocation_id,
+                agent_context,
+                stat_snapshot,
+            } => {
+                let invocation = crate::daemon::domain::BashInvocation {
+                    agent_context,
+                    stat_snapshot,
+                    stored_at: std::time::Instant::now(),
+                };
+                match self
+                    .coordinator
+                    .store_bash_invocation_family(
+                        Path::new(&repo_working_dir),
+                        invocation_id,
+                        invocation,
+                    )
                     .await
+                {
+                    Ok(()) => Ok(ControlResponse::ok(None, None)),
+                    Err(e) => Err(e),
+                }
+            }
+            ControlRequest::BashCompleteInvocation {
+                repo_working_dir,
+                invocation_id,
+            } => {
+                match self
+                    .coordinator
+                    .consume_bash_invocation_family(
+                        Path::new(&repo_working_dir),
+                        invocation_id,
+                    )
+                    .await
+                {
+                    Ok(Some(inv)) => {
+                        let data = serde_json::json!({
+                            "agent_context": inv.agent_context,
+                            "stat_snapshot": inv.stat_snapshot,
+                        });
+                        Ok(ControlResponse::ok(None, Some(data)))
+                    }
+                    Ok(None) => Ok(ControlResponse::ok(None, None)),
+                    Err(e) => Err(e),
+                }
             }
             ControlRequest::StatusFamily { repo_working_dir } => self
                 .status_for_family(repo_working_dir)
@@ -7370,15 +7346,6 @@ impl ActorDaemonCoordinator {
         match result {
             Ok(response) => response,
             Err(error) => ControlResponse::err(error.to_string()),
-        }
-    }
-
-    fn extract_checkpoint_request(
-        request: &CheckpointRunRequest,
-    ) -> Option<&crate::commands::checkpoint_agent::orchestrator::CheckpointRequest> {
-        match request {
-            CheckpointRunRequest::Live(live_req) => live_req.checkpoint_request.as_ref(),
-            CheckpointRunRequest::Captured(_) => None,
         }
     }
 
@@ -8432,12 +8399,6 @@ fn checkpoint_control_response_timeout(
     use_ci_or_test_budget: bool,
 ) -> Duration {
     match request {
-        // If the caller explicitly asked to wait for checkpoint completion, use
-        // the longer budget even in product mode because the request is
-        // intentionally synchronous.
-        ControlRequest::CheckpointRun { wait, .. } if wait.unwrap_or(false) => {
-            DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
-        }
         // Queued checkpoint requests can block behind trace-ingest ordering. In
         // CI/test we allow the longer budget so replay-heavy daemon tests don't
         // tear down captured state mid-request. Product mode keeps the short
@@ -8746,59 +8707,39 @@ mod tests {
         }
     }
 
-    fn queued_checkpoint_request() -> ControlRequest {
+    fn sample_checkpoint_request() -> ControlRequest {
+        use crate::commands::checkpoint_agent::orchestrator::{CheckpointFile, CheckpointRequest};
         ControlRequest::CheckpointRun {
-            request: Box::new(CheckpointRunRequest::Captured(
-                CapturedCheckpointRunRequest {
-                    repo_working_dir: "/tmp/repo".to_string(),
-                    capture_id: "capture".to_string(),
-                },
-            )),
-            wait: Some(false),
-        }
-    }
-
-    fn waited_checkpoint_request() -> ControlRequest {
-        ControlRequest::CheckpointRun {
-            request: Box::new(CheckpointRunRequest::Live(Box::new(
-                LiveCheckpointRunRequest {
-                    repo_working_dir: "/tmp/repo".to_string(),
-                    kind: Some("human".to_string()),
-                    author: Some("test".to_string()),
-                    quiet: Some(true),
-                    is_pre_commit: Some(false),
-                    checkpoint_request: None,
-                },
-            ))),
-            wait: Some(true),
+            request: Box::new(CheckpointRequest {
+                trace_id: "test-trace".to_string(),
+                checkpoint_kind: crate::authorship::working_log::CheckpointKind::Human,
+                agent_id: None,
+                files: vec![CheckpointFile {
+                    path: std::path::PathBuf::from("/tmp/repo/test.txt"),
+                    content: "hello".to_string(),
+                    repo_work_dir: std::path::PathBuf::from("/tmp/repo"),
+                    base_commit_sha: "abc123".to_string(),
+                }],
+                path_role: crate::commands::checkpoint::PreparedPathRole::WillEdit,
+                transcript_source: None,
+                metadata: std::collections::HashMap::new(),
+            }),
         }
     }
 
     #[test]
     fn checkpoint_requests_use_long_timeout_in_ci_or_test_env() {
         assert_eq!(
-            checkpoint_control_response_timeout(&queued_checkpoint_request(), true),
-            DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
-        );
-        assert_eq!(
-            checkpoint_control_response_timeout(&waited_checkpoint_request(), true),
+            checkpoint_control_response_timeout(&sample_checkpoint_request(), true),
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         );
     }
 
     #[test]
-    fn queued_checkpoint_requests_use_short_timeout_in_product_env() {
+    fn checkpoint_requests_use_short_timeout_in_product_env() {
         assert_eq!(
-            checkpoint_control_response_timeout(&queued_checkpoint_request(), false),
+            checkpoint_control_response_timeout(&sample_checkpoint_request(), false),
             DAEMON_CONTROL_RESPONSE_TIMEOUT
-        );
-    }
-
-    #[test]
-    fn waited_checkpoint_requests_use_long_timeout_in_product_env() {
-        assert_eq!(
-            checkpoint_control_response_timeout(&waited_checkpoint_request(), false),
-            DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         );
     }
 

@@ -175,6 +175,7 @@ mod tests {
             last_error: None,
             applied_seq: 0,
             watermarks: WatermarkState::default(),
+            bash_invocations: HashMap::new(),
         }
     }
 

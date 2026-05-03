@@ -53,13 +53,15 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
 
     let default_user_name = repo.git_author_identity().formatted_or_unknown();
 
-    let _ = checkpoint::run(
+    let _ = checkpoint::run_with_base_commit_override(
         &repo,
         &default_user_name,
         CheckpointKind::Human,
         true,
         None,
+        None, // dirty_files_override
         false,
+        None, // base_commit_override
     );
 
     let head = repo.head()?;

@@ -1,4 +1,3 @@
-use crate::daemon::CheckpointRunRequest;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::repository::config_get_str_for_path_no_git_exec;
 use std::collections::HashSet;
@@ -54,8 +53,11 @@ pub fn tracked_parsed_git_invocation_for_test_sync(
     resolve_alias_invocation_no_git_exec(&parsed, &repo_lookup).unwrap_or(parsed)
 }
 
-pub fn tracks_checkpoint_request_for_test_sync(request: &CheckpointRunRequest) -> bool {
-    !request.is_pre_commit()
+/// All checkpoint requests flowing through the new `CheckpointRequest` type are
+/// non-pre-commit (the daemon builds synthetic replays internally), so they are
+/// always tracked for test sync.
+pub fn tracks_checkpoint_request_for_test_sync() -> bool {
+    true
 }
 
 pub fn test_sync_session_from_invocation(invocation: &ParsedGitInvocation) -> Option<String> {

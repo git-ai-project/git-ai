@@ -266,7 +266,7 @@ pub struct BashInvocation {
     pub stored_at: std::time::Instant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FamilyState {
     pub family_key: FamilyKey,
     pub refs: HashMap<String, String>,
