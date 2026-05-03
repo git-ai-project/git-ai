@@ -1,12 +1,11 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::working_log::{AgentId, Checkpoint, CheckpointKind, WorkingLogEntry};
 use git_ai::commands::checkpoint::{
-    BaseOverrideResolutionPolicy, PreparedPathRole, cleanup_failed_captured_checkpoint_prepare,
-    compute_file_line_stats, explicit_capture_target_paths, is_ai_author_id,
-    run_with_base_commit_override, run_with_base_commit_override_with_policy,
+    BaseOverrideResolutionPolicy, PreparedPathRole, compute_file_line_stats,
+    explicit_capture_target_paths, is_ai_author_id, run_with_base_commit_override,
+    run_with_base_commit_override_with_policy,
 };
-use git_ai::commands::checkpoint_agent::orchestrator::CheckpointRequest;
-use git_ai::error::GitAiError;
+use git_ai::commands::checkpoint_agent::orchestrator::{CheckpointFile, CheckpointRequest};
 use git_ai::git::repository::find_repository_in_path;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,7 +34,7 @@ fn test_checkpoint_request(
     checkpoint_kind: CheckpointKind,
     edited_filepaths: Option<Vec<&str>>,
     will_edit_filepaths: Option<Vec<&str>>,
-    dirty_files: Option<HashMap<&str, &str>>,
+    _dirty_files: Option<HashMap<&str, &str>>,
 ) -> CheckpointRequest {
     let (file_paths, path_role) = if let Some(paths) = edited_filepaths {
         (
@@ -51,6 +50,16 @@ fn test_checkpoint_request(
         (vec![], PreparedPathRole::Edited)
     };
 
+    let files = file_paths
+        .into_iter()
+        .map(|path| CheckpointFile {
+            path,
+            content: String::new(),
+            repo_work_dir: PathBuf::from("."),
+            base_commit_sha: "test".to_string(),
+        })
+        .collect();
+
     CheckpointRequest {
         trace_id: "test-trace".to_string(),
         checkpoint_kind,
@@ -59,18 +68,10 @@ fn test_checkpoint_request(
             id: "test-capture".to_string(),
             model: "test-model".to_string(),
         }),
-        repo_working_dir: PathBuf::from("."),
-        file_paths,
+        files,
         path_role,
-        dirty_files: dirty_files.map(|files| {
-            files
-                .into_iter()
-                .map(|(path, content)| (PathBuf::from(path), content.to_string()))
-                .collect()
-        }),
         transcript_source: None,
         metadata: HashMap::new(),
-        captured_checkpoint_id: None,
     }
 }
 
@@ -163,27 +164,6 @@ fn test_explicit_capture_target_paths_rejects_empty_explicit_lists() {
     assert_eq!(
         explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&ai_result)),
         None
-    );
-}
-
-#[test]
-fn test_cleanup_failed_captured_checkpoint_prepare_removes_partial_capture_dir() {
-    let temp = tempfile::tempdir().expect("temp dir should be creatable");
-    let capture_dir = temp.path().join("capture-fixture");
-    std::fs::create_dir_all(capture_dir.join("blobs"))
-        .expect("partial capture directory should be creatable");
-    std::fs::write(capture_dir.join("blobs").join("partial-blob"), "partial")
-        .expect("partial blob should be creatable");
-
-    cleanup_failed_captured_checkpoint_prepare(
-        &capture_dir,
-        "capture-fixture",
-        &GitAiError::Generic("synthetic prepare failure".to_string()),
-    );
-
-    assert!(
-        !capture_dir.exists(),
-        "cleanup helper should remove partial capture directories"
     );
 }
 
@@ -392,13 +372,15 @@ fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
             id: "base-override-regression".to_string(),
             model: "test".to_string(),
         }),
-        repo_working_dir: repo.path().to_path_buf(),
-        file_paths: vec![PathBuf::from(&lines_file)],
+        files: vec![CheckpointFile {
+            path: PathBuf::from(&lines_file),
+            content: "line from commit B\n".to_string(),
+            repo_work_dir: repo.path().to_path_buf(),
+            base_commit_sha: base_commit.clone(),
+        }],
         path_role: PreparedPathRole::Edited,
-        dirty_files: Some(dirty_files),
         transcript_source: None,
         metadata: HashMap::new(),
-        captured_checkpoint_id: None,
     };
 
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
@@ -408,6 +390,7 @@ fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
         CheckpointKind::AiAgent,
         true,
         Some(checkpoint_request),
+        Some(dirty_files),
         false,
         Some(base_commit.as_str()),
         BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
@@ -455,13 +438,15 @@ fn test_checkpoint_base_override_strict_rejects_missing_dirty_snapshot() {
             id: "base-override-strict-missing-snapshot".to_string(),
             model: "test".to_string(),
         }),
-        repo_working_dir: repo.path().to_path_buf(),
-        file_paths: vec![PathBuf::from(&lines_file)],
+        files: vec![CheckpointFile {
+            path: PathBuf::from(&lines_file),
+            content: String::new(),
+            repo_work_dir: repo.path().to_path_buf(),
+            base_commit_sha: base_commit.clone(),
+        }],
         path_role: PreparedPathRole::Edited,
-        dirty_files: None,
         transcript_source: None,
         metadata: HashMap::new(),
-        captured_checkpoint_id: None,
     };
 
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
@@ -471,6 +456,7 @@ fn test_checkpoint_base_override_strict_rejects_missing_dirty_snapshot() {
         CheckpointKind::AiAgent,
         true,
         Some(checkpoint_request),
+        None,
         false,
         Some(base_commit.as_str()),
         BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
@@ -517,13 +503,15 @@ fn test_checkpoint_base_override_allow_fallback_scans_when_snapshot_missing() {
             id: "base-override-allow-fallback".to_string(),
             model: "test".to_string(),
         }),
-        repo_working_dir: repo.path().to_path_buf(),
-        file_paths: vec![PathBuf::from(&lines_file)],
+        files: vec![CheckpointFile {
+            path: PathBuf::from(&lines_file),
+            content: String::new(),
+            repo_work_dir: repo.path().to_path_buf(),
+            base_commit_sha: base_commit.clone(),
+        }],
         path_role: PreparedPathRole::Edited,
-        dirty_files: None,
         transcript_source: None,
         metadata: HashMap::new(),
-        captured_checkpoint_id: None,
     };
 
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
@@ -533,6 +521,7 @@ fn test_checkpoint_base_override_allow_fallback_scans_when_snapshot_missing() {
         CheckpointKind::AiAgent,
         true,
         Some(checkpoint_request),
+        None,
         false,
         Some(base_commit.as_str()),
     )
@@ -633,6 +622,12 @@ fn test_checkpoint_with_paths_outside_repo() {
     repo.git(&["add", &lines_file]).unwrap();
 
     // Create checkpoint request with paths outside the repo
+    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let base_commit = gitai_repo
+        .head()
+        .ok()
+        .and_then(|head| head.target().ok())
+        .unwrap_or_else(|| "initial".to_string());
     let checkpoint_request = CheckpointRequest {
         trace_id: "test-outside-paths".to_string(),
         checkpoint_kind: CheckpointKind::AiAgent,
@@ -641,27 +636,39 @@ fn test_checkpoint_with_paths_outside_repo() {
             id: "test_session".to_string(),
             model: "test_model".to_string(),
         }),
-        repo_working_dir: repo.path().to_path_buf(),
-        file_paths: vec![
-            PathBuf::from("/tmp/outside_file.txt"),
-            PathBuf::from("../outside_parent.txt"),
-            PathBuf::from(&lines_file), // This one is valid
+        files: vec![
+            CheckpointFile {
+                path: PathBuf::from("/tmp/outside_file.txt"),
+                content: String::new(),
+                repo_work_dir: repo.path().to_path_buf(),
+                base_commit_sha: base_commit.clone(),
+            },
+            CheckpointFile {
+                path: PathBuf::from("../outside_parent.txt"),
+                content: String::new(),
+                repo_work_dir: repo.path().to_path_buf(),
+                base_commit_sha: base_commit.clone(),
+            },
+            CheckpointFile {
+                path: PathBuf::from(&lines_file), // This one is valid
+                content: String::new(),
+                repo_work_dir: repo.path().to_path_buf(),
+                base_commit_sha: base_commit.clone(),
+            },
         ],
         path_role: PreparedPathRole::Edited,
-        dirty_files: None,
         transcript_source: None,
         metadata: HashMap::new(),
-        captured_checkpoint_id: None,
     };
 
     // Run checkpoint - should not crash even with paths outside repo
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let result = run_with_base_commit_override(
         &gitai_repo,
         "test_user",
         CheckpointKind::AiAgent,
         true,
         Some(checkpoint_request),
+        None,
         false,
         None,
     );

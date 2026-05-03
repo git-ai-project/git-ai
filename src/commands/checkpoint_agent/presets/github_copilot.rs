@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
-    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::ToolClass;
@@ -51,7 +51,6 @@ fn parse_legacy_extension_hooks(
                 "workspace_folder or workspaceFolder not found in hook_input for GitHub Copilot preset".to_string(),
             )
         })?;
-
 
     let session_id = extract_session_id(data);
 
@@ -273,7 +272,6 @@ fn parse_vscode_native_hooks(
         }
 
         if tool_name.eq_ignore_ascii_case("create_file") {
-
             if extracted_paths.is_empty() {
                 return Err(GitAiError::PresetError(
                     "No file path found in create_file PreToolUse tool_input".to_string(),

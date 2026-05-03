@@ -7,7 +7,7 @@ use crate::commands::checkpoint_agent::presets::{
     TranscriptSource, UntrackedEdit,
 };
 use crate::error::GitAiError;
-use crate::git::repository::{find_repository_for_file, Repository};
+use crate::git::repository::{Repository, find_repository_for_file};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;

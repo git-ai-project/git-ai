@@ -11,14 +11,12 @@ use std::path::PathBuf;
 #[serde(tag = "method", content = "params")]
 pub enum ControlRequest {
     #[serde(rename = "checkpoint.run")]
-    CheckpointRun {
-        request: Box<CheckpointRequest>,
-    },
+    CheckpointRun { request: Box<CheckpointRequest> },
     #[serde(rename = "bash.begin_invocation")]
     BashBeginInvocation {
         repo_working_dir: String,
         invocation_id: String,
-        agent_context: InflightBashAgentContext,
+        agent_context: Box<InflightBashAgentContext>,
         stat_snapshot: BashStatSnapshot,
     },
     #[serde(rename = "bash.complete_invocation")]

@@ -64,10 +64,6 @@ pub enum PreparedPathRole {
     WillEdit,
 }
 
-
-
-
-
 #[derive(Debug, Clone)]
 struct ResolvedCheckpointExecution {
     base_commit: String,
@@ -197,9 +193,6 @@ fn resolve_base_commit(repo: &Repository, base_commit_override: Option<&str>) ->
             Err(_) => "initial".to_string(),
         })
 }
-
-
-
 
 /// New entry point: takes the unified `CheckpointRequest` and pre-resolved file refs.
 pub fn run(
@@ -963,11 +956,6 @@ fn execute_resolved_checkpoint(
     );
     Ok((entries.len(), resolved.files.len(), checkpoints.len()))
 }
-
-
-
-
-
 
 // Gets tracked changes AND
 fn get_status_of_files(

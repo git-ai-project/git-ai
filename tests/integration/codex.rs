@@ -1,8 +1,6 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::test_utils::fixture_path;
-use git_ai::commands::checkpoint_agent::presets::{
-    BashPreHookStrategy, ParsedHookEvent, resolve_preset,
-};
+use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
 use git_ai::error::GitAiError;
 use git_ai::transcripts::agent::Agent;
 use git_ai::transcripts::agents::CodexAgent;
@@ -132,7 +130,6 @@ fn test_codex_preset_bash_pre_tool_use_skips_checkpoint_after_capturing_snapshot
     assert_eq!(events.len(), 1);
     match &events[0] {
         ParsedHookEvent::PreBashCall(e) => {
-            assert_eq!(e.strategy, BashPreHookStrategy::SnapshotOnly);
             assert_eq!(e.context.agent_id.tool, "codex");
             assert_eq!(e.context.session_id, "session-bash-pre");
             assert_eq!(e.tool_use_id, "bash-use-1");
@@ -166,7 +163,6 @@ fn test_codex_preset_bash_pre_tool_use_supports_camel_case_hook_event_name() {
     assert_eq!(events.len(), 1);
     match &events[0] {
         ParsedHookEvent::PreBashCall(e) => {
-            assert_eq!(e.strategy, BashPreHookStrategy::SnapshotOnly);
             assert_eq!(e.context.agent_id.tool, "codex");
             assert_eq!(e.context.session_id, "session-bash-pre-camel");
             assert_eq!(e.tool_use_id, "bash-use-camel-1");

@@ -126,10 +126,6 @@ fn test_copilot_preset_before_edit_human_checkpoint_snake_case() {
     match &events[0] {
         ParsedHookEvent::PreFileEdit(e) => {
             assert!(!e.file_paths.is_empty());
-            assert!(e.dirty_files.is_some());
-            let dirty_files = e.dirty_files.as_ref().unwrap();
-            assert_eq!(dirty_files.len(), 1);
-            assert!(dirty_files.values().any(|v| v.contains("hello")));
             assert_eq!(e.context.agent_id.tool, "github-copilot");
         }
         _ => panic!("Expected PreFileEdit for before_edit"),
@@ -151,7 +147,6 @@ fn test_copilot_preset_before_edit_human_checkpoint_camel_case() {
     match &events[0] {
         ParsedHookEvent::PreFileEdit(e) => {
             assert!(!e.file_paths.is_empty());
-            assert!(e.dirty_files.is_some());
         }
         _ => panic!("Expected PreFileEdit for before_edit"),
     }
@@ -312,7 +307,7 @@ fn test_copilot_preset_after_edit_camel_case() {
             assert_eq!(e.context.agent_id.id, "test-session-123");
             assert_eq!(e.context.agent_id.tool, "github-copilot");
             assert!(!e.file_paths.is_empty());
-            assert!(e.dirty_files.is_some());
+            // dirty_files removed from preset types in checkpoint rewrite
         }
         _ => panic!("Expected PostFileEdit for after_edit"),
     }
@@ -342,7 +337,7 @@ fn test_copilot_preset_after_edit_snake_case() {
             assert_eq!(e.context.agent_id.id, "test-session-456");
             assert_eq!(e.context.agent_id.tool, "github-copilot");
             assert!(!e.file_paths.is_empty());
-            assert!(e.dirty_files.is_some());
+            // dirty_files removed from preset types in checkpoint rewrite
         }
         _ => panic!("Expected PostFileEdit for after_edit"),
     }
@@ -383,7 +378,7 @@ fn test_copilot_after_edit_with_jsonl_session() {
             assert_eq!(e.context.agent_id.id, "test-jsonl-session-789");
             assert_eq!(e.context.agent_id.tool, "github-copilot");
             assert!(!e.file_paths.is_empty());
-            assert!(e.dirty_files.is_some());
+            // dirty_files removed from preset types in checkpoint rewrite
         }
         _ => panic!("Expected PostFileEdit"),
     }

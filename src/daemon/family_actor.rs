@@ -20,8 +20,11 @@ pub enum FamilyMsg {
     Status(oneshot::Sender<Result<FamilyStatus, GitAiError>>),
     GetWatermarks(oneshot::Sender<Result<WatermarkState, GitAiError>>),
     UpdateWatermarks(WatermarkState),
-    StoreBashInvocation(String, BashInvocation),
-    ConsumeBashInvocation(String, oneshot::Sender<Result<Option<BashInvocation>, GitAiError>>),
+    StoreBashInvocation(String, Box<BashInvocation>),
+    ConsumeBashInvocation(
+        String,
+        oneshot::Sender<Result<Option<BashInvocation>, GitAiError>>,
+    ),
     GetActiveBashContext(oneshot::Sender<Option<InflightBashAgentContext>>),
     EvictStaleBashInvocations,
     Shutdown,
@@ -91,12 +94,10 @@ impl FamilyActorHandle {
         invocation: BashInvocation,
     ) -> Result<(), GitAiError> {
         self.tx
-            .send(FamilyMsg::StoreBashInvocation(id, invocation))
+            .send(FamilyMsg::StoreBashInvocation(id, Box::new(invocation)))
             .await
             .map_err(|_| {
-                GitAiError::Generic(
-                    "family actor store_bash_invocation send failed".to_string(),
-                )
+                GitAiError::Generic("family actor store_bash_invocation send failed".to_string())
             })
     }
 
@@ -109,14 +110,10 @@ impl FamilyActorHandle {
             .send(FamilyMsg::ConsumeBashInvocation(id, tx))
             .await
             .map_err(|_| {
-                GitAiError::Generic(
-                    "family actor consume_bash_invocation send failed".to_string(),
-                )
+                GitAiError::Generic("family actor consume_bash_invocation send failed".to_string())
             })?;
         rx.await.map_err(|_| {
-            GitAiError::Generic(
-                "family actor consume_bash_invocation receive failed".to_string(),
-            )
+            GitAiError::Generic("family actor consume_bash_invocation receive failed".to_string())
         })?
     }
 
@@ -211,7 +208,7 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                     }
                 }
                 FamilyMsg::StoreBashInvocation(id, invocation) => {
-                    state.bash_invocations.insert(id, invocation);
+                    state.bash_invocations.insert(id, *invocation);
                 }
                 FamilyMsg::ConsumeBashInvocation(id, respond_to) => {
                     let result = state.bash_invocations.remove(&id);

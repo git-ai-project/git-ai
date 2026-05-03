@@ -309,21 +309,19 @@ fn handle_checkpoint(args: &[String]) {
         std::process::exit(1);
     }
     let preset_name = args[0].as_str();
-    let effective_hook_input = hook_input.unwrap_or_else(|| {
-        synthesize_hook_input_from_cli_args(preset_name, &args[1..])
-    });
+    let effective_hook_input =
+        hook_input.unwrap_or_else(|| synthesize_hook_input_from_cli_args(preset_name, &args[1..]));
 
-    let requests =
-        match crate::commands::checkpoint_agent::orchestrator::execute_preset_checkpoint(
-            preset_name,
-            &effective_hook_input,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("{} preset error: {}", preset_name, e);
-                std::process::exit(1);
-            }
-        };
+    let requests = match crate::commands::checkpoint_agent::orchestrator::execute_preset_checkpoint(
+        preset_name,
+        &effective_hook_input,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{} preset error: {}", preset_name, e);
+            std::process::exit(1);
+        }
+    };
 
     if requests.is_empty() {
         std::process::exit(0);
@@ -341,15 +339,14 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
-    let daemon_config = match crate::commands::daemon::ensure_daemon_running(
-        std::time::Duration::from_secs(5),
-    ) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[git-ai] checkpoint failed: daemon unavailable: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let daemon_config =
+        match crate::commands::daemon::ensure_daemon_running(std::time::Duration::from_secs(5)) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[git-ai] checkpoint failed: daemon unavailable: {}", e);
+                std::process::exit(1);
+            }
+        };
 
     for request in requests {
         let control_request = ControlRequest::CheckpointRun {
@@ -854,8 +851,7 @@ fn handle_git_hooks(args: &[String]) {
 fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[String]) -> String {
     match preset_name {
         "human" | "mock_ai" | "mock_known_human" => {
-            let cwd = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let paths: Vec<String> = remaining_args
                 .iter()
                 .filter(|a| !a.starts_with("--"))
@@ -907,8 +903,7 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
                     }
                 }
             }
-            let cwd = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let files: Vec<String> = files
                 .into_iter()
                 .map(|f| {

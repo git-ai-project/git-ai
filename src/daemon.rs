@@ -2589,14 +2589,12 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
                     metadata: std::collections::HashMap::new(),
                 }
             }
-            None => {
-                build_human_replay_checkpoint_request(
-                    changed_files,
-                    dirty_files,
-                    repo_root,
-                    &base_commit,
-                )
-            }
+            None => build_human_replay_checkpoint_request(
+                changed_files,
+                dirty_files,
+                repo_root,
+                &base_commit,
+            ),
         }
     };
 
@@ -5645,15 +5643,11 @@ impl ActorDaemonCoordinator {
                         .files
                         .iter()
                         .map(|f| {
-                            let rel = f
-                                .path
-                                .strip_prefix(&f.repo_work_dir)
-                                .unwrap_or(&f.path);
+                            let rel = f.path.strip_prefix(&f.repo_work_dir).unwrap_or(&f.path);
                             crate::utils::normalize_to_posix(&rel.to_string_lossy())
                         })
                         .collect();
-                    let is_human_checkpoint =
-                        request.checkpoint_kind == CheckpointKind::Human;
+                    let is_human_checkpoint = request.checkpoint_kind == CheckpointKind::Human;
                     let should_log_completion =
                         crate::daemon::test_sync::tracks_checkpoint_request_for_test_sync();
                     let checkpoint_kind_str = request.checkpoint_kind.to_str().to_string();
@@ -5662,14 +5656,9 @@ impl ActorDaemonCoordinator {
                     // Wrap checkpoint processing in catch_unwind to recover from panics.
                     let checkpoint_result = {
                         let future = async {
-                            let ack = self
-                                .coordinator
-                                .apply_checkpoint(Path::new(&repo_wd))
-                                .await;
+                            let ack = self.coordinator.apply_checkpoint(Path::new(&repo_wd)).await;
                             match ack {
-                                Ok(ack) => {
-                                    apply_checkpoint_side_effect(&request).map(|_| ack.seq)
-                                }
+                                Ok(ack) => apply_checkpoint_side_effect(&request).map(|_| ack.seq),
                                 Err(error) => Err(error),
                             }
                         };
@@ -7252,7 +7241,7 @@ impl ActorDaemonCoordinator {
                 stat_snapshot,
             } => {
                 let invocation = crate::daemon::domain::BashInvocation {
-                    agent_context,
+                    agent_context: *agent_context,
                     stat_snapshot,
                     stored_at: std::time::Instant::now(),
                 };
@@ -7275,10 +7264,7 @@ impl ActorDaemonCoordinator {
             } => {
                 match self
                     .coordinator
-                    .consume_bash_invocation_family(
-                        Path::new(&repo_working_dir),
-                        invocation_id,
-                    )
+                    .consume_bash_invocation_family(Path::new(&repo_working_dir), invocation_id)
                     .await
                 {
                     Ok(Some(inv)) => {
