@@ -53,13 +53,7 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
 
     let default_user_name = repo.git_author_identity().formatted_or_unknown();
 
-    let _ = checkpoint::run(
-        &repo,
-        &default_user_name,
-        CheckpointKind::Human,
-        true,
-        None,
-    );
+    let _ = checkpoint::run(&repo, &default_user_name, CheckpointKind::Human, true, None);
 
     let head = repo.head()?;
     let head_sha = head.target()?;

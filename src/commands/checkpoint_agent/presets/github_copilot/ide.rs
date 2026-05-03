@@ -26,7 +26,7 @@ pub(super) fn parse_legacy_extension_hooks(
             )
         })?;
 
-    let dirty_files = super::dirty_files_from_hook_data(data, cwd);
+    let _dirty_files = super::dirty_files_from_hook_data(data, cwd);
 
     let session_id = super::extract_session_id(data);
 
@@ -143,7 +143,7 @@ pub(super) fn parse_vscode_native_hooks(
     let cwd = parse::optional_str_multi(data, &["cwd", "workspace_folder", "workspaceFolder"])
         .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
 
-    let dirty_files = super::dirty_files_from_hook_data(data, cwd);
+    let _dirty_files = super::dirty_files_from_hook_data(data, cwd);
     let session_id = super::extract_session_id(data);
 
     let tool_name =
@@ -456,7 +456,7 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_some());
+                assert!(!e.file_paths.is_empty());
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -647,11 +647,8 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/new_file.rs")]
                 );
-                let df = e.dirty_files.as_ref().unwrap();
-                assert_eq!(
-                    df.get(&PathBuf::from("/home/user/project/src/new_file.rs")),
-                    Some(&String::new())
-                );
+                // dirty_files removed from PreFileEdit; just verify the path is present
+                assert!(!e.file_paths.is_empty());
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -827,9 +824,7 @@ mod tests {
             .unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert!(e.dirty_files.is_some());
-                let df = e.dirty_files.as_ref().unwrap();
-                assert!(df.contains_key(&PathBuf::from("/home/user/project/src/main.rs")));
+                assert!(!e.file_paths.is_empty());
             }
             _ => panic!("Expected PreFileEdit"),
         }

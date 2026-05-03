@@ -9,8 +9,6 @@
 
 use crate::repos::test_repo::TestRepo;
 #[cfg(unix)]
-use git_ai::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash;
-#[cfg(unix)]
 use git_ai::commands::checkpoint_agent::bash_tool::handle_bash_pre_tool_use_with_context;
 use git_ai::commands::checkpoint_agent::bash_tool::{
     BashCheckpointAction, BashToolResult, HookEvent, diff, git_status_fallback, handle_bash_tool,
@@ -1717,28 +1715,19 @@ exit 0
         BashCheckpointAction::TakePreSnapshot
     ));
 
-    // Verify that checkpoint_context_from_active_bash finds the active context
+    // Verify that checkpoint_kind_from_active_bash finds the active context
     // (this is what the pre-commit hook would see during commit execution)
-    let repo_working_dir = root.to_string_lossy().to_string();
-    let context = checkpoint_context_from_active_bash(&root, &repo_working_dir);
+    let kind =
+        git_ai::commands::checkpoint_agent::bash_tool::checkpoint_kind_from_active_bash(&root);
     assert!(
-        context.is_some(),
-        "checkpoint_context_from_active_bash should find active bash snapshot"
+        kind.is_some(),
+        "checkpoint_kind_from_active_bash should find active bash snapshot"
     );
-    let (kind, agent_run) = context.unwrap();
     assert_eq!(
-        kind,
+        kind.unwrap(),
         git_ai::authorship::working_log::CheckpointKind::AiAgent,
         "checkpoint kind should be AiAgent"
     );
-    let agent_run = agent_run.expect("should have agent run result with context");
-    let agent_id = agent_run
-        .agent_id
-        .as_ref()
-        .expect("AI checkpoint should have agent_id");
-    assert_eq!(agent_id.tool, "claude");
-    assert_eq!(agent_id.id, "test-session-1");
-    assert_eq!(agent_id.model, "opus-4");
 
     // Now run the actual commit with hooks
     write_file(&repo, "module.py", "import os\n");

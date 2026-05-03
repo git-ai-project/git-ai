@@ -23,6 +23,7 @@ struct FirebenderHookInput {
     tool_name: Option<String>,
     tool_input: Option<serde_json::Value>,
     completion_id: Option<String>,
+    #[allow(dead_code)]
     dirty_files: Option<HashMap<String, String>>,
 }
 
@@ -127,6 +128,7 @@ impl AgentPreset for FirebenderPreset {
             tool_name,
             tool_input,
             completion_id,
+            ..
         } = hook_input;
 
         // Legacy events that should be silently skipped
@@ -190,9 +192,6 @@ impl AgentPreset for FirebenderPreset {
                 .map(|d| d.as_millis().to_string())
                 .unwrap_or_else(|_| "0".to_string())
         });
-
-        let dirty =
-            dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
 
         let context = PresetContext {
             agent_id: AgentId {
@@ -449,7 +448,7 @@ mod tests {
         let events = FirebenderPreset.parse(&input, "t_test").unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert!(e.dirty_files.is_some());
+                assert_eq!(e.file_paths.len(), 1);
             }
             _ => panic!("Expected PreFileEdit"),
         }

@@ -11,7 +11,7 @@ use crate::git::repository::find_repository_for_file;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointFileEntry {
@@ -52,7 +52,10 @@ fn build_file_entries(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFileEntry>
         let (repo_work_dir, base_commit_sha) = repo_cache
             .entry(work_dir.clone())
             .or_insert_with(|| {
-                let head = repo.rev_parse_head().unwrap_or_default();
+                let head = repo
+                    .revparse_single("HEAD")
+                    .map(|o| o.id())
+                    .unwrap_or_default();
                 (work_dir, head)
             })
             .clone();
@@ -61,42 +64,6 @@ fn build_file_entries(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFileEntry>
         entries.push(CheckpointFileEntry {
             path: path.clone(),
             content,
-            repo_work_dir,
-            base_commit_sha,
-        });
-    }
-    Ok(entries)
-}
-
-fn build_file_entries_with_content(
-    files_with_content: &[(PathBuf, String)],
-) -> Result<Vec<CheckpointFileEntry>, GitAiError> {
-    if files_with_content.is_empty() {
-        return Ok(vec![]);
-    }
-    let mut repo_cache: HashMap<PathBuf, (PathBuf, String)> = HashMap::new();
-    let mut entries = Vec::with_capacity(files_with_content.len());
-
-    for (path, content) in files_with_content {
-        if !path.is_absolute() {
-            return Err(GitAiError::PresetError(format!(
-                "file path must be absolute: {}",
-                path.display()
-            )));
-        }
-        let repo = find_repository_for_file(&path.to_string_lossy(), None)?;
-        let work_dir = repo.workdir()?;
-        let (repo_work_dir, base_commit_sha) = repo_cache
-            .entry(work_dir.clone())
-            .or_insert_with(|| {
-                let head = repo.rev_parse_head().unwrap_or_default();
-                (work_dir, head)
-            })
-            .clone();
-
-        entries.push(CheckpointFileEntry {
-            path: path.clone(),
-            content: content.clone(),
             repo_work_dir,
             base_commit_sha,
         });

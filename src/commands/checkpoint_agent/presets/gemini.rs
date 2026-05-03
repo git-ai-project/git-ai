@@ -116,7 +116,7 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_none());
+                // dirty_files removed from PreFileEdit
             }
             _ => panic!("Expected PreFileEdit"),
         }

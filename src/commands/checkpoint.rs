@@ -158,7 +158,6 @@ fn resolve_base_commit(repo: &Repository) -> String {
     }
 }
 
-
 pub fn run(
     repo: &Repository,
     author: &str,
@@ -168,11 +167,7 @@ pub fn run(
 ) -> Result<(usize, usize, usize), GitAiError> {
     let checkpoint_start = Instant::now();
     tracing::debug!("[BENCHMARK] Starting checkpoint run");
-    let resolved = resolve_live_checkpoint_execution(
-        repo,
-        kind,
-        checkpoint_request.as_ref(),
-    )?;
+    let resolved = resolve_live_checkpoint_execution(repo, kind, checkpoint_request.as_ref())?;
     let Some(resolved) = resolved else {
         tracing::debug!(
             "[BENCHMARK] Total checkpoint run took {:?}",
@@ -362,7 +357,7 @@ fn resolve_live_checkpoint_execution(
     );
 
     // Build content map from request files and set as dirty_files on the working log
-    if let Some(ref request) = checkpoint_request {
+    if let Some(request) = checkpoint_request {
         let content_map: HashMap<String, String> = request
             .files
             .iter()
@@ -389,8 +384,7 @@ fn resolve_live_checkpoint_execution(
         .map(|r| !r.files.is_empty())
         .unwrap_or(false);
     let pathspec_start = Instant::now();
-    let filtered_pathspec =
-        filtered_pathspecs_for_checkpoint_request(repo, checkpoint_request);
+    let filtered_pathspec = filtered_pathspecs_for_checkpoint_request(repo, checkpoint_request);
     tracing::debug!(
         "[BENCHMARK] Pathspec filtering took {:?}",
         pathspec_start.elapsed()

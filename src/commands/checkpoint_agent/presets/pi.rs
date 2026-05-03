@@ -26,6 +26,7 @@ struct PiHookInput {
     #[serde(default)]
     edited_filepaths: Vec<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     dirty_files: Option<HashMap<String, String>>,
     #[serde(default)]
     tool_use_id: Option<String>,
@@ -99,6 +100,7 @@ impl AgentPreset for PiPreset {
             tool_use_id,
             tool_input: _,
             tool_result: _,
+            ..
         } = hook_input;
 
         let hook_event = PiHookEvent::parse(&hook_event_name)?;
@@ -126,9 +128,6 @@ impl AgentPreset for PiPreset {
         } else {
             model_stripped
         };
-
-        let dirty =
-            dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
 
         // Build agent metadata
         let mut metadata = HashMap::new();
@@ -244,7 +243,6 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/tmp/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_some());
                 let metadata = &e.context.metadata;
                 assert_eq!(metadata.get("tool_name").map(String::as_str), Some("edit"));
                 assert_eq!(

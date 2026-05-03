@@ -3,27 +3,18 @@ use crate::authorship::ignore::effective_ignore_patterns;
 use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::range_authorship;
 use crate::authorship::stats::stats_command;
-use crate::authorship::working_log::CheckpointKind;
 use crate::commands;
-use crate::commands::checkpoint::PreparedPathRole;
-use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::config;
-use crate::daemon::{
-    ControlRequest,
-    send_control_request,
-};
 use crate::git::find_repository;
 use crate::git::find_repository_in_path;
-use crate::git::repository::{CommitRange, Repository, group_files_by_repository};
+use crate::git::repository::{CommitRange, Repository};
 use crate::git::sync_authorship::{NotesExistence, fetch_authorship_notes, push_authorship_notes};
-use crate::observability::performance_targets::log_performance_for_checkpoint;
-use crate::observability::{self, log_message};
+use crate::observability::log_message;
 use crate::utils::is_interactive_terminal;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
-use std::time::Duration;
 
 pub fn handle_git_ai(args: &[String]) {
     if args.is_empty() {
@@ -336,19 +327,20 @@ fn handle_checkpoint(args: &[String]) {
     }
 
     let preset_name = args[0].as_str();
-    let effective_hook_input = hook_input
-        .unwrap_or_else(|| synthesize_hook_input_from_cli_args(preset_name, &args[1..]));
+    let effective_hook_input =
+        hook_input.unwrap_or_else(|| synthesize_hook_input_from_cli_args(preset_name, &args[1..]));
 
-    let checkpoint_requests = match crate::commands::checkpoint_agent::orchestrator::execute_preset_checkpoint(
-        preset_name,
-        &effective_hook_input,
-    ) {
-        Ok(results) => results,
-        Err(e) => {
-            eprintln!("{} preset error: {}", preset_name, e);
-            std::process::exit(0);
-        }
-    };
+    let checkpoint_requests =
+        match crate::commands::checkpoint_agent::orchestrator::execute_preset_checkpoint(
+            preset_name,
+            &effective_hook_input,
+        ) {
+            Ok(results) => results,
+            Err(e) => {
+                eprintln!("{} preset error: {}", preset_name, e);
+                std::process::exit(0);
+            }
+        };
 
     if checkpoint_requests.is_empty() {
         std::process::exit(0);
@@ -407,10 +399,15 @@ fn handle_checkpoint(args: &[String]) {
         let control_request = crate::daemon::ControlRequest::CheckpointRun {
             request: Box::new(request),
         };
-        match crate::daemon::send_control_request(&daemon_config.control_socket_path, &control_request) {
+        match crate::daemon::send_control_request(
+            &daemon_config.control_socket_path,
+            &control_request,
+        ) {
             Ok(response) if response.ok => {}
             Ok(response) => {
-                let msg = response.error.unwrap_or_else(|| "unknown error".to_string());
+                let msg = response
+                    .error
+                    .unwrap_or_else(|| "unknown error".to_string());
                 eprintln!("[git-ai] checkpoint rejected by daemon: {}", msg);
             }
             Err(e) => {
@@ -422,22 +419,6 @@ fn handle_checkpoint(args: &[String]) {
     let elapsed = checkpoint_start.elapsed();
     eprintln!("Checkpoint dispatched in {:?}", elapsed);
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-
-
-#[allow(clippy::too_many_arguments)]
-
-
-
-
-
-
-
-
-
-
-
 
 fn strip_utf8_bom(input: String) -> String {
     if let Some(stripped) = input.strip_prefix('\u{feff}') {
@@ -918,15 +899,12 @@ fn handle_git_hooks(args: &[String]) {
     }
 }
 
-
-
 /// Synthesize JSON hook_input from CLI args for mock/test presets that can be
 /// invoked without --hook-input.
 fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[String]) -> String {
     match preset_name {
         "human" | "mock_ai" | "mock_known_human" => {
-            let cwd = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let paths: Vec<String> = remaining_args
                 .iter()
                 .filter(|a| !a.starts_with("--"))
@@ -946,8 +924,7 @@ fn synthesize_hook_input_from_cli_args(preset_name: &str, remaining_args: &[Stri
             .to_string()
         }
         "known_human" => {
-            let cwd = std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
             let mut editor = "unknown".to_string();
             let mut editor_version = "unknown".to_string();
             let mut extension_version = "unknown".to_string();

@@ -8,9 +8,7 @@ use serde_json::Value;
 #[serde(tag = "method", content = "params")]
 pub enum ControlRequest {
     #[serde(rename = "checkpoint.run")]
-    CheckpointRun {
-        request: Box<CheckpointRequest>,
-    },
+    CheckpointRun { request: Box<CheckpointRequest> },
     #[serde(rename = "status.family")]
     StatusFamily { repo_working_dir: String },
     #[serde(rename = "telemetry.submit")]

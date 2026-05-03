@@ -32,7 +32,7 @@ use crate::{
     },
     authorship::working_log::CheckpointKind,
     commands::checkpoint::PreparedPathRole,
-    commands::checkpoint_agent::orchestrator::{CheckpointRequest, CheckpointFileEntry},
+    commands::checkpoint_agent::orchestrator::{CheckpointFileEntry, CheckpointRequest},
     commands::hooks::{push_hooks, stash_hooks},
 };
 #[cfg(not(windows))]
@@ -80,9 +80,7 @@ pub mod test_sync;
 pub mod trace_normalizer;
 pub mod transcript_worker;
 
-pub use control_api::{
-    ControlRequest, ControlResponse, FamilyStatus, TelemetryEnvelope,
-};
+pub use control_api::{ControlRequest, ControlResponse, FamilyStatus, TelemetryEnvelope};
 
 const PID_META_FILE: &str = "daemon.pid.json";
 const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
@@ -1363,13 +1361,7 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
     let kind = request.checkpoint_kind;
     let quiet = true;
 
-    let _ = crate::commands::checkpoint::run(
-        &repo,
-        &author,
-        kind,
-        quiet,
-        Some(request),
-    )?;
+    let _ = crate::commands::checkpoint::run(&repo, &author, kind, quiet, Some(request))?;
     Ok(())
 }
 
@@ -1399,16 +1391,6 @@ fn compute_watermarks_from_stat(
         }
     }
     watermarks
-}
-
-fn parse_checkpoint_kind(value: &str) -> Option<CheckpointKind> {
-    match value {
-        "human" => Some(CheckpointKind::Human),
-        "ai_agent" => Some(CheckpointKind::AiAgent),
-        "ai_tab" => Some(CheckpointKind::AiTab),
-        "known_human" => Some(CheckpointKind::KnownHuman),
-        _ => None,
-    }
 }
 
 fn parsed_invocation_for_side_effect(
@@ -1783,7 +1765,6 @@ fn filter_commit_replay_files(
 
     (selected_files, selected_dirty_files)
 }
-
 
 fn family_key_for_repository(repo: &Repository) -> String {
     repo.common_dir()
@@ -2493,7 +2474,11 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         // full committed diff so those files also receive attribution.
         if crate::commands::checkpoint_agent::bash_tool::has_active_bash_inflight(repo_root)
             && let Ok(full_diff) =
-                crate::authorship::rebase_authorship::committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)
+                crate::authorship::rebase_authorship::committed_file_snapshot_between_commits(
+                    repo,
+                    committed_diff_base,
+                    &target_commit,
+                )
         {
             for (path, content) in full_diff {
                 dirty.entry(path).or_insert(content);
@@ -2501,7 +2486,11 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         }
         dirty
     } else {
-        crate::authorship::rebase_authorship::committed_file_snapshot_between_commits(repo, committed_diff_base, &target_commit)?
+        crate::authorship::rebase_authorship::committed_file_snapshot_between_commits(
+            repo,
+            committed_diff_base,
+            &target_commit,
+        )?
     };
 
     let changed_files = commit_replay_files_from_snapshot(&dirty_files);
@@ -2541,12 +2530,14 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
             .into_iter()
             .filter_map(|path| {
                 let content = dirty_files.get(&path)?.clone();
-                Some(crate::commands::checkpoint_agent::orchestrator::CheckpointFileEntry {
-                    path: repo_work_dir.join(&path),
-                    content,
-                    repo_work_dir: repo_work_dir.clone(),
-                    base_commit_sha: base_commit.to_string(),
-                })
+                Some(
+                    crate::commands::checkpoint_agent::orchestrator::CheckpointFileEntry {
+                        path: repo_work_dir.join(&path),
+                        content,
+                        repo_work_dir: repo_work_dir.clone(),
+                        base_commit_sha: base_commit.to_string(),
+                    },
+                )
             })
             .collect();
 
@@ -4608,10 +4599,12 @@ impl ActorDaemonCoordinator {
         (self.next_trace_ingest_seq.fetch_add(1, Ordering::Relaxed) as u64) + 1
     }
 
+    #[allow(dead_code)]
     fn trace_ingest_high_watermark(&self) -> u64 {
         self.next_trace_ingest_seq.load(Ordering::Relaxed) as u64
     }
 
+    #[allow(dead_code)]
     async fn wait_for_trace_ingest_processed_through(&self, seq: u64) -> Result<(), GitAiError> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
@@ -5631,10 +5624,7 @@ impl ActorDaemonCoordinator {
                     // Wrap checkpoint processing in catch_unwind to recover from panics.
                     let checkpoint_result = {
                         let future = async {
-                            let ack = self
-                                .coordinator
-                                .apply_checkpoint(Path::new(&repo_wd))
-                                .await;
+                            let ack = self.coordinator.apply_checkpoint(Path::new(&repo_wd)).await;
                             match ack {
                                 Ok(ack) => apply_checkpoint_side_effect(*request).map(|_| ack.seq),
                                 Err(error) => Err(error),
@@ -5643,7 +5633,7 @@ impl ActorDaemonCoordinator {
                         let caught = std::panic::AssertUnwindSafe(future);
                         futures::FutureExt::catch_unwind(caught).await
                     };
-                    let mut result = match checkpoint_result {
+                    let result = match checkpoint_result {
                         Ok(inner) => inner,
                         Err(panic_payload) => {
                             let panic_msg = if let Some(s) = panic_payload.downcast_ref::<String>()
@@ -7130,7 +7120,7 @@ impl ActorDaemonCoordinator {
         for file in request.files {
             files_by_repo
                 .entry(file.repo_work_dir.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(file);
         }
 
@@ -7240,8 +7230,7 @@ impl ActorDaemonCoordinator {
                     );
                 }
 
-                self.ingest_checkpoint_payload(*request)
-                    .await
+                self.ingest_checkpoint_payload(*request).await
             }
             ControlRequest::StatusFamily { repo_working_dir } => self
                 .status_for_family(repo_working_dir)
@@ -7299,7 +7288,6 @@ impl ActorDaemonCoordinator {
             Err(error) => ControlResponse::err(error.to_string()),
         }
     }
-
 
     fn ensure_session_exists(
         db: &crate::transcripts::db::TranscriptsDatabase,
@@ -8635,9 +8623,11 @@ mod tests {
     }
 
     fn test_checkpoint_request() -> ControlRequest {
-        use crate::commands::checkpoint_agent::orchestrator::{CheckpointFileEntry, CheckpointRequest};
         use crate::authorship::working_log::CheckpointKind;
         use crate::commands::checkpoint::PreparedPathRole;
+        use crate::commands::checkpoint_agent::orchestrator::{
+            CheckpointFileEntry, CheckpointRequest,
+        };
 
         ControlRequest::CheckpointRun {
             request: Box::new(CheckpointRequest {
