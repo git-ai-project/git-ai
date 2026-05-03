@@ -112,6 +112,8 @@ fn should_apply_post_repo_refs(cmd: &NormalizedCommand, analysis: &AnalysisResul
                 | crate::daemon::domain::SemanticEvent::RebaseAbort { .. }
                 | crate::daemon::domain::SemanticEvent::CherryPickComplete { .. }
                 | crate::daemon::domain::SemanticEvent::CherryPickAbort { .. }
+                | crate::daemon::domain::SemanticEvent::RevertComplete { .. }
+                | crate::daemon::domain::SemanticEvent::RevertAbort { .. }
                 | crate::daemon::domain::SemanticEvent::PullCompleted { .. }
                 | crate::daemon::domain::SemanticEvent::RefUpdated { .. }
                 | crate::daemon::domain::SemanticEvent::BranchCreated { .. }

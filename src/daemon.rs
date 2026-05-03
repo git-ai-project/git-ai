@@ -18,7 +18,8 @@ use crate::git::repo_state::{
 use crate::git::repository::{Repository, discover_repository_in_path_no_git_exec, exec_git};
 use crate::git::rewrite_log::{
     CherryPickAbortEvent, CherryPickCompleteEvent, MergeSquashEvent, RebaseAbortEvent,
-    RebaseCompleteEvent, ResetEvent, ResetKind, RewriteLogEvent, StashEvent, StashOperation,
+    RebaseCompleteEvent, ResetEvent, ResetKind, RevertMixedEvent, RewriteLogEvent, StashEvent,
+    StashOperation,
 };
 use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
 use crate::utils::LockFile;
@@ -684,6 +685,7 @@ fn trace_command_may_mutate_refs(primary_command: Option<&str>) -> bool {
                 | "push"
                 | "rebase"
                 | "reset"
+                | "revert"
                 | "stash"
                 | "switch"
         )
@@ -1238,7 +1240,16 @@ fn tracked_reflog_refs_for_command(
     }
     if matches!(
         command,
-        Some("reset" | "merge" | "pull" | "rebase" | "cherry-pick" | "checkout" | "switch")
+        Some(
+            "reset"
+                | "merge"
+                | "pull"
+                | "rebase"
+                | "cherry-pick"
+                | "revert"
+                | "checkout"
+                | "switch"
+        )
     ) {
         refs.push("ORIG_HEAD".to_string());
     }
@@ -1456,6 +1467,136 @@ fn parsed_invocation_for_normalized_command(
         saw_end_of_opts: false,
         is_help: false,
     }
+}
+
+/// Daemon-mode side effect for `git revert`: copy AI attribution notes when
+/// a revert-of-revert restores AI-authored content.
+///
+/// This mirrors the logic in `revert_hooks::post_revert_hook` but operates from
+/// the daemon context where we have the normalized command and semantic event
+/// data instead of `CommandHooksContext`.
+fn apply_revert_attribution_side_effect(
+    worktree: &str,
+    cmd: &crate::daemon::domain::NormalizedCommand,
+    new_head: &str,
+) -> Result<(), GitAiError> {
+    use crate::git::refs::{get_reference_as_authorship_log_v3, notes_add};
+
+    let repo = find_repository_in_path(worktree)?;
+
+    // Resolve the reverted commit from command args
+    let reverted_ref = match revert_source_ref_from_command(cmd) {
+        Some(r) => r,
+        None => {
+            tracing::debug!("daemon revert: no source ref found in command args");
+            return Ok(());
+        }
+    };
+
+    // Resolve the ref to a full OID
+    let reverted_commit = {
+        let obj = repo.revparse_single(&reverted_ref).map_err(|err| {
+            GitAiError::Generic(format!(
+                "daemon revert: failed to resolve reverted ref '{}': {}",
+                reverted_ref, err
+            ))
+        })?;
+        obj.peel_to_commit()
+            .map(|c| c.id())
+            .unwrap_or_else(|_| obj.id())
+    };
+
+    if reverted_commit.is_empty() || is_zero_oid(&reverted_commit) {
+        tracing::debug!("daemon revert: reverted commit resolved to empty/zero OID");
+        return Ok(());
+    }
+
+    tracing::debug!(
+        "daemon revert: reverted_commit={} new_head={}",
+        reverted_commit, new_head
+    );
+
+    // Check if the reverted commit has AI attribution
+    let reverted_has_ai = match get_reference_as_authorship_log_v3(&repo, &reverted_commit) {
+        Ok(log) => log.metadata.prompts.values().any(|p| p.accepted_lines > 0),
+        Err(_) => false,
+    };
+
+    if reverted_has_ai {
+        // Reverting an AI commit → undoing AI work → no attribution to copy
+        tracing::debug!(
+            "daemon revert: reverted commit {} has AI attribution, this revert undoes AI work",
+            reverted_commit
+        );
+        return Ok(());
+    }
+
+    // Only proceed with parent chain traversal if the reverted commit is itself
+    // a revert commit (by commit message convention). This prevents false attribution
+    // when reverting a normal human commit whose parent happens to be an AI commit.
+    let is_revert = match repo.find_commit(reverted_commit.clone()) {
+        Ok(commit) => commit.summary().unwrap_or_default().starts_with("Revert "),
+        Err(_) => false,
+    };
+    if !is_revert {
+        tracing::debug!(
+            "daemon revert: reverted commit {} is not itself a revert, skipping parent check",
+            reverted_commit
+        );
+        return Ok(());
+    }
+
+    // The reverted commit has no AI attribution and is itself a revert.
+    // Check its parent for revert-of-revert chain traversal.
+    let parent_sha = {
+        match repo.find_commit(reverted_commit.clone()) {
+            Ok(commit) => commit.parents().next().map(|p| p.id().to_string()),
+            Err(_) => None,
+        }
+    };
+
+    let source_sha = match parent_sha {
+        Some(ref parent) => match get_reference_as_authorship_log_v3(&repo, parent) {
+            Ok(log) if log.metadata.prompts.values().any(|p| p.accepted_lines > 0) => {
+                Some(parent.clone())
+            }
+            _ => None,
+        },
+        None => None,
+    };
+
+    let Some(source_sha) = source_sha else {
+        tracing::debug!("daemon revert: no AI attribution found in revert chain");
+        return Ok(());
+    };
+
+    tracing::debug!(
+        "daemon revert: copying attribution from {} to {}",
+        source_sha, new_head
+    );
+
+    // Copy the attribution note from source to the new commit
+    match get_reference_as_authorship_log_v3(&repo, &source_sha) {
+        Ok(mut log) => {
+            log.metadata.base_commit_sha = new_head.to_string();
+            if let Ok(serialized) = log.serialize_to_string()
+                && let Err(e) = notes_add(&repo, new_head, &serialized)
+            {
+                tracing::debug!(
+                    "daemon revert: failed to add note to {}: {}",
+                    new_head, e
+                );
+            }
+        }
+        Err(e) => {
+            tracing::debug!(
+                "daemon revert: failed to read authorship log from {}: {}",
+                source_sha, e
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn apply_push_side_effect(
@@ -3136,6 +3277,37 @@ fn resolve_cherry_pick_source_refs(
         }
     }
     Ok(resolved)
+}
+
+/// Extract the single positional argument from a `git revert <commit>` invocation.
+/// Returns the first positional (non-flag) argument, skipping control-mode keywords.
+fn revert_source_ref_from_command(
+    cmd: &crate::daemon::domain::NormalizedCommand,
+) -> Option<String> {
+    let mut skip_next = false;
+    for arg in &cmd.invoked_args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--abort" || arg == "--continue" || arg == "--quit" || arg == "--skip" {
+            return None;
+        }
+        if matches!(
+            arg.as_str(),
+            "-m" | "--mainline" | "-X" | "--strategy-option" | "--strategy"
+        ) {
+            skip_next = true;
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        if !arg.is_empty() {
+            return Some(arg.clone());
+        }
+    }
+    None
 }
 
 fn rebase_is_control_mode(cmd: &crate::daemon::domain::NormalizedCommand) -> bool {
@@ -6477,6 +6649,24 @@ impl ActorDaemonCoordinator {
                         self.clear_pending_cherry_pick_sources_for_worktree(worktree)?;
                     }
                 }
+                crate::daemon::domain::SemanticEvent::RevertComplete {
+                    original_head: _,
+                    new_head,
+                } => {
+                    if !new_head.is_empty() {
+                        // Find the reverted commit from command args
+                        let reverted_commit = revert_source_ref_from_command(cmd);
+                        out.push(RewriteLogEvent::revert_mixed(RevertMixedEvent::new(
+                            reverted_commit.unwrap_or_default(),
+                            true,
+                            Vec::new(),
+                        )));
+                    }
+                }
+                crate::daemon::domain::SemanticEvent::RevertAbort { .. } => {
+                    // Revert abort restores working tree to pre-revert state.
+                    // No attribution or rewrite log action needed.
+                }
                 crate::daemon::domain::SemanticEvent::MergeSquash {
                     base_branch,
                     base_head,
@@ -6937,6 +7127,19 @@ impl ActorDaemonCoordinator {
                             cmd.invoked_command.as_deref(),
                             &cmd.invoked_args,
                         );
+                    }
+                    crate::daemon::domain::SemanticEvent::RevertComplete {
+                        original_head: _,
+                        new_head,
+                    } => {
+                        if let Err(e) =
+                            apply_revert_attribution_side_effect(&worktree, cmd, new_head)
+                        {
+                            tracing::debug!(
+                                "daemon revert attribution side effect failed for {}: {}",
+                                worktree, e
+                            );
+                        }
                     }
                     _ => {}
                 }

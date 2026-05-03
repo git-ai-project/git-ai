@@ -1406,6 +1406,7 @@ fn command_may_mutate_refs(primary_command: Option<&str>) -> bool {
                 | "push"
                 | "rebase"
                 | "reset"
+                | "revert"
                 | "stash"
                 | "switch"
         )

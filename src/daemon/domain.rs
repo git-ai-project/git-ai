@@ -142,6 +142,13 @@ pub enum SemanticEvent {
     CherryPickAbort {
         head: String,
     },
+    RevertComplete {
+        original_head: String,
+        new_head: String,
+    },
+    RevertAbort {
+        head: String,
+    },
     MergeSquash {
         base_branch: Option<String>,
         base_head: String,
