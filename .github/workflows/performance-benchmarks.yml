@@ -22,7 +22,7 @@ jobs:
     if: github.event_name == 'pull_request'
     name: PR Smoke Nasty Benchmark
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 360
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -64,12 +64,29 @@ jobs:
             --margin-baseline main_wrapper \
             --enforce-margin
 
+      - name: Run full checkpoint stress benchmark gate
+        run: |
+          python3 scripts/benchmarks/git/benchmark_checkpoint_stress.py \
+            --work-root .benchmarks/pr-checkpoints \
+            --basic-files 100 \
+            --basic-lines 800 \
+            --basic-series-per-file 20 \
+            --basic-threshold-ms 100 \
+            --churn-files 100 \
+            --churn-lines 10000 \
+            --churn-series-per-file 100 \
+            --churn-threshold-ms 250 \
+            --churn-history-commits 300 \
+            --enforce-thresholds
+
       - name: Upload smoke benchmark artifacts
         if: always()
         uses: actions/upload-artifact@v7.0.1
         with:
           name: pr-smoke-nasty-benchmarks
-          path: .benchmarks/pr-smoke/artifacts/**
+          path: |
+            .benchmarks/pr-smoke/artifacts/**
+            .benchmarks/pr-checkpoints/artifacts/**
           if-no-files-found: ignore
 
   nightly-full-benchmarks:
@@ -128,6 +145,21 @@ jobs:
             --margin-baseline current_wrapper \
             --enforce-margin
 
+      - name: Run full checkpoint stress benchmark gate
+        run: |
+          python3 scripts/benchmarks/git/benchmark_checkpoint_stress.py \
+            --work-root .benchmarks/nightly-checkpoints \
+            --basic-files 100 \
+            --basic-lines 800 \
+            --basic-series-per-file 20 \
+            --basic-threshold-ms 100 \
+            --churn-files 100 \
+            --churn-lines 10000 \
+            --churn-series-per-file 100 \
+            --churn-threshold-ms 250 \
+            --churn-history-commits 300 \
+            --enforce-thresholds
+
       - name: Upload nightly benchmark artifacts
         if: always()
         uses: actions/upload-artifact@v7.0.1
@@ -136,4 +168,5 @@ jobs:
           path: |
             .benchmarks/nightly-modes/artifacts/**
             .benchmarks/nightly-nasty/artifacts/**
+            .benchmarks/nightly-checkpoints/artifacts/**
           if-no-files-found: ignore
