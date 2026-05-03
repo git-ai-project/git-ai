@@ -19,6 +19,13 @@ pub trait Agent: Send + Sync {
     /// The coordinator will compare against the DB to decide what to process.
     fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, TranscriptError>;
 
+    /// Maximum number of events to return per `read_incremental` call.
+    /// Bounds peak memory to batch_size × avg_event_size instead of file_size.
+    /// The caller loops until an empty batch is returned.
+    fn batch_size_hint(&self) -> usize {
+        1000
+    }
+
     /// Read transcript incrementally from the given watermark.
     ///
     /// # Arguments

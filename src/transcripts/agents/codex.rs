@@ -121,7 +121,8 @@ impl Agent for CodexAgent {
                 retry_after: Duration::from_secs(5),
             })?;
 
-        let mut events = Vec::new();
+        let batch_limit = self.batch_size_hint();
+        let mut events = Vec::with_capacity(batch_limit);
         let mut current_offset = start_offset;
         let mut line_number = 0;
         let mut line = String::new();
@@ -153,8 +154,10 @@ impl Agent for CodexAgent {
                     message: format!("Invalid JSON in {}: {}", path.display(), e),
                 })?;
 
-            // Push raw JSON entry
             events.push(entry);
+            if events.len() >= batch_limit {
+                break;
+            }
         }
 
         let new_watermark = Box::new(ByteOffsetWatermark::new(current_offset));

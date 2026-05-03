@@ -5,7 +5,7 @@
 //! 2. **Periodic sweeps** (Low priority, every 30min) - agent-specific discovery of all sessions
 
 use crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle;
-use crate::metrics::{EventAttributes, SessionEventValues, record};
+use crate::metrics::{EventAttributes, MetricEvent, PosEncoded, SessionEventValues};
 use crate::transcripts::db::TranscriptsDatabase;
 use crate::transcripts::types::TranscriptError;
 use crate::transcripts::watermark::WatermarkType;
@@ -269,9 +269,14 @@ impl TranscriptWorker {
     }
 
     /// Process a session (blocking I/O).
+    ///
+    /// Loops over bounded batches from `read_incremental`, saving the watermark
+    /// after each batch for crash resilience. Applies backpressure between
+    /// batches when the telemetry buffer is above a threshold, sleeping to let
+    /// the 3-second flush cycle drain it.
     fn process_session_blocking(
         db: &TranscriptsDatabase,
-        _telemetry: &DaemonTelemetryWorkerHandle,
+        telemetry: &DaemonTelemetryWorkerHandle,
         task: &ProcessingTask,
     ) -> Result<(), TranscriptError> {
         let session = db
@@ -280,46 +285,62 @@ impl TranscriptWorker {
                 message: format!("session not found: {}", task.session_id),
             })?;
 
-        // Get the agent implementation
         let agent = crate::transcripts::agent::get_agent(&task.agent_type).ok_or_else(|| {
             TranscriptError::Fatal {
                 message: format!("unknown agent type: {}", task.agent_type),
             }
         })?;
 
-        // Parse watermark type
-        let watermark_type = match session.watermark_type.as_str() {
-            "ByteOffset" => WatermarkType::ByteOffset,
-            "Hybrid" => WatermarkType::Hybrid,
-            _ => {
-                return Err(TranscriptError::Parse {
-                    line: 0,
-                    message: format!("unknown watermark type: {}", session.watermark_type),
-                });
+        let watermark_type: WatermarkType = session.watermark_type.parse()?;
+
+        let mut current_watermark = watermark_type.deserialize(&session.watermark_value)?;
+        let path = PathBuf::from(&session.transcript_path);
+        let mut total_events = 0usize;
+        let attrs_sparse = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+            .session_id(session.session_id.clone())
+            .to_sparse();
+
+        loop {
+            let batch = agent.read_incremental(&path, current_watermark, &session.session_id)?;
+
+            if batch.events.is_empty() {
+                db.update_watermark(&session.session_id, batch.new_watermark.as_ref())?;
+                break;
             }
-        };
 
-        // Deserialize watermark
-        let watermark = watermark_type.deserialize(&session.watermark_value)?;
+            let batch_count = batch.events.len();
 
-        // Read transcript using agent
-        let batch = agent.read_incremental(
-            &PathBuf::from(&session.transcript_path),
-            watermark,
-            &session.session_id,
-        )?;
+            let metric_events: Vec<MetricEvent> = batch
+                .events
+                .into_iter()
+                .map(|raw_event| {
+                    MetricEvent::from_values(
+                        SessionEventValues::new(raw_event),
+                        attrs_sparse.clone(),
+                    )
+                })
+                .collect();
 
-        let event_count = batch.events.len();
+            crate::observability::log_metrics(metric_events);
 
-        // Emit events via metrics::record
-        for raw_event in batch.events {
-            let attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
-                .session_id(session.session_id.clone());
-            record(SessionEventValues::new(raw_event), attrs);
+            // Backpressure: if the telemetry buffer has accumulated too many
+            // events, poll briefly to let the 3-second flush cycle drain it.
+            // Short sleeps (~100ms) keep shutdown latency low since this runs
+            // inside spawn_blocking. Capped at ~4s to avoid blocking forever
+            // if the flush loop is stuck (API down, etc.).
+            const BACKPRESSURE_THRESHOLD: usize = 5_000;
+            const BACKPRESSURE_MAX_WAITS: usize = 40;
+            for _ in 0..BACKPRESSURE_MAX_WAITS {
+                if telemetry.metrics_buffer_len() < BACKPRESSURE_THRESHOLD {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            total_events += batch_count;
+            db.update_watermark(&session.session_id, batch.new_watermark.as_ref())?;
+            current_watermark = batch.new_watermark;
         }
-
-        // Update watermark and metadata
-        db.update_watermark(&session.session_id, batch.new_watermark.as_ref())?;
 
         if let Ok(metadata) = std::fs::metadata(&session.transcript_path) {
             let file_size = metadata.len();
@@ -333,7 +354,7 @@ impl TranscriptWorker {
 
         tracing::debug!(
             session_id = %task.session_id,
-            events = event_count,
+            events = total_events,
             "processed session"
         );
 

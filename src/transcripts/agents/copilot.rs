@@ -3,7 +3,9 @@
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
-use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy, WatermarkType};
+use crate::transcripts::watermark::{
+    ByteOffsetWatermark, RecordIndexWatermark, WatermarkStrategy, WatermarkType,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -84,15 +86,28 @@ impl Agent for CopilotAgent {
             // Determine format from file extension (no I/O, just checking path)
             let format = Self::determine_format(&path);
 
-            // Don't parse file content here - just filesystem scanning.
-            // Model will be extracted later during first read_incremental() if needed.
+            // JSONL event streams use byte offset (seekable); session JSON uses
+            // record index (count of processed requests).
+            let (watermark_type, initial_watermark): (WatermarkType, Box<dyn WatermarkStrategy>) =
+                if format == TranscriptFormat::CopilotEventStreamJsonl {
+                    (
+                        WatermarkType::ByteOffset,
+                        Box::new(ByteOffsetWatermark::new(0)),
+                    )
+                } else {
+                    (
+                        WatermarkType::RecordIndex,
+                        Box::new(RecordIndexWatermark::new(0)),
+                    )
+                };
+
             let session = DiscoveredSession {
                 session_id,
                 agent_type: "copilot".to_string(),
                 transcript_path: path,
                 transcript_format: format,
-                watermark_type: WatermarkType::ByteOffset,
-                initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
+                watermark_type,
+                initial_watermark,
                 model: None,
                 tool: Some("GitHub Copilot".to_string()),
                 external_thread_id: None,
@@ -112,10 +127,11 @@ impl Agent for CopilotAgent {
     ) -> Result<TranscriptBatch, TranscriptError> {
         // Migrated from formats/copilot.rs (will be removed in Phase 9)
         // Determine which reader to use based on file extension
+        let batch_limit = self.batch_size_hint();
         if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-            read_event_stream(path, watermark, session_id)
+            read_event_stream(path, watermark, session_id, batch_limit)
         } else {
-            read_session_json(path, watermark, session_id)
+            read_session_json(path, watermark, session_id, batch_limit)
         }
     }
 }
@@ -125,17 +141,19 @@ fn read_session_json(
     path: &Path,
     watermark: Box<dyn WatermarkStrategy>,
     session_id: &str,
+    batch_limit: usize,
 ) -> Result<TranscriptBatch, TranscriptError> {
-    // Downcast watermark to ByteOffsetWatermark
-    let byte_watermark = watermark
+    let record_watermark = watermark
         .as_any()
-        .downcast_ref::<ByteOffsetWatermark>()
+        .downcast_ref::<RecordIndexWatermark>()
         .ok_or_else(|| TranscriptError::Fatal {
             message: format!(
-                "Copilot session reader requires ByteOffsetWatermark, got incompatible type for session {}",
+                "Copilot session reader requires RecordIndexWatermark, got incompatible type for session {}",
                 session_id
             ),
         })?;
+
+    let skip_count = record_watermark.0 as usize;
 
     // Check if running in Codespaces or Remote Containers - if so, return empty transcript
     let is_codespaces = std::env::var("CODESPACES").ok().as_deref() == Some("true");
@@ -148,8 +166,7 @@ fn read_session_json(
         });
     }
 
-    // Read the entire file
-    let content = std::fs::read_to_string(path).map_err(|e| {
+    let file = std::fs::File::open(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             TranscriptError::Fatal {
                 message: format!("Transcript file not found: {}", path.display()),
@@ -166,35 +183,35 @@ fn read_session_json(
         }
     })?;
 
-    // If we already read this content (watermark at end), return empty batch
-    if byte_watermark.0 >= content.len() as u64 {
-        return Ok(TranscriptBatch {
-            events: Vec::new(),
-            new_watermark: watermark,
-        });
-    }
-
-    // Parse the JSON
-    let session_json: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| TranscriptError::Parse {
+    let reader = std::io::BufReader::new(file);
+    let mut session_json: serde_json::Value =
+        serde_json::from_reader(reader).map_err(|e| TranscriptError::Parse {
             line: 0,
             message: format!("Invalid JSON in {}: {}", path.display(), e),
         })?;
 
-    // Extract the requests array
-    let requests = session_json
-        .get("requests")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| TranscriptError::Parse {
-            line: 0,
-            message: "requests array not found in Copilot session JSON".to_string(),
-        })?;
+    let requests = match session_json
+        .as_object_mut()
+        .and_then(|obj| obj.remove("requests"))
+    {
+        Some(serde_json::Value::Array(arr)) => arr,
+        _ => {
+            return Err(TranscriptError::Parse {
+                line: 0,
+                message: "requests array not found in Copilot session JSON".to_string(),
+            });
+        }
+    };
 
-    // Push each request object as a raw serde_json::Value
-    let events: Vec<serde_json::Value> = requests.to_vec();
+    let events: Vec<serde_json::Value> = requests
+        .into_iter()
+        .skip(skip_count)
+        .take(batch_limit)
+        .collect();
 
-    // Update watermark to end of file
-    let new_watermark = Box::new(ByteOffsetWatermark::new(content.len() as u64));
+    let new_watermark = Box::new(RecordIndexWatermark::new(
+        (skip_count + events.len()) as u64,
+    ));
 
     Ok(TranscriptBatch {
         events,
@@ -207,6 +224,7 @@ fn read_event_stream(
     path: &Path,
     watermark: Box<dyn WatermarkStrategy>,
     session_id: &str,
+    batch_limit: usize,
 ) -> Result<TranscriptBatch, TranscriptError> {
     use std::fs::File;
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -252,7 +270,7 @@ fn read_event_stream(
             retry_after: std::time::Duration::from_secs(5),
         })?;
 
-    let mut events = Vec::new();
+    let mut events = Vec::with_capacity(batch_limit);
     let mut current_offset = start_offset;
     let mut line_number = 0;
 
@@ -268,21 +286,16 @@ fn read_event_stream(
             })?;
 
         if bytes_read == 0 {
-            // EOF
             break;
         }
 
         line_number += 1;
-
-        // Update offset before processing
         current_offset += bytes_read as u64;
 
-        // Skip empty lines
         if line.trim().is_empty() {
             continue;
         }
 
-        // Parse JSONL entry and push raw JSON
         let entry: serde_json::Value =
             serde_json::from_str(&line).map_err(|e| TranscriptError::Parse {
                 line: line_number,
@@ -290,6 +303,9 @@ fn read_event_stream(
             })?;
 
         events.push(entry);
+        if events.len() >= batch_limit {
+            break;
+        }
     }
 
     // Create new watermark with updated offset
@@ -360,7 +376,7 @@ mod tests {
         file.flush().unwrap();
 
         let agent = CopilotAgent;
-        let watermark = Box::new(ByteOffsetWatermark::new(0));
+        let watermark = Box::new(RecordIndexWatermark::new(0));
         let result = agent
             .read_incremental(file.path(), watermark, "test-session")
             .unwrap();

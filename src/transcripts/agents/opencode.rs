@@ -75,9 +75,18 @@ fn read_session_messages_raw(
         // Build directly via Map to move parsed_data instead of cloning (json! macro clones)
         let mut map = serde_json::Map::with_capacity(5);
         map.insert("id".into(), serde_json::Value::String(id.clone()));
-        map.insert("session_id".into(), serde_json::Value::String(row_session_id));
-        map.insert("time_created".into(), serde_json::Value::Number(time_created.into()));
-        map.insert("time_updated".into(), serde_json::Value::Number(time_updated.into()));
+        map.insert(
+            "session_id".into(),
+            serde_json::Value::String(row_session_id),
+        );
+        map.insert(
+            "time_created".into(),
+            serde_json::Value::Number(time_created.into()),
+        );
+        map.insert(
+            "time_updated".into(),
+            serde_json::Value::Number(time_updated.into()),
+        );
         map.insert("data".into(), parsed_data);
 
         messages.push((id, time_updated, serde_json::Value::Object(map)));
@@ -115,7 +124,14 @@ fn read_parts_for_messages(
             let time_created: i64 = row.get(3)?;
             let time_updated: i64 = row.get(4)?;
             let data: String = row.get(5)?;
-            Ok((id, message_id, row_session_id, time_created, time_updated, data))
+            Ok((
+                id,
+                message_id,
+                row_session_id,
+                time_created,
+                time_updated,
+                data,
+            ))
         })
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to query parts: {}", e),
@@ -131,10 +147,22 @@ fn read_parts_for_messages(
         if let Ok(parsed_data) = serde_json::from_str::<serde_json::Value>(&data) {
             let mut map = serde_json::Map::with_capacity(6);
             map.insert("id".into(), serde_json::Value::String(id));
-            map.insert("message_id".into(), serde_json::Value::String(message_id.clone()));
-            map.insert("session_id".into(), serde_json::Value::String(row_session_id));
-            map.insert("time_created".into(), serde_json::Value::Number(time_created.into()));
-            map.insert("time_updated".into(), serde_json::Value::Number(time_updated.into()));
+            map.insert(
+                "message_id".into(),
+                serde_json::Value::String(message_id.clone()),
+            );
+            map.insert(
+                "session_id".into(),
+                serde_json::Value::String(row_session_id),
+            );
+            map.insert(
+                "time_created".into(),
+                serde_json::Value::Number(time_created.into()),
+            );
+            map.insert(
+                "time_updated".into(),
+                serde_json::Value::Number(time_updated.into()),
+            );
             map.insert("data".into(), parsed_data);
             parts_by_message
                 .entry(message_id)

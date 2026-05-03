@@ -86,7 +86,14 @@ fn test_opencode_raw_event_fidelity() {
             let time_created: i64 = row.get(3)?;
             let time_updated: i64 = row.get(4)?;
             let data: String = row.get(5)?;
-            Ok((id, message_id, row_session_id, time_created, time_updated, data))
+            Ok((
+                id,
+                message_id,
+                row_session_id,
+                time_created,
+                time_updated,
+                data,
+            ))
         })
         .unwrap()
         .map(|r| {

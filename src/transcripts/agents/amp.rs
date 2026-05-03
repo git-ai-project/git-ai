@@ -133,8 +133,7 @@ impl Agent for AmpAgent {
 
         let skip_count = record_watermark.0 as usize;
 
-        // Read and parse the JSON file
-        let content = fs::read_to_string(path).map_err(|e| {
+        let file = fs::File::open(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 TranscriptError::Fatal {
                     message: format!("Transcript file not found: {}", path.display()),
@@ -151,28 +150,40 @@ impl Agent for AmpAgent {
             }
         })?;
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&content).map_err(|e| TranscriptError::Parse {
+        let reader = std::io::BufReader::new(file);
+        let mut parsed: serde_json::Value =
+            serde_json::from_reader(reader).map_err(|e| TranscriptError::Parse {
                 line: 0,
                 message: format!("Invalid JSON in {}: {}", path.display(), e),
             })?;
 
-        let messages = parsed
-            .get("messages")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| TranscriptError::Fatal {
-                message: format!(
-                    "Missing 'messages' array in Amp thread file: {}",
-                    path.display()
-                ),
-            })?;
+        let messages = match parsed
+            .as_object_mut()
+            .and_then(|obj| obj.remove("messages"))
+        {
+            Some(serde_json::Value::Array(arr)) => arr,
+            _ => {
+                return Err(TranscriptError::Fatal {
+                    message: format!(
+                        "Missing 'messages' array in Amp thread file: {}",
+                        path.display()
+                    ),
+                });
+            }
+        };
 
-        let total_messages = messages.len();
+        let batch_limit = self.batch_size_hint();
 
-        // Skip first `skip_count` messages (already processed), push rest as raw JSON
-        let events: Vec<serde_json::Value> = messages.iter().skip(skip_count).cloned().collect();
+        // Skip first `skip_count` messages (already processed), take up to batch_limit
+        let events: Vec<serde_json::Value> = messages
+            .into_iter()
+            .skip(skip_count)
+            .take(batch_limit)
+            .collect();
 
-        let new_watermark = Box::new(RecordIndexWatermark::new(total_messages as u64));
+        let new_watermark = Box::new(RecordIndexWatermark::new(
+            (skip_count + events.len()) as u64,
+        ));
 
         Ok(TranscriptBatch {
             events,
