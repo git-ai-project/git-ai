@@ -1,7 +1,9 @@
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::StatSnapshot;
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+const STALE_SESSION_SECS: u64 = 300;
 
 pub struct BashSession {
     pub repo_work_dir: String,
@@ -21,6 +23,11 @@ impl BashSessionState {
         Self::default()
     }
 
+    fn prune_stale_sessions(&mut self) {
+        self.sessions
+            .retain(|_, s| s.started_at.elapsed() < Duration::from_secs(STALE_SESSION_SECS));
+    }
+
     pub fn start_session(
         &mut self,
         session_id: String,
@@ -30,6 +37,7 @@ impl BashSessionState {
         metadata: HashMap<String, String>,
         stat_snapshot: StatSnapshot,
     ) {
+        self.prune_stale_sessions();
         self.sessions.insert(
             (session_id, tool_use_id),
             BashSession {
