@@ -29,12 +29,6 @@ struct PiHookInput {
     dirty_files: Option<HashMap<String, String>>,
     #[serde(default)]
     tool_use_id: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    tool_input: Option<serde_json::Value>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    tool_result: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
@@ -98,8 +92,6 @@ impl AgentPreset for PiPreset {
             edited_filepaths,
             dirty_files,
             tool_use_id,
-            tool_input: _,
-            tool_result: _,
         } = hook_input;
 
         let hook_event = PiHookEvent::parse(&hook_event_name)?;

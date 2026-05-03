@@ -147,9 +147,6 @@ pub(crate) struct Deletion {
     pub(crate) start: usize,
     /// End position in old content
     pub(crate) end: usize,
-    /// The deleted bytes (may not be valid UTF-8)
-    #[allow(dead_code)]
-    pub(crate) bytes: Vec<u8>,
 }
 
 /// Represents an insertion operation from the diff
@@ -159,9 +156,6 @@ pub(crate) struct Insertion {
     pub(crate) start: usize,
     /// End position in new content
     pub(crate) end: usize,
-    /// The inserted bytes (may not be valid UTF-8)
-    #[allow(dead_code)]
-    pub(crate) bytes: Vec<u8>,
 }
 
 /// Information about a detected move operation
@@ -230,8 +224,6 @@ struct Token {
     lexeme: String,
     start: usize,
     end: usize,
-    #[allow(dead_code)]
-    line: usize,
 }
 
 impl PartialEq for Token {
@@ -673,7 +665,6 @@ impl AttributionTracker {
                     deletions.push(Deletion {
                         start: old_pos,
                         end: old_pos + len,
-                        bytes: bytes.to_vec(),
                     });
                     old_pos += len;
                 }
@@ -683,7 +674,6 @@ impl AttributionTracker {
                     insertions.push(Insertion {
                         start: new_pos,
                         end: new_pos + len,
-                        bytes: bytes.to_vec(),
                     });
                     new_pos += len;
                 }
@@ -1359,7 +1349,6 @@ fn tokenize_non_whitespace(
                 lexeme: op.to_string(),
                 start: i,
                 end: i + op_len,
-                line,
             });
             i += op_len;
             continue;
@@ -1402,7 +1391,6 @@ fn tokenize_non_whitespace(
                 lexeme,
                 start: token_start,
                 end: i,
-                line,
             });
             continue;
         }
@@ -1451,7 +1439,6 @@ fn tokenize_non_whitespace(
                         lexeme,
                         start: token_start,
                         end: i,
-                        line,
                     });
                     continue;
                 }
@@ -1489,7 +1476,6 @@ fn tokenize_non_whitespace(
                 lexeme,
                 start: token_start,
                 end: i,
-                line,
             });
             continue;
         }
@@ -1518,7 +1504,6 @@ fn tokenize_non_whitespace(
                 lexeme,
                 start: token_start,
                 end: i,
-                line,
             });
             continue;
         }
@@ -1529,7 +1514,6 @@ fn tokenize_non_whitespace(
                 lexeme: ch.to_string(),
                 start: i,
                 end: i + ch_len,
-                line,
             });
             i += ch_len;
             continue;
@@ -1540,7 +1524,6 @@ fn tokenize_non_whitespace(
             lexeme: ch.to_string(),
             start: i,
             end: i + ch_len,
-            line,
         });
         i += ch_len;
     }

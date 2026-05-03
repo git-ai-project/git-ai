@@ -61,19 +61,8 @@ define_feature_flags!(
 
 impl FeatureFlags {
     /// Build FeatureFlags from deserializable config
-    #[allow(dead_code)]
     fn from_deserializable(flags: DeserializableFeatureFlags) -> Self {
         Self::merge_with(FeatureFlags::default(), flags)
-    }
-
-    /// Build FeatureFlags from file configuration
-    /// Falls back to defaults for any invalid or missing values
-    #[allow(dead_code)]
-    pub(crate) fn from_file_config(file_flags: Option<DeserializableFeatureFlags>) -> Self {
-        match file_flags {
-            Some(flags) => Self::from_deserializable(flags),
-            None => FeatureFlags::default(),
-        }
     }
 
     /// Build FeatureFlags from environment variables
@@ -136,46 +125,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_from_file_config_none() {
-        let flags = FeatureFlags::from_file_config(None);
-        // Should return defaults
-        let defaults = FeatureFlags::default();
-        assert_eq!(flags.rewrite_stash, defaults.rewrite_stash);
-        assert_eq!(flags.inter_commit_move, defaults.inter_commit_move);
-        assert_eq!(flags.auth_keyring, defaults.auth_keyring);
-    }
-
-    #[test]
-    fn test_from_file_config_some() {
-        let deserializable = DeserializableFeatureFlags {
-            rewrite_stash: Some(false),
-            checkpoint_inter_commit_move: Some(true),
-            auth_keyring: Some(true),
-            ..Default::default()
-        };
-
-        let flags = FeatureFlags::from_file_config(Some(deserializable));
-        assert!(!flags.rewrite_stash);
-        assert!(flags.inter_commit_move);
-        assert!(flags.auth_keyring);
-    }
-
-    #[test]
-    fn test_from_file_config_partial() {
-        let deserializable = DeserializableFeatureFlags {
-            rewrite_stash: Some(true),
-            ..Default::default()
-        };
-        // Other fields remain None, should use defaults
-
-        let flags = FeatureFlags::from_file_config(Some(deserializable));
-        assert!(flags.rewrite_stash);
-
-        let defaults = FeatureFlags::default();
-        assert_eq!(flags.inter_commit_move, defaults.inter_commit_move);
-        assert_eq!(flags.auth_keyring, defaults.auth_keyring);
-    }
 
     #[test]
     fn test_from_deserializable() {
