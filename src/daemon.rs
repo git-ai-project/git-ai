@@ -3795,6 +3795,7 @@ pub struct ActorDaemonCoordinator {
     trace_ingest_tx: std::sync::OnceLock<mpsc::Sender<Value>>,
     telemetry_worker: Option<crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle>,
     transcript_worker: Option<crate::daemon::transcript_worker::TranscriptWorkerHandle>,
+    transcript_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     transcripts_db: Option<Arc<crate::transcripts::db::TranscriptsDatabase>>,
     next_trace_ingest_seq: AtomicUsize,
     next_carryover_snapshot_id: AtomicUsize,
@@ -3858,6 +3859,7 @@ impl ActorDaemonCoordinator {
             trace_ingest_tx: std::sync::OnceLock::new(),
             telemetry_worker: None,
             transcript_worker: None,
+            transcript_shutdown_notify: std::sync::OnceLock::new(),
             transcripts_db: None,
             next_trace_ingest_seq: AtomicUsize::new(0),
             next_carryover_snapshot_id: AtomicUsize::new(0),
@@ -3888,6 +3890,9 @@ impl ActorDaemonCoordinator {
         // The ingest worker exits via its select! shutdown arm (watching
         // shutdown_notify); we no longer rely on channel closure to stop it.
         self.shutdown_notify.notify_waiters();
+        if let Some(transcript_shutdown) = self.transcript_shutdown_notify.get() {
+            transcript_shutdown.notify_waiters();
+        }
         // Hold the condvar mutex so notify_all cannot race with the
         // check-then-wait sequence in daemon_update_check_loop.
         let _guard = self
@@ -7303,14 +7308,12 @@ impl ActorDaemonCoordinator {
                     }
 
                     // Notify worker for immediate processing
-                    worker
-                        .notify_checkpoint(
-                            session_id,
-                            agent_type,
-                            trace_id,
-                            transcript_source.path.clone(),
-                        )
-                        .await;
+                    worker.notify_checkpoint(
+                        session_id,
+                        agent_type,
+                        trace_id,
+                        transcript_source.path.clone(),
+                    );
                 }
 
                 self.ingest_checkpoint_payload(*request, wait.unwrap_or(false))
@@ -8293,16 +8296,16 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
         Ok(transcripts_db) => {
             let transcripts_db = std::sync::Arc::new(transcripts_db);
             let shutdown_notify = Arc::new(tokio::sync::Notify::new());
-            // We'll need to notify this when the coordinator shuts down
-            // For now, we create a separate notify instance
-            // TODO: integrate with coordinator shutdown mechanism
             let transcript_handle = crate::daemon::transcript_worker::spawn_transcript_worker(
                 transcripts_db.clone(),
                 telemetry_handle.clone(),
-                shutdown_notify,
+                shutdown_notify.clone(),
             );
             coordinator_inner.transcripts_db = Some(transcripts_db);
             coordinator_inner.transcript_worker = Some(transcript_handle);
+            let _ = coordinator_inner
+                .transcript_shutdown_notify
+                .set(shutdown_notify);
             tracing::info!("transcript worker spawned");
         }
         Err(e) => {

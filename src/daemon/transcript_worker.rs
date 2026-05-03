@@ -13,7 +13,7 @@ use chrono::{TimeZone, Utc};
 use std::collections::{BinaryHeap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::sync::Notify;
 use tokio::time::{Duration, interval};
 
 const PROCESSING_TICK_INTERVAL: Duration = Duration::from_millis(100);
@@ -60,26 +60,25 @@ impl Ord for ProcessingTask {
 /// Handle for sending checkpoint notifications to the worker.
 #[derive(Clone)]
 pub struct TranscriptWorkerHandle {
-    checkpoint_tx: Arc<AsyncMutex<tokio::sync::mpsc::UnboundedSender<CheckpointNotification>>>,
+    checkpoint_tx: tokio::sync::mpsc::UnboundedSender<CheckpointNotification>,
 }
 
 impl TranscriptWorkerHandle {
     /// Notify the worker that a checkpoint was recorded.
-    pub async fn notify_checkpoint(
+    pub fn notify_checkpoint(
         &self,
         session_id: String,
-        agent_type: String, // NEW parameter
+        agent_type: String,
         trace_id: String,
         transcript_path: PathBuf,
     ) {
         let notification = CheckpointNotification {
             session_id,
-            agent_type, // NEW field
+            agent_type,
             trace_id,
             transcript_path,
         };
-        let tx = self.checkpoint_tx.lock().await;
-        let _ = tx.send(notification);
+        let _ = self.checkpoint_tx.send(notification);
     }
 }
 
@@ -97,6 +96,7 @@ struct TranscriptWorker {
     transcripts_db: Arc<TranscriptsDatabase>,
     sweep_coordinator: crate::daemon::sweep_coordinator::SweepCoordinator, // NEW
     priority_queue: BinaryHeap<ProcessingTask>,
+    delayed_tasks: Vec<ProcessingTask>,
     in_flight: HashSet<PathBuf>,
     telemetry_handle: DaemonTelemetryWorkerHandle,
     shutdown_notify: Arc<Notify>,
@@ -118,6 +118,7 @@ impl TranscriptWorker {
             transcripts_db,
             sweep_coordinator, // NEW
             priority_queue: BinaryHeap::new(),
+            delayed_tasks: Vec::new(),
             in_flight: HashSet::new(),
             telemetry_handle,
             shutdown_notify,
@@ -215,18 +216,31 @@ impl TranscriptWorker {
 
     /// Process the next task from the queue.
     async fn process_next_task(&mut self) {
+        // Move any now-ready delayed tasks back to the priority queue
+        let now = std::time::Instant::now();
+        let mut i = 0;
+        while i < self.delayed_tasks.len() {
+            if self.delayed_tasks[i]
+                .next_retry_at
+                .is_none_or(|t| now >= t)
+            {
+                let task = self.delayed_tasks.swap_remove(i);
+                self.priority_queue.push(task);
+            } else {
+                i += 1;
+            }
+        }
+
         let Some(task) = self.priority_queue.pop() else {
             return;
         };
 
         // Check if task is ready to be processed (retry delay)
-        if let Some(next_retry_at) = task.next_retry_at {
-            let now = std::time::Instant::now();
-            if now < next_retry_at {
-                // Not ready yet - push back to queue
-                self.priority_queue.push(task);
-                return;
-            }
+        if let Some(next_retry_at) = task.next_retry_at
+            && now < next_retry_at
+        {
+            self.delayed_tasks.push(task);
+            return;
         }
 
         // Mark as in-flight
@@ -375,9 +389,12 @@ impl TranscriptWorker {
                         error = %message,
                         "max retries exceeded, dropping task"
                     );
-                    let _ = self
+                    if let Err(e) = self
                         .transcripts_db
-                        .record_error(&task.session_id, &format!("max retries: {}", message));
+                        .record_error(&task.session_id, &format!("max retries: {}", message))
+                    {
+                        tracing::warn!(session_id = %task.session_id, error = %e, "failed to record error in database");
+                    }
                     return;
                 }
 
@@ -410,10 +427,12 @@ impl TranscriptWorker {
                     error = %message,
                     "parse error, skipping session"
                 );
-                let _ = self.transcripts_db.record_error(
+                if let Err(e) = self.transcripts_db.record_error(
                     &task.session_id,
                     &format!("parse line {}: {}", line, message),
-                );
+                ) {
+                    tracing::warn!(session_id = %task.session_id, error = %e, "failed to record error in database");
+                }
             }
             TranscriptError::Fatal { message } => {
                 // Fatal errors are not retried
@@ -422,9 +441,12 @@ impl TranscriptWorker {
                     error = %message,
                     "fatal error, skipping session"
                 );
-                let _ = self
+                if let Err(e) = self
                     .transcripts_db
-                    .record_error(&task.session_id, &format!("fatal: {}", message));
+                    .record_error(&task.session_id, &format!("fatal: {}", message))
+                {
+                    tracing::warn!(session_id = %task.session_id, error = %e, "failed to record error in database");
+                }
             }
         }
     }
@@ -433,10 +455,18 @@ impl TranscriptWorker {
     async fn drain_immediate_tasks(&mut self) {
         let mut immediate_tasks = Vec::new();
 
-        // Collect all immediate tasks
+        // Collect all immediate tasks from priority queue and delayed tasks
         while let Some(task) = self.priority_queue.pop() {
             if task.priority == Priority::Immediate {
                 immediate_tasks.push(task);
+            }
+        }
+        let mut i = 0;
+        while i < self.delayed_tasks.len() {
+            if self.delayed_tasks[i].priority == Priority::Immediate {
+                immediate_tasks.push(self.delayed_tasks.swap_remove(i));
+            } else {
+                i += 1;
             }
         }
 
@@ -482,7 +512,5 @@ pub fn spawn_transcript_worker(
         worker.run().await;
     });
 
-    TranscriptWorkerHandle {
-        checkpoint_tx: Arc::new(AsyncMutex::new(checkpoint_tx)),
-    }
+    TranscriptWorkerHandle { checkpoint_tx }
 }
