@@ -8,7 +8,7 @@ use crate::commands::checkpoint_agent::bash_tool::ToolClass;
 use crate::error::GitAiError;
 use crate::transcripts::model_extraction;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Legacy extension path (before_edit / after_edit)
