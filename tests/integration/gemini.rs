@@ -1,12 +1,11 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use crate::test_utils::fixture_path;
-use chrono::{DateTime, Utc};
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
 use git_ai::error::GitAiError;
 use git_ai::transcripts::agent::Agent;
 use git_ai::transcripts::agents::GeminiAgent;
-use git_ai::transcripts::watermark::TimestampWatermark;
+use git_ai::transcripts::watermark::ByteOffsetWatermark;
 use serde_json::json;
 use std::fs;
 
@@ -16,17 +15,19 @@ fn parse_gemini(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
 
 #[test]
 fn test_gemini_raw_event_fidelity() {
-    let fixture = fixture_path("gemini-session-simple.json");
+    let fixture = fixture_path("gemini-session-simple.jsonl");
     let agent = GeminiAgent::new();
-    let watermark = Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
+    let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
         .unwrap();
 
-    // Independently parse the fixture. With UNIX_EPOCH watermark all messages are returned.
-    let parsed: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&fixture).unwrap()).unwrap();
-    let expected: Vec<serde_json::Value> = parsed["messages"].as_array().unwrap().clone();
+    let content = std::fs::read_to_string(&fixture).unwrap();
+    let expected: Vec<serde_json::Value> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
 
     assert_eq!(result.events.len(), expected.len());
     assert_eq!(result.events, expected);
@@ -41,7 +42,7 @@ fn test_gemini_preset_extracts_edited_filepath() {
         "tool_input": {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
-        "transcript_path": "tests/fixtures/gemini-session-simple.json"
+        "transcript_path": "tests/fixtures/gemini-session-simple.jsonl"
     })
     .to_string();
 
@@ -67,7 +68,7 @@ fn test_gemini_preset_no_filepath_when_tool_input_missing() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
-        "transcript_path": "tests/fixtures/gemini-session-simple.json"
+        "transcript_path": "tests/fixtures/gemini-session-simple.jsonl"
     })
     .to_string();
 
@@ -93,7 +94,7 @@ fn test_gemini_preset_human_checkpoint() {
         "tool_input": {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
-        "transcript_path": "tests/fixtures/gemini-session-simple.json"
+        "transcript_path": "tests/fixtures/gemini-session-simple.jsonl"
     })
     .to_string();
 
@@ -121,7 +122,7 @@ fn test_gemini_preset_ai_checkpoint() {
         "tool_input": {
             "file_path": "/Users/svarlamov/projects/testing-git/index.ts"
         },
-        "transcript_path": "tests/fixtures/gemini-session-simple.json"
+        "transcript_path": "tests/fixtures/gemini-session-simple.jsonl"
     })
     .to_string();
 
@@ -142,14 +143,13 @@ fn test_gemini_preset_extracts_model() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
-        "transcript_path": "tests/fixtures/gemini-session-simple.json"
+        "transcript_path": "tests/fixtures/gemini-session-simple.jsonl"
     })
     .to_string();
 
     let events = parse_gemini(&hook_input).expect("Failed to run GeminiPreset");
     match &events[0] {
         ParsedHookEvent::PostFileEdit(e) => {
-            // Model is extracted from the fixture transcript file at parse time
             assert_eq!(e.context.agent_id.model, "gemini-2.5-flash");
             assert_eq!(e.context.agent_id.tool, "gemini");
             assert_eq!(
@@ -167,7 +167,7 @@ fn test_gemini_preset_stores_transcript_path_in_metadata() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
-        "transcript_path": "tests/fixtures/gemini-session-simple.json"
+        "transcript_path": "tests/fixtures/gemini-session-simple.jsonl"
     })
     .to_string();
 
@@ -176,7 +176,7 @@ fn test_gemini_preset_stores_transcript_path_in_metadata() {
         ParsedHookEvent::PostFileEdit(e) => {
             assert_eq!(
                 e.context.metadata.get("transcript_path"),
-                Some(&"tests/fixtures/gemini-session-simple.json".to_string())
+                Some(&"tests/fixtures/gemini-session-simple.jsonl".to_string())
             );
         }
         _ => panic!("Expected PostFileEdit"),
@@ -213,7 +213,7 @@ fn test_gemini_preset_handles_missing_session_id() {
     let hook_input = json!({
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
-        "transcript_path": "tests/fixtures/gemini-session-simple.json"
+        "transcript_path": "tests/fixtures/gemini-session-simple.jsonl"
     })
     .to_string();
 
@@ -233,12 +233,11 @@ fn test_gemini_preset_handles_missing_file() {
         "cwd": "/Users/svarlamov/projects/testing-git",
         "hook_event_name": "AfterTool",
         "session_id": "18f475c0-690f-4bc9-b84e-88a0a1e9518f",
-        "transcript_path": "tests/fixtures/nonexistent.json"
+        "transcript_path": "tests/fixtures/nonexistent.jsonl"
     })
     .to_string();
 
     let result = parse_gemini(&hook_input);
-    // Should handle missing file gracefully
     assert!(result.is_ok());
     let events = result.unwrap();
     match &events[0] {
@@ -256,7 +255,7 @@ fn test_gemini_preset_handles_missing_file() {
 #[test]
 fn test_gemini_e2e_with_attribution() {
     let repo = TestRepo::new();
-    let fixture_path_str = fixture_path("gemini-session-simple.json")
+    let fixture_path_str = fixture_path("gemini-session-simple.jsonl")
         .to_string_lossy()
         .to_string();
 
@@ -314,7 +313,7 @@ fn test_gemini_e2e_with_attribution() {
 #[test]
 fn test_gemini_e2e_human_checkpoint() {
     let repo = TestRepo::new();
-    let fixture_path_str = fixture_path("gemini-session-simple.json")
+    let fixture_path_str = fixture_path("gemini-session-simple.jsonl")
         .to_string_lossy()
         .to_string();
 
@@ -360,7 +359,7 @@ fn test_gemini_e2e_human_checkpoint() {
 #[test]
 fn test_gemini_e2e_multiple_tool_calls() {
     let repo = TestRepo::new();
-    let fixture_path_str = fixture_path("gemini-session-simple.json")
+    let fixture_path_str = fixture_path("gemini-session-simple.jsonl")
         .to_string_lossy()
         .to_string();
 
@@ -398,38 +397,10 @@ fn test_gemini_e2e_multiple_tool_calls() {
 
 #[test]
 fn test_gemini_e2e_with_resync() {
-    use tempfile::TempDir;
-
     let repo = TestRepo::new();
-    let fixture_path_original = fixture_path("gemini-session-simple.json");
-
-    let temp_dir = TempDir::new().expect("Failed to create temp directory");
-    let temp_session_path = temp_dir.path().join("modified_gemini_session.json");
-
-    fs::copy(&fixture_path_original, &temp_session_path).expect("Failed to copy session file");
-
-    let mut session_content: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&temp_session_path).unwrap()).unwrap();
-
-    if let Some(messages) = session_content
-        .get_mut("messages")
-        .and_then(|m| m.as_array_mut())
-    {
-        let new_message = json!({
-            "id": "new-msg-id",
-            "timestamp": "2025-12-06T18:30:00.000Z",
-            "type": "gemini",
-            "content": "RESYNC_TEST_MESSAGE: This message was added after checkpoint",
-            "model": "gemini-2.5-flash"
-        });
-        messages.push(new_message);
-    }
-
-    fs::write(
-        &temp_session_path,
-        serde_json::to_string_pretty(&session_content).unwrap(),
-    )
-    .expect("Failed to write modified session");
+    let fixture_path_str = fixture_path("gemini-session-simple.jsonl")
+        .to_string_lossy()
+        .to_string();
 
     let file_path = repo.path().join("test.ts");
     fs::write(&file_path, "const x = 1;\n").unwrap();
@@ -444,22 +415,14 @@ fn test_gemini_e2e_with_resync() {
         "tool_input": {
             "file_path": file_path.to_string_lossy().to_string()
         },
-        "transcript_path": fixture_path_original.to_string_lossy().to_string()
+        "transcript_path": fixture_path_str
     })
     .to_string();
 
     repo.git_ai(&["checkpoint", "gemini", "--hook-input", &hook_input])
         .unwrap();
 
-    let temp_session_path_str = temp_session_path.to_string_lossy().to_string();
-    repo.git(&["add", "-A"]).expect("add --all should succeed");
-    let commit = repo
-        .commit_with_env(
-            "Add gemini edits",
-            &[("GIT_AI_GEMINI_SESSION_PATH", &temp_session_path_str)],
-            None,
-        )
-        .unwrap();
+    let commit = repo.stage_all_and_commit("Add gemini edits").unwrap();
 
     let mut file = repo.filename("test.ts");
     file.assert_lines_and_blame(crate::lines!["const x = 1;".human(), "const y = 2;".ai(),]);
@@ -478,7 +441,7 @@ fn test_gemini_e2e_with_resync() {
 #[test]
 fn test_gemini_e2e_partial_staging() {
     let repo = TestRepo::new();
-    let fixture_path_str = fixture_path("gemini-session-simple.json")
+    let fixture_path_str = fixture_path("gemini-session-simple.jsonl")
         .to_string_lossy()
         .to_string();
 
@@ -522,7 +485,7 @@ fn test_gemini_e2e_partial_staging() {
 #[test]
 fn test_gemini_preset_bash_tool_aftertool_detects_changes() {
     let repo = TestRepo::new();
-    let fixture_path_str = fixture_path("gemini-session-simple.json")
+    let fixture_path_str = fixture_path("gemini-session-simple.jsonl")
         .to_string_lossy()
         .to_string();
     let cwd = repo.canonical_path().to_string_lossy().to_string();
@@ -533,7 +496,6 @@ fn test_gemini_preset_bash_tool_aftertool_detects_changes() {
     fs::write(&file_path, "#!/bin/sh\necho hello\n").unwrap();
     repo.stage_all_and_commit("initial").unwrap();
 
-    // BeforeTool via CLI
     let pre_hook_input = json!({
         "session_id": session_id,
         "tool_use_id": tool_use_id,
@@ -547,11 +509,9 @@ fn test_gemini_preset_bash_tool_aftertool_detects_changes() {
     repo.git_ai(&["checkpoint", "gemini", "--hook-input", &pre_hook_input])
         .unwrap();
 
-    // Simulate the bash tool writing a new file.
     let output_path = repo.path().join("output.txt");
     fs::write(&output_path, "modified\n").unwrap();
 
-    // AfterTool via CLI
     let post_hook_input = json!({
         "session_id": session_id,
         "tool_use_id": tool_use_id,
@@ -565,7 +525,6 @@ fn test_gemini_preset_bash_tool_aftertool_detects_changes() {
     repo.git_ai(&["checkpoint", "gemini", "--hook-input", &post_hook_input])
         .unwrap();
 
-    // Verify changes were detected by committing and checking attribution
     let commit = repo.stage_all_and_commit("Gemini bash edit").unwrap();
     assert!(
         !commit.authorship_log.attestations.is_empty(),
