@@ -65,6 +65,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
 use tokio::time::Duration;
 
 pub mod analyzers;
+pub mod bash_sessions;
 pub mod control_api;
 pub mod coordinator;
 pub mod domain;
