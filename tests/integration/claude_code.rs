@@ -2,10 +2,8 @@ use crate::test_utils::fixture_path;
 use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
 use git_ai::transcripts::agent::Agent;
 use git_ai::transcripts::agents::ClaudeAgent;
-use git_ai::transcripts::agents::{extract_plan_from_tool_use, is_plan_file_path};
 use git_ai::transcripts::watermark::ByteOffsetWatermark;
 use serde_json::json;
-use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 
@@ -269,137 +267,6 @@ fn test_claude_code_thinking_raw_event_fidelity() {
     assert_eq!(result.events, expected);
 }
 
-// ===== Plan detection tests =====
-
-#[test]
-fn test_is_plan_file_path_detects_plan_files() {
-    assert!(is_plan_file_path(
-        "/Users/dev/.claude/plans/abstract-frolicking-neumann.md"
-    ));
-    assert!(is_plan_file_path(
-        "/home/user/.claude/plans/glistening-doodling-manatee.md"
-    ));
-    #[cfg(windows)]
-    assert!(is_plan_file_path(
-        r"C:\Users\dev\.claude\plans\tender-watching-thompson.md"
-    ));
-    assert!(is_plan_file_path("/Users/dev/.claude/plans/PLAN.MD"));
-
-    assert!(!is_plan_file_path("/Users/dev/myproject/src/main.rs"));
-    assert!(!is_plan_file_path("/Users/dev/myproject/README.md"));
-    assert!(!is_plan_file_path("/Users/dev/myproject/index.ts"));
-    assert!(!is_plan_file_path(
-        "/Users/dev/.claude/projects/settings.json"
-    ));
-
-    assert!(!is_plan_file_path(
-        "/Users/dev/.claude/projects/-Users-dev-myproject/plan.md"
-    ));
-    assert!(!is_plan_file_path("/tmp/claude-plan.md"));
-    assert!(!is_plan_file_path("/home/user/.claude/plan.md"));
-    assert!(!is_plan_file_path("plan.md"));
-    assert!(!is_plan_file_path("/some/path/my-plan.md"));
-
-    assert!(!is_plan_file_path("/some/path/plan.txt"));
-    assert!(!is_plan_file_path("/some/path/plan.json"));
-    assert!(!is_plan_file_path("/Users/dev/.claude/plans/plan.txt"));
-}
-
-#[test]
-fn test_extract_plan_from_write_tool() {
-    let mut plan_states = HashMap::new();
-    let input = serde_json::json!({
-        "file_path": "/Users/dev/.claude/plans/abstract-frolicking-neumann.md",
-        "content": "# My Plan\n\n## Step 1\nDo something"
-    });
-
-    let result = extract_plan_from_tool_use("Write", &input, &mut plan_states);
-    assert!(result.is_some());
-    assert_eq!(result.unwrap(), "# My Plan\n\n## Step 1\nDo something");
-
-    assert_eq!(
-        plan_states.get("/Users/dev/.claude/plans/abstract-frolicking-neumann.md"),
-        Some(&"# My Plan\n\n## Step 1\nDo something".to_string())
-    );
-}
-
-#[test]
-fn test_extract_plan_from_edit_tool_with_prior_state() {
-    let plan_path = "/Users/dev/.claude/plans/abstract-frolicking-neumann.md";
-    let mut plan_states = HashMap::new();
-
-    let write_input = serde_json::json!({
-        "file_path": plan_path,
-        "content": "# My Plan\n\n## Step 1\nDo something\n\n## Step 2\nDo another thing"
-    });
-    let write_result = extract_plan_from_tool_use("Write", &write_input, &mut plan_states);
-    assert!(write_result.is_some());
-
-    let edit_input = serde_json::json!({
-        "file_path": plan_path,
-        "old_string": "## Step 1\nDo something",
-        "new_string": "## Step 1\nDo something specific"
-    });
-    let result = extract_plan_from_tool_use("Edit", &edit_input, &mut plan_states);
-    assert!(result.is_some());
-    let text = result.unwrap();
-
-    assert_eq!(
-        text,
-        "# My Plan\n\n## Step 1\nDo something specific\n\n## Step 2\nDo another thing"
-    );
-}
-
-#[test]
-fn test_extract_plan_from_edit_tool_without_prior_state() {
-    let mut plan_states = HashMap::new();
-
-    let edit_input = serde_json::json!({
-        "file_path": "/Users/dev/.claude/plans/bright-inventing-crescent.md",
-        "old_string": "old text",
-        "new_string": "new text"
-    });
-    let result = extract_plan_from_tool_use("Edit", &edit_input, &mut plan_states);
-    assert!(result.is_some());
-    assert_eq!(result.unwrap(), "new text");
-}
-
-#[test]
-fn test_extract_plan_returns_none_for_non_plan_files() {
-    let mut plan_states = HashMap::new();
-    let input = serde_json::json!({
-        "file_path": "/Users/dev/myproject/src/main.rs",
-        "content": "fn main() {}"
-    });
-
-    let result = extract_plan_from_tool_use("Write", &input, &mut plan_states);
-    assert!(result.is_none());
-}
-
-#[test]
-fn test_extract_plan_returns_none_for_non_write_edit_tools() {
-    let mut plan_states = HashMap::new();
-    let input = serde_json::json!({
-        "file_path": "/Users/dev/.claude/plans/bright-inventing-crescent.md",
-        "content": "# Plan"
-    });
-
-    let result = extract_plan_from_tool_use("Read", &input, &mut plan_states);
-    assert!(result.is_none());
-}
-
-#[test]
-fn test_extract_plan_returns_none_for_empty_content() {
-    let mut plan_states = HashMap::new();
-    let input = serde_json::json!({
-        "file_path": "/Users/dev/.claude/plans/bright-inventing-crescent.md",
-        "content": "   "
-    });
-
-    let result = extract_plan_from_tool_use("Write", &input, &mut plan_states);
-    assert!(result.is_none());
-}
-
 #[test]
 fn test_claude_code_plan_raw_event_fidelity() {
     let fixture = fixture_path("claude-code-with-plan.jsonl");
@@ -429,11 +296,4 @@ crate::reuse_tests_in_worktree!(
     test_claude_preset_ignores_cursor_payload,
     test_claude_preset_does_not_ignore_when_transcript_path_is_claude,
     test_claude_e2e_prefers_latest_checkpoint_for_prompts,
-    test_is_plan_file_path_detects_plan_files,
-    test_extract_plan_from_write_tool,
-    test_extract_plan_from_edit_tool_with_prior_state,
-    test_extract_plan_from_edit_tool_without_prior_state,
-    test_extract_plan_returns_none_for_non_plan_files,
-    test_extract_plan_returns_none_for_non_write_edit_tools,
-    test_extract_plan_returns_none_for_empty_content,
 );

@@ -7404,25 +7404,7 @@ impl ActorDaemonCoordinator {
         // Create new session record
         let now = chrono::Utc::now().timestamp();
 
-        // Determine watermark type from format
-        let watermark_type = match transcript_source.format {
-            crate::commands::checkpoint_agent::presets::TranscriptFormat::ClaudeJsonl => {
-                crate::transcripts::watermark::WatermarkType::ByteOffset
-            }
-            crate::commands::checkpoint_agent::presets::TranscriptFormat::CursorJsonl => {
-                crate::transcripts::watermark::WatermarkType::ByteOffset
-            }
-            crate::commands::checkpoint_agent::presets::TranscriptFormat::DroidJsonl => {
-                crate::transcripts::watermark::WatermarkType::Hybrid
-            }
-            crate::commands::checkpoint_agent::presets::TranscriptFormat::CopilotSessionJson => {
-                crate::transcripts::watermark::WatermarkType::ByteOffset
-            }
-            crate::commands::checkpoint_agent::presets::TranscriptFormat::CopilotEventStreamJsonl => {
-                crate::transcripts::watermark::WatermarkType::ByteOffset
-            }
-            _ => crate::transcripts::watermark::WatermarkType::ByteOffset,
-        };
+        let watermark_type = transcript_source.format.watermark_type();
 
         let initial_watermark = match watermark_type {
             crate::transcripts::watermark::WatermarkType::ByteOffset => {
