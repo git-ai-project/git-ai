@@ -1399,16 +1399,6 @@ fn compute_watermarks_from_stat(
     watermarks
 }
 
-fn parse_checkpoint_kind(value: &str) -> Option<CheckpointKind> {
-    match value {
-        "human" => Some(CheckpointKind::Human),
-        "ai_agent" => Some(CheckpointKind::AiAgent),
-        "ai_tab" => Some(CheckpointKind::AiTab),
-        "known_human" => Some(CheckpointKind::KnownHuman),
-        _ => None,
-    }
-}
-
 fn parsed_invocation_for_side_effect(
     command: Option<&str>,
     args: &[String],
@@ -4585,32 +4575,6 @@ impl ActorDaemonCoordinator {
         // Relaxed: we only need fetch_add atomicity (unique monotone values),
         // not ordering w.r.t. any other atomic.
         (self.next_trace_ingest_seq.fetch_add(1, Ordering::Relaxed) as u64) + 1
-    }
-
-    fn trace_ingest_high_watermark(&self) -> u64 {
-        self.next_trace_ingest_seq.load(Ordering::Relaxed) as u64
-    }
-
-    async fn wait_for_trace_ingest_processed_through(&self, seq: u64) -> Result<(), GitAiError> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let notified = self.trace_ingest_progress_notify.notified();
-            // Acquire pairs with the Release store in the ingest worker so we
-            // observe all prior state updates when the sequence number advances.
-            let processed = self.processed_trace_ingest_seq.load(Ordering::Acquire) as u64;
-            if processed >= seq {
-                return Ok(());
-            }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return Err(GitAiError::Generic(format!(
-                    "timed out waiting for trace ingest through seq {} (processed={})",
-                    seq, processed
-                )));
-            }
-            let wait_for = deadline.saturating_duration_since(now);
-            let _ = tokio::time::timeout(wait_for, notified).await;
-        }
     }
 
     fn start_trace_ingest_worker(self: &Arc<Self>) -> Result<(), GitAiError> {
