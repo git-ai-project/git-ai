@@ -2374,6 +2374,13 @@ impl TestRepo {
             self.sync_daemon_force();
         }
 
+        let baseline_completion_count =
+            if self.git_mode.uses_daemon() && git_ai_primary_command(args) == Some("checkpoint") {
+                Some(self.daemon_total_completion_count())
+            } else {
+                None
+            };
+
         let binary_path = get_binary_path();
         let normalized_args = normalize_test_git_ai_checkpoint_args(args);
 
@@ -2403,6 +2410,16 @@ impl TestRepo {
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        // If the checkpoint was queued to the daemon, wait for the daemon to
+        // process it before returning.  This prevents race conditions where
+        // tests read the working log before the daemon writes it.
+        if let Some(baseline) = baseline_completion_count {
+            let combined_output = format!("{}{}", &stdout, &stderr);
+            if combined_output.contains("Checkpoint queued") {
+                self.wait_for_next_daemon_checkpoint_completion(baseline);
+            }
+        }
 
         if output.status.success() {
             // Combine stdout and stderr since git-ai often writes to stderr

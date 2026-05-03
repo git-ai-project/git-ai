@@ -74,8 +74,7 @@ fn test_windsurf_preset_ai_checkpoint_post_write_code() {
         vec!["/home/user/project/main.rs"]
     );
     assert!(result.will_edit_filepaths.is_none());
-    // Transcript parsing will fail since the derived path doesn't exist, but preset handles it gracefully
-    assert!(result.transcript.is_some());
+    assert!(result.transcript.is_none());
     assert!(result.agent_metadata.is_some());
     assert_eq!(result.agent_id.tool, "windsurf");
     // No model_name in hook input → falls back to "unknown"
@@ -129,41 +128,20 @@ fn test_windsurf_preset_ignores_unknown_model_name() {
 
 #[test]
 fn test_windsurf_preset_ai_checkpoint_post_cascade() {
-    // Create a temp transcript file using real Windsurf nested format
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    writeln!(
-        temp_file,
-        r#"{{"status":"done","type":"user_input","user_input":{{"user_response":"Hello AI"}}}}"#
-    )
-    .unwrap();
-    writeln!(temp_file, r#"{{"planner_response":{{"response":"I will help you"}},"status":"done","type":"planner_response"}}"#).unwrap();
-    let temp_path = temp_file.path().to_str().unwrap().to_string();
-
     let hook_input = json!({
         "trajectory_id": "traj-abc-123",
         "agent_action_name": "post_cascade_response_with_transcript",
-        "tool_info": {
-            "transcript_path": temp_path
-        }
+        "tool_info": {}
     });
 
     let flags = AgentCheckpointFlags {
         hook_input: Some(hook_input.to_string()),
     };
 
-    let result = WindsurfPreset
-        .run(flags)
-        .expect("Failed to run WindsurfPreset");
-
-    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
-    assert!(result.transcript.is_some());
-    let transcript = result.transcript.unwrap();
-    assert_eq!(transcript.messages().len(), 2);
-
-    // Verify message types
-    assert!(matches!(&transcript.messages()[0], Message::User { text, .. } if text == "Hello AI"));
+    let result = WindsurfPreset.run(flags);
     assert!(
-        matches!(&transcript.messages()[1], Message::Assistant { text, .. } if text == "I will help you")
+        result.is_err(),
+        "post_cascade_response_with_transcript should be silently ignored"
     );
 }
 
@@ -603,8 +581,8 @@ fn test_windsurf_preset_post_run_command_detects_changed_files() {
     assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
     assert_eq!(result.agent_id.tool, "windsurf");
     assert!(
-        result.transcript.is_some(),
-        "post_run_command should attach transcript content"
+        result.transcript.is_none(),
+        "post_run_command should defer transcript loading to commit time"
     );
     assert_eq!(
         result.edited_filepaths,

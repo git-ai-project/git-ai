@@ -1489,10 +1489,9 @@ fn run_checkpoint_via_daemon_or_local(
                                 }
                             }
                             Ok(None) => {
-                                return Ok(CheckpointDispatchOutcome {
-                                    stats: (0, 0, 0),
-                                    queued: false,
-                                });
+                                tracing::warn!(
+                                    "prepare_captured_checkpoint returned None unexpectedly"
+                                );
                             }
                             Err(e) => {
                                 log_daemon_checkpoint_delegate_failure(
