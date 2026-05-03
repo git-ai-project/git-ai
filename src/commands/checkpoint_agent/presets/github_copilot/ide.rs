@@ -67,7 +67,6 @@ pub(super) fn parse_legacy_extension_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: will_edit_filepaths,
-            dirty_files,
         })]);
     }
 
@@ -128,7 +127,6 @@ pub(super) fn parse_legacy_extension_hooks(
     Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
         context,
         file_paths: edited_filepaths,
-        dirty_files,
         transcript_source,
     })])
 }
@@ -267,7 +265,6 @@ pub(super) fn parse_vscode_native_hooks(
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: extracted_paths,
-                dirty_files: Some(empty_dirty_files),
             })]);
         }
 
@@ -281,7 +278,6 @@ pub(super) fn parse_vscode_native_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: extracted_paths,
-            dirty_files,
         })]);
     }
 
@@ -304,7 +300,6 @@ pub(super) fn parse_vscode_native_hooks(
     Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
         context,
         file_paths: extracted_paths,
-        dirty_files,
         transcript_source,
     })])
 }

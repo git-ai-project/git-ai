@@ -96,7 +96,6 @@ impl AgentPreset for PiPreset {
             tool_name_raw,
             will_edit_filepaths,
             edited_filepaths,
-            dirty_files,
             tool_use_id,
             tool_input: _,
             tool_result: _,
@@ -175,7 +174,6 @@ impl AgentPreset for PiPreset {
                 ParsedHookEvent::PreFileEdit(PreFileEdit {
                     context,
                     file_paths: will_edit_filepaths.into_iter().map(PathBuf::from).collect(),
-                    dirty_files: dirty,
                 })
             }
             PiHookEvent::AfterEdit => {
@@ -187,7 +185,6 @@ impl AgentPreset for PiPreset {
                 ParsedHookEvent::PostFileEdit(PostFileEdit {
                     context,
                     file_paths: edited_filepaths.into_iter().map(PathBuf::from).collect(),
-                    dirty_files: dirty,
                     transcript_source,
                 })
             }

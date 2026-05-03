@@ -148,7 +148,6 @@ impl AgentPreset for CodexPreset {
                     ParsedHookEvent::PreFileEdit(PreFileEdit {
                         context,
                         file_paths: vec![],
-                        dirty_files: None,
                     })
                 } else {
                     return Err(GitAiError::PresetError(format!(
@@ -176,7 +175,6 @@ impl AgentPreset for CodexPreset {
                     ParsedHookEvent::PostFileEdit(PostFileEdit {
                         context,
                         file_paths,
-                        dirty_files: None,
                         transcript_source,
                     })
                 } else {

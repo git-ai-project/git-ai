@@ -56,7 +56,6 @@ impl AgentPreset for KnownHumanPreset {
                     extension_version,
                     cwd,
                     file_paths,
-                    dirty_files,
                 )
             };
 
@@ -69,7 +68,6 @@ impl AgentPreset for KnownHumanPreset {
             trace_id: trace_id.to_string(),
             cwd,
             file_paths,
-            dirty_files,
             editor_metadata,
         })])
     }

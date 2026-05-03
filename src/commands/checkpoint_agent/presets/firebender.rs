@@ -127,7 +127,6 @@ impl AgentPreset for FirebenderPreset {
             tool_name,
             tool_input,
             completion_id,
-            dirty_files,
         } = hook_input;
 
         // Legacy events that should be silently skipped
@@ -216,7 +215,6 @@ impl AgentPreset for FirebenderPreset {
             ("preToolUse", false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
-                dirty_files: dirty,
             }),
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -226,7 +224,6 @@ impl AgentPreset for FirebenderPreset {
             (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
-                dirty_files: dirty,
                 transcript_source: None,
             }),
         };

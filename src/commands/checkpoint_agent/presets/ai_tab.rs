@@ -70,14 +70,12 @@ impl AgentPreset for AiTabPreset {
             ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
-                dirty_files,
             })
         } else {
             let file_paths = parse::pathbuf_array(&data, "edited_filepaths", cwd);
             ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
-                dirty_files,
                 transcript_source: None,
             })
         };

@@ -40,7 +40,6 @@ impl AgentPreset for AgentV1Preset {
             AgentV1Payload::Human {
                 repo_working_dir,
                 will_edit_filepaths,
-                dirty_files,
             } => {
                 let cwd = PathBuf::from(&repo_working_dir);
                 let file_paths = will_edit_filepaths
@@ -63,7 +62,6 @@ impl AgentPreset for AgentV1Preset {
                         metadata: HashMap::new(),
                     },
                     file_paths,
-                    dirty_files: dirty,
                 })
             }
             AgentV1Payload::AiAgent {
@@ -72,7 +70,6 @@ impl AgentPreset for AgentV1Preset {
                 agent_name,
                 model,
                 conversation_id,
-                dirty_files,
             } => {
                 let cwd = PathBuf::from(&repo_working_dir);
                 let file_paths = edited_filepaths
@@ -95,7 +92,6 @@ impl AgentPreset for AgentV1Preset {
                         metadata: HashMap::new(),
                     },
                     file_paths,
-                    dirty_files: dirty,
                     transcript_source: None,
                 })
             }

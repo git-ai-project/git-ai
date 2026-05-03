@@ -10,7 +10,8 @@ use crate::error::GitAiError;
 use crate::git::repository::find_repository_for_file;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointFileEntry {
@@ -31,6 +32,78 @@ pub struct CheckpointRequest {
     pub metadata: HashMap<String, String>,
 }
 
+fn build_file_entries(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFileEntry>, GitAiError> {
+    if file_paths.is_empty() {
+        return Ok(vec![]);
+    }
+    // Cache repo lookups — files in the same repo share work_dir and head
+    let mut repo_cache: HashMap<PathBuf, (PathBuf, String)> = HashMap::new();
+    let mut entries = Vec::with_capacity(file_paths.len());
+
+    for path in file_paths {
+        if !path.is_absolute() {
+            return Err(GitAiError::PresetError(format!(
+                "file path must be absolute: {}",
+                path.display()
+            )));
+        }
+        let repo = find_repository_for_file(&path.to_string_lossy(), None)?;
+        let work_dir = repo.workdir()?;
+        let (repo_work_dir, base_commit_sha) = repo_cache
+            .entry(work_dir.clone())
+            .or_insert_with(|| {
+                let head = repo.rev_parse_head().unwrap_or_default();
+                (work_dir, head)
+            })
+            .clone();
+
+        let content = fs::read_to_string(path).unwrap_or_default();
+        entries.push(CheckpointFileEntry {
+            path: path.clone(),
+            content,
+            repo_work_dir,
+            base_commit_sha,
+        });
+    }
+    Ok(entries)
+}
+
+fn build_file_entries_with_content(
+    files_with_content: &[(PathBuf, String)],
+) -> Result<Vec<CheckpointFileEntry>, GitAiError> {
+    if files_with_content.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut repo_cache: HashMap<PathBuf, (PathBuf, String)> = HashMap::new();
+    let mut entries = Vec::with_capacity(files_with_content.len());
+
+    for (path, content) in files_with_content {
+        if !path.is_absolute() {
+            return Err(GitAiError::PresetError(format!(
+                "file path must be absolute: {}",
+                path.display()
+            )));
+        }
+        let repo = find_repository_for_file(&path.to_string_lossy(), None)?;
+        let work_dir = repo.workdir()?;
+        let (repo_work_dir, base_commit_sha) = repo_cache
+            .entry(work_dir.clone())
+            .or_insert_with(|| {
+                let head = repo.rev_parse_head().unwrap_or_default();
+                (work_dir, head)
+            })
+            .clone();
+
+        entries.push(CheckpointFileEntry {
+            path: path.clone(),
+            content: content.clone(),
+            repo_work_dir,
+            base_commit_sha,
+        });
+    }
+    Ok(entries)
+}
+
 pub fn execute_preset_checkpoint(
     preset_name: &str,
     hook_input: &str,
@@ -44,19 +117,6 @@ pub fn execute_preset_checkpoint(
         .map(|event| execute_event(event, preset_name))
         .collect::<Result<Vec<_>, _>>()
         .map(|v| v.into_iter().flatten().collect())
-}
-
-fn resolve_repo_working_dir_from_file_paths(file_paths: &[PathBuf]) -> Result<PathBuf, GitAiError> {
-    let first_path = file_paths.first().ok_or_else(|| {
-        GitAiError::PresetError("No file paths provided for repo discovery".to_string())
-    })?;
-    let repo = find_repository_for_file(&first_path.to_string_lossy(), None)?;
-    repo.workdir()
-}
-
-fn resolve_repo_working_dir_from_cwd(cwd: &std::path::Path) -> Result<PathBuf, GitAiError> {
-    let repo = find_repository_for_file(&cwd.to_string_lossy(), None)?;
-    repo.workdir()
 }
 
 fn execute_event(
@@ -74,23 +134,15 @@ fn execute_event(
 }
 
 fn execute_pre_file_edit(e: PreFileEdit) -> Result<CheckpointRequest, GitAiError> {
-    let repo_working_dir = if !e.file_paths.is_empty() {
-        resolve_repo_working_dir_from_file_paths(&e.file_paths)?
-    } else {
-        resolve_repo_working_dir_from_cwd(&e.context.cwd)?
-    };
-
+    let files = build_file_entries(&e.file_paths)?;
     Ok(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind: CheckpointKind::Human,
         agent_id: None,
-        repo_working_dir,
-        file_paths: e.file_paths,
+        files,
         path_role: PreparedPathRole::WillEdit,
-        dirty_files: e.dirty_files,
         transcript_source: None,
         metadata: e.context.metadata,
-        captured_checkpoint_id: None,
     })
 }
 
@@ -98,70 +150,45 @@ fn execute_post_file_edit(
     e: PostFileEdit,
     preset_name: &str,
 ) -> Result<CheckpointRequest, GitAiError> {
-    let repo_working_dir = if !e.file_paths.is_empty() {
-        resolve_repo_working_dir_from_file_paths(&e.file_paths)?
-    } else {
-        resolve_repo_working_dir_from_cwd(&e.context.cwd)?
-    };
-
+    let files = build_file_entries(&e.file_paths)?;
     let checkpoint_kind = match preset_name {
         "ai_tab" => CheckpointKind::AiTab,
         _ => CheckpointKind::AiAgent,
     };
-
     Ok(CheckpointRequest {
         trace_id: e.context.trace_id,
         checkpoint_kind,
         agent_id: Some(e.context.agent_id),
-        repo_working_dir,
-        file_paths: e.file_paths,
+        files,
         path_role: PreparedPathRole::Edited,
-        dirty_files: e.dirty_files,
         transcript_source: e.transcript_source,
         metadata: e.context.metadata,
-        captured_checkpoint_id: None,
     })
 }
 
 fn execute_known_human_edit(e: KnownHumanEdit) -> Result<CheckpointRequest, GitAiError> {
-    let repo_working_dir = if !e.file_paths.is_empty() {
-        resolve_repo_working_dir_from_file_paths(&e.file_paths)?
-    } else {
-        resolve_repo_working_dir_from_cwd(&e.cwd)?
-    };
-
+    let files = build_file_entries(&e.file_paths)?;
     Ok(CheckpointRequest {
         trace_id: e.trace_id,
         checkpoint_kind: CheckpointKind::KnownHuman,
         agent_id: None,
-        repo_working_dir,
-        file_paths: e.file_paths,
+        files,
         path_role: PreparedPathRole::Edited,
-        dirty_files: e.dirty_files,
         transcript_source: None,
         metadata: e.editor_metadata,
-        captured_checkpoint_id: None,
     })
 }
 
 fn execute_untracked_edit(e: UntrackedEdit) -> Result<CheckpointRequest, GitAiError> {
-    let repo_working_dir = if !e.file_paths.is_empty() {
-        resolve_repo_working_dir_from_file_paths(&e.file_paths)?
-    } else {
-        resolve_repo_working_dir_from_cwd(&e.cwd)?
-    };
-
+    let files = build_file_entries(&e.file_paths)?;
     Ok(CheckpointRequest {
         trace_id: e.trace_id,
         checkpoint_kind: CheckpointKind::Human,
         agent_id: None,
-        repo_working_dir,
-        file_paths: e.file_paths,
+        files,
         path_role: PreparedPathRole::WillEdit,
-        dirty_files: None,
         transcript_source: None,
         metadata: HashMap::new(),
-        captured_checkpoint_id: None,
     })
 }
 
