@@ -85,3 +85,23 @@ pub enum TranscriptFormat {
     OpenCodeSqlite,
     PiJsonl,
 }
+
+impl TranscriptFormat {
+    pub fn watermark_type(self) -> super::watermark::WatermarkType {
+        use super::watermark::WatermarkType;
+        match self {
+            Self::ClaudeJsonl
+            | Self::CursorJsonl
+            | Self::GeminiJsonl
+            | Self::WindsurfJsonl
+            | Self::CodexJsonl
+            | Self::PiJsonl
+            | Self::CopilotEventStreamJsonl => WatermarkType::ByteOffset,
+            Self::DroidJsonl => WatermarkType::Hybrid,
+            Self::CopilotSessionJson | Self::ContinueJson | Self::AmpThreadJson => {
+                WatermarkType::RecordIndex
+            }
+            Self::OpenCodeSqlite => WatermarkType::Timestamp,
+        }
+    }
+}

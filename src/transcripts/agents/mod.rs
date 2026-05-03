@@ -12,7 +12,6 @@ mod windsurf;
 
 pub use amp::AmpAgent;
 pub use claude::ClaudeAgent;
-pub use claude::{extract_plan_from_tool_use, is_plan_file_path};
 pub use codex::CodexAgent;
 pub use continue_cli::ContinueAgent;
 pub use copilot::CopilotAgent;
