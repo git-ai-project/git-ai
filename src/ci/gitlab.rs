@@ -62,10 +62,10 @@ pub fn get_gitlab_ci_context() -> Result<Option<CiContext>, GitAiError> {
     };
 
     // Calculate cutoff time (10 minutes ago) with safety buffer
-    let lookback_minutes = std::env::var("GIT_AI_CI_LOOKBACK_MINUTES")                                                                                                                                                 
-      .ok()                                                                                                                                                                                                        
-      .and_then(|v| v.parse().ok())
-      .unwrap_or(15);                                                                                                                                                                                                
+    let lookback_minutes = std::env::var("GIT_AI_CI_LOOKBACK_MINUTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15);
     let cutoff = Utc::now() - Duration::minutes(lookback_minutes);
 
     let cutoff_str = cutoff.format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -355,37 +355,37 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]                                                                                                                                                        
+    #[serial_test::serial]
     fn test_lookback_minutes_defaults_to_15() {
-        std::env::remove_var("GIT_AI_CI_LOOKBACK_MINUTES");                                                                                                                                                            
-        let lookback = std::env::var("GIT_AI_CI_LOOKBACK_MINUTES")                                                                                                                                                   
-            .ok()                                                 
-            .and_then(|v| v.parse().ok())                                                                                                                                                                              
-            .unwrap_or(15i64);           
-        assert_eq!(lookback, 15);                                                                                                                                                                                      
-    }                                                                                                                                                                                                                
-    
-    #[test]
-    #[serial_test::serial]                                                                                                                                                                                                     
-    fn test_lookback_minutes_reads_env_var() {
-        std::env::set_var("GIT_AI_CI_LOOKBACK_MINUTES", "4320");                                                                                                                                                       
-        let lookback = std::env::var("GIT_AI_CI_LOOKBACK_MINUTES")                                                                                                                                                   
-            .ok()                                                 
-            .and_then(|v| v.parse().ok())                                                                                                                                                                              
-            .unwrap_or(15i64);           
-        std::env::remove_var("GIT_AI_CI_LOOKBACK_MINUTES");                                                                                                                                                            
-        assert_eq!(lookback, 4320);                                                                                                                                                                                  
-    }                                                                                                                                                                                                                  
-    
-    #[test]
-    #[serial_test::serial]                                                                                                                                                                                                          
-    fn test_lookback_minutes_falls_back_on_invalid_value() {                                                                                                                                                         
-        std::env::set_var("GIT_AI_CI_LOOKBACK_MINUTES", "not-a-number");
-        let lookback = std::env::var("GIT_AI_CI_LOOKBACK_MINUTES")      
-            .ok()                                                                                                                                                                                                      
+        unsafe { std::env::remove_var("GIT_AI_CI_LOOKBACK_MINUTES") };
+        let lookback = std::env::var("GIT_AI_CI_LOOKBACK_MINUTES")
+            .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(15i64);                                                                                                                                                                                         
-        std::env::remove_var("GIT_AI_CI_LOOKBACK_MINUTES");                                                                                                                                                          
-        assert_eq!(lookback, 15);                                                                                                                                                                                      
-    } 
+            .unwrap_or(15i64);
+        assert_eq!(lookback, 15);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_lookback_minutes_reads_env_var() {
+        unsafe { std::env::set_var("GIT_AI_CI_LOOKBACK_MINUTES", "4320") };
+        let lookback = std::env::var("GIT_AI_CI_LOOKBACK_MINUTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15i64);
+        unsafe { std::env::remove_var("GIT_AI_CI_LOOKBACK_MINUTES") };
+        assert_eq!(lookback, 4320);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_lookback_minutes_falls_back_on_invalid_value() {
+        unsafe { std::env::set_var("GIT_AI_CI_LOOKBACK_MINUTES", "not-a-number") };
+        let lookback = std::env::var("GIT_AI_CI_LOOKBACK_MINUTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(15i64);
+        unsafe { std::env::remove_var("GIT_AI_CI_LOOKBACK_MINUTES") };
+        assert_eq!(lookback, 15);
+    }
 }
