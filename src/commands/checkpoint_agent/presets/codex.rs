@@ -30,15 +30,19 @@ impl CodexPreset {
             })
     }
 
-    fn resolve_transcript_path(data: &serde_json::Value, _session_id: &str) -> Option<String> {
-        // 1. Explicit transcript_path in hook input
+    fn resolve_transcript_path(data: &serde_json::Value, session_id: &str) -> Option<String> {
         if let Some(tp) = parse::optional_str(data, "transcript_path") {
             return Some(tp.to_string());
         }
 
-        // 2. Search for latest rollout file on disk - REMOVED: transcript_readers deleted
-        // TODO: Re-implement using transcripts/ module if needed
-        None
+        let codex_home = dirs::home_dir()?.join(".codex");
+        crate::transcripts::agents::CodexAgent::find_rollout_path_for_session_in_home(
+            session_id,
+            &codex_home,
+        )
+        .ok()
+        .flatten()
+        .map(|p| p.to_string_lossy().into_owned())
     }
 
     fn extract_filepaths_from_tool_response(hook_data: &serde_json::Value) -> Vec<PathBuf> {

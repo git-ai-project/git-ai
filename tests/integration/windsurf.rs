@@ -216,17 +216,11 @@ fn test_windsurf_transcript_parser_handles_malformed_lines() {
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent.read_incremental(temp_file.path(), watermark, "test");
 
-    // The new reader returns a parse error on malformed JSON lines
-    match result {
-        Err(err) => {
-            assert!(
-                err.to_string().contains("Parse error"),
-                "Expected parse error, got: {}",
-                err
-            );
-        }
-        Ok(_) => panic!("Expected error on malformed JSON line, but got Ok"),
-    }
+    // Malformed JSON lines are skipped; valid lines before and after are returned
+    let batch = result.expect("malformed lines should be skipped, not cause errors");
+    assert_eq!(batch.events.len(), 2);
+    assert_eq!(batch.events[0]["type"].as_str(), Some("user_input"));
+    assert_eq!(batch.events[1]["type"].as_str(), Some("planner_response"));
 }
 
 #[test]
