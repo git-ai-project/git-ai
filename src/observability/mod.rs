@@ -6,7 +6,7 @@ use crate::metrics::MetricEvent;
 pub mod performance_targets;
 
 /// Maximum events per metrics envelope
-pub const MAX_METRICS_PER_ENVELOPE: usize = 250;
+pub const MAX_METRICS_PER_ENVELOPE: usize = 1000;
 
 /// Submit telemetry envelopes via the best available path:
 /// 1. External daemon control socket (wrapper processes)
@@ -61,7 +61,7 @@ pub fn log_message(message: &str, level: &str, context: Option<serde_json::Value
 
 /// Log a batch of metric events (via daemon telemetry worker).
 ///
-/// Events are batched into envelopes of up to 250 events each.
+/// Events are batched into envelopes of up to 1000 events each.
 pub fn log_metrics(
     #[cfg_attr(any(test, feature = "test-support"), allow(unused))] events: Vec<MetricEvent>,
 ) {
@@ -155,6 +155,6 @@ mod tests {
     // Test constants
     #[test]
     fn test_max_metrics_per_envelope() {
-        assert_eq!(MAX_METRICS_PER_ENVELOPE, 250);
+        assert_eq!(MAX_METRICS_PER_ENVELOPE, 1000);
     }
 }
