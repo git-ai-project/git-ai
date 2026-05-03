@@ -201,7 +201,7 @@ impl StatEntry {
 /// `mtime > effective_worktree_wm + GRACE` (i.e., not covered by any watermark).
 /// Filtering is applied uniformly to all files — there is no special treatment
 /// for git-tracked vs untracked files.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatSnapshot {
     /// File metadata for files that passed the ignore filter and are not
     /// covered by any watermark at snapshot time.
