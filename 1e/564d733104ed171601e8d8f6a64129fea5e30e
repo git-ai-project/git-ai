@@ -1,0 +1,23 @@
+tests/integration/transcripts_e2e.rs
+  75b8b35dceb7e11d 1-6,8-88,90-109,111-244
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "1e564d733104ed171601e8d8f6a64129fea5e30e",
+  "prompts": {
+    "75b8b35dceb7e11d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ffd64922-c64c-40e8-9619-70e9280abcfa",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Sasha Varlamov",
+      "messages": [],
+      "total_additions": 29066,
+      "total_deletions": 26403,
+      "accepted_lines": 241,
+      "overriden_lines": 0
+    }
+  }
+}
