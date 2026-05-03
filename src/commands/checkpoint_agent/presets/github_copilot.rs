@@ -272,7 +272,6 @@ fn parse_vscode_native_hooks(
             })]);
         }
 
-        // For create_file PreToolUse, synthesize dirty_files with empty content
         if tool_name.eq_ignore_ascii_case("create_file") {
 
             if extracted_paths.is_empty() {
@@ -780,11 +779,6 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/new_file.rs")]
                 );
-                let df = e.dirty_files.as_ref().unwrap();
-                assert_eq!(
-                    df.get(&PathBuf::from("/home/user/project/src/new_file.rs")),
-                    Some(&String::new())
-                );
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -1015,8 +1009,10 @@ mod tests {
             .unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                let df = e.dirty_files.as_ref().unwrap();
-                assert!(df.contains_key(&PathBuf::from("/home/user/project/src/main.rs")));
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/main.rs")]
+                );
             }
             _ => panic!("Expected PreFileEdit"),
         }

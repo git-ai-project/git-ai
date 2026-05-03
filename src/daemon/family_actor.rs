@@ -9,6 +9,8 @@ use crate::error::GitAiError;
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
 
+const BASH_INVOCATION_STALE_SECS: u64 = 300;
+
 pub enum FamilyMsg {
     Apply(
         Box<NormalizedCommand>,
@@ -217,7 +219,8 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                 }
                 FamilyMsg::GetActiveBashContext(respond_to) => {
                     let now = std::time::Instant::now();
-                    let stale_threshold = std::time::Duration::from_secs(300);
+                    let stale_threshold =
+                        std::time::Duration::from_secs(BASH_INVOCATION_STALE_SECS);
                     let most_recent = state
                         .bash_invocations
                         .values()
@@ -228,7 +231,8 @@ pub fn spawn_family_actor(family_key: FamilyKey) -> FamilyActorHandle {
                 }
                 FamilyMsg::EvictStaleBashInvocations => {
                     let now = std::time::Instant::now();
-                    let stale_threshold = std::time::Duration::from_secs(300);
+                    let stale_threshold =
+                        std::time::Duration::from_secs(BASH_INVOCATION_STALE_SECS);
                     state
                         .bash_invocations
                         .retain(|_, inv| now.duration_since(inv.stored_at) < stale_threshold);

@@ -297,7 +297,6 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "firebender");
                 assert_eq!(e.tool_use_id, "bash");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }

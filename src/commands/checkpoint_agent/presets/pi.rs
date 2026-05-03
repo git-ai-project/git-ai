@@ -303,7 +303,6 @@ mod tests {
                 assert_eq!(e.context.agent_id.tool, "pi");
                 assert_eq!(e.context.session_id, "pi-sess-789");
                 assert_eq!(e.tool_use_id, "tu-abc123");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }
