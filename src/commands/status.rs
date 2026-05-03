@@ -59,7 +59,6 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
         CheckpointKind::Human,
         true,
         None,
-        false,
     );
 
     let head = repo.head()?;

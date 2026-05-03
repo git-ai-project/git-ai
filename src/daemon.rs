@@ -1367,7 +1367,6 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
         request.checkpoint_kind,
         true,
         Some(request),
-        false,
     )?;
     Ok(())
 }
@@ -2546,7 +2545,6 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         CheckpointKind::Human,
         true,
         Some(replay_checkpoint_request),
-        false,
         Some(base_commit.as_str()),
         crate::commands::checkpoint::BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
     )
@@ -8120,14 +8118,6 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     sanitize_git_env_for_daemon();
     disable_trace2_for_daemon_process();
     config.ensure_parent_dirs()?;
-    if let Err(error) = crate::commands::checkpoint::prune_stale_captured_checkpoints(
-        Duration::from_secs(60 * 60 * 24),
-    ) {
-        tracing::warn!(
-            %error,
-            "stale captured checkpoint pruning failed"
-        );
-    }
     let _lock = DaemonLock::acquire(&config.lock_path)?;
     let _active_guard = DaemonProcessActiveGuard::enter();
     write_pid_metadata(&config)?;
