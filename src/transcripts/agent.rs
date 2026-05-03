@@ -63,7 +63,7 @@ pub fn get_agent(agent_type: &str) -> Option<Box<dyn Agent>> {
         "claude" => Some(Box::new(super::agents::ClaudeAgent::new())),
         "cursor" => Some(Box::new(super::agents::CursorAgent::new())),
         "droid" => Some(Box::new(super::agents::DroidAgent::new())),
-        "copilot" => Some(Box::new(super::agents::CopilotAgent::new())),
+        "copilot" | "github-copilot" => Some(Box::new(super::agents::CopilotAgent::new())),
         "gemini" => Some(Box::new(super::agents::GeminiAgent::new())),
         "continue-cli" => Some(Box::new(super::agents::ContinueAgent::new())),
         "windsurf" => Some(Box::new(super::agents::WindsurfAgent::new())),

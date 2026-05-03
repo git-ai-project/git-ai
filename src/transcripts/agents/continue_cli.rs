@@ -84,7 +84,7 @@ impl Agent for ContinueAgent {
 
             let session = DiscoveredSession {
                 session_id,
-                agent_type: "continue".to_string(),
+                agent_type: "continue-cli".to_string(),
                 transcript_path: path,
                 transcript_format: TranscriptFormat::ContinueJson,
                 watermark_type: WatermarkType::RecordIndex,
