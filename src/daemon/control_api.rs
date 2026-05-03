@@ -9,8 +9,7 @@ use serde_json::Value;
 pub enum ControlRequest {
     #[serde(rename = "checkpoint.run")]
     CheckpointRun {
-        request: Box<CheckpointRunRequest>,
-        wait: Option<bool>,
+        request: Box<CheckpointRequest>,
     },
     #[serde(rename = "status.family")]
     StatusFamily { repo_working_dir: String },
@@ -34,53 +33,6 @@ pub enum ControlRequest {
     SnapshotWatermarks { repo_working_dir: String },
     #[serde(rename = "shutdown")]
     Shutdown,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "request_type", rename_all = "snake_case")]
-pub enum CheckpointRunRequest {
-    Live(Box<LiveCheckpointRunRequest>),
-    Captured(CapturedCheckpointRunRequest),
-}
-
-impl CheckpointRunRequest {
-    pub fn repo_working_dir(&self) -> &str {
-        match self {
-            Self::Live(request) => &request.repo_working_dir,
-            Self::Captured(request) => &request.repo_working_dir,
-        }
-    }
-
-    pub fn is_pre_commit(&self) -> bool {
-        match self {
-            Self::Live(request) => request.is_pre_commit.unwrap_or(false),
-            Self::Captured(_) => false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct LiveCheckpointRunRequest {
-    #[serde(default)]
-    pub repo_working_dir: String,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub author: Option<String>,
-    #[serde(default)]
-    pub quiet: Option<bool>,
-    #[serde(default)]
-    pub is_pre_commit: Option<bool>,
-    #[serde(default)]
-    pub checkpoint_request: Option<CheckpointRequest>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CapturedCheckpointRunRequest {
-    #[serde(default)]
-    pub repo_working_dir: String,
-    #[serde(default)]
-    pub capture_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
