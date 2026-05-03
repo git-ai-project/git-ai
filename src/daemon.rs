@@ -1363,14 +1363,12 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
     let kind = request.checkpoint_kind;
     let quiet = true;
 
-    // Pass false for is_pre_commit (will be removed in Task 8)
     let _ = crate::commands::checkpoint::run(
         &repo,
         &author,
         kind,
         quiet,
         Some(request),
-        false,
     )?;
     Ok(())
 }
@@ -2544,7 +2542,7 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
             .filter_map(|path| {
                 let content = dirty_files.get(&path)?.clone();
                 Some(crate::commands::checkpoint_agent::orchestrator::CheckpointFileEntry {
-                    path: std::path::PathBuf::from(&path),
+                    path: repo_work_dir.join(&path),
                     content,
                     repo_work_dir: repo_work_dir.clone(),
                     base_commit_sha: base_commit.to_string(),
@@ -2566,15 +2564,12 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
         metadata: std::collections::HashMap::new(),
     };
 
-    crate::commands::checkpoint::run_with_base_commit_override_with_policy(
+    crate::commands::checkpoint::run(
         repo,
         author,
         checkpoint_kind,
         true,
         Some(replay_checkpoint_request),
-        base_commit != "initial",
-        Some(base_commit.as_str()),
-        crate::commands::checkpoint::BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
     )
     .map(|_| ())
 }
@@ -8139,14 +8134,6 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     sanitize_git_env_for_daemon();
     disable_trace2_for_daemon_process();
     config.ensure_parent_dirs()?;
-    if let Err(error) = crate::commands::checkpoint::prune_stale_captured_checkpoints(
-        Duration::from_secs(60 * 60 * 24),
-    ) {
-        tracing::warn!(
-            %error,
-            "stale captured checkpoint pruning failed"
-        );
-    }
     let _lock = DaemonLock::acquire(&config.lock_path)?;
     let _active_guard = DaemonProcessActiveGuard::enter();
     write_pid_metadata(&config)?;

@@ -11,7 +11,6 @@ pub fn pre_commit(repo: &Repository, default_author: String) -> Result<(), GitAi
         checkpoint_kind,
         true,
         checkpoint_request,
-        true, // should skip if NO AI CHECKPOINTS
     );
     result.map(|_| ())
 }
