@@ -101,6 +101,7 @@ struct BashSession {
 - `captured_checkpoint_id` field (everywhere)
 - `wait` field on `CheckpointRun`
 - `BashPreHookStrategy` enum (all agents now use explicit pre/post file edit events)
+- `is_pre_commit` parameter threaded through checkpoint.rs — with `pre_commit.rs` dead and the daemon never setting this to true, all branches guarded by `is_pre_commit` are dead code
 
 ## Component Designs
 
