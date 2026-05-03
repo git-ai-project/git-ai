@@ -1,5 +1,5 @@
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
     PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
@@ -305,12 +305,10 @@ impl AgentPreset for OpenCodePreset {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id_str,
-                strategy: BashPreHookStrategy::EmitHumanCheckpoint,
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
-                dirty_files: None,
             }),
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -320,7 +318,6 @@ impl AgentPreset for OpenCodePreset {
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
-                dirty_files: None,
                 transcript_source,
             }),
         };
@@ -390,7 +387,6 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "opencode");
                 assert_eq!(e.tool_use_id, "tu-1");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }

@@ -1,6 +1,6 @@
 use super::parse;
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
     PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
@@ -167,13 +167,11 @@ impl AgentPreset for DroidPreset {
                 return Ok(vec![ParsedHookEvent::PreBashCall(PreBashCall {
                     context,
                     tool_use_id,
-                    strategy: BashPreHookStrategy::EmitHumanCheckpoint,
                 })]);
             }
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
-                dirty_files: None,
             })]);
         }
 
@@ -189,7 +187,6 @@ impl AgentPreset for DroidPreset {
         Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
             context,
             file_paths,
-            dirty_files: None,
             transcript_source,
         })])
     }
@@ -244,7 +241,6 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_none());
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -280,7 +276,6 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "droid");
                 assert_eq!(e.tool_use_id, "tu-1");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }

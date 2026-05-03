@@ -1,6 +1,6 @@
 use super::parse;
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
     PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
@@ -52,7 +52,6 @@ fn parse_legacy_extension_hooks(
             )
         })?;
 
-    let dirty_files = dirty_files_from_hook_data(data, cwd);
 
     let session_id = extract_session_id(data);
 
@@ -93,7 +92,6 @@ fn parse_legacy_extension_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: will_edit_filepaths,
-            dirty_files,
         })]);
     }
 
@@ -154,7 +152,6 @@ fn parse_legacy_extension_hooks(
     Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
         context,
         file_paths: edited_filepaths,
-        dirty_files,
         transcript_source,
     })])
 }
@@ -171,7 +168,6 @@ fn parse_vscode_native_hooks(
     let cwd = parse::optional_str_multi(data, &["cwd", "workspace_folder", "workspaceFolder"])
         .ok_or_else(|| GitAiError::PresetError("cwd not found in hook_input".to_string()))?;
 
-    let dirty_files = dirty_files_from_hook_data(data, cwd);
     let session_id = extract_session_id(data);
 
     let tool_name =
@@ -273,16 +269,11 @@ fn parse_vscode_native_hooks(
             return Ok(vec![ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id,
-                strategy: BashPreHookStrategy::SnapshotOnly,
             })]);
         }
 
         // For create_file PreToolUse, synthesize dirty_files with empty content
         if tool_name.eq_ignore_ascii_case("create_file") {
-            let mut empty_dirty_files: HashMap<PathBuf, String> = HashMap::new();
-            for path in &extracted_paths {
-                empty_dirty_files.insert(path.clone(), String::new());
-            }
 
             if extracted_paths.is_empty() {
                 return Err(GitAiError::PresetError(
@@ -293,7 +284,6 @@ fn parse_vscode_native_hooks(
             return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: extracted_paths,
-                dirty_files: Some(empty_dirty_files),
             })]);
         }
 
@@ -307,7 +297,6 @@ fn parse_vscode_native_hooks(
         return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
             context,
             file_paths: extracted_paths,
-            dirty_files,
         })]);
     }
 
@@ -330,7 +319,6 @@ fn parse_vscode_native_hooks(
     Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
         context,
         file_paths: extracted_paths,
-        dirty_files,
         transcript_source,
     })])
 }
@@ -351,29 +339,6 @@ fn extract_session_id(data: &serde_json::Value) -> String {
     )
     .unwrap_or("unknown")
     .to_string()
-}
-
-fn dirty_files_from_hook_data(
-    data: &serde_json::Value,
-    cwd: &str,
-) -> Option<HashMap<PathBuf, String>> {
-    let obj = data
-        .get("dirty_files")
-        .and_then(|v| v.as_object())
-        .or_else(|| data.get("dirtyFiles").and_then(|v| v.as_object()))?;
-
-    let mut result = HashMap::new();
-    for (key, value) in obj {
-        if let Some(content) = value.as_str() {
-            let path = parse::resolve_absolute(key, cwd);
-            result.insert(path, content.to_string());
-        }
-    }
-    if result.is_empty() {
-        None
-    } else {
-        Some(result)
-    }
 }
 
 fn transcript_path_from_hook_data(data: &serde_json::Value) -> Option<&str> {
@@ -626,7 +591,6 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_some());
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -766,7 +730,6 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "github-copilot");
                 assert_eq!(e.tool_use_id, "tu-3");
-                assert_eq!(e.strategy, BashPreHookStrategy::SnapshotOnly);
             }
             _ => panic!("Expected PreBashCall"),
         }
@@ -817,7 +780,6 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/new_file.rs")]
                 );
-                // dirty_files should contain the path with empty content
                 let df = e.dirty_files.as_ref().unwrap();
                 assert_eq!(
                     df.get(&PathBuf::from("/home/user/project/src/new_file.rs")),
@@ -1053,7 +1015,6 @@ mod tests {
             .unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert!(e.dirty_files.is_some());
                 let df = e.dirty_files.as_ref().unwrap();
                 assert!(df.contains_key(&PathBuf::from("/home/user/project/src/main.rs")));
             }

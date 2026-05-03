@@ -1,6 +1,6 @@
 use super::parse;
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
     PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
@@ -60,12 +60,10 @@ impl AgentPreset for GeminiPreset {
             (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: tool_use_id.to_string(),
-                strategy: BashPreHookStrategy::EmitHumanCheckpoint,
             }),
             (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
-                dirty_files: None,
             }),
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -75,7 +73,6 @@ impl AgentPreset for GeminiPreset {
             (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
-                dirty_files: None,
                 transcript_source,
             }),
         };
@@ -118,7 +115,6 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
                 );
-                assert!(e.dirty_files.is_none());
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -157,7 +153,6 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "gemini");
                 assert_eq!(e.tool_use_id, "tu-1");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }

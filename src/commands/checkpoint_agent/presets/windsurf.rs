@@ -1,6 +1,6 @@
 use super::parse;
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
     PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
@@ -135,7 +135,6 @@ impl AgentPreset for WindsurfPreset {
                 ParsedHookEvent::PreBashCall(PreBashCall {
                     context,
                     tool_use_id: execution_id,
-                    strategy: BashPreHookStrategy::EmitHumanCheckpoint,
                 })
             } else {
                 ParsedHookEvent::PostBashCall(PostBashCall {
@@ -154,7 +153,6 @@ impl AgentPreset for WindsurfPreset {
             ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths: file_path,
-                dirty_files: None,
             })
         } else {
             let file_path = tool_info
@@ -166,7 +164,6 @@ impl AgentPreset for WindsurfPreset {
             ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths: file_path,
-                dirty_files: None,
                 transcript_source,
             })
         };
@@ -260,7 +257,6 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "windsurf");
                 assert_eq!(e.tool_use_id, "exec-bash-1");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }
