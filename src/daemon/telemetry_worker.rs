@@ -147,6 +147,19 @@ impl DaemonTelemetryWorkerHandle {
         self.buffer.lock().await.ingest_cas(records);
     }
 
+    /// Returns the current number of buffered metric events.
+    ///
+    /// Used by the transcript worker for backpressure: if the buffer is
+    /// above a threshold, the worker yields to let the flush loop drain it.
+    /// Returns `usize::MAX` when the lock is contended, so callers default
+    /// to "wait" rather than "push more".
+    pub fn metrics_buffer_len(&self) -> usize {
+        self.buffer
+            .try_lock()
+            .map(|buf| buf.metrics.len())
+            .unwrap_or(usize::MAX)
+    }
+
     /// Submit telemetry envelopes synchronously (best-effort, non-blocking).
     ///
     /// Used by the daemon process's own `observability::log_*()` calls which

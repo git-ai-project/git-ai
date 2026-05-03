@@ -77,7 +77,7 @@ pub enum TranscriptFormat {
     DroidJsonl,
     CopilotSessionJson,
     CopilotEventStreamJsonl,
-    GeminiJson,
+    GeminiJsonl,
     ContinueJson,
     WindsurfJsonl,
     CodexJsonl,

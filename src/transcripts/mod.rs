@@ -49,7 +49,7 @@ pub mod watermark;
 
 // Re-export main types for convenient access
 pub use db::{SessionRecord, TranscriptsDatabase};
-pub use types::{AgentTraceValues, TranscriptBatch, TranscriptError};
+pub use types::{TranscriptBatch, TranscriptError};
 pub use watermark::{
     ByteOffsetWatermark, HybridWatermark, RecordIndexWatermark, TimestampWatermark,
     WatermarkStrategy, WatermarkType,

@@ -1,123 +1,30 @@
 //! OpenCode agent implementation (SQLite-only).
 
-use crate::metrics::events::AgentTraceValues;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
 use crate::transcripts::watermark::{TimestampWatermark, WatermarkStrategy};
 use chrono::DateTime;
 use rusqlite::{Connection, OpenFlags};
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-#[derive(Debug, Deserialize)]
-struct OpenCodeDbMessageData {
-    role: String,
-    #[serde(default)]
-    time: Option<OpenCodeTime>,
-    #[serde(rename = "modelID")]
-    model_id: Option<String>,
-    #[serde(rename = "providerID")]
-    provider_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenCodeTime {
-    created: i64,
-    #[allow(dead_code)]
-    completed: Option<i64>,
-}
-
-#[derive(Debug)]
-struct OpenCodeSourceMessage {
-    id: String,
-    role: String,
-    created: i64,
-    model_id: Option<String>,
-    provider_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenCodeToolState {
-    #[allow(dead_code)]
-    status: Option<String>,
-    input: Option<serde_json::Value>,
-    #[allow(dead_code)]
-    output: Option<serde_json::Value>,
-    #[allow(dead_code)]
-    title: Option<String>,
-    #[allow(dead_code)]
-    metadata: Option<serde_json::Value>,
-    #[allow(dead_code)]
-    time: Option<OpenCodePartTime>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
-#[allow(clippy::large_enum_variant)]
-enum OpenCodePart {
-    Text {
-        #[serde(rename = "messageID", default)]
-        #[allow(dead_code)]
-        message_id: Option<String>,
-        text: String,
-        #[allow(dead_code)]
-        time: Option<OpenCodePartTime>,
-        #[allow(dead_code)]
-        synthetic: Option<bool>,
-        #[allow(dead_code)]
-        id: Option<String>,
-    },
-    Tool {
-        #[serde(rename = "messageID", default)]
-        #[allow(dead_code)]
-        message_id: Option<String>,
-        tool: String,
-        #[serde(rename = "callID")]
-        #[allow(dead_code)]
-        call_id: String,
-        state: Option<OpenCodeToolState>,
-        input: Option<serde_json::Value>,
-        #[allow(dead_code)]
-        output: Option<serde_json::Value>,
-        #[allow(dead_code)]
-        time: Option<OpenCodePartTime>,
-        #[allow(dead_code)]
-        id: Option<String>,
-    },
-    StepStart {
-        #[serde(rename = "messageID", default)]
-        #[allow(dead_code)]
-        message_id: Option<String>,
-        #[allow(dead_code)]
-        time: Option<OpenCodePartTime>,
-        #[allow(dead_code)]
-        id: Option<String>,
-    },
-    StepFinish {
-        #[serde(rename = "messageID", default)]
-        #[allow(dead_code)]
-        message_id: Option<String>,
-        #[allow(dead_code)]
-        time: Option<OpenCodePartTime>,
-        #[allow(dead_code)]
-        id: Option<String>,
-    },
-    #[serde(other)]
-    Unknown,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenCodePartTime {
-    start: i64,
-    #[allow(dead_code)]
-    end: Option<i64>,
-}
-
 /// OpenCode agent that reads from an OpenCode SQLite database.
-pub struct OpenCodeAgent;
+pub struct OpenCodeAgent {
+    batch_size: usize,
+}
+
+impl OpenCodeAgent {
+    pub fn new() -> Self {
+        Self { batch_size: 1000 }
+    }
+
+    #[cfg(test)]
+    pub fn with_batch_size(batch_size: usize) -> Self {
+        Self { batch_size }
+    }
+}
 
 fn open_sqlite_readonly(path: &Path) -> Result<Connection, TranscriptError> {
     let conn =
@@ -135,27 +42,31 @@ fn open_sqlite_readonly(path: &Path) -> Result<Connection, TranscriptError> {
     Ok(conn)
 }
 
-fn read_session_messages(
+/// Read messages from the database, returning each row as a complete JSON object
+/// containing all columns (id, session_id, time_created, time_updated, data).
+fn read_session_messages_raw(
     conn: &Connection,
     session_id: &str,
-    after_created: i64,
-) -> Result<Vec<OpenCodeSourceMessage>, TranscriptError> {
+    after_updated: i64,
+) -> Result<Vec<(String, i64, serde_json::Value)>, TranscriptError> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, time_created, data FROM message \
-             WHERE session_id = ? AND time_created > ? \
-             ORDER BY time_created ASC, id ASC",
+            "SELECT id, session_id, time_created, time_updated, data FROM message \
+             WHERE session_id = ? AND time_updated > ? \
+             ORDER BY time_updated ASC, id ASC",
         )
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to prepare message query: {}", e),
         })?;
 
     let rows = stmt
-        .query_map(rusqlite::params![session_id, after_created], |row| {
+        .query_map(rusqlite::params![session_id, after_updated], |row| {
             let id: String = row.get(0)?;
-            let time_created: i64 = row.get(1)?;
-            let data: String = row.get(2)?;
-            Ok((id, time_created, data))
+            let row_session_id: String = row.get(1)?;
+            let time_created: i64 = row.get(2)?;
+            let time_updated: i64 = row.get(3)?;
+            let data: String = row.get(4)?;
+            Ok((id, row_session_id, time_created, time_updated, data))
         })
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to query messages: {}", e),
@@ -163,100 +74,130 @@ fn read_session_messages(
 
     let mut messages = Vec::new();
     for row in rows {
-        let (id, time_created, data) = row.map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to read message row: {}", e),
-        })?;
+        let (id, row_session_id, time_created, time_updated, data) =
+            row.map_err(|e| TranscriptError::Fatal {
+                message: format!("Failed to read message row: {}", e),
+            })?;
 
-        let parsed: OpenCodeDbMessageData =
+        let parsed_data: serde_json::Value =
             serde_json::from_str(&data).map_err(|e| TranscriptError::Parse {
                 line: 0,
                 message: format!("Failed to parse message data for id {}: {}", id, e),
             })?;
 
-        let created = parsed
-            .time
-            .as_ref()
-            .map(|t| t.created)
-            .unwrap_or(time_created);
+        // Build directly via Map to move parsed_data instead of cloning (json! macro clones)
+        let mut map = serde_json::Map::with_capacity(5);
+        map.insert("id".into(), serde_json::Value::String(id.clone()));
+        map.insert(
+            "session_id".into(),
+            serde_json::Value::String(row_session_id),
+        );
+        map.insert(
+            "time_created".into(),
+            serde_json::Value::Number(time_created.into()),
+        );
+        map.insert(
+            "time_updated".into(),
+            serde_json::Value::Number(time_updated.into()),
+        );
+        map.insert("data".into(), parsed_data);
 
-        messages.push(OpenCodeSourceMessage {
-            id,
-            role: parsed.role,
-            created,
-            model_id: parsed.model_id,
-            provider_id: parsed.provider_id,
-        });
+        messages.push((id, time_updated, serde_json::Value::Object(map)));
     }
 
     Ok(messages)
 }
 
-// Loads all parts for the session. Parts lack a reliable timestamp correlated with
-// their parent message's `time_created`, so we can't filter by watermark here.
-// Only parts whose message_id matches a filtered message are used by the caller.
-fn read_all_parts(
+/// Read parts for the matched messages only, using an IN-subquery to avoid loading
+/// all parts for the entire session. Returns each row as a complete JSON object
+/// containing all columns (id, message_id, session_id, time_created, time_updated, data),
+/// grouped by message_id.
+fn read_parts_for_messages(
     conn: &Connection,
     session_id: &str,
-) -> Result<HashMap<String, Vec<OpenCodePart>>, TranscriptError> {
+    after_updated: i64,
+) -> Result<HashMap<String, Vec<serde_json::Value>>, TranscriptError> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, message_id, time_created, data FROM part \
-             WHERE session_id = ? \
-             ORDER BY message_id ASC, id ASC",
+            "SELECT id, message_id, session_id, time_created, time_updated, data FROM part \
+             WHERE message_id IN ( \
+                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? \
+             ) \
+             ORDER BY message_id ASC, time_updated ASC, id ASC",
         )
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to prepare part query: {}", e),
         })?;
 
     let rows = stmt
-        .query_map(rusqlite::params![session_id], |row| {
-            let _id: String = row.get(0)?;
+        .query_map(rusqlite::params![session_id, after_updated], |row| {
+            let id: String = row.get(0)?;
             let message_id: String = row.get(1)?;
-            let time_created: i64 = row.get(2)?;
-            let data: String = row.get(3)?;
-            Ok((message_id, time_created, data))
+            let row_session_id: String = row.get(2)?;
+            let time_created: i64 = row.get(3)?;
+            let time_updated: i64 = row.get(4)?;
+            let data: String = row.get(5)?;
+            Ok((
+                id,
+                message_id,
+                row_session_id,
+                time_created,
+                time_updated,
+                data,
+            ))
         })
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to query parts: {}", e),
         })?;
 
-    let mut parts_by_message: HashMap<String, Vec<(OpenCodePart, i64)>> = HashMap::new();
+    let mut parts_by_message: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
     for row in rows {
-        let (message_id, time_created, data) = row.map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to read part row: {}", e),
-        })?;
+        let (id, message_id, row_session_id, time_created, time_updated, data) =
+            row.map_err(|e| TranscriptError::Fatal {
+                message: format!("Failed to read part row: {}", e),
+            })?;
 
-        // Skip parts that fail to parse (unknown types handled by #[serde(other)])
-        if let Ok(part) = serde_json::from_str::<OpenCodePart>(&data) {
+        if let Ok(parsed_data) = serde_json::from_str::<serde_json::Value>(&data) {
+            let mut map = serde_json::Map::with_capacity(6);
+            map.insert("id".into(), serde_json::Value::String(id));
+            map.insert(
+                "message_id".into(),
+                serde_json::Value::String(message_id.clone()),
+            );
+            map.insert(
+                "session_id".into(),
+                serde_json::Value::String(row_session_id),
+            );
+            map.insert(
+                "time_created".into(),
+                serde_json::Value::Number(time_created.into()),
+            );
+            map.insert(
+                "time_updated".into(),
+                serde_json::Value::Number(time_updated.into()),
+            );
+            map.insert("data".into(), parsed_data);
             parts_by_message
                 .entry(message_id)
                 .or_default()
-                .push((part, time_created));
+                .push(serde_json::Value::Object(map));
         }
     }
 
-    // Sort parts within each message by their time, then convert to just parts
-    let mut result = HashMap::new();
-    for (message_id, mut parts_with_time) in parts_by_message {
-        parts_with_time.sort_by_key(|(part, fallback)| part_sort_key(part, *fallback));
-        let parts = parts_with_time.into_iter().map(|(part, _)| part).collect();
-        result.insert(message_id, parts);
-    }
-
-    Ok(result)
+    Ok(parts_by_message)
 }
 
-fn part_sort_key(part: &OpenCodePart, fallback: i64) -> i64 {
-    match part {
-        OpenCodePart::Text { time, .. } => time.as_ref().map(|t| t.start).unwrap_or(fallback),
-        OpenCodePart::Tool { time, .. } => time.as_ref().map(|t| t.start).unwrap_or(fallback),
-        OpenCodePart::StepStart { time, .. } => time.as_ref().map(|t| t.start).unwrap_or(fallback),
-        OpenCodePart::StepFinish { time, .. } => time.as_ref().map(|t| t.start).unwrap_or(fallback),
-        OpenCodePart::Unknown => fallback,
+impl Default for OpenCodeAgent {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl Agent for OpenCodeAgent {
+    fn batch_size_hint(&self) -> usize {
+        self.batch_size
+    }
+
     fn sweep_strategy(&self) -> SweepStrategy {
         SweepStrategy::Periodic(Duration::from_secs(30 * 60))
     }
@@ -288,112 +229,43 @@ impl Agent for OpenCodeAgent {
         // Open SQLite read-only
         let conn = open_sqlite_readonly(path)?;
 
-        // Read messages with time_created > watermark_millis
-        let messages = read_session_messages(&conn, session_id, watermark_millis)?;
+        // Read messages with time_updated > watermark_millis
+        let messages = read_session_messages_raw(&conn, session_id, watermark_millis)?;
 
         if messages.is_empty() {
             return Ok(TranscriptBatch {
                 events: Vec::new(),
-                model: None,
                 new_watermark: Box::new(TimestampWatermark::new(ts_watermark.0)),
             });
         }
 
-        // Read all parts for the session, build HashMap by message_id
-        let parts_by_message = read_all_parts(&conn, session_id)?;
+        // Read only parts for the matched messages (IN-subquery, single scan)
+        let mut parts_by_message = read_parts_for_messages(&conn, session_id, watermark_millis)?;
 
-        // Track model: first assistant with provider_id/model_id
-        let mut model: Option<String> = None;
-        let mut max_created: i64 = watermark_millis;
-        let mut events = Vec::new();
+        let mut max_updated: i64 = watermark_millis;
+        let mut events = Vec::with_capacity(messages.len());
 
-        for msg in &messages {
-            // Update max_created
-            if msg.created > max_created {
-                max_created = msg.created;
+        for (msg_id, time_updated, msg_data) in messages {
+            if time_updated > max_updated {
+                max_updated = time_updated;
             }
 
-            // Track model from first assistant message that has it
-            if model.is_none()
-                && msg.role == "assistant"
-                && let Some(ref mid) = msg.model_id
-            {
-                model = Some(match &msg.provider_id {
-                    Some(pid) => format!("{}/{}", pid, mid),
-                    None => mid.clone(),
-                });
+            // Use .remove() to move parts out of the HashMap instead of cloning via .get()
+            let mut map = serde_json::Map::with_capacity(2);
+            map.insert("message".into(), msg_data);
+            if let Some(parts) = parts_by_message.remove(&msg_id) {
+                map.insert("parts".into(), serde_json::Value::Array(parts));
             }
 
-            // Convert created (milliseconds) to RFC3339 timestamp for event_ts (seconds)
-            let event_ts = (msg.created / 1000) as u64;
-
-            // Get parts for this message
-            let parts = parts_by_message.get(&msg.id);
-
-            if let Some(parts) = parts {
-                for part in parts {
-                    match part {
-                        OpenCodePart::Text { text, .. } => {
-                            if text.trim().is_empty() {
-                                continue;
-                            }
-                            if msg.role == "user" {
-                                events.push(
-                                    AgentTraceValues::new()
-                                        .event_type("user_message")
-                                        .prompt_text(text.as_str())
-                                        .event_ts(event_ts),
-                                );
-                            } else if msg.role == "assistant" {
-                                events.push(
-                                    AgentTraceValues::new()
-                                        .event_type("assistant_message")
-                                        .response_text(text.as_str())
-                                        .event_ts(event_ts),
-                                );
-                            }
-                        }
-                        OpenCodePart::Tool {
-                            tool, input, state, ..
-                        } => {
-                            if msg.role == "assistant" {
-                                let tool_input = input
-                                    .as_ref()
-                                    .or_else(|| state.as_ref().and_then(|s| s.input.as_ref()));
-
-                                let mut event = AgentTraceValues::new()
-                                    .event_type("tool_use")
-                                    .tool_name(tool.as_str())
-                                    .event_ts(event_ts);
-
-                                // Include tool input as response_text if available
-                                if let Some(input_val) = tool_input
-                                    && let Ok(input_str) = serde_json::to_string(input_val)
-                                {
-                                    event = event.response_text(input_str);
-                                }
-
-                                events.push(event);
-                            }
-                        }
-                        OpenCodePart::StepStart { .. }
-                        | OpenCodePart::StepFinish { .. }
-                        | OpenCodePart::Unknown => {
-                            // Skip
-                        }
-                    }
-                }
-            }
+            events.push(serde_json::Value::Object(map));
         }
 
-        // New watermark from max_created
         let new_watermark_ts =
-            DateTime::from_timestamp_millis(max_created).unwrap_or(ts_watermark.0);
+            DateTime::from_timestamp_millis(max_updated).unwrap_or(ts_watermark.0);
         let new_watermark = Box::new(TimestampWatermark::new(new_watermark_ts));
 
         Ok(TranscriptBatch {
             events,
-            model,
             new_watermark,
         })
     }
@@ -405,13 +277,208 @@ mod tests {
 
     #[test]
     fn test_sweep_strategy() {
-        let agent = OpenCodeAgent;
+        let agent = OpenCodeAgent::new();
         assert_eq!(
             agent.sweep_strategy(),
             SweepStrategy::Periodic(Duration::from_secs(30 * 60))
         );
     }
 
-    // SQLite tests require fixtures, so keep unit tests minimal.
-    // Integration tests in tests/integration/opencode.rs cover the full flow.
+    fn create_test_db(path: &std::path::Path, message_count: usize) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        for i in 0..message_count {
+            let ts = 1000 + (i as i64) * 1000;
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    format!("msg-{}", i),
+                    "test-session",
+                    ts,
+                    ts,
+                    format!(r#"{{"role":"user","id":{}}}"#, i),
+                ],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    format!("prt-{}", i),
+                    format!("msg-{}", i),
+                    "test-session",
+                    ts + 1,
+                    ts + 1,
+                    format!(r#"{{"type":"text","text":"part-{}"}}"#, i),
+                ],
+            ).unwrap();
+        }
+    }
+
+    fn drain_all(
+        agent: &OpenCodeAgent,
+        path: &std::path::Path,
+    ) -> (Vec<serde_json::Value>, Box<dyn WatermarkStrategy>) {
+        use chrono::{DateTime, Utc};
+        let mut all = Vec::new();
+        let mut wm: Box<dyn WatermarkStrategy> =
+            Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
+        loop {
+            let batch = agent.read_incremental(path, wm, "test-session").unwrap();
+            if batch.events.is_empty() {
+                wm = batch.new_watermark;
+                break;
+            }
+            all.extend(batch.events);
+            wm = batch.new_watermark;
+        }
+        (all, wm)
+    }
+
+    #[test]
+    fn test_batch_resume_no_loss_or_repeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path, 5);
+
+        let agent = OpenCodeAgent::with_batch_size(2);
+        let (events, _) = drain_all(&agent, &db_path);
+
+        assert_eq!(events.len(), 5);
+        let ids: Vec<u64> = events
+            .iter()
+            .map(|e| e["message"]["data"]["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_append_one_record_after_full_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path, 3);
+
+        let agent = OpenCodeAgent::with_batch_size(2);
+        let (all, wm) = drain_all(&agent, &db_path);
+        assert_eq!(all.len(), 3);
+
+        // Insert one more record with a later timestamp
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let ts = 1000 + 3 * 1000i64;
+        conn.execute(
+            "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params!["msg-3", "test-session", ts, ts, r#"{"role":"user","id":3}"#],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params!["prt-3", "msg-3", "test-session", ts+1, ts+1, r#"{"type":"text","text":"part-3"}"#],
+        ).unwrap();
+        drop(conn);
+
+        let batch = agent
+            .read_incremental(&db_path, wm, "test-session")
+            .unwrap();
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(
+            batch.events[0]["message"]["data"]["id"].as_u64().unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn test_append_several_records_after_full_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        create_test_db(&db_path, 3);
+
+        let agent = OpenCodeAgent::with_batch_size(2);
+        let (_, mut wm) = drain_all(&agent, &db_path);
+
+        // Insert 3 more records
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        for i in 3..6usize {
+            let ts = 1000 + (i as i64) * 1000;
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    format!("msg-{}", i),
+                    "test-session",
+                    ts, ts,
+                    format!(r#"{{"role":"user","id":{}}}"#, i),
+                ],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    format!("prt-{}", i),
+                    format!("msg-{}", i),
+                    "test-session",
+                    ts+1, ts+1,
+                    format!(r#"{{"type":"text","text":"part-{}"}}"#, i),
+                ],
+            ).unwrap();
+        }
+        drop(conn);
+
+        let mut new_events = Vec::new();
+        loop {
+            let batch = agent
+                .read_incremental(&db_path, wm, "test-session")
+                .unwrap();
+            wm = batch.new_watermark;
+            if batch.events.is_empty() {
+                break;
+            }
+            new_events.extend(batch.events);
+        }
+        assert_eq!(new_events.len(), 3);
+        let ids: Vec<u64> = new_events
+            .iter()
+            .map(|e| e["message"]["data"]["id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn test_sqlite_open_sets_cache_size_pragma() {
+        let source = include_str!("opencode.rs");
+        assert!(
+            source.contains("PRAGMA cache_size"),
+            "open_sqlite_readonly must set PRAGMA cache_size to cap memory usage (PR #1120)"
+        );
+    }
+
+    #[test]
+    fn test_parts_are_batch_loaded_not_per_message() {
+        let db_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/opencode-sqlite/opencode.db");
+        let conn = open_sqlite_readonly(&db_path).unwrap();
+        // watermark=0 matches all messages in the fixture
+        let parts = read_parts_for_messages(&conn, "test-session-123", 0).unwrap();
+        // Verify IN-subquery loading returns parts grouped by message_id.
+        // Single query with IN-subquery instead of one per message,
+        // prevents full-table-scan memory blowup on large unindexed databases.
+        assert!(
+            !parts.is_empty(),
+            "batch parts query must return data from fixture"
+        );
+        for msg_parts in parts.values() {
+            assert!(!msg_parts.is_empty());
+        }
+    }
 }

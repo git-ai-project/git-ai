@@ -15,40 +15,23 @@ fn parse_codex(hook_input: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
 }
 
 #[test]
-fn test_parse_codex_rollout_transcript() {
+fn test_codex_raw_event_fidelity() {
     let fixture = fixture_path("codex-session-simple.jsonl");
-    let agent = CodexAgent;
+    let agent = CodexAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Failed to parse Codex rollout");
+        .expect("Should parse codex JSONL");
 
-    assert!(
-        !result.events.is_empty(),
-        "Transcript should contain events"
-    );
-    assert_eq!(
-        result.model.as_deref(),
-        Some("gpt-5-codex"),
-        "Model should come from turn_context.model"
-    );
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
 
-    let has_user = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("user_message".to_string())));
-    let has_assistant = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("assistant_message".to_string())));
-    let has_tool_use = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("tool_use".to_string())));
-
-    assert!(has_user, "Should parse user messages");
-    assert!(has_assistant, "Should parse assistant messages");
-    assert!(has_tool_use, "Should parse function calls as tool uses");
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -716,7 +699,7 @@ fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai_standard
 }
 
 crate::reuse_tests_in_worktree!(
-    test_parse_codex_rollout_transcript,
+    test_codex_raw_event_fidelity,
     test_codex_preset_legacy_hook_input,
     test_codex_preset_structured_hook_input,
     test_codex_preset_bash_pre_tool_use_skips_checkpoint_after_capturing_snapshot,

@@ -7,231 +7,25 @@ use git_ai::transcripts::agents::ContinueAgent;
 use git_ai::transcripts::watermark::RecordIndexWatermark;
 use serde_json::json;
 use std::fs;
-use std::io::Write;
 
 fn parse_continue(hook_input: &str) -> Result<Vec<ParsedHookEvent>, git_ai::error::GitAiError> {
     resolve_preset("continue-cli")?.parse(hook_input, "t_test")
 }
 
 #[test]
-fn test_parse_example_continue_cli_json() {
+fn test_continue_cli_raw_event_fidelity() {
     let fixture = fixture_path("continue-cli-session-simple.json");
-    let agent = ContinueAgent;
+    let agent = ContinueAgent::new();
     let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Failed to parse Continue CLI JSON");
+        .expect("Should parse continue-cli session JSON");
 
-    assert!(!result.events.is_empty());
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&fixture).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["history"].as_array().unwrap().clone();
 
-    println!("Parsed {} events:", result.events.len());
-    for (i, e) in result.events.iter().enumerate() {
-        if e.event_type == Some(Some("user_message".to_string())) {
-            println!("{}: User: {:?}", i, e.prompt_text);
-        } else if e.event_type == Some(Some("assistant_message".to_string())) {
-            println!("{}: Assistant: {:?}", i, e.response_text);
-        } else if e.event_type == Some(Some("tool_use".to_string())) {
-            println!("{}: ToolUse: {:?}", i, e.tool_name);
-        }
-    }
-}
-
-#[test]
-fn test_continue_cli_parses_user_messages() {
-    let fixture = fixture_path("continue-cli-session-simple.json");
-    let agent = ContinueAgent;
-    let watermark = Box::new(RecordIndexWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Failed to parse Continue CLI JSON");
-
-    let user_messages: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
-        .collect();
-
-    assert_eq!(
-        user_messages.len(),
-        1,
-        "Should have exactly one user message"
-    );
-
-    if let Some(Some(ref text)) = user_messages[0].prompt_text {
-        assert!(text.contains("Add another hello world line"));
-    }
-}
-
-#[test]
-fn test_continue_cli_parses_assistant_messages() {
-    let fixture = fixture_path("continue-cli-session-simple.json");
-    let agent = ContinueAgent;
-    let watermark = Box::new(RecordIndexWatermark::new(0));
-    let result = agent
-        .read_incremental(fixture.as_path(), watermark, "test")
-        .expect("Failed to parse Continue CLI JSON");
-
-    let assistant_messages: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("assistant_message".to_string())))
-        .collect();
-
-    assert!(
-        !assistant_messages.is_empty(),
-        "Should have at least one assistant message"
-    );
-
-    if let Some(Some(ref text)) = assistant_messages[0].response_text {
-        assert!(text.contains("I'll read the file first"));
-    }
-}
-
-#[test]
-fn test_continue_cli_parses_tool_calls_from_context_items() {
-    // The ContinueAgent reader extracts tool calls from contextItems, not from
-    // message.toolCalls. The simple fixture does not have contextItems with tool data,
-    // so we create a temp fixture that includes them.
-    let sample = r##"{
-        "sessionId": "test-session",
-        "title": "Test",
-        "workspaceDirectory": "/test",
-        "history": [
-            {
-                "message": { "role": "user", "content": "Read file" },
-                "contextItems": []
-            },
-            {
-                "message": { "role": "assistant", "content": "I'll read it" },
-                "contextItems": [
-                    {
-                        "name": "Read",
-                        "content": {"filepath": "/test/main.rs"}
-                    }
-                ]
-            }
-        ]
-    }"##;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
-    let agent = ContinueAgent;
-    let watermark = Box::new(RecordIndexWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_file.path(), watermark, "test")
-        .expect("Failed to parse Continue CLI JSON");
-
-    let tool_uses: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("tool_use".to_string())))
-        .collect();
-
-    assert!(!tool_uses.is_empty(), "Should have at least one tool call");
-
-    if let Some(Some(ref name)) = tool_uses[0].tool_name {
-        assert_eq!(name, "Read");
-    }
-}
-
-#[test]
-fn test_continue_cli_parses_tool_call_args_from_context_items() {
-    let sample = r##"{
-        "sessionId": "test-session",
-        "title": "Test",
-        "workspaceDirectory": "/test",
-        "history": [
-            {
-                "message": { "role": "assistant", "content": "Reading" },
-                "contextItems": [
-                    {
-                        "name": "Read",
-                        "content": {"filepath": "/test/main.rs"}
-                    }
-                ]
-            }
-        ]
-    }"##;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
-    let agent = ContinueAgent;
-    let watermark = Box::new(RecordIndexWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_file.path(), watermark, "test")
-        .expect("Failed to parse Continue CLI JSON");
-
-    let read_tool = result
-        .events
-        .iter()
-        .find(|e| {
-            e.event_type == Some(Some("tool_use".to_string()))
-                && e.tool_name == Some(Some("Read".to_string()))
-        })
-        .expect("Should find a Read tool call");
-
-    assert_eq!(
-        read_tool.tool_name,
-        Some(Some("Read".to_string())),
-        "Tool call should have name 'Read'"
-    );
-}
-
-#[test]
-fn test_continue_cli_handles_empty_content() {
-    let sample = r##"{
-        "sessionId": "test-session",
-        "title": "Test",
-        "workspaceDirectory": "/test",
-        "history": [
-            {
-                "message": {
-                    "role": "user",
-                    "content": "Hello"
-                },
-                "contextItems": []
-            },
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": ""
-                },
-                "contextItems": []
-            },
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "Response text"
-                },
-                "contextItems": []
-            }
-        ]
-    }"##;
-
-    let mut temp_file = tempfile::NamedTempFile::new().unwrap();
-    temp_file.write_all(sample.as_bytes()).unwrap();
-
-    let agent = ContinueAgent;
-    let watermark = Box::new(RecordIndexWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_file.path(), watermark, "test")
-        .expect("Failed to parse Continue CLI JSON");
-
-    let user_count = result
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("user_message".to_string())))
-        .count();
-    let assistant_count = result
-        .events
-        .iter()
-        .filter(|e| e.event_type == Some(Some("assistant_message".to_string())))
-        .count();
-
-    assert_eq!(user_count, 1);
-    assert_eq!(assistant_count, 1, "Should skip empty content");
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -686,12 +480,7 @@ fn test_continue_cli_e2e_preserves_model_on_commit() {
 }
 
 crate::reuse_tests_in_worktree!(
-    test_parse_example_continue_cli_json,
-    test_continue_cli_parses_user_messages,
-    test_continue_cli_parses_assistant_messages,
-    test_continue_cli_parses_tool_calls_from_context_items,
-    test_continue_cli_parses_tool_call_args_from_context_items,
-    test_continue_cli_handles_empty_content,
+    test_continue_cli_raw_event_fidelity,
     test_continue_cli_preset_extracts_model_from_hook_input,
     test_continue_cli_preset_defaults_to_unknown_model,
     test_continue_cli_preset_extracts_edited_filepath,

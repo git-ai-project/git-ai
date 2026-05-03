@@ -10,69 +10,22 @@ use std::fs;
 use std::io::Write;
 
 #[test]
-fn test_parse_example_claude_code_jsonl_with_model() {
+fn test_claude_code_raw_event_fidelity() {
     let fixture = fixture_path("example-claude-code.jsonl");
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Failed to parse JSONL");
 
-    // Verify we parsed some events
-    assert!(!result.events.is_empty());
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
 
-    // Verify we extracted the model
-    assert!(result.model.is_some());
-    let model_name = result.model.unwrap();
-    println!("Extracted model: {}", model_name);
-
-    // Based on the example file, we should get claude-sonnet-4-20250514
-    assert_eq!(model_name, "claude-sonnet-4-20250514");
-
-    // Print the parsed events for inspection
-    println!("Parsed {} events:", result.events.len());
-    for (i, event) in result.events.iter().enumerate() {
-        match event.event_type.as_ref().and_then(|v| v.as_deref()) {
-            Some("user_message") => {
-                let text = event
-                    .prompt_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: User: {}", i, text);
-            }
-            Some("assistant_message") => {
-                let text = event
-                    .response_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: Assistant: {}", i, text);
-            }
-            Some("tool_use") => {
-                let name = event
-                    .tool_name
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: ToolUse: {}", i, name);
-            }
-            Some("assistant_thinking") => {
-                let text = event
-                    .response_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: Thinking: {}", i, text);
-            }
-            Some(other) => {
-                println!("{}: {}", i, other);
-            }
-            None => {
-                println!("{}: (no event type)", i);
-            }
-        }
-    }
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -290,255 +243,30 @@ fn test_claude_e2e_prefers_latest_checkpoint_for_prompts() {
         .next()
         .expect("Session record should exist");
 
-    // Model comes from preset AgentId (model resolution from transcript not wired up)
+    // Model is extracted from the real transcript fixture copied in the second checkpoint
     assert_eq!(
-        session_record.agent_id.model, "unknown",
-        "Session record model comes from preset AgentId"
+        session_record.agent_id.model, "claude-sonnet-4-20250514",
+        "Session record model should come from the latest checkpoint's transcript"
     );
 }
 
 #[test]
-fn test_parse_claude_code_jsonl_with_thinking() {
+fn test_claude_code_thinking_raw_event_fidelity() {
     let fixture = fixture_path("claude-code-with-thinking.jsonl");
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Failed to parse JSONL");
 
-    // Verify we parsed some events
-    assert!(!result.events.is_empty());
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
 
-    // Verify we extracted the model
-    assert!(result.model.is_some());
-    let model_name = result.model.unwrap();
-    println!("Extracted model: {}", model_name);
-    assert_eq!(model_name, "claude-sonnet-4-5-20250929");
-
-    // Print the parsed events for inspection
-    println!("Parsed {} events:", result.events.len());
-    for (i, event) in result.events.iter().enumerate() {
-        match event.event_type.as_ref().and_then(|v| v.as_deref()) {
-            Some("user_message") => {
-                let text = event
-                    .prompt_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!(
-                    "{}: User: {}",
-                    i,
-                    text.chars().take(100).collect::<String>()
-                )
-            }
-            Some("assistant_message") => {
-                let text = event
-                    .response_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!(
-                    "{}: Assistant: {}",
-                    i,
-                    text.chars().take(100).collect::<String>()
-                )
-            }
-            Some("tool_use") => {
-                let name = event
-                    .tool_name
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: ToolUse: {}", i, name)
-            }
-            Some("assistant_thinking") => {
-                let text = event
-                    .response_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!(
-                    "{}: Thinking: {}",
-                    i,
-                    text.chars().take(100).collect::<String>()
-                )
-            }
-            Some(other) => println!("{}: {}", i, other),
-            None => println!("{}: (no event type)", i),
-        }
-    }
-
-    assert_eq!(
-        result.events.len(),
-        6,
-        "Expected 6 events (1 user_message + 2 assistant_thinking + 2 assistant_message + 1 tool_use)"
-    );
-
-    assert_eq!(
-        result.events[0]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("user_message"),
-        "First event should be user_message"
-    );
-
-    assert_eq!(
-        result.events[1]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_thinking"),
-        "Second event should be assistant_thinking"
-    );
-    {
-        let text = result.events[1]
-            .response_text
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
-        assert!(
-            text.contains("add another"),
-            "Thinking event should contain thinking content"
-        );
-    }
-
-    assert_eq!(
-        result.events[2]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Third event should be assistant_message"
-    );
-
-    assert_eq!(
-        result.events[3]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("tool_use"),
-        "Fourth event should be tool_use"
-    );
-    {
-        let name = result.events[3]
-            .tool_name
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
-        assert_eq!(name, "Edit", "Tool should be Edit");
-    }
-
-    assert_eq!(
-        result.events[4]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_thinking"),
-        "Fifth event should be assistant_thinking"
-    );
-
-    assert_eq!(
-        result.events[5]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Sixth event should be assistant_message"
-    );
-}
-
-#[test]
-fn test_tool_results_are_not_parsed_as_user_messages() {
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    let jsonl_content = r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_123","type":"tool_result","content":"File created successfully"}]},"timestamp":"2025-01-01T00:00:00Z"}
-{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"text","text":"Done!"}]},"timestamp":"2025-01-01T00:00:01Z"}"#;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(jsonl_content.as_bytes()).unwrap();
-    let temp_path = temp_file.path();
-
-    let agent = ClaudeAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_path, watermark, "test")
-        .expect("Failed to parse JSONL");
-
-    assert_eq!(
-        result.events.len(),
-        1,
-        "Tool results should not be parsed as user messages"
-    );
-
-    assert_eq!(
-        result.events[0]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Only event should be assistant_message"
-    );
-    {
-        let text = result.events[0]
-            .response_text
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
-        assert_eq!(text, "Done!");
-    }
-}
-
-#[test]
-fn test_user_text_content_blocks_are_parsed_correctly() {
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    let jsonl_content = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Hello, can you help me?"}]},"timestamp":"2025-01-01T00:00:00Z"}
-{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"text","text":"Of course!"}]},"timestamp":"2025-01-01T00:00:01Z"}"#;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(jsonl_content.as_bytes()).unwrap();
-    let temp_path = temp_file.path();
-
-    let agent = ClaudeAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_path, watermark, "test")
-        .expect("Failed to parse JSONL");
-
-    assert_eq!(
-        result.events.len(),
-        2,
-        "Should have user_message and assistant_message events"
-    );
-
-    assert_eq!(
-        result.events[0]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("user_message"),
-        "First event should be user_message"
-    );
-    {
-        let text = result.events[0]
-            .prompt_text
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
-        assert_eq!(text, "Hello, can you help me?");
-    }
-
-    assert_eq!(
-        result.events[1]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Second event should be assistant_message"
-    );
+    assert_eq!(result.events, expected);
 }
 
 // ===== Plan detection tests =====
@@ -673,319 +401,34 @@ fn test_extract_plan_returns_none_for_empty_content() {
 }
 
 #[test]
-fn test_parse_claude_code_jsonl_with_plan() {
+fn test_claude_code_plan_raw_event_fidelity() {
     let fixture = fixture_path("claude-code-with-plan.jsonl");
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let result = agent
         .read_incremental(fixture.as_path(), watermark, "test")
         .expect("Failed to parse JSONL");
 
-    assert_eq!(result.model.unwrap(), "claude-sonnet-4-20250514");
+    let expected: Vec<serde_json::Value> = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
 
-    println!("Parsed {} events:", result.events.len());
-    for (i, event) in result.events.iter().enumerate() {
-        match event.event_type.as_ref().and_then(|v| v.as_deref()) {
-            Some("user_message") => {
-                let text = event
-                    .prompt_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: User: {}", i, text.chars().take(80).collect::<String>())
-            }
-            Some("assistant_message") => {
-                let text = event
-                    .response_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!(
-                    "{}: Assistant: {}",
-                    i,
-                    text.chars().take(80).collect::<String>()
-                )
-            }
-            Some("tool_use") => {
-                let name = event
-                    .tool_name
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!("{}: ToolUse: {}", i, name)
-            }
-            Some("assistant_thinking") => {
-                let text = event
-                    .response_text
-                    .as_ref()
-                    .and_then(|v| v.as_deref())
-                    .unwrap_or("");
-                println!(
-                    "{}: Thinking: {}",
-                    i,
-                    text.chars().take(80).collect::<String>()
-                )
-            }
-            Some(other) => println!("{}: {}", i, other),
-            None => println!("{}: (no event type)", i),
-        }
-    }
-
-    // The new ClaudeAgent emits tool_use events for plan file writes/edits
-    // instead of separate Plan events. Plan extraction is now handled
-    // separately via is_plan_file_path and extract_plan_from_tool_use.
-    assert_eq!(
-        result.events.len(),
-        7,
-        "Expected 7 events (1 user_message + 3 assistant_message + 3 tool_use)"
-    );
-
-    // [0]: user_message asking about authentication
-    {
-        let event = &result.events[0];
-        assert_eq!(
-            event.event_type.as_ref().and_then(|v| v.as_deref()),
-            Some("user_message"),
-            "First event should be user_message"
-        );
-        let text = event
-            .prompt_text
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
-        assert!(
-            text.contains("authentication"),
-            "User message should ask about authentication"
-        );
-    }
-
-    // [1]: assistant_message
-    assert_eq!(
-        result.events[1]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Second event should be assistant_message"
-    );
-
-    // [2]: tool_use (Write to plan file) - was previously Plan
-    {
-        let event = &result.events[2];
-        assert_eq!(
-            event.event_type.as_ref().and_then(|v| v.as_deref()),
-            Some("tool_use"),
-            "Third event should be tool_use (plan Write)"
-        );
-        let name = event
-            .tool_name
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
-        assert_eq!(name, "Write", "Should be a Write tool use for the plan");
-    }
-
-    // [3]: assistant_message
-    assert_eq!(
-        result.events[3]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Fourth event should be assistant_message"
-    );
-
-    // [4]: tool_use (Edit to plan file) - was previously Plan
-    {
-        let event = &result.events[4];
-        assert_eq!(
-            event.event_type.as_ref().and_then(|v| v.as_deref()),
-            Some("tool_use"),
-            "Fifth event should be tool_use (plan Edit)"
-        );
-        let name = event
-            .tool_name
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
-        assert_eq!(name, "Edit", "Should be an Edit tool use for the plan");
-    }
-
-    // [5]: tool_use (Edit to main.rs - a code edit, not a plan)
-    {
-        let event = &result.events[5];
-        assert_eq!(
-            event.event_type.as_ref().and_then(|v| v.as_deref()),
-            Some("tool_use"),
-            "Sixth event should be tool_use (code Edit)"
-        );
-        let name = event
-            .tool_name
-            .as_ref()
-            .and_then(|v| v.as_deref())
-            .unwrap_or("");
-        assert_eq!(name, "Edit", "Should be an Edit tool use for code");
-    }
-
-    // [6]: assistant_message
-    assert_eq!(
-        result.events[6]
-            .event_type
-            .as_ref()
-            .and_then(|v| v.as_deref()),
-        Some("assistant_message"),
-        "Last event should be assistant_message"
-    );
-}
-
-#[test]
-fn test_plan_write_emits_tool_use_event() {
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"/home/user/.claude/plans/tender-watching-thompson.md","content":"# Plan\n\n1. First step\n2. Second step"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(jsonl_content.as_bytes()).unwrap();
-    let temp_path = temp_file.path();
-
-    let agent = ClaudeAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_path, watermark, "test")
-        .unwrap();
-
-    assert_eq!(result.events.len(), 1);
-    // The new ClaudeAgent emits tool_use events for plan file writes
-    let event = &result.events[0];
-    assert_eq!(
-        event.event_type.as_ref().and_then(|v| v.as_deref()),
-        Some("tool_use"),
-        "Plan write should be emitted as tool_use"
-    );
-    assert_eq!(
-        event.tool_name.as_ref().and_then(|v| v.as_deref()),
-        Some("Write"),
-        "Tool name should be Write"
-    );
-}
-
-#[test]
-fn test_plan_edit_emits_tool_use_event() {
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Edit","input":{"file_path":"/home/user/.claude/plans/tender-watching-thompson.md","old_string":"1. First step","new_string":"1. First step (done)\n2. New step"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(jsonl_content.as_bytes()).unwrap();
-    let temp_path = temp_file.path();
-
-    let agent = ClaudeAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_path, watermark, "test")
-        .unwrap();
-
-    assert_eq!(result.events.len(), 1);
-    // The new ClaudeAgent emits tool_use events for plan file edits
-    let event = &result.events[0];
-    assert_eq!(
-        event.event_type.as_ref().and_then(|v| v.as_deref()),
-        Some("tool_use"),
-        "Plan edit should be emitted as tool_use"
-    );
-    assert_eq!(
-        event.tool_name.as_ref().and_then(|v| v.as_deref()),
-        Some("Edit"),
-        "Tool name should be Edit"
-    );
-}
-
-#[test]
-fn test_non_plan_edit_remains_tool_use() {
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Edit","input":{"file_path":"/home/user/project/src/main.rs","old_string":"old code","new_string":"new code"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(jsonl_content.as_bytes()).unwrap();
-    let temp_path = temp_file.path();
-
-    let agent = ClaudeAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_path, watermark, "test")
-        .unwrap();
-
-    assert_eq!(result.events.len(), 1);
-    let event = &result.events[0];
-    assert_eq!(
-        event.event_type.as_ref().and_then(|v| v.as_deref()),
-        Some("tool_use"),
-        "Non-plan Edit should be tool_use"
-    );
-    assert_eq!(
-        event.tool_name.as_ref().and_then(|v| v.as_deref()),
-        Some("Edit"),
-    );
-}
-
-#[test]
-fn test_mixed_plan_and_code_edits_in_single_assistant_message() {
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    let jsonl_content = r##"{"type":"assistant","message":{"model":"claude-sonnet-4-20250514","role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Write","input":{"file_path":"/home/user/.claude/plans/tender-watching-thompson.md","content":"# Plan\nStep 1"}},{"type":"tool_use","id":"toolu_2","name":"Write","input":{"file_path":"/home/user/project/src/lib.rs","content":"pub fn hello() {}"}}]},"timestamp":"2025-01-01T00:00:00Z"}"##;
-
-    let mut temp_file = NamedTempFile::new().unwrap();
-    temp_file.write_all(jsonl_content.as_bytes()).unwrap();
-    let temp_path = temp_file.path();
-
-    let agent = ClaudeAgent;
-    let watermark = Box::new(ByteOffsetWatermark::new(0));
-    let result = agent
-        .read_incremental(temp_path, watermark, "test")
-        .unwrap();
-
-    assert_eq!(result.events.len(), 2);
-
-    // Both are tool_use events in the new API (plan detection is separate)
-    let event0 = &result.events[0];
-    assert_eq!(
-        event0.event_type.as_ref().and_then(|v| v.as_deref()),
-        Some("tool_use"),
-        "First tool_use should be tool_use (plan Write)"
-    );
-    assert_eq!(
-        event0.tool_name.as_ref().and_then(|v| v.as_deref()),
-        Some("Write"),
-    );
-
-    let event1 = &result.events[1];
-    assert_eq!(
-        event1.event_type.as_ref().and_then(|v| v.as_deref()),
-        Some("tool_use"),
-        "Second tool_use should be tool_use (code Write)"
-    );
-    assert_eq!(
-        event1.tool_name.as_ref().and_then(|v| v.as_deref()),
-        Some("Write"),
-    );
+    assert_eq!(result.events, expected);
 }
 
 crate::reuse_tests_in_worktree!(
-    test_parse_example_claude_code_jsonl_with_model,
+    test_claude_code_raw_event_fidelity,
+    test_claude_code_thinking_raw_event_fidelity,
+    test_claude_code_plan_raw_event_fidelity,
     test_claude_preset_extracts_edited_filepath,
     test_claude_preset_no_filepath_when_tool_input_missing,
     test_claude_preset_ignores_vscode_copilot_payload,
     test_claude_preset_ignores_cursor_payload,
     test_claude_preset_does_not_ignore_when_transcript_path_is_claude,
     test_claude_e2e_prefers_latest_checkpoint_for_prompts,
-    test_parse_claude_code_jsonl_with_thinking,
-    test_tool_results_are_not_parsed_as_user_messages,
-    test_user_text_content_blocks_are_parsed_correctly,
     test_is_plan_file_path_detects_plan_files,
     test_extract_plan_from_write_tool,
     test_extract_plan_from_edit_tool_with_prior_state,
@@ -993,9 +436,4 @@ crate::reuse_tests_in_worktree!(
     test_extract_plan_returns_none_for_non_plan_files,
     test_extract_plan_returns_none_for_non_write_edit_tools,
     test_extract_plan_returns_none_for_empty_content,
-    test_parse_claude_code_jsonl_with_plan,
-    test_plan_write_emits_tool_use_event,
-    test_plan_edit_emits_tool_use_event,
-    test_non_plan_edit_remains_tool_use,
-    test_mixed_plan_and_code_edits_in_single_assistant_message,
 );

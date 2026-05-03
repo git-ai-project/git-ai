@@ -20,61 +20,41 @@ fn amp_simple_thread_fixture_path() -> PathBuf {
 }
 
 #[test]
-fn test_parse_amp_thread_transcript() {
-    let thread_path = amp_simple_thread_fixture_path();
+fn test_amp_raw_event_fidelity() {
+    let thread_path = amp_threads_fixture_path().join(format!("{}.json", AMP_THINKING_THREAD_ID));
 
-    let agent = AmpAgent;
+    let agent = AmpAgent::new();
     let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent
         .read_incremental(&thread_path, watermark, "test")
         .expect("Failed to parse Amp thread JSON");
 
-    assert_eq!(result.model.as_deref(), Some("claude-opus-4-6"));
-    assert!(!result.events.is_empty());
+    // Independently parse the fixture and extract the messages array.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&thread_path).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["messages"].as_array().unwrap().clone();
 
-    let has_user = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("user_message".to_string())));
-    let has_assistant = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("assistant_message".to_string())));
-    let has_tool_use = result
-        .events
-        .iter()
-        .any(|e| e.event_type == Some(Some("tool_use".to_string())));
-
-    assert!(has_user, "Expected at least one user message");
-    assert!(has_assistant, "Expected at least one assistant message");
-    assert!(has_tool_use, "Expected at least one tool use message");
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
-fn test_parse_amp_thread_with_thinking_blocks() {
-    let thread_path = amp_threads_fixture_path().join(format!("{}.json", AMP_THINKING_THREAD_ID));
+fn test_amp_raw_event_fidelity_with_thinking() {
+    let thread_path = amp_simple_thread_fixture_path();
 
-    let agent = AmpAgent;
+    let agent = AmpAgent::new();
     let watermark = Box::new(RecordIndexWatermark::new(0));
     let result = agent
         .read_incremental(&thread_path, watermark, "test")
         .expect("Failed to parse Amp thread JSON");
 
-    assert_eq!(result.model.as_deref(), Some("claude-opus-4-6"));
+    // Independently parse the fixture and extract the messages array.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&thread_path).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["messages"].as_array().unwrap().clone();
 
-    let contains_thinking_text = result.events.iter().any(|e| {
-        e.event_type == Some(Some("assistant_thinking".to_string()))
-            && e.response_text
-                .as_ref()
-                .and_then(|v| v.as_ref())
-                .map(|t| t.contains("create a plan"))
-                .unwrap_or(false)
-    });
-
-    assert!(
-        contains_thinking_text,
-        "Assistant transcript should include converted thinking blocks"
-    );
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -153,8 +133,8 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
         ParsedHookEvent::PostFileEdit(e) => {
             assert_eq!(e.context.agent_id.tool, "amp");
             assert_eq!(e.context.agent_id.id, AMP_SIMPLE_THREAD_ID);
-            // Model is lazily resolved from transcript, so at parse time it's "unknown"
-            assert_eq!(e.context.agent_id.model, "unknown");
+            // Model is extracted from the resolved Amp thread fixture file
+            assert_eq!(e.context.agent_id.model, "claude-opus-4-6");
             assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
             assert_eq!(
                 e.file_paths,
@@ -252,7 +232,7 @@ fn test_amp_e2e_checkpoint_and_commit() {
         .expect("session record should exist");
 
     assert_eq!(session_record.agent_id.tool, "amp");
-    assert_eq!(session_record.agent_id.model, "unknown");
+    assert_eq!(session_record.agent_id.model, "claude-opus-4-6");
 }
 
 #[test]
@@ -381,3 +361,8 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+crate::reuse_tests_in_worktree!(
+    test_amp_raw_event_fidelity,
+    test_amp_raw_event_fidelity_with_thinking,
+);

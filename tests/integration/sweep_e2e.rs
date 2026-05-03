@@ -83,7 +83,7 @@ fn test_initial_sweep_discovers_all_claude_transcripts() {
 
     // Note: We can't easily mock the dirs::config_dir() to point to our temp directory,
     // so this test verifies the Agent trait implementation directly
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
 
     // Verify sweep strategy
     match agent.sweep_strategy() {
@@ -106,7 +106,7 @@ fn test_watermark_prevents_double_processing() {
     // Create initial transcript
     create_claude_transcript(&transcript_path, &["Message 1", "Message 2"]).unwrap();
 
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let session_id = "test_session";
 
     // First read from beginning
@@ -149,7 +149,7 @@ fn test_no_messages_missed_on_append() {
     // Create initial transcript
     create_claude_transcript(&transcript_path, &["Message 1", "Message 2"]).unwrap();
 
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let session_id = "test_session";
 
     // First read
@@ -176,10 +176,10 @@ fn test_no_messages_missed_on_append() {
     );
 
     // Verify we can extract message content
-    let messages: Vec<_> = batch2
+    let messages: Vec<&str> = batch2
         .events
         .iter()
-        .filter_map(|e| e.prompt_text.as_ref().and_then(|t| t.as_ref()))
+        .filter_map(|e| e["message"]["content"].as_str())
         .collect();
 
     assert_eq!(messages.len(), 3, "Should have 3 messages with content");
@@ -193,7 +193,7 @@ fn test_incremental_processing_completeness() {
     // Create initial transcript
     create_claude_transcript(&transcript_path, &["Msg1"]).unwrap();
 
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let session_id = "test_session";
 
     // Track all messages we've seen
@@ -407,7 +407,7 @@ fn test_watermark_persistence_after_processing() {
     db.insert_session(&record).unwrap();
 
     // Process with agent
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let batch = agent
         .read_incremental(
             &transcript_path,
@@ -441,7 +441,7 @@ fn test_empty_transcript_file() {
     let transcript_path = temp_dir.path().join("empty.jsonl");
     fs::write(&transcript_path, "").unwrap(); // Empty file
 
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let batch = agent
         .read_incremental(
             &transcript_path,
@@ -469,7 +469,7 @@ fn test_malformed_json_line_handling() {
     writeln!(file, r#"{{"type":"user","message":{{"content":"Also valid"}},"timestamp":"2026-04-30T12:00:01Z"}}"#).unwrap();
     file.flush().unwrap();
 
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let result = agent.read_incremental(
         &transcript_path,
         Box::new(ByteOffsetWatermark::new(0)),
@@ -501,7 +501,7 @@ fn test_file_deleted_during_processing() {
     // Delete the file
     fs::remove_file(&transcript_path).unwrap();
 
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let result = agent.read_incremental(
         &transcript_path,
         Box::new(ByteOffsetWatermark::new(0)),

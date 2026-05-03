@@ -86,7 +86,7 @@ fn test_watermark_integration() {
     drop(file);
 
     // Read from start
-    let agent = ClaudeAgent;
+    let agent = ClaudeAgent::new();
     let watermark1 = Box::new(ByteOffsetWatermark::new(0));
     let result1 = agent
         .read_incremental(&transcript_file, watermark1, "s_test")
@@ -116,8 +116,8 @@ fn test_watermark_integration() {
         .unwrap();
     assert_eq!(result2.events.len(), 1);
     assert_eq!(
-        result2.events[0].prompt_text,
-        Some(Some("Second".to_string()))
+        result2.events[0]["message"]["content"].as_str(),
+        Some("Second")
     );
 
     let offset2: u64 = result2.new_watermark.serialize().parse().unwrap();

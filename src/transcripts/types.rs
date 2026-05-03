@@ -37,15 +37,10 @@ impl std::fmt::Display for TranscriptError {
 
 impl std::error::Error for TranscriptError {}
 
-/// Re-export AgentTraceValues from metrics module.
-pub use crate::metrics::events::AgentTraceValues;
-
 /// Batch of transcript events returned by transcript readers after processing.
 pub struct TranscriptBatch {
-    /// Events parsed from the transcript.
-    pub events: Vec<AgentTraceValues>,
-    /// Model information extracted from transcript metadata.
-    pub model: Option<String>,
+    /// Raw JSON events from the transcript.
+    pub events: Vec<serde_json::Value>,
     /// Updated watermark position after processing this batch.
     pub new_watermark: Box<dyn crate::transcripts::WatermarkStrategy>,
 }

@@ -19,6 +19,13 @@ pub trait Agent: Send + Sync {
     /// The coordinator will compare against the DB to decide what to process.
     fn discover_sessions(&self) -> Result<Vec<DiscoveredSession>, TranscriptError>;
 
+    /// Maximum number of events to return per `read_incremental` call.
+    /// Bounds peak memory to batch_size × avg_event_size instead of file_size.
+    /// The caller loops until an empty batch is returned.
+    fn batch_size_hint(&self) -> usize {
+        1000
+    }
+
     /// Read transcript incrementally from the given watermark.
     ///
     /// # Arguments
@@ -39,17 +46,17 @@ pub trait Agent: Send + Sync {
 /// Returns None for agents without sweep/read support (e.g., "human", "mock_ai").
 pub fn get_agent(agent_type: &str) -> Option<Box<dyn Agent>> {
     match agent_type {
-        "claude" => Some(Box::new(super::agents::ClaudeAgent)),
-        "cursor" => Some(Box::new(super::agents::CursorAgent)),
-        "droid" => Some(Box::new(super::agents::DroidAgent)),
-        "copilot" => Some(Box::new(super::agents::CopilotAgent)),
-        "gemini" => Some(Box::new(super::agents::GeminiAgent)),
-        "continue-cli" => Some(Box::new(super::agents::ContinueAgent)),
-        "windsurf" => Some(Box::new(super::agents::WindsurfAgent)),
-        "codex" => Some(Box::new(super::agents::CodexAgent)),
-        "amp" => Some(Box::new(super::agents::AmpAgent)),
-        "opencode" => Some(Box::new(super::agents::OpenCodeAgent)),
-        "pi" => Some(Box::new(super::agents::PiAgent)),
+        "claude" => Some(Box::new(super::agents::ClaudeAgent::new())),
+        "cursor" => Some(Box::new(super::agents::CursorAgent::new())),
+        "droid" => Some(Box::new(super::agents::DroidAgent::new())),
+        "copilot" => Some(Box::new(super::agents::CopilotAgent::new())),
+        "gemini" => Some(Box::new(super::agents::GeminiAgent::new())),
+        "continue-cli" => Some(Box::new(super::agents::ContinueAgent::new())),
+        "windsurf" => Some(Box::new(super::agents::WindsurfAgent::new())),
+        "codex" => Some(Box::new(super::agents::CodexAgent::new())),
+        "amp" => Some(Box::new(super::agents::AmpAgent::new())),
+        "opencode" => Some(Box::new(super::agents::OpenCodeAgent::new())),
+        "pi" => Some(Box::new(super::agents::PiAgent::new())),
         _ => None,
     }
 }
