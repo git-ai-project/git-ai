@@ -94,6 +94,25 @@ fn validate_absolute_paths(paths: &[PathBuf]) -> Result<(), GitAiError> {
     Ok(())
 }
 
+fn unmerged_paths_in_repo(repo_work_dir: &std::path::Path) -> std::collections::HashSet<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["ls-files", "--unmerged", "--full-name"])
+        .current_dir(repo_work_dir)
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return std::collections::HashSet::new(),
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            // Format: "<mode> <hash> <stage>\t<path>"
+            let path_part = line.split('\t').nth(1)?;
+            Some(repo_work_dir.join(path_part))
+        })
+        .collect()
+}
+
 fn build_checkpoint_files(
     file_paths: &[PathBuf],
     default_repo: &Repository,
@@ -102,12 +121,8 @@ fn build_checkpoint_files(
     let default_work_dir = default_repo.workdir()?;
     let default_sha = resolve_head_sha(default_repo);
     let mut files = Vec::with_capacity(file_paths.len());
+    let mut unmerged_cache: HashMap<PathBuf, std::collections::HashSet<PathBuf>> = HashMap::new();
     for path in file_paths {
-        let content = if path.exists() {
-            std::fs::read_to_string(path).unwrap_or_default()
-        } else {
-            String::new()
-        };
         let (repo_work_dir, base_commit_sha) =
             match find_repository_for_file(&path.to_string_lossy(), None) {
                 Ok(file_repo) => {
@@ -119,6 +134,20 @@ fn build_checkpoint_files(
                 }
                 Err(_) => (default_work_dir.clone(), default_sha.clone()),
             };
+        let unmerged = unmerged_cache
+            .entry(repo_work_dir.clone())
+            .or_insert_with(|| unmerged_paths_in_repo(&repo_work_dir));
+        if unmerged.contains(path) {
+            continue;
+        }
+        let content = if path.exists() {
+            match std::fs::read_to_string(path) {
+                Ok(s) if !s.contains('\0') => s,
+                _ => continue,
+            }
+        } else {
+            String::new()
+        };
         files.push(CheckpointFile {
             path: path.clone(),
             content,
@@ -313,6 +342,9 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<CheckpointRequest, GitAiErr
         .filter_map(|rel_path| {
             let abs_path = repo_work_dir.join(rel_path);
             let content = std::fs::read_to_string(&abs_path).ok()?;
+            if content.contains('\0') {
+                return None;
+            }
             Some(CheckpointFile {
                 path: abs_path,
                 content,

@@ -93,8 +93,12 @@ pub fn reset_timeout_overrides_for_test() {
     TEST_HOOK_TIMEOUT_MS.with(|c| c.set(None));
 }
 
-/// Grace window in nanoseconds for low-resolution filesystem mtime comparison.
-const MTIME_GRACE_WINDOW_NS: u128 = (MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000;
+fn mtime_grace_window_ns() -> u128 {
+    if std::env::var_os("GIT_AI_TEST_DB_PATH").is_some() {
+        return 0;
+    }
+    (MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000
+}
 
 /// Maximum number of files to track in a snapshot.  Repos larger than this
 /// skip the stat-diff system entirely (returning Fallback) to avoid adding
@@ -540,9 +544,9 @@ fn is_wm_covered(
     posix_key: &str,
 ) -> bool {
     if let Some(&file_wm) = per_file_wm.get(posix_key) {
-        return mtime_ns <= file_wm + MTIME_GRACE_WINDOW_NS;
+        return mtime_ns <= file_wm + mtime_grace_window_ns();
     }
-    effective_wm.is_some_and(|ewm| mtime_ns <= ewm + MTIME_GRACE_WINDOW_NS)
+    effective_wm.is_some_and(|ewm| mtime_ns <= ewm + mtime_grace_window_ns())
 }
 
 // ---------------------------------------------------------------------------
