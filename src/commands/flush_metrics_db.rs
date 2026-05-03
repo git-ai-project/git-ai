@@ -7,7 +7,7 @@ use crate::metrics::db::MetricsDatabase;
 use crate::metrics::{MetricEvent, MetricsBatch};
 
 /// Max events per batch upload
-const MAX_BATCH_SIZE: usize = 250;
+const MAX_BATCH_SIZE: usize = 1000;
 
 /// Handle the flush-metrics-db command
 pub fn handle_flush_metrics_db(_args: &[String]) {
