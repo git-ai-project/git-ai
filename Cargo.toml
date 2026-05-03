@@ -17,7 +17,7 @@ humantime = "2.3"
 indicatif = "0.18"
 smol = "2.0"
 futures = "0.3"
-tokio = { version = "1.51", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 interprocess = "2.4"
