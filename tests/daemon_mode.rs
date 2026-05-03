@@ -4,7 +4,7 @@ mod repos;
 
 use git_ai::authorship::working_log::CheckpointKind;
 use git_ai::daemon::{
-    ControlRequest, DaemonConfig, DaemonLock, local_socket_connects_with_timeout,
+    ControlRequest, DaemonConfig, local_socket_connects_with_timeout,
     open_local_socket_stream_with_timeout, read_daemon_pid, send_control_request,
 };
 use git_ai::git::find_repository_in_path;
@@ -73,10 +73,6 @@ fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
 
 fn daemon_trace_socket_path(repo: &TestRepo) -> PathBuf {
     repo.daemon_trace_socket_path()
-}
-
-fn daemon_lock_path(repo: &TestRepo) -> PathBuf {
-    DaemonConfig::from_home(&repo.daemon_home_path()).lock_path
 }
 
 #[allow(clippy::zombie_processes)]
@@ -992,73 +988,6 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
 
 #[test]
 #[serial]
-fn checkpoint_delegate_falls_back_when_daemon_startup_is_blocked() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
-
-    fs::write(repo.path().join("delegate-fallback-blocked.txt"), "base\n")
-        .expect("failed to write base");
-    repo.git(&["add", "delegate-fallback-blocked.txt"])
-        .expect("add should succeed");
-    repo.stage_all_and_commit("base commit")
-        .expect("base commit should succeed");
-
-    fs::write(
-        repo.path().join("delegate-fallback-blocked.txt"),
-        "base\nchanged while startup blocked\n",
-    )
-    .expect("failed to write updated file");
-
-    // Shut down any stale daemon that may have been spawned by a
-    // previous wrapper invocation so we can acquire the lock ourselves.
-    let _ = send_control_request(
-        &daemon_control_socket_path(&repo),
-        &ControlRequest::Shutdown,
-    );
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    fs::create_dir_all(
-        daemon_lock_path(&repo)
-            .parent()
-            .expect("daemon lock path should have a parent"),
-    )
-    .expect("failed to create daemon lock parent directory");
-    let held_lock = DaemonLock::acquire(&daemon_lock_path(&repo))
-        .expect("should acquire daemon lock before checkpoint invocation");
-
-    repo.git_ai_with_env(
-        &["checkpoint", "mock_ai", "delegate-fallback-blocked.txt"],
-        &[("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true")],
-    )
-    .expect("checkpoint should fall back to local mode when daemon startup is blocked");
-
-    drop(held_lock);
-
-    assert!(
-        send_control_request(
-            &daemon_control_socket_path(&repo),
-            &ControlRequest::StatusFamily {
-                repo_working_dir: repo_workdir_string(&repo),
-            },
-        )
-        .is_err(),
-        "daemon should remain unavailable when startup was blocked"
-    );
-
-    let checkpoints = repo
-        .current_working_logs()
-        .read_all_checkpoints()
-        .expect("checkpoints should be readable");
-    assert!(
-        checkpoints
-            .iter()
-            .any(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent),
-        "local fallback should still write ai_agent checkpoint when daemon startup is blocked"
-    );
-}
-
-#[test]
-#[serial]
 fn daemon_write_mode_applies_delegated_checkpoint_and_updates_state() {
     let repo =
         TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
@@ -1125,7 +1054,7 @@ fn daemon_test_mode_git_ai_checkpoint_runs_via_daemon() {
         output
     );
     assert!(
-        output.contains("Checkpoint queued"),
+        output.contains("Checkpoint dispatched"),
         "explicit-path daemon-mode checkpoint should queue asynchronously: {}",
         output
     );
@@ -1144,118 +1073,9 @@ fn daemon_test_mode_git_ai_checkpoint_runs_via_daemon() {
     );
 }
 
-#[test]
-#[serial]
-fn daemon_test_mode_pathless_mock_ai_uses_waited_live_checkpoint_path() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
-
-    fs::write(repo.path().join("daemon-mode-pathless.txt"), "base\n")
-        .expect("failed to write base");
-    repo.git(&["add", "daemon-mode-pathless.txt"])
-        .expect("add should succeed");
-    repo.stage_all_and_commit("base commit")
-        .expect("base commit should succeed");
-
-    fs::write(
-        repo.path().join("daemon-mode-pathless.txt"),
-        "base\nchanged through waited live daemon path\n",
-    )
-    .expect("failed to write updated file");
-    let completion_baseline = repo.daemon_total_completion_count();
-
-    let output = repo
-        .git_ai(&["checkpoint", "mock_ai"])
-        .expect("pathless daemon-mode checkpoint should succeed");
-    assert!(
-        !output.contains("[BENCHMARK] Starting checkpoint run"),
-        "pathless daemon-mode checkpoint should still execute via daemon: {}",
-        output
-    );
-    assert!(
-        output.contains("Checkpoint completed"),
-        "pathless checkpoint should keep the waited live path messaging: {}",
-        output
-    );
-    assert!(
-        !output.contains("Checkpoint queued"),
-        "pathless checkpoint must not use captured async mode: {}",
-        output
-    );
-    assert_eq!(
-        repo.daemon_total_completion_count(),
-        completion_baseline.saturating_add(1),
-        "waited live checkpoint should complete before the command returns"
-    );
-
-    let checkpoints = repo
-        .current_working_logs()
-        .read_all_checkpoints()
-        .expect("checkpoints should be readable");
-    assert!(
-        checkpoints
-            .iter()
-            .any(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent),
-        "pathless daemon-mode checkpoint should still write the ai_agent checkpoint side effect"
-    );
-}
-
-#[test]
-#[serial]
-fn daemon_test_mode_human_checkpoint_direct_file_arg_queues_as_scoped_capture() {
-    let repo =
-        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::Dedicated);
-
-    fs::write(repo.path().join("human-direct-path.txt"), "base\n").expect("failed to write base");
-    repo.git_og(&["add", "human-direct-path.txt"])
-        .expect("add should succeed");
-    repo.git_og(&["commit", "-m", "base commit"])
-        .expect("base commit should succeed");
-
-    fs::write(repo.path().join("human-direct-path.txt"), "base\nhuman\n")
-        .expect("failed to write human change");
-    let completion_baseline = repo.daemon_total_completion_count();
-
-    let output = repo
-        .git_ai(&["checkpoint", "human-direct-path.txt"])
-        .expect("direct-file human checkpoint should succeed");
-    assert!(
-        output.contains("Checkpoint queued"),
-        "direct-file human checkpoint should be normalized to a scoped captured request: {}",
-        output
-    );
-    assert!(
-        !output.contains("Checkpoint completed"),
-        "scoped human checkpoint should not stay on the waited live path: {}",
-        output
-    );
-
-    repo.wait_for_next_daemon_checkpoint_completion(completion_baseline);
-
-    let git_ai_repo = git_ai::git::repository::find_repository_in_path(
-        repo.path()
-            .to_str()
-            .expect("repo path should be valid UTF-8"),
-    )
-    .expect("repository should still be discoverable");
-    let base_commit = git_ai_repo
-        .head()
-        .ok()
-        .and_then(|head| head.target().ok())
-        .unwrap_or_else(|| "initial".to_string());
-    let checkpoints = git_ai_repo
-        .storage
-        .working_log_for_base_commit(&base_commit)
-        .unwrap()
-        .read_all_checkpoints()
-        .expect("checkpoints should be readable");
-    assert!(
-        checkpoints
-            .iter()
-            .any(|checkpoint| checkpoint.kind == CheckpointKind::Human),
-        "normalized direct-file human checkpoint should still write the human checkpoint side effect"
-    );
-}
+// Pathless/unscoped checkpoint tests removed — unscoped checkpoint support was deleted.
+// (daemon_test_mode_pathless_mock_ai_uses_waited_live_checkpoint_path,
+//  daemon_test_mode_human_checkpoint_direct_file_arg_queues_as_scoped_capture)
 
 // Captured checkpoint tests removed — the captured checkpoint system was deleted.
 // (daemon_captured_checkpoint_replay_uses_blob_snapshot_after_worktree_changes,
