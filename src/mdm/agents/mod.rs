@@ -7,6 +7,7 @@ mod firebender;
 mod gemini;
 mod github_copilot;
 mod jetbrains;
+mod neovim;
 mod opencode;
 mod pi;
 mod vscode;
@@ -21,6 +22,7 @@ pub use firebender::FirebenderInstaller;
 pub use gemini::GeminiInstaller;
 pub use github_copilot::GitHubCopilotInstaller;
 pub use jetbrains::JetBrainsInstaller;
+pub use neovim::NeovimInstaller;
 pub use opencode::OpenCodeInstaller;
 pub use pi::PiInstaller;
 pub use vscode::VSCodeInstaller;
@@ -43,6 +45,7 @@ pub fn get_all_installers() -> Vec<Box<dyn HookInstaller>> {
         Box::new(DroidInstaller),
         Box::new(FirebenderInstaller),
         Box::new(JetBrainsInstaller),
+        Box::new(NeovimInstaller),
         Box::new(WindsurfInstaller),
     ]
 }
