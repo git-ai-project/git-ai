@@ -782,7 +782,7 @@ fn build_feature_flags(file_cfg: &Option<FileConfig>) -> FeatureFlags {
     FeatureFlags::from_env_and_file(file_flags)
 }
 
-fn try_resolve_git_path(file_cfg: &Option<FileConfig>) -> Option<String> {
+fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
     // 1) From config file
     if let Some(cfg) = file_cfg
         && let Some(path) = cfg.git_path.as_ref()
@@ -791,7 +791,7 @@ fn try_resolve_git_path(file_cfg: &Option<FileConfig>) -> Option<String> {
         if !trimmed.is_empty() {
             let p = Path::new(trimmed);
             if is_executable(p) && !path_is_git_ai_binary(p) {
-                return Some(trimmed.to_string());
+                return trimmed.to_string();
             }
         }
     }
@@ -857,7 +857,7 @@ fn try_resolve_git_path(file_cfg: &Option<FileConfig>) -> Option<String> {
         .map(Path::new)
         .find(|p| is_executable(p) && !path_is_git_ai_binary(p))
     {
-        return Some(found.to_string_lossy().to_string());
+        return found.to_string_lossy().to_string();
     }
 
     // 3) Windows-only: try `where.exe git.exe` as a PATH-based fallback
@@ -866,26 +866,17 @@ fn try_resolve_git_path(file_cfg: &Option<FileConfig>) -> Option<String> {
         if let Ok(output) = std::process::Command::new("where.exe")
             .arg("git.exe")
             .output()
+            && output.status.success()
         {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    let trimmed = line.trim();
-                    let p = Path::new(trimmed);
-                    if is_executable(p) && !path_is_git_ai_binary(p) {
-                        return Some(trimmed.to_string());
-                    }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                let p = Path::new(trimmed);
+                if is_executable(p) && !path_is_git_ai_binary(p) {
+                    return trimmed.to_string();
                 }
             }
         }
-    }
-
-    None
-}
-
-fn resolve_git_path(file_cfg: &Option<FileConfig>) -> String {
-    if let Some(path) = try_resolve_git_path(file_cfg) {
-        return path;
     }
 
     eprintln!(
@@ -1075,17 +1066,17 @@ fn path_is_git_ai_binary(path: &Path) -> bool {
     // a real git binary legitimately coexists with a git-ai symlink (e.g.
     // Docker images that compile git from source into /usr/local/bin).
     if let Some(parent) = path.parent() {
-        let git_ai_name = if cfg!(windows) {
-            "git-ai.exe"
-        } else {
-            "git-ai"
-        };
-        let sibling = parent.join(git_ai_name);
-        if cfg!(windows) {
-            if sibling.exists() {
-                return true;
-            }
-        } else if sibling.exists() && same_file(path, &sibling) {
+        #[cfg(windows)]
+        let sibling = parent.join("git-ai.exe");
+        #[cfg(not(windows))]
+        let sibling = parent.join("git-ai");
+
+        #[cfg(windows)]
+        if sibling.exists() {
+            return true;
+        }
+        #[cfg(not(windows))]
+        if sibling.exists() && same_file(path, &sibling) {
             return true;
         }
     }
