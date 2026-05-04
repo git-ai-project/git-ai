@@ -282,6 +282,9 @@ pub enum HookEvent {
 pub struct BashToolResult {
     /// The checkpoint action.
     pub action: BashCheckpointAction,
+    /// Files with mtime > watermark at pre-snapshot time (absolute paths).
+    /// Populated only by `handle_bash_pre_tool_use_with_context`; empty for post-hook results.
+    pub dirty_paths: Vec<PathBuf>,
 }
 
 /// Per-agent tool classification.
@@ -909,6 +912,8 @@ pub fn handle_bash_pre_tool_use_with_context(
     let wm = query_daemon_watermarks(&repo_working_dir);
     let snap = snapshot(repo_root, session_id, tool_use_id, wm.as_ref())?;
 
+    let dirty_paths: Vec<PathBuf> = snap.entries.keys().map(|rel| repo_root.join(rel)).collect();
+
     let socket = effective_daemon_socket().ok_or_else(|| {
         GitAiError::Generic("no daemon socket available for BashSessionStart".into())
     })?;
@@ -926,6 +931,7 @@ pub fn handle_bash_pre_tool_use_with_context(
 
     Ok(BashToolResult {
         action: BashCheckpointAction::TakePreSnapshot,
+        dirty_paths,
     })
 }
 
@@ -966,6 +972,7 @@ pub fn handle_bash_tool(
             );
             return Ok(BashToolResult {
                 action: BashCheckpointAction::Fallback,
+                dirty_paths: vec![],
             });
         }};
     }
@@ -983,6 +990,9 @@ pub fn handle_bash_tool(
 
             match snapshot(repo_root, session_id, tool_use_id, wm.as_ref()) {
                 Ok(snap) => {
+                    let dirty_paths: Vec<PathBuf> =
+                        snap.entries.keys().map(|rel| repo_root.join(rel)).collect();
+
                     // Send to daemon; if daemon is unavailable, still return
                     // TakePreSnapshot so the caller knows a pre-hook ran.
                     if let Some(socket) = effective_daemon_socket() {
@@ -1005,12 +1015,14 @@ pub fn handle_bash_tool(
 
                     Ok(BashToolResult {
                         action: BashCheckpointAction::TakePreSnapshot,
+                        dirty_paths,
                     })
                 }
                 Err(e) => {
                     tracing::debug!("Pre-snapshot failed: {}; will use fallback on post", e);
                     Ok(BashToolResult {
                         action: BashCheckpointAction::TakePreSnapshot,
+                        dirty_paths: vec![],
                     })
                 }
             }
@@ -1048,6 +1060,7 @@ pub fn handle_bash_tool(
                                     );
                                     Ok(BashToolResult {
                                         action: BashCheckpointAction::NoChanges,
+                                        dirty_paths: vec![],
                                     })
                                 } else {
                                     let paths = diff_result.all_changed_paths();
@@ -1061,6 +1074,7 @@ pub fn handle_bash_tool(
 
                                     Ok(BashToolResult {
                                         action: BashCheckpointAction::Checkpoint(paths),
+                                        dirty_paths: vec![],
                                     })
                                 }
                             }
@@ -1068,6 +1082,7 @@ pub fn handle_bash_tool(
                                 tracing::debug!("Post-snapshot failed: {}; returning fallback", e);
                                 Ok(BashToolResult {
                                     action: BashCheckpointAction::Fallback,
+                                    dirty_paths: vec![],
                                 })
                             }
                         };
@@ -1085,6 +1100,7 @@ pub fn handle_bash_tool(
                     );
                     Ok(BashToolResult {
                         action: BashCheckpointAction::Fallback,
+                        dirty_paths: vec![],
                     })
                 }
             }
