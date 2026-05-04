@@ -13,7 +13,6 @@ mod ai_tab;
 mod amend;
 mod amp;
 mod attribution_tracker_comprehensive;
-mod bash_attribution;
 mod bash_tool_benchmark;
 mod bash_tool_conformance;
 mod bash_tool_provenance;
