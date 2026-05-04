@@ -1,5 +1,17 @@
 use serde::{Deserialize, Serialize};
 
+/// Parse a boolean from an environment variable string.
+/// Accepts: "1", "true", "True", "TRUE" → Some(true)
+///          "0", "false", "False", "FALSE" → Some(false)
+///          Missing or invalid → None
+fn parse_bool_env(value: Option<String>) -> Option<bool> {
+    value.and_then(|v| match v.as_str() {
+        "1" | "true" | "True" | "TRUE" => Some(true),
+        "0" | "false" | "False" | "FALSE" => Some(false),
+        _ => None,
+    })
+}
+
 macro_rules! define_feature_flags {
     (
         $(
@@ -38,6 +50,20 @@ macro_rules! define_feature_flags {
             )*
         }
 
+        impl DeserializableFeatureFlags {
+            /// Parse feature flags from environment variables with the given prefix.
+            /// Converts field names to SCREAMING_SNAKE_CASE.
+            pub(crate) fn from_env(prefix: &str) -> Self {
+                DeserializableFeatureFlags {
+                    $(
+                        $file_name: parse_bool_env(
+                            std::env::var(format!("{}{}", prefix, stringify!($file_name).to_uppercase())).ok()
+                        ),
+                    )*
+                }
+            }
+        }
+
         impl FeatureFlags {
             /// Merge flags with a base, applying any Some values as overrides
             pub(crate) fn merge_with(base: Self, overrides: DeserializableFeatureFlags) -> Self {
@@ -71,8 +97,7 @@ impl FeatureFlags {
     /// Falls back to defaults for any invalid or missing values
     #[allow(dead_code)]
     pub fn from_env() -> Self {
-        let env_flags: DeserializableFeatureFlags =
-            envy::prefixed("GIT_AI_").from_env().unwrap_or_default();
+        let env_flags = DeserializableFeatureFlags::from_env("GIT_AI_");
         Self::from_deserializable(env_flags)
     }
 
@@ -91,8 +116,7 @@ impl FeatureFlags {
         }
 
         // Apply env var overrides (highest priority)
-        let env_flags: DeserializableFeatureFlags =
-            envy::prefixed("GIT_AI_").from_env().unwrap_or_default();
+        let env_flags = DeserializableFeatureFlags::from_env("GIT_AI_");
         result = Self::merge_with(result, env_flags);
 
         result
