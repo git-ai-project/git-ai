@@ -25,6 +25,7 @@ use std::path::PathBuf;
 const FORK_BUNDLE_ID: &str = "com.DanPristupov.Fork";
 
 /// Git instance type values for Fork
+#[cfg(any(target_os = "macos", windows))]
 mod git_instance_type {
     pub const SYSTEM: i32 = 0;
     pub const CUSTOM: i32 = 2;
