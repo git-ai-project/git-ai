@@ -6,11 +6,14 @@ use crate::commands::checkpoint_agent::presets::{
     TranscriptSource, UntrackedEdit,
 };
 use crate::error::GitAiError;
+use crate::git::repo_state::{
+    git_dir_for_worktree, read_head_state_for_worktree, worktree_root_for_path,
+};
 use crate::git::repository::discover_repository_in_path_no_git_exec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BaseCommit {
@@ -45,6 +48,34 @@ struct RepoContext {
 
 const MAX_CHECKPOINT_FILES: usize = 1000;
 
+fn has_active_merge_state(git_dir: &Path) -> bool {
+    git_dir.join("MERGE_HEAD").exists()
+        || git_dir.join("CHERRY_PICK_HEAD").exists()
+        || git_dir.join("rebase-merge").exists()
+        || git_dir.join("rebase-apply").exists()
+}
+
+fn get_unmerged_paths_via_git(repo_work_dir: &Path) -> std::collections::HashSet<PathBuf> {
+    use crate::git::repository::exec_git_allow_nonzero;
+    let args = vec![
+        "-C".to_string(),
+        repo_work_dir.to_string_lossy().to_string(),
+        "ls-files".to_string(),
+        "-u".to_string(),
+    ];
+    let output = match exec_git_allow_nonzero(&args) {
+        Ok(o) => o,
+        Err(_) => return std::collections::HashSet::new(),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| l.split('\t').nth(1))
+        .map(|path| repo_work_dir.join(path))
+        .collect()
+}
+
 fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>, GitAiError> {
     let perf = std::env::var("GIT_AI_DEBUG_PERFORMANCE").is_ok_and(|v| !v.is_empty() && v != "0");
 
@@ -70,21 +101,31 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
 
         let ctx = {
             let t_discover = std::time::Instant::now();
-            let repo = discover_repository_in_path_no_git_exec(path)?;
-            let repo_work_dir = repo.workdir()?;
+            let repo_work_dir = worktree_root_for_path(path).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "No git repository found for path: {}",
+                    path.display()
+                ))
+            })?;
             if !repo_cache.contains_key(&repo_work_dir) {
                 let t_head = std::time::Instant::now();
-                let base_commit = match repo.head() {
-                    Ok(head) => match head.target() {
-                        Ok(sha) => BaseCommit::Sha(sha),
-                        Err(_) => BaseCommit::Initial,
+                let base_commit = match read_head_state_for_worktree(&repo_work_dir) {
+                    Some(state) => match state.head {
+                        Some(sha) => BaseCommit::Sha(sha),
+                        None => BaseCommit::Initial,
                     },
-                    Err(_) => BaseCommit::Initial,
+                    None => BaseCommit::Initial,
                 };
                 let head_ms = t_head.elapsed().as_secs_f64() * 1000.0;
 
                 let t_unmerged = std::time::Instant::now();
-                let unmerged_paths = repo.get_unmerged_paths().unwrap_or_default();
+                let unmerged_paths = if let Some(git_dir) = git_dir_for_worktree(&repo_work_dir)
+                    && has_active_merge_state(&git_dir)
+                {
+                    get_unmerged_paths_via_git(&repo_work_dir)
+                } else {
+                    std::collections::HashSet::new()
+                };
                 let unmerged_ms = t_unmerged.elapsed().as_secs_f64() * 1000.0;
 
                 if perf {

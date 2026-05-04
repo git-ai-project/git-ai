@@ -2013,6 +2013,8 @@ impl TestRepo {
             "GIT_AI_DAEMON_TRACE_SOCKET",
             self.daemon_trace_socket_path(),
         );
+        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
         if self.has_active_daemon() {
             command.env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true");

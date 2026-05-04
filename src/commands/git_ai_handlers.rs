@@ -451,10 +451,9 @@ fn handle_checkpoint(args: &[String]) {
         );
     }
 
-    // In debug builds (tests + dev), wait for the daemon response so
-    // checkpoints are persisted before the caller proceeds. In release
-    // builds (production), fire-and-forget to minimize CLI latency.
-    let wait_for_response = cfg!(debug_assertions);
+    // In test builds, wait for the daemon response so checkpoints are
+    // persisted before the caller proceeds. Otherwise fire-and-forget.
+    let wait_for_response = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some();
 
     for request in requests {
         let t_send = std::time::Instant::now();
