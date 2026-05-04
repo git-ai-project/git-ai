@@ -1,5 +1,7 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
+use crate::test_utils::fixture_path;
+use serde_json::json;
 use std::fs;
 
 #[test]
@@ -90,4 +92,67 @@ fn test_bash_multiple_files_mixed_dirty_state() {
         "bash touched a".ai(),
     ]);
     file_b.assert_committed_lines(lines!["line b".unattributed_human(), "bash touched b".ai()]);
+}
+
+/// Orchestrator-level regression test: fires through the real codex
+/// preset/orchestrator path (not manual `git-ai checkpoint human` CLI
+/// calls). If `execute_pre_bash_call` regresses to returning `Ok(vec![])`,
+/// the dirty human edit would be swept into the post-bash AI checkpoint
+/// and misattributed as AI.
+#[test]
+fn test_codex_preset_pre_bash_preserves_dirty_file_attribution() {
+    let repo = TestRepo::new();
+    let repo_root = repo.canonical_path();
+    let file_path = repo_root.join("example.txt");
+
+    fs::write(&file_path, "original line\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    let mut file = repo.filename("example.txt");
+    file.assert_committed_lines(lines!["original line".unattributed_human()]);
+
+    // Human edits the file before the AI bash tool runs.
+    fs::write(&file_path, "original line\nhuman edit line\n").unwrap();
+
+    let simple_fixture = fixture_path("codex-session-simple.jsonl");
+    let transcript_path = repo_root.join("codex-transcript.jsonl");
+    fs::copy(&simple_fixture, &transcript_path).unwrap();
+
+    let pre_hook_input = json!({
+        "session_id": "attr-pre-sess",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "attr-bash-1",
+        "tool_input": { "command": "echo hello" },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
+        .expect("codex pre-hook checkpoint should succeed");
+
+    // AI bash tool edits the file.
+    fs::write(&file_path, "original line\nhuman edit line\nai bash line\n").unwrap();
+
+    let post_hook_input = json!({
+        "session_id": "attr-pre-sess",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "attr-bash-1",
+        "tool_input": { "command": "echo hello" },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("codex post-hook checkpoint should succeed");
+
+    repo.stage_all_and_commit("After codex bash").unwrap();
+    file.assert_committed_lines(lines![
+        "original line".unattributed_human(),
+        "human edit line".unattributed_human(),
+        "ai bash line".ai(),
+    ]);
 }
