@@ -240,14 +240,14 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
     let repo = discover_repository_in_path_no_git_exec(e.context.cwd.as_path())?;
     let repo_work_dir = repo.workdir()?;
 
-    match bash_tool::handle_bash_pre_tool_use_with_context(
+    let dirty_paths = match bash_tool::handle_bash_pre_tool_use_with_context(
         &repo_work_dir,
         &e.context.session_id,
         &e.tool_use_id,
         &e.context.agent_id,
         Some(&e.context.metadata),
     ) {
-        Ok(_) => Ok(vec![]),
+        Ok(result) => result.dirty_paths,
         Err(error) => {
             tracing::debug!(
                 "Bash pre-hook snapshot failed for {} session {}: {}",
@@ -255,9 +255,24 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
                 e.context.session_id,
                 error
             );
-            Ok(vec![])
+            return Ok(vec![]);
         }
+    };
+
+    if dirty_paths.is_empty() {
+        return Ok(vec![]);
     }
+
+    let files = build_checkpoint_files(&dirty_paths)?;
+    Ok(split_files_into_requests(
+        files,
+        e.context.trace_id,
+        CheckpointKind::Human,
+        None,
+        PreparedPathRole::WillEdit,
+        None,
+        e.context.metadata,
+    ))
 }
 
 fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, GitAiError> {
