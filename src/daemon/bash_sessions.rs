@@ -55,10 +55,13 @@ impl BashSessionState {
             .remove(&(session_id.to_string(), tool_use_id.to_string()))
     }
 
-    pub fn query_active_for_repo(&self, repo_work_dir: &str) -> Option<&BashSession> {
+    pub fn query_active_for_repo(
+        &self,
+        repo_work_dir: &str,
+    ) -> Option<(&(String, String), &BashSession)> {
         self.sessions
-            .values()
-            .find(|s| s.repo_work_dir == repo_work_dir)
+            .iter()
+            .find(|(_, s)| s.repo_work_dir == repo_work_dir)
     }
 
     pub fn get_snapshot(&self, session_id: &str, tool_use_id: &str) -> Option<&StatSnapshot> {

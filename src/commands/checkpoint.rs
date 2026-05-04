@@ -14,7 +14,7 @@ use crate::authorship::imara_diff_utils::{
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
 use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
-use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
+use crate::commands::checkpoint_agent::orchestrator::{BaseCommit, CheckpointRequest};
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
@@ -465,7 +465,17 @@ fn resolve_live_checkpoint_execution(
     base_commit_override: Option<&str>,
     base_override_resolution_policy: BaseOverrideResolutionPolicy,
 ) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
-    let base_commit = resolve_base_commit(repo, base_commit_override);
+    let base_commit = if base_commit_override.is_none()
+        && let Some(request) = checkpoint_request
+        && let Some(first_file) = request.files.first()
+    {
+        match &first_file.base_commit {
+            BaseCommit::Sha(sha) => sha.clone(),
+            BaseCommit::Initial => "initial".to_string(),
+        }
+    } else {
+        resolve_base_commit(repo, base_commit_override)
+    };
 
     if repo.workdir().is_err() {
         eprintln!("Cannot run checkpoint on bare repositories");

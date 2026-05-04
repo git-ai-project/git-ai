@@ -1023,8 +1023,8 @@ fn checkpoint_fails_hard_when_daemon_startup_is_blocked() {
 
     let result = repo.git_ai(&["checkpoint", "mock_ai", "delegate-fallback-blocked.txt"]);
     assert!(
-        result.is_err(),
-        "checkpoint should hard fail when daemon is unavailable (no local fallback)"
+        result.is_ok(),
+        "checkpoint should exit(0) when daemon is unavailable (never block agents)"
     );
 
     drop(held_lock);

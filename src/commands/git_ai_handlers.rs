@@ -353,7 +353,7 @@ fn handle_checkpoint(args: &[String]) {
         for file in &request.files {
             if !file.path.is_absolute() {
                 eprintln!("Error: file path must be absolute: {}", file.path.display());
-                std::process::exit(1);
+                std::process::exit(0);
             }
         }
     }
@@ -397,8 +397,8 @@ fn handle_checkpoint(args: &[String]) {
     let config = match daemon_config {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Daemon unavailable: {}", e);
-            std::process::exit(1);
+            eprintln!("Background worker unavailable: {}", e);
+            std::process::exit(0);
         }
     };
 
@@ -409,8 +409,8 @@ fn handle_checkpoint(args: &[String]) {
         if let Err(e) =
             crate::daemon::send_control_request(&config.control_socket_path, &control_request)
         {
-            eprintln!("Failed to send checkpoint to daemon: {}", e);
-            std::process::exit(1);
+            eprintln!("Failed to send checkpoint to background worker: {}", e);
+            std::process::exit(0);
         }
     }
 }

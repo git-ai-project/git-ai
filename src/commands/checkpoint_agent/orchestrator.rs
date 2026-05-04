@@ -43,11 +43,22 @@ struct RepoContext {
     unmerged_paths: std::collections::HashSet<PathBuf>,
 }
 
+const MAX_CHECKPOINT_FILES: usize = 1000;
+
 fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>, GitAiError> {
+    if file_paths.len() > MAX_CHECKPOINT_FILES {
+        tracing::warn!(
+            "build_checkpoint_files called with {} paths (max {}); truncating",
+            file_paths.len(),
+            MAX_CHECKPOINT_FILES,
+        );
+    }
+    let capped_paths = &file_paths[..file_paths.len().min(MAX_CHECKPOINT_FILES)];
+
     let mut repo_cache: HashMap<PathBuf, RepoContext> = HashMap::new();
     let mut files = Vec::new();
 
-    for path in file_paths {
+    for path in capped_paths {
         if !path.is_absolute() {
             return Err(GitAiError::PresetError(format!(
                 "file path must be absolute: {}",
