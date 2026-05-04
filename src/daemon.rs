@@ -2505,6 +2505,10 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     rewrite_event: &RewriteLogEvent,
     author: &str,
     carryover_snapshot: Option<&HashMap<String, String>>,
+    active_bash: Option<(
+        &crate::authorship::working_log::AgentId,
+        &HashMap<String, String>,
+    )>,
 ) -> Result<(), GitAiError> {
     let Some((base_commit, target_commit)) =
         commit_replay_context_from_rewrite_event(rewrite_event)
@@ -2554,10 +2558,16 @@ fn sync_pre_commit_checkpoint_for_daemon_commit(
     let replay_checkpoint_request =
         build_human_replay_checkpoint_request(&repo_workdir, changed_files, dirty_files);
 
+    let checkpoint_kind = if active_bash.is_some() {
+        CheckpointKind::AiAgent
+    } else {
+        CheckpointKind::Human
+    };
+
     crate::commands::checkpoint::run_with_base_commit_override_with_policy(
         repo,
         author,
-        CheckpointKind::Human,
+        checkpoint_kind,
         true,
         Some(replay_checkpoint_request),
         Some(base_commit.as_str()),
@@ -2651,11 +2661,22 @@ fn apply_rewrite_side_effect(
         &author,
         normalized_carryover_snapshot_ref,
     )?;
+    let active_bash = {
+        let repo_workdir_str = repo
+            .workdir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let state = coordinator.bash_sessions.lock().unwrap();
+        state
+            .query_active_for_repo(&repo_workdir_str)
+            .map(|(_, session)| (session.agent_id.clone(), session.metadata.clone()))
+    };
     sync_pre_commit_checkpoint_for_daemon_commit(
         &repo,
         &rewrite_event,
         &author,
         normalized_carryover_snapshot_ref,
+        active_bash.as_ref().map(|(id, meta)| (id, meta)),
     )?;
     // Read the current log BEFORE appending, so we can pass it to authorship
     // processing.  We intentionally defer the append until AFTER authorship
@@ -7231,12 +7252,12 @@ impl ActorDaemonCoordinator {
             ControlRequest::BashSessionQuery { repo_work_dir } => {
                 let state = self.bash_sessions.lock().unwrap();
                 let response = match state.query_active_for_repo(&repo_work_dir) {
-                    Some(session) => {
+                    Some((key, session)) => {
                         let data = serde_json::to_value(BashSessionQueryResponse {
                             active: true,
                             agent_id: Some(session.agent_id.clone()),
-                            session_id: None,
-                            tool_use_id: None,
+                            session_id: Some(key.0.clone()),
+                            tool_use_id: Some(key.1.clone()),
                             metadata: Some(session.metadata.clone()),
                         })
                         .ok();

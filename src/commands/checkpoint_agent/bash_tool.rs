@@ -909,7 +909,19 @@ pub fn handle_bash_pre_tool_use_with_context(
     });
     let snap = snapshot(repo_root, session_id, tool_use_id, wm.as_ref())?;
 
-    let dirty_paths: Vec<PathBuf> = snap.entries.keys().map(|rel| repo_root.join(rel)).collect();
+    // When watermarks are unavailable (no daemon + no .git/index), the snapshot
+    // contains every non-ignored file in the repo. Using that as dirty_paths
+    // would trigger per-file repo discovery + file reads in
+    // build_checkpoint_files — catastrophic on large repos. Fall back to git
+    // status which only reports actually changed files.
+    let dirty_paths: Vec<PathBuf> = if wm.is_none() {
+        match git_status_fallback(repo_root) {
+            Ok(paths) => paths.into_iter().map(|p| repo_root.join(p)).collect(),
+            Err(_) => vec![],
+        }
+    } else {
+        snap.entries.keys().map(|rel| repo_root.join(rel)).collect()
+    };
 
     let socket = effective_daemon_socket().ok_or_else(|| {
         GitAiError::Generic("no daemon socket available for BashSessionStart".into())
