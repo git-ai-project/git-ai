@@ -53,10 +53,6 @@ pub fn tracked_parsed_git_invocation_for_test_sync(
     resolve_alias_invocation_no_git_exec(&parsed, &repo_lookup).unwrap_or(parsed)
 }
 
-pub fn tracks_checkpoint_request_for_test_sync() -> bool {
-    true // All checkpoints are tracked for test sync (is_pre_commit removed)
-}
-
 pub fn test_sync_session_from_invocation(invocation: &ParsedGitInvocation) -> Option<String> {
     let mut idx = 0usize;
     while idx < invocation.global_args.len() {
