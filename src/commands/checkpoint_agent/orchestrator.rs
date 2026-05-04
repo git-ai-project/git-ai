@@ -46,6 +46,8 @@ struct RepoContext {
 const MAX_CHECKPOINT_FILES: usize = 1000;
 
 fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>, GitAiError> {
+    let perf = std::env::var("GIT_AI_DEBUG_PERFORMANCE").is_ok_and(|v| !v.is_empty() && v != "0");
+
     if file_paths.len() > MAX_CHECKPOINT_FILES {
         tracing::warn!(
             "build_checkpoint_files called with {} paths (max {}); truncating",
@@ -67,9 +69,11 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
         }
 
         let ctx = {
+            let t_discover = std::time::Instant::now();
             let repo = discover_repository_in_path_no_git_exec(path)?;
             let repo_work_dir = repo.workdir()?;
             if !repo_cache.contains_key(&repo_work_dir) {
+                let t_head = std::time::Instant::now();
                 let base_commit = match repo.head() {
                     Ok(head) => match head.target() {
                         Ok(sha) => BaseCommit::Sha(sha),
@@ -77,7 +81,22 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
                     },
                     Err(_) => BaseCommit::Initial,
                 };
+                let head_ms = t_head.elapsed().as_secs_f64() * 1000.0;
+
+                let t_unmerged = std::time::Instant::now();
                 let unmerged_paths = repo.get_unmerged_paths().unwrap_or_default();
+                let unmerged_ms = t_unmerged.elapsed().as_secs_f64() * 1000.0;
+
+                if perf {
+                    eprintln!(
+                        "[perf] build_checkpoint_files: discover={:.1}ms head={:.1}ms unmerged={:.1}ms (repo={})",
+                        t_discover.elapsed().as_secs_f64() * 1000.0,
+                        head_ms,
+                        unmerged_ms,
+                        repo_work_dir.display(),
+                    );
+                }
+
                 let key = repo_work_dir.clone();
                 repo_cache.insert(
                     key,
@@ -95,7 +114,16 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
             continue;
         }
 
+        let t_read = std::time::Instant::now();
         let content = fs::read_to_string(path).ok();
+        if perf {
+            eprintln!(
+                "[perf] build_checkpoint_files: read_file={:.1}ms (path={}, size={})",
+                t_read.elapsed().as_secs_f64() * 1000.0,
+                path.display(),
+                content.as_ref().map(|c| c.len()).unwrap_or(0),
+            );
+        }
 
         files.push(CheckpointFile {
             path: path.clone(),
@@ -112,13 +140,35 @@ pub fn execute_preset_checkpoint(
     preset_name: &str,
     hook_input: &str,
 ) -> Result<Vec<CheckpointRequest>, GitAiError> {
+    let perf = std::env::var("GIT_AI_DEBUG_PERFORMANCE").is_ok_and(|v| !v.is_empty() && v != "0");
+    let t0 = std::time::Instant::now();
+
     let trace_id = generate_trace_id();
     let preset = super::presets::resolve_preset(preset_name)?;
     let events = preset.parse(hook_input, &trace_id)?;
 
+    if perf {
+        eprintln!(
+            "[perf] orchestrator: parse={:.1}ms (events={})",
+            t0.elapsed().as_secs_f64() * 1000.0,
+            events.len(),
+        );
+    }
+
     let mut requests = Vec::new();
     for event in events {
-        requests.extend(execute_event(event, preset_name)?);
+        let t_event = std::time::Instant::now();
+        let event_name = format!("{:?}", std::mem::discriminant(&event));
+        let new_requests = execute_event(event, preset_name)?;
+        if perf {
+            eprintln!(
+                "[perf] orchestrator: execute_event({})={:.1}ms (requests={})",
+                event_name,
+                t_event.elapsed().as_secs_f64() * 1000.0,
+                new_requests.len(),
+            );
+        }
+        requests.extend(new_requests);
     }
     Ok(requests)
 }

@@ -17,6 +17,13 @@ use std::io::IsTerminal;
 use std::io::Read;
 
 pub fn handle_git_ai(args: &[String]) {
+    let perf_entry =
+        if std::env::var("GIT_AI_DEBUG_PERFORMANCE").is_ok_and(|v| !v.is_empty() && v != "0") {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+
     if args.is_empty() {
         print_help();
         return;
@@ -107,6 +114,12 @@ pub fn handle_git_ai(args: &[String]) {
             commands::show::handle_show(&args[1..]);
         }
         "checkpoint" => {
+            if let Some(t) = perf_entry {
+                eprintln!(
+                    "[perf] checkpoint: entry_overhead={:.1}ms (binary startup + clap + dispatch)",
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
+            }
             handle_checkpoint(&args[1..]);
         }
         "log" => {
@@ -284,6 +297,9 @@ fn print_help() {
 }
 
 fn handle_checkpoint(args: &[String]) {
+    let perf = std::env::var("GIT_AI_DEBUG_PERFORMANCE").is_ok_and(|v| !v.is_empty() && v != "0");
+    let t0 = std::time::Instant::now();
+
     let mut hook_input = None;
     let mut i = 0;
     while i < args.len() {
@@ -319,6 +335,13 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
+    if perf {
+        eprintln!(
+            "[perf] checkpoint: arg_parse={:.1}ms",
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
     let (preset_name, file_args): (&str, &[String]) = if args.is_empty() {
         ("human", &[])
     } else if args[0] == "--" {
@@ -334,6 +357,14 @@ fn handle_checkpoint(args: &[String]) {
     let effective_hook_input =
         hook_input.unwrap_or_else(|| synthesize_hook_input_from_cli_args(preset_name, file_args));
 
+    if perf {
+        eprintln!(
+            "[perf] checkpoint: synth_hook_input={:.1}ms",
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let t_orchestrator = std::time::Instant::now();
     let requests = match crate::commands::checkpoint_agent::orchestrator::execute_preset_checkpoint(
         preset_name,
         &effective_hook_input,
@@ -344,6 +375,15 @@ fn handle_checkpoint(args: &[String]) {
             std::process::exit(0);
         }
     };
+
+    if perf {
+        eprintln!(
+            "[perf] checkpoint: orchestrator={:.1}ms (requests={}, files={})",
+            t_orchestrator.elapsed().as_secs_f64() * 1000.0,
+            requests.len(),
+            requests.iter().map(|r| r.files.len()).sum::<usize>(),
+        );
+    }
 
     if requests.is_empty() {
         std::process::exit(0);
@@ -361,6 +401,7 @@ fn handle_checkpoint(args: &[String]) {
     // Check repository allowlist before sending to daemon.
     // Skip entirely when no allow/exclude filters are configured (common case)
     // to avoid spawning a `git remote -v` subprocess.
+    let t_allowlist = std::time::Instant::now();
     {
         let config = config::Config::get();
         if config.has_repository_filters() {
@@ -384,9 +425,14 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
-    // The telemetry init (run at handle_git_ai entry) already called
-    // ensure_daemon_running, so the daemon is up. Just resolve the config
-    // without re-probing liveness to avoid redundant socket connects.
+    if perf {
+        eprintln!(
+            "[perf] checkpoint: allowlist={:.1}ms",
+            t_allowlist.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    let t_daemon_config = std::time::Instant::now();
     let daemon_config =
         crate::daemon::DaemonConfig::from_env_or_default_paths().map_err(|e| e.to_string());
 
@@ -398,12 +444,20 @@ fn handle_checkpoint(args: &[String]) {
         }
     };
 
+    if perf {
+        eprintln!(
+            "[perf] checkpoint: daemon_config={:.1}ms",
+            t_daemon_config.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
     // In debug builds (tests + dev), wait for the daemon response so
     // checkpoints are persisted before the caller proceeds. In release
     // builds (production), fire-and-forget to minimize CLI latency.
     let wait_for_response = cfg!(debug_assertions);
 
     for request in requests {
+        let t_send = std::time::Instant::now();
         let control_request = ControlRequest::CheckpointRun {
             request: Box::new(request),
         };
@@ -416,10 +470,24 @@ fn handle_checkpoint(args: &[String]) {
                 &control_request,
             )
         };
+        if perf {
+            eprintln!(
+                "[perf] checkpoint: ipc_send={:.1}ms (fire_and_forget={})",
+                t_send.elapsed().as_secs_f64() * 1000.0,
+                !wait_for_response,
+            );
+        }
         if let Err(e) = send_result {
             eprintln!("Failed to send checkpoint to background worker: {}", e);
             std::process::exit(0);
         }
+    }
+
+    if perf {
+        eprintln!(
+            "[perf] checkpoint: total={:.1}ms",
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
     }
 }
 
