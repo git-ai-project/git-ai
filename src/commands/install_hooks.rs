@@ -823,16 +823,24 @@ fn warn_if_git_version_too_old() {
         if v < (maj, min, patch) {
             let (vmaj, vmin, vpatch) = v;
             eprintln!();
-            eprintln!("\x1b[1;31m╔══════════════════════════════════════════════════════════════╗\x1b[0m");
-            eprintln!("\x1b[1;31m║  WARNING: git version too old — git-ai will not work          ║\x1b[0m");
-            eprintln!("\x1b[1;31m╚══════════════════════════════════════════════════════════════╝\x1b[0m");
+            eprintln!(
+                "\x1b[1;31m╔══════════════════════════════════════════════════════════════╗\x1b[0m"
+            );
+            eprintln!(
+                "\x1b[1;31m║  WARNING: git version too old — git-ai will not work         ║\x1b[0m"
+            );
+            eprintln!(
+                "\x1b[1;31m╚══════════════════════════════════════════════════════════════╝\x1b[0m"
+            );
             eprintln!(
                 "\x1b[1;31mDetected git {}.{}.{} — git-ai requires git >= {}.{}.{}\x1b[0m",
                 vmaj, vmin, vpatch, maj, min, patch
             );
             eprintln!("\x1b[33mPlease upgrade git before using git-ai:\x1b[0m");
             eprintln!("  macOS:   brew install git");
-            eprintln!("  Ubuntu:  sudo add-apt-repository ppa:git-core/ppa && sudo apt-get update && sudo apt-get install git");
+            eprintln!(
+                "  Ubuntu:  sudo add-apt-repository ppa:git-core/ppa && sudo apt-get update && sudo apt-get install git"
+            );
             eprintln!("  Windows: https://git-scm.com/download/win");
             eprintln!();
         }
@@ -1253,10 +1261,7 @@ mod tests {
 
     #[test]
     fn parse_git_version_standard() {
-        assert_eq!(
-            parse_git_version("git version 2.39.1"),
-            Some((2, 39, 1))
-        );
+        assert_eq!(parse_git_version("git version 2.39.1"), Some((2, 39, 1)));
     }
 
     #[test]
@@ -1269,27 +1274,18 @@ mod tests {
 
     #[test]
     fn parse_git_version_no_patch() {
-        assert_eq!(
-            parse_git_version("git version 2.22"),
-            Some((2, 22, 0))
-        );
+        assert_eq!(parse_git_version("git version 2.22"), Some((2, 22, 0)));
     }
 
     #[test]
     fn parse_git_version_old() {
-        assert_eq!(
-            parse_git_version("git version 2.17.1"),
-            Some((2, 17, 1))
-        );
+        assert_eq!(parse_git_version("git version 2.17.1"), Some((2, 17, 1)));
         assert!(parse_git_version("git version 2.17.1").unwrap() < MIN_GIT_VERSION);
     }
 
     #[test]
     fn parse_git_version_at_minimum() {
-        assert_eq!(
-            parse_git_version("git version 2.22.0"),
-            Some((2, 22, 0))
-        );
+        assert_eq!(parse_git_version("git version 2.22.0"), Some((2, 22, 0)));
         assert!(parse_git_version("git version 2.22.0").unwrap() >= MIN_GIT_VERSION);
     }
 
