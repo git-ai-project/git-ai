@@ -174,6 +174,9 @@ pub fn handle_config(args: &[String]) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
+            if key == "feature_flags.transcript_streaming" {
+                println!("Run `git-ai bg restart` for changes to take effect.");
+            }
         }
         "unset" => {
             if filtered_args.len() < 2 {

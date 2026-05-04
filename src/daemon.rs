@@ -8274,25 +8274,30 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     coordinator_inner.telemetry_worker = Some(telemetry_handle.clone());
 
     // Spawn the transcript worker BEFORE wrapping coordinator in Arc
-    let transcripts_db_path = config.internal_dir.join("transcripts-db");
-    match crate::transcripts::db::TranscriptsDatabase::open(&transcripts_db_path) {
-        Ok(transcripts_db) => {
-            let transcripts_db = std::sync::Arc::new(transcripts_db);
-            let shutdown_notify = Arc::new(tokio::sync::Notify::new());
-            let transcript_handle = crate::daemon::transcript_worker::spawn_transcript_worker(
-                transcripts_db.clone(),
-                telemetry_handle.clone(),
-                shutdown_notify.clone(),
-            );
-            coordinator_inner.transcripts_db = Some(transcripts_db);
-            coordinator_inner.transcript_worker = Some(transcript_handle);
-            let _ = coordinator_inner
-                .transcript_shutdown_notify
-                .set(shutdown_notify);
-            tracing::info!("transcript worker spawned");
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to open transcripts database, transcript worker not started");
+    if config::Config::get()
+        .get_feature_flags()
+        .transcript_streaming
+    {
+        let transcripts_db_path = config.internal_dir.join("transcripts-db");
+        match crate::transcripts::db::TranscriptsDatabase::open(&transcripts_db_path) {
+            Ok(transcripts_db) => {
+                let transcripts_db = std::sync::Arc::new(transcripts_db);
+                let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+                let transcript_handle = crate::daemon::transcript_worker::spawn_transcript_worker(
+                    transcripts_db.clone(),
+                    telemetry_handle.clone(),
+                    shutdown_notify.clone(),
+                );
+                coordinator_inner.transcripts_db = Some(transcripts_db);
+                coordinator_inner.transcript_worker = Some(transcript_handle);
+                let _ = coordinator_inner
+                    .transcript_shutdown_notify
+                    .set(shutdown_notify);
+                tracing::info!("transcript worker spawned");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to open transcripts database, transcript worker not started");
+            }
         }
     }
 

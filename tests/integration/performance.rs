@@ -20,6 +20,7 @@ fn setup() {
         auth_keyring: false,
         git_hooks_enabled: false,
         git_hooks_externally_managed: false,
+        transcript_streaming: true,
     };
 
     git_ai::config::Config::set_test_feature_flags(test_flags.clone());
