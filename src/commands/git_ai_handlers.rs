@@ -53,7 +53,6 @@ pub fn handle_git_ai(args: &[String]) {
             | "install-hooks"
             | "install"
             | "uninstall-hooks"
-            | "checkpoint"
     );
     if needs_daemon {
         use crate::daemon::telemetry_handle::{
