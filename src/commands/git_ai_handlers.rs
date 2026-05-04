@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::IsTerminal;
 use std::io::Read;
-use std::time::Duration;
 
 pub fn handle_git_ai(args: &[String]) {
     if args.is_empty() {
@@ -358,44 +357,37 @@ fn handle_checkpoint(args: &[String]) {
         }
     }
 
-    // Check repository allowlist before sending to daemon
+    // Check repository allowlist before sending to daemon.
+    // Skip entirely when no allow/exclude filters are configured (common case)
+    // to avoid spawning a `git remote -v` subprocess.
     {
         let config = config::Config::get();
-        let mut checked_repos = std::collections::HashSet::new();
-        for request in &requests {
-            for file in &request.files {
-                if checked_repos.insert(file.repo_work_dir.clone())
-                    && let Ok(repo) =
-                        crate::git::repository::discover_repository_in_path_no_git_exec(
-                            &file.repo_work_dir,
-                        )
-                    && !config.is_allowed_repository(&Some(repo))
-                {
-                    eprintln!(
-                        "Skipping checkpoint because repository is excluded or not in allow_repositories list"
-                    );
-                    std::process::exit(0);
+        if config.has_repository_filters() {
+            let mut checked_repos = std::collections::HashSet::new();
+            for request in &requests {
+                for file in &request.files {
+                    if checked_repos.insert(file.repo_work_dir.clone())
+                        && let Ok(repo) =
+                            crate::git::repository::discover_repository_in_path_no_git_exec(
+                                &file.repo_work_dir,
+                            )
+                        && !config.is_allowed_repository(&Some(repo))
+                    {
+                        eprintln!(
+                            "Skipping checkpoint because repository is excluded or not in allow_repositories list"
+                        );
+                        std::process::exit(0);
+                    }
                 }
             }
         }
     }
 
-    let is_test = std::env::var_os("GIT_AI_TEST_DB_PATH").is_some()
-        || std::env::var_os("GITAI_TEST_DB_PATH").is_some();
-    let daemon_timeout = if cfg!(windows) || is_test {
-        Duration::from_secs(10)
-    } else {
-        Duration::from_secs(5)
-    };
-
-    let daemon_config = if is_test
-        && (std::env::var_os("GIT_AI_DAEMON_HOME").is_some()
-            || std::env::var_os("GIT_AI_DAEMON_CONTROL_SOCKET").is_some())
-    {
-        crate::daemon::DaemonConfig::from_env_or_default_paths().map_err(|e| e.to_string())
-    } else {
-        crate::commands::daemon::ensure_daemon_running(daemon_timeout)
-    };
+    // The telemetry init (run at handle_git_ai entry) already called
+    // ensure_daemon_running, so the daemon is up. Just resolve the config
+    // without re-probing liveness to avoid redundant socket connects.
+    let daemon_config =
+        crate::daemon::DaemonConfig::from_env_or_default_paths().map_err(|e| e.to_string());
 
     let config = match daemon_config {
         Ok(c) => c,
@@ -405,13 +397,25 @@ fn handle_checkpoint(args: &[String]) {
         }
     };
 
+    // In debug builds (tests + dev), wait for the daemon response so
+    // checkpoints are persisted before the caller proceeds. In release
+    // builds (production), fire-and-forget to minimize CLI latency.
+    let wait_for_response = cfg!(debug_assertions);
+
     for request in requests {
         let control_request = ControlRequest::CheckpointRun {
             request: Box::new(request),
         };
-        if let Err(e) =
+        let send_result = if wait_for_response {
             crate::daemon::send_control_request(&config.control_socket_path, &control_request)
-        {
+                .map(|_| ())
+        } else {
+            crate::daemon::send_control_request_fire_and_forget(
+                &config.control_socket_path,
+                &control_request,
+            )
+        };
+        if let Err(e) = send_result {
             eprintln!("Failed to send checkpoint to background worker: {}", e);
             std::process::exit(0);
         }

@@ -8587,6 +8587,20 @@ pub fn send_control_request(
     )
 }
 
+pub fn send_control_request_fire_and_forget(
+    socket_path: &Path,
+    request: &ControlRequest,
+) -> Result<(), GitAiError> {
+    let mut stream =
+        open_local_socket_stream_with_timeout(socket_path, DAEMON_CONTROL_CONNECT_TIMEOUT)?;
+    let write_timeout = Duration::from_millis(500);
+    set_daemon_client_stream_timeouts(&mut stream, socket_path, write_timeout)?;
+    let mut body = serde_json::to_vec(request)?;
+    body.push(b'\n');
+    write_all_daemon_client_stream(&mut stream, socket_path, &body)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod transcript_worker_tests;
 

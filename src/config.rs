@@ -208,6 +208,10 @@ impl Config {
         &self.git_path
     }
 
+    pub fn has_repository_filters(&self) -> bool {
+        !self.allow_repositories.is_empty() || !self.exclude_repositories.is_empty()
+    }
+
     pub fn is_allowed_repository(&self, repository: &Option<Repository>) -> bool {
         // Fetch remotes once and reuse for both exclude and allow checks
         let remotes = repository
