@@ -437,7 +437,8 @@ fn handle_tail(args: &[String]) -> Result<(), String> {
         return Err(format!("log file not found: {}", log_path.display()));
     }
 
-    let full = has_flag(args, "--full") || has_flag(args, "-f");
+    let full = has_flag(args, "--full");
+    let follow = has_flag(args, "--follow") || has_flag(args, "-f");
     let lines: usize = parse_number_arg(args, "-n")
         .or_else(|| parse_number_arg(args, "--lines"))
         .unwrap_or(20);
@@ -457,8 +458,11 @@ fn handle_tail(args: &[String]) -> Result<(), String> {
         print_last_n_lines(&file, lines).map_err(|e| e.to_string())?;
     }
 
-    // Tail: poll for new content.
-    tail_file(file).map_err(|e| e.to_string())
+    if follow {
+        tail_file(file).map_err(|e| e.to_string())
+    } else {
+        Ok(())
+    }
 }
 
 fn parse_number_arg(args: &[String], flag: &str) -> Option<usize> {
@@ -494,7 +498,7 @@ fn print_last_n_lines(file: &std::fs::File, n: usize) -> Result<(), std::io::Err
         println!("{}", line);
     }
 
-    // Seek to end for tailing.
+    // Seek to end so tail_file can pick up from here.
     f.seek(SeekFrom::End(0))?;
     Ok(())
 }
@@ -699,5 +703,5 @@ fn print_help() {
     eprintln!("  git-ai bg status [--repo <path>]");
     eprintln!("  git-ai bg shutdown [--hard]");
     eprintln!("  git-ai bg restart [--hard]");
-    eprintln!("  git-ai bg tail [-n <lines>] [--full]");
+    eprintln!("  git-ai bg tail [-n <lines>] [--full] [-f | --follow]");
 }
