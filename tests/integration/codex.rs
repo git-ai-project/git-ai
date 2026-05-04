@@ -226,6 +226,22 @@ fn test_codex_commit_inside_bash_inflight_is_attributed_to_codex() {
     )
     .unwrap();
 
+    let post_hook_input = json!({
+        "session_id": "codex-bash-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "bash-use-commit",
+        "tool_input": {
+            "command": "python - <<'PY'\nprint('commit from codex bash')\nPY"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("post-hook checkpoint should succeed");
+
     let commit = repo
         .stage_all_and_commit("Apply codex bash refactor")
         .expect("commit should succeed");
@@ -290,6 +306,23 @@ fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai() {
         .expect("pre-hook checkpoint should succeed");
 
     readme.set_contents(crate::lines!["Project README", "Updated by Codex".ai()]);
+
+    let post_hook_input = json!({
+        "session_id": "codex-bash-append-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "bash-use-append-commit",
+        "tool_input": {
+            "command": "git add README.md && git commit -m 'Codex append proof'"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("post-hook checkpoint should succeed");
+
     repo.stage_all_and_commit("Codex append proof")
         .expect("Codex append commit should succeed");
 
@@ -324,6 +357,28 @@ fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai() {
         "Updated by Codex".ai(),
         "Updated again by Codex".ai(),
     ]);
+
+    let second_post_hook_input = json!({
+        "session_id": "codex-bash-append-session-2",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "bash-use-append-commit-2",
+        "tool_input": {
+            "command": "git add README.md && git commit -m 'Codex append proof 2'"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&[
+        "checkpoint",
+        "codex",
+        "--hook-input",
+        &second_post_hook_input,
+    ])
+    .expect("second post-hook checkpoint should succeed");
+
     repo.stage_all_and_commit("Codex append proof 2")
         .expect("second Codex append commit should succeed");
 
@@ -352,12 +407,6 @@ fn test_codex_file_edit_then_bash_pretooluse_does_not_steal_ai_commit_attributio
     let transcript_path = repo_root.join("codex-bash-status-rollout.jsonl");
     fs::copy(&simple_fixture, &transcript_path).unwrap();
 
-    fs::write(
-        repo_root.join("README.md"),
-        "Project README\nUpdated by live Codex proof\n",
-    )
-    .unwrap();
-
     let pre_hook_input = json!({
         "session_id": "codex-status-session",
         "cwd": repo_root.to_string_lossy().to_string(),
@@ -365,7 +414,7 @@ fn test_codex_file_edit_then_bash_pretooluse_does_not_steal_ai_commit_attributio
         "tool_name": "Bash",
         "tool_use_id": "bash-use-status",
         "tool_input": {
-            "command": "git status --short -- README.md"
+            "command": "echo 'Updated by live Codex proof' >> README.md"
         },
         "transcript_path": transcript_path.to_string_lossy().to_string()
     })
@@ -373,6 +422,28 @@ fn test_codex_file_edit_then_bash_pretooluse_does_not_steal_ai_commit_attributio
 
     repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
         .expect("pre-hook checkpoint should succeed");
+
+    fs::write(
+        repo_root.join("README.md"),
+        "Project README\nUpdated by live Codex proof\n",
+    )
+    .unwrap();
+
+    let post_hook_input = json!({
+        "session_id": "codex-status-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "bash-use-status",
+        "tool_input": {
+            "command": "echo 'Updated by live Codex proof' >> README.md"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("post-hook checkpoint should succeed");
 
     repo.stage_all_and_commit("Codex status commit")
         .expect("Codex status commit should succeed");
@@ -401,12 +472,6 @@ fn test_codex_file_edit_then_camel_case_bash_pretooluse_does_not_steal_ai_commit
     let transcript_path = repo_root.join("codex-bash-status-rollout-camel.jsonl");
     fs::copy(&simple_fixture, &transcript_path).unwrap();
 
-    fs::write(
-        repo_root.join("README.md"),
-        "Project README\nUpdated by live Codex proof camel\n",
-    )
-    .unwrap();
-
     let pre_hook_input = json!({
         "session_id": "codex-status-session-camel",
         "cwd": repo_root.to_string_lossy().to_string(),
@@ -414,7 +479,7 @@ fn test_codex_file_edit_then_camel_case_bash_pretooluse_does_not_steal_ai_commit
         "toolName": "Bash",
         "toolUseId": "bash-use-status-camel",
         "tool_input": {
-            "command": "git status --short -- README.md"
+            "command": "echo 'Updated by live Codex proof camel' >> README.md"
         },
         "transcript_path": transcript_path.to_string_lossy().to_string()
     })
@@ -422,6 +487,28 @@ fn test_codex_file_edit_then_camel_case_bash_pretooluse_does_not_steal_ai_commit
 
     repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
         .expect("pre-hook checkpoint should succeed");
+
+    fs::write(
+        repo_root.join("README.md"),
+        "Project README\nUpdated by live Codex proof camel\n",
+    )
+    .unwrap();
+
+    let post_hook_input = json!({
+        "session_id": "codex-status-session-camel",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hookEventName": "PostToolUse",
+        "toolName": "Bash",
+        "toolUseId": "bash-use-status-camel",
+        "tool_input": {
+            "command": "echo 'Updated by live Codex proof camel' >> README.md"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("post-hook checkpoint should succeed");
 
     repo.stage_all_and_commit("Codex status camel commit")
         .expect("Codex status camel commit should succeed");
@@ -477,12 +564,6 @@ fn test_codex_read_only_bash_post_tool_use_before_edit_does_not_steal_commit_att
     repo.git_ai(&["checkpoint", "codex", "--hook-input", &which_git_post])
         .expect("read-only post-hook should succeed");
 
-    fs::write(
-        repo_root.join("README.md"),
-        "Project README\nUpdated after read-only bash\n",
-    )
-    .unwrap();
-
     let commit_pre = json!({
         "session_id": "codex-live-readonly-session",
         "cwd": repo_root.to_string_lossy().to_string(),
@@ -497,6 +578,27 @@ fn test_codex_read_only_bash_post_tool_use_before_edit_does_not_steal_commit_att
     .to_string();
     repo.git_ai(&["checkpoint", "codex", "--hook-input", &commit_pre])
         .expect("commit pre-hook should succeed");
+
+    fs::write(
+        repo_root.join("README.md"),
+        "Project README\nUpdated after read-only bash\n",
+    )
+    .unwrap();
+
+    let commit_post = json!({
+        "session_id": "codex-live-readonly-session",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "commit-bash",
+        "tool_input": {
+            "command": "git add README.md && git commit -m \"Codex readonly bash commit\""
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &commit_post])
+        .expect("commit post-hook should succeed");
 
     repo.stage_all_and_commit("Codex readonly bash commit")
         .expect("commit should succeed");
@@ -542,10 +644,25 @@ fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai_standard
     repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook_input])
         .expect("pre-hook checkpoint should succeed");
 
-    readme.set_contents(crate::lines![
-        "Project README".unattributed_human(),
-        "Updated by Codex".unattributed_human()
-    ]);
+    let readme_path = repo_root.join("README.md");
+    fs::write(&readme_path, "Project README\nUpdated by Codex").unwrap();
+
+    let post_hook_input = json!({
+        "session_id": "codex-bash-append-session-sh",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "bash-use-append-commit-sh",
+        "tool_input": {
+            "command": "git add README.md && git commit -m 'Codex append proof'"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&["checkpoint", "codex", "--hook-input", &post_hook_input])
+        .expect("post-hook checkpoint should succeed");
+
     repo.stage_all_and_commit("Codex append proof")
         .expect("Codex append commit should succeed");
 
@@ -575,11 +692,33 @@ fn test_codex_commit_inside_bash_inflight_repeated_append_keeps_file_ai_standard
     ])
     .expect("second pre-hook checkpoint should succeed");
 
-    readme.set_contents(crate::lines![
-        "Project README".unattributed_human(),
-        "Updated by Codex".unattributed_human(),
-        "Updated again by Codex".unattributed_human(),
-    ]);
+    fs::write(
+        &readme_path,
+        "Project README\nUpdated by Codex\nUpdated again by Codex",
+    )
+    .unwrap();
+
+    let second_post_hook_input = json!({
+        "session_id": "codex-bash-append-session-2-sh",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_use_id": "bash-use-append-commit-2-sh",
+        "tool_input": {
+            "command": "git add README.md && git commit -m 'Codex append proof 2'"
+        },
+        "transcript_path": transcript_path.to_string_lossy().to_string()
+    })
+    .to_string();
+
+    repo.git_ai(&[
+        "checkpoint",
+        "codex",
+        "--hook-input",
+        &second_post_hook_input,
+    ])
+    .expect("second post-hook checkpoint should succeed");
+
     repo.stage_all_and_commit("Codex append proof 2")
         .expect("second Codex append commit should succeed");
 
