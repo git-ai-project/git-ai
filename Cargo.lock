@@ -1132,7 +1132,6 @@ dependencies = [
  "unicode-normalization",
  "ureq",
  "url",
- "uuid",
  "windows-sys 0.61.2",
  "winreg",
  "zip",

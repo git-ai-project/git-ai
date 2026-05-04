@@ -3,7 +3,6 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use uuid::Uuid;
 
 use glob::Pattern;
 use serde::{Deserialize, Serialize, Serializer};
@@ -910,7 +909,7 @@ pub fn get_or_create_distinct_id() -> String {
             }
 
             // Generate new UUID
-            let new_id = Uuid::new_v4().to_string();
+            let new_id = crate::uuid::generate_v4();
 
             // Ensure directory exists
             if let Some(parent) = id_path.parent() {
