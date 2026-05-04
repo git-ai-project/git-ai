@@ -978,6 +978,7 @@ pub fn handle_bash_post_tool_use(
                     "hook_timeout_ms": hook_timeout.as_millis(),
                 })),
             );
+            signal_daemon_bash_session_end(session_id, tool_use_id);
             return Ok(BashPostHookResult {
                 action: BashCheckpointAction::HookTimeout,
             });
@@ -1042,6 +1043,7 @@ pub fn handle_bash_post_tool_use(
                 "Pre-snapshot not found in daemon for {}; returning MissingPreSnapshot",
                 invocation_key
             );
+            signal_daemon_bash_session_end(session_id, tool_use_id);
             Ok(BashPostHookResult {
                 action: BashCheckpointAction::MissingPreSnapshot,
             })

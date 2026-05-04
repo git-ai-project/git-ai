@@ -1071,10 +1071,12 @@ fn discover_dirty_files_from_status(cwd: &std::path::Path) -> Vec<String> {
             if line.len() < 4 {
                 return None;
             }
-            let mut file = line[3..].trim();
-            if file.is_empty() {
+            let raw_file = line[3..].trim();
+            if raw_file.is_empty() {
                 return None;
             }
+            let unescaped = crate::utils::unescape_git_path(raw_file);
+            let mut file = unescaped.as_str();
             // Renames show as "old_name -> new_name"; take only the new name
             if let Some(arrow_pos) = file.find(" -> ") {
                 file = &file[arrow_pos + 4..];
