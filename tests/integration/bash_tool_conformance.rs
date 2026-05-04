@@ -6,10 +6,12 @@
 //! orchestration.
 
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::working_log::AgentId;
 use git_ai::commands::checkpoint_agent::bash_tool::{
-    Agent, BashCheckpointAction, HookEvent, StatDiffResult, StatEntry, StatFileType, StatSnapshot,
-    ToolClass, build_gitignore, classify_tool, diff, git_status_fallback, handle_bash_tool,
-    normalize_path, set_daemon_socket_for_test, snapshot,
+    Agent, BashCheckpointAction, BashPostHookResult, StatDiffResult, StatEntry, StatFileType,
+    StatSnapshot, ToolClass, build_gitignore, classify_tool, diff, git_status_fallback,
+    handle_bash_post_tool_use, handle_bash_pre_tool_use_with_context, normalize_path,
+    set_daemon_socket_for_test, snapshot,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -43,6 +45,23 @@ fn add_and_commit(repo: &TestRepo, rel_path: &str, contents: &str, message: &str
 fn repo_root(repo: &TestRepo) -> std::path::PathBuf {
     set_daemon_socket_for_test(repo.daemon_control_socket_path());
     repo.canonical_path()
+}
+
+fn dummy_agent_id() -> AgentId {
+    AgentId {
+        tool: "test".to_string(),
+        id: "test".to_string(),
+        model: String::new(),
+    }
+}
+
+fn pre_hook(root: &std::path::Path, session_id: &str, tool_use_id: &str) {
+    handle_bash_pre_tool_use_with_context(root, session_id, tool_use_id, &dummy_agent_id(), None)
+        .expect("pre-hook should succeed");
+}
+
+fn post_hook(root: &std::path::Path, session_id: &str, tool_use_id: &str) -> BashPostHookResult {
+    handle_bash_post_tool_use(root, session_id, tool_use_id).expect("post-hook should succeed")
 }
 
 // ===========================================================================
@@ -331,13 +350,7 @@ fn test_bash_tool_pre_hook_returns_take_pre_snapshot() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
-    let action = handle_bash_tool(HookEvent::PreToolUse, &root, "sess", "tool1")
-        .expect("handle_bash_tool PreToolUse should succeed");
-
-    assert!(
-        matches!(action.action, BashCheckpointAction::TakePreSnapshot),
-        "PreToolUse should return TakePreSnapshot"
-    );
+    pre_hook(&root, "sess", "tool1");
 }
 
 #[test]
@@ -348,21 +361,14 @@ fn test_bash_tool_post_hook_no_changes() {
     add_and_commit(&repo, "stable.txt", "unchanged", "initial");
 
     // Pre-hook stores the snapshot
-    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "sess", "tool1")
-        .expect("PreToolUse should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
+    pre_hook(&root, "sess", "tool1");
 
     // Post-hook with no changes
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "sess", "tool1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "sess", "tool1");
     assert!(
         matches!(post_action.action, BashCheckpointAction::NoChanges),
         "PostToolUse with no changes should return NoChanges; got {:?}",
         match &post_action.action {
-            BashCheckpointAction::TakePreSnapshot => "TakePreSnapshot",
             BashCheckpointAction::Checkpoint(_) => "Checkpoint",
             BashCheckpointAction::NoChanges => "NoChanges",
             BashCheckpointAction::Fallback => "Fallback",
@@ -378,20 +384,14 @@ fn test_bash_tool_post_hook_detects_changes() {
     add_and_commit(&repo, "target.txt", "before", "initial");
 
     // Pre-hook
-    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "sess", "tool2")
-        .expect("PreToolUse should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
+    pre_hook(&root, "sess", "tool2");
 
     // Mutate between pre and post
     thread::sleep(Duration::from_millis(50));
     write_file(&repo, "target.txt", "after");
 
     // Post-hook
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "sess", "tool2")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "sess", "tool2");
     match &post_action.action {
         BashCheckpointAction::Checkpoint(paths) => {
             assert!(
@@ -403,7 +403,6 @@ fn test_bash_tool_post_hook_detects_changes() {
         other => panic!(
             "Expected Checkpoint, got {:?}",
             match other {
-                BashCheckpointAction::TakePreSnapshot => "TakePreSnapshot",
                 BashCheckpointAction::NoChanges => "NoChanges",
                 BashCheckpointAction::Fallback => "Fallback",
                 BashCheckpointAction::Checkpoint(_) => unreachable!(),
@@ -422,8 +421,7 @@ fn test_bash_tool_post_hook_without_pre_uses_fallback() {
     add_and_commit(&repo, "changed.txt", "original", "initial");
     write_file(&repo, "changed.txt", "modified");
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "sess", "missing-pre")
-        .expect("PostToolUse without pre should succeed via fallback");
+    let post_action = post_hook(&root, "sess", "missing-pre");
 
     // Should be Checkpoint (from git status) or NoChanges, but not panic
     match &post_action.action {
@@ -439,9 +437,6 @@ fn test_bash_tool_post_hook_without_pre_uses_fallback() {
         }
         BashCheckpointAction::Fallback => {
             // Also acceptable — means git status itself failed
-        }
-        BashCheckpointAction::TakePreSnapshot => {
-            panic!("PostToolUse should never return TakePreSnapshot");
         }
     }
 }
@@ -459,15 +454,13 @@ fn test_bash_tool_orchestration_create_file() {
     add_and_commit(&repo, "readme.md", "# Hello", "init");
 
     // Pre-hook
-    handle_bash_tool(HookEvent::PreToolUse, &root, "orch-sess", "orch-tool")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "orch-sess", "orch-tool");
 
     // Simulate bash creating a new file
     write_file(&repo, "generated.rs", "fn main() {}");
 
     // Post-hook
-    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "orch-sess", "orch-tool")
-        .expect("PostToolUse should succeed");
+    let action = post_hook(&root, "orch-sess", "orch-tool");
 
     match &action.action {
         BashCheckpointAction::Checkpoint(paths) => {
@@ -493,13 +486,11 @@ fn test_bash_tool_orchestration_delete_file() {
 
     add_and_commit(&repo, "doomed.txt", "temporary", "initial");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "del-sess", "del-tool")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "del-sess", "del-tool");
 
     fs::remove_file(repo.path().join("doomed.txt")).expect("remove should succeed");
 
-    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "del-sess", "del-tool")
-        .expect("PostToolUse should succeed");
+    let action = post_hook(&root, "del-sess", "del-tool");
 
     // Deletion-only bash call: no changed paths to report.
     assert!(
@@ -516,23 +507,19 @@ fn test_bash_tool_orchestration_multiple_tool_uses() {
     add_and_commit(&repo, "base.txt", "base", "initial");
 
     // First tool use: create file
-    handle_bash_tool(HookEvent::PreToolUse, &root, "multi-sess", "use1")
-        .expect("PreToolUse 1 should succeed");
+    pre_hook(&root, "multi-sess", "use1");
     write_file(&repo, "first.txt", "first");
-    let action1 = handle_bash_tool(HookEvent::PostToolUse, &root, "multi-sess", "use1")
-        .expect("PostToolUse 1 should succeed");
+    let action1 = post_hook(&root, "multi-sess", "use1");
     assert!(
         matches!(action1.action, BashCheckpointAction::Checkpoint(_)),
         "First tool use should produce Checkpoint"
     );
 
     // Second tool use: modify file
-    handle_bash_tool(HookEvent::PreToolUse, &root, "multi-sess", "use2")
-        .expect("PreToolUse 2 should succeed");
+    pre_hook(&root, "multi-sess", "use2");
     thread::sleep(Duration::from_millis(50));
     write_file(&repo, "first.txt", "modified-first");
-    let action2 = handle_bash_tool(HookEvent::PostToolUse, &root, "multi-sess", "use2")
-        .expect("PostToolUse 2 should succeed");
+    let action2 = post_hook(&root, "multi-sess", "use2");
     assert!(
         matches!(action2.action, BashCheckpointAction::Checkpoint(_)),
         "Second tool use should produce Checkpoint"
@@ -1358,8 +1345,7 @@ fn test_post_hook_without_pre_clean_repo_returns_no_changes() {
     add_and_commit(&repo, "clean.txt", "clean", "initial");
     // No PreToolUse, no modifications — git status fallback should find nothing
 
-    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "sess", "missing")
-        .expect("PostToolUse should succeed");
+    let action = post_hook(&root, "sess", "missing");
 
     assert!(
         matches!(
@@ -1380,13 +1366,13 @@ fn test_post_hook_without_pre_clean_repo_returns_no_changes() {
 
 #[test]
 fn test_handle_bash_tool_detects_rename() {
+    use git_ai::commands::checkpoint_agent::bash_tool::diff;
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
     add_and_commit(&repo, "original.txt", "content", "initial");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "rename-sess", "rename-t1")
-        .expect("PreToolUse should succeed");
+    let pre = snapshot(&root, "rename-sess", "rename-t1", None).unwrap();
 
     fs::rename(
         repo.path().join("original.txt"),
@@ -1394,18 +1380,14 @@ fn test_handle_bash_tool_detects_rename() {
     )
     .expect("rename should succeed");
 
-    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "rename-sess", "rename-t1")
-        .expect("PostToolUse should succeed");
-
-    match &action.action {
-        BashCheckpointAction::Checkpoint(paths) => {
-            // Deletions are not tracked; only the new file appears.
-            assert!(
-                paths.iter().any(|p| p.contains("renamed.txt")),
-                "should report created rename target; got {:?}",
-                paths
-            );
-        }
-        _ => panic!("Expected Checkpoint for rename"),
-    }
+    let post = snapshot(&root, "rename-sess", "rename-t2", None).unwrap();
+    let result = diff(&pre, &post);
+    assert!(
+        result
+            .created
+            .iter()
+            .any(|p| p.display().to_string().contains("renamed.txt")),
+        "renamed.txt should appear as created after rename; got created={:?}",
+        result.created,
+    );
 }

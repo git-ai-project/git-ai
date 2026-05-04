@@ -2,20 +2,19 @@
 //!
 //! Verifies that:
 //! - A snapshot walk that exceeds WALK_TIMEOUT returns `Err` immediately.
-//! - A pre-hook walk timeout is swallowed (pre-hook still returns Ok) so the
-//!   user's tool call is not blocked.
+//! - A pre-hook walk timeout propagates as `Err` (orchestrator handles gracefully).
 //! - A post-hook walk timeout returns `BashCheckpointAction::Fallback`.
-//! - A hook-level timeout (the 4 s hard limit) returns `Fallback` at every
-//!   check-point (after daemon query, after snapshot, before capture).
+//! - A hook-level timeout (the 4 s hard limit) returns `Fallback` on the post-hook.
 //!
 //! Timeouts are injected via thread-local overrides so parallel tests in other
 //! modules are never affected.
 
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::working_log::AgentId;
 use git_ai::commands::checkpoint_agent::bash_tool::{
-    BashCheckpointAction, HookEvent, handle_bash_tool, reset_timeout_overrides_for_test,
-    set_daemon_socket_for_test, set_hook_timeout_ms_for_test, set_walk_timeout_ms_for_test,
-    snapshot,
+    BashCheckpointAction, handle_bash_post_tool_use, handle_bash_pre_tool_use_with_context,
+    reset_timeout_overrides_for_test, set_daemon_socket_for_test, set_hook_timeout_ms_for_test,
+    set_walk_timeout_ms_for_test, snapshot,
 };
 use std::fs;
 
@@ -26,6 +25,14 @@ use std::fs;
 fn repo_root(repo: &TestRepo) -> std::path::PathBuf {
     set_daemon_socket_for_test(repo.daemon_control_socket_path());
     repo.canonical_path()
+}
+
+fn dummy_agent_id() -> AgentId {
+    AgentId {
+        tool: "test".to_string(),
+        id: "test".to_string(),
+        model: String::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -64,22 +71,26 @@ fn test_snapshot_walk_timeout_returns_err() {
     );
 }
 
-/// A walk timeout during pre-hook must NOT propagate as Err to the caller —
-/// the hook swallows it so the user's bash tool call is never blocked.
-/// The action is still TakePreSnapshot (no snapshot stored).
+/// A walk timeout during pre-hook propagates as Err — the orchestrator
+/// handles this gracefully by returning Ok(vec![]).
 #[test]
-fn test_pre_hook_walk_timeout_swallows_error() {
+fn test_pre_hook_walk_timeout_returns_err() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
     set_walk_timeout_ms_for_test(0);
-    let result = handle_bash_tool(HookEvent::PreToolUse, &root, "wt-sess", "wt-pre-swallow");
+    let result = handle_bash_pre_tool_use_with_context(
+        &root,
+        "wt-sess",
+        "wt-pre-swallow",
+        &dummy_agent_id(),
+        None,
+    );
     reset_timeout_overrides_for_test();
 
-    let r = result.expect("pre-hook must not return Err even on walk timeout");
     assert!(
-        matches!(r.action, BashCheckpointAction::TakePreSnapshot),
-        "pre-hook walk timeout should yield TakePreSnapshot (no snapshot stored)"
+        result.is_err(),
+        "pre-hook should return Err on walk timeout"
     );
 }
 
@@ -90,14 +101,20 @@ fn test_post_hook_walk_timeout_returns_fallback() {
     let root = repo_root(&repo);
 
     // Successful pre-hook first (no timeout override).
-    handle_bash_tool(HookEvent::PreToolUse, &root, "wt-sess", "wt-post-walk")
-        .expect("pre-hook should succeed");
+    handle_bash_pre_tool_use_with_context(
+        &root,
+        "wt-sess",
+        "wt-post-walk",
+        &dummy_agent_id(),
+        None,
+    )
+    .expect("pre-hook should succeed");
 
     // Write a file so the post-hook has something to snapshot.
     fs::write(root.join("changed.txt"), "new content").expect("file write should succeed");
 
     set_walk_timeout_ms_for_test(0);
-    let result = handle_bash_tool(HookEvent::PostToolUse, &root, "wt-sess", "wt-post-walk");
+    let result = handle_bash_post_tool_use(&root, "wt-sess", "wt-post-walk");
     reset_timeout_overrides_for_test();
 
     let r = result.expect("post-hook must not return Err on walk timeout");
@@ -105,7 +122,6 @@ fn test_post_hook_walk_timeout_returns_fallback() {
         matches!(r.action, BashCheckpointAction::Fallback),
         "post-hook walk timeout should yield Fallback; got action: {:?}",
         match r.action {
-            BashCheckpointAction::TakePreSnapshot => "TakePreSnapshot",
             BashCheckpointAction::NoChanges => "NoChanges",
             BashCheckpointAction::Checkpoint(_) => "Checkpoint",
             BashCheckpointAction::Fallback => "Fallback",
@@ -117,24 +133,6 @@ fn test_post_hook_walk_timeout_returns_fallback() {
 // Hook-level timeout tests (the 4 s hard limit)
 // ---------------------------------------------------------------------------
 
-/// A hook-level timeout during the pre-hook (fires after the daemon query)
-/// must return Fallback rather than proceeding or panicking.
-#[test]
-fn test_pre_hook_hook_timeout_returns_fallback() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-
-    set_hook_timeout_ms_for_test(0);
-    let result = handle_bash_tool(HookEvent::PreToolUse, &root, "ht-sess", "ht-pre");
-    reset_timeout_overrides_for_test();
-
-    let r = result.expect("pre-hook must not return Err on hook timeout");
-    assert!(
-        matches!(r.action, BashCheckpointAction::Fallback),
-        "pre-hook hook timeout should yield Fallback"
-    );
-}
-
 /// A hook-level timeout during the post-hook (fires after load + before
 /// snapshot) must return Fallback.
 #[test]
@@ -142,14 +140,14 @@ fn test_post_hook_hook_timeout_returns_fallback() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
-    // Successful pre-hook so a snapshot file exists on disk.
-    handle_bash_tool(HookEvent::PreToolUse, &root, "ht-sess", "ht-post")
+    // Successful pre-hook so a snapshot exists in the daemon.
+    handle_bash_pre_tool_use_with_context(&root, "ht-sess", "ht-post", &dummy_agent_id(), None)
         .expect("pre-hook should succeed");
 
     fs::write(root.join("ht_changed.txt"), "content").expect("file write should succeed");
 
     set_hook_timeout_ms_for_test(0);
-    let result = handle_bash_tool(HookEvent::PostToolUse, &root, "ht-sess", "ht-post");
+    let result = handle_bash_post_tool_use(&root, "ht-sess", "ht-post");
     reset_timeout_overrides_for_test();
 
     let r = result.expect("post-hook must not return Err on hook timeout");
@@ -172,12 +170,12 @@ fn test_timeout_override_reset_restores_normal_operation() {
     reset_timeout_overrides_for_test();
 
     // Now a normal round-trip should detect a changed file.
-    handle_bash_tool(HookEvent::PreToolUse, &root, "reset-sess", "reset-t1")
+    handle_bash_pre_tool_use_with_context(&root, "reset-sess", "reset-t1", &dummy_agent_id(), None)
         .expect("pre-hook should succeed after reset");
 
     fs::write(root.join("reset_check.txt"), "hello").expect("write should succeed");
 
-    let result = handle_bash_tool(HookEvent::PostToolUse, &root, "reset-sess", "reset-t1")
+    let result = handle_bash_post_tool_use(&root, "reset-sess", "reset-t1")
         .expect("post-hook should succeed after reset");
 
     assert!(

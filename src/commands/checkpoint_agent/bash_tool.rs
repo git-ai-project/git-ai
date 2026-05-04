@@ -35,7 +35,7 @@ const MTIME_GRACE_WINDOW_SECS: u64 = 0;
 /// the snapshot is abandoned (returning Err) and the hook falls back gracefully.
 const WALK_TIMEOUT_MS: u64 = 1500;
 
-/// Hard limit for the entire handle_bash_tool execution.  If this is exceeded
+/// Hard limit for the entire post-hook execution.  If this is exceeded
 /// at any checkpoint, the hook returns Fallback immediately.
 const HOOK_TIMEOUT_MS: u64 = 4000;
 
@@ -262,10 +262,8 @@ impl StatDiffResult {
     }
 }
 
-/// What the bash tool handler decided to do.
+/// What the bash post-hook decided to do.
 pub enum BashCheckpointAction {
-    /// Take a pre-snapshot (PreToolUse).
-    TakePreSnapshot,
     /// Files changed — emit a checkpoint with these paths.
     Checkpoint(Vec<String>),
     /// Stat-diff ran but found nothing.
@@ -274,20 +272,16 @@ pub enum BashCheckpointAction {
     Fallback,
 }
 
-/// Which hook event triggered the bash tool handler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HookEvent {
-    PreToolUse,
-    PostToolUse,
+/// Result from `handle_bash_pre_tool_use_with_context`.
+pub struct BashPreHookResult {
+    /// Files with mtime > watermark at pre-snapshot time (absolute paths).
+    pub dirty_paths: Vec<PathBuf>,
 }
 
-/// Result from `handle_bash_tool`.
-pub struct BashToolResult {
+/// Result from `handle_bash_post_tool_use`.
+pub struct BashPostHookResult {
     /// The checkpoint action.
     pub action: BashCheckpointAction,
-    /// Files with mtime > watermark at pre-snapshot time (absolute paths).
-    /// Populated only by `handle_bash_pre_tool_use_with_context`; empty for post-hook results.
-    pub dirty_paths: Vec<PathBuf>,
 }
 
 /// Per-agent tool classification.
@@ -526,7 +520,7 @@ pub fn snapshot(
     //                without daemon context).
     //
     // Note: the cold-start proxy (git_index_mtime_ns) is injected by
-    // handle_bash_tool when no daemon is running, not here, so direct
+    // handle_bash_pre_tool_use_with_context when no daemon is running, not here, so direct
     // snapshot() callers (e.g. tests, git_status_fallback) are unaffected.
     let effective_worktree_wm: Option<u128> = match wm {
         Some(w) if w.worktree.is_some() => w.worktree,
@@ -891,7 +885,7 @@ fn signal_daemon_bash_session_end(session_id: &str, tool_use_id: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// handle_bash_tool() — main orchestration
+// Pre/post hook orchestration
 // ---------------------------------------------------------------------------
 
 /// Handle the pre-tool-use hook with full agent context.
@@ -904,7 +898,7 @@ pub fn handle_bash_pre_tool_use_with_context(
     tool_use_id: &str,
     agent_id: &AgentId,
     agent_metadata: Option<&HashMap<String, String>>,
-) -> Result<BashToolResult, GitAiError> {
+) -> Result<BashPreHookResult, GitAiError> {
     let repo_working_dir = repo_root.to_string_lossy().to_string();
 
     let wm = query_daemon_watermarks(&repo_working_dir).or_else(|| {
@@ -932,30 +926,24 @@ pub fn handle_bash_pre_tool_use_with_context(
 
     send_control_request(&socket, &request)?;
 
-    Ok(BashToolResult {
-        action: BashCheckpointAction::TakePreSnapshot,
-        dirty_paths,
-    })
+    Ok(BashPreHookResult { dirty_paths })
 }
 
-/// Handle a bash tool invocation (both pre and post hooks).
+/// Handle the post-tool-use hook for a bash tool invocation.
 ///
-/// On `PreToolUse`: takes a pre-snapshot and sends it to the daemon.
-/// On `PostToolUse`: queries the daemon for the pre-snapshot, takes a
-/// post-snapshot, diffs them, signals `BashSessionEnd`, and returns
+/// Queries the daemon for the pre-snapshot (stored during `BashSessionStart`),
+/// takes a post-snapshot, diffs them, signals `BashSessionEnd`, and returns
 /// the list of changed files.
-pub fn handle_bash_tool(
-    hook_event: HookEvent,
+pub fn handle_bash_post_tool_use(
     repo_root: &Path,
     session_id: &str,
     tool_use_id: &str,
-) -> Result<BashToolResult, GitAiError> {
+) -> Result<BashPostHookResult, GitAiError> {
     let invocation_key = format!("{}:{}", session_id, tool_use_id);
 
     let hook_start = Instant::now();
     let hook_timeout = Duration::from_millis(effective_hook_timeout_ms());
 
-    /// Log a hook timeout event to both stderr and telemetry, then return Fallback.
     macro_rules! hook_timeout_fallback {
         ($label:expr) => {{
             let elapsed_ms = hook_start.elapsed().as_millis();
@@ -973,137 +961,73 @@ pub fn handle_bash_tool(
                     "hook_timeout_ms": hook_timeout.as_millis(),
                 })),
             );
-            return Ok(BashToolResult {
+            return Ok(BashPostHookResult {
                 action: BashCheckpointAction::Fallback,
-                dirty_paths: vec![],
             });
         }};
     }
 
-    match hook_event {
-        HookEvent::PreToolUse => {
-            // For uncontexted pre-hooks (no agent identity), take a snapshot
-            // and send it to the daemon. The agent identity will be unknown.
-            let repo_working_dir = repo_root.to_string_lossy().to_string();
-            let wm = query_daemon_watermarks(&repo_working_dir);
+    let pre_snapshot = query_daemon_bash_snapshot(session_id, tool_use_id);
 
+    match pre_snapshot {
+        Some(pre) => {
             if hook_start.elapsed() >= hook_timeout {
-                hook_timeout_fallback!("pre-hook after daemon query");
+                hook_timeout_fallback!("post-hook before snapshot");
             }
 
-            match snapshot(repo_root, session_id, tool_use_id, wm.as_ref()) {
-                Ok(snap) => {
-                    // Send to daemon; if daemon is unavailable, still return
-                    // TakePreSnapshot so the caller knows a pre-hook ran.
-                    if let Some(socket) = effective_daemon_socket() {
-                        let request = ControlRequest::BashSessionStart {
-                            repo_work_dir: repo_working_dir,
-                            session_id: session_id.to_string(),
-                            tool_use_id: tool_use_id.to_string(),
-                            agent_id: AgentId {
-                                tool: "bash-tool".to_string(),
-                                id: session_id.to_string(),
-                                model: String::new(),
-                            },
-                            metadata: HashMap::new(),
-                            stat_snapshot: Box::new(snap),
-                        };
-                        if let Err(e) = send_control_request(&socket, &request) {
-                            tracing::debug!("Failed to send BashSessionStart to daemon: {}", e);
-                        }
-                    }
-
-                    Ok(BashToolResult {
-                        action: BashCheckpointAction::TakePreSnapshot,
-                        dirty_paths: vec![],
+            let post_wm: Option<DaemonWatermarks> =
+                if pre.effective_worktree_wm.is_some() || !pre.per_file_wm.is_empty() {
+                    Some(DaemonWatermarks {
+                        per_file: pre.per_file_wm.clone(),
+                        worktree: pre.effective_worktree_wm,
                     })
+                } else {
+                    None
+                };
+            let result = match snapshot(repo_root, session_id, tool_use_id, post_wm.as_ref()) {
+                Ok(post) => {
+                    let diff_result = diff(&pre, &post);
+
+                    if diff_result.is_empty() {
+                        tracing::debug!("Bash tool {}: no changes detected", invocation_key);
+                        Ok(BashPostHookResult {
+                            action: BashCheckpointAction::NoChanges,
+                        })
+                    } else {
+                        let paths = diff_result.all_changed_paths();
+                        tracing::debug!(
+                            "Bash tool {}: {} files changed ({} created, {} modified)",
+                            invocation_key,
+                            paths.len(),
+                            diff_result.created.len(),
+                            diff_result.modified.len(),
+                        );
+
+                        Ok(BashPostHookResult {
+                            action: BashCheckpointAction::Checkpoint(paths),
+                        })
+                    }
                 }
                 Err(e) => {
-                    tracing::debug!("Pre-snapshot failed: {}; will use fallback on post", e);
-                    Ok(BashToolResult {
-                        action: BashCheckpointAction::TakePreSnapshot,
-                        dirty_paths: vec![],
-                    })
-                }
-            }
-        }
-        HookEvent::PostToolUse => {
-            // Query daemon for the pre-snapshot
-            let pre_snapshot = query_daemon_bash_snapshot(session_id, tool_use_id);
-
-            match pre_snapshot {
-                Some(pre) => {
-                    if hook_start.elapsed() >= hook_timeout {
-                        hook_timeout_fallback!("post-hook before snapshot");
-                    }
-
-                    // Take post-snapshot using the same effective watermark as
-                    // the pre-snapshot so the coverage filter is consistent.
-                    let post_wm: Option<DaemonWatermarks> =
-                        if pre.effective_worktree_wm.is_some() || !pre.per_file_wm.is_empty() {
-                            Some(DaemonWatermarks {
-                                per_file: pre.per_file_wm.clone(),
-                                worktree: pre.effective_worktree_wm,
-                            })
-                        } else {
-                            None
-                        };
-                    let result =
-                        match snapshot(repo_root, session_id, tool_use_id, post_wm.as_ref()) {
-                            Ok(post) => {
-                                let diff_result = diff(&pre, &post);
-
-                                if diff_result.is_empty() {
-                                    tracing::debug!(
-                                        "Bash tool {}: no changes detected",
-                                        invocation_key
-                                    );
-                                    Ok(BashToolResult {
-                                        action: BashCheckpointAction::NoChanges,
-                                        dirty_paths: vec![],
-                                    })
-                                } else {
-                                    let paths = diff_result.all_changed_paths();
-                                    tracing::debug!(
-                                        "Bash tool {}: {} files changed ({} created, {} modified)",
-                                        invocation_key,
-                                        paths.len(),
-                                        diff_result.created.len(),
-                                        diff_result.modified.len(),
-                                    );
-
-                                    Ok(BashToolResult {
-                                        action: BashCheckpointAction::Checkpoint(paths),
-                                        dirty_paths: vec![],
-                                    })
-                                }
-                            }
-                            Err(e) => {
-                                tracing::debug!("Post-snapshot failed: {}; returning fallback", e);
-                                Ok(BashToolResult {
-                                    action: BashCheckpointAction::Fallback,
-                                    dirty_paths: vec![],
-                                })
-                            }
-                        };
-
-                    // Signal end of bash session regardless of diff outcome
-                    signal_daemon_bash_session_end(session_id, tool_use_id);
-
-                    result
-                }
-                None => {
-                    // Pre-snapshot not found in daemon (daemon restart, etc.)
-                    tracing::debug!(
-                        "Pre-snapshot not found in daemon for {}; returning fallback",
-                        invocation_key
-                    );
-                    Ok(BashToolResult {
+                    tracing::debug!("Post-snapshot failed: {}; returning fallback", e);
+                    Ok(BashPostHookResult {
                         action: BashCheckpointAction::Fallback,
-                        dirty_paths: vec![],
                     })
                 }
-            }
+            };
+
+            signal_daemon_bash_session_end(session_id, tool_use_id);
+
+            result
+        }
+        None => {
+            tracing::debug!(
+                "Pre-snapshot not found in daemon for {}; returning fallback",
+                invocation_key
+            );
+            Ok(BashPostHookResult {
+                action: BashCheckpointAction::Fallback,
+            })
         }
     }
 }
