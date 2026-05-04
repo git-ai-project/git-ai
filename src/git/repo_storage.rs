@@ -670,7 +670,16 @@ impl PersistedWorkingLog {
             return Ok(Some(content));
         }
         if initial.files.contains_key(file_path) {
-            return Ok(Some(self.read_current_file_content(file_path)?));
+            // Graceful skip for legacy INITIAL data (pre-March-2026) that lacks file_blobs.
+            // The checkpoint flow sets dirty_files to only the files being checkpointed, but
+            // this function iterates ALL files in INITIAL (including ones not in the current
+            // checkpoint). For those files, read_current_file_content will error since they're
+            // not in dirty_files — returning None is safe because it just means we can't provide
+            // supplementary context for that file's prior state.
+            match self.read_current_file_content(file_path) {
+                Ok(content) => return Ok(Some(content)),
+                Err(_) => return Ok(None),
+            }
         }
         Ok(None)
     }

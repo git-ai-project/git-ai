@@ -1212,3 +1212,108 @@ fn test_checkpoint_stale_crlf_blob_causes_ai_reattribution() {
         test_entry.line_attributions
     );
 }
+
+/// Regression test: legacy INITIAL attributions without stored file_blobs should not
+/// abort checkpoints. When a file is in INITIAL but has no blob and isn't in dirty_files,
+/// initial_file_content_from should gracefully return None instead of erroring.
+#[test]
+fn test_checkpoint_succeeds_with_legacy_initial_missing_blobs() {
+    let repo = TestRepo::new();
+    let file_a = repo.path().join("file_a.txt");
+    let file_b = repo.path().join("file_b.txt");
+
+    // Create both files and commit
+    std::fs::write(&file_a, "line1\nline2\n").unwrap();
+    std::fs::write(&file_b, "hello\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "file_a.txt"])
+        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "file_b.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("initial commit").unwrap();
+
+    // Edit BOTH files and commit (so both end up in INITIAL after reset)
+    std::fs::write(&file_a, "line1\nline2\nai on a\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "file_a.txt"])
+        .unwrap();
+    std::fs::write(&file_b, "hello\nai added\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "file_b.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("second commit with AI on both files")
+        .unwrap();
+
+    repo.git(&["reset", "--soft", "HEAD~1"]).unwrap();
+    repo.sync_daemon_force();
+
+    // Strip file_blobs from INITIAL to simulate legacy data (pre-March-2026)
+    let git_ai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let head_sha = git_ai_repo.head().unwrap().target().unwrap();
+    let working_log = git_ai_repo
+        .storage
+        .working_log_for_base_commit(&head_sha)
+        .unwrap();
+    let initial = working_log.read_initial_attributions();
+    assert!(
+        initial.files.contains_key("file_a.txt"),
+        "INITIAL must contain file_a.txt for this test"
+    );
+    assert!(
+        initial.files.contains_key("file_b.txt"),
+        "INITIAL must contain file_b.txt for this test"
+    );
+
+    let mut legacy_initial = initial.clone();
+    legacy_initial.file_blobs.clear();
+    let json = serde_json::to_string(&legacy_initial).unwrap();
+    std::fs::write(&working_log.initial_file, &json).unwrap();
+
+    // Directly invoke checkpoint daemon logic on file_b only.
+    // dirty_files contains only file_b, but INITIAL references file_a too.
+    // Without the fix, this errors because file_a can't be read from dirty_files.
+    let mut dirty_files = HashMap::new();
+    dirty_files.insert(
+        "file_b.txt".to_string(),
+        "hello\nai added\nnew line\n".to_string(),
+    );
+
+    let resolved = ResolvedCheckpointExecution {
+        base_commit: head_sha.clone(),
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+        files: vec!["file_b.txt".to_string()],
+        dirty_files,
+    };
+
+    let checkpoint_request = CheckpointRequest {
+        trace_id: "test-trace".to_string(),
+        checkpoint_kind: CheckpointKind::AiAgent,
+        agent_id: Some(AgentId {
+            tool: "test".to_string(),
+            id: "test-id".to_string(),
+            model: "test-model".to_string(),
+        }),
+        files: vec![CheckpointFile {
+            path: file_b.clone(),
+            content: Some("hello\nai added\nnew line\n".to_string()),
+            repo_work_dir: repo.path().to_path_buf(),
+            base_commit: BaseCommit::Sha(head_sha),
+        }],
+        path_role: PreparedPathRole::Edited,
+        transcript_source: None,
+        metadata: HashMap::new(),
+    };
+
+    let result = execute_resolved_checkpoint_from_daemon(
+        &git_ai_repo,
+        "test",
+        CheckpointKind::AiAgent,
+        checkpoint_request,
+        resolved,
+    );
+    assert!(
+        result.is_ok(),
+        "Checkpoint should succeed with legacy INITIAL missing blobs, got: {:?}",
+        result.err()
+    );
+}
