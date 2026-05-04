@@ -365,7 +365,10 @@ fn handle_checkpoint(args: &[String]) {
         for request in &requests {
             for file in &request.files {
                 if checked_repos.insert(file.repo_work_dir.clone())
-                    && let Ok(repo) = find_repository_in_path(&file.repo_work_dir.to_string_lossy())
+                    && let Ok(repo) =
+                        crate::git::repository::discover_repository_in_path_no_git_exec(
+                            &file.repo_work_dir,
+                        )
                     && !config.is_allowed_repository(&Some(repo))
                 {
                     eprintln!(

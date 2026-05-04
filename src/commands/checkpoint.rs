@@ -368,6 +368,7 @@ fn resolve_explicit_path_execution(
     explicit_paths: &[String],
     ignore_matcher: &IgnoreMatcher,
     _kind: CheckpointKind,
+    checkpoint_request: Option<&CheckpointRequest>,
 ) -> Result<Option<ResolvedCheckpointExecution>, GitAiError> {
     let repo_workdir = repo.workdir()?;
     let mut candidate_paths = Vec::new();
@@ -396,6 +397,63 @@ fn resolve_explicit_path_execution(
 
     if candidate_paths.is_empty() {
         return Ok(None);
+    }
+
+    // Fast path: when the orchestrator already captured file content for every
+    // file in the CheckpointRequest, we can skip the git-status subprocess
+    // entirely. Unmerged files were already filtered by build_checkpoint_files
+    // upstream. If any file has content: None (binary/unreadable), fall through
+    // to the status-based path which knows how to handle those cases.
+    let all_files_have_content = checkpoint_request
+        .map(|r| r.files.iter().all(|f| f.content.is_some()))
+        .unwrap_or(false);
+    if all_files_have_content && let Some(request) = checkpoint_request {
+        let content_by_path: HashMap<&str, Option<&str>> = request
+            .files
+            .iter()
+            .map(|f| (f.path.to_str().unwrap_or_default(), f.content.as_deref()))
+            .collect();
+
+        let mut files = Vec::new();
+        let mut resolved_dirty_files = HashMap::new();
+
+        for normalized_path in &candidate_paths {
+            let abs_path = if std::path::Path::new(normalized_path.as_str()).is_absolute() {
+                normalized_path.clone()
+            } else {
+                repo_workdir
+                    .join(normalized_path)
+                    .to_string_lossy()
+                    .to_string()
+            };
+
+            if let Some(maybe_content) = content_by_path.get(abs_path.as_str()) {
+                if let Some(content) = maybe_content
+                    && !content.chars().any(|c| c == '\0')
+                {
+                    resolved_dirty_files.insert(normalized_path.clone(), content.to_string());
+                    files.push(normalized_path.clone());
+                }
+            } else {
+                let explicit_dirty_content =
+                    explicit_dirty_file_content_if_text(working_log, normalized_path);
+                if let Some(content) = explicit_dirty_content {
+                    resolved_dirty_files.insert(normalized_path.clone(), content);
+                    files.push(normalized_path.clone());
+                }
+            }
+        }
+
+        return if files.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(ResolvedCheckpointExecution {
+                base_commit: base_commit.to_string(),
+                ts,
+                files,
+                dirty_files: resolved_dirty_files,
+            }))
+        };
     }
 
     let status_pathspecs = candidate_paths.iter().cloned().collect::<HashSet<_>>();
@@ -598,6 +656,7 @@ fn resolve_live_checkpoint_execution(
                 explicit_paths,
                 &ignore_matcher,
                 kind,
+                checkpoint_request,
             )
         } else {
             Ok(None)

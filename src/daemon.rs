@@ -1375,14 +1375,14 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
             .model(&agent_id.model)
             .prompt_id(prompt_id)
             .external_prompt_id(&agent_id.id)
-            .custom_attributes_map(crate::config::Config::fresh().custom_attributes());
+            .custom_attributes_map(crate::config::Config::get().custom_attributes());
 
         let values = crate::metrics::AgentUsageValues::new();
         crate::metrics::record(values, attrs);
     }
 
     let repo_work_dir = &request.files[0].repo_work_dir;
-    let repo = find_repository_in_path(&repo_work_dir.to_string_lossy())?;
+    let repo = discover_repository_in_path_no_git_exec(repo_work_dir)?;
     let author = repo.git_author_identity().formatted_or_unknown();
 
     let _ = crate::commands::checkpoint::run(
