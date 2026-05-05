@@ -7,6 +7,7 @@ mod test_utils;
 // Test modules (one per original test file)
 mod agent_commits_blame;
 mod agent_presets_comprehensive;
+mod agent_usage_repo_url;
 mod agent_v1;
 mod ai_reflow_attribution;
 mod ai_tab;
