@@ -89,12 +89,7 @@ pub fn post_commit_with_final_state(
     let repo_storage = &repo.storage;
     let working_log = repo_storage.working_log_for_base_commit(&parent_sha)?;
 
-    // Refresh prompts/transcripts under the same checkpoints lock used by append_checkpoint so
-    // concurrent checkpoint appends cannot be lost between a read and rewrite of the JSONL file.
-    let parent_working_log = working_log.mutate_all_checkpoints(|checkpoints| {
-        update_prompts_to_latest(checkpoints)?;
-        Ok(())
-    })?;
+    let parent_working_log = working_log.read_all_checkpoints()?;
 
     // Create VirtualAttributions from working log (fast path - no blame)
     // We don't need to run blame because we only care about the working log data
@@ -381,6 +376,7 @@ pub fn count_line_ranges(lines: &[u32]) -> usize {
 /// For each unique prompt/conversation (identified by agent_id), only the LAST checkpoint
 /// with that agent_id is updated. This prevents duplicating the same full transcript
 /// across multiple checkpoints when only the final version matters.
+#[allow(dead_code)]
 fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiError> {
     // Group checkpoints by agent ID (tool + id), tracking indices
     let mut agent_checkpoint_indices: HashMap<String, Vec<usize>> = HashMap::new();

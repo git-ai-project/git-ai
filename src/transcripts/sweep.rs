@@ -86,6 +86,25 @@ pub enum TranscriptFormat {
     PiJsonl,
 }
 
+impl std::fmt::Display for TranscriptFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClaudeJsonl => write!(f, "ClaudeJsonl"),
+            Self::CursorJsonl => write!(f, "CursorJsonl"),
+            Self::DroidJsonl => write!(f, "DroidJsonl"),
+            Self::CopilotSessionJson => write!(f, "CopilotSessionJson"),
+            Self::CopilotEventStreamJsonl => write!(f, "CopilotEventStreamJsonl"),
+            Self::GeminiJsonl => write!(f, "GeminiJsonl"),
+            Self::ContinueJson => write!(f, "ContinueJson"),
+            Self::WindsurfJsonl => write!(f, "WindsurfJsonl"),
+            Self::CodexJsonl => write!(f, "CodexJsonl"),
+            Self::AmpThreadJson => write!(f, "AmpThreadJson"),
+            Self::OpenCodeSqlite => write!(f, "OpenCodeSqlite"),
+            Self::PiJsonl => write!(f, "PiJsonl"),
+        }
+    }
+}
+
 impl TranscriptFormat {
     pub fn watermark_type(self) -> super::watermark::WatermarkType {
         use super::watermark::WatermarkType;

@@ -435,12 +435,23 @@ impl AuthorshipLog {
                     continue;
                 }
 
-                let prompt_record = self
-                    .metadata
-                    .prompts
-                    .get(session_hash)
-                    .ok_or_else(|| format!("Missing prompt record for hash: {}", session_hash))?
-                    .clone();
+                // s_-prefixed hashes are session attestations — look up in sessions map
+                let prompt_record = if session_hash.starts_with("s_") {
+                    let session_key = session_hash.split("::").next().unwrap_or(session_hash);
+                    self.metadata
+                        .sessions
+                        .get(session_key)
+                        .ok_or_else(|| {
+                            format!("Missing session record for hash: {}", session_hash)
+                        })?
+                        .to_prompt_record()
+                } else {
+                    self.metadata
+                        .prompts
+                        .get(session_hash)
+                        .ok_or_else(|| format!("Missing prompt record for hash: {}", session_hash))?
+                        .clone()
+                };
 
                 // Expand ranges to individual lines, then compress to working log format
                 let mut all_lines: Vec<u32> = Vec::new();

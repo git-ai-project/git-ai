@@ -44,23 +44,25 @@ fn open_sqlite_readonly(path: &Path) -> Result<Connection, TranscriptError> {
 
 /// Read messages from the database, returning each row as a complete JSON object
 /// containing all columns (id, session_id, time_created, time_updated, data).
-fn read_session_messages_raw(
+fn read_session_messages_raw_with_limit(
     conn: &Connection,
     session_id: &str,
     after_updated: i64,
+    limit: usize,
 ) -> Result<Vec<(String, i64, serde_json::Value)>, TranscriptError> {
     let mut stmt = conn
         .prepare(
             "SELECT id, session_id, time_created, time_updated, data FROM message \
-             WHERE session_id = ? AND time_updated > ? \
-             ORDER BY time_updated ASC, id ASC",
+             WHERE session_id = ? AND time_updated >= ? \
+             ORDER BY time_updated ASC, id ASC \
+             LIMIT ?",
         )
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to prepare message query: {}", e),
         })?;
 
     let rows = stmt
-        .query_map(rusqlite::params![session_id, after_updated], |row| {
+        .query_map(rusqlite::params![session_id, after_updated, limit], |row| {
             let id: String = row.get(0)?;
             let row_session_id: String = row.get(1)?;
             let time_created: i64 = row.get(2)?;
@@ -112,16 +114,26 @@ fn read_session_messages_raw(
 /// all parts for the entire session. Returns each row as a complete JSON object
 /// containing all columns (id, message_id, session_id, time_created, time_updated, data),
 /// grouped by message_id.
+#[cfg(test)]
 fn read_parts_for_messages(
     conn: &Connection,
     session_id: &str,
     after_updated: i64,
 ) -> Result<HashMap<String, Vec<serde_json::Value>>, TranscriptError> {
+    read_parts_for_messages_with_limit(conn, session_id, after_updated, 1000)
+}
+
+fn read_parts_for_messages_with_limit(
+    conn: &Connection,
+    session_id: &str,
+    after_updated: i64,
+    limit: usize,
+) -> Result<HashMap<String, Vec<serde_json::Value>>, TranscriptError> {
     let mut stmt = conn
         .prepare(
             "SELECT id, message_id, session_id, time_created, time_updated, data FROM part \
              WHERE message_id IN ( \
-                 SELECT id FROM message WHERE session_id = ? AND time_updated > ? \
+                 SELECT id FROM message WHERE session_id = ? AND time_updated >= ? LIMIT ? \
              ) \
              ORDER BY message_id ASC, time_updated ASC, id ASC",
         )
@@ -130,7 +142,7 @@ fn read_parts_for_messages(
         })?;
 
     let rows = stmt
-        .query_map(rusqlite::params![session_id, after_updated], |row| {
+        .query_map(rusqlite::params![session_id, after_updated, limit], |row| {
             let id: String = row.get(0)?;
             let message_id: String = row.get(1)?;
             let row_session_id: String = row.get(2)?;
@@ -229,8 +241,14 @@ impl Agent for OpenCodeAgent {
         // Open SQLite read-only
         let conn = open_sqlite_readonly(path)?;
 
-        // Read messages with time_updated > watermark_millis
-        let messages = read_session_messages_raw(&conn, session_id, watermark_millis)?;
+        // Read messages with time_updated >= watermark_millis (uses >= to avoid skipping
+        // messages sharing the boundary millisecond, with batch LIMIT for memory safety)
+        let messages = read_session_messages_raw_with_limit(
+            &conn,
+            session_id,
+            watermark_millis,
+            self.batch_size,
+        )?;
 
         if messages.is_empty() {
             return Ok(TranscriptBatch {
@@ -240,7 +258,12 @@ impl Agent for OpenCodeAgent {
         }
 
         // Read only parts for the matched messages (IN-subquery, single scan)
-        let mut parts_by_message = read_parts_for_messages(&conn, session_id, watermark_millis)?;
+        let mut parts_by_message = read_parts_for_messages_with_limit(
+            &conn,
+            session_id,
+            watermark_millis,
+            self.batch_size,
+        )?;
 
         let mut max_updated: i64 = watermark_millis;
         let mut events = Vec::with_capacity(messages.len());
@@ -260,8 +283,10 @@ impl Agent for OpenCodeAgent {
             events.push(serde_json::Value::Object(map));
         }
 
+        // Advance watermark 1ms past max_updated to avoid re-reading boundary messages
+        // on the next call (safe because all messages at max_updated are already in the DB)
         let new_watermark_ts =
-            DateTime::from_timestamp_millis(max_updated).unwrap_or(ts_watermark.0);
+            DateTime::from_timestamp_millis(max_updated + 1).unwrap_or(ts_watermark.0);
         let new_watermark = Box::new(TimestampWatermark::new(new_watermark_ts));
 
         Ok(TranscriptBatch {

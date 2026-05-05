@@ -168,9 +168,7 @@ impl TranscriptWorker {
 
     /// Run a sweep across all agents to discover new/behind sessions.
     async fn run_sweep(&mut self) -> Result<(), String> {
-        let sessions = self
-            .sweep_coordinator
-            .run_sweep()
+        let sessions = tokio::task::block_in_place(|| self.sweep_coordinator.run_sweep())
             .map_err(|e| e.to_string())?;
 
         tracing::info!(discovered = sessions.len(), "sweep completed");
@@ -483,8 +481,14 @@ impl TranscriptWorker {
 
             self.in_flight.remove(&task.canonical_path);
 
-            if let Err(e) = result {
-                tracing::error!(error = %e, session_id = %task.session_id, "failed to drain task");
+            match result {
+                Err(e) => {
+                    tracing::error!(error = %e, session_id = %task.session_id, "drain task panicked");
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(error = %e, session_id = %task.session_id, "drain task processing error");
+                }
+                Ok(Ok(())) => {}
             }
         }
     }

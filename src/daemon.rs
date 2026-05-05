@@ -4050,6 +4050,13 @@ impl ActorDaemonCoordinator {
         if let Ok(mut map) = self.queued_trace_payloads_by_root.lock() {
             map.retain(|_, count| *count > 0);
         }
+        // Clean wrapper_states entries older than 60s — these represent wrapper
+        // pre/post states that were never consumed by a matching trace2 event.
+        let stale_threshold_ns = 60_000_000_000u128; // 60 seconds in nanoseconds
+        let now_ns = now_unix_nanos();
+        if let Ok(mut map) = self.wrapper_states.lock() {
+            map.retain(|_, entry| now_ns.saturating_sub(entry.received_at_ns) < stale_threshold_ns);
+        }
     }
 
     fn trace_command_participates_in_family_sequencer(primary_command: Option<&str>) -> bool {
