@@ -344,7 +344,7 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
         },
         Agent::Codex => match tool_name {
             "apply_patch" => ToolClass::FileEdit,
-            "Bash" => ToolClass::Bash,
+            "Bash" | "exec_command" | "shell" | "shell_command" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
         Agent::Pi => match tool_name {
