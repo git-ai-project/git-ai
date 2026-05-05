@@ -140,6 +140,41 @@ pub fn post_commit_with_final_state(
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
+    // No-hooks background agents (Devin, Codex Cloud, etc.) may not fire checkpoints
+    // for all edits. Attribute any committed lines that have no existing attestation
+    // ("holes") to the detected agent, preserving explicit attributions.
+    if !matches!(
+        crate::authorship::background_agent::detect(),
+        crate::authorship::background_agent::BackgroundAgent::None
+            | crate::authorship::background_agent::BackgroundAgent::WithHooks { .. }
+    ) {
+        let diff_base = if parent_sha == "initial" {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        } else {
+            &parent_sha
+        };
+        if let Ok(added_lines) = repo.diff_added_lines(diff_base, &commit_sha, None) {
+            let committed_hunks: HashMap<
+                String,
+                Vec<crate::authorship::authorship_log::LineRange>,
+            > = added_lines
+                .into_iter()
+                .filter(|(_, lines)| !lines.is_empty())
+                .map(|(path, lines)| {
+                    (
+                        path,
+                        crate::authorship::authorship_log::LineRange::compress_lines(&lines),
+                    )
+                })
+                .collect();
+            crate::authorship::background_agent::fill_unattributed_lines(
+                &mut authorship_log,
+                &committed_hunks,
+                &human_author,
+            );
+        }
+    }
+
     // Long-lived daemon processes should read a fresh config snapshot.
     // Always use Config::fresh() to support runtime config updates
     // (especially important for daemon mode, but also good for consistency)

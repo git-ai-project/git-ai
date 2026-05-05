@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 static IS_TERMINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-static IS_IN_BACKGROUND_AGENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Print a git diff in a readable format
 ///
@@ -146,17 +145,10 @@ pub fn is_interactive_terminal() -> bool {
 
 /// Returns true if the process is running inside a background AI agent environment.
 pub fn is_in_background_agent() -> bool {
-    *IS_IN_BACKGROUND_AGENT.get_or_init(|| {
-        // Claude Code remote agent (Anthropic)
-        std::env::var("CLAUDE_CODE_REMOTE").map(|v| v == "true").unwrap_or(false)
-            // Cursor background agent
-            || std::env::var("CURSOR_AGENT").map(|v| v == "1").unwrap_or(false)
-            // Cloud agent environment (CLOUD_AGENT_* prefix)
-            || std::env::vars().any(|(k, _)| k.starts_with("CLOUD_AGENT_"))
-            || std::path::Path::new("/opt/.devin").is_dir()
-            // Explicit opt-in for cloud/background agent environments
-            || std::env::var("GIT_AI_CLOUD_AGENT").map(|v| v == "1").unwrap_or(false)
-    })
+    !matches!(
+        crate::authorship::background_agent::detect(),
+        crate::authorship::background_agent::BackgroundAgent::None
+    )
 }
 
 /// A cross-platform exclusive file lock.
