@@ -240,7 +240,6 @@ fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
         path_role: PreparedPathRole::Edited,
         transcript_source: None,
         metadata: HashMap::new(),
-        is_ai_pre_edit: false,
     };
 
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
@@ -383,7 +382,6 @@ fn test_checkpoint_with_paths_outside_repo() {
         path_role: PreparedPathRole::Edited,
         transcript_source: None,
         metadata: HashMap::new(),
-        is_ai_pre_edit: false,
     };
 
     let result = execute_resolved_checkpoint_from_daemon(
@@ -1304,7 +1302,6 @@ fn test_checkpoint_succeeds_with_legacy_initial_missing_blobs() {
         path_role: PreparedPathRole::Edited,
         transcript_source: None,
         metadata: HashMap::new(),
-        is_ai_pre_edit: false,
     };
 
     let result = execute_resolved_checkpoint_from_daemon(

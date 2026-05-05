@@ -505,7 +505,7 @@ fn test_windsurf_known_human_suppressed_during_pending_ai_edit() {
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     // Step 1: Pre-edit checkpoint via Windsurf preset (pretooluse).
-    // This sets is_ai_pre_edit=true, registering pending AI edit state.
+    // This has agent_id + WillEdit path_role, registering pending AI edit state.
     let pre_hook = json!({
         "trajectory_id": "traj-race-001",
         "agent_action_name": "pre_write_code",

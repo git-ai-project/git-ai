@@ -1918,7 +1918,6 @@ fn build_human_replay_checkpoint_request(
         path_role: PreparedPathRole::WillEdit,
         transcript_source: None,
         metadata: std::collections::HashMap::new(),
-        is_ai_pre_edit: false,
     }
 }
 
@@ -5834,13 +5833,15 @@ impl ActorDaemonCoordinator {
                         .collect();
                     let checkpoint_kind = request.checkpoint_kind;
                     let checkpoint_path_role = request.path_role;
-                    let checkpoint_is_ai_pre_edit = request.is_ai_pre_edit;
+                    let checkpoint_has_agent = request.agent_id.is_some();
                     let checkpoint_kind_str = format!("{:?}", checkpoint_kind);
                     let is_human_checkpoint = checkpoint_kind == CheckpointKind::Human;
 
                     // Register pending AI edit state when an AI agent fires its
                     // pre-edit snapshot. This signals that an AI edit is in-flight.
-                    if checkpoint_is_ai_pre_edit {
+                    // Identified by: WillEdit path_role + agent_id present (only AI
+                    // agent presets have an agent_id on their pre-edit checkpoints).
+                    if checkpoint_path_role == PreparedPathRole::WillEdit && checkpoint_has_agent {
                         self.register_pending_ai_edits(family, &checkpoint_file_paths);
                     }
 
@@ -8951,7 +8952,6 @@ mod tests {
                 path_role: PreparedPathRole::WillEdit,
                 transcript_source: None,
                 metadata: std::collections::HashMap::new(),
-                is_ai_pre_edit: false,
             }),
         }
     }
