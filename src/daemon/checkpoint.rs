@@ -102,7 +102,7 @@ pub fn build_agent_usage_attrs(
         .model(&agent_id.model)
         .prompt_id(prompt_id)
         .external_prompt_id(&agent_id.id)
-        .custom_attributes_map(crate::config::Config::get().custom_attributes());
+        .custom_attributes_map(crate::config::Config::fresh().custom_attributes());
 
     if let Ok(Some(remote_name)) = repo.get_default_remote()
         && let Ok(remotes) = repo.remotes_with_urls()
