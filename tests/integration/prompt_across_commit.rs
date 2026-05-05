@@ -43,21 +43,24 @@ fn test_change_across_commits() {
     let file_attestation = commit.authorship_log.attestations.first().unwrap();
     assert_eq!(file_attestation.entries.len(), 2);
 
-    let second_ai_prompt_hash = commit
-        .authorship_log
-        .metadata
-        .prompts
-        .keys()
-        .next()
-        .unwrap();
-    assert_ne!(*second_ai_prompt_hash, initial_ai_entry.hash);
+    // With sessions format, verify that sessions exist in metadata
+    // Sessions use unique IDs (based on timestamp), so each set_contents/replace_at creates new sessions
+    assert!(
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Should have session records in metadata"
+    );
 
+    // Find the entry for the new AI line (line 6)
     let second_ai_entry = file_attestation
         .entries
         .iter()
-        .find(|e| commit.authorship_log.metadata.prompts.contains_key(&e.hash))
-        .unwrap();
-    assert_eq!(second_ai_entry.line_ranges, vec![LineRange::Single(6)]);
+        .find(|e| {
+            // The new AI line should be at line 6 (after human insertion at line 4)
+            e.line_ranges.contains(&LineRange::Single(6))
+        })
+        .expect("Should find entry for new AI line at line 6");
+
+    // Verify it's a different session than the initial one
     assert_ne!(second_ai_entry.hash, initial_ai_entry.hash);
 }
 
@@ -101,14 +104,14 @@ fn test_change_across_commits_standard_human() {
     let file_attestation = commit.authorship_log.attestations.first().unwrap();
     assert_eq!(file_attestation.entries.len(), 1);
 
-    let second_ai_prompt_hash = commit
+    let second_ai_session_hash = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .keys()
         .next()
         .unwrap();
-    assert_ne!(*second_ai_prompt_hash, initial_ai_entry.hash);
+    assert_ne!(*second_ai_session_hash, initial_ai_entry.hash);
 
     let second_ai_entry = file_attestation.entries.first().unwrap();
     assert_eq!(second_ai_entry.line_ranges, vec![LineRange::Single(6)]);

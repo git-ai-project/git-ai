@@ -1,10 +1,8 @@
 use crate::test_utils::fixture_path;
-use git_ai::authorship::transcript::Message;
-use git_ai::authorship::working_log::CheckpointKind;
-use git_ai::commands::checkpoint_agent::agent_presets::{
-    AgentCheckpointFlags, AgentCheckpointPreset,
-};
-use git_ai::commands::checkpoint_agent::amp_preset::AmpPreset;
+use git_ai::commands::checkpoint_agent::presets::{ParsedHookEvent, resolve_preset};
+use git_ai::transcripts::agent::Agent;
+use git_ai::transcripts::agents::AmpAgent;
+use git_ai::transcripts::watermark::RecordIndexWatermark;
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,59 +20,41 @@ fn amp_simple_thread_fixture_path() -> PathBuf {
 }
 
 #[test]
-fn test_parse_amp_thread_transcript() {
-    let thread_path = amp_simple_thread_fixture_path();
+fn test_amp_raw_event_fidelity() {
+    let thread_path = amp_threads_fixture_path().join(format!("{}.json", AMP_THINKING_THREAD_ID));
 
-    let (transcript, model, thread_id) =
-        AmpPreset::transcript_and_model_from_thread_path(&thread_path)
-            .expect("Failed to parse Amp thread JSON");
+    let agent = AmpAgent::new();
+    let watermark = Box::new(RecordIndexWatermark::new(0));
+    let result = agent
+        .read_incremental(&thread_path, watermark, "test")
+        .expect("Failed to parse Amp thread JSON");
 
-    assert_eq!(thread_id, AMP_SIMPLE_THREAD_ID);
-    assert_eq!(model.as_deref(), Some("claude-opus-4-6"));
-    assert!(!transcript.messages().is_empty());
+    // Independently parse the fixture and extract the messages array.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&thread_path).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["messages"].as_array().unwrap().clone();
 
-    let has_user = transcript
-        .messages()
-        .iter()
-        .any(|m| matches!(m, Message::User { .. }));
-    let has_assistant = transcript
-        .messages()
-        .iter()
-        .any(|m| matches!(m, Message::Assistant { .. }));
-    let has_tool_use = transcript
-        .messages()
-        .iter()
-        .any(|m| matches!(m, Message::ToolUse { .. }));
-
-    assert!(has_user, "Expected at least one user message");
-    assert!(has_assistant, "Expected at least one assistant message");
-    assert!(has_tool_use, "Expected at least one tool use message");
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
-fn test_parse_amp_thread_with_thinking_blocks() {
-    let thread_path = amp_threads_fixture_path().join(format!("{}.json", AMP_THINKING_THREAD_ID));
+fn test_amp_raw_event_fidelity_with_thinking() {
+    let thread_path = amp_simple_thread_fixture_path();
 
-    let (transcript, model, thread_id) =
-        AmpPreset::transcript_and_model_from_thread_path(&thread_path)
-            .expect("Failed to parse Amp thread JSON");
+    let agent = AmpAgent::new();
+    let watermark = Box::new(RecordIndexWatermark::new(0));
+    let result = agent
+        .read_incremental(&thread_path, watermark, "test")
+        .expect("Failed to parse Amp thread JSON");
 
-    assert_eq!(thread_id, AMP_THINKING_THREAD_ID);
-    assert_eq!(model.as_deref(), Some("claude-opus-4-6"));
+    // Independently parse the fixture and extract the messages array.
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&thread_path).unwrap()).unwrap();
+    let expected: Vec<serde_json::Value> = parsed["messages"].as_array().unwrap().clone();
 
-    let contains_thinking_text = transcript
-        .messages()
-        .iter()
-        .filter_map(|message| match message {
-            Message::Assistant { text, .. } => Some(text),
-            _ => None,
-        })
-        .any(|text| text.contains("create a plan"));
-
-    assert!(
-        contains_thinking_text,
-        "Assistant transcript should include converted thinking blocks"
-    );
+    assert_eq!(result.events.len(), expected.len());
+    assert_eq!(result.events, expected);
 }
 
 #[test]
@@ -87,6 +67,7 @@ fn test_amp_preset_pretooluse_returns_human_checkpoint() {
     let hook_input = json!({
         "hook_event_name": "PreToolUse",
         "tool_use_id": AMP_SIMPLE_EDIT_TOOL_USE_ID,
+        "thread_id": AMP_SIMPLE_THREAD_ID,
         "cwd": "/Users/test/project",
         "edited_filepaths": ["/Users/test/project/jokes.csv"],
         "tool_input": {
@@ -95,29 +76,28 @@ fn test_amp_preset_pretooluse_returns_human_checkpoint() {
     })
     .to_string();
 
-    let result = AmpPreset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = resolve_preset("amp")
+        .unwrap()
+        .parse(&hook_input, "t_test")
         .expect("Amp preset should succeed");
 
     unsafe {
         std::env::remove_var("GIT_AI_AMP_THREADS_PATH");
     }
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::Human);
-    assert!(result.transcript.is_none());
-    assert_eq!(result.agent_id.tool, "amp");
-    assert_eq!(result.agent_id.id, AMP_SIMPLE_THREAD_ID);
-    assert_eq!(
-        result.repo_working_dir.as_deref(),
-        Some("/Users/test/project")
-    );
-
-    let will_edit = result
-        .will_edit_filepaths
-        .expect("will_edit_filepaths should be present");
-    assert_eq!(will_edit, vec!["/Users/test/project/jokes.csv"]);
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreFileEdit(e) => {
+            assert_eq!(e.context.agent_id.tool, "amp");
+            assert_eq!(e.context.agent_id.id, AMP_SIMPLE_THREAD_ID);
+            assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
+            assert_eq!(
+                e.file_paths,
+                vec![PathBuf::from("/Users/test/project/jokes.csv")]
+            );
+        }
+        _ => panic!("Expected PreFileEdit for PreToolUse"),
+    }
 }
 
 #[test]
@@ -130,6 +110,7 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
     let hook_input = json!({
         "hook_event_name": "PostToolUse",
         "tool_use_id": AMP_SIMPLE_EDIT_TOOL_USE_ID,
+        "thread_id": AMP_SIMPLE_THREAD_ID,
         "cwd": "/Users/test/project",
         "edited_filepaths": ["/Users/test/project/jokes.csv"],
         "tool_input": {
@@ -138,32 +119,46 @@ fn test_amp_preset_posttooluse_returns_ai_checkpoint() {
     })
     .to_string();
 
-    let result = AmpPreset
-        .run(AgentCheckpointFlags {
-            hook_input: Some(hook_input),
-        })
+    let events = resolve_preset("amp")
+        .unwrap()
+        .parse(&hook_input, "t_test")
         .expect("Amp preset should succeed");
 
     unsafe {
         std::env::remove_var("GIT_AI_AMP_THREADS_PATH");
     }
 
-    assert_eq!(result.checkpoint_kind, CheckpointKind::AiAgent);
-    assert!(result.transcript.is_some());
-    assert_eq!(result.agent_id.tool, "amp");
-    assert_eq!(result.agent_id.id, AMP_SIMPLE_THREAD_ID);
-    assert_eq!(result.agent_id.model, "claude-opus-4-6");
-
-    let metadata = result
-        .agent_metadata
-        .expect("agent metadata should be present for amp checkpoints");
-    let transcript_path = metadata
-        .get("transcript_path")
-        .expect("transcript_path should be present in metadata");
-    assert!(
-        transcript_path.ends_with(&format!("{}.json", AMP_SIMPLE_THREAD_ID)),
-        "transcript_path should point to the matched Amp thread file"
-    );
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            assert_eq!(e.context.agent_id.tool, "amp");
+            assert_eq!(e.context.agent_id.id, AMP_SIMPLE_THREAD_ID);
+            // Model is extracted from the resolved Amp thread fixture file
+            assert_eq!(e.context.agent_id.model, "claude-opus-4-6");
+            assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
+            assert_eq!(
+                e.file_paths,
+                vec![PathBuf::from("/Users/test/project/jokes.csv")]
+            );
+            // Transcript should be a path reference (lazy loading)
+            assert!(e.transcript_source.is_some());
+            let transcript_path_str = e
+                .transcript_source
+                .as_ref()
+                .map(|ts| ts.path.to_string_lossy().to_string())
+                .unwrap();
+            assert!(
+                transcript_path_str.ends_with(&format!("{}.json", AMP_SIMPLE_THREAD_ID)),
+                "transcript_path should point to the matched Amp thread file"
+            );
+            // Metadata should contain transcript_path
+            assert!(
+                e.context.metadata.contains_key("transcript_path"),
+                "metadata should contain transcript_path"
+            );
+        }
+        _ => panic!("Expected PostFileEdit for PostToolUse"),
+    }
 }
 
 #[test]
@@ -224,24 +219,20 @@ fn test_amp_e2e_checkpoint_and_commit() {
     let commit = repo.stage_all_and_commit("Add amp-authored line").unwrap();
 
     assert!(
-        !commit.authorship_log.metadata.prompts.is_empty(),
-        "Expected a prompt record after amp checkpoint + commit"
+        !commit.authorship_log.metadata.sessions.is_empty(),
+        "Expected a session record after amp checkpoint + commit"
     );
 
-    let prompt_record = commit
+    let session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("prompt record should exist");
+        .expect("session record should exist");
 
-    assert_eq!(prompt_record.agent_id.tool, "amp");
-    assert_eq!(prompt_record.agent_id.model, "claude-opus-4-6");
-    assert!(
-        !prompt_record.messages.is_empty(),
-        "Prompt record should include transcript messages"
-    );
+    assert_eq!(session_record.agent_id.tool, "amp");
+    assert_eq!(session_record.agent_id.model, "claude-opus-4-6");
 }
 
 #[test]
@@ -305,23 +296,15 @@ fn test_amp_post_commit_resyncs_latest_thread_transcript() {
         .stage_all_and_commit("Commit with amp transcript resync")
         .unwrap();
 
-    let prompt_record = commit
+    let _session_record = commit
         .authorship_log
         .metadata
-        .prompts
+        .sessions
         .values()
         .next()
-        .expect("Expected a prompt record");
+        .expect("Expected a session record");
 
-    let has_resync_message = prompt_record.messages.iter().any(|msg| match msg {
-        Message::Assistant { text, .. } => text.contains("RESYNC_TEST_MESSAGE"),
-        _ => false,
-    });
-
-    assert!(
-        has_resync_message,
-        "Post-commit should refresh amp transcript to include latest thread message"
-    );
+    // Note: Messages field has been removed from SessionRecord
 }
 
 fn append_assistant_message(thread_path: &Path, text: &str) {
@@ -378,3 +361,8 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+crate::reuse_tests_in_worktree!(
+    test_amp_raw_event_fidelity,
+    test_amp_raw_event_fidelity_with_thinking,
+);

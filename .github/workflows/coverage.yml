@@ -1,29 +1,10 @@
 name: Coverage
 
+# Temporarily disabled: daemon session timeouts under llvm-cov instrumentation
+# cause flaky failures (~50% of runs). Needs retry logic or increased timeouts.
+# See: https://github.com/git-ai-project/git-ai/pull/1178
 on:
-  pull_request:
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'Taskfile.yml'
-      - 'flake.nix'
-      - 'flake.lock'
-      - '.github/workflows/coverage.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'Taskfile.yml'
-      - 'flake.nix'
-      - 'flake.lock'
-      - '.github/workflows/coverage.yml'
-  merge_group:
-    branches: [main]
+  workflow_dispatch:
 
 env:
   CARGO_INCREMENTAL: 0

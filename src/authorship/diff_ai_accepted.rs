@@ -57,19 +57,19 @@ pub fn diff_ai_accepted_stats(
             Err(_) => continue,
         };
 
-        let mut prompt_tool_map: HashMap<String, String> = HashMap::new();
+        let mut author_tool_map: HashMap<String, String> = HashMap::new();
         for (hash, record) in &prompt_records {
             let tool_model = format!("{}::{}", record.agent_id.tool, record.agent_id.model);
-            prompt_tool_map.insert(hash.clone(), tool_model);
+            author_tool_map.insert(hash.clone(), tool_model);
         }
 
         for line in &lines {
-            if let Some(prompt_hash) = line_authors.get(line)
-                && prompt_records.contains_key(prompt_hash)
+            if let Some(author_hash) = line_authors.get(line)
+                && prompt_records.contains_key(author_hash)
             {
                 stats.total_ai_accepted += 1;
-                *stats.per_prompt.entry(prompt_hash.clone()).or_insert(0) += 1;
-                if let Some(tool_model) = prompt_tool_map.get(prompt_hash) {
+                *stats.per_prompt.entry(author_hash.clone()).or_insert(0) += 1;
+                if let Some(tool_model) = author_tool_map.get(author_hash) {
                     *stats.per_tool_model.entry(tool_model.clone()).or_insert(0) += 1;
                 }
             }

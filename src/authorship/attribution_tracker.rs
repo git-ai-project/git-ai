@@ -147,9 +147,6 @@ pub(crate) struct Deletion {
     pub(crate) start: usize,
     /// End position in old content
     pub(crate) end: usize,
-    /// The deleted bytes (may not be valid UTF-8)
-    #[allow(dead_code)]
-    pub(crate) bytes: Vec<u8>,
 }
 
 /// Represents an insertion operation from the diff
@@ -159,9 +156,6 @@ pub(crate) struct Insertion {
     pub(crate) start: usize,
     /// End position in new content
     pub(crate) end: usize,
-    /// The inserted bytes (may not be valid UTF-8)
-    #[allow(dead_code)]
-    pub(crate) bytes: Vec<u8>,
 }
 
 /// Information about a detected move operation
@@ -230,8 +224,6 @@ struct Token {
     lexeme: String,
     start: usize,
     end: usize,
-    #[allow(dead_code)]
-    line: usize,
 }
 
 impl PartialEq for Token {
@@ -484,8 +476,6 @@ impl AttributionTracker {
             new_content,
             (old_start, old_end),
             (new_start, new_end),
-            old_start_line + 1,
-            new_start_line + 1,
         );
 
         computation.diffs.append(&mut hunk_diffs);
@@ -673,7 +663,6 @@ impl AttributionTracker {
                     deletions.push(Deletion {
                         start: old_pos,
                         end: old_pos + len,
-                        bytes: bytes.to_vec(),
                     });
                     old_pos += len;
                 }
@@ -683,7 +672,6 @@ impl AttributionTracker {
                     insertions.push(Insertion {
                         start: new_pos,
                         end: new_pos + len,
-                        bytes: bytes.to_vec(),
                     });
                     new_pos += len;
                 }
@@ -1321,18 +1309,13 @@ fn try_match_multi_char_op(ch: char, peek: Option<char>) -> Option<&'static str>
 }
 
 /// Code-optimized tokenizer that treats syntactic elements as meaningful units
-fn tokenize_non_whitespace(
-    content: &str,
-    range: (usize, usize),
-    starting_line: usize,
-) -> Vec<Token> {
+fn tokenize_non_whitespace(content: &str, range: (usize, usize)) -> Vec<Token> {
     let (start, end) = range;
     if start >= end {
         return Vec::new();
     }
 
     let mut tokens = Vec::new();
-    let mut line = starting_line;
 
     let mut i = start;
     while i < end {
@@ -1342,11 +1325,8 @@ fn tokenize_non_whitespace(
         };
         let ch_len = ch.len_utf8();
 
-        // Skip whitespace (track newlines for line counting)
+        // Skip whitespace
         if ch.is_whitespace() {
-            if ch == '\n' {
-                line += 1;
-            }
             i += ch_len;
             continue;
         }
@@ -1359,7 +1339,6 @@ fn tokenize_non_whitespace(
                 lexeme: op.to_string(),
                 start: i,
                 end: i + op_len,
-                line,
             });
             i += op_len;
             continue;
@@ -1382,10 +1361,6 @@ fn tokenize_non_whitespace(
                 let str_ch_len = str_ch.len_utf8();
                 lexeme.push(str_ch);
 
-                if str_ch == '\n' {
-                    line += 1;
-                }
-
                 if escaped {
                     escaped = false;
                 } else if str_ch == '\\' {
@@ -1402,7 +1377,6 @@ fn tokenize_non_whitespace(
                 lexeme,
                 start: token_start,
                 end: i,
-                line,
             });
             continue;
         }
@@ -1451,7 +1425,6 @@ fn tokenize_non_whitespace(
                         lexeme,
                         start: token_start,
                         end: i,
-                        line,
                     });
                     continue;
                 }
@@ -1489,7 +1462,6 @@ fn tokenize_non_whitespace(
                 lexeme,
                 start: token_start,
                 end: i,
-                line,
             });
             continue;
         }
@@ -1518,7 +1490,6 @@ fn tokenize_non_whitespace(
                 lexeme,
                 start: token_start,
                 end: i,
-                line,
             });
             continue;
         }
@@ -1529,7 +1500,6 @@ fn tokenize_non_whitespace(
                 lexeme: ch.to_string(),
                 start: i,
                 end: i + ch_len,
-                line,
             });
             i += ch_len;
             continue;
@@ -1540,7 +1510,6 @@ fn tokenize_non_whitespace(
             lexeme: ch.to_string(),
             start: i,
             end: i + ch_len,
-            line,
         });
         i += ch_len;
     }
@@ -1584,8 +1553,6 @@ fn build_token_aligned_diffs(
     new_content: &str,
     old_range: (usize, usize),
     new_range: (usize, usize),
-    old_start_line: usize,
-    new_start_line: usize,
 ) -> (Vec<ByteDiff>, Vec<(usize, usize)>) {
     let (old_start, old_end) = old_range;
     let (new_start, new_end) = new_range;
@@ -1593,8 +1560,8 @@ fn build_token_aligned_diffs(
     let mut diffs = Vec::new();
     let mut substantive_ranges = Vec::new();
 
-    let old_tokens = tokenize_non_whitespace(old_content, old_range, old_start_line);
-    let new_tokens = tokenize_non_whitespace(new_content, new_range, new_start_line);
+    let old_tokens = tokenize_non_whitespace(old_content, old_range);
+    let new_tokens = tokenize_non_whitespace(new_content, new_range);
 
     if old_tokens.is_empty() && new_tokens.is_empty() {
         append_range_diffs(

@@ -62,7 +62,6 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
-use uuid::Uuid;
 
 const DETERMINISTIC_GIT_NAME: &str = "Graphite Test";
 const DETERMINISTIC_GIT_EMAIL: &str = "graphite-test@example.com";
@@ -171,7 +170,7 @@ fn new_gt_started_log_path() -> PathBuf {
     std::env::temp_dir().join(format!(
         "git-ai-gt-started-{}-{}.jsonl",
         std::process::id(),
-        Uuid::new_v4()
+        git_ai::uuid::generate_v4()
     ))
 }
 
@@ -312,8 +311,8 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
     }
 
     // In WrapperDaemon mode, the shim's target (git-ai wrapper) needs daemon
-    // socket paths and the config patch (with async_mode: true) to initialize
-    // the telemetry handle and send authoritative wrapper state.
+    // socket paths and the config patch to initialize the telemetry handle
+    // and send authoritative wrapper state.
     if repo.mode() == GitTestMode::WrapperDaemon {
         command.env("GIT_AI_DAEMON_HOME", repo.daemon_home_path());
         command.env(
@@ -333,7 +332,7 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
     command.env("GIT_AI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
     command.env("GITAI_TEST_DB_PATH", repo.test_db_path().to_str().unwrap());
 
-    // Pass config patch (needed for async_mode in wrapper-daemon mode).
+    // Pass config patch (needed for wrapper-daemon mode).
     if let Some(patch) = repo.config_patch_json() {
         command.env("GIT_AI_TEST_CONFIG_PATCH", patch);
     }

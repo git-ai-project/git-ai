@@ -1,6 +1,6 @@
 //! Global daemon telemetry handle for sending events over the control socket.
 //!
-//! When async_mode is enabled, this handle is initialized once on process start
+//! When daemon mode is active, this handle is initialized once on process start
 //! and used by the observability and metrics modules to route events through the
 //! daemon instead of writing to per-PID log files.
 //!
@@ -107,7 +107,7 @@ pub enum DaemonTelemetryInitResult {
 
 /// Initialize the global daemon telemetry handle.
 ///
-/// Should be called once on process start when `async_mode` is enabled.
+/// Should be called once on process start when daemon mode is active.
 /// Attempts to connect to the daemon control socket (starting the daemon if needed)
 /// with a 2-second timeout. The connection is kept open and reused for all
 /// subsequent telemetry and CAS submissions.

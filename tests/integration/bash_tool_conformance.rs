@@ -6,15 +6,16 @@
 //! orchestration.
 
 use crate::repos::test_repo::TestRepo;
+use git_ai::authorship::working_log::AgentId;
 use git_ai::commands::checkpoint_agent::bash_tool::{
-    Agent, BashCheckpointAction, HookEvent, StatDiffResult, StatEntry, StatFileType, StatSnapshot,
-    ToolClass, build_gitignore, classify_tool, cleanup_stale_snapshots, diff, git_status_fallback,
-    handle_bash_tool, load_and_consume_snapshot, normalize_path, save_snapshot, snapshot,
+    Agent, BashCheckpointAction, BashPostHookResult, StatDiffResult, StatEntry, StatFileType,
+    StatSnapshot, ToolClass, build_gitignore, classify_tool, diff, git_status_fallback,
+    handle_bash_post_tool_use, handle_bash_pre_tool_use_with_context, normalize_path,
+    set_daemon_socket_for_test, snapshot,
 };
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -42,7 +43,25 @@ fn add_and_commit(repo: &TestRepo, rel_path: &str, contents: &str, message: &str
 
 /// Canonical repo root path (resolves /tmp -> /private/tmp on macOS).
 fn repo_root(repo: &TestRepo) -> std::path::PathBuf {
+    set_daemon_socket_for_test(repo.daemon_control_socket_path());
     repo.canonical_path()
+}
+
+fn dummy_agent_id() -> AgentId {
+    AgentId {
+        tool: "test".to_string(),
+        id: "test".to_string(),
+        model: String::new(),
+    }
+}
+
+fn pre_hook(root: &std::path::Path, session_id: &str, tool_use_id: &str) {
+    handle_bash_pre_tool_use_with_context(root, session_id, tool_use_id, &dummy_agent_id(), None)
+        .expect("pre-hook should succeed");
+}
+
+fn post_hook(root: &std::path::Path, session_id: &str, tool_use_id: &str) -> BashPostHookResult {
+    handle_bash_post_tool_use(root, session_id, tool_use_id).expect("post-hook should succeed")
 }
 
 // ===========================================================================
@@ -331,13 +350,7 @@ fn test_bash_tool_pre_hook_returns_take_pre_snapshot() {
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
-    let action = handle_bash_tool(HookEvent::PreToolUse, &root, "sess", "tool1")
-        .expect("handle_bash_tool PreToolUse should succeed");
-
-    assert!(
-        matches!(action.action, BashCheckpointAction::TakePreSnapshot),
-        "PreToolUse should return TakePreSnapshot"
-    );
+    pre_hook(&root, "sess", "tool1");
 }
 
 #[test]
@@ -348,25 +361,14 @@ fn test_bash_tool_post_hook_no_changes() {
     add_and_commit(&repo, "stable.txt", "unchanged", "initial");
 
     // Pre-hook stores the snapshot
-    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "sess", "tool1")
-        .expect("PreToolUse should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
+    pre_hook(&root, "sess", "tool1");
 
     // Post-hook with no changes
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "sess", "tool1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "sess", "tool1");
     assert!(
         matches!(post_action.action, BashCheckpointAction::NoChanges),
         "PostToolUse with no changes should return NoChanges; got {:?}",
-        match &post_action.action {
-            BashCheckpointAction::TakePreSnapshot => "TakePreSnapshot",
-            BashCheckpointAction::Checkpoint(_) => "Checkpoint",
-            BashCheckpointAction::NoChanges => "NoChanges",
-            BashCheckpointAction::Fallback => "Fallback",
-        }
+        &post_action.action
     );
 }
 
@@ -378,20 +380,14 @@ fn test_bash_tool_post_hook_detects_changes() {
     add_and_commit(&repo, "target.txt", "before", "initial");
 
     // Pre-hook
-    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "sess", "tool2")
-        .expect("PreToolUse should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
+    pre_hook(&root, "sess", "tool2");
 
     // Mutate between pre and post
     thread::sleep(Duration::from_millis(50));
     write_file(&repo, "target.txt", "after");
 
     // Post-hook
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "sess", "tool2")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "sess", "tool2");
     match &post_action.action {
         BashCheckpointAction::Checkpoint(paths) => {
             assert!(
@@ -400,15 +396,7 @@ fn test_bash_tool_post_hook_detects_changes() {
                 paths
             );
         }
-        other => panic!(
-            "Expected Checkpoint, got {:?}",
-            match other {
-                BashCheckpointAction::TakePreSnapshot => "TakePreSnapshot",
-                BashCheckpointAction::NoChanges => "NoChanges",
-                BashCheckpointAction::Fallback => "Fallback",
-                BashCheckpointAction::Checkpoint(_) => unreachable!(),
-            }
-        ),
+        other => panic!("Expected Checkpoint, got {:?}", other),
     }
 }
 
@@ -422,26 +410,23 @@ fn test_bash_tool_post_hook_without_pre_uses_fallback() {
     add_and_commit(&repo, "changed.txt", "original", "initial");
     write_file(&repo, "changed.txt", "modified");
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "sess", "missing-pre")
-        .expect("PostToolUse without pre should succeed via fallback");
+    let post_action = post_hook(&root, "sess", "missing-pre");
 
-    // Should be Checkpoint (from git status) or NoChanges, but not panic
+    // Without a pre-snapshot, expect MissingPreSnapshot (or possibly Checkpoint
+    // if the daemon happens to have state from a prior run).
     match &post_action.action {
         BashCheckpointAction::Checkpoint(paths) => {
             assert!(
                 paths.iter().any(|p| p.contains("changed.txt")),
-                "Fallback should detect changed.txt via git status; got {:?}",
+                "Should detect changed.txt; got {:?}",
                 paths
             );
         }
-        BashCheckpointAction::NoChanges => {
-            // Acceptable if git status does not report changes (unlikely but possible)
-        }
-        BashCheckpointAction::Fallback => {
-            // Also acceptable — means git status itself failed
-        }
-        BashCheckpointAction::TakePreSnapshot => {
-            panic!("PostToolUse should never return TakePreSnapshot");
+        BashCheckpointAction::NoChanges
+        | BashCheckpointAction::MissingPreSnapshot
+        | BashCheckpointAction::HookTimeout
+        | BashCheckpointAction::SnapshotFailed => {
+            // Acceptable — no pre-snapshot was stored or other failure
         }
     }
 }
@@ -459,15 +444,13 @@ fn test_bash_tool_orchestration_create_file() {
     add_and_commit(&repo, "readme.md", "# Hello", "init");
 
     // Pre-hook
-    handle_bash_tool(HookEvent::PreToolUse, &root, "orch-sess", "orch-tool")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "orch-sess", "orch-tool");
 
     // Simulate bash creating a new file
     write_file(&repo, "generated.rs", "fn main() {}");
 
     // Post-hook
-    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "orch-sess", "orch-tool")
-        .expect("PostToolUse should succeed");
+    let action = post_hook(&root, "orch-sess", "orch-tool");
 
     match &action.action {
         BashCheckpointAction::Checkpoint(paths) => {
@@ -493,13 +476,11 @@ fn test_bash_tool_orchestration_delete_file() {
 
     add_and_commit(&repo, "doomed.txt", "temporary", "initial");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "del-sess", "del-tool")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "del-sess", "del-tool");
 
     fs::remove_file(repo.path().join("doomed.txt")).expect("remove should succeed");
 
-    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "del-sess", "del-tool")
-        .expect("PostToolUse should succeed");
+    let action = post_hook(&root, "del-sess", "del-tool");
 
     // Deletion-only bash call: no changed paths to report.
     assert!(
@@ -516,23 +497,19 @@ fn test_bash_tool_orchestration_multiple_tool_uses() {
     add_and_commit(&repo, "base.txt", "base", "initial");
 
     // First tool use: create file
-    handle_bash_tool(HookEvent::PreToolUse, &root, "multi-sess", "use1")
-        .expect("PreToolUse 1 should succeed");
+    pre_hook(&root, "multi-sess", "use1");
     write_file(&repo, "first.txt", "first");
-    let action1 = handle_bash_tool(HookEvent::PostToolUse, &root, "multi-sess", "use1")
-        .expect("PostToolUse 1 should succeed");
+    let action1 = post_hook(&root, "multi-sess", "use1");
     assert!(
         matches!(action1.action, BashCheckpointAction::Checkpoint(_)),
         "First tool use should produce Checkpoint"
     );
 
     // Second tool use: modify file
-    handle_bash_tool(HookEvent::PreToolUse, &root, "multi-sess", "use2")
-        .expect("PreToolUse 2 should succeed");
+    pre_hook(&root, "multi-sess", "use2");
     thread::sleep(Duration::from_millis(50));
     write_file(&repo, "first.txt", "modified-first");
-    let action2 = handle_bash_tool(HookEvent::PostToolUse, &root, "multi-sess", "use2")
-        .expect("PostToolUse 2 should succeed");
+    let action2 = post_hook(&root, "multi-sess", "use2");
     assert!(
         matches!(action2.action, BashCheckpointAction::Checkpoint(_)),
         "Second tool use should produce Checkpoint"
@@ -629,9 +606,10 @@ fn test_classify_tool_opencode() {
 #[test]
 fn test_classify_tool_codex() {
     assert_eq!(classify_tool(Agent::Codex, "Bash"), ToolClass::Bash);
-    // `apply_patch` is a real Codex edit tool, but today Codex file edits are
-    // handled via Stop rather than PreToolUse/PostToolUse tool hooks.
-    assert_eq!(classify_tool(Agent::Codex, "apply_patch"), ToolClass::Skip);
+    assert_eq!(
+        classify_tool(Agent::Codex, "apply_patch"),
+        ToolClass::FileEdit
+    );
     assert_eq!(classify_tool(Agent::Codex, "unknown"), ToolClass::Skip);
 }
 
@@ -821,17 +799,8 @@ fn test_git_status_fallback_clean_repo() {
 // cleanup_stale_snapshots
 // ===========================================================================
 
-#[test]
-fn test_cleanup_stale_snapshots_does_not_error_on_empty() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-
-    // Make an initial commit so .git directory is valid
-    add_and_commit(&repo, "init.txt", "init", "initial");
-
-    // Should not error even when there are no snapshots
-    cleanup_stale_snapshots(&root).expect("cleanup_stale_snapshots should succeed on empty dir");
-}
+// test_cleanup_stale_snapshots_does_not_error_on_empty was removed:
+// cleanup_stale_snapshots has been deleted from the codebase.
 
 // ===========================================================================
 // normalize_path consistency
@@ -1064,136 +1033,19 @@ fn test_snapshot_nested_gitignore_excludes_matching_new_files() {
 // Snapshot save/load round-trip and snapshot consumption
 // ===========================================================================
 
-#[test]
-fn test_snapshot_save_load_round_trip() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
+// test_snapshot_save_load_round_trip was removed:
+// save_snapshot and load_and_consume_snapshot have been deleted from the codebase.
 
-    add_and_commit(&repo, "tracked.txt", "content", "initial");
-
-    let snap = snapshot(&root, "rt-sess", "rt-tool", None).expect("snapshot should succeed");
-    let entry_count = snap.entries.len();
-    let key = snap.invocation_key.clone();
-
-    save_snapshot(&snap).expect("save_snapshot should succeed");
-
-    // Load and consume — should get the snapshot back
-    let loaded = load_and_consume_snapshot(&root, &key)
-        .expect("load should succeed")
-        .expect("snapshot should exist");
-    assert_eq!(loaded.entries.len(), entry_count);
-    assert_eq!(loaded.invocation_key, key);
-
-    // Second load — should return None (consumed)
-    let second = load_and_consume_snapshot(&root, &key).expect("load should succeed");
-    assert!(
-        second.is_none(),
-        "snapshot should be consumed after first load"
-    );
-}
-
-#[test]
-fn test_gitignore_filtering_through_save_load_round_trip() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-
-    add_and_commit(&repo, ".gitignore", "*.log\n", "add gitignore");
-    add_and_commit(&repo, "base.txt", "base", "initial");
-
-    // Use handle_bash_tool to go through save/load path
-    handle_bash_tool(HookEvent::PreToolUse, &root, "gi-rt", "gi-t1")
-        .expect("PreToolUse should succeed");
-
-    // Create both ignored and non-ignored files
-    write_file(&repo, "output.log", "log data");
-    write_file(&repo, "result.txt", "result data");
-
-    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "gi-rt", "gi-t1")
-        .expect("PostToolUse should succeed");
-
-    match &action.action {
-        BashCheckpointAction::Checkpoint(paths) => {
-            assert!(
-                paths.iter().any(|p| p.contains("result.txt")),
-                "result.txt should be in checkpoint; got {:?}",
-                paths
-            );
-            assert!(
-                !paths.iter().any(|p| p.contains("output.log")),
-                "output.log should be excluded by gitignore after round-trip; got {:?}",
-                paths
-            );
-        }
-        BashCheckpointAction::NoChanges => {
-            panic!("Expected Checkpoint, got NoChanges");
-        }
-        _ => panic!("Expected Checkpoint"),
-    }
-}
+// test_gitignore_filtering_through_save_load_round_trip was removed:
+// save_snapshot and load_and_consume_snapshot have been deleted from the codebase.
+// Gitignore filtering is still tested via the snapshot/diff tests above.
 
 // ===========================================================================
 // Stale snapshot cleanup — actually removes old snapshots
 // ===========================================================================
 
-#[test]
-fn test_cleanup_stale_snapshots_removes_old_files() {
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-    add_and_commit(&repo, "init.txt", "init", "initial");
-
-    // Save a snapshot
-    let snap = snapshot(&root, "stale-sess", "stale-t1", None).expect("snapshot should succeed");
-    save_snapshot(&snap).expect("save should succeed");
-
-    // Manually backdate the snapshot file to be older than SNAPSHOT_STALE_SECS
-    let git_dir = Command::new("git")
-        .args(["rev-parse", "--git-dir"])
-        .current_dir(&root)
-        .output()
-        .expect("git rev-parse should succeed");
-    let git_dir_str = String::from_utf8_lossy(&git_dir.stdout).trim().to_string();
-    let cache_dir = root.join(&git_dir_str).join("ai").join("bash_snapshots");
-
-    // Find the snapshot file and backdate it
-    let entries: Vec<_> = fs::read_dir(&cache_dir)
-        .expect("cache dir should exist")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .collect();
-    assert!(
-        !entries.is_empty(),
-        "should have at least one snapshot file"
-    );
-
-    for entry in &entries {
-        // Set mtime to 10 minutes ago (well past 300s stale threshold)
-        let ten_min_ago = SystemTime::now() - Duration::from_secs(600);
-        filetime::set_file_mtime(
-            entry.path(),
-            filetime::FileTime::from_system_time(ten_min_ago),
-        )
-        .unwrap_or_else(|_| {
-            // filetime crate may not be available; use touch -t as fallback
-            let _ = Command::new("touch")
-                .args(["-t", "202001010000", &entry.path().display().to_string()])
-                .output();
-        });
-    }
-
-    cleanup_stale_snapshots(&root).expect("cleanup should succeed");
-
-    // Verify the files are gone
-    let remaining: Vec<_> = fs::read_dir(&cache_dir)
-        .expect("cache dir should exist")
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .collect();
-    assert!(
-        remaining.is_empty(),
-        "stale snapshot files should be removed; found {:?}",
-        remaining.iter().map(|e| e.path()).collect::<Vec<_>>()
-    );
-}
+// test_cleanup_stale_snapshots_removes_old_files was removed:
+// cleanup_stale_snapshots and save_snapshot have been deleted from the codebase.
 
 // ===========================================================================
 // diff with gitignore=None passes all new files through
@@ -1209,7 +1061,6 @@ fn test_diff_no_gitignore_includes_all_new_files() {
         repo_root: PathBuf::from("/tmp"),
         effective_worktree_wm: None,
         per_file_wm: HashMap::new(),
-        inflight_agent_context: None,
     };
 
     let mut post_entries = HashMap::new();
@@ -1245,7 +1096,6 @@ fn test_diff_no_gitignore_includes_all_new_files() {
         repo_root: PathBuf::from("/tmp"),
         effective_worktree_wm: None,
         per_file_wm: HashMap::new(),
-        inflight_agent_context: None,
     };
 
     let result = diff(&pre, &post);
@@ -1483,17 +1333,16 @@ fn test_post_hook_without_pre_clean_repo_returns_no_changes() {
     let root = repo_root(&repo);
 
     add_and_commit(&repo, "clean.txt", "clean", "initial");
-    // No PreToolUse, no modifications — git status fallback should find nothing
+    // No PreToolUse, no modifications — should get MissingPreSnapshot or NoChanges
 
-    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "sess", "missing")
-        .expect("PostToolUse should succeed");
+    let action = post_hook(&root, "sess", "missing");
 
     assert!(
         matches!(
             action.action,
-            BashCheckpointAction::NoChanges | BashCheckpointAction::Fallback
+            BashCheckpointAction::NoChanges | BashCheckpointAction::MissingPreSnapshot
         ),
-        "Clean repo without pre-snapshot should return NoChanges or Fallback"
+        "Clean repo without pre-snapshot should return NoChanges or MissingPreSnapshot"
     );
 }
 
@@ -1507,13 +1356,13 @@ fn test_post_hook_without_pre_clean_repo_returns_no_changes() {
 
 #[test]
 fn test_handle_bash_tool_detects_rename() {
+    use git_ai::commands::checkpoint_agent::bash_tool::diff;
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
     add_and_commit(&repo, "original.txt", "content", "initial");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "rename-sess", "rename-t1")
-        .expect("PreToolUse should succeed");
+    let pre = snapshot(&root, "rename-sess", "rename-t1", None).unwrap();
 
     fs::rename(
         repo.path().join("original.txt"),
@@ -1521,18 +1370,14 @@ fn test_handle_bash_tool_detects_rename() {
     )
     .expect("rename should succeed");
 
-    let action = handle_bash_tool(HookEvent::PostToolUse, &root, "rename-sess", "rename-t1")
-        .expect("PostToolUse should succeed");
-
-    match &action.action {
-        BashCheckpointAction::Checkpoint(paths) => {
-            // Deletions are not tracked; only the new file appears.
-            assert!(
-                paths.iter().any(|p| p.contains("renamed.txt")),
-                "should report created rename target; got {:?}",
-                paths
-            );
-        }
-        _ => panic!("Expected Checkpoint for rename"),
-    }
+    let post = snapshot(&root, "rename-sess", "rename-t2", None).unwrap();
+    let result = diff(&pre, &post);
+    assert!(
+        result
+            .created
+            .iter()
+            .any(|p| p.display().to_string().contains("renamed.txt")),
+        "renamed.txt should appear as created after rename; got created={:?}",
+        result.created,
+    );
 }

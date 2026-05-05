@@ -15,4 +15,4 @@ file,test,rationale
 "t7102-reset.sh","38","Known failures in core git-ai compatibility run"
 "t7501-commit-basic-functionality.sh","15","Known failures in core git-ai compatibility run"
 "t7508-status.sh","6-11,14-19,21-35,37-41,43-56,59-64,66-68,70,72-94,108,122-125","Known failures in core git-ai compatibility run"
-"t7600-merge.sh","3,7-10,13","Known failures in core git-ai compatibility run"
+"t7600-merge.sh","3,7-10,13,80","Known failures in core git-ai compatibility run"

@@ -1791,8 +1791,8 @@ crate::subdir_test_variants! {
 
         // Check authorship log has AI prompts
         assert!(
-            !commit.authorship_log.metadata.prompts.is_empty(),
-            "Expected AI prompts in authorship log"
+            !commit.authorship_log.metadata.sessions.is_empty(),
+            "Expected sessions in authorship log"
         );
     }
 }
@@ -1838,8 +1838,8 @@ crate::subdir_test_variants! {
 
         // Check authorship log has AI prompts
         assert!(
-            !commit.authorship_log.metadata.prompts.is_empty(),
-            "Expected AI prompts in authorship log"
+            !commit.authorship_log.metadata.sessions.is_empty(),
+            "Expected sessions in authorship log"
         );
     }
 }
@@ -1891,8 +1891,8 @@ crate::subdir_test_variants! {
 
         // Check authorship log has AI prompts
         assert!(
-            !commit.authorship_log.metadata.prompts.is_empty(),
-            "Expected AI prompts in authorship log"
+            !commit.authorship_log.metadata.sessions.is_empty(),
+            "Expected sessions in authorship log"
         );
     }
 }

@@ -1,10 +1,10 @@
 use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::{GitTestMode, TestRepo};
+use crate::repos::test_repo::TestRepo;
 use git_ai::git::refs::get_reference_as_authorship_log_v3;
 use git_ai::git::repository as GitAiRepository;
 
 fn direct_test_repo() -> TestRepo {
-    TestRepo::new_with_mode(GitTestMode::Wrapper)
+    TestRepo::new()
 }
 
 /// Test basic squash merge via CI - AI code from feature branch squashed into main
@@ -224,12 +224,12 @@ fn test_ci_squash_merge_mixed_content() {
     // Verify metadata.humans contains the known human attribution
     let merge_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha).unwrap();
     assert!(
-        merge_log.metadata.humans.contains_key("h_9e95a89b42f1fb"),
-        "squash note should carry h_9e95a89b42f1fb from human-attributed lines in mixed content"
+        merge_log.metadata.humans.contains_key("h_e858f2c2faea28"),
+        "squash note should carry h_e858f2c2faea28 from human-attributed lines in mixed content"
     );
     assert_eq!(
-        merge_log.metadata.humans["h_9e95a89b42f1fb"].author,
-        "Test User"
+        merge_log.metadata.humans["h_e858f2c2faea28"].author,
+        "Test User <test@example.com>"
     );
 
     // Verify mixed authorship is preserved
@@ -407,12 +407,12 @@ fn test_ci_squash_merge_with_manual_changes() {
     // Verify metadata.humans contains the known human attribution
     let merge_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha).unwrap();
     assert!(
-        merge_log.metadata.humans.contains_key("h_9e95a89b42f1fb"),
-        "squash note should carry h_9e95a89b42f1fb from human-attributed lines in config"
+        merge_log.metadata.humans.contains_key("h_e858f2c2faea28"),
+        "squash note should carry h_e858f2c2faea28 from human-attributed lines in config"
     );
     assert_eq!(
-        merge_log.metadata.humans["h_9e95a89b42f1fb"].author,
-        "Test User"
+        merge_log.metadata.humans["h_e858f2c2faea28"].author,
+        "Test User <test@example.com>"
     );
 
     // Verify AI authorship is preserved for AI lines, human for manual additions
@@ -500,12 +500,12 @@ fn test_ci_rebase_merge_multiple_commits() {
     // Verify metadata.humans contains the known human attribution
     let merge_log = get_reference_as_authorship_log_v3(&git_ai_repo, &merge_sha).unwrap();
     assert!(
-        merge_log.metadata.humans.contains_key("h_9e95a89b42f1fb"),
-        "squash note should carry h_9e95a89b42f1fb from human function lines"
+        merge_log.metadata.humans.contains_key("h_e858f2c2faea28"),
+        "squash note should carry h_e858f2c2faea28 from human function lines"
     );
     assert_eq!(
-        merge_log.metadata.humans["h_9e95a89b42f1fb"].author,
-        "Test User"
+        merge_log.metadata.humans["h_e858f2c2faea28"].author,
+        "Test User <test@example.com>"
     );
 
     // Verify all authorship is correctly attributed

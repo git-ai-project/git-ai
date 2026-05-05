@@ -1,7 +1,6 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::attribution_tracker::LineAttribution;
 use git_ai::authorship::authorship_log::PromptRecord;
-use git_ai::authorship::transcript::Message;
 use git_ai::authorship::working_log::AgentId;
 use insta::assert_debug_snapshot;
 use regex::Regex;
@@ -55,13 +54,12 @@ fn test_initial_only_no_blame_data() {
                 model: "test-model".to_string(),
             },
             human_author: None,
-            messages: vec![Message::assistant("Initial attribution".to_string(), None)],
             total_additions: 0,
             total_deletions: 0,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -144,13 +142,12 @@ fn test_initial_wins_overlaps() {
                 model: "override-model".to_string(),
             },
             human_author: None,
-            messages: vec![Message::assistant("Override attribution".to_string(), None)],
             total_additions: 0,
             total_deletions: 0,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -222,13 +219,12 @@ fn test_initial_and_blame_merge() {
                 model: "model1".to_string(),
             },
             human_author: None,
-            messages: vec![Message::assistant("Attribution 123".to_string(), None)],
             total_additions: 0,
             total_deletions: 0,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
     prompts.insert(
@@ -240,13 +236,12 @@ fn test_initial_and_blame_merge() {
                 model: "model2".to_string(),
             },
             human_author: None,
-            messages: vec![Message::assistant("Attribution 456".to_string(), None)],
             total_additions: 0,
             total_deletions: 0,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -311,13 +306,12 @@ fn test_partial_file_coverage() {
                 model: "modelA".to_string(),
             },
             human_author: None,
-            messages: vec![Message::assistant("FileA attribution".to_string(), None)],
             total_additions: 0,
             total_deletions: 0,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 
@@ -397,16 +391,12 @@ fn test_initial_attributions_in_subsequent_checkpoint() {
                 model: "subsequent-model".to_string(),
             },
             human_author: None,
-            messages: vec![Message::assistant(
-                "Subsequent checkpoint attribution".to_string(),
-                None,
-            )],
             total_additions: 0,
             total_deletions: 0,
             accepted_lines: 0,
             overriden_lines: 0,
-            messages_url: None,
             custom_attributes: None,
+            messages_url: None,
         },
     );
 

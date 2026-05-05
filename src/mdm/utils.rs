@@ -11,6 +11,7 @@ use std::process::Command;
 pub const MIN_CURSOR_VERSION: (u32, u32) = (1, 7);
 pub const MIN_CODE_VERSION: (u32, u32) = (1, 99);
 pub const MIN_CLAUDE_VERSION: (u32, u32) = (2, 0);
+pub const MIN_CODEX_VERSION: (u32, u32) = (0, 124);
 
 /// Get version from a binary's --version output
 pub fn get_binary_version(binary: &str) -> Result<String, GitAiError> {
@@ -50,19 +51,26 @@ pub fn get_editor_version(cli: &EditorCliCommand) -> Result<String, GitAiError> 
 /// Parse version string to extract major.minor version
 /// Handles formats like "1.7.38", "1.104.3", "2.0.8 (Claude Code)"
 pub fn parse_version(version_str: &str) -> Option<(u32, u32)> {
-    // Split by whitespace and take the first part (handles "2.0.8 (Claude Code)")
-    let version_part = version_str.split_whitespace().next()?;
+    for token in version_str.split_whitespace() {
+        let version_part = token
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.')
+            .trim_start_matches('v');
 
-    // Split by dots and take first two numbers
-    let parts: Vec<&str> = version_part.split('.').collect();
-    if parts.len() < 2 {
-        return None;
+        let parts: Vec<&str> = version_part.split('.').collect();
+        if parts.len() < 2 {
+            continue;
+        }
+
+        let Ok(major) = parts[0].parse::<u32>() else {
+            continue;
+        };
+        let Ok(minor) = parts[1].parse::<u32>() else {
+            continue;
+        };
+
+        return Some((major, minor));
     }
-
-    let major = parts[0].parse::<u32>().ok()?;
-    let minor = parts[1].parse::<u32>().ok()?;
-
-    Some((major, minor))
+    None
 }
 
 /// Compare version against minimum requirement
