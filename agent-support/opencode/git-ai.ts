@@ -1,23 +1,20 @@
 /**
- * git-ai plugin for OpenCode
+ * git-ai plugin for OpenCode-family agents (OpenCode, Kilo Code, etc.)
  *
- * This plugin integrates git-ai with OpenCode to track AI-generated code.
+ * This plugin integrates git-ai with OpenCode-family agents to track AI-generated code.
  * It uses the tool.execute.before and tool.execute.after events to create
  * checkpoints that mark code changes as human or AI-authored.
  *
  * Installation:
  *   - Automatically installed by `git-ai install-hooks`
- *   - Or manually copy to ~/.config/opencode/plugins/git-ai.ts (global)
- *   - Or to .opencode/plugins/git-ai.ts (project-local)
  *
  * Requirements:
  *   - git-ai must be installed (path is injected at install time)
  *
  * @see https://github.com/git-ai-project/git-ai
- * @see https://opencode.ai/docs/plugins/
  */
 
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin } from "__PLUGIN_PACKAGE__"
 import { dirname, isAbsolute, join } from "path"
 
 // Absolute path to git-ai binary, replaced at install time by `git-ai install-hooks`
@@ -231,7 +228,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
             tool_name: input.tool,
             tool_input: toolInput,
           })
-          await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
+          await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint __CHECKPOINT_PRESET__ --hook-input stdin`.quiet()
         } catch (error) {
           console.error("[git-ai] Failed to create human checkpoint:", String(error))
         }
@@ -254,7 +251,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
             tool_name: input.tool,
             tool_input: toolInput,
           })
-          await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
+          await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint __CHECKPOINT_PRESET__ --hook-input stdin`.quiet()
         } catch (error) {
           console.error("[git-ai] Failed to create human checkpoint:", String(error))
         }
@@ -284,7 +281,7 @@ export const GitAiPlugin: Plugin = async (ctx) => {
           tool_name: input.tool,
           tool_input: toolInput,
         })
-        await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
+        await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint __CHECKPOINT_PRESET__ --hook-input stdin`.quiet()
       } catch (error) {
         console.error("[git-ai] Failed to create AI checkpoint:", String(error))
       }
