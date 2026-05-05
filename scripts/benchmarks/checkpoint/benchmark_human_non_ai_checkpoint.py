@@ -190,7 +190,6 @@ def run_scenario(
     changed_counts: list[int],
     repeats: int,
     keep_repo: bool,
-    inter_commit_move: bool,
 ) -> None:
     tmp_parent = repo_root / "tmp"
     tmp_parent.mkdir(parents=True, exist_ok=True)
@@ -200,8 +199,6 @@ def run_scenario(
 
     try:
         base_env = dict(os.environ)
-        if inter_commit_move:
-            base_env["GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE"] = "true"
         perf_env = {**base_env, "GIT_AI_DEBUG_PERFORMANCE": "2"}
 
         all_results: list[RunResult] = []
@@ -308,11 +305,6 @@ def main() -> None:
         action="store_true",
         help="Keep generated benchmark repository under ./tmp for inspection.",
     )
-    parser.add_argument(
-        "--inter-commit-move",
-        action="store_true",
-        help="Enable inter-commit move feature flag (adds git blame work per file).",
-    )
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[3]
@@ -323,7 +315,7 @@ def main() -> None:
     print(
         "scenario: human checkpoints on non-AI-changed files "
         f"(total_files={args.total_files}, ai_seed_files={args.ai_seed_files}, "
-        f"repeats={args.repeats}, inter_commit_move={args.inter_commit_move})"
+        f"repeats={args.repeats})"
     )
     run_scenario(
         repo_root=repo_root,
@@ -333,7 +325,7 @@ def main() -> None:
         changed_counts=changed_counts,
         repeats=args.repeats,
         keep_repo=args.keep_repo,
-        inter_commit_move=args.inter_commit_move,
+
     )
 
 

@@ -388,7 +388,6 @@ GITOGEOF
               let
                 knownFlags = filterAttrs (n: v: v != null) {
                   rewrite_stash = cfg.settings.featureFlags.rewriteStash;
-                  checkpoint_inter_commit_move = cfg.settings.featureFlags.interCommitMove;
                   auth_keyring = cfg.settings.featureFlags.authKeyring;
                   git_hooks_enabled = cfg.settings.featureFlags.gitHooksEnabled;
                   git_hooks_externally_managed = cfg.settings.featureFlags.gitHooksExternallyManaged;
@@ -569,14 +568,6 @@ GITOGEOF
                   '';
                 };
 
-                interCommitMove = mkOption {
-                  type = types.nullOr types.bool;
-                  default = null;
-                  description = ''
-                    Enable checkpoint inter-commit move tracking.
-                  '';
-                };
-
                 authKeyring = mkOption {
                   type = types.nullOr types.bool;
                   default = null;
@@ -683,7 +674,6 @@ GITOGEOF
               let
                 knownFlags = filterAttrs (n: v: v != null) {
                   rewrite_stash = cfg.settings.featureFlags.rewriteStash;
-                  checkpoint_inter_commit_move = cfg.settings.featureFlags.interCommitMove;
                   auth_keyring = cfg.settings.featureFlags.authKeyring;
                   git_hooks_enabled = cfg.settings.featureFlags.gitHooksEnabled;
                   git_hooks_externally_managed = cfg.settings.featureFlags.gitHooksExternallyManaged;
@@ -848,14 +838,6 @@ GITOGEOF
                   description = ''
                     Enable stash rewriting for improved AI tracking of stash
                     operations.
-                  '';
-                };
-
-                interCommitMove = mkOption {
-                  type = types.nullOr types.bool;
-                  default = null;
-                  description = ''
-                    Enable checkpoint inter-commit move tracking.
                   '';
                 };
 
