@@ -17,6 +17,9 @@ const AI_AUTHOR_NAMES: &[&str] = &[
     "amp",
     "windsurf",
     "devin",
+    "cloud-agent",
+    "codex-cloud",
+    "git-ai-cloud-agent",
 ];
 
 #[derive(Debug, Clone, PartialEq)]

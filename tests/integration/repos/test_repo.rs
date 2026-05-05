@@ -204,6 +204,15 @@ impl DaemonProcess {
     }
 
     fn start(repo_path: &Path, test_home: &Path, test_db_path: &Path) -> Self {
+        Self::start_with_env(repo_path, test_home, test_db_path, &[])
+    }
+
+    fn start_with_env(
+        repo_path: &Path,
+        test_home: &Path,
+        test_db_path: &Path,
+        extra_env: &[(&str, &str)],
+    ) -> Self {
         let control_socket_path = Self::control_socket_path_for_home(test_home);
         let trace_socket_path = Self::trace_socket_path_for_home(test_home);
         let stderr_log_path = test_home
@@ -240,6 +249,9 @@ impl DaemonProcess {
                     .try_clone()
                     .expect("failed to clone daemon stderr log file"),
             );
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
         configure_test_home_env(&mut command, test_home);
 
         let mut child = command
@@ -1240,6 +1252,50 @@ impl TestRepo {
         repo.setup_daemon_mode();
         repo.setup_git_hooks_mode();
 
+        repo
+    }
+
+    pub fn new_with_daemon_env(daemon_env: &[(&str, &str)]) -> Self {
+        ensure_isolated_process_home();
+
+        let mut rng = rand::rng();
+        let n: u64 = rng.random_range(0..10000000000);
+        let base = std::env::temp_dir();
+        let path = base.join(n.to_string());
+        let test_home = base.join(format!("{}-home", n));
+        let git_mode = GitTestMode::from_env();
+        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
+
+        clone_template_to(&path);
+
+        let mut repo = Self {
+            path,
+            feature_flags: FeatureFlags::default(),
+            config_patch: None,
+            test_db_path,
+            test_home,
+            git_mode,
+            daemon_scope: DaemonTestScope::Dedicated,
+            daemon_process: None,
+            _base_repo_path: None,
+            _base_test_db_path: None,
+            daemon_family_key: OnceLock::new(),
+        };
+
+        repo.apply_default_config_patch();
+
+        // Start a dedicated daemon with extra env vars
+        let daemon = Arc::new(DaemonProcess::start_with_env(
+            &repo.path,
+            &repo.test_home,
+            &repo.test_db_path,
+            daemon_env,
+        ));
+        repo.test_db_path = daemon.test_db_path.clone();
+        repo.daemon_process = Some(daemon);
+        repo.sync_test_home_config_for_hooks();
+
+        repo.setup_git_hooks_mode();
         repo
     }
 
