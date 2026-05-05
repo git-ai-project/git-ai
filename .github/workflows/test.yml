@@ -29,38 +29,27 @@ on:
     branches: [main]
 
 jobs:
+  compute-matrix:
+    name: Compute test matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - id: set-matrix
+        run: |
+          if [ "${{ github.event_name }}" = "merge_group" ]; then
+            echo 'matrix={"include":[{"os":"ubuntu-latest","test_mode":"daemon","test_threads":4,"daemon_pool":4},{"os":"ubuntu-latest","test_mode":"wrapper-daemon","test_threads":4,"daemon_pool":4},{"os":"macos-latest","test_mode":"daemon","test_threads":2,"daemon_pool":2},{"os":"macos-latest","test_mode":"wrapper-daemon","test_threads":2,"daemon_pool":2}]}' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"include":[{"os":"ubuntu-latest","test_mode":"daemon","test_threads":4,"daemon_pool":4},{"os":"ubuntu-latest","test_mode":"wrapper-daemon","test_threads":4,"daemon_pool":4},{"os":"windows-latest","test_mode":"daemon","test_threads":4,"daemon_pool":4},{"os":"windows-latest","test_mode":"wrapper-daemon","test_threads":4,"daemon_pool":4},{"os":"macos-latest","test_mode":"daemon","test_threads":2,"daemon_pool":2},{"os":"macos-latest","test_mode":"wrapper-daemon","test_threads":2,"daemon_pool":2}]}' >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: Test on ${{ matrix.os }} (${{ matrix.test_mode }})
-    if: ${{ !(startsWith(matrix.os, 'windows') && github.event_name == 'merge_group') }}
+    needs: compute-matrix
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            test_mode: daemon
-            test_threads: 4
-            daemon_pool: 4
-          - os: ubuntu-latest
-            test_mode: wrapper-daemon
-            test_threads: 4
-            daemon_pool: 4
-          - os: windows-latest
-            test_mode: daemon
-            test_threads: 4
-            daemon_pool: 4
-          - os: windows-latest
-            test_mode: wrapper-daemon
-            test_threads: 4
-            daemon_pool: 4
-          - os: macos-latest
-            test_mode: daemon
-            test_threads: 2
-            daemon_pool: 2
-          - os: macos-latest
-            test_mode: wrapper-daemon
-            test_threads: 2
-            daemon_pool: 2
+      matrix: ${{ fromJSON(needs.compute-matrix.outputs.matrix) }}
 
     steps:
       - name: Checkout code
