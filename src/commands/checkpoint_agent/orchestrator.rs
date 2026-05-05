@@ -156,7 +156,11 @@ fn build_checkpoint_files(file_paths: &[PathBuf]) -> Result<Vec<CheckpointFile>,
         }
 
         let t_read = std::time::Instant::now();
-        let content = fs::read_to_string(path).ok();
+        let content = if path.exists() {
+            fs::read_to_string(path).ok()
+        } else {
+            Some(String::new())
+        };
         if perf {
             eprintln!(
                 "[perf] build_checkpoint_files: read_file={:.1}ms (path={}, size={})",

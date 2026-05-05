@@ -1317,3 +1317,83 @@ fn test_checkpoint_succeeds_with_legacy_initial_missing_blobs() {
         result.err()
     );
 }
+
+/// When an AI agent deletes a file, the checkpoint should still be recorded (not silently
+/// dropped). The scoped post-edit checkpoint fires with the deleted file's path — the file
+/// no longer exists on disk, so the orchestrator must set content = Some("") and pass it
+/// through to the daemon so the deletion is tracked in the working log.
+#[test]
+fn test_scoped_checkpoint_records_file_deletion() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("to_delete.txt");
+
+    // Create file and commit with known human attribution
+    std::fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "to_delete.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("initial commit").unwrap();
+
+    // AI agent pre-edit snapshot (captures before state)
+    repo.git_ai(&["checkpoint", "human", "to_delete.txt"])
+        .unwrap();
+
+    // AI deletes the file
+    std::fs::remove_file(&file_path).unwrap();
+
+    // AI agent post-edit checkpoint on the now-deleted file
+    let checkpoint_result = repo.git_ai(&["checkpoint", "mock_ai", "to_delete.txt"]);
+    assert!(
+        checkpoint_result.is_ok(),
+        "Checkpoint on deleted file should succeed, got: {:?}",
+        checkpoint_result.err()
+    );
+
+    // Verify the checkpoint was recorded in the working log with deletion stats
+    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let head_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit(&head_sha)
+        .unwrap();
+    let checkpoints = working_log.read_all_checkpoints().unwrap();
+
+    // The AI post-edit checkpoint should be recorded (human pre-edit is a no-op since
+    // the file hadn't changed relative to HEAD at that point)
+    assert!(
+        !checkpoints.is_empty(),
+        "At least one checkpoint should be recorded for the deletion"
+    );
+
+    // The AI checkpoint should reference to_delete.txt and record 3 deleted lines
+    let ai_checkpoint = checkpoints
+        .iter()
+        .find(|cp| cp.kind.is_ai())
+        .expect("Should have an AI checkpoint");
+    assert!(
+        ai_checkpoint.kind.is_ai(),
+        "Last checkpoint should be AI, got {:?}",
+        ai_checkpoint.kind
+    );
+    let has_file = ai_checkpoint
+        .entries
+        .iter()
+        .any(|e| e.file == "to_delete.txt");
+    assert!(
+        has_file,
+        "AI checkpoint should reference to_delete.txt, entries: {:?}",
+        ai_checkpoint
+            .entries
+            .iter()
+            .map(|e| &e.file)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ai_checkpoint.line_stats.deletions, 3,
+        "AI checkpoint should record 3 deleted lines, got {}",
+        ai_checkpoint.line_stats.deletions
+    );
+}
