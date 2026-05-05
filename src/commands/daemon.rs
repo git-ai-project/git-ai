@@ -188,13 +188,33 @@ fn handle_run(args: &[String]) -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|e| e.to_string())?;
-    runtime
+    let exit_action = runtime
         .block_on(async move { crate::daemon::run_daemon(config).await })
         .map_err(|e| e.to_string())?;
 
-    // Daemon is fully dead (lock released, sockets removed, threads joined).
-    // Now safe to self-update — install.sh can start a fresh daemon.
-    crate::daemon::daemon_run_pending_self_update();
+    match exit_action {
+        crate::daemon::DaemonExitAction::Stop => {}
+        crate::daemon::DaemonExitAction::Restart => {
+            ensure_daemon_running(Duration::from_secs(5)).map(|_| ())?;
+        }
+        crate::daemon::DaemonExitAction::RestartAfterUpdate => {
+            // Daemon is fully dead (lock released, sockets removed, threads joined).
+            // Now safe to self-update — if the install cannot proceed, bring the
+            // daemon back so a failed update does not leave the service down.
+            match crate::daemon::daemon_run_pending_self_update() {
+                crate::daemon::DaemonSelfUpdateOutcome::Installed => {
+                    #[cfg(not(windows))]
+                    {
+                        ensure_daemon_running(Duration::from_secs(5)).map(|_| ())?;
+                    }
+                }
+                crate::daemon::DaemonSelfUpdateOutcome::NoUpdate
+                | crate::daemon::DaemonSelfUpdateOutcome::Failed => {
+                    ensure_daemon_running(Duration::from_secs(5)).map(|_| ())?;
+                }
+            }
+        }
+    }
 
     Ok(())
 }

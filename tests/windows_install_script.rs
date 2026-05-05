@@ -432,3 +432,29 @@ fn windows_git_extension_upgrade_requires_direct_git_ai_binary() {
         combined
     );
 }
+
+#[test]
+fn windows_install_script_does_not_shadow_reserved_pid_variable() {
+    let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
+    assert!(
+        !script.contains("foreach ($pid in $pids)"),
+        "install.ps1 should not iterate with the reserved $PID variable name"
+    );
+    assert!(
+        script.contains("foreach ($managedPid in $pids)"),
+        "install.ps1 should use a non-reserved loop variable for managed process ids"
+    );
+}
+
+#[test]
+fn windows_install_script_gates_daemon_restart_to_self_update() {
+    let script = fs::read_to_string(install_script_path()).expect("failed to read install.ps1");
+    assert!(
+        script.contains("GIT_AI_RESTART_DAEMON_AFTER_INSTALL"),
+        "install.ps1 should only restart the daemon when the self-update env flag is set"
+    );
+    assert!(
+        script.contains("Start-DaemonIfRequested"),
+        "install.ps1 should funnel daemon restart attempts through the gated helper"
+    );
+}
