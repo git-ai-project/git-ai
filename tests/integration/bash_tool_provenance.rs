@@ -1248,15 +1248,15 @@ fn test_bash_provenance_mv_directory_rename() {
 
     let pre = snapshot(&root, "mvdir-sess", "mvdir-t1", None).unwrap();
 
-    run_bash(&repo, "mv", &["src", "lib"]);
+    std::fs::rename(root.join("src"), root.join("lib")).unwrap();
 
     let post = snapshot(&root, "mvdir-sess", "mvdir-t2", None).unwrap();
     let result = diff(&pre, &post);
     assert!(
-        result
-            .created
-            .iter()
-            .any(|p| p.display().to_string().contains("lib/lib.rs")),
+        result.created.iter().any(|p| p
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains("lib/lib.rs")),
         "lib/lib.rs should appear as created after directory rename; got created={:?}",
         result.created,
     );
