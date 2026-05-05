@@ -386,7 +386,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
         files,
         e.context.trace_id,
         CheckpointKind::Human,
-        Some(e.context.agent_id),
+        None,
         PreparedPathRole::WillEdit,
         None,
         metadata,
