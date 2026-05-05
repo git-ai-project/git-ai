@@ -79,7 +79,6 @@ macro_rules! define_feature_flags {
 // Format: struct_field: file_and_env_name, debug = <bool>, release = <bool>
 define_feature_flags!(
     rewrite_stash: rewrite_stash, debug = true, release = true,
-    inter_commit_move: checkpoint_inter_commit_move, debug = false, release = false,
     auth_keyring: auth_keyring, debug = false, release = false,
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
@@ -94,7 +93,7 @@ impl FeatureFlags {
 
     /// Build FeatureFlags from environment variables
     /// Reads from GIT_AI_* prefixed environment variables
-    /// Example: GIT_AI_REWRITE_STASH=true, GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE=false
+    /// Example: GIT_AI_REWRITE_STASH=true, GIT_AI_AUTH_KEYRING=false
     /// Falls back to defaults for any invalid or missing values
     #[allow(dead_code)]
     pub fn from_env() -> Self {
@@ -135,7 +134,6 @@ mod tests {
         #[cfg(debug_assertions)]
         {
             assert!(flags.rewrite_stash);
-            assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
@@ -144,7 +142,6 @@ mod tests {
         #[cfg(not(debug_assertions))]
         {
             assert!(flags.rewrite_stash);
-            assert!(!flags.inter_commit_move);
             assert!(!flags.auth_keyring);
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
@@ -156,14 +153,12 @@ mod tests {
     fn test_from_deserializable() {
         let deserializable = DeserializableFeatureFlags {
             rewrite_stash: Some(false),
-            checkpoint_inter_commit_move: Some(false),
             auth_keyring: Some(true),
             ..Default::default()
         };
 
         let flags = FeatureFlags::from_deserializable(deserializable);
         assert!(!flags.rewrite_stash);
-        assert!(!flags.inter_commit_move);
         assert!(flags.auth_keyring);
     }
 
@@ -173,14 +168,12 @@ mod tests {
         // No file flags, env should be empty
         unsafe {
             std::env::remove_var("GIT_AI_REWRITE_STASH");
-            std::env::remove_var("GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE");
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
         }
 
         let flags = FeatureFlags::from_env_and_file(None);
         let defaults = FeatureFlags::default();
         assert_eq!(flags.rewrite_stash, defaults.rewrite_stash);
-        assert_eq!(flags.inter_commit_move, defaults.inter_commit_move);
         assert_eq!(flags.auth_keyring, defaults.auth_keyring);
     }
 
@@ -189,7 +182,6 @@ mod tests {
     fn test_from_env_and_file_file_overrides() {
         unsafe {
             std::env::remove_var("GIT_AI_REWRITE_STASH");
-            std::env::remove_var("GIT_AI_CHECKPOINT_INTER_COMMIT_MOVE");
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
         }
 
@@ -208,7 +200,6 @@ mod tests {
     fn test_serialization() {
         let flags = FeatureFlags {
             rewrite_stash: true,
-            inter_commit_move: false,
             auth_keyring: true,
             git_hooks_enabled: false,
             git_hooks_externally_managed: false,
@@ -217,7 +208,6 @@ mod tests {
 
         let serialized = serde_json::to_string(&flags).unwrap();
         assert!(serialized.contains("rewrite_stash"));
-        assert!(serialized.contains("inter_commit_move"));
         assert!(serialized.contains("auth_keyring"));
         assert!(serialized.contains("git_hooks_enabled"));
         assert!(serialized.contains("git_hooks_externally_managed"));
@@ -228,7 +218,6 @@ mod tests {
     fn test_clone_trait() {
         let flags = FeatureFlags {
             rewrite_stash: true,
-            inter_commit_move: false,
             auth_keyring: true,
             git_hooks_enabled: true,
             git_hooks_externally_managed: false,
@@ -236,7 +225,6 @@ mod tests {
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
-        assert_eq!(cloned.inter_commit_move, flags.inter_commit_move);
         assert_eq!(cloned.auth_keyring, flags.auth_keyring);
         assert_eq!(cloned.git_hooks_enabled, flags.git_hooks_enabled);
         assert_eq!(
