@@ -595,10 +595,10 @@
   resolved "https://registry.yarnpkg.com/@types/sarif/-/sarif-2.1.7.tgz#dab4d16ba7568e9846c454a8764f33c5d98e5524"
   integrity sha512-kRz0VEkJqWLf1LLVN4pT1cg1Z9wAuvI6L97V3m2f5B76Tg8d413ddvLBPTEHAZJlnn4XSvu0FkZtViCQGVyrXQ==
 
-"@types/vscode@1.116.0":
-  version "1.116.0"
-  resolved "https://registry.yarnpkg.com/@types/vscode/-/vscode-1.116.0.tgz#88e90907200b5d2776a2ebfae5fb791833193d79"
-  integrity sha512-sYHp4MO6BqJ2PD7Hjt0hlIS3tMaYsVPJrd0RUjDJ8HtOYnyJIEej0bLSccM8rE77WrC+Xox/kdBwEFDO8MsxNA==
+"@types/vscode@1.118.0":
+  version "1.118.0"
+  resolved "https://registry.yarnpkg.com/@types/vscode/-/vscode-1.118.0.tgz#4a226ddf8faa11a9e6b338555431c4edd3230e4a"
+  integrity sha512-Ah6eTlqDcwIMELEVwQMO++rJAFBRz/oLluLD/vWdYrH1KuI9kfpaM+7pg0OvvascgcJy+ghLCERAYouM4QbzGw==
 
 "@typescript-eslint/eslint-plugin@^8.58.0":
   version "8.58.0"
