@@ -357,6 +357,11 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "run_command" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::Cursor => match tool_name {
+            "Write" | "Delete" | "StrReplace" => ToolClass::FileEdit,
+            "Shell" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
     }
 }
 
@@ -373,6 +378,7 @@ pub enum Agent {
     Codex,
     Pi,
     Windsurf,
+    Cursor,
 }
 
 // ---------------------------------------------------------------------------
@@ -1276,6 +1282,16 @@ mod tests {
         assert_eq!(classify_tool(Agent::OpenCode, "edit"), ToolClass::FileEdit);
         assert_eq!(classify_tool(Agent::OpenCode, "bash"), ToolClass::Bash);
         assert_eq!(classify_tool(Agent::OpenCode, "shell"), ToolClass::Bash);
+
+        // Cursor
+        assert_eq!(classify_tool(Agent::Cursor, "Write"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::Cursor, "Delete"), ToolClass::FileEdit);
+        assert_eq!(
+            classify_tool(Agent::Cursor, "StrReplace"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(classify_tool(Agent::Cursor, "Shell"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::Cursor, "Read"), ToolClass::Skip);
     }
 
     #[test]
