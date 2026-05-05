@@ -36,10 +36,8 @@ impl<'a> FastRefReader<'a> {
 
     /// Read HEAD and determine if it's symbolic or detached.
     ///
-    /// Returns:
-    /// - Some(Symbolic("refs/heads/main")) for symbolic HEAD
-    /// - Some(Detached("<sha>")) for detached HEAD
-    /// - None if HEAD can't be read or has unexpected format
+    /// Returns `Some(Symbolic(...))` for symbolic HEAD, `Some(Detached(...))` for
+    /// detached HEAD, or `None` if HEAD can't be read or has unexpected format.
     pub fn try_read_head(&self) -> Option<HeadKind> {
         let head_path = self.git_dir.join("HEAD");
         let content = fs::read_to_string(&head_path).ok()?;
@@ -194,7 +192,7 @@ impl<'a> FastObjectReader<'a> {
 
     /// Read a loose commit object and extract its tree OID.
     ///
-    /// Commit format after header: "tree <hex-oid>\n..."
+    /// Commit format after header: `tree {hex-oid}\n...`
     pub fn try_read_commit_tree_oid(&self, commit_oid: &str) -> Option<String> {
         let data = self.decompress_object(commit_oid)?;
         let null_pos = data.iter().position(|&b| b == 0)?;
@@ -264,7 +262,7 @@ impl<'a> FastObjectReader<'a> {
 
     /// Parse binary tree entries to find an entry by name.
     ///
-    /// Tree entry format: "<mode> <name>\0<raw-binary-hash>"
+    /// Tree entry format: `{mode} {name}\0{raw-binary-hash}`
     fn parse_tree_entries_for_name(
         &self,
         mut data: &[u8],
