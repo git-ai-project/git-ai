@@ -111,7 +111,6 @@ fn read_session_messages_raw_with_limit(
 }
 
 /// Read parts for the matched messages only, using an IN-subquery to avoid loading
-/// Read parts for the matched messages only, using an IN-subquery to avoid loading
 /// all parts for the entire session. Returns each row as a complete JSON object
 /// containing all columns (id, message_id, session_id, time_created, time_updated, data),
 /// grouped by message_id.
@@ -490,13 +489,20 @@ mod tests {
         let agent = OpenCodeAgent::with_batch_size(3);
         let (events, _) = drain_all(&agent, &db_path);
 
-        assert_eq!(events.len(), 20, "all 20 messages must be returned across batches");
+        assert_eq!(
+            events.len(),
+            20,
+            "all 20 messages must be returned across batches"
+        );
         let ids: Vec<u64> = events
             .iter()
             .map(|e| e["message"]["data"]["id"].as_u64().unwrap())
             .collect();
         let expected: Vec<u64> = (0..20).collect();
-        assert_eq!(ids, expected, "messages must arrive in order with no gaps or duplicates");
+        assert_eq!(
+            ids, expected,
+            "messages must arrive in order with no gaps or duplicates"
+        );
     }
 
     #[test]
@@ -506,10 +512,13 @@ mod tests {
         create_test_db(&db_path, 10);
 
         let agent = OpenCodeAgent::with_batch_size(4);
-        let wm: Box<dyn WatermarkStrategy> =
-            Box::new(TimestampWatermark::new(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH));
+        let wm: Box<dyn WatermarkStrategy> = Box::new(TimestampWatermark::new(
+            chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+        ));
 
-        let batch = agent.read_incremental(&db_path, wm, "test-session").unwrap();
+        let batch = agent
+            .read_incremental(&db_path, wm, "test-session")
+            .unwrap();
         assert!(
             batch.events.len() <= 4,
             "single call must not exceed batch_size (got {})",

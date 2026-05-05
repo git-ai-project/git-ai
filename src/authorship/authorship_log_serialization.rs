@@ -1599,10 +1599,7 @@ mod tests {
         let checkpoints = result.unwrap();
         assert_eq!(checkpoints.len(), 1);
         assert_eq!(checkpoints[0].agent_id.as_ref().unwrap().tool, "claude");
-        assert_eq!(
-            checkpoints[0].agent_id.as_ref().unwrap().id,
-            "conv_abc123"
-        );
+        assert_eq!(checkpoints[0].agent_id.as_ref().unwrap().id, "conv_abc123");
     }
 
     // TODO: `get_line_attribution` routing for h_ hashes requires a live `Repository` instance

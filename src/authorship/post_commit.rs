@@ -370,7 +370,6 @@ pub fn count_line_ranges(lines: &[u32]) -> usize {
     ranges
 }
 
-
 /// Record metrics for a committed change.
 /// This is a best-effort operation - failures are silently ignored.
 fn record_commit_metrics(
