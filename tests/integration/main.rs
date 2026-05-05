@@ -96,6 +96,7 @@ mod rebase_determinism;
 mod rebase_hooks_unit;
 mod rebase_merge_commit_note_leak;
 mod rebase_note_integrity;
+mod rebase_production_failures;
 mod rebase_realworld;
 mod refs_unit;
 mod repo_storage_unit;
