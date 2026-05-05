@@ -64,6 +64,7 @@ impl AgentPreset for AgentV1Preset {
                     },
                     file_paths,
                     dirty_files: dirty,
+                    tool_use_id: None,
                 })
             }
             AgentV1Payload::AiAgent {
@@ -97,6 +98,7 @@ impl AgentPreset for AgentV1Preset {
                     file_paths,
                     dirty_files: dirty,
                     transcript_source: None,
+                    tool_use_id: None,
                 })
             }
         };

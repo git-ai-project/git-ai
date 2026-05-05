@@ -216,6 +216,7 @@ impl AgentPreset for FirebenderPreset {
                 context,
                 file_paths,
                 dirty_files: dirty,
+                tool_use_id: None,
             }),
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -227,6 +228,7 @@ impl AgentPreset for FirebenderPreset {
                 file_paths,
                 dirty_files: dirty,
                 transcript_source: None,
+                tool_use_id: None,
             }),
         };
 

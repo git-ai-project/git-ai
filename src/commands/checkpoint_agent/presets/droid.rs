@@ -173,6 +173,7 @@ impl AgentPreset for DroidPreset {
                 context,
                 file_paths,
                 dirty_files: None,
+                tool_use_id: Some(tool_use_id.clone()),
             })]);
         }
 
@@ -190,6 +191,7 @@ impl AgentPreset for DroidPreset {
             file_paths,
             dirty_files: None,
             transcript_source,
+            tool_use_id: Some(tool_use_id.clone()),
         })])
     }
 }

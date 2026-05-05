@@ -100,6 +100,7 @@ impl AgentPreset for ClaudePreset {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
                 dirty_files: None,
+                tool_use_id: Some(tool_use_id.to_string()),
             }),
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -111,6 +112,7 @@ impl AgentPreset for ClaudePreset {
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
                 dirty_files: None,
                 transcript_source,
+                tool_use_id: Some(tool_use_id.to_string()),
             }),
         };
 

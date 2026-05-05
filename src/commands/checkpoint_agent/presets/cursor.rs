@@ -123,37 +123,32 @@ impl AgentPreset for CursorPreset {
         });
 
         let is_pre = hook_event_name == "preToolUse";
+        let tool_use_id = parse::optional_str(&data, "tool_use_id")
+            .unwrap_or("bash")
+            .to_string();
 
         let event = match (tool_class, is_pre) {
-            (ToolClass::Bash, true) => {
-                let tool_use_id = parse::optional_str(&data, "tool_use_id")
-                    .unwrap_or("bash")
-                    .to_string();
-                ParsedHookEvent::PreBashCall(PreBashCall {
-                    context,
-                    tool_use_id,
-                })
-            }
-            (ToolClass::Bash, false) => {
-                let tool_use_id = parse::optional_str(&data, "tool_use_id")
-                    .unwrap_or("bash")
-                    .to_string();
-                ParsedHookEvent::PostBashCall(PostBashCall {
-                    context,
-                    tool_use_id,
-                    transcript_source,
-                })
-            }
+            (ToolClass::Bash, true) => ParsedHookEvent::PreBashCall(PreBashCall {
+                context,
+                tool_use_id,
+            }),
+            (ToolClass::Bash, false) => ParsedHookEvent::PostBashCall(PostBashCall {
+                context,
+                tool_use_id,
+                transcript_source,
+            }),
             (ToolClass::FileEdit, true) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
                 dirty_files: None,
+                tool_use_id: Some(tool_use_id),
             }),
             (ToolClass::FileEdit, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
                 dirty_files: None,
                 transcript_source,
+                tool_use_id: Some(tool_use_id),
             }),
             (ToolClass::Skip, _) => unreachable!("Skip handled above"),
         };

@@ -68,6 +68,7 @@ pub(super) fn parse_legacy_extension_hooks(
             context,
             file_paths: will_edit_filepaths,
             dirty_files,
+            tool_use_id: None,
         })]);
     }
 
@@ -130,6 +131,7 @@ pub(super) fn parse_legacy_extension_hooks(
         file_paths: edited_filepaths,
         dirty_files,
         transcript_source,
+        tool_use_id: None,
     })])
 }
 
@@ -266,6 +268,7 @@ pub(super) fn parse_vscode_native_hooks(
                 context,
                 file_paths: extracted_paths,
                 dirty_files: Some(empty_dirty_files),
+                tool_use_id: Some(tool_use_id),
             })]);
         }
 
@@ -280,6 +283,7 @@ pub(super) fn parse_vscode_native_hooks(
             context,
             file_paths: extracted_paths,
             dirty_files,
+            tool_use_id: Some(tool_use_id),
         })]);
     }
 
@@ -304,6 +308,7 @@ pub(super) fn parse_vscode_native_hooks(
         file_paths: extracted_paths,
         dirty_files,
         transcript_source,
+        tool_use_id: Some(tool_use_id),
     })])
 }
 

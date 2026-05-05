@@ -88,6 +88,7 @@ pub(super) fn parse_cli_hooks(
                     context,
                     file_paths: extracted_paths,
                     dirty_files: Some(dirty_files),
+                    tool_use_id: Some(tool_use_id),
                 })]);
             }
             if extracted_paths.is_empty() {
@@ -100,6 +101,7 @@ pub(super) fn parse_cli_hooks(
                 context,
                 file_paths: extracted_paths,
                 dirty_files,
+                tool_use_id: Some(tool_use_id),
             })])
         }
         ("PostToolUse", ToolClass::FileEdit) => {
@@ -114,6 +116,7 @@ pub(super) fn parse_cli_hooks(
                 file_paths: extracted_paths,
                 dirty_files,
                 transcript_source: None,
+                tool_use_id: Some(tool_use_id),
             })])
         }
         _ => unreachable!("hook_event_name pre-validated by mod.rs fork"),

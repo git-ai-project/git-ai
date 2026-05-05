@@ -71,6 +71,7 @@ impl AgentPreset for AiTabPreset {
                 context,
                 file_paths,
                 dirty_files,
+                tool_use_id: None,
             })
         } else {
             let file_paths = parse::pathbuf_array(&data, "edited_filepaths", cwd);
@@ -79,6 +80,7 @@ impl AgentPreset for AiTabPreset {
                 file_paths,
                 dirty_files,
                 transcript_source: None,
+                tool_use_id: None,
             })
         };
 

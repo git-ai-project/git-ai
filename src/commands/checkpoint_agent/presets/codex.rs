@@ -148,6 +148,7 @@ impl AgentPreset for CodexPreset {
                         context,
                         file_paths: vec![],
                         dirty_files: None,
+                        tool_use_id: Some(tool_use_id.to_string()),
                     })
                 } else {
                     return Err(GitAiError::PresetError(format!(
@@ -177,6 +178,7 @@ impl AgentPreset for CodexPreset {
                         file_paths,
                         dirty_files: None,
                         transcript_source,
+                        tool_use_id: Some(tool_use_id.to_string()),
                     })
                 } else {
                     return Err(GitAiError::PresetError(format!(

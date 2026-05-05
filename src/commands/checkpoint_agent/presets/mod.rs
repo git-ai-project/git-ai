@@ -49,6 +49,8 @@ pub struct PreFileEdit {
     pub context: PresetContext,
     pub file_paths: Vec<PathBuf>,
     pub dirty_files: Option<HashMap<PathBuf, String>>,
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +59,8 @@ pub struct PostFileEdit {
     pub file_paths: Vec<PathBuf>,
     pub dirty_files: Option<HashMap<PathBuf, String>>,
     pub transcript_source: Option<TranscriptSource>,
+    #[serde(default)]
+    pub tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

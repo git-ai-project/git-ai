@@ -154,6 +154,7 @@ impl AgentPreset for WindsurfPreset {
                 context,
                 file_paths: file_path,
                 dirty_files: None,
+                tool_use_id: Some(execution_id.clone()),
             })
         } else {
             let file_path = tool_info
@@ -167,6 +168,7 @@ impl AgentPreset for WindsurfPreset {
                 file_paths: file_path,
                 dirty_files: None,
                 transcript_source,
+                tool_use_id: Some(execution_id),
             })
         };
 

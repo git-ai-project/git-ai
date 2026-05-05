@@ -310,6 +310,7 @@ impl AgentPreset for OpenCodePreset {
                 context,
                 file_paths,
                 dirty_files: None,
+                tool_use_id: Some(tool_use_id_str),
             }),
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -321,6 +322,7 @@ impl AgentPreset for OpenCodePreset {
                 file_paths,
                 dirty_files: None,
                 transcript_source,
+                tool_use_id: Some(tool_use_id_str),
             }),
         };
 

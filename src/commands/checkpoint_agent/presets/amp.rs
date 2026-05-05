@@ -336,6 +336,7 @@ impl AgentPreset for AmpPreset {
                 context,
                 file_paths,
                 dirty_files: None,
+                tool_use_id: tool_use_id.clone(),
             }),
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -347,6 +348,7 @@ impl AgentPreset for AmpPreset {
                 file_paths,
                 dirty_files: None,
                 transcript_source,
+                tool_use_id: tool_use_id.clone(),
             }),
         };
 
