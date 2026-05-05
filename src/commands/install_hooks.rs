@@ -299,12 +299,16 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     // Parse flags
     let mut dry_run = false;
     let mut verbose = false;
+    let mut install_skills = false;
     for arg in args {
         if arg == "--dry-run" || arg == "--dry-run=true" {
             dry_run = true;
         }
         if arg == "--verbose" || arg == "-v" {
             verbose = true;
+        }
+        if arg == "--skills" {
+            install_skills = true;
         }
     }
 
@@ -327,7 +331,7 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     let params = HookInstallerParams { binary_path };
 
     // Run async operations with smol and convert result
-    let statuses = smol::block_on(async_run_install(&params, dry_run, verbose))?;
+    let statuses = smol::block_on(async_run_install(&params, dry_run, verbose, install_skills))?;
 
     // Clean up legacy envelope logs directory and related artifacts.
     // These are no longer used — all telemetry now routes through the daemon.
@@ -431,6 +435,7 @@ async fn async_run_install(
     params: &HookInstallerParams,
     dry_run: bool,
     verbose: bool,
+    install_skills: bool,
 ) -> Result<HashMap<String, InstallStatus>, GitAiError> {
     let mut any_checked = false;
     let mut has_changes = false;
@@ -604,8 +609,9 @@ async fn async_run_install(
         }
     }
 
-    // Install skills for detected agents only
-    if let Ok(result) = skills_installer::install_skills(dry_run, verbose, &installed_tools)
+    // Install skills for detected agents only (requires --skills flag)
+    if install_skills
+        && let Ok(result) = skills_installer::install_skills(dry_run, verbose, &installed_tools)
         && result.changed
     {
         has_changes = true;
