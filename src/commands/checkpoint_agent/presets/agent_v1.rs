@@ -19,11 +19,11 @@ enum AgentV1Payload {
     AiAgent {
         repo_working_dir: String,
         edited_filepaths: Option<Vec<String>>,
+        #[serde(default)]
+        dirty_files: Option<HashMap<String, String>>,
         agent_name: String,
         model: String,
         conversation_id: String,
-        #[serde(default)]
-        dirty_files: Option<HashMap<String, String>>,
     },
 }
 
@@ -46,7 +46,7 @@ impl AgentPreset for AgentV1Preset {
                 let file_paths = will_edit_filepaths
                     .unwrap_or_default()
                     .into_iter()
-                    .map(PathBuf::from)
+                    .map(|p| super::parse::resolve_absolute(&p, &repo_working_dir))
                     .collect();
                 let dirty = dirty_files
                     .map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
@@ -69,16 +69,16 @@ impl AgentPreset for AgentV1Preset {
             AgentV1Payload::AiAgent {
                 repo_working_dir,
                 edited_filepaths,
+                dirty_files,
                 agent_name,
                 model,
                 conversation_id,
-                dirty_files,
             } => {
                 let cwd = PathBuf::from(&repo_working_dir);
                 let file_paths = edited_filepaths
                     .unwrap_or_default()
                     .into_iter()
-                    .map(PathBuf::from)
+                    .map(|p| super::parse::resolve_absolute(&p, &repo_working_dir))
                     .collect();
                 let dirty = dirty_files
                     .map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());

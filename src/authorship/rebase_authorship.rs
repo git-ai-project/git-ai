@@ -4505,30 +4505,6 @@ fn add_prompt_line_metrics_for_line_attributions(
     }
 }
 
-#[allow(dead_code)]
-fn subtract_prompt_line_metrics_for_line_attributions(
-    metrics: &mut HashMap<String, PromptLineMetrics>,
-    line_attrs: &[crate::authorship::attribution_tracker::LineAttribution],
-) {
-    let human_id = crate::authorship::working_log::CheckpointKind::Human.to_str();
-    for line_attr in line_attrs {
-        let line_count = line_attr
-            .end_line
-            .saturating_sub(line_attr.start_line)
-            .saturating_add(1);
-        if line_attr.author_id != human_id
-            && let Some(entry) = metrics.get_mut(&line_attr.author_id)
-        {
-            entry.accepted_lines = entry.accepted_lines.saturating_sub(line_count);
-        }
-        if let Some(overrode_id) = &line_attr.overrode
-            && let Some(entry) = metrics.get_mut(overrode_id)
-        {
-            entry.overridden_lines = entry.overridden_lines.saturating_sub(line_count);
-        }
-    }
-}
-
 fn apply_prompt_line_metrics_to_prompts(
     prompts: &mut BTreeMap<
         String,

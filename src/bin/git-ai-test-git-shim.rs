@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use std::process::Command;
 #[cfg(not(unix))]
 use std::process::Stdio;
-use uuid::Uuid;
 
 #[derive(Serialize)]
 struct StartedGitInvocationLogEntry {
@@ -75,7 +74,7 @@ fn append_started_log(
 }
 
 fn new_test_sync_session() -> String {
-    format!("gt-shim-{}", Uuid::new_v4())
+    format!("gt-shim-{}", git_ai::uuid::generate_v4())
 }
 
 fn argv_with_test_sync_session(argv: &[String], test_sync_session: &str) -> Vec<String> {

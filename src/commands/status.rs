@@ -4,7 +4,6 @@ use crate::authorship::ignore::{
 use crate::authorship::stats::{CommitStats, stats_from_authorship_log, write_stats_to_terminal};
 use crate::authorship::virtual_attribution::VirtualAttributions;
 use crate::authorship::working_log::CheckpointKind;
-use crate::commands::checkpoint;
 use crate::error::GitAiError;
 use crate::git::find_repository;
 use crate::git::repo_storage::InitialAttributions;
@@ -53,22 +52,17 @@ fn run_status(json: bool) -> Result<(), GitAiError> {
 
     let default_user_name = repo.git_author_identity().formatted_or_unknown();
 
-    let _ = checkpoint::run(
-        &repo,
-        &default_user_name,
-        CheckpointKind::Human,
-        true,
-        None,
-        false,
-    );
-
     let head = repo.head()?;
     let head_sha = head.target()?;
 
     let working_log = repo.storage.working_log_for_base_commit(&head_sha)?;
     let checkpoints = working_log.read_all_checkpoints()?;
+    let initial_attributions = working_log.read_initial_attributions();
 
-    if checkpoints.is_empty() {
+    let has_checkpoints = !checkpoints.is_empty();
+    let has_initial = !initial_attributions.files.is_empty();
+
+    if !has_checkpoints && !has_initial {
         if json {
             let output = StatusOutput {
                 stats: CommitStats::default(),

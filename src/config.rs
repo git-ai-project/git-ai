@@ -3,7 +3,6 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use uuid::Uuid;
 
 use glob::Pattern;
 use serde::{Deserialize, Serialize, Serializer};
@@ -206,6 +205,10 @@ impl Config {
     /// Returns the command to invoke git.
     pub fn git_cmd(&self) -> &str {
         &self.git_path
+    }
+
+    pub fn has_repository_filters(&self) -> bool {
+        !self.allow_repositories.is_empty() || !self.exclude_repositories.is_empty()
     }
 
     pub fn is_allowed_repository(&self, repository: &Option<Repository>) -> bool {
@@ -906,7 +909,7 @@ pub fn get_or_create_distinct_id() -> String {
             }
 
             // Generate new UUID
-            let new_id = Uuid::new_v4().to_string();
+            let new_id = crate::uuid::generate_v4();
 
             // Ensure directory exists
             if let Some(parent) = id_path.parent() {

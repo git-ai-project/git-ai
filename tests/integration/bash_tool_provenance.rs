@@ -8,13 +8,10 @@
 //! commands.
 
 use crate::repos::test_repo::TestRepo;
-#[cfg(unix)]
-use git_ai::commands::checkpoint_agent::bash_tool::checkpoint_context_from_active_bash;
-#[cfg(unix)]
-use git_ai::commands::checkpoint_agent::bash_tool::handle_bash_pre_tool_use_with_context;
+use git_ai::authorship::working_log::AgentId;
 use git_ai::commands::checkpoint_agent::bash_tool::{
-    BashCheckpointAction, BashToolResult, HookEvent, diff, git_status_fallback, handle_bash_tool,
-    snapshot,
+    BashCheckpointAction, BashPostHookResult, diff, git_status_fallback, handle_bash_post_tool_use,
+    handle_bash_pre_tool_use_with_context, set_daemon_socket_for_test, snapshot,
 };
 use std::fs;
 use std::process::Command;
@@ -45,7 +42,25 @@ fn add_and_commit(repo: &TestRepo, rel_path: &str, contents: &str, message: &str
 
 /// Canonical repo root path (resolves /tmp -> /private/tmp on macOS).
 fn repo_root(repo: &TestRepo) -> std::path::PathBuf {
+    set_daemon_socket_for_test(repo.daemon_control_socket_path());
     repo.canonical_path()
+}
+
+fn dummy_agent_id() -> AgentId {
+    AgentId {
+        tool: "test".to_string(),
+        id: "test".to_string(),
+        model: String::new(),
+    }
+}
+
+fn pre_hook(root: &std::path::Path, session_id: &str, tool_use_id: &str) {
+    handle_bash_pre_tool_use_with_context(root, session_id, tool_use_id, &dummy_agent_id(), None)
+        .expect("pre-hook should succeed");
+}
+
+fn post_hook(root: &std::path::Path, session_id: &str, tool_use_id: &str) -> BashPostHookResult {
+    handle_bash_post_tool_use(root, session_id, tool_use_id).expect("post-hook should succeed")
 }
 
 /// Run a bash command in the repo and assert it succeeds.
@@ -66,9 +81,8 @@ fn run_bash(repo: &TestRepo, program: &str, args: &[&str]) -> std::process::Outp
 }
 
 /// Assert that a BashCheckpointAction::Checkpoint contains the expected path.
-fn assert_checkpoint_contains(result: &BashToolResult, expected_path: &str) {
-    let action = &result.action;
-    match action {
+fn assert_checkpoint_contains(result: &BashPostHookResult, expected_path: &str) {
+    match &result.action {
         BashCheckpointAction::Checkpoint(paths) => {
             assert!(
                 paths.iter().any(|p| p.contains(expected_path)),
@@ -83,17 +97,14 @@ fn assert_checkpoint_contains(result: &BashToolResult, expected_path: &str) {
                 expected_path
             );
         }
-        BashCheckpointAction::TakePreSnapshot => {
-            panic!("Expected Checkpoint, got TakePreSnapshot");
-        }
-        BashCheckpointAction::Fallback => {
-            panic!("Expected Checkpoint, got Fallback");
+        other => {
+            panic!("Expected Checkpoint, got {:?}", other);
         }
     }
 }
 
 /// Assert that a BashCheckpointAction::Checkpoint does NOT contain a path.
-fn assert_checkpoint_excludes(result: &BashToolResult, excluded_path: &str) {
+fn assert_checkpoint_excludes(result: &BashPostHookResult, excluded_path: &str) {
     if let BashCheckpointAction::Checkpoint(paths) = &result.action {
         assert!(
             !paths.iter().any(|p| p.contains(excluded_path)),
@@ -105,35 +116,20 @@ fn assert_checkpoint_excludes(result: &BashToolResult, excluded_path: &str) {
 }
 
 /// Assert that a BashCheckpointAction is NoChanges.
-fn assert_no_changes(result: &BashToolResult) {
-    let action = &result.action;
-    assert!(
-        matches!(action, BashCheckpointAction::NoChanges),
-        "Expected NoChanges, got {:?}",
-        match action {
-            BashCheckpointAction::TakePreSnapshot => "TakePreSnapshot",
-            BashCheckpointAction::Checkpoint(p) => {
-                panic!("Expected NoChanges, got Checkpoint({:?})", p);
-            }
-            BashCheckpointAction::NoChanges => "NoChanges",
-            BashCheckpointAction::Fallback => "Fallback",
+fn assert_no_changes(result: &BashPostHookResult) {
+    match &result.action {
+        BashCheckpointAction::NoChanges => {}
+        other => {
+            panic!("Expected NoChanges, got {:?}", other);
         }
-    );
+    }
 }
 
 /// Get the checkpoint paths from an action, panicking if not a Checkpoint.
-fn checkpoint_paths(result: &BashToolResult) -> &[String] {
+fn checkpoint_paths(result: &BashPostHookResult) -> &[String] {
     match &result.action {
         BashCheckpointAction::Checkpoint(paths) => paths,
-        other => panic!(
-            "Expected Checkpoint, got {:?}",
-            match other {
-                BashCheckpointAction::TakePreSnapshot => "TakePreSnapshot",
-                BashCheckpointAction::NoChanges => "NoChanges",
-                BashCheckpointAction::Fallback => "Fallback",
-                BashCheckpointAction::Checkpoint(_) => unreachable!(),
-            }
-        ),
+        other => panic!("Expected Checkpoint, got {:?}", other),
     }
 }
 
@@ -147,17 +143,11 @@ fn test_bash_provenance_echo_redirect_creates_file() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "echo-sess", "echo-t1")
-        .expect("PreToolUse should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
+    pre_hook(&root, "echo-sess", "echo-t1");
 
     run_bash(&repo, "sh", &["-c", "echo 'hello world' > created.txt"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "echo-sess", "echo-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "echo-sess", "echo-t1");
     assert_checkpoint_contains(&post_action, "created.txt");
 }
 
@@ -167,8 +157,7 @@ fn test_bash_provenance_printf_redirect_creates_file() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "printf-sess", "printf-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "printf-sess", "printf-t1");
 
     run_bash(
         &repo,
@@ -176,8 +165,7 @@ fn test_bash_provenance_printf_redirect_creates_file() {
         &["-c", "printf 'formatted content' > printf_out.txt"],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "printf-sess", "printf-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "printf-sess", "printf-t1");
     assert_checkpoint_contains(&post_action, "printf_out.txt");
 }
 
@@ -187,8 +175,7 @@ fn test_bash_provenance_heredoc_creates_file() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "heredoc-sess", "heredoc-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "heredoc-sess", "heredoc-t1");
 
     run_bash(
         &repo,
@@ -199,8 +186,7 @@ fn test_bash_provenance_heredoc_creates_file() {
         ],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "heredoc-sess", "heredoc-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "heredoc-sess", "heredoc-t1");
     assert_checkpoint_contains(&post_action, "heredoc.txt");
 }
 
@@ -210,13 +196,11 @@ fn test_bash_provenance_touch_creates_empty_file() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "touch-sess", "touch-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "touch-sess", "touch-t1");
 
     run_bash(&repo, "touch", &["newfile.txt"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "touch-sess", "touch-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "touch-sess", "touch-t1");
     assert_checkpoint_contains(&post_action, "newfile.txt");
 }
 
@@ -226,13 +210,11 @@ fn test_bash_provenance_cp_creates_copy() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "existing.txt", "original content", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "cp-sess", "cp-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "cp-sess", "cp-t1");
 
     run_bash(&repo, "cp", &["existing.txt", "copy.txt"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "cp-sess", "cp-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "cp-sess", "cp-t1");
     assert_checkpoint_contains(&post_action, "copy.txt");
     assert_checkpoint_excludes(&post_action, "existing.txt");
 }
@@ -243,8 +225,7 @@ fn test_bash_provenance_tee_creates_file() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "tee-sess", "tee-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "tee-sess", "tee-t1");
 
     run_bash(
         &repo,
@@ -252,8 +233,7 @@ fn test_bash_provenance_tee_creates_file() {
         &["-c", "echo content | tee output.txt > /dev/null"],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "tee-sess", "tee-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "tee-sess", "tee-t1");
     assert_checkpoint_contains(&post_action, "output.txt");
 }
 
@@ -263,8 +243,7 @@ fn test_bash_provenance_nested_directory_creation() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "nested-sess", "nested-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "nested-sess", "nested-t1");
 
     run_bash(
         &repo,
@@ -275,8 +254,7 @@ fn test_bash_provenance_nested_directory_creation() {
         ],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "nested-sess", "nested-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "nested-sess", "nested-t1");
     assert_checkpoint_contains(&post_action, "mod.rs");
 }
 
@@ -290,8 +268,7 @@ fn test_bash_provenance_sed_in_place_edit() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "target.txt", "old value here", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "sed-sess", "sed-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "sed-sess", "sed-t1");
 
     thread::sleep(Duration::from_millis(50));
     run_bash(
@@ -303,8 +280,7 @@ fn test_bash_provenance_sed_in_place_edit() {
         ],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "sed-sess", "sed-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "sed-sess", "sed-t1");
     assert_checkpoint_contains(&post_action, "target.txt");
 }
 
@@ -314,14 +290,12 @@ fn test_bash_provenance_append_with_redirect() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "log.txt", "line one\n", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "append-sess", "append-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "append-sess", "append-t1");
 
     thread::sleep(Duration::from_millis(50));
     run_bash(&repo, "sh", &["-c", "echo 'appended line' >> log.txt"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "append-sess", "append-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "append-sess", "append-t1");
     assert_checkpoint_contains(&post_action, "log.txt");
 }
 
@@ -336,54 +310,60 @@ fn test_bash_provenance_truncate_to_zero() {
         "initial commit",
     );
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "trunc-sess", "trunc-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "trunc-sess", "trunc-t1");
 
     thread::sleep(Duration::from_millis(50));
     run_bash(&repo, "sh", &["-c", ": > data.txt"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "trunc-sess", "trunc-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "trunc-sess", "trunc-t1");
     assert_checkpoint_contains(&post_action, "data.txt");
 }
 
 #[cfg(unix)]
 #[test]
 fn test_bash_provenance_chmod_permission_change() {
+    use git_ai::commands::checkpoint_agent::bash_tool::diff;
     let repo = TestRepo::new();
     let root = repo_root(&repo);
     add_and_commit(&repo, "script.sh", "#!/bin/bash\necho hi", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "chmod-sess", "chmod-t1")
-        .expect("PreToolUse should succeed");
+    let pre = snapshot(&root, "chmod-sess", "chmod-t1", None).unwrap();
 
     run_bash(&repo, "chmod", &["+x", "script.sh"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "chmod-sess", "chmod-t1")
-        .expect("PostToolUse should succeed");
-    assert_checkpoint_contains(&post_action, "script.sh");
+    let post = snapshot(&root, "chmod-sess", "chmod-t2", None).unwrap();
+    let result = diff(&pre, &post);
+    assert!(
+        result
+            .modified
+            .iter()
+            .any(|p| p.display().to_string().contains("script.sh")),
+        "chmod should be detected via stat-tuple diff; got created={:?} modified={:?}",
+        result.created,
+        result.modified,
+    );
 }
 
 #[test]
 fn test_bash_provenance_mv_rename() {
+    use git_ai::commands::checkpoint_agent::bash_tool::diff;
     let repo = TestRepo::new();
     let root = repo_root(&repo);
     add_and_commit(&repo, "old_name.txt", "rename me", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "mv-sess", "mv-t1")
-        .expect("PreToolUse should succeed");
+    let pre = snapshot(&root, "mv-sess", "mv-t1", None).unwrap();
 
     run_bash(&repo, "mv", &["old_name.txt", "new_name.txt"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "mv-sess", "mv-t1")
-        .expect("PostToolUse should succeed");
-
-    // Deletions are not tracked; rename shows only the new file as created.
-    let paths = checkpoint_paths(&post_action);
+    let post = snapshot(&root, "mv-sess", "mv-t2", None).unwrap();
+    let result = diff(&pre, &post);
     assert!(
-        paths.iter().any(|p| p.contains("new_name.txt")),
-        "new_name.txt should appear in checkpoint paths (as created); got {:?}",
-        paths
+        result
+            .created
+            .iter()
+            .any(|p| p.display().to_string().contains("new_name.txt")),
+        "new_name.txt should appear as created after rename; got created={:?}",
+        result.created,
     );
 }
 
@@ -401,8 +381,7 @@ fn test_bash_provenance_simulated_cargo_init() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "cargo-sess", "cargo-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "cargo-sess", "cargo-t1");
 
     run_bash(
         &repo,
@@ -413,8 +392,7 @@ fn test_bash_provenance_simulated_cargo_init() {
         ],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "cargo-sess", "cargo-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "cargo-sess", "cargo-t1");
     assert_checkpoint_contains(&post_action, "main.rs");
     // On macOS, paths are case-normalized to lowercase, so check for lowercase.
     let paths = checkpoint_paths(&post_action);
@@ -433,8 +411,7 @@ fn test_bash_provenance_simulated_npm_init() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "npm-sess", "npm-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "npm-sess", "npm-t1");
 
     run_bash(
         &repo,
@@ -445,8 +422,7 @@ fn test_bash_provenance_simulated_npm_init() {
         ],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "npm-sess", "npm-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "npm-sess", "npm-t1");
     assert_checkpoint_contains(&post_action, "package.json");
 }
 
@@ -469,21 +445,14 @@ fn test_bash_provenance_git_checkout_restore() {
     thread::sleep(Duration::from_millis(50));
     write_file(&repo, "restorable.txt", "modified content");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "checkout-sess", "checkout-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "checkout-sess", "checkout-t1");
 
     thread::sleep(Duration::from_millis(50));
     // Use git_og to bypass hooks, simulating what a bash command would do
     repo.git_og(&["checkout", "--", "restorable.txt"])
         .expect("git checkout should succeed");
 
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "checkout-sess",
-        "checkout-t1",
-    )
-    .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "checkout-sess", "checkout-t1");
     assert_checkpoint_contains(&post_action, "restorable.txt");
 }
 
@@ -501,15 +470,13 @@ fn test_bash_provenance_git_stash_pop() {
     repo.git_og(&["stash", "push", "-m", "test stash"])
         .expect("git stash should succeed");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "stash-sess", "stash-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "stash-sess", "stash-t1");
 
     thread::sleep(Duration::from_millis(50));
     repo.git_og(&["stash", "pop"])
         .expect("git stash pop should succeed");
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "stash-sess", "stash-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "stash-sess", "stash-t1");
     assert_checkpoint_contains(&post_action, "stashed.txt");
 }
 
@@ -536,15 +503,13 @@ fn test_bash_provenance_git_apply_patch() {
 ";
     write_file(&repo, "fix.patch", patch_content);
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "patch-sess", "patch-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "patch-sess", "patch-t1");
 
     thread::sleep(Duration::from_millis(50));
     repo.git_og(&["apply", "fix.patch"])
         .expect("git apply should succeed");
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "patch-sess", "patch-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "patch-sess", "patch-t1");
     assert_checkpoint_contains(&post_action, "patchme.txt");
 }
 
@@ -558,8 +523,7 @@ fn test_bash_provenance_loop_creating_multiple_files() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "loop-sess", "loop-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "loop-sess", "loop-t1");
 
     run_bash(
         &repo,
@@ -570,8 +534,7 @@ fn test_bash_provenance_loop_creating_multiple_files() {
         ],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "loop-sess", "loop-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "loop-sess", "loop-t1");
     assert_checkpoint_contains(&post_action, "a.txt");
     assert_checkpoint_contains(&post_action, "b.txt");
     assert_checkpoint_contains(&post_action, "c.txt");
@@ -585,8 +548,7 @@ fn test_bash_provenance_grep_sed_pipeline() {
     add_and_commit(&repo, "file2.txt", "old pattern there", "add file2");
     add_and_commit(&repo, "file3.txt", "no match", "add file3");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "pipeline-sess", "pipeline-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "pipeline-sess", "pipeline-t1");
 
     thread::sleep(Duration::from_millis(50));
     run_bash(
@@ -598,13 +560,7 @@ fn test_bash_provenance_grep_sed_pipeline() {
         ],
     );
 
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "pipeline-sess",
-        "pipeline-t1",
-    )
-    .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "pipeline-sess", "pipeline-t1");
     assert_checkpoint_contains(&post_action, "file1.txt");
     assert_checkpoint_contains(&post_action, "file2.txt");
     assert_checkpoint_excludes(&post_action, "file3.txt");
@@ -620,13 +576,11 @@ fn test_bash_provenance_cat_is_readonly() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "readable.txt", "read me", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "cat-sess", "cat-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "cat-sess", "cat-t1");
 
     run_bash(&repo, "cat", &["readable.txt"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "cat-sess", "cat-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "cat-sess", "cat-t1");
     assert_no_changes(&post_action);
 }
 
@@ -636,13 +590,11 @@ fn test_bash_provenance_ls_is_readonly() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "visible.txt", "content", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "ls-sess", "ls-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "ls-sess", "ls-t1");
 
     run_bash(&repo, "ls", &["-la"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "ls-sess", "ls-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "ls-sess", "ls-t1");
     assert_no_changes(&post_action);
 }
 
@@ -653,13 +605,11 @@ fn test_bash_provenance_find_is_readonly() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "src/main.rs", "fn main() {}", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "find-sess", "find-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "find-sess", "find-t1");
 
     run_bash(&repo, "find", &[".", "-name", "*.rs"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "find-sess", "find-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "find-sess", "find-t1");
     assert_no_changes(&post_action);
 }
 
@@ -674,8 +624,7 @@ fn test_bash_provenance_grep_is_readonly() {
         "initial commit",
     );
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "grep-sess", "grep-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "grep-sess", "grep-t1");
 
     // grep may exit non-zero if no match, so use sh -c with || true
     run_bash(
@@ -684,8 +633,7 @@ fn test_bash_provenance_grep_is_readonly() {
         &["-c", "grep 'pattern' searchable.txt || true"],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "grep-sess", "grep-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "grep-sess", "grep-t1");
     assert_no_changes(&post_action);
 }
 
@@ -695,13 +643,11 @@ fn test_bash_provenance_wc_is_readonly() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "countme.txt", "one\ntwo\nthree\n", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "wc-sess", "wc-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "wc-sess", "wc-t1");
 
     run_bash(&repo, "wc", &["-l", "countme.txt"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "wc-sess", "wc-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "wc-sess", "wc-t1");
     assert_no_changes(&post_action);
 }
 
@@ -716,13 +662,11 @@ fn test_bash_provenance_head_is_readonly() {
         "initial commit",
     );
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "head-sess", "head-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "head-sess", "head-t1");
 
     run_bash(&repo, "head", &["-5", "longfile.txt"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "head-sess", "head-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "head-sess", "head-t1");
     assert_no_changes(&post_action);
 }
 
@@ -733,14 +677,12 @@ fn test_bash_provenance_diff_is_readonly() {
     add_and_commit(&repo, "file1.txt", "alpha\nbeta\n", "add file1");
     add_and_commit(&repo, "file2.txt", "alpha\ngamma\n", "add file2");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "diff-sess", "diff-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "diff-sess", "diff-t1");
 
     // diff returns non-zero when files differ, so use || true
     run_bash(&repo, "sh", &["-c", "diff file1.txt file2.txt || true"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "diff-sess", "diff-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "diff-sess", "diff-t1");
     assert_no_changes(&post_action);
 }
 
@@ -750,14 +692,12 @@ fn test_bash_provenance_git_log_is_readonly() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "gitlog-sess", "gitlog-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "gitlog-sess", "gitlog-t1");
 
     repo.git_og(&["log", "--oneline"])
         .expect("git log should succeed");
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "gitlog-sess", "gitlog-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "gitlog-sess", "gitlog-t1");
     assert_no_changes(&post_action);
 }
 
@@ -767,13 +707,11 @@ fn test_bash_provenance_git_diff_is_readonly() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "gitdiff-sess", "gitdiff-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "gitdiff-sess", "gitdiff-t1");
 
     repo.git_og(&["diff"]).expect("git diff should succeed");
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "gitdiff-sess", "gitdiff-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "gitdiff-sess", "gitdiff-t1");
     assert_no_changes(&post_action);
 }
 
@@ -783,23 +721,11 @@ fn test_bash_provenance_git_status_is_readonly() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(
-        HookEvent::PreToolUse,
-        &root,
-        "gitstatus-sess",
-        "gitstatus-t1",
-    )
-    .expect("PreToolUse should succeed");
+    pre_hook(&root, "gitstatus-sess", "gitstatus-t1");
 
     repo.git_og(&["status"]).expect("git status should succeed");
 
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "gitstatus-sess",
-        "gitstatus-t1",
-    )
-    .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "gitstatus-sess", "gitstatus-t1");
     assert_no_changes(&post_action);
 }
 
@@ -809,18 +735,11 @@ fn test_bash_provenance_compound_readonly() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "compound-sess", "compound-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "compound-sess", "compound-t1");
 
     run_bash(&repo, "sh", &["-c", "pwd && ls"]);
 
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "compound-sess",
-        "compound-t1",
-    )
-    .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "compound-sess", "compound-t1");
     assert_no_changes(&post_action);
 }
 
@@ -835,13 +754,11 @@ fn test_bash_provenance_symlink_creation() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "target.txt", "symlink target", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "symlink-sess", "symlink-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "symlink-sess", "symlink-t1");
 
     run_bash(&repo, "ln", &["-s", "target.txt", "link.txt"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "symlink-sess", "symlink-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "symlink-sess", "symlink-t1");
     assert_checkpoint_contains(&post_action, "link.txt");
 }
 
@@ -861,8 +778,7 @@ fn test_bash_provenance_symlink_target_change() {
     repo.git_og(&["commit", "-m", "add symlink"])
         .expect("git commit symlink should succeed");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "symtgt-sess", "symtgt-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "symtgt-sess", "symtgt-t1");
 
     // Re-point the symlink to target_b
     run_bash(
@@ -871,8 +787,7 @@ fn test_bash_provenance_symlink_target_change() {
         &["-c", "rm mylink.txt && ln -s target_b.txt mylink.txt"],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "symtgt-sess", "symtgt-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "symtgt-sess", "symtgt-t1");
     assert_checkpoint_contains(&post_action, "mylink.txt");
 }
 
@@ -886,8 +801,7 @@ fn test_bash_provenance_create_50_files() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "batch50-sess", "batch50-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "batch50-sess", "batch50-t1");
 
     run_bash(
         &repo,
@@ -898,8 +812,7 @@ fn test_bash_provenance_create_50_files() {
         ],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "batch50-sess", "batch50-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "batch50-sess", "batch50-t1");
     let paths = checkpoint_paths(&post_action);
     assert!(
         paths.len() >= 50,
@@ -929,8 +842,7 @@ fn test_bash_provenance_modify_20_of_50_tracked() {
         );
     }
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "mod20-sess", "mod20-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "mod20-sess", "mod20-t1");
 
     thread::sleep(Duration::from_millis(50));
     // Modify only files 1-20
@@ -943,8 +855,7 @@ fn test_bash_provenance_modify_20_of_50_tracked() {
         ],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "mod20-sess", "mod20-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "mod20-sess", "mod20-t1");
     let paths = checkpoint_paths(&post_action);
 
     // Exactly 20 files should be modified
@@ -975,8 +886,7 @@ fn test_bash_provenance_failed_command_with_partial_output() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "fail-sess", "fail-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "fail-sess", "fail-t1");
 
     // Command that creates a file then fails. We use || true so run_bash
     // does not panic, but the file is still created.
@@ -986,8 +896,7 @@ fn test_bash_provenance_failed_command_with_partial_output() {
         &["-c", "echo 'partial' > partial.txt && false || true"],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "fail-sess", "fail-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "fail-sess", "fail-t1");
     assert_checkpoint_contains(&post_action, "partial.txt");
 }
 
@@ -997,13 +906,11 @@ fn test_bash_provenance_file_with_spaces_in_name() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "spaces-sess", "spaces-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "spaces-sess", "spaces-t1");
 
     run_bash(&repo, "sh", &["-c", "echo 'x' > 'file with spaces.txt'"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "spaces-sess", "spaces-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "spaces-sess", "spaces-t1");
     assert_checkpoint_contains(&post_action, "file with spaces.txt");
 }
 
@@ -1013,8 +920,7 @@ fn test_bash_provenance_file_with_special_characters() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "special-sess", "special-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "special-sess", "special-t1");
 
     run_bash(
         &repo,
@@ -1022,8 +928,7 @@ fn test_bash_provenance_file_with_special_characters() {
         &["-c", "echo 'x' > 'file-with-dashes_and_underscores.txt'"],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "special-sess", "special-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "special-sess", "special-t1");
     assert_checkpoint_contains(&post_action, "file-with-dashes_and_underscores.txt");
 }
 
@@ -1033,8 +938,7 @@ fn test_bash_provenance_hidden_file_creation() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "hidden-sess", "hidden-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "hidden-sess", "hidden-t1");
 
     run_bash(
         &repo,
@@ -1042,8 +946,7 @@ fn test_bash_provenance_hidden_file_creation() {
         &["-c", "echo 'secret config' > .hidden_config"],
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "hidden-sess", "hidden-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "hidden-sess", "hidden-t1");
     assert_checkpoint_contains(&post_action, ".hidden_config");
 }
 
@@ -1053,13 +956,7 @@ fn test_bash_provenance_touch_then_write_shows_created() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
-    handle_bash_tool(
-        HookEvent::PreToolUse,
-        &root,
-        "touchwrite-sess",
-        "touchwrite-t1",
-    )
-    .expect("PreToolUse should succeed");
+    pre_hook(&root, "touchwrite-sess", "touchwrite-t1");
 
     run_bash(
         &repo,
@@ -1070,13 +967,7 @@ fn test_bash_provenance_touch_then_write_shows_created() {
         ],
     );
 
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "touchwrite-sess",
-        "touchwrite-t1",
-    )
-    .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "touchwrite-sess", "touchwrite-t1");
     assert_checkpoint_contains(&post_action, "empty.txt");
 }
 
@@ -1086,26 +977,14 @@ fn test_bash_provenance_overwrite_identical_content_detects_mtime_change() {
     let root = repo_root(&repo);
     add_and_commit(&repo, "same.txt", "identical", "initial commit");
 
-    handle_bash_tool(
-        HookEvent::PreToolUse,
-        &root,
-        "identical-sess",
-        "identical-t1",
-    )
-    .expect("PreToolUse should succeed");
+    pre_hook(&root, "identical-sess", "identical-t1");
 
     // Wait so mtime advances even though content is the same
     thread::sleep(Duration::from_millis(50));
     // Write exact same content but file metadata (mtime) will change
     run_bash(&repo, "sh", &["-c", "echo 'identical' > same.txt"]);
 
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "identical-sess",
-        "identical-t1",
-    )
-    .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "identical-sess", "identical-t1");
     // The stat tuple should differ because mtime changed, even if content is the same.
     // Note: echo adds a trailing newline, so content actually differs from "identical"
     // to "identical\n". Regardless, the stat-tuple approach detects this.
@@ -1119,32 +998,20 @@ fn test_bash_provenance_sequential_tool_uses_same_session() {
     add_and_commit(&repo, "init.txt", "seed", "initial commit");
 
     // --- First cycle: create alpha.txt ---
-    let pre1 = handle_bash_tool(HookEvent::PreToolUse, &root, "seq-sess", "seq-use1")
-        .expect("PreToolUse 1 should succeed");
-    assert!(
-        matches!(pre1.action, BashCheckpointAction::TakePreSnapshot),
-        "First PreToolUse should return TakePreSnapshot"
-    );
+    pre_hook(&root, "seq-sess", "seq-use1");
 
     run_bash(&repo, "sh", &["-c", "echo 'alpha' > alpha.txt"]);
 
-    let post1 = handle_bash_tool(HookEvent::PostToolUse, &root, "seq-sess", "seq-use1")
-        .expect("PostToolUse 1 should succeed");
+    let post1 = post_hook(&root, "seq-sess", "seq-use1");
     assert_checkpoint_contains(&post1, "alpha.txt");
     assert_checkpoint_excludes(&post1, "beta.txt");
 
     // --- Second cycle: create beta.txt ---
-    let pre2 = handle_bash_tool(HookEvent::PreToolUse, &root, "seq-sess", "seq-use2")
-        .expect("PreToolUse 2 should succeed");
-    assert!(
-        matches!(pre2.action, BashCheckpointAction::TakePreSnapshot),
-        "Second PreToolUse should return TakePreSnapshot"
-    );
+    pre_hook(&root, "seq-sess", "seq-use2");
 
     run_bash(&repo, "sh", &["-c", "echo 'beta' > beta.txt"]);
 
-    let post2 = handle_bash_tool(HookEvent::PostToolUse, &root, "seq-sess", "seq-use2")
-        .expect("PostToolUse 2 should succeed");
+    let post2 = post_hook(&root, "seq-sess", "seq-use2");
     assert_checkpoint_contains(&post2, "beta.txt");
     // alpha.txt was created in the first cycle; it should NOT appear in the second
     // cycle since the second pre-snapshot includes it.
@@ -1162,28 +1029,17 @@ fn test_bash_provenance_create_tarball() {
     add_and_commit(&repo, "archive/one.txt", "one", "add one");
     add_and_commit(&repo, "archive/two.txt", "two", "add two");
 
-    handle_bash_tool(
-        HookEvent::PreToolUse,
-        &root,
-        "tar-create-sess",
-        "tar-create-t1",
-    )
-    .expect("PreToolUse should succeed");
+    pre_hook(&root, "tar-create-sess", "tar-create-t1");
 
     run_bash(&repo, "tar", &["czf", "archive.tar.gz", "archive"]);
 
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "tar-create-sess",
-        "tar-create-t1",
-    )
-    .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "tar-create-sess", "tar-create-t1");
     assert_checkpoint_contains(&post_action, "archive.tar.gz");
 }
 
 #[test]
 fn test_bash_provenance_extract_tarball() {
+    use git_ai::commands::checkpoint_agent::bash_tool::diff;
     let repo = TestRepo::new();
     let root = repo_root(&repo);
     add_and_commit(&repo, "pkg/alpha.txt", "alpha", "add alpha");
@@ -1203,25 +1059,28 @@ fn test_bash_provenance_extract_tarball() {
     repo.git_og(&["commit", "-m", "remove pkg dir"])
         .expect("git commit removal should succeed");
 
-    handle_bash_tool(
-        HookEvent::PreToolUse,
-        &root,
-        "tar-extract-sess",
-        "tar-extract-t1",
-    )
-    .expect("PreToolUse should succeed");
+    let pre = snapshot(&root, "tar-extract-sess", "tar-extract-t1", None).unwrap();
 
     run_bash(&repo, "tar", &["xzf", "pkg.tar.gz"]);
 
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "tar-extract-sess",
-        "tar-extract-t1",
-    )
-    .expect("PostToolUse should succeed");
-    assert_checkpoint_contains(&post_action, "alpha.txt");
-    assert_checkpoint_contains(&post_action, "beta.txt");
+    let post = snapshot(&root, "tar-extract-sess", "tar-extract-t2", None).unwrap();
+    let result = diff(&pre, &post);
+    assert!(
+        result
+            .created
+            .iter()
+            .any(|p| p.display().to_string().contains("alpha.txt")),
+        "alpha.txt should appear as created after tarball extract; got created={:?}",
+        result.created,
+    );
+    assert!(
+        result
+            .created
+            .iter()
+            .any(|p| p.display().to_string().contains("beta.txt")),
+        "beta.txt should appear as created after tarball extract; got created={:?}",
+        result.created,
+    );
 }
 
 // ===========================================================================
@@ -1239,14 +1098,12 @@ fn test_bash_provenance_simulated_compile() {
         "initial commit",
     );
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "compile-sess", "compile-t1")
-        .expect("PreToolUse should succeed");
+    pre_hook(&root, "compile-sess", "compile-t1");
 
     // Simulate compilation by creating an output binary
     run_bash(&repo, "sh", &["-c", "echo 'compiled binary' > hello"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "compile-sess", "compile-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "compile-sess", "compile-t1");
     assert_checkpoint_contains(&post_action, "hello");
 }
 
@@ -1381,6 +1238,7 @@ fn test_git_status_fallback_rename_reports_both_paths() {
 
 #[test]
 fn test_bash_provenance_mv_directory_rename() {
+    use git_ai::commands::checkpoint_agent::bash_tool::diff;
     let repo = TestRepo::new();
     let root = repo_root(&repo);
 
@@ -1388,20 +1246,19 @@ fn test_bash_provenance_mv_directory_rename() {
     add_and_commit(&repo, "src/lib.rs", "fn main() {}", "add src");
     add_and_commit(&repo, "src/utils.rs", "fn helper() {}", "add utils");
 
-    handle_bash_tool(HookEvent::PreToolUse, &root, "mvdir-sess", "mvdir-t1")
-        .expect("PreToolUse should succeed");
+    let pre = snapshot(&root, "mvdir-sess", "mvdir-t1", None).unwrap();
 
     run_bash(&repo, "mv", &["src", "lib"]);
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "mvdir-sess", "mvdir-t1")
-        .expect("PostToolUse should succeed");
-
-    // Deletions not tracked; only new paths (lib/*) appear as created.
-    let paths = checkpoint_paths(&post_action);
+    let post = snapshot(&root, "mvdir-sess", "mvdir-t2", None).unwrap();
+    let result = diff(&pre, &post);
     assert!(
-        paths.iter().any(|p| p.contains("lib/lib.rs")),
-        "lib/lib.rs should appear in checkpoint (created); got {:?}",
-        paths
+        result
+            .created
+            .iter()
+            .any(|p| p.display().to_string().contains("lib/lib.rs")),
+        "lib/lib.rs should appear as created after directory rename; got created={:?}",
+        result.created,
     );
 }
 
@@ -1476,12 +1333,7 @@ exit 0
     );
 
     // Pre-snapshot: AI agent's bash tool starts
-    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "fmt-sess", "fmt-t1")
-        .expect("PreToolUse should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
+    pre_hook(&root, "fmt-sess", "fmt-t1");
 
     // AI agent creates and stages a Python file
     write_file(&repo, "main.py", "print('hello')\n");
@@ -1504,8 +1356,7 @@ exit 0
     );
 
     // Post-snapshot: stat-diff should detect the formatter's modification
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "fmt-sess", "fmt-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "fmt-sess", "fmt-t1");
     assert_checkpoint_contains(&post_action, "main.py");
 }
 
@@ -1532,12 +1383,7 @@ exit 0
 "#,
     );
 
-    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "fmtstage-sess", "fmtstage-t1")
-        .expect("PreToolUse should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
+    pre_hook(&root, "fmtstage-sess", "fmtstage-t1");
 
     write_file(&repo, "app.py", "x = 1   \ny = 2   \n");
     run_git_with_hooks(&repo, &["add", "app.py"]);
@@ -1556,13 +1402,7 @@ exit 0
         content
     );
 
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "fmtstage-sess",
-        "fmtstage-t1",
-    )
-    .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "fmtstage-sess", "fmtstage-t1");
     assert_checkpoint_contains(&post_action, "app.py");
 }
 
@@ -1584,12 +1424,7 @@ exit 0
 "#,
     );
 
-    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "hooknew-sess", "hooknew-t1")
-        .expect("PreToolUse should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
+    pre_hook(&root, "hooknew-sess", "hooknew-t1");
 
     write_file(&repo, "feature.py", "def feature(): pass\n");
     run_git_with_hooks(&repo, &["add", "feature.py"]);
@@ -1607,8 +1442,7 @@ exit 0
         "pre-commit hook should have created .commit-metadata"
     );
 
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "hooknew-sess", "hooknew-t1")
-        .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "hooknew-sess", "hooknew-t1");
 
     // Both the agent's file and the hook-created file should be detected
     assert_checkpoint_contains(&post_action, "feature.py");
@@ -1637,17 +1471,7 @@ exit 0
 "#,
     );
 
-    let pre_action = handle_bash_tool(
-        HookEvent::PreToolUse,
-        &root,
-        "hookother-sess",
-        "hookother-t1",
-    )
-    .expect("PreToolUse should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
+    pre_hook(&root, "hookother-sess", "hookother-t1");
 
     // AI agent creates a completely different file
     thread::sleep(Duration::from_millis(50));
@@ -1669,101 +1493,15 @@ exit 0
         content
     );
 
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "hookother-sess",
-        "hookother-t1",
-    )
-    .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "hookother-sess", "hookother-t1");
 
     // Both files should be detected: the agent's new file and the hook-modified file
     assert_checkpoint_contains(&post_action, "new-feature.rs");
     assert_checkpoint_contains(&post_action, "build-stamp.txt");
 }
 
-#[cfg(unix)]
-#[test]
-fn test_bash_provenance_precommit_hook_with_agent_context_attribution() {
-    // Scenario: Same as the formatter test, but uses handle_bash_pre_tool_use_with_context
-    // to set up proper AI agent context. Verifies that checkpoint_context_from_active_bash
-    // returns AiAgent while the pre-snapshot is active (which is the case during
-    // the pre-commit hook execution).
-    let repo = TestRepo::new();
-    let root = repo_root(&repo);
-    add_and_commit(&repo, "init.txt", "seed", "initial commit");
-
-    install_pre_commit_hook(
-        &repo,
-        r#"#!/bin/sh
-for f in $(git diff --cached --name-only --diff-filter=ACM -- '*.py'); do
-    echo '# agent-formatted' >> "$f"
-done
-exit 0
-"#,
-    );
-
-    // Set up pre-snapshot WITH agent context (simulating a real AI agent session)
-    let agent_id = git_ai::authorship::working_log::AgentId {
-        tool: "claude".to_string(),
-        id: "test-session-1".to_string(),
-        model: "opus-4".to_string(),
-    };
-    let pre_action =
-        handle_bash_pre_tool_use_with_context(&root, "agent-sess", "agent-t1", &agent_id, None)
-            .expect("PreToolUse with context should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
-
-    // Verify that checkpoint_context_from_active_bash finds the active context
-    // (this is what the pre-commit hook would see during commit execution)
-    let repo_working_dir = root.to_string_lossy().to_string();
-    let context = checkpoint_context_from_active_bash(&root, &repo_working_dir);
-    assert!(
-        context.is_some(),
-        "checkpoint_context_from_active_bash should find active bash snapshot"
-    );
-    let (kind, agent_run) = context.unwrap();
-    assert_eq!(
-        kind,
-        git_ai::authorship::working_log::CheckpointKind::AiAgent,
-        "checkpoint kind should be AiAgent"
-    );
-    let agent_run = agent_run.expect("should have agent run result with context");
-    let agent_id = agent_run
-        .agent_id
-        .as_ref()
-        .expect("AI checkpoint should have agent_id");
-    assert_eq!(agent_id.tool, "claude");
-    assert_eq!(agent_id.id, "test-session-1");
-    assert_eq!(agent_id.model, "opus-4");
-
-    // Now run the actual commit with hooks
-    write_file(&repo, "module.py", "import os\n");
-    run_git_with_hooks(&repo, &["add", "module.py"]);
-
-    let commit_output = run_git_with_hooks(&repo, &["commit", "-m", "add module"]);
-    assert!(
-        commit_output.status.success(),
-        "git commit should succeed: {}",
-        String::from_utf8_lossy(&commit_output.stderr)
-    );
-
-    // Verify formatter ran
-    let content = fs::read_to_string(repo.path().join("module.py")).unwrap();
-    assert!(
-        content.contains("# agent-formatted"),
-        "formatter should have modified module.py; got: {:?}",
-        content
-    );
-
-    // Post-snapshot should detect the change
-    let post_action = handle_bash_tool(HookEvent::PostToolUse, &root, "agent-sess", "agent-t1")
-        .expect("PostToolUse should succeed");
-    assert_checkpoint_contains(&post_action, "module.py");
-}
+// test_bash_provenance_precommit_hook_with_agent_context_attribution was removed:
+// checkpoint_context_from_active_bash has been deleted from the codebase.
 
 #[cfg(unix)]
 #[test]
@@ -1784,17 +1522,7 @@ exit 0
 "#,
     );
 
-    let pre_action = handle_bash_tool(
-        HookEvent::PreToolUse,
-        &root,
-        "multi-fmt-sess",
-        "multi-fmt-t1",
-    )
-    .expect("PreToolUse should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
+    pre_hook(&root, "multi-fmt-sess", "multi-fmt-t1");
 
     // AI agent creates multiple Python files
     write_file(&repo, "src/api.py", "def api(): pass\n");
@@ -1828,13 +1556,7 @@ exit 0
         "readme.md should not have been formatted"
     );
 
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "multi-fmt-sess",
-        "multi-fmt-t1",
-    )
-    .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "multi-fmt-sess", "multi-fmt-t1");
 
     // All created/modified files should be detected
     assert_checkpoint_contains(&post_action, "api.py");
@@ -1865,12 +1587,7 @@ exit 1
 "#,
     );
 
-    let pre_action = handle_bash_tool(HookEvent::PreToolUse, &root, "hookfail-sess", "hookfail-t1")
-        .expect("PreToolUse should succeed");
-    assert!(matches!(
-        pre_action.action,
-        BashCheckpointAction::TakePreSnapshot
-    ));
+    pre_hook(&root, "hookfail-sess", "hookfail-t1");
 
     write_file(&repo, "broken.py", "x=1\n");
     run_git_with_hooks(&repo, &["add", "broken.py"]);
@@ -1891,12 +1608,6 @@ exit 1
     );
 
     // The stat-diff should detect the modification
-    let post_action = handle_bash_tool(
-        HookEvent::PostToolUse,
-        &root,
-        "hookfail-sess",
-        "hookfail-t1",
-    )
-    .expect("PostToolUse should succeed");
+    let post_action = post_hook(&root, "hookfail-sess", "hookfail-t1");
     assert_checkpoint_contains(&post_action, "broken.py");
 }

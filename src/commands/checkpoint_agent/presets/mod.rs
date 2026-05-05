@@ -20,11 +20,6 @@ mod pi;
 mod windsurf;
 
 use crate::authorship::working_log::AgentId;
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BashPreHookStrategy {
-    EmitHumanCheckpoint,
-    SnapshotOnly,
-}
 use crate::error::GitAiError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -84,7 +79,6 @@ pub struct UntrackedEdit {
 pub struct PreBashCall {
     pub context: PresetContext,
     pub tool_use_id: String,
-    pub strategy: BashPreHookStrategy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

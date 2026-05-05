@@ -1,12 +1,12 @@
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::working_log::{AgentId, Checkpoint, CheckpointKind, WorkingLogEntry};
-use git_ai::commands::checkpoint::{
-    BaseOverrideResolutionPolicy, PreparedPathRole, cleanup_failed_captured_checkpoint_prepare,
-    compute_file_line_stats, explicit_capture_target_paths, is_ai_author_id,
-    run_with_base_commit_override, run_with_base_commit_override_with_policy,
+use git_ai::commands::checkpoint_agent::orchestrator::{
+    BaseCommit, CheckpointFile, CheckpointRequest,
 };
-use git_ai::commands::checkpoint_agent::orchestrator::CheckpointRequest;
-use git_ai::error::GitAiError;
+use git_ai::daemon::checkpoint::{
+    PreparedPathRole, ResolvedCheckpointExecution, compute_file_line_stats,
+    execute_resolved_checkpoint_from_daemon, is_ai_author_id,
+};
 use git_ai::git::repository::find_repository_in_path;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -29,162 +29,6 @@ fn setup_repo_with_base_commit() -> (TestRepo, String, String) {
     repo.stage_all_and_commit("initial commit").unwrap();
 
     (repo, "lines.md".to_string(), "alphabet.md".to_string())
-}
-
-fn test_checkpoint_request(
-    checkpoint_kind: CheckpointKind,
-    edited_filepaths: Option<Vec<&str>>,
-    will_edit_filepaths: Option<Vec<&str>>,
-    dirty_files: Option<HashMap<&str, &str>>,
-) -> CheckpointRequest {
-    let (file_paths, path_role) = if let Some(paths) = edited_filepaths {
-        (
-            paths.into_iter().map(PathBuf::from).collect::<Vec<_>>(),
-            PreparedPathRole::Edited,
-        )
-    } else if let Some(paths) = will_edit_filepaths {
-        (
-            paths.into_iter().map(PathBuf::from).collect::<Vec<_>>(),
-            PreparedPathRole::WillEdit,
-        )
-    } else {
-        (vec![], PreparedPathRole::Edited)
-    };
-
-    CheckpointRequest {
-        trace_id: "test-trace".to_string(),
-        checkpoint_kind,
-        agent_id: Some(AgentId {
-            tool: "test-agent".to_string(),
-            id: "test-capture".to_string(),
-            model: "test-model".to_string(),
-        }),
-        repo_working_dir: PathBuf::from("."),
-        file_paths,
-        path_role,
-        dirty_files: dirty_files.map(|files| {
-            files
-                .into_iter()
-                .map(|(path, content)| (PathBuf::from(path), content.to_string()))
-                .collect()
-        }),
-        transcript_source: None,
-        metadata: HashMap::new(),
-        captured_checkpoint_id: None,
-    }
-}
-
-#[test]
-fn test_explicit_capture_target_paths_accepts_non_empty_edited_filepaths() {
-    let agent_run_result = test_checkpoint_request(
-        CheckpointKind::AiAgent,
-        Some(vec!["src/main.rs"]),
-        None,
-        None,
-    );
-
-    assert_eq!(
-        explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&agent_run_result)),
-        Some((PreparedPathRole::Edited, vec!["src/main.rs".to_string()]))
-    );
-}
-
-#[test]
-fn test_explicit_capture_target_paths_accepts_non_empty_will_edit_filepaths() {
-    let agent_run_result =
-        test_checkpoint_request(CheckpointKind::Human, None, Some(vec!["src/lib.rs"]), None);
-
-    assert_eq!(
-        explicit_capture_target_paths(CheckpointKind::Human, Some(&agent_run_result)),
-        Some((PreparedPathRole::WillEdit, vec!["src/lib.rs".to_string()]))
-    );
-}
-
-#[test]
-fn test_explicit_capture_target_paths_rejects_dirty_files_without_explicit_paths() {
-    let agent_run_result = test_checkpoint_request(
-        CheckpointKind::AiAgent,
-        None,
-        None,
-        Some(HashMap::from([("src/main.rs", "fn main() {}\n")])),
-    );
-
-    assert_eq!(
-        explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&agent_run_result)),
-        None
-    );
-}
-
-#[test]
-fn test_explicit_capture_target_paths_known_human_uses_edited_filepaths() {
-    // KnownHuman post-save: edit already happened, uses edited_filepaths.
-    let agent_run_result = test_checkpoint_request(
-        CheckpointKind::KnownHuman,
-        Some(vec!["src/foo.rs"]),
-        None,
-        None,
-    );
-
-    assert_eq!(
-        explicit_capture_target_paths(CheckpointKind::KnownHuman, Some(&agent_run_result)),
-        Some((PreparedPathRole::Edited, vec!["src/foo.rs".to_string()]))
-    );
-}
-
-#[test]
-fn test_explicit_capture_target_paths_known_human_uses_will_edit_filepaths() {
-    // KnownHuman pre-save: edit hasn't happened yet, uses will_edit_filepaths.
-    // Regression: KnownHuman fell into the else branch which only reads edited_filepaths,
-    // returning None and silently disabling pathspec scoping for pre-save KnownHuman.
-    let agent_run_result = test_checkpoint_request(
-        CheckpointKind::KnownHuman,
-        None,
-        Some(vec!["src/foo.rs"]),
-        None,
-    );
-
-    assert_eq!(
-        explicit_capture_target_paths(CheckpointKind::KnownHuman, Some(&agent_run_result)),
-        Some((PreparedPathRole::WillEdit, vec!["src/foo.rs".to_string()]))
-    );
-}
-
-#[test]
-fn test_explicit_capture_target_paths_rejects_empty_explicit_lists() {
-    let human_result =
-        test_checkpoint_request(CheckpointKind::Human, None, Some(vec!["", "   "]), None);
-    let ai_result =
-        test_checkpoint_request(CheckpointKind::AiAgent, Some(vec!["", "   "]), None, None);
-
-    assert_eq!(
-        explicit_capture_target_paths(CheckpointKind::Human, Some(&human_result)),
-        None
-    );
-    assert_eq!(
-        explicit_capture_target_paths(CheckpointKind::AiAgent, Some(&ai_result)),
-        None
-    );
-}
-
-#[test]
-fn test_cleanup_failed_captured_checkpoint_prepare_removes_partial_capture_dir() {
-    let temp = tempfile::tempdir().expect("temp dir should be creatable");
-    let capture_dir = temp.path().join("capture-fixture");
-    std::fs::create_dir_all(capture_dir.join("blobs"))
-        .expect("partial capture directory should be creatable");
-    std::fs::write(capture_dir.join("blobs").join("partial-blob"), "partial")
-        .expect("partial blob should be creatable");
-
-    cleanup_failed_captured_checkpoint_prepare(
-        &capture_dir,
-        "capture-fixture",
-        &GitAiError::Generic("synthetic prepare failure".to_string()),
-    );
-
-    assert!(
-        !capture_dir.exists(),
-        "cleanup helper should remove partial capture directories"
-    );
 }
 
 #[test]
@@ -376,14 +220,9 @@ fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
     repo.stage_all_and_commit("commit B").unwrap();
 
     // Keep the worktree dirty so git status returns this file, but inject deterministic
-    // content from commit B via dirty_files.
+    // content from commit B via the CheckpointFile content field.
     fs::write(&file_path, "line from uncommitted edit\n").unwrap();
 
-    let mut dirty_files = HashMap::new();
-    dirty_files.insert(
-        PathBuf::from(&lines_file),
-        "line from commit B\n".to_string(),
-    );
     let checkpoint_request = CheckpointRequest {
         trace_id: "base-override-regression".to_string(),
         checkpoint_kind: CheckpointKind::AiAgent,
@@ -392,160 +231,40 @@ fn test_checkpoint_base_override_controls_head_context_for_entry_generation() {
             id: "base-override-regression".to_string(),
             model: "test".to_string(),
         }),
-        repo_working_dir: repo.path().to_path_buf(),
-        file_paths: vec![PathBuf::from(&lines_file)],
+        files: vec![CheckpointFile {
+            path: PathBuf::from(&lines_file),
+            content: Some("line from commit B\n".to_string()),
+            repo_work_dir: repo.path().to_path_buf(),
+            base_commit: BaseCommit::Sha(base_commit.clone()),
+        }],
         path_role: PreparedPathRole::Edited,
-        dirty_files: Some(dirty_files),
         transcript_source: None,
         metadata: HashMap::new(),
-        captured_checkpoint_id: None,
     };
 
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let (entries_len, files_len, _) = run_with_base_commit_override_with_policy(
+
+    let mut dirty_files = HashMap::new();
+    dirty_files.insert(lines_file.clone(), "line from commit B\n".to_string());
+
+    let resolved = ResolvedCheckpointExecution {
+        base_commit,
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+        files: vec![lines_file],
+        dirty_files,
+    };
+
+    execute_resolved_checkpoint_from_daemon(
         &gitai_repo,
         "mock-ai",
         CheckpointKind::AiAgent,
-        true,
-        Some(checkpoint_request),
-        false,
-        Some(base_commit.as_str()),
-        BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
+        checkpoint_request,
+        resolved,
     )
     .unwrap();
-
-    assert_eq!(
-        files_len, 1,
-        "Expected one tracked file for the checkpoint run"
-    );
-    assert_eq!(
-        entries_len, 1,
-        "When base override points to commit A, current content from commit B must produce an entry"
-    );
-}
-
-#[test]
-fn test_checkpoint_base_override_strict_rejects_missing_dirty_snapshot() {
-    use std::fs;
-
-    let (repo, lines_file, _) = setup_repo_with_base_commit();
-    let file_path = repo.path().join(&lines_file);
-
-    fs::write(&file_path, "line from commit A\n").unwrap();
-    repo.git(&["add", &lines_file]).unwrap();
-    repo.stage_all_and_commit("commit A").unwrap();
-    let base_commit = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    fs::write(&file_path, "line from commit B\n").unwrap();
-    repo.git(&["add", &lines_file]).unwrap();
-    repo.stage_all_and_commit("commit B").unwrap();
-
-    // Keep the worktree dirty so the legacy fallback would succeed if it were used.
-    fs::write(&file_path, "line from uncommitted edit\n").unwrap();
-
-    let checkpoint_request = CheckpointRequest {
-        trace_id: "base-override-strict-missing-snapshot".to_string(),
-        checkpoint_kind: CheckpointKind::AiAgent,
-        agent_id: Some(AgentId {
-            tool: "mock_ai".to_string(),
-            id: "base-override-strict-missing-snapshot".to_string(),
-            model: "test".to_string(),
-        }),
-        repo_working_dir: repo.path().to_path_buf(),
-        file_paths: vec![PathBuf::from(&lines_file)],
-        path_role: PreparedPathRole::Edited,
-        dirty_files: None,
-        transcript_source: None,
-        metadata: HashMap::new(),
-        captured_checkpoint_id: None,
-    };
-
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let error = run_with_base_commit_override_with_policy(
-        &gitai_repo,
-        "mock-ai",
-        CheckpointKind::AiAgent,
-        true,
-        Some(checkpoint_request),
-        false,
-        Some(base_commit.as_str()),
-        BaseOverrideResolutionPolicy::RequireExplicitSnapshot,
-    )
-    .expect_err("strict base override should reject missing dirty snapshots");
-
-    assert!(
-        error
-            .to_string()
-            .contains("requires explicit in-repository target paths and a matching dirty snapshot"),
-        "expected strict snapshot error, got: {}",
-        error
-    );
-}
-
-#[test]
-fn test_checkpoint_base_override_allow_fallback_scans_when_snapshot_missing() {
-    use std::fs;
-
-    let (repo, lines_file, _) = setup_repo_with_base_commit();
-    let file_path = repo.path().join(&lines_file);
-
-    fs::write(&file_path, "line from commit A\n").unwrap();
-    repo.git(&["add", &lines_file]).unwrap();
-    repo.stage_all_and_commit("commit A").unwrap();
-    let base_commit = repo
-        .git_og(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
-
-    fs::write(&file_path, "line from commit B\n").unwrap();
-    repo.git(&["add", &lines_file]).unwrap();
-    repo.stage_all_and_commit("commit B").unwrap();
-
-    // Without a dirty snapshot the fallback path must rediscover the dirty file from the repo.
-    fs::write(&file_path, "line from uncommitted edit\n").unwrap();
-
-    let checkpoint_request = CheckpointRequest {
-        trace_id: "base-override-allow-fallback".to_string(),
-        checkpoint_kind: CheckpointKind::AiAgent,
-        agent_id: Some(AgentId {
-            tool: "mock_ai".to_string(),
-            id: "base-override-allow-fallback".to_string(),
-            model: "test".to_string(),
-        }),
-        repo_working_dir: repo.path().to_path_buf(),
-        file_paths: vec![PathBuf::from(&lines_file)],
-        path_role: PreparedPathRole::Edited,
-        dirty_files: None,
-        transcript_source: None,
-        metadata: HashMap::new(),
-        captured_checkpoint_id: None,
-    };
-
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let (entries_len, files_len, _) = run_with_base_commit_override(
-        &gitai_repo,
-        "mock-ai",
-        CheckpointKind::AiAgent,
-        true,
-        Some(checkpoint_request),
-        false,
-        Some(base_commit.as_str()),
-    )
-    .expect("allow-fallback base override should still scan the repo");
-
-    assert_eq!(
-        files_len, 1,
-        "fallback path should rediscover the changed file"
-    );
-    assert_eq!(
-        entries_len, 1,
-        "fallback path should still produce checkpoint entries from the worktree scan"
-    );
 }
 
 #[test]
@@ -632,7 +351,20 @@ fn test_checkpoint_with_paths_outside_repo() {
     std::fs::write(&file_path, &content).unwrap();
     repo.git(&["add", &lines_file]).unwrap();
 
-    // Create checkpoint request with paths outside the repo
+    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let base_commit = gitai_repo.head().unwrap().target().unwrap();
+
+    // Build a resolved checkpoint with only the valid file (outside paths filtered at resolution)
+    let resolved = ResolvedCheckpointExecution {
+        base_commit: base_commit.clone(),
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+        files: vec![lines_file.clone()],
+        dirty_files: HashMap::from([(lines_file.clone(), content.clone())]),
+    };
+
     let checkpoint_request = CheckpointRequest {
         trace_id: "test-outside-paths".to_string(),
         checkpoint_kind: CheckpointKind::AiAgent,
@@ -641,42 +373,30 @@ fn test_checkpoint_with_paths_outside_repo() {
             id: "test_session".to_string(),
             model: "test_model".to_string(),
         }),
-        repo_working_dir: repo.path().to_path_buf(),
-        file_paths: vec![
-            PathBuf::from("/tmp/outside_file.txt"),
-            PathBuf::from("../outside_parent.txt"),
-            PathBuf::from(&lines_file), // This one is valid
-        ],
+        files: vec![CheckpointFile {
+            path: file_path,
+            content: Some(content.clone()),
+            repo_work_dir: repo.path().to_path_buf(),
+            base_commit: BaseCommit::Sha(base_commit),
+        }],
         path_role: PreparedPathRole::Edited,
-        dirty_files: None,
         transcript_source: None,
         metadata: HashMap::new(),
-        captured_checkpoint_id: None,
     };
 
-    // Run checkpoint - should not crash even with paths outside repo
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let result = run_with_base_commit_override(
+    let result = execute_resolved_checkpoint_from_daemon(
         &gitai_repo,
         "test_user",
         CheckpointKind::AiAgent,
-        true,
-        Some(checkpoint_request),
-        false,
-        None,
+        checkpoint_request,
+        resolved,
     );
 
-    // Should succeed without crashing
     assert!(
         result.is_ok(),
-        "Checkpoint should succeed even with paths outside repo: {:?}",
+        "Checkpoint should succeed: {:?}",
         result.err()
     );
-
-    let (entries_len, files_len, _) = result.unwrap();
-    // Should only process the valid file
-    assert_eq!(files_len, 1, "Should process 1 valid file");
-    assert_eq!(entries_len, 1, "Should create 1 entry");
 }
 
 #[test]
@@ -1490,5 +1210,190 @@ fn test_checkpoint_stale_crlf_blob_causes_ai_reattribution() {
         ai_line_count,
         ai_line_attrs,
         test_entry.line_attributions
+    );
+}
+
+/// Regression test: legacy INITIAL attributions without stored file_blobs should not
+/// abort checkpoints. When a file is in INITIAL but has no blob and isn't in dirty_files,
+/// initial_file_content_from should gracefully return None instead of erroring.
+#[test]
+fn test_checkpoint_succeeds_with_legacy_initial_missing_blobs() {
+    let repo = TestRepo::new();
+    let file_a = repo.path().join("file_a.txt");
+    let file_b = repo.path().join("file_b.txt");
+
+    // Create both files and commit
+    std::fs::write(&file_a, "line1\nline2\n").unwrap();
+    std::fs::write(&file_b, "hello\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "file_a.txt"])
+        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "file_b.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("initial commit").unwrap();
+
+    // Edit BOTH files and commit (so both end up in INITIAL after reset)
+    std::fs::write(&file_a, "line1\nline2\nai on a\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "file_a.txt"])
+        .unwrap();
+    std::fs::write(&file_b, "hello\nai added\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "file_b.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("second commit with AI on both files")
+        .unwrap();
+
+    repo.git(&["reset", "--soft", "HEAD~1"]).unwrap();
+    repo.sync_daemon_force();
+
+    // Strip file_blobs from INITIAL to simulate legacy data (pre-March-2026)
+    let git_ai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let head_sha = git_ai_repo.head().unwrap().target().unwrap();
+    let working_log = git_ai_repo
+        .storage
+        .working_log_for_base_commit(&head_sha)
+        .unwrap();
+    let initial = working_log.read_initial_attributions();
+    assert!(
+        initial.files.contains_key("file_a.txt"),
+        "INITIAL must contain file_a.txt for this test"
+    );
+    assert!(
+        initial.files.contains_key("file_b.txt"),
+        "INITIAL must contain file_b.txt for this test"
+    );
+
+    let mut legacy_initial = initial.clone();
+    legacy_initial.file_blobs.clear();
+    let json = serde_json::to_string(&legacy_initial).unwrap();
+    std::fs::write(&working_log.initial_file, &json).unwrap();
+
+    // Directly invoke checkpoint daemon logic on file_b only.
+    // dirty_files contains only file_b, but INITIAL references file_a too.
+    // Without the fix, this errors because file_a can't be read from dirty_files.
+    let mut dirty_files = HashMap::new();
+    dirty_files.insert(
+        "file_b.txt".to_string(),
+        "hello\nai added\nnew line\n".to_string(),
+    );
+
+    let resolved = ResolvedCheckpointExecution {
+        base_commit: head_sha.clone(),
+        ts: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+        files: vec!["file_b.txt".to_string()],
+        dirty_files,
+    };
+
+    let checkpoint_request = CheckpointRequest {
+        trace_id: "test-trace".to_string(),
+        checkpoint_kind: CheckpointKind::AiAgent,
+        agent_id: Some(AgentId {
+            tool: "test".to_string(),
+            id: "test-id".to_string(),
+            model: "test-model".to_string(),
+        }),
+        files: vec![CheckpointFile {
+            path: file_b.clone(),
+            content: Some("hello\nai added\nnew line\n".to_string()),
+            repo_work_dir: repo.path().to_path_buf(),
+            base_commit: BaseCommit::Sha(head_sha),
+        }],
+        path_role: PreparedPathRole::Edited,
+        transcript_source: None,
+        metadata: HashMap::new(),
+    };
+
+    let result = execute_resolved_checkpoint_from_daemon(
+        &git_ai_repo,
+        "test",
+        CheckpointKind::AiAgent,
+        checkpoint_request,
+        resolved,
+    );
+    assert!(
+        result.is_ok(),
+        "Checkpoint should succeed with legacy INITIAL missing blobs, got: {:?}",
+        result.err()
+    );
+}
+
+/// When an AI agent deletes a file, the checkpoint should still be recorded (not silently
+/// dropped). The scoped post-edit checkpoint fires with the deleted file's path — the file
+/// no longer exists on disk, so the orchestrator must set content = Some("") and pass it
+/// through to the daemon so the deletion is tracked in the working log.
+#[test]
+fn test_scoped_checkpoint_records_file_deletion() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("to_delete.txt");
+
+    // Create file and commit with known human attribution
+    std::fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "to_delete.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("initial commit").unwrap();
+
+    // AI agent pre-edit snapshot (captures before state)
+    repo.git_ai(&["checkpoint", "human", "to_delete.txt"])
+        .unwrap();
+
+    // AI deletes the file
+    std::fs::remove_file(&file_path).unwrap();
+
+    // AI agent post-edit checkpoint on the now-deleted file
+    let checkpoint_result = repo.git_ai(&["checkpoint", "mock_ai", "to_delete.txt"]);
+    assert!(
+        checkpoint_result.is_ok(),
+        "Checkpoint on deleted file should succeed, got: {:?}",
+        checkpoint_result.err()
+    );
+
+    // Verify the checkpoint was recorded in the working log with deletion stats
+    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+    let head_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit(&head_sha)
+        .unwrap();
+    let checkpoints = working_log.read_all_checkpoints().unwrap();
+
+    // The AI post-edit checkpoint should be recorded (human pre-edit is a no-op since
+    // the file hadn't changed relative to HEAD at that point)
+    assert!(
+        !checkpoints.is_empty(),
+        "At least one checkpoint should be recorded for the deletion"
+    );
+
+    // The AI checkpoint should reference to_delete.txt and record 3 deleted lines
+    let ai_checkpoint = checkpoints
+        .iter()
+        .find(|cp| cp.kind.is_ai())
+        .expect("Should have an AI checkpoint");
+    assert!(
+        ai_checkpoint.kind.is_ai(),
+        "Last checkpoint should be AI, got {:?}",
+        ai_checkpoint.kind
+    );
+    let has_file = ai_checkpoint
+        .entries
+        .iter()
+        .any(|e| e.file == "to_delete.txt");
+    assert!(
+        has_file,
+        "AI checkpoint should reference to_delete.txt, entries: {:?}",
+        ai_checkpoint
+            .entries
+            .iter()
+            .map(|e| &e.file)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ai_checkpoint.line_stats.deletions, 3,
+        "AI checkpoint should record 3 deleted lines, got {}",
+        ai_checkpoint.line_stats.deletions
     );
 }

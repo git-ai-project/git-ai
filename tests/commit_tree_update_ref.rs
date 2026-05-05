@@ -205,6 +205,8 @@ fn test_commit_tree_update_ref_moves_working_log_to_rewritten_head() {
         "pending ai".ai(),
     ]);
 
+    repo.sync_daemon();
+
     let old_head = head_sha(&repo);
     let git_ai_repo = open_repo(&repo);
     assert!(

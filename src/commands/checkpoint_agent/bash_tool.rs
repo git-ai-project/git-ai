@@ -7,13 +7,10 @@ use crate::authorship::ignore::{
     default_ignore_patterns, load_git_ai_ignore_patterns_from_path,
     load_linguist_generated_patterns_from_path,
 };
-use crate::authorship::working_log::{AgentId, CheckpointKind};
-use crate::commands::checkpoint::prepare_captured_checkpoint;
-use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
-use crate::daemon::control_api::ControlRequest;
-use crate::daemon::{DaemonConfig, send_control_request_with_timeout};
+use crate::authorship::working_log::AgentId;
+use crate::daemon::control_api::{BashSnapshotQueryResponse, ControlRequest};
+use crate::daemon::{DaemonConfig, send_control_request, send_control_request_with_timeout};
 use crate::error::GitAiError;
-use crate::git::find_repository_in_path;
 use crate::utils::normalize_to_posix;
 use ignore::WalkBuilder;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -29,18 +26,18 @@ use std::time::{Duration, Instant, SystemTime};
 // ---------------------------------------------------------------------------
 
 /// Grace window for low-resolution filesystem detection (seconds).
+#[cfg(not(any(test, feature = "test-support")))]
 const MTIME_GRACE_WINDOW_SECS: u64 = 2;
+#[cfg(any(test, feature = "test-support"))]
+const MTIME_GRACE_WINDOW_SECS: u64 = 0;
 
 /// Hard limit for the filesystem stat-diff walk.  If the walk exceeds this,
 /// the snapshot is abandoned (returning Err) and the hook falls back gracefully.
 const WALK_TIMEOUT_MS: u64 = 1500;
 
-/// Hard limit for the entire handle_bash_tool execution.  If this is exceeded
-/// at any checkpoint, the hook returns Fallback immediately.
+/// Hard limit for the entire post-hook execution.  If this is exceeded
+/// at any checkpoint, the hook returns HookTimeout immediately.
 const HOOK_TIMEOUT_MS: u64 = 4000;
-
-/// Pre-snapshots older than this are garbage-collected (seconds).
-const SNAPSHOT_STALE_SECS: u64 = 300;
 
 // ---------------------------------------------------------------------------
 // Test-only timeout overrides (thread-local so parallel tests don't interfere)
@@ -54,6 +51,7 @@ const SNAPSHOT_STALE_SECS: u64 = 300;
 std::thread_local! {
     static TEST_WALK_TIMEOUT_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     static TEST_HOOK_TIMEOUT_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static TEST_DAEMON_SOCKET: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Return the walk timeout, honouring any test-time thread-local override.
@@ -88,26 +86,44 @@ pub fn set_hook_timeout_ms_for_test(ms: u64) {
     TEST_HOOK_TIMEOUT_MS.with(|c| c.set(Some(ms)));
 }
 
-/// Clear all test-time timeout overrides for the current thread.
+/// Override the daemon control socket path for the current thread.
+/// This avoids process-global env vars that race in parallel tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_daemon_socket_for_test(path: std::path::PathBuf) {
+    TEST_DAEMON_SOCKET.with(|c| c.borrow_mut().replace(path));
+}
+
+/// Clear test-time timeout overrides for the current thread.
+/// Does NOT clear the daemon socket override — that is managed separately
+/// via `set_daemon_socket_for_test`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_timeout_overrides_for_test() {
     TEST_WALK_TIMEOUT_MS.with(|c| c.set(None));
     TEST_HOOK_TIMEOUT_MS.with(|c| c.set(None));
 }
 
+/// Resolve the daemon control socket path, preferring the thread-local test
+/// override over the env-based `DaemonConfig`.
+fn effective_daemon_socket() -> Option<std::path::PathBuf> {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        let tl = TEST_DAEMON_SOCKET.with(|c| c.borrow().clone());
+        if tl.is_some() {
+            return tl;
+        }
+    }
+    DaemonConfig::from_env_or_default_paths()
+        .ok()
+        .map(|c| c.control_socket_path)
+}
+
 /// Grace window in nanoseconds for low-resolution filesystem mtime comparison.
 const MTIME_GRACE_WINDOW_NS: u128 = (MTIME_GRACE_WINDOW_SECS as u128) * 1_000_000_000;
 
-/// Maximum number of stale files before skipping content capture.
-const MAX_STALE_FILES_FOR_CAPTURE: usize = 1000;
-
 /// Maximum number of files to track in a snapshot.  Repos larger than this
-/// skip the stat-diff system entirely (returning Fallback) to avoid adding
+/// skip the stat-diff system entirely (returning SnapshotFailed) to avoid adding
 /// seconds of latency to every Bash tool call.
 const MAX_TRACKED_FILES: usize = 50_000;
-
-/// Maximum file size for content capture (10 MB).
-const MAX_CAPTURE_FILE_SIZE: u64 = 10 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -201,7 +217,7 @@ impl StatEntry {
 /// `mtime > effective_worktree_wm + GRACE` (i.e., not covered by any watermark).
 /// Filtering is applied uniformly to all files — there is no special treatment
 /// for git-tracked vs untracked files.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatSnapshot {
     /// File metadata for files that passed the ignore filter and are not
     /// covered by any watermark at snapshot time.
@@ -222,11 +238,6 @@ pub struct StatSnapshot {
     /// Used for Tier-1 stale detection in `find_stale_files`.
     #[serde(default)]
     pub per_file_wm: HashMap<String, u128>,
-    /// Optional agent identity for an inflight bash invocation.
-    /// Stored in the snapshot itself so pre-commit recovery can reuse the same
-    /// lifecycle as the snapshot file without extra sidecar state.
-    #[serde(default)]
-    pub inflight_agent_context: Option<InflightBashAgentContext>,
 }
 
 /// Result of diffing two snapshots.
@@ -251,157 +262,31 @@ impl StatDiffResult {
     }
 }
 
-/// What the bash tool handler decided to do.
+/// What the bash post-hook decided to do.
+#[derive(Debug)]
 pub enum BashCheckpointAction {
-    /// Take a pre-snapshot (PreToolUse).
-    TakePreSnapshot,
     /// Files changed — emit a checkpoint with these paths.
     Checkpoint(Vec<String>),
     /// Stat-diff ran but found nothing.
     NoChanges,
-    /// An error occurred; caller should fall back to a safe default.
-    Fallback,
+    /// The post-hook exceeded its time budget.
+    HookTimeout,
+    /// The post-snapshot filesystem walk failed (walk timeout, too many files, IO error).
+    SnapshotFailed,
+    /// The daemon had no pre-snapshot for this tool-use ID.
+    MissingPreSnapshot,
 }
 
-/// Which hook event triggered the bash tool handler.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HookEvent {
-    PreToolUse,
-    PostToolUse,
+/// Result from `handle_bash_pre_tool_use_with_context`.
+pub struct BashPreHookResult {
+    /// Files with mtime > watermark at pre-snapshot time (absolute paths).
+    pub dirty_paths: Vec<PathBuf>,
 }
 
-/// Result from `handle_bash_tool` combining the action with optional captured checkpoint info.
-pub struct BashToolResult {
-    /// The checkpoint action (unchanged from previous API).
+/// Result from `handle_bash_post_tool_use`.
+pub struct BashPostHookResult {
+    /// The checkpoint action.
     pub action: BashCheckpointAction,
-    /// If set, a captured checkpoint was prepared and needs submission by the handler.
-    pub captured_checkpoint: Option<CapturedCheckpointInfo>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ActiveBashSnapshotScan {
-    has_inflight_snapshot: bool,
-    latest_context: Option<InflightBashAgentContext>,
-}
-
-/// Info about a captured checkpoint prepared by the bash tool.
-pub struct CapturedCheckpointInfo {
-    pub capture_id: String,
-    pub repo_working_dir: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InflightBashAgentContext {
-    pub session_id: String,
-    pub tool_use_id: String,
-    pub agent_id: AgentId,
-    #[serde(default)]
-    pub agent_metadata: Option<HashMap<String, String>>,
-}
-
-impl InflightBashAgentContext {
-    pub fn into_checkpoint_request(self, repo_working_dir: PathBuf) -> CheckpointRequest {
-        CheckpointRequest {
-            trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-            checkpoint_kind: CheckpointKind::AiAgent,
-            agent_id: Some(self.agent_id),
-            repo_working_dir,
-            file_paths: vec![],
-            path_role: crate::commands::checkpoint::PreparedPathRole::Edited,
-            dirty_files: None,
-            transcript_source: None,
-            metadata: self.agent_metadata.unwrap_or_default(),
-            captured_checkpoint_id: None,
-        }
-    }
-}
-
-fn scan_active_bash_snapshots(repo_root: &Path) -> ActiveBashSnapshotScan {
-    let Ok(cache_dir) = snapshot_cache_dir(repo_root) else {
-        return ActiveBashSnapshotScan {
-            has_inflight_snapshot: false,
-            latest_context: None,
-        };
-    };
-    let Ok(entries) = fs::read_dir(&cache_dir) else {
-        return ActiveBashSnapshotScan {
-            has_inflight_snapshot: false,
-            latest_context: None,
-        };
-    };
-
-    let now = SystemTime::now();
-    let mut has_inflight_snapshot = false;
-    let mut latest_context: Option<(SystemTime, InflightBashAgentContext)> = None;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "json") || !cache_entry_is_fresh(&path, now) {
-            continue;
-        }
-
-        has_inflight_snapshot = true;
-
-        let data = match fs::read(&path) {
-            Ok(data) => data,
-            Err(_) => continue,
-        };
-        let snapshot: StatSnapshot = match serde_json::from_slice(&data) {
-            Ok(snapshot) => snapshot,
-            Err(_) => continue,
-        };
-        let Some(context) = snapshot.inflight_agent_context else {
-            continue;
-        };
-
-        let modified = fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-
-        match &latest_context {
-            Some((current_modified, _)) if *current_modified >= modified => {}
-            _ => latest_context = Some((modified, context)),
-        }
-    }
-
-    ActiveBashSnapshotScan {
-        has_inflight_snapshot,
-        latest_context: latest_context.map(|(_, context)| context),
-    }
-}
-
-pub fn checkpoint_context_from_active_bash(
-    repo_root: &Path,
-    repo_working_dir: &str,
-) -> Option<(CheckpointKind, Option<CheckpointRequest>)> {
-    match scan_active_bash_snapshots(repo_root) {
-        ActiveBashSnapshotScan {
-            latest_context: Some(active_context),
-            ..
-        } => {
-            tracing::debug!(
-                "active bash context: found {} session {} tool_use_id {}",
-                active_context.agent_id.tool,
-                active_context.session_id,
-                active_context.tool_use_id
-            );
-            Some((
-                CheckpointKind::AiAgent,
-                Some(active_context.into_checkpoint_request(PathBuf::from(repo_working_dir))),
-            ))
-        }
-        ActiveBashSnapshotScan {
-            has_inflight_snapshot: true,
-            latest_context: None,
-        } => {
-            tracing::debug!("active bash context: falling back to unscoped AI checkpoint");
-            Some((CheckpointKind::AiAgent, None))
-        }
-        ActiveBashSnapshotScan {
-            has_inflight_snapshot: false,
-            latest_context: None,
-        } => None,
-    }
 }
 
 /// Per-agent tool classification.
@@ -640,7 +525,7 @@ pub fn snapshot(
     //                without daemon context).
     //
     // Note: the cold-start proxy (git_index_mtime_ns) is injected by
-    // handle_bash_tool when no daemon is running, not here, so direct
+    // handle_bash_pre_tool_use_with_context when no daemon is running, not here, so direct
     // snapshot() callers (e.g. tests, git_status_fallback) are unaffected.
     let effective_worktree_wm: Option<u128> = match wm {
         Some(w) if w.worktree.is_some() => w.worktree,
@@ -779,7 +664,6 @@ pub fn snapshot(
         repo_root: repo_root.to_path_buf(),
         effective_worktree_wm,
         per_file_wm,
-        inflight_agent_context: None,
     })
 }
 
@@ -822,96 +706,6 @@ pub fn diff(pre: &StatSnapshot, post: &StatSnapshot) -> StatDiffResult {
     result.modified.sort();
 
     result
-}
-
-// ---------------------------------------------------------------------------
-// Snapshot caching (file-based persistence)
-// ---------------------------------------------------------------------------
-
-/// Get the directory for storing bash snapshots.
-fn snapshot_cache_dir(repo_root: &Path) -> Result<PathBuf, GitAiError> {
-    let cache_dir = get_git_dir(repo_root)?.join("ai").join("bash_snapshots");
-    fs::create_dir_all(&cache_dir).map_err(GitAiError::IoError)?;
-    Ok(cache_dir)
-}
-
-/// Save a pre-snapshot to the cache.
-pub fn save_snapshot(snapshot: &StatSnapshot) -> Result<(), GitAiError> {
-    let cache_dir = snapshot_cache_dir(&snapshot.repo_root)?;
-    let filename = sanitize_key(&snapshot.invocation_key);
-    let path = cache_dir.join(format!("{}.json", filename));
-
-    let data = serde_json::to_vec(snapshot).map_err(GitAiError::JsonError)?;
-
-    fs::write(&path, data).map_err(GitAiError::IoError)?;
-
-    tracing::debug!(
-        "Saved pre-snapshot: {} ({} entries)",
-        path.display(),
-        snapshot.entries.len()
-    );
-
-    Ok(())
-}
-
-/// Load a pre-snapshot from the cache and remove it (consume).
-pub fn load_and_consume_snapshot(
-    repo_root: &Path,
-    invocation_key: &str,
-) -> Result<Option<StatSnapshot>, GitAiError> {
-    let cache_dir = snapshot_cache_dir(repo_root)?;
-    let filename = sanitize_key(invocation_key);
-    let path = cache_dir.join(format!("{}.json", filename));
-
-    // Read and then delete atomically: skip the exists() check to avoid a
-    // TOCTOU race where a concurrent post-hook deletes the file between the
-    // check and the read.  NotFound after the read means it was already
-    // consumed; any other error is a real failure.
-    let data = match fs::read(&path) {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(GitAiError::IoError(e)),
-    };
-    let snapshot: StatSnapshot = serde_json::from_slice(&data).map_err(GitAiError::JsonError)?;
-
-    // Consume: remove the file after a successful read.
-    let _ = fs::remove_file(&path);
-
-    tracing::debug!(
-        "Loaded pre-snapshot: {} ({} entries)",
-        path.display(),
-        snapshot.entries.len()
-    );
-
-    Ok(Some(snapshot))
-}
-
-/// Clean up stale snapshots older than SNAPSHOT_STALE_SECS.
-pub fn cleanup_stale_snapshots(repo_root: &Path) -> Result<(), GitAiError> {
-    let cache_dir = snapshot_cache_dir(repo_root)?;
-
-    if let Ok(entries) = fs::read_dir(&cache_dir) {
-        let now = SystemTime::now();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json")
-                && let Ok(meta) = fs::metadata(&path)
-                && let Ok(modified) = meta.modified()
-                && let Ok(age) = now.duration_since(modified)
-                && age.as_secs() > SNAPSHOT_STALE_SECS
-            {
-                tracing::debug!("Cleaning stale snapshot: {}", path.display());
-                let _ = fs::remove_file(&path);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Sanitize an invocation key for use as a filename.
-fn sanitize_key(key: &str) -> String {
-    key.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
 }
 
 // ---------------------------------------------------------------------------
@@ -993,51 +787,6 @@ fn system_time_to_nanos(t: SystemTime) -> u128 {
         .as_nanos()
 }
 
-/// Read file contents for captured checkpoint, skipping binary/large/unreadable files.
-fn capture_file_contents(repo_root: &Path, file_paths: &[PathBuf]) -> HashMap<String, String> {
-    use std::io::Read;
-    let mut contents = HashMap::new();
-    for rel_path in file_paths {
-        let abs_path = repo_root.join(rel_path);
-        let mut file = match fs::File::open(&abs_path) {
-            Ok(f) => f,
-            Err(e) => {
-                tracing::debug!(
-                    "Skipping unreadable file for capture: {}: {}",
-                    rel_path.display(),
-                    e
-                );
-                continue;
-            }
-        };
-        if let Ok(meta) = file.metadata()
-            && meta.len() > MAX_CAPTURE_FILE_SIZE
-        {
-            tracing::debug!(
-                "Skipping large file for capture: {} ({} bytes)",
-                rel_path.display(),
-                meta.len()
-            );
-            continue;
-        }
-        let mut content = String::new();
-        match file.read_to_string(&mut content) {
-            Ok(_) => {
-                let key = normalize_to_posix(&rel_path.to_string_lossy());
-                contents.insert(key, content);
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "Skipping non-UTF8/unreadable file for capture: {}: {}",
-                    rel_path.display(),
-                    e
-                );
-            }
-        }
-    }
-    contents
-}
-
 // ---------------------------------------------------------------------------
 // Daemon watermark query + stale file detection
 // ---------------------------------------------------------------------------
@@ -1057,21 +806,15 @@ pub struct DaemonWatermarks {
 }
 
 fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
-    let config = DaemonConfig::from_env_or_default_paths().ok()?;
-    // Fast-exit when the socket file does not exist — avoids the connect
-    // timeout on every hook call when no daemon is running.
-    if !config.control_socket_path.exists() {
+    let socket = effective_daemon_socket()?;
+    if !socket.exists() {
         return None;
     }
     let request = ControlRequest::SnapshotWatermarks {
         repo_working_dir: repo_working_dir.to_string(),
     };
-    let response = send_control_request_with_timeout(
-        &config.control_socket_path,
-        &request,
-        Duration::from_millis(500),
-    )
-    .ok()?;
+    let response =
+        send_control_request_with_timeout(&socket, &request, Duration::from_millis(500)).ok()?;
 
     if !response.ok {
         tracing::debug!(
@@ -1081,7 +824,6 @@ fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
         return None;
     }
 
-    // The daemon returns `{ "watermarks": {...}, "worktree_watermark": <u128|null> }`.
     let data = response.data?;
     let per_file: HashMap<String, u128> = data
         .get("watermarks")
@@ -1090,477 +832,135 @@ fn query_daemon_watermarks(repo_working_dir: &str) -> Option<DaemonWatermarks> {
     let worktree: Option<u128> = data
         .get("worktree_watermark")
         .and_then(|v| serde_json::from_value(v.clone()).ok());
+    if per_file.is_empty() && worktree.is_none() {
+        return None;
+    }
     Some(DaemonWatermarks { per_file, worktree })
 }
 
-/// Find files in the snapshot that are stale (modified since the last baseline).
-///
-/// Because `snapshot()` already filters out wm-covered files, every entry in
-/// `snapshot.entries` is a candidate.  We still apply the per-file (Tier 1)
-/// check for precision: a file that passed the coarser worktree-wm filter may
-/// still be within the grace window of its own more-recent per-file watermark.
-///
-/// Three-tier logic per entry:
-/// 1. Per-file watermark → stale if `mtime > file_wm + GRACE`.
-/// 2. Worktree watermark (real or cold-start proxy) → all entries already
-///    passed this threshold via the snapshot filter; push unconditionally.
-/// 3. Neither watermark → no baseline, skip (cold-start with no index mtime).
-fn find_stale_files(snapshot: &StatSnapshot) -> Vec<PathBuf> {
-    let mut stale = Vec::new();
-    for (rel_path, entry) in &snapshot.entries {
-        if !entry.exists {
-            continue;
-        }
-        let Some(mtime) = entry.mtime else {
-            continue;
-        };
-        let mtime_ns = system_time_to_nanos(mtime);
-        let posix_key = normalize_to_posix(&rel_path.to_string_lossy());
-
-        if let Some(&file_wm) = snapshot.per_file_wm.get(&posix_key) {
-            // Tier 1: precise per-file watermark — may be tighter than the
-            // effective worktree wm used for snapshot filtering.
-            if mtime_ns > file_wm + MTIME_GRACE_WINDOW_NS {
-                stale.push(rel_path.clone());
-            }
-        } else if snapshot.effective_worktree_wm.is_some() {
-            // Tier 2: entry passed the worktree-wm snapshot filter, so by
-            // definition mtime > effective_wm + GRACE → stale.
-            stale.push(rel_path.clone());
-        }
-        // Tier 3: no watermark at all → no baseline, skip.
-    }
-    stale.sort();
-    stale
-}
-
 // ---------------------------------------------------------------------------
-// Pre/post hook captured-checkpoint helpers
+// Daemon-based bash session query
 // ---------------------------------------------------------------------------
 
-/// Attempt to prepare a captured checkpoint during the pre-hook.
+/// Query the daemon for the pre-snapshot stored during `BashSessionStart`.
 ///
-/// Uses watermarks already embedded in the snapshot to identify stale files
-/// (modified since the last checkpoint), captures their contents, and prepares
-/// a captured checkpoint with `CheckpointKind::Human` and `will_edit_filepaths`.
-///
-/// Returns `None` on any failure or when no stale files are found, allowing
-/// the caller to proceed without a captured checkpoint.
-fn attempt_pre_hook_capture(
-    snap: &StatSnapshot,
-    repo_root: &Path,
-) -> Option<CapturedCheckpointInfo> {
-    let repo_working_dir = repo_root.to_string_lossy().to_string();
-
-    // Watermarks are already embedded in the snapshot (queried before snapshot
-    // was taken); no second daemon round-trip needed.
-    let stale_files = find_stale_files(snap);
-
-    if stale_files.is_empty() {
-        tracing::debug!("Pre-hook capture: no stale files found, skipping");
+/// Returns `None` if the daemon is not running, the session is not found,
+/// or any communication error occurs.
+fn query_daemon_bash_snapshot(session_id: &str, tool_use_id: &str) -> Option<StatSnapshot> {
+    let socket = effective_daemon_socket()?;
+    if !socket.exists() {
         return None;
     }
-    if stale_files.len() > MAX_STALE_FILES_FOR_CAPTURE {
+    let request = ControlRequest::BashSnapshotQuery {
+        session_id: session_id.to_string(),
+        tool_use_id: tool_use_id.to_string(),
+    };
+    let response =
+        send_control_request_with_timeout(&socket, &request, Duration::from_millis(500)).ok()?;
+
+    if !response.ok {
         tracing::debug!(
-            "Pre-hook capture: {} stale files exceeds limit of {}, skipping",
-            stale_files.len(),
-            MAX_STALE_FILES_FOR_CAPTURE,
+            "Daemon bash snapshot query returned error: {}",
+            response.error.as_deref().unwrap_or("unknown")
         );
         return None;
     }
 
-    let contents = capture_file_contents(repo_root, &stale_files);
+    let data = response.data?;
+    let snapshot_response: BashSnapshotQueryResponse = serde_json::from_value(data).ok()?;
+    snapshot_response.stat_snapshot
+}
 
-    let repo = match find_repository_in_path(&repo_working_dir) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::debug!("Pre-hook capture: failed to open repo: {}", e);
-            return None;
-        }
+/// Signal the daemon that a bash session has ended.
+fn signal_daemon_bash_session_end(session_id: &str, tool_use_id: &str) {
+    let Some(socket) = effective_daemon_socket() else {
+        return;
     };
-
-    let checkpoint_request = CheckpointRequest {
-        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-        checkpoint_kind: CheckpointKind::Human,
-        agent_id: None,
-        repo_working_dir: PathBuf::from(repo_working_dir.clone()),
-        file_paths: stale_files
-            .iter()
-            .map(|p| PathBuf::from(crate::utils::normalize_to_posix(&p.to_string_lossy())))
-            .collect(),
-        path_role: crate::commands::checkpoint::PreparedPathRole::WillEdit,
-        dirty_files: Some(
-            contents
-                .into_iter()
-                .map(|(k, v)| (PathBuf::from(k), v))
-                .collect(),
-        ),
-        transcript_source: None,
-        metadata: HashMap::new(),
-        captured_checkpoint_id: None,
+    if !socket.exists() {
+        return;
+    }
+    let request = ControlRequest::BashSessionEnd {
+        session_id: session_id.to_string(),
+        tool_use_id: tool_use_id.to_string(),
     };
-
-    match prepare_captured_checkpoint(
-        &repo,
-        "bash-tool", // author
-        CheckpointKind::Human,
-        Some(&checkpoint_request),
-        false, // is_pre_commit
-        None,  // base_commit_override
-    ) {
-        Ok(Some(capture)) => {
-            tracing::debug!(
-                "Pre-hook captured checkpoint prepared: {} ({} files)",
-                capture.capture_id,
-                capture.file_count,
-            );
-            Some(CapturedCheckpointInfo {
-                capture_id: capture.capture_id,
-                repo_working_dir: capture.repo_working_dir,
-            })
-        }
-        Ok(None) => {
-            tracing::debug!("Pre-hook capture: prepare_captured_checkpoint returned None");
-            None
-        }
-        Err(e) => {
-            tracing::debug!(
-                "Pre-hook capture: prepare_captured_checkpoint failed: {}",
-                e
-            );
-            None
-        }
-    }
-}
-
-/// Attempt to prepare a captured checkpoint during the post-hook.
-///
-/// Captures the current contents of changed files and prepares a captured
-/// checkpoint with `CheckpointKind::AiAgent` and `edited_filepaths`.
-///
-/// Returns `None` on any failure, allowing the caller to proceed without a
-/// captured checkpoint (the stat-diff paths are still returned for the
-/// live checkpoint path).
-fn attempt_post_hook_capture(
-    repo_root: &Path,
-    changed_paths: &[String],
-) -> Option<CapturedCheckpointInfo> {
-    let repo_working_dir = repo_root.to_string_lossy().to_string();
-
-    // Exclude deleted files: they have no post-content to capture, and recording
-    // them as empty blobs would misrepresent deletions as "file was emptied".
-    // The Checkpoint action already carries all changed paths for attribution.
-    let (existing_paths, _deleted_paths): (Vec<&String>, Vec<&String>) = changed_paths
-        .iter()
-        .partition(|p| repo_root.join(p.as_str()).exists());
-
-    if existing_paths.is_empty() {
-        tracing::debug!("Post-hook capture: no existing changed files to capture, skipping");
-        return None;
-    }
-
-    let path_bufs: Vec<PathBuf> = existing_paths
-        .iter()
-        .map(|p| PathBuf::from(p.as_str()))
-        .collect();
-    let contents = capture_file_contents(repo_root, &path_bufs);
-
-    let repo = match find_repository_in_path(&repo_working_dir) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::debug!("Post-hook capture: failed to open repo: {}", e);
-            return None;
-        }
-    };
-
-    let checkpoint_request = CheckpointRequest {
-        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-        checkpoint_kind: CheckpointKind::AiAgent,
-        agent_id: Some(AgentId {
-            tool: "bash-tool".to_string(),
-            id: "post-hook".to_string(),
-            model: String::new(),
-        }),
-        repo_working_dir: PathBuf::from(repo_working_dir.clone()),
-        file_paths: existing_paths
-            .iter()
-            .map(|p| PathBuf::from(p.as_str()))
-            .collect(),
-        path_role: crate::commands::checkpoint::PreparedPathRole::Edited,
-        dirty_files: Some(
-            contents
-                .into_iter()
-                .map(|(k, v)| (PathBuf::from(k), v))
-                .collect(),
-        ),
-        transcript_source: None,
-        metadata: HashMap::new(),
-        captured_checkpoint_id: None,
-    };
-
-    match prepare_captured_checkpoint(
-        &repo,
-        "bash-tool", // author
-        CheckpointKind::AiAgent,
-        Some(&checkpoint_request),
-        false, // is_pre_commit
-        None,  // base_commit_override
-    ) {
-        Ok(Some(capture)) => {
-            tracing::debug!(
-                "Post-hook captured checkpoint prepared: {} ({} files)",
-                capture.capture_id,
-                capture.file_count,
-            );
-            Some(CapturedCheckpointInfo {
-                capture_id: capture.capture_id,
-                repo_working_dir: capture.repo_working_dir,
-            })
-        }
-        Ok(None) => {
-            tracing::debug!("Post-hook capture: prepare_captured_checkpoint returned None");
-            None
-        }
-        Err(e) => {
-            tracing::debug!(
-                "Post-hook capture: prepare_captured_checkpoint failed: {}",
-                e
-            );
-            None
-        }
+    if let Err(e) = send_control_request_with_timeout(&socket, &request, Duration::from_millis(500))
+    {
+        tracing::debug!("Failed to signal bash session end: {}", e);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Inflight bash-call detection
+// Pre/post hook orchestration
 // ---------------------------------------------------------------------------
-//
-// When an AI agent runs a bash tool that internally calls `git commit`, the
-// git pre-commit hook fires with no agent context and would normally be
-// attributed as human. We detect this via the pre-snapshot files that already
-// exist in the bash_snapshots cache: a snapshot is written at pre-hook time
-// and deleted when the post-hook consumes it, so its presence is a precise
-// signal that a bash invocation is currently in flight.
-//
-// Stale snapshots (> SNAPSHOT_STALE_SECS old) are excluded so a crashed
-// pre-hook does not permanently block human attribution.
 
-/// Returns `true` if any non-stale pre-snapshot exists for this repo,
-/// indicating an AI bash tool call is currently in flight.
+/// Handle the pre-tool-use hook with full agent context.
 ///
-/// Used by the checkpoint handler to override Human attribution to AI when
-/// a `git commit` is triggered from within a bash tool invocation.
-pub fn has_active_bash_inflight(repo_root: &Path) -> bool {
-    scan_active_bash_snapshots(repo_root).has_inflight_snapshot
-}
-
-// ---------------------------------------------------------------------------
-// Invocation-ID sidecar helpers
-// ---------------------------------------------------------------------------
-
-/// Sidecar file path used to correlate pre and post hooks for agents that do
-/// not provide a unique per-call `tool_use_id` (e.g. Gemini CLI, ContinueCli).
-fn bash_sidecar_path(repo_root: &Path, session_id: &str) -> Option<PathBuf> {
-    snapshot_cache_dir(repo_root)
-        .ok()
-        .map(|d| d.join(format!("last_id_{}.txt", sanitize_key(session_id))))
-}
-
-fn cache_entry_is_fresh(path: &Path, now: SystemTime) -> bool {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| now.duration_since(t).ok())
-        .map(|age| age.as_secs() <= SNAPSHOT_STALE_SECS)
-        .unwrap_or(false)
-}
-
-pub fn latest_inflight_bash_agent_context(repo_root: &Path) -> Option<InflightBashAgentContext> {
-    scan_active_bash_snapshots(repo_root).latest_context
-}
-
-/// Resolve the effective `tool_use_id` for a bash tool invocation.
-///
-/// When the caller passes the generic fallback `"bash"` (meaning the agent did
-/// not supply a unique per-call identifier), we generate a fresh UUID at
-/// pre-hook time and persist it in a small sidecar file, then read it back at
-/// post-hook time. This prevents snapshot key collisions when two bash calls
-/// share the same session.
-///
-/// Returns the resolved ID (either the original or a sidecar-backed UUID).
-fn resolve_bash_tool_use_id(
-    hook_event: HookEvent,
-    repo_root: &Path,
-    session_id: &str,
-    tool_use_id: &str,
-) -> String {
-    const FALLBACK: &str = "bash";
-    if tool_use_id != FALLBACK {
-        return tool_use_id.to_string();
-    }
-
-    // The caller passed the generic "bash" fallback — use the sidecar mechanism.
-    match hook_event {
-        HookEvent::PreToolUse => {
-            let id = uuid::Uuid::new_v4().to_string();
-            if let Some(path) = bash_sidecar_path(repo_root, session_id)
-                && let Err(e) = fs::write(&path, &id)
-            {
-                tracing::debug!("bash sidecar write failed ({}): {}", path.display(), e);
-            }
-            id
-        }
-        HookEvent::PostToolUse => {
-            let path = bash_sidecar_path(repo_root, session_id);
-            if let Some(ref p) = path
-                && let Ok(id) = fs::read_to_string(p)
-            {
-                let id = id.trim().to_string();
-                // Consume the sidecar so it doesn't linger after the post-hook.
-                let _ = fs::remove_file(p);
-                if !id.is_empty() {
-                    return id;
-                }
-            }
-            // No sidecar found — caller passed "bash" for both hooks without a
-            // matching pre-hook; fall back to the literal key (best effort).
-            tracing::debug!("bash sidecar not found for post-hook; using 'bash' as fallback key");
-            FALLBACK.to_string()
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// handle_bash_tool() — main orchestration
-// ---------------------------------------------------------------------------
-
-/// Handle a bash tool invocation.
-///
-/// On `PreToolUse`: takes a pre-snapshot and stores it.
-/// On `PostToolUse`: takes a post-snapshot, diffs against the stored pre-snapshot,
-/// and returns the list of changed files.
-fn handle_bash_pre_tool_use_internal(
-    repo_root: &Path,
-    session_id: &str,
-    tool_use_id: &str,
-    inflight_agent_context: Option<InflightBashAgentContext>,
-) -> Result<BashToolResult, GitAiError> {
-    let hook_start = Instant::now();
-    let hook_timeout = Duration::from_millis(effective_hook_timeout_ms());
-    let invocation_key = format!("{}:{}", session_id, tool_use_id);
-
-    /// Log a hook timeout event to both stderr and telemetry, then return Fallback.
-    macro_rules! hook_timeout_fallback {
-        ($label:expr) => {{
-            let elapsed_ms = hook_start.elapsed().as_millis();
-            let msg = format!(
-                "bash_tool: {} exceeded {}ms hook limit ({}ms elapsed); abandoning",
-                $label, hook_timeout.as_millis(), elapsed_ms
-            );
-            tracing::debug!("{}", msg);
-            crate::observability::log_message(
-                &msg,
-                "warning",
-                Some(serde_json::json!({
-                    "label": $label,
-                    "elapsed_ms": elapsed_ms,
-                    "hook_timeout_ms": hook_timeout.as_millis(),
-                })),
-            );
-            return Ok(BashToolResult {
-                action: BashCheckpointAction::Fallback,
-                captured_checkpoint: None,
-            });
-        }};
-    }
-
-    // Clean up stale snapshots
-    let _ = cleanup_stale_snapshots(repo_root);
-
-    // Query daemon watermarks first so snapshot() can filter out
-    // wm-covered files and embed the watermarks for the post-hook.
-    let repo_working_dir = repo_root.to_string_lossy().to_string();
-    let wm = query_daemon_watermarks(&repo_working_dir);
-
-    if hook_start.elapsed() >= hook_timeout {
-        hook_timeout_fallback!("pre-hook after daemon query");
-    }
-
-    // Take and store pre-snapshot (filtered by watermarks)
-    match snapshot(repo_root, session_id, tool_use_id, wm.as_ref()) {
-        Ok(mut snap) => {
-            snap.inflight_agent_context = inflight_agent_context;
-            save_snapshot(&snap)?;
-            tracing::debug!(
-                "Pre-snapshot stored for invocation {} ({} entries, effective_wm={:?})",
-                invocation_key,
-                snap.entries.len(),
-                snap.effective_worktree_wm,
-            );
-
-            if hook_start.elapsed() >= hook_timeout {
-                hook_timeout_fallback!("pre-hook after snapshot");
-            }
-
-            // Attempt watermark-based pre-hook content capture using
-            // the embedded watermarks (no second daemon query needed).
-            let captured_checkpoint = attempt_pre_hook_capture(&snap, repo_root);
-
-            Ok(BashToolResult {
-                action: BashCheckpointAction::TakePreSnapshot,
-                captured_checkpoint,
-            })
-        }
-        Err(e) => {
-            tracing::debug!("Pre-snapshot failed: {}; will use fallback on post", e);
-            // Don't fail the tool call; post-hook will use fallback path
-            Ok(BashToolResult {
-                action: BashCheckpointAction::TakePreSnapshot,
-                captured_checkpoint: None,
-            })
-        }
-    }
-}
-
+/// Takes a filesystem snapshot and sends it to the daemon via `BashSessionStart`.
+/// The daemon stores the snapshot in memory for retrieval at post-hook time.
 pub fn handle_bash_pre_tool_use_with_context(
     repo_root: &Path,
     session_id: &str,
     tool_use_id: &str,
     agent_id: &AgentId,
     agent_metadata: Option<&HashMap<String, String>>,
-) -> Result<BashToolResult, GitAiError> {
-    let tool_use_id =
-        resolve_bash_tool_use_id(HookEvent::PreToolUse, repo_root, session_id, tool_use_id);
-    let inflight_agent_context = InflightBashAgentContext {
-        session_id: session_id.to_string(),
-        tool_use_id: tool_use_id.clone(),
-        agent_id: agent_id.clone(),
-        agent_metadata: agent_metadata.cloned(),
+) -> Result<BashPreHookResult, GitAiError> {
+    let repo_working_dir = repo_root.to_string_lossy().to_string();
+
+    let wm = query_daemon_watermarks(&repo_working_dir).or_else(|| {
+        git_index_mtime_ns(repo_root).map(|ts| DaemonWatermarks {
+            per_file: HashMap::new(),
+            worktree: Some(ts),
+        })
+    });
+    let snap = snapshot(repo_root, session_id, tool_use_id, wm.as_ref())?;
+
+    // When watermarks are unavailable (no daemon + no .git/index), the snapshot
+    // contains every non-ignored file in the repo. Using that as dirty_paths
+    // would trigger per-file repo discovery + file reads in
+    // build_checkpoint_files — catastrophic on large repos. Fall back to git
+    // status which only reports actually changed files.
+    let dirty_paths: Vec<PathBuf> = if wm.is_none() {
+        match git_status_fallback(repo_root) {
+            Ok(paths) => paths.into_iter().map(|p| repo_root.join(p)).collect(),
+            Err(_) => vec![],
+        }
+    } else {
+        snap.entries.keys().map(|rel| repo_root.join(rel)).collect()
     };
-    handle_bash_pre_tool_use_internal(
-        repo_root,
-        session_id,
-        tool_use_id.as_str(),
-        Some(inflight_agent_context),
-    )
+
+    let socket = effective_daemon_socket().ok_or_else(|| {
+        GitAiError::Generic("no daemon socket available for BashSessionStart".into())
+    })?;
+
+    let request = ControlRequest::BashSessionStart {
+        repo_work_dir: repo_working_dir,
+        session_id: session_id.to_string(),
+        tool_use_id: tool_use_id.to_string(),
+        agent_id: agent_id.clone(),
+        metadata: agent_metadata.cloned().unwrap_or_default(),
+        stat_snapshot: Box::new(snap),
+    };
+
+    send_control_request(&socket, &request)?;
+
+    Ok(BashPreHookResult { dirty_paths })
 }
 
-pub fn handle_bash_tool(
-    hook_event: HookEvent,
+/// Handle the post-tool-use hook for a bash tool invocation.
+///
+/// Queries the daemon for the pre-snapshot (stored during `BashSessionStart`),
+/// takes a post-snapshot, diffs them, signals `BashSessionEnd`, and returns
+/// the list of changed files.
+pub fn handle_bash_post_tool_use(
     repo_root: &Path,
     session_id: &str,
     tool_use_id: &str,
-) -> Result<BashToolResult, GitAiError> {
-    // Resolve the effective tool_use_id — generates/reads a sidecar UUID when
-    // the caller passes the generic "bash" fallback (no per-call ID from agent).
-    let tool_use_id = resolve_bash_tool_use_id(hook_event, repo_root, session_id, tool_use_id);
-    let tool_use_id = tool_use_id.as_str();
+) -> Result<BashPostHookResult, GitAiError> {
     let invocation_key = format!("{}:{}", session_id, tool_use_id);
 
     let hook_start = Instant::now();
     let hook_timeout = Duration::from_millis(effective_hook_timeout_ms());
 
-    /// Log a hook timeout event to both stderr and telemetry, then return Fallback.
     macro_rules! hook_timeout_fallback {
         ($label:expr) => {{
             let elapsed_ms = hook_start.elapsed().as_millis();
@@ -1578,107 +978,75 @@ pub fn handle_bash_tool(
                     "hook_timeout_ms": hook_timeout.as_millis(),
                 })),
             );
-            return Ok(BashToolResult {
-                action: BashCheckpointAction::Fallback,
-                captured_checkpoint: None,
+            signal_daemon_bash_session_end(session_id, tool_use_id);
+            return Ok(BashPostHookResult {
+                action: BashCheckpointAction::HookTimeout,
             });
         }};
     }
 
-    match hook_event {
-        HookEvent::PreToolUse => {
-            handle_bash_pre_tool_use_internal(repo_root, session_id, tool_use_id, None)
-        }
-        HookEvent::PostToolUse => {
-            // Try to load the pre-snapshot
-            let pre_snapshot = load_and_consume_snapshot(repo_root, &invocation_key)?;
+    let pre_snapshot = query_daemon_bash_snapshot(session_id, tool_use_id);
 
-            match pre_snapshot {
-                Some(pre) => {
-                    if hook_start.elapsed() >= hook_timeout {
-                        hook_timeout_fallback!("post-hook before snapshot");
-                    }
+    match pre_snapshot {
+        Some(pre) => {
+            if hook_start.elapsed() >= hook_timeout {
+                hook_timeout_fallback!("post-hook before snapshot");
+            }
 
-                    // Take post-snapshot using the same effective watermark as
-                    // the pre-snapshot so the coverage filter is consistent.
-                    // Files that bash modified will have crossed the threshold
-                    // and appear in post.entries even if they were absent from
-                    // pre.entries (wm-covered before the tool ran).
-                    //
-                    // When the pre-snapshot had no watermarks at all (no daemon
-                    // at pre-hook time → effective_worktree_wm = None and no
-                    // per-file wm), pass None so the post-snapshot also does a
-                    // full scan rather than falling through to git_index_mtime_ns
-                    // and producing an asymmetric filter.
-                    let post_wm: Option<DaemonWatermarks> =
-                        if pre.effective_worktree_wm.is_some() || !pre.per_file_wm.is_empty() {
-                            Some(DaemonWatermarks {
-                                per_file: pre.per_file_wm.clone(),
-                                worktree: pre.effective_worktree_wm,
-                            })
-                        } else {
-                            None
-                        };
-                    match snapshot(repo_root, session_id, tool_use_id, post_wm.as_ref()) {
-                        Ok(post) => {
-                            let diff_result = diff(&pre, &post);
+            let post_wm: Option<DaemonWatermarks> =
+                if pre.effective_worktree_wm.is_some() || !pre.per_file_wm.is_empty() {
+                    Some(DaemonWatermarks {
+                        per_file: pre.per_file_wm.clone(),
+                        worktree: pre.effective_worktree_wm,
+                    })
+                } else {
+                    None
+                };
+            let result = match snapshot(repo_root, session_id, tool_use_id, post_wm.as_ref()) {
+                Ok(post) => {
+                    let diff_result = diff(&pre, &post);
 
-                            if diff_result.is_empty() {
-                                tracing::debug!(
-                                    "Bash tool {}: no changes detected",
-                                    invocation_key
-                                );
-                                Ok(BashToolResult {
-                                    action: BashCheckpointAction::NoChanges,
-                                    captured_checkpoint: None,
-                                })
-                            } else {
-                                let paths = diff_result.all_changed_paths();
-                                tracing::debug!(
-                                    "Bash tool {}: {} files changed ({} created, {} modified)",
-                                    invocation_key,
-                                    paths.len(),
-                                    diff_result.created.len(),
-                                    diff_result.modified.len(),
-                                );
+                    if diff_result.is_empty() {
+                        tracing::debug!("Bash tool {}: no changes detected", invocation_key);
+                        Ok(BashPostHookResult {
+                            action: BashCheckpointAction::NoChanges,
+                        })
+                    } else {
+                        let paths = diff_result.all_changed_paths();
+                        tracing::debug!(
+                            "Bash tool {}: {} files changed ({} created, {} modified)",
+                            invocation_key,
+                            paths.len(),
+                            diff_result.created.len(),
+                            diff_result.modified.len(),
+                        );
 
-                                if hook_start.elapsed() >= hook_timeout {
-                                    hook_timeout_fallback!("post-hook after snapshot");
-                                }
-
-                                // Attempt post-hook content capture for async checkpoint.
-                                let captured_checkpoint =
-                                    attempt_post_hook_capture(repo_root, &paths);
-
-                                Ok(BashToolResult {
-                                    action: BashCheckpointAction::Checkpoint(paths),
-                                    captured_checkpoint,
-                                })
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!("Post-snapshot failed: {}; returning fallback", e);
-                            Ok(BashToolResult {
-                                action: BashCheckpointAction::Fallback,
-                                captured_checkpoint: None,
-                            })
-                        }
+                        Ok(BashPostHookResult {
+                            action: BashCheckpointAction::Checkpoint(paths),
+                        })
                     }
                 }
-                None => {
-                    // Pre-snapshot lost (process restart, etc.) — return fallback.
-                    // We do not call git status here: it is extremely slow on large
-                    // monorepos and cannot be relied on at this point in the flow.
-                    tracing::debug!(
-                        "Pre-snapshot not found for {}; returning fallback (no git status)",
-                        invocation_key
-                    );
-                    Ok(BashToolResult {
-                        action: BashCheckpointAction::Fallback,
-                        captured_checkpoint: None,
+                Err(e) => {
+                    tracing::debug!("Post-snapshot failed: {}; returning SnapshotFailed", e);
+                    Ok(BashPostHookResult {
+                        action: BashCheckpointAction::SnapshotFailed,
                     })
                 }
-            }
+            };
+
+            signal_daemon_bash_session_end(session_id, tool_use_id);
+
+            result
+        }
+        None => {
+            tracing::debug!(
+                "Pre-snapshot not found in daemon for {}; returning MissingPreSnapshot",
+                invocation_key
+            );
+            signal_daemon_bash_session_end(session_id, tool_use_id);
+            Ok(BashPostHookResult {
+                action: BashCheckpointAction::MissingPreSnapshot,
+            })
         }
     }
 }
@@ -1750,7 +1118,6 @@ mod tests {
             repo_root: PathBuf::from("/tmp"),
             effective_worktree_wm: None,
             per_file_wm: HashMap::new(),
-            inflight_agent_context: None,
         };
         let post = StatSnapshot {
             entries: HashMap::new(),
@@ -1759,7 +1126,6 @@ mod tests {
             repo_root: PathBuf::from("/tmp"),
             effective_worktree_wm: None,
             per_file_wm: HashMap::new(),
-            inflight_agent_context: None,
         };
 
         let result = diff(&pre, &post);
@@ -1775,7 +1141,6 @@ mod tests {
             repo_root: PathBuf::from("/tmp"),
             effective_worktree_wm: None,
             per_file_wm: HashMap::new(),
-            inflight_agent_context: None,
         };
 
         let mut post_entries = HashMap::new();
@@ -1798,7 +1163,6 @@ mod tests {
             repo_root: PathBuf::from("/tmp"),
             effective_worktree_wm: None,
             per_file_wm: HashMap::new(),
-            inflight_agent_context: None,
         };
 
         let result = diff(&pre, &post);
@@ -1845,7 +1209,6 @@ mod tests {
             repo_root: PathBuf::from("/tmp"),
             effective_worktree_wm: None,
             per_file_wm: HashMap::new(),
-            inflight_agent_context: None,
         };
 
         let post = StatSnapshot {
@@ -1855,7 +1218,6 @@ mod tests {
             repo_root: PathBuf::from("/tmp"),
             effective_worktree_wm: None,
             per_file_wm: HashMap::new(),
-            inflight_agent_context: None,
         };
 
         let result = diff(&pre, &post);
@@ -1917,13 +1279,6 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_key() {
-        assert_eq!(sanitize_key("session:tool"), "session_tool");
-        assert_eq!(sanitize_key("a/b\\c"), "a_b_c");
-        assert_eq!(sanitize_key("normal_key"), "normal_key");
-    }
-
-    #[test]
     fn test_stat_diff_result_all_changed_paths() {
         let result = StatDiffResult {
             created: vec![PathBuf::from("new.txt")],
@@ -1948,293 +1303,6 @@ mod tests {
     #[test]
     fn test_system_time_to_nanos_epoch() {
         assert_eq!(system_time_to_nanos(SystemTime::UNIX_EPOCH), 0);
-    }
-
-    // -----------------------------------------------------------------------
-    // find_stale_files tests
-    // -----------------------------------------------------------------------
-
-    /// Helper: build a minimal `StatSnapshot` with the given entries and
-    /// optional embedded watermarks.
-    fn make_snapshot_with_wm(
-        entries: HashMap<PathBuf, StatEntry>,
-        per_file_wm: HashMap<String, u128>,
-        effective_worktree_wm: Option<u128>,
-    ) -> StatSnapshot {
-        StatSnapshot {
-            entries,
-            taken_at: None,
-            invocation_key: "test:stale".to_string(),
-            repo_root: PathBuf::from("/tmp"),
-            effective_worktree_wm,
-            per_file_wm,
-            inflight_agent_context: None,
-        }
-    }
-
-    /// Shorthand: no watermarks (cold-start, no index mtime).
-    fn make_snapshot(entries: HashMap<PathBuf, StatEntry>) -> StatSnapshot {
-        make_snapshot_with_wm(entries, HashMap::new(), None)
-    }
-
-    /// Helper: build a `StatEntry` for a regular file with the given mtime.
-    fn make_entry(mtime_secs: u64, exists: bool) -> StatEntry {
-        let mtime = if exists {
-            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(mtime_secs))
-        } else {
-            None
-        };
-        StatEntry {
-            exists,
-            mtime,
-            ctime: mtime,
-            size: 100,
-            mode: 0o644,
-            file_type: StatFileType::Regular,
-        }
-    }
-
-    #[test]
-    fn test_find_stale_files_cold_start_excludes_unwatermarked_files() {
-        // On cold start (no per-file and no worktree watermark), files with no
-        // watermark are NOT returned by find_stale_files — they are simply skipped.
-        let mut entries = HashMap::new();
-        entries.insert(
-            normalize_path(Path::new("src/main.rs")),
-            make_entry(100, true),
-        );
-        let snapshot = make_snapshot(entries); // no embedded wm
-
-        let stale = find_stale_files(&snapshot);
-        assert!(
-            stale.is_empty(),
-            "cold-start: unwatermarked files are not returned (no baseline)"
-        );
-    }
-
-    #[test]
-    fn test_find_stale_files_uses_worktree_watermark_as_fallback() {
-        // File has no per-file watermark, but worktree watermark exists at 90s.
-        // File mtime is 100s → 10s beyond grace window → stale.
-        let mut entries = HashMap::new();
-        entries.insert(
-            normalize_path(Path::new("src/main.rs")),
-            make_entry(100, true),
-        );
-        let snapshot = make_snapshot_with_wm(
-            entries,
-            HashMap::new(),
-            Some(Duration::from_secs(90).as_nanos()),
-        );
-
-        let stale = find_stale_files(&snapshot);
-        assert_eq!(
-            stale.len(),
-            1,
-            "file modified after worktree watermark is stale"
-        );
-    }
-
-    #[test]
-    fn test_find_stale_files_worktree_watermark_within_grace() {
-        // File mtime=100s, worktree watermark=99s → within 2s grace → NOT stale.
-        // Note: this file would have been filtered from the snapshot by
-        // is_wm_covered in production; this test exercises the Tier-2 guard
-        // inside find_stale_files for robustness.
-        let mut entries = HashMap::new();
-        entries.insert(
-            normalize_path(Path::new("src/main.rs")),
-            make_entry(100, true),
-        );
-        let snapshot = make_snapshot_with_wm(
-            entries,
-            HashMap::new(),
-            Some(Duration::from_secs(99).as_nanos()),
-        );
-
-        // mtime 100s > effective_wm 99s, but find_stale_files pushes Tier-2
-        // entries unconditionally (coverage filter already checked).  The file
-        // is stale from find_stale_files' perspective even though the diff with
-        // an identical post-snapshot would report no change.
-        let stale = find_stale_files(&snapshot);
-        assert_eq!(stale.len(), 1, "entry that passed coverage filter is stale");
-    }
-
-    #[test]
-    fn test_find_stale_files_per_file_wins_over_worktree() {
-        // Per-file watermark (95s) is older than worktree watermark (98s).
-        // File mtime=100s → 5s beyond per-file watermark → stale.
-        let mut entries = HashMap::new();
-        let path = normalize_path(Path::new("src/lib.rs"));
-        entries.insert(path, make_entry(100, true));
-
-        let mut per_file = HashMap::new();
-        per_file.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
-        let snapshot =
-            make_snapshot_with_wm(entries, per_file, Some(Duration::from_secs(98).as_nanos()));
-
-        let stale = find_stale_files(&snapshot);
-        assert_eq!(stale.len(), 1);
-    }
-
-    #[test]
-    fn test_find_stale_files_within_grace_window() {
-        // File with mtime=100s, per-file watermark at 99s.
-        // Difference is 1s which is within the 2s grace window → NOT stale.
-        let mut entries = HashMap::new();
-        let path = normalize_path(Path::new("src/lib.rs"));
-        entries.insert(path, make_entry(100, true));
-
-        let mut per_file = HashMap::new();
-        per_file.insert("src/lib.rs".to_string(), Duration::from_secs(99).as_nanos());
-        let snapshot = make_snapshot_with_wm(entries, per_file, None);
-
-        let stale = find_stale_files(&snapshot);
-        assert!(
-            stale.is_empty(),
-            "file within grace window should not be stale"
-        );
-    }
-
-    #[test]
-    fn test_find_stale_files_beyond_grace_window() {
-        // File with mtime=100s, per-file watermark at 95s.
-        // Difference is 5s which exceeds the 2s grace window → stale.
-        let mut entries = HashMap::new();
-        let path = normalize_path(Path::new("src/lib.rs"));
-        entries.insert(path, make_entry(100, true));
-
-        let mut per_file = HashMap::new();
-        per_file.insert("src/lib.rs".to_string(), Duration::from_secs(95).as_nanos());
-        let snapshot = make_snapshot_with_wm(entries, per_file, None);
-
-        let stale = find_stale_files(&snapshot);
-        assert_eq!(stale.len(), 1, "file beyond grace window should be stale");
-    }
-
-    #[test]
-    fn test_find_stale_files_nonexistent_skipped() {
-        // File with exists=false should not appear in stale list regardless of watermarks.
-        let mut entries = HashMap::new();
-        entries.insert(normalize_path(Path::new("gone.rs")), make_entry(100, false));
-        let snapshot = make_snapshot_with_wm(entries, HashMap::new(), Some(0));
-
-        let stale = find_stale_files(&snapshot);
-        assert!(stale.is_empty(), "nonexistent file should not be stale");
-    }
-
-    // -----------------------------------------------------------------------
-    // capture_file_contents tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_capture_file_contents_reads_text_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let file_path = dir.path().join("hello.txt");
-        fs::write(&file_path, "hello world").unwrap();
-
-        let contents = capture_file_contents(dir.path(), &[PathBuf::from("hello.txt")]);
-        assert_eq!(contents.get("hello.txt").unwrap(), "hello world",);
-    }
-
-    #[test]
-    fn test_capture_file_contents_skips_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let contents = capture_file_contents(dir.path(), &[PathBuf::from("nonexistent.txt")]);
-        assert!(contents.is_empty());
-    }
-
-    /// Verify that the sidecar mechanism correlates pre and post hooks when no unique
-    /// tool_use_id is provided (the "bash" fallback case).
-    ///
-    /// Two sequential pre-hooks must produce distinct invocation keys so their
-    /// snapshots do not collide.
-    #[test]
-    fn test_bash_sidecar_generates_unique_ids_per_pre_hook() {
-        let dir = tempfile::tempdir().unwrap();
-        // Initialise a real git repo so snapshot_cache_dir works.
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-
-        let session_id = "test-session-abc";
-
-        // First pre-hook: should generate UUID1
-        let id1 = resolve_bash_tool_use_id(HookEvent::PreToolUse, dir.path(), session_id, "bash");
-
-        // Second pre-hook (while first post-hook hasn't fired yet): should generate UUID2
-        let id2 = resolve_bash_tool_use_id(HookEvent::PreToolUse, dir.path(), session_id, "bash");
-
-        assert_ne!(id1, id2, "sequential pre-hooks must produce different IDs");
-        assert_ne!(id1, "bash");
-        assert_ne!(id2, "bash");
-
-        // Post-hook reads back the LAST written sidecar (id2)
-        let id_post =
-            resolve_bash_tool_use_id(HookEvent::PostToolUse, dir.path(), session_id, "bash");
-        assert_eq!(
-            id_post, id2,
-            "post-hook should recover the last pre-hook ID"
-        );
-
-        // Sidecar is consumed; second post-hook falls back to "bash"
-        let id_post2 =
-            resolve_bash_tool_use_id(HookEvent::PostToolUse, dir.path(), session_id, "bash");
-        assert_eq!(
-            id_post2, "bash",
-            "after sidecar consumed, falls back to 'bash'"
-        );
-    }
-
-    #[test]
-    fn test_bash_sidecar_not_triggered_when_real_id_provided() {
-        let dir = tempfile::tempdir().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-
-        let real_id = "toolu_real_unique_id_12345";
-        let resolved =
-            resolve_bash_tool_use_id(HookEvent::PreToolUse, dir.path(), "session", real_id);
-        assert_eq!(resolved, real_id, "real IDs pass through unchanged");
-
-        // No sidecar file should have been created
-        let sidecar = bash_sidecar_path(dir.path(), "session");
-        if let Some(path) = sidecar {
-            assert!(!path.exists(), "sidecar must not be created for real IDs");
-        }
-    }
-
-    /// Verify that attempt_post_hook_capture does not pass deleted files as edited_filepaths.
-    /// Deleted files have no post-content to capture; passing them would store empty blobs.
-    #[test]
-    fn test_post_hook_capture_excludes_deleted_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let existing = dir.path().join("modified.txt");
-        let deleted = "deleted.txt"; // does not exist on disk
-
-        fs::write(&existing, b"new content").unwrap();
-
-        // Simulate changed_paths from diff (includes both modified and deleted)
-        let changed_paths = ["modified.txt".to_string(), deleted.to_string()];
-
-        let (existing_paths, deleted_paths): (Vec<&String>, Vec<&String>) = changed_paths
-            .iter()
-            .partition(|p| dir.path().join(p.as_str()).exists());
-
-        assert_eq!(existing_paths.len(), 1, "one existing file");
-        assert_eq!(existing_paths[0], "modified.txt");
-        assert_eq!(deleted_paths.len(), 1, "one deleted file");
-        assert_eq!(deleted_paths[0], "deleted.txt");
-
-        // Captured checkpoint edited_filepaths must only contain existing files
-        let captured_edited: Vec<String> = existing_paths.iter().map(|p| p.to_string()).collect();
-        assert!(!captured_edited.contains(&deleted.to_string()));
-        assert!(captured_edited.contains(&"modified.txt".to_string()));
     }
 
     // -----------------------------------------------------------------------
@@ -2330,175 +1398,6 @@ mod tests {
         assert!(
             should_include_new_file(&gitignore, Path::new("generated/manual.go"), false),
             "non-generated file in generated/ should not be ignored"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // has_active_bash_inflight tests
-    // -----------------------------------------------------------------------
-
-    fn make_snapshot_file(cache_dir: &Path, name: &str) -> PathBuf {
-        let path = cache_dir.join(format!("{}.json", name));
-        fs::write(&path, b"{}").unwrap();
-        path
-    }
-
-    /// No snapshot files → not in flight.
-    #[test]
-    fn test_inflight_false_when_no_snapshots() {
-        let dir = tempfile::tempdir().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        assert!(!has_active_bash_inflight(dir.path()));
-    }
-
-    /// A fresh snapshot file (just written) → in flight.
-    #[test]
-    fn test_inflight_true_when_snapshot_present() {
-        let dir = tempfile::tempdir().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        let cache = snapshot_cache_dir(dir.path()).unwrap();
-        make_snapshot_file(&cache, "session1_call1");
-        assert!(has_active_bash_inflight(dir.path()));
-    }
-
-    /// Snapshot consumed (deleted) by post-hook → not in flight.
-    #[test]
-    fn test_inflight_false_after_snapshot_consumed() {
-        let dir = tempfile::tempdir().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        let cache = snapshot_cache_dir(dir.path()).unwrap();
-        let snap = make_snapshot_file(&cache, "session1_call1");
-        assert!(has_active_bash_inflight(dir.path()));
-        fs::remove_file(&snap).unwrap(); // post-hook consumes it
-        assert!(!has_active_bash_inflight(dir.path()));
-    }
-
-    /// Stale snapshot (backdated mtime) is ignored — does not count as in flight.
-    #[test]
-    fn test_inflight_false_for_stale_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        let cache = snapshot_cache_dir(dir.path()).unwrap();
-        let snap = make_snapshot_file(&cache, "session_stale");
-        // Backdate the mtime beyond the stale threshold
-        let stale_time = SystemTime::now()
-            .checked_sub(Duration::from_secs(SNAPSHOT_STALE_SECS + 60))
-            .unwrap();
-        filetime::set_file_mtime(&snap, filetime::FileTime::from_system_time(stale_time)).unwrap();
-        assert!(
-            !has_active_bash_inflight(dir.path()),
-            "stale snapshot should not count as inflight"
-        );
-    }
-
-    /// REGRESSION: Two parallel bash calls are in flight simultaneously.
-    /// Removing one does not clear the inflight signal; only when both are
-    /// consumed does `has_active_bash_inflight` return false.
-    /// This ensures parallel AI bash calls never cause a commit to be
-    /// attributed as human.
-    #[test]
-    fn test_inflight_parallel_calls_regression() {
-        let dir = tempfile::tempdir().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        let cache = snapshot_cache_dir(dir.path()).unwrap();
-
-        // Two bash calls start (pre-hooks fire)
-        let snap1 = make_snapshot_file(&cache, "session1_callA");
-        let snap2 = make_snapshot_file(&cache, "session1_callB");
-
-        // Both in flight → commits during this window must be AI
-        assert!(has_active_bash_inflight(dir.path()), "both in flight");
-
-        // First call finishes (post-hook consumes its snapshot)
-        fs::remove_file(&snap1).unwrap();
-        // Second call still in flight → commits must STILL be AI
-        assert!(
-            has_active_bash_inflight(dir.path()),
-            "second call still in flight — must not regress to human"
-        );
-
-        // Second call finishes
-        fs::remove_file(&snap2).unwrap();
-        // Now safe to attribute as human again
-        assert!(!has_active_bash_inflight(dir.path()), "all calls complete");
-    }
-
-    /// Sidecar .txt files in the same directory do not count as snapshots.
-    #[test]
-    fn test_inflight_ignores_sidecar_txt_files() {
-        let dir = tempfile::tempdir().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        let cache = snapshot_cache_dir(dir.path()).unwrap();
-        // Write a sidecar (the kind resolve_bash_tool_use_id creates)
-        fs::write(cache.join("last_id_mysession.txt"), "some-uuid").unwrap();
-        assert!(
-            !has_active_bash_inflight(dir.path()),
-            "txt sidecar must not be treated as snapshot"
-        );
-    }
-
-    #[test]
-    fn test_latest_inflight_bash_agent_context_reads_from_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-
-        let metadata = HashMap::from([(
-            "transcript_path".to_string(),
-            "/tmp/codex-rollout.jsonl".to_string(),
-        )]);
-        handle_bash_pre_tool_use_with_context(
-            dir.path(),
-            "session-1",
-            "tool-1",
-            &AgentId {
-                tool: "codex".to_string(),
-                id: "session-1".to_string(),
-                model: "gpt-5.4".to_string(),
-            },
-            Some(&metadata),
-        )
-        .unwrap();
-
-        let active_context = latest_inflight_bash_agent_context(dir.path())
-            .expect("expected inflight context in snapshot");
-        assert_eq!(active_context.session_id, "session-1");
-        assert_eq!(active_context.tool_use_id, "tool-1");
-        assert_eq!(active_context.agent_id.tool, "codex");
-        assert_eq!(
-            active_context
-                .agent_metadata
-                .as_ref()
-                .and_then(|m| m.get("transcript_path"))
-                .map(String::as_str),
-            Some("/tmp/codex-rollout.jsonl")
         );
     }
 }

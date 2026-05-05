@@ -375,20 +375,16 @@ impl PersistedWorkingLog {
     }
 
     pub fn read_current_file_content(&self, file_path: &str) -> Result<String, GitAiError> {
-        // First try to read from dirty_files (using raw path)
         if let Some(ref dirty_files) = self.dirty_files
             && let Some(content) = dirty_files.get(&file_path.to_string())
         {
             return Ok(content.clone());
         }
 
-        let file_path = self.to_repo_absolute_path(file_path);
-
-        // Fall back to reading from filesystem
-        match fs::read(&file_path) {
-            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
-            Err(_) => Ok(String::new()),
-        }
+        Err(GitAiError::Generic(format!(
+            "read_current_file_content: file '{}' not found in dirty_files snapshot (filesystem fallback is not allowed in checkpoint flow)",
+            file_path
+        )))
     }
 
     /* append checkpoint */
@@ -669,14 +665,23 @@ impl PersistedWorkingLog {
         &self,
         initial: &InitialAttributions,
         file_path: &str,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, GitAiError> {
         if let Some(content) = self.stored_initial_file_content_from(initial, file_path) {
-            return Some(content);
+            return Ok(Some(content));
         }
         if initial.files.contains_key(file_path) {
-            return self.read_current_file_content(file_path).ok();
+            // Graceful skip for legacy INITIAL data (pre-March-2026) that lacks file_blobs.
+            // The checkpoint flow sets dirty_files to only the files being checkpointed, but
+            // this function iterates ALL files in INITIAL (including ones not in the current
+            // checkpoint). For those files, read_current_file_content will error since they're
+            // not in dirty_files — returning None is safe because it just means we can't provide
+            // supplementary context for that file's prior state.
+            match self.read_current_file_content(file_path) {
+                Ok(content) => return Ok(Some(content)),
+                Err(_) => return Ok(None),
+            }
         }
-        None
+        Ok(None)
     }
 
     pub fn stored_initial_file_content_from(
@@ -705,9 +710,11 @@ impl PersistedWorkingLog {
         &self,
         initial: &InitialAttributions,
         file_path: &str,
-    ) -> Option<String> {
-        self.latest_checkpoint_file_content(file_path)
-            .or_else(|| self.initial_file_content_from(initial, file_path))
+    ) -> Result<Option<String>, GitAiError> {
+        if let Some(content) = self.latest_checkpoint_file_content(file_path) {
+            return Ok(Some(content));
+        }
+        self.initial_file_content_from(initial, file_path)
     }
 
     /// Read initial attributions from the INITIAL file.

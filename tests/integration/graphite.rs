@@ -62,7 +62,6 @@ use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::OnceLock;
-use uuid::Uuid;
 
 const DETERMINISTIC_GIT_NAME: &str = "Graphite Test";
 const DETERMINISTIC_GIT_EMAIL: &str = "graphite-test@example.com";
@@ -171,7 +170,7 @@ fn new_gt_started_log_path() -> PathBuf {
     std::env::temp_dir().join(format!(
         "git-ai-gt-started-{}-{}.jsonl",
         std::process::id(),
-        Uuid::new_v4()
+        git_ai::uuid::generate_v4()
     ))
 }
 

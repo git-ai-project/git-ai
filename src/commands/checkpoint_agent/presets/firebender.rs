@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, PresetContext,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext,
 };
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
@@ -192,9 +192,6 @@ impl AgentPreset for FirebenderPreset {
                 .unwrap_or_else(|_| "0".to_string())
         });
 
-        let dirty =
-            dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
-
         let context = PresetContext {
             agent_id: AgentId {
                 tool: "firebender".to_string(),
@@ -207,11 +204,13 @@ impl AgentPreset for FirebenderPreset {
             metadata: HashMap::new(),
         };
 
+        let dirty =
+            dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
+
         let event = match (hook_event_name.as_str(), is_bash) {
             ("preToolUse", true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
                 tool_use_id: "bash".to_string(),
-                strategy: BashPreHookStrategy::EmitHumanCheckpoint,
             }),
             ("preToolUse", false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
@@ -305,7 +304,6 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "firebender");
                 assert_eq!(e.tool_use_id, "bash");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }
@@ -417,25 +415,6 @@ mod tests {
     }
 
     #[test]
-    fn test_firebender_normalize_hook_path() {
-        assert_eq!(
-            FirebenderPreset::normalize_hook_path(
-                "/home/user/project/src/main.rs",
-                "/home/user/project"
-            ),
-            Some("src/main.rs".to_string())
-        );
-        assert_eq!(
-            FirebenderPreset::normalize_hook_path("src/main.rs", "/home/user/project"),
-            Some("src/main.rs".to_string())
-        );
-        assert_eq!(
-            FirebenderPreset::normalize_hook_path("", "/home/user"),
-            None
-        );
-    }
-
-    #[test]
     fn test_firebender_dirty_files() {
         let input = json!({
             "hook_event_name": "preToolUse",
@@ -456,5 +435,24 @@ mod tests {
             }
             _ => panic!("Expected PreFileEdit"),
         }
+    }
+
+    #[test]
+    fn test_firebender_normalize_hook_path() {
+        assert_eq!(
+            FirebenderPreset::normalize_hook_path(
+                "/home/user/project/src/main.rs",
+                "/home/user/project"
+            ),
+            Some("src/main.rs".to_string())
+        );
+        assert_eq!(
+            FirebenderPreset::normalize_hook_path("src/main.rs", "/home/user/project"),
+            Some("src/main.rs".to_string())
+        );
+        assert_eq!(
+            FirebenderPreset::normalize_hook_path("", "/home/user"),
+            None
+        );
     }
 }

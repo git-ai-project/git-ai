@@ -1,7 +1,7 @@
 use super::parse;
 use super::{
-    AgentPreset, BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall,
-    PreFileEdit, PresetContext, TranscriptFormat, TranscriptSource,
+    AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
+    PresetContext, TranscriptFormat, TranscriptSource,
 };
 use crate::authorship::working_log::AgentId;
 use crate::error::GitAiError;
@@ -135,7 +135,6 @@ impl AgentPreset for WindsurfPreset {
                 ParsedHookEvent::PreBashCall(PreBashCall {
                     context,
                     tool_use_id: execution_id,
-                    strategy: BashPreHookStrategy::EmitHumanCheckpoint,
                 })
             } else {
                 ParsedHookEvent::PostBashCall(PostBashCall {
@@ -260,7 +259,6 @@ mod tests {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "windsurf");
                 assert_eq!(e.tool_use_id, "exec-bash-1");
-                assert_eq!(e.strategy, BashPreHookStrategy::EmitHumanCheckpoint);
             }
             _ => panic!("Expected PreBashCall"),
         }

@@ -666,6 +666,12 @@ fn resolve_test_db_path(
 struct DaemonSyncRegistry {
     last_synced_completion_count: HashMap<String, u64>,
     pending_sessions: HashMap<String, Vec<String>>,
+    /// Number of checkpoint completions we expect the daemon to have processed.
+    /// Unlike session tracking (which uses session IDs), checkpoint completions
+    /// are tracked by counting entries with `kind == "checkpoint"` in the
+    /// completion log.
+    expected_checkpoint_count: HashMap<String, u64>,
+    last_synced_checkpoint_count: HashMap<String, u64>,
 }
 
 impl DaemonSyncRegistry {
@@ -674,6 +680,20 @@ impl DaemonSyncRegistry {
             .get(family_key)
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn expected_checkpoint_count(&self, family_key: &str) -> u64 {
+        self.expected_checkpoint_count
+            .get(family_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn last_synced_checkpoint_count(&self, family_key: &str) -> u64 {
+        self.last_synced_checkpoint_count
+            .get(family_key)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn last_synced_completion_count(&self, family_key: &str) -> u64 {
@@ -688,6 +708,22 @@ impl DaemonSyncRegistry {
             .entry(family_key.to_string())
             .or_default()
             .push(session.to_string());
+    }
+
+    fn raise_expected_checkpoint_count(&mut self, family_key: &str, count: u64) {
+        let entry = self
+            .expected_checkpoint_count
+            .entry(family_key.to_string())
+            .or_insert(0);
+        *entry += count;
+    }
+
+    fn advance_last_synced_checkpoint_count(&mut self, family_key: &str, checkpoint_count: u64) {
+        let entry = self
+            .last_synced_checkpoint_count
+            .entry(family_key.to_string())
+            .or_insert(0);
+        *entry = (*entry).max(checkpoint_count);
     }
 
     fn clear_pending_sessions(&mut self, family_key: &str) {
@@ -711,6 +747,8 @@ impl DaemonSyncRegistry {
 pub(crate) struct DaemonTestCompletionLogEntry {
     #[serde(default)]
     pub(crate) seq: u64,
+    #[serde(default)]
+    pub(crate) kind: String,
     #[serde(default)]
     pub(crate) primary_command: Option<String>,
     #[serde(default)]
@@ -830,6 +868,15 @@ fn normalize_test_git_ai_checkpoint_args(args: &[&str]) -> Vec<String> {
     }
 
     normalized
+}
+
+fn parse_checkpoint_request_count(stdout: &str) -> u64 {
+    for line in stdout.lines() {
+        if let Some(val) = line.strip_prefix("checkpoint_requests=") {
+            return val.trim().parse().unwrap_or(0);
+        }
+    }
+    0
 }
 
 fn git_ai_command_requires_daemon_sync(args: &[&str]) -> bool {
@@ -1503,6 +1550,16 @@ impl TestRepo {
             .unwrap_or_else(|| DaemonProcess::trace_socket_path_for_home(&self.test_home))
     }
 
+    pub(crate) fn set_daemon_env_for_in_process(&self) {
+        unsafe {
+            std::env::set_var("GIT_AI_DAEMON_HOME", self.daemon_home_path());
+            std::env::set_var(
+                "GIT_AI_DAEMON_CONTROL_SOCKET",
+                self.daemon_control_socket_path(),
+            );
+        }
+    }
+
     pub(crate) fn config_patch_json(&self) -> Option<String> {
         self.config_patch
             .as_ref()
@@ -1636,6 +1693,52 @@ impl TestRepo {
         panic!(
             "daemon completion log for family {} did not reach {} entries within timeout",
             family_key, expected_count
+        );
+    }
+
+    fn wait_for_daemon_checkpoint_count(
+        &self,
+        family_key: &str,
+        expected_checkpoint_count: u64,
+    ) -> u64 {
+        let start = Instant::now();
+        let mut last_progress = start;
+        let mut last_observed = 0u64;
+        loop {
+            let entries = self.daemon_completion_entries_for_family(family_key);
+            let checkpoint_entries: Vec<_> = entries
+                .iter()
+                .filter(|e| e.sync_tracked && e.kind == "checkpoint")
+                .collect();
+            if let Some(error_entry) = checkpoint_entries.iter().find(|e| e.status == "error") {
+                panic!(
+                    "daemon checkpoint completion reported an error for family {}: {}",
+                    family_key,
+                    error_entry
+                        .error
+                        .as_deref()
+                        .unwrap_or("unknown checkpoint error")
+                );
+            }
+            let observed = checkpoint_entries.len() as u64;
+            if observed >= expected_checkpoint_count {
+                return observed;
+            }
+            if observed > last_observed {
+                last_progress = Instant::now();
+                last_observed = observed;
+            }
+            if start.elapsed() >= DAEMON_TEST_SYNC_TOTAL_TIMEOUT
+                || last_progress.elapsed() >= DAEMON_TEST_SYNC_IDLE_TIMEOUT
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        panic!(
+            "daemon checkpoint completions for family {} did not reach {} within timeout (observed {})",
+            family_key, expected_checkpoint_count, last_observed
         );
     }
 
@@ -1795,6 +1898,31 @@ impl TestRepo {
             .clone()
     }
 
+    fn resolve_checkpoint_family_keys_from_args(&self, args: &[&str]) -> HashMap<String, u64> {
+        // checkpoint args: ["checkpoint", "<preset>", "<file_path>", ...]
+        // Group file paths by their repo family key. The orchestrator creates
+        // one CheckpointRequest per distinct repo, so each family gets count=1.
+        let mut families: HashMap<String, u64> = HashMap::new();
+        if args.len() >= 3 {
+            for arg in &args[2..] {
+                let candidate = std::path::Path::new(arg);
+                if candidate.is_absolute()
+                    && let Some(key) = self.maybe_daemon_family_key_for_repo_path(candidate)
+                {
+                    families.entry(key).or_insert(0);
+                    continue;
+                }
+            }
+        }
+        if families.is_empty() {
+            families.insert(self.daemon_family_key(), 0);
+        }
+        for val in families.values_mut() {
+            *val = 1;
+        }
+        families
+    }
+
     pub(crate) fn record_daemon_family_expected_completion_session(&self, session: &str) {
         if !self.has_active_daemon() {
             return;
@@ -1805,6 +1933,14 @@ impl TestRepo {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         registry.record_expected_completion_session(&family_key, session);
+    }
+
+    fn record_pending_checkpoint_completions(&self, count: u64) {
+        let family_key = self.daemon_family_key();
+        let mut registry = daemon_sync_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        registry.raise_expected_checkpoint_count(&family_key, count);
     }
 
     pub(crate) fn append_daemon_test_sync_session_args(
@@ -1908,24 +2044,43 @@ impl TestRepo {
     }
 
     fn sync_pending_daemon_sessions(&self, family_key: &str) {
-        let pending_sessions = {
+        let (pending_sessions, expected_checkpoints) = {
             let registry = daemon_sync_registry()
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            registry.pending_sessions(family_key)
+            (
+                registry.pending_sessions(family_key),
+                registry.expected_checkpoint_count(family_key),
+            )
         };
 
-        if pending_sessions.is_empty() {
-            return;
+        if !pending_sessions.is_empty() {
+            let observed_count =
+                self.wait_for_daemon_completion_sessions(family_key, &pending_sessions);
+            let mut registry = daemon_sync_registry()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            registry.clear_pending_sessions(family_key);
+            registry.advance_last_synced_completion_count(family_key, observed_count);
         }
 
-        let observed_count =
-            self.wait_for_daemon_completion_sessions(family_key, &pending_sessions);
-        let mut registry = daemon_sync_registry()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.clear_pending_sessions(family_key);
-        registry.advance_last_synced_completion_count(family_key, observed_count);
+        if expected_checkpoints > 0 {
+            let last_synced = {
+                let registry = daemon_sync_registry()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                registry.last_synced_checkpoint_count(family_key)
+            };
+            if expected_checkpoints > last_synced {
+                let observed_checkpoint_count =
+                    self.wait_for_daemon_checkpoint_count(family_key, expected_checkpoints);
+                let mut registry = daemon_sync_registry()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                registry
+                    .advance_last_synced_checkpoint_count(family_key, observed_checkpoint_count);
+            }
+        }
     }
 
     fn setup_git_hooks_mode(&self) {
@@ -2003,6 +2158,8 @@ impl TestRepo {
             "GIT_AI_DAEMON_TRACE_SOCKET",
             self.daemon_trace_socket_path(),
         );
+        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
         if self.has_active_daemon() {
             command.env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true");
@@ -2402,6 +2559,8 @@ impl TestRepo {
             self.sync_daemon_force();
         }
 
+        let is_checkpoint = git_ai_primary_command(args) == Some("checkpoint");
+
         let binary_path = get_binary_path();
 
         let mut command = Command::new(binary_path);
@@ -2418,13 +2577,6 @@ impl TestRepo {
             .args(&normalized_args)
             .current_dir(&absolute_working_dir);
         self.configure_git_ai_env(&mut command);
-
-        // Do NOT delegate checkpoints to the daemon drain here.  The caller's
-        // CWD may differ from self's repo root (cross-repo / subrepo tests),
-        // so the completion log family key is unpredictable and any async wait
-        // would target the wrong family.  Running synchronously means the
-        // working log is guaranteed to be written before we return.
-        command.env_remove("GIT_AI_DAEMON_CHECKPOINT_DELEGATE");
 
         if let Some(patch) = &self.config_patch
             && let Ok(patch_json) = serde_json::to_string(patch)
@@ -2443,6 +2595,21 @@ impl TestRepo {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if output.status.success() {
+            if is_checkpoint && self.has_active_daemon() {
+                let count = parse_checkpoint_request_count(&stdout);
+                if count > 0 {
+                    let families = self.resolve_checkpoint_family_keys_from_args(args);
+                    for (family_key, per_family_count) in &families {
+                        let mut registry = daemon_sync_registry()
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        registry.raise_expected_checkpoint_count(family_key, *per_family_count);
+                    }
+                    for family_key in families.keys() {
+                        self.sync_pending_daemon_sessions(family_key);
+                    }
+                }
+            }
             let combined = if stdout.is_empty() {
                 stderr
             } else if stderr.is_empty() {
@@ -2467,6 +2634,8 @@ impl TestRepo {
         if git_ai_command_requires_daemon_sync(args) {
             self.sync_daemon_force();
         }
+
+        let is_checkpoint = git_ai_primary_command(args) == Some("checkpoint");
 
         let binary_path = get_binary_path();
         let normalized_args = normalize_test_git_ai_checkpoint_args(args);
@@ -2499,6 +2668,13 @@ impl TestRepo {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if output.status.success() {
+            if is_checkpoint && self.has_active_daemon() {
+                let count = parse_checkpoint_request_count(&stdout);
+                if count > 0 {
+                    self.record_pending_checkpoint_completions(count);
+                    self.sync_daemon_force();
+                }
+            }
             // Combine stdout and stderr since git-ai often writes to stderr
             let combined = if stdout.is_empty() {
                 stderr
@@ -2531,6 +2707,8 @@ impl TestRepo {
         if git_ai_command_requires_daemon_sync(args) {
             self.sync_daemon_force();
         }
+
+        let is_checkpoint = git_ai_primary_command(args) == Some("checkpoint");
 
         let binary_path = get_binary_path();
         let normalized_args = normalize_test_git_ai_checkpoint_args(args);
@@ -2570,6 +2748,13 @@ impl TestRepo {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if output.status.success() {
+            if is_checkpoint && self.has_active_daemon() {
+                let count = parse_checkpoint_request_count(&stdout);
+                if count > 0 {
+                    self.record_pending_checkpoint_completions(count);
+                    self.sync_daemon_force();
+                }
+            }
             // Combine stdout and stderr since git-ai often writes to stderr
             let combined = if stdout.is_empty() {
                 stderr

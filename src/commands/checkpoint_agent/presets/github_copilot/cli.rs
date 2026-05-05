@@ -1,7 +1,6 @@
 use super::super::parse;
 use super::super::{
-    BashPreHookStrategy, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
-    PresetContext,
+    ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit, PresetContext,
 };
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::ToolClass;
@@ -30,6 +29,7 @@ pub(super) fn parse_cli_hooks(
     }
 
     let dirty_files = super::dirty_files_from_hook_data(data, cwd);
+
     let tool_input = data.get("tool_input").or_else(|| data.get("toolInput"));
     let tool_result = data
         .get("tool_result")
@@ -65,7 +65,6 @@ pub(super) fn parse_cli_hooks(
         ("PreToolUse", ToolClass::Bash) => Ok(vec![ParsedHookEvent::PreBashCall(PreBashCall {
             context,
             tool_use_id,
-            strategy: BashPreHookStrategy::SnapshotOnly,
         })]),
         ("PostToolUse", ToolClass::Bash) => Ok(vec![ParsedHookEvent::PostBashCall(PostBashCall {
             context,
@@ -81,14 +80,14 @@ pub(super) fn parse_cli_hooks(
                         "No path in CopilotCLI create tool_input".to_string(),
                     ));
                 }
-                let mut empty: HashMap<PathBuf, String> = HashMap::new();
-                for p in &extracted_paths {
-                    empty.insert(p.clone(), String::new());
-                }
+                let dirty_files: HashMap<PathBuf, String> = extracted_paths
+                    .iter()
+                    .map(|p| (p.clone(), String::new()))
+                    .collect();
                 return Ok(vec![ParsedHookEvent::PreFileEdit(PreFileEdit {
                     context,
                     file_paths: extracted_paths,
-                    dirty_files: Some(empty),
+                    dirty_files: Some(dirty_files),
                 })]);
             }
             if extracted_paths.is_empty() {
@@ -161,7 +160,6 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "github-copilot");
-                assert_eq!(e.strategy, BashPreHookStrategy::SnapshotOnly);
                 assert_eq!(
                     e.context.metadata.get("source"),
                     Some(&"copilot-cli".to_string())
@@ -217,9 +215,11 @@ mod tests {
                     e.file_paths,
                     vec![PathBuf::from("/Users/a/project/very_fun.md")]
                 );
-                let df = e.dirty_files.as_ref().unwrap();
                 assert_eq!(
-                    df.get(&PathBuf::from("/Users/a/project/very_fun.md")),
+                    e.dirty_files
+                        .as_ref()
+                        .unwrap()
+                        .get(&PathBuf::from("/Users/a/project/very_fun.md")),
                     Some(&String::new())
                 );
             }

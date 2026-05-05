@@ -120,7 +120,7 @@ pub fn handle_git(args: &[String]) {
     let pre_state = worktree
         .as_deref()
         .and_then(crate::git::repo_state::read_head_state_for_worktree);
-    let invocation_id = uuid::Uuid::new_v4().to_string();
+    let invocation_id = crate::uuid::generate_v4();
 
     // Send pre-state BEFORE running git so it's available when the daemon
     // processes the atexit trace event and starts the wrapper state timeout.

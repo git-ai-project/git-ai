@@ -1,4 +1,3 @@
-use crate::daemon::CheckpointRunRequest;
 use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
 use crate::git::repository::config_get_str_for_path_no_git_exec;
 use std::collections::HashSet;
@@ -52,10 +51,6 @@ pub fn tracked_parsed_git_invocation_for_test_sync(
 
     let repo_lookup = resolve_repo_lookup_for_git_invocation(&parsed, cwd);
     resolve_alias_invocation_no_git_exec(&parsed, &repo_lookup).unwrap_or(parsed)
-}
-
-pub fn tracks_checkpoint_request_for_test_sync(request: &CheckpointRunRequest) -> bool {
-    !request.is_pre_commit()
 }
 
 pub fn test_sync_session_from_invocation(invocation: &ParsedGitInvocation) -> Option<String> {
