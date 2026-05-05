@@ -92,12 +92,18 @@ SCHEMA=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d.g
 
 pass "schema_version = $SCHEMA"
 
-# ── 6. Prompts non-empty ──────────────────────────────────────────────────────
-PROMPT_COUNT=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(len(d.get('prompts', {})))" "$META_JSON")
-[ "$PROMPT_COUNT" -gt 0 ] \
-  || fail "No prompt sessions recorded in authorship note — agent hooks did not capture activity (check hook wiring with verify-hook-wiring.sh)"
+# ── 6. Sessions non-empty ─────────────────────────────────────────────────────
+SESSION_COUNT=$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+prompts = len(d.get('prompts', {}))
+sessions = len(d.get('sessions', {}))
+print(prompts + sessions)
+" "$META_JSON")
+[ "$SESSION_COUNT" -gt 0 ] \
+  || fail "No prompt/session entries recorded in authorship note — agent hooks did not capture activity (check hook wiring with verify-hook-wiring.sh)"
 
-pass "$PROMPT_COUNT prompt session(s) recorded"
+pass "$SESSION_COUNT AI session(s) recorded"
 
 # ── 7. Agent identification ────────────────────────────────────────────────────
 AGENT_MATCH=$(python3 - "$META_JSON" "$AGENT" <<'PYEOF'
@@ -106,7 +112,8 @@ import json, sys
 meta = json.load(open(sys.argv[1]))
 agent = sys.argv[2].lower()
 
-for record in meta.get("prompts", {}).values():
+all_records = list(meta.get("prompts", {}).values()) + list(meta.get("sessions", {}).values())
+for record in all_records:
     tool = str(record.get("agent_id", {}).get("tool", "")).lower()
     # Fuzzy match: "claude" matches "claude_code", "gemini" matches "gemini_cli", etc.
     if tool and (agent in tool or tool in agent):
@@ -114,7 +121,7 @@ for record in meta.get("prompts", {}).values():
         sys.exit(0)
 
 # Print what we did find for debugging
-tools = [str(r.get("agent_id", {}).get("tool", "")) for r in meta.get("prompts", {}).values()]
+tools = [str(r.get("agent_id", {}).get("tool", "")) for r in all_records]
 print(f"not_found (found tools: {tools})", file=sys.stderr)
 print("not_found")
 PYEOF
@@ -130,7 +137,7 @@ fi
 MSG_COUNT=$(python3 -c "
 import json, sys
 d = json.load(open(sys.argv[1]))
-total = sum(len(r.get('messages', [])) for r in d.get('prompts', {}).values())
+total = sum(len(r.get('messages', [])) for r in list(d.get('prompts', {}).values()) + list(d.get('sessions', {}).values()))
 print(total)
 " "$META_JSON")
 

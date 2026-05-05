@@ -60,7 +60,7 @@ pass "Commit created successfully"
 
 # Verify authorship note was generated
 if git notes --ref=ai show HEAD 2>/dev/null \
-    | grep -qiE "authorship|schema_version|prompts"; then
+    | grep -qiE "authorship|schema_version|prompts|sessions"; then
   pass "Authorship note found on HEAD"
 else
   fail "No authorship note found on HEAD (post-commit hook may not have fired)"

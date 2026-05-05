@@ -20,11 +20,6 @@ on:
 env:
   GIT_AI_DEBUG: "1"
   CARGO_INCREMENTAL: "0"
-  # Async mode: each job starts a per-job daemon via
-  # start-async-daemon.sh which exports GIT_AI_TEST_FORCE_TTY and
-  # GIT_AI_POST_COMMIT_TIMEOUT_MS so the wrapper polls for authorship
-  # notes after commits.
-  GIT_AI_ASYNC_MODE: "true"
 
 jobs:
   # ── Version Resolution ─────────────────────────────────────────────────────
