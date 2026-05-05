@@ -26,6 +26,7 @@ mod checkout_switch;
 mod checkpoint_explicit_paths;
 mod checkpoint_perf;
 mod checkpoint_size;
+mod checkpoint_telemetry;
 mod checkpoint_unit;
 mod cherry_pick;
 mod chinese_text_edits;
