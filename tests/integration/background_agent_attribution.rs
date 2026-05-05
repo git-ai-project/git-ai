@@ -1,5 +1,5 @@
 use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::{DaemonTestScope, GitTestMode, TestRepo};
+use crate::repos::test_repo::TestRepo;
 use std::fs;
 
 /// When git-ai runs inside a no-hooks background agent (simulated via
