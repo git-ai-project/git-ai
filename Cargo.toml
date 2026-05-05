@@ -45,7 +45,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 
 [target.'cfg(windows)'.dependencies]
 named_pipe = "0.4.1"
-winreg = "0.55"
+winreg = "0.56"
 
 [features]
 test-support = []
