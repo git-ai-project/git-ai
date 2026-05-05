@@ -8,6 +8,15 @@
 //!
 //! Unlike attribution-focused tests, these verify structural invariants and
 //! prove git-ai doesn't interfere with Git's rebase mechanics.
+//!
+//! ## Cross-environment determinism
+//!
+//! To ensure identical tree/commit SHAs across CI runners and developer machines:
+//! - Frozen environment variables control author/committer timestamps
+//! - Explicit `core.autocrlf=false` prevents Windows CRLF conversions
+//! - Explicit `core.filemode=false` ignores executable bit differences
+//!
+//! Without these, blob hashes differ between platforms → tree hash mismatch → SHA mismatch.
 
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
@@ -41,6 +50,10 @@ const FROZEN_ENV: &[(&str, &str)] = &[
 ///
 /// After rebasing dev onto main, the result should have both additions.
 fn setup_divergent_fixture(repo: &TestRepo) {
+    // Ensure deterministic git config (prevent cross-environment blob/tree hash differences)
+    repo.git(&["config", "core.autocrlf", "false"]).unwrap();
+    repo.git(&["config", "core.filemode", "false"]).unwrap();
+
     // Shared base commit with two files
     let mut main_file = repo.filename("main_file.rs");
     let mut dev_file = repo.filename("dev_file.rs");
@@ -82,6 +95,10 @@ fn setup_divergent_fixture(repo: &TestRepo) {
 ///   main: 2 commits adding human functions
 ///   dev:  3 commits adding AI functions + new file
 fn setup_multicommit_fixture(repo: &TestRepo) {
+    // Ensure deterministic git config (prevent cross-environment blob/tree hash differences)
+    repo.git(&["config", "core.autocrlf", "false"]).unwrap();
+    repo.git(&["config", "core.filemode", "false"]).unwrap();
+
     // Base commit with separate files for main and dev
     let mut main_mod = repo.filename("main_mod.rs");
     let mut dev_mod = repo.filename("dev_mod.rs");
@@ -423,6 +440,10 @@ fn test_multicommit_rebase_tree_equivalence_and_sha_determinism() {
 fn test_line_number_mapping_through_rebase() {
     let repo = TestRepo::new();
 
+    // Ensure deterministic git config
+    repo.git(&["config", "core.autocrlf", "false"]).unwrap();
+    repo.git(&["config", "core.filemode", "false"]).unwrap();
+
     // Base: 10-line file
     let mut file = repo.filename("lines.txt");
     file.set_contents(crate::lines![
@@ -554,6 +575,10 @@ fn test_rebase_file_deletion_recreation_tree_equivalence() {
     // === Run 1: git-ai rebase ===
     let repo1 = TestRepo::new();
 
+    // Ensure deterministic git config
+    repo1.git(&["config", "core.autocrlf", "false"]).unwrap();
+    repo1.git(&["config", "core.filemode", "false"]).unwrap();
+
     // Base: create temp.txt
     let mut temp = repo1.filename("temp.txt");
     temp.set_contents(crate::lines!["temporary content"]);
@@ -612,6 +637,10 @@ fn test_rebase_file_deletion_recreation_tree_equivalence() {
 
     // === Run 2: native git rebase ===
     let repo2 = TestRepo::new();
+
+    // Ensure deterministic git config (same as repo1)
+    repo2.git_og(&["config", "core.autocrlf", "false"]).unwrap();
+    repo2.git_og(&["config", "core.filemode", "false"]).unwrap();
 
     let mut temp2 = repo2.filename("temp.txt");
     temp2.set_contents(crate::lines!["temporary content"]);
