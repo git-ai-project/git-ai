@@ -370,29 +370,6 @@ pub fn count_line_ranges(lines: &[u32]) -> usize {
     ranges
 }
 
-/// Update prompts/transcripts in working log checkpoints to their latest versions.
-/// This helps prevent race conditions where we miss the last message in a conversation.
-///
-/// For each unique prompt/conversation (identified by agent_id), only the LAST checkpoint
-/// with that agent_id is updated. This prevents duplicating the same full transcript
-/// across multiple checkpoints when only the final version matters.
-#[allow(dead_code)]
-fn update_prompts_to_latest(checkpoints: &mut [Checkpoint]) -> Result<(), GitAiError> {
-    // Group checkpoints by agent ID (tool + id), tracking indices
-    let mut agent_checkpoint_indices: HashMap<String, Vec<usize>> = HashMap::new();
-
-    for (idx, checkpoint) in checkpoints.iter().enumerate() {
-        if let Some(agent_id) = &checkpoint.agent_id {
-            let key = format!("{}:{}", agent_id.tool, agent_id.id);
-            agent_checkpoint_indices.entry(key).or_default().push(idx);
-        }
-    }
-
-    // Transcript enrichment disabled - model is already set from checkpoint
-    // No per-agent updates needed
-
-    Ok(())
-}
 
 /// Record metrics for a committed change.
 /// This is a best-effort operation - failures are silently ignored.

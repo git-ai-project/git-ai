@@ -1545,6 +1545,66 @@ mod tests {
         assert_eq!(checkpoints[0].author, "ai");
     }
 
+    /// Test that `convert_to_checkpoints_for_squash` correctly handles s_ session attestations
+    /// by looking them up in the sessions map rather than the prompts map.
+    #[test]
+    fn test_convert_to_checkpoints_handles_s_session_entries() {
+        use crate::authorship::working_log::AgentId;
+        use std::collections::HashMap;
+
+        let mut log = AuthorshipLog::new();
+        log.metadata.base_commit_sha = "base456".to_string();
+
+        let agent_id = AgentId {
+            tool: "claude".to_string(),
+            id: "conv_abc123".to_string(),
+            model: "claude-sonnet-4-5-20250514".to_string(),
+        };
+
+        // Generate session ID the same way production code does
+        let session_key = generate_session_id(&agent_id.id, &agent_id.tool);
+        let trace_id = generate_trace_id();
+        let attestation_hash = format!("{}::{}", session_key, trace_id);
+
+        // Insert into sessions map (NOT prompts map)
+        log.metadata.sessions.insert(
+            session_key.clone(),
+            crate::authorship::authorship_log::SessionRecord {
+                agent_id: agent_id.clone(),
+                human_author: Some("dev@example.com".to_string()),
+                custom_attributes: None,
+            },
+        );
+
+        // File with session-format attestation
+        let mut file1 = FileAttestation::new("src/main.rs".to_string());
+        file1.add_entry(AttestationEntry::new(
+            attestation_hash.clone(),
+            vec![LineRange::Range(1, 3)],
+        ));
+        log.attestations.push(file1);
+
+        let mut file_contents = HashMap::new();
+        file_contents.insert(
+            "src/main.rs".to_string(),
+            "line1\nline2\nline3\n".to_string(),
+        );
+
+        let result = log.convert_to_checkpoints_for_squash(&file_contents);
+        assert!(
+            result.is_ok(),
+            "convert_to_checkpoints_for_squash must handle s_ session entries: {:?}",
+            result.err()
+        );
+        let checkpoints = result.unwrap();
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].agent_id.as_ref().unwrap().tool, "claude");
+        assert_eq!(
+            checkpoints[0].agent_id.as_ref().unwrap().id,
+            "conv_abc123"
+        );
+    }
+
     // TODO: `get_line_attribution` routing for h_ hashes requires a live `Repository` instance
     // and cannot be unit-tested here without significant mocking infrastructure.
     // The h_-routing path (returning HumanRecord data instead of PromptRecord) is covered by

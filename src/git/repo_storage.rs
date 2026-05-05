@@ -393,8 +393,6 @@ impl PersistedWorkingLog {
         let mut checkpoints = self.read_all_checkpoints().unwrap_or_default();
 
         // Create a copy, potentially without transcript to reduce storage size.
-        // Transcripts are refetched in update_prompts_to_latest() before post-commit
-        // using tool-specific sources (transcript_path for Claude, cursor_db_path for Cursor, etc.)
         //
         // Tools that DON'T support refetch (transcript must be kept):
         // - "mock_ai" - test preset, transcript not stored externally
