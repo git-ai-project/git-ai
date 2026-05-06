@@ -91,32 +91,6 @@ fn benchmark_checkpoint_daemon(iterations: usize) -> DurationStats {
     DurationStats::from_durations(&mut durations)
 }
 
-fn benchmark_checkpoint_wrapper_daemon(iterations: usize) -> DurationStats {
-    let repo = TestRepo::new_with_mode_and_daemon_scope(
-        GitTestMode::WrapperDaemon,
-        DaemonTestScope::Dedicated,
-    );
-    let repo_path = repo.canonical_path();
-
-    fs::write(repo_path.join("base.txt"), "initial\n").unwrap();
-    repo.stage_all_and_commit("init").unwrap();
-
-    // Warm-up
-    fs::write(repo_path.join("warmup.txt"), "warmup\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "warmup.txt"])
-        .unwrap();
-    repo.sync_daemon();
-
-    let mut durations = Vec::with_capacity(iterations);
-    for i in 0..iterations {
-        let fname = format!("file_{i}.txt");
-        fs::write(repo_path.join(&fname), format!("content {i}\n")).unwrap();
-        let start = Instant::now();
-        repo.git_ai(&["checkpoint", "mock_ai", &fname]).unwrap();
-        durations.push(start.elapsed());
-    }
-    DurationStats::from_durations(&mut durations)
-}
 
 #[test]
 #[ignore]
@@ -144,18 +118,6 @@ fn bench_checkpoint_single_file_daemon() {
     );
 }
 
-#[test]
-#[ignore]
-fn bench_checkpoint_single_file_wrapper_daemon() {
-    println!("\n=== Checkpoint Single-File Benchmark (WrapperDaemon Mode) ===");
-    let stats = benchmark_checkpoint_wrapper_daemon(20);
-    stats.print("WrapperDaemon checkpoint");
-    assert!(
-        stats.p95 < Duration::from_millis(200),
-        "p95 checkpoint latency too high: {:?}",
-        stats.p95
-    );
-}
 
 #[test]
 #[ignore]
@@ -291,9 +253,6 @@ fn bench_checkpoint_all_modes_summary() {
     let daemon = benchmark_checkpoint_daemon(20);
     daemon.print("Daemon");
 
-    let wrapper_daemon = benchmark_checkpoint_wrapper_daemon(20);
-    wrapper_daemon.print("WrapperDaemon");
-
     println!("\n============================================\n");
 
     assert!(
@@ -303,9 +262,5 @@ fn bench_checkpoint_all_modes_summary() {
     assert!(
         daemon.p95 < Duration::from_millis(200),
         "Daemon p95 too high"
-    );
-    assert!(
-        wrapper_daemon.p95 < Duration::from_millis(200),
-        "WrapperDaemon p95 too high"
     );
 }

@@ -60,27 +60,15 @@ const DAEMON_TEST_TRACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitTestMode {
     Daemon,
-    WrapperDaemon,
 }
 
 impl GitTestMode {
     pub fn from_env() -> Self {
-        let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
-            .unwrap_or_else(|_| "daemon".to_string())
-            .to_lowercase();
-        Self::from_mode_name(&mode)
+        Self::Daemon
     }
 
-    pub fn from_mode_name(mode: &str) -> Self {
-        match mode.to_lowercase().as_str() {
-            "daemon" | "trace-daemon" | "pure-daemon" => Self::Daemon,
-            "wrapper-daemon" => Self::WrapperDaemon,
-            _ => Self::Daemon,
-        }
-    }
-
-    pub fn uses_wrapper(self) -> bool {
-        matches!(self, Self::WrapperDaemon)
+    pub fn from_mode_name(_mode: &str) -> Self {
+        Self::Daemon
     }
 
     pub fn uses_hooks(self) -> bool {
@@ -664,14 +652,10 @@ fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> 
 fn resolve_test_db_path(
     base: &std::path::Path,
     id: u64,
-    test_home: &std::path::Path,
-    git_mode: GitTestMode,
+    _test_home: &std::path::Path,
+    _git_mode: GitTestMode,
 ) -> PathBuf {
-    if git_mode.uses_hooks() {
-        test_home.join(".git-ai").join("internal").join("db")
-    } else {
-        base.join(format!("{}-db", id))
-    }
+    base.join(format!("{}-db", id))
 }
 
 #[derive(Debug, Default)]
@@ -1052,9 +1036,6 @@ impl TestRepo {
     }
 
     fn sync_test_home_config_for_hooks(&self) {
-        if !self.git_mode.uses_hooks() && !self.git_mode.uses_daemon() {
-            return;
-        }
         self.write_test_config_to_home(&self.test_home);
         if let Some(daemon) = &self.daemon_process
             && daemon.daemon_home != self.test_home
@@ -2179,27 +2160,6 @@ impl TestRepo {
             command.env("GIT_TRACE2_EVENT_NESTING", Self::trace2_nesting_value());
         }
 
-        if self.git_mode.uses_hooks() {
-            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
-        }
-
-        if self.git_mode.uses_wrapper() {
-            command.env("GIT_AI", "git");
-        }
-
-        // In WrapperDaemon mode, the wrapper needs the daemon socket paths
-        // to initialize the telemetry handle and send wrapper state.
-        if self.git_mode == GitTestMode::WrapperDaemon {
-            command.env("GIT_AI_DAEMON_HOME", self.daemon_home_path());
-            command.env(
-                "GIT_AI_DAEMON_CONTROL_SOCKET",
-                self.daemon_control_socket_path(),
-            );
-            command.env(
-                "GIT_AI_DAEMON_TRACE_SOCKET",
-                self.daemon_trace_socket_path(),
-            );
-        }
     }
 
     fn configure_git_ai_env(&self, command: &mut Command) {
@@ -2219,10 +2179,6 @@ impl TestRepo {
 
         if self.has_active_daemon() {
             command.env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true");
-        }
-
-        if self.git_mode.uses_hooks() {
-            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
         }
     }
 
@@ -2512,11 +2468,7 @@ impl TestRepo {
             let daemon_test_sync_session =
                 daemon_command_pending.then(new_daemon_test_sync_session_id);
 
-            let mut command = if self.git_mode.uses_wrapper() {
-                Command::new(get_binary_path())
-            } else {
-                Command::new(real_git_executable())
-            };
+            let mut command = Command::new(real_git_executable());
 
             // If working_dir is provided, use current_dir instead of -C flag
             // This tests that git-ai correctly finds the repository root when run from a subdirectory

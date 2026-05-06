@@ -609,13 +609,13 @@ fn daemon_telemetry_and_cas_over_persistent_connection() {
 }
 
 // ---------------------------------------------------------------------------
-// Post-commit stats display in async (wrapper-daemon) mode
+// Post-commit stats display in async (daemon) mode
 // ---------------------------------------------------------------------------
 
-/// Helper: create a WrapperDaemon repo with AI content, commit, and return the
-/// combined stdout+stderr output from the wrapper binary.
+/// Helper: create a Daemon repo with AI content, commit, and return the
+/// combined stdout+stderr output.
 fn async_commit_with_ai_content(extra_envs: &[(&str, &str)]) -> (TestRepo, String) {
-    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+    let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
 
     // Base commit (human only).
     let mut file = repo.filename("test.txt");
@@ -640,7 +640,7 @@ fn async_commit_with_ai_content(extra_envs: &[(&str, &str)]) -> (TestRepo, Strin
 #[test]
 fn async_mode_post_commit_shows_stats_for_ai_commit() {
     let (_repo, output) = async_commit_with_ai_content(&[]);
-    // The wrapper should have found the authorship note and printed the
+    // The daemon should have found the authorship note and printed the
     // stats progress bar (contains "you" label and "ai" label).
     assert!(
         output.contains("you") && output.contains("ai"),
@@ -651,7 +651,7 @@ fn async_mode_post_commit_shows_stats_for_ai_commit() {
 
 #[test]
 fn async_mode_post_commit_quiet_flag_suppresses_stats() {
-    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+    let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
 
     let mut file = repo.filename("q.txt");
     file.set_contents(crate::lines!["Base"]);
@@ -668,7 +668,7 @@ fn async_mode_post_commit_quiet_flag_suppresses_stats() {
         )
         .expect("commit should succeed");
 
-    // With -q the wrapper should suppress all git-ai post-commit output.
+    // With -q git-ai should suppress all post-commit output.
     assert!(
         !output.contains("you") && !output.contains("[git-ai]"),
         "expected no stats/processing output with -q, got:\n{}",
@@ -678,7 +678,7 @@ fn async_mode_post_commit_quiet_flag_suppresses_stats() {
 
 #[test]
 fn async_mode_post_commit_non_interactive_suppresses_stats() {
-    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+    let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
 
     let mut file = repo.filename("ni.txt");
     file.set_contents(crate::lines!["Base"]);
@@ -701,7 +701,7 @@ fn async_mode_post_commit_non_interactive_suppresses_stats() {
 
 #[test]
 fn async_mode_post_commit_skips_stats_for_large_commit() {
-    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+    let repo = TestRepo::new_with_mode(GitTestMode::Daemon);
 
     // Base commit.
     fs::write(repo.path().join("base.txt"), "base\n").expect("write");

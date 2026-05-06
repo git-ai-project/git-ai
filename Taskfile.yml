@@ -67,15 +67,6 @@ tasks:
         vars:
           GIT_AI_TEST_GIT_MODE: daemon
 
-  test:wrapper-daemon:
-    desc: |
-      Run unit tests in wrapper-daemon mode. Wrapper-daemon mode is where we simulate `git` pointing to the git-ai-wrapped git, but
-      all git-ai processing is still done in the shared daemon with some extra context from the wrapper that is passed over the control
-      socket. Do not use this test mode unless explicitly requested, use `task test` for normal testing purposes.
-    cmds:
-      - task: test:base
-        vars:
-          GIT_AI_TEST_GIT_MODE: wrapper-daemon
 
   lint:
     desc: Run cargo check and clippy with warnings as errors
