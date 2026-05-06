@@ -91,7 +91,6 @@ fn benchmark_checkpoint_daemon(iterations: usize) -> DurationStats {
     DurationStats::from_durations(&mut durations)
 }
 
-
 #[test]
 #[ignore]
 fn bench_checkpoint_single_file_wrapper() {
@@ -117,7 +116,6 @@ fn bench_checkpoint_single_file_daemon() {
         stats.p95
     );
 }
-
 
 #[test]
 #[ignore]

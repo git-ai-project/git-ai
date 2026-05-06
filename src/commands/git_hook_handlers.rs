@@ -3,9 +3,6 @@
 //! The git core-hooks feature has been sunset.  This module now contains only:
 //! - detection of hook-style binary invocations (`is_git_hook_binary_name`)
 //! - the `remove_repo_hooks` command (so users can clean up old symlinks)
-//! - helpers consumed by the git wrapper to resolve a previous non-managed
-//!   hooks path and to set `ENV_SKIP_MANAGED_HOOKS` on child git processes
-//!   during the transition period.
 
 use crate::error::GitAiError;
 use crate::git::repository::Repository;
@@ -25,9 +22,6 @@ const GIT_HOOKS_DIR_NAME: &str = "hooks";
 const REPO_HOOK_STATE_SCHEMA_VERSION: &str = "repo_hooks/2";
 
 pub const ENV_SKIP_ALL_HOOKS: &str = "GIT_AI_SKIP_ALL_HOOKS";
-// Intentionally avoid a GIT_* prefix so git alias shell-command tests don't
-// observe extra GIT_* variables in the environment.
-pub const ENV_SKIP_MANAGED_HOOKS: &str = "GITAI_SKIP_MANAGED_HOOKS";
 
 // ---------------------------------------------------------------------------
 // Core git hook names (used for binary-name detection)
@@ -175,21 +169,6 @@ pub fn remove_repo_hooks(
     })
 }
 
-/// Returns `true` when a hook state file exists for the repo (or from env context),
-/// meaning managed hooks were previously installed.
-pub fn has_repo_hook_state(repo: Option<&Repository>) -> bool {
-    let state_path = repo.map(repo_state_path).or_else(repo_state_path_from_env);
-    state_path
-        .map(|path| path.exists() || path.symlink_metadata().is_ok())
-        .unwrap_or(false)
-}
-
-/// Resolve the hooks path that was active before git-ai managed hooks were
-/// installed so the wrapper can set it on child git invocations.
-pub fn resolve_previous_non_managed_hooks_path(repo: Option<&Repository>) -> Option<PathBuf> {
-    should_forward_repo_state_first(repo)
-}
-
 // ---------------------------------------------------------------------------
 // Internal helpers - path resolution
 // ---------------------------------------------------------------------------
@@ -250,37 +229,6 @@ fn is_managed_hooks_path(path: &Path, repo: Option<&Repository>) -> bool {
 // ---------------------------------------------------------------------------
 // Internal helpers - git config operations
 // ---------------------------------------------------------------------------
-
-fn global_git_config_path() -> PathBuf {
-    #[cfg(test)]
-    if let Some(path) = test_global_git_config_override_path() {
-        return path;
-    }
-
-    if let Ok(path) = std::env::var("GIT_CONFIG_GLOBAL")
-        && !path.trim().is_empty()
-    {
-        return PathBuf::from(path);
-    }
-    crate::mdm::utils::home_dir().join(".gitconfig")
-}
-
-#[cfg(test)]
-fn test_global_git_config_override_path() -> Option<PathBuf> {
-    test_global_git_config_override()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
-}
-
-#[cfg(test)]
-fn test_global_git_config_override() -> &'static std::sync::Mutex<Option<PathBuf>> {
-    use std::sync::OnceLock;
-
-    static TEST_GLOBAL_CONFIG_OVERRIDE: OnceLock<std::sync::Mutex<Option<PathBuf>>> =
-        OnceLock::new();
-    TEST_GLOBAL_CONFIG_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
-}
 
 fn load_config(
     path: &Path,
@@ -449,13 +397,6 @@ fn is_disallowed_forward_hooks_path(
 // Internal helpers - repository / git-dir context discovery
 // ---------------------------------------------------------------------------
 
-fn repo_state_path_from_env() -> Option<PathBuf> {
-    if let Some(repo) = find_hook_repository_from_context() {
-        return Some(repo_state_path(&repo));
-    }
-    git_dir_from_context().map(|git_dir| git_dir.join("ai").join(REPO_HOOK_STATE_FILE))
-}
-
 fn git_dir_from_env() -> Option<PathBuf> {
     let git_dir = std::env::var("GIT_DIR").ok()?;
     let git_dir = git_dir.trim();
@@ -557,59 +498,4 @@ fn find_hook_repository_from_context() -> Option<Repository> {
     hook_repository_lookup_paths()
         .into_iter()
         .find_map(|path| crate::git::find_repository_in_path(&path.to_string_lossy()).ok())
-}
-
-fn context_repo_ai_dir() -> Option<PathBuf> {
-    if let Some(repo) = find_hook_repository_from_context() {
-        return Some(repo_ai_dir(&repo));
-    }
-    git_dir_from_context().map(|git_dir| git_dir.join("ai"))
-}
-
-// ---------------------------------------------------------------------------
-// Internal helpers - forward resolution (used by wrapper during transition)
-// ---------------------------------------------------------------------------
-
-fn should_forward_repo_state_first(repo: Option<&Repository>) -> Option<PathBuf> {
-    let state_path = repo
-        .map(repo_state_path)
-        .or_else(repo_state_path_from_env)?;
-    let state = read_repo_hook_state(&state_path).ok().flatten()?;
-
-    let managed_hooks_dir = if !state.managed_hooks_path.trim().is_empty() {
-        Some(PathBuf::from(state.managed_hooks_path.trim()))
-    } else if let Some(repo) = repo {
-        Some(managed_git_hooks_dir_for_repo(repo))
-    } else {
-        managed_git_hooks_dir_from_context()
-    };
-
-    let fallback_repo = repo;
-    let candidate = match state.forward_mode {
-        ForwardMode::RepoLocal => state
-            .forward_hooks_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from),
-        ForwardMode::GlobalFallback => {
-            read_hooks_path_from_config(&global_git_config_path(), gix_config::Source::User)
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        }
-        ForwardMode::None => None,
-    }?;
-
-    if is_disallowed_forward_hooks_path(&candidate, fallback_repo, managed_hooks_dir.as_deref()) {
-        return None;
-    }
-    if let Some(context_repo_ai_dir) = context_repo_ai_dir()
-        && normalize_path(&candidate).starts_with(normalize_path(&context_repo_ai_dir))
-    {
-        return None;
-    }
-
-    Some(candidate)
 }

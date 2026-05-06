@@ -242,4 +242,3 @@ pub fn submit_cas(records: Vec<CasSyncPayload>) {
     let request = ControlRequest::SubmitCas { records };
     let _ = send_via_daemon(&request);
 }
-

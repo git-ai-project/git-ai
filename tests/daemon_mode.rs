@@ -835,7 +835,6 @@ fn daemon_mode_post_commit_uploads_prompt_cas() {
     assert_post_commit_uploads_prompt_cas(GitTestMode::Daemon);
 }
 
-
 #[test]
 #[serial]
 fn daemon_start_spawns_detached_run_process() {

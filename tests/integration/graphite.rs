@@ -303,7 +303,6 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
         command.env("GIT_TRACE2_EVENT_NESTING", nesting);
     }
 
-
     // Only set hook-mode env in hook-based test modes.
     if repo.mode().uses_hooks() {
         command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");

@@ -2159,7 +2159,6 @@ impl TestRepo {
             );
             command.env("GIT_TRACE2_EVENT_NESTING", Self::trace2_nesting_value());
         }
-
     }
 
     fn configure_git_ai_env(&self, command: &mut Command) {
