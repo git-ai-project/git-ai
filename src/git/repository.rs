@@ -1217,14 +1217,12 @@ impl Repository {
         !has_intervening_git_dir(&normalized, base)
     }
 
-    // List all remotes for a given repository
     pub fn remotes(&self) -> Result<Vec<String>, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("remote".to_string());
-
-        let output = exec_git(&args)?;
-        let remotes = String::from_utf8(output.stdout)?;
-        Ok(remotes.trim().split("\n").map(|s| s.to_string()).collect())
+        Ok(self
+            .remotes_with_urls()?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect())
     }
 
     // List all remotes with their URLs as tuples (name, url)
