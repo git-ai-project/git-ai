@@ -24,6 +24,7 @@ struct FirebenderHookInput {
     tool_input: Option<serde_json::Value>,
     completion_id: Option<String>,
     dirty_files: Option<HashMap<String, String>>,
+    tool_use_id: Option<String>,
 }
 
 impl FirebenderPreset {
@@ -128,6 +129,7 @@ impl AgentPreset for FirebenderPreset {
             tool_input,
             completion_id,
             dirty_files,
+            tool_use_id,
         } = hook_input;
 
         // Legacy events that should be silently skipped
@@ -207,20 +209,22 @@ impl AgentPreset for FirebenderPreset {
         let dirty =
             dirty_files.map(|df| df.into_iter().map(|(k, v)| (PathBuf::from(k), v)).collect());
 
+        let tool_use_id_str = tool_use_id.unwrap_or_else(|| "bash".to_string());
+
         let event = match (hook_event_name.as_str(), is_bash) {
             ("preToolUse", true) => ParsedHookEvent::PreBashCall(PreBashCall {
                 context,
-                tool_use_id: "bash".to_string(),
+                tool_use_id: tool_use_id_str,
             }),
             ("preToolUse", false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
                 dirty_files: dirty,
-                tool_use_id: None,
+                tool_use_id: Some(tool_use_id_str),
             }),
             (_, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
-                tool_use_id: "bash".to_string(),
+                tool_use_id: tool_use_id_str,
                 transcript_source: None,
             }),
             (_, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
@@ -228,7 +232,7 @@ impl AgentPreset for FirebenderPreset {
                 file_paths,
                 dirty_files: dirty,
                 transcript_source: None,
-                tool_use_id: None,
+                tool_use_id: Some(tool_use_id_str),
             }),
         };
 
@@ -456,5 +460,43 @@ mod tests {
             FirebenderPreset::normalize_hook_path("", "/home/user"),
             None
         );
+    }
+
+    #[test]
+    fn test_firebender_propagates_tool_use_id() {
+        let input = json!({
+            "hook_event_name": "preToolUse",
+            "model": "claude-sonnet-4-5",
+            "repo_working_dir": "/home/user/project",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/main.rs"},
+            "completion_id": "comp-123",
+            "tool_use_id": "toolu_fb_abc123"
+        })
+        .to_string();
+        let events = FirebenderPreset.parse(&input, "t_test").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert_eq!(e.tool_use_id, Some("toolu_fb_abc123".to_string()));
+            }
+            _ => panic!("Expected PreFileEdit"),
+        }
+
+        let bash_input = json!({
+            "hook_event_name": "postToolUse",
+            "model": "claude-sonnet-4-5",
+            "repo_working_dir": "/home/user/project",
+            "tool_name": "Bash",
+            "completion_id": "comp-456",
+            "tool_use_id": "toolu_fb_bash456"
+        })
+        .to_string();
+        let events = FirebenderPreset.parse(&bash_input, "t_test").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PostBashCall(e) => {
+                assert_eq!(e.tool_use_id, "toolu_fb_bash456");
+            }
+            _ => panic!("Expected PostBashCall"),
+        }
     }
 }
