@@ -1217,38 +1217,30 @@ impl Repository {
         !has_intervening_git_dir(&normalized, base)
     }
 
-    // List all remotes for a given repository
     pub fn remotes(&self) -> Result<Vec<String>, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("remote".to_string());
-
-        let output = exec_git(&args)?;
-        let remotes = String::from_utf8(output.stdout)?;
-        Ok(remotes.trim().split("\n").map(|s| s.to_string()).collect())
+        Ok(self
+            .remotes_with_urls()?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect())
     }
 
     // List all remotes with their URLs as tuples (name, url)
     pub fn remotes_with_urls(&self) -> Result<Vec<(String, String)>, GitAiError> {
-        let mut args = self.global_args_for_exec();
-        args.push("remote".to_string());
-        args.push("-v".to_string());
-
-        let output = exec_git(&args)?;
-        let remotes_output = String::from_utf8(output.stdout)?;
-
+        let config = self.get_git_config_file()?;
         let mut remotes = Vec::new();
-        let mut seen = std::collections::HashSet::new();
 
-        for line in remotes_output.trim().split("\n").filter(|s| !s.is_empty()) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let name = parts[0].to_string();
-                let url = parts[1].to_string();
-                // Only add each remote once (git remote -v shows fetch and push)
-                if seen.insert(name.clone()) {
-                    remotes.push((name, url));
-                }
+        for section in config.sections() {
+            if !section.header().name().eq_ignore_ascii_case(b"remote") {
+                continue;
             }
+            let Some(name) = section.header().subsection_name() else {
+                continue;
+            };
+            let Some(url) = section.body().value("url") else {
+                continue;
+            };
+            remotes.push((name.to_string(), url.to_string()));
         }
 
         Ok(remotes)
