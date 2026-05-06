@@ -374,9 +374,11 @@ fn spawn_daemon_run_with_piped_stderr(
 
     #[cfg(windows)]
     {
+        use crate::utils::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
         use std::os::windows::process::CommandExt;
-        use crate::utils::{CREATE_NO_WINDOW, CREATE_NEW_PROCESS_GROUP, CREATE_BREAKAWAY_FROM_JOB};
-        child.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
+        child.creation_flags(
+            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
+        );
     }
 
     child.spawn().map_err(|e| e.to_string())
