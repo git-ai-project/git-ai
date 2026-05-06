@@ -376,9 +376,20 @@ fn spawn_daemon_run_with_piped_stderr(
     {
         use crate::utils::{CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
         use std::os::windows::process::CommandExt;
-        child.creation_flags(
-            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
-        );
+
+        let preferred_flags =
+            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB;
+        child.creation_flags(preferred_flags);
+        match child.spawn() {
+            Ok(child) => return Ok(child),
+            Err(preferred_err) => {
+                tracing::debug!(
+                    "piped-stderr daemon spawn with CREATE_BREAKAWAY_FROM_JOB failed, retrying without it: {}",
+                    preferred_err
+                );
+                child.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+            }
+        }
     }
 
     child.spawn().map_err(|e| e.to_string())
