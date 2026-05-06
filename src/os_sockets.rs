@@ -21,13 +21,31 @@ mod unix_impl {
         }
 
         pub fn connect_timeout(path: &Path, timeout: Duration) -> io::Result<Self> {
-            // Unix doesn't have a built-in connect_timeout for Unix sockets,
-            // so we set the socket to non-blocking, attempt connect, and poll
-            let sock = StdUnixStream::connect(path)?;
-            sock.set_nonblocking(false)?;
-            sock.set_read_timeout(Some(timeout))?;
-            sock.set_write_timeout(Some(timeout))?;
-            Ok(UnixStream(sock))
+            // Unix doesn't have a built-in connect_timeout for Unix sockets.
+            // Spawn blocking connect in a thread and join with timeout.
+            use std::sync::mpsc;
+            use std::thread;
+
+            let path = path.to_path_buf();
+            let (tx, rx) = mpsc::channel();
+
+            thread::spawn(move || {
+                let result = StdUnixStream::connect(&path);
+                let _ = tx.send(result);
+            });
+
+            match rx.recv_timeout(timeout) {
+                Ok(Ok(sock)) => {
+                    sock.set_read_timeout(Some(timeout))?;
+                    sock.set_write_timeout(Some(timeout))?;
+                    Ok(UnixStream(sock))
+                }
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("connection timed out after {:?}", timeout),
+                )),
+            }
         }
 
         pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
@@ -201,10 +219,30 @@ mod windows_impl {
         }
 
         pub fn connect_timeout(path: &Path, timeout: Duration) -> io::Result<Self> {
-            let stream = Self::connect(path)?;
-            stream.set_read_timeout(Some(timeout))?;
-            stream.set_write_timeout(Some(timeout))?;
-            Ok(stream)
+            // Spawn blocking connect in a thread and join with timeout.
+            use std::sync::mpsc;
+            use std::thread;
+
+            let path = path.to_path_buf();
+            let (tx, rx) = mpsc::channel();
+
+            thread::spawn(move || {
+                let result = Self::connect(&path);
+                let _ = tx.send(result);
+            });
+
+            match rx.recv_timeout(timeout) {
+                Ok(Ok(stream)) => {
+                    stream.set_read_timeout(Some(timeout))?;
+                    stream.set_write_timeout(Some(timeout))?;
+                    Ok(stream)
+                }
+                Ok(Err(e)) => Err(e),
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("connection timed out after {:?}", timeout),
+                )),
+            }
         }
 
         pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
