@@ -361,51 +361,59 @@ impl AttributionTracker {
                     new_index,
                     new_len,
                 } => {
-                    // For Replaces that are purely CRLF↔LF changes, skip counting.
-                    // Compare normalized text to detect substantive changes.
-                    let mut real_del: u32 = 0;
-                    let mut real_add: u32 = 0;
-                    let mut real_del_sloc: u32 = 0;
-                    let mut real_add_sloc: u32 = 0;
-                    let min_len = old_len.min(new_len);
-                    for i in 0..min_len {
-                        let old_text = old_normalized[old_index + i];
-                        let new_text = new_normalized[new_index + i];
-                        if old_text != new_text {
-                            real_del += 1;
-                            real_add += 1;
-                            if !old_text.trim().is_empty() {
-                                real_del_sloc += 1;
+                    // Run a sub-diff on normalized slices to correctly handle
+                    // CRLF↔LF changes co-occurring with real edits.
+                    let old_chunk = &old_normalized[old_index..old_index + old_len];
+                    let new_chunk = &new_normalized[new_index..new_index + new_len];
+                    let sub_ops = capture_diff_slices(old_chunk, new_chunk);
+                    for sub_op in &sub_ops {
+                        match *sub_op {
+                            DiffOp::Insert {
+                                new_index: si,
+                                new_len: sn,
+                                ..
+                            } => {
+                                additions += sn as u32;
+                                for item in new_chunk.iter().skip(si).take(sn) {
+                                    if !item.trim().is_empty() {
+                                        additions_sloc += 1;
+                                    }
+                                }
                             }
-                            if !new_text.trim().is_empty() {
-                                real_add_sloc += 1;
+                            DiffOp::Delete {
+                                old_index: si,
+                                old_len: sn,
+                                ..
+                            } => {
+                                deletions += sn as u32;
+                                for item in old_chunk.iter().skip(si).take(sn) {
+                                    if !item.trim().is_empty() {
+                                        deletions_sloc += 1;
+                                    }
+                                }
                             }
+                            DiffOp::Replace {
+                                old_index: soi,
+                                old_len: sol,
+                                new_index: sni,
+                                new_len: snl,
+                            } => {
+                                deletions += sol as u32;
+                                additions += snl as u32;
+                                for item in old_chunk.iter().skip(soi).take(sol) {
+                                    if !item.trim().is_empty() {
+                                        deletions_sloc += 1;
+                                    }
+                                }
+                                for item in new_chunk.iter().skip(sni).take(snl) {
+                                    if !item.trim().is_empty() {
+                                        additions_sloc += 1;
+                                    }
+                                }
+                            }
+                            DiffOp::Equal { .. } => {}
                         }
                     }
-                    for item in old_normalized
-                        .iter()
-                        .skip(old_index + min_len)
-                        .take(old_len - min_len)
-                    {
-                        real_del += 1;
-                        if !item.trim().is_empty() {
-                            real_del_sloc += 1;
-                        }
-                    }
-                    for item in new_normalized
-                        .iter()
-                        .skip(new_index + min_len)
-                        .take(new_len - min_len)
-                    {
-                        real_add += 1;
-                        if !item.trim().is_empty() {
-                            real_add_sloc += 1;
-                        }
-                    }
-                    deletions += real_del;
-                    additions += real_add;
-                    deletions_sloc += real_del_sloc;
-                    additions_sloc += real_add_sloc;
                 }
                 DiffOp::Equal { .. } => {}
             }
