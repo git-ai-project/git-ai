@@ -183,7 +183,13 @@ mod windows_impl {
                 SetHandleInformation(socket as HANDLE, HANDLE_FLAG_INHERIT, 0);
             }
 
-            let (addr, addr_len) = path_to_sockaddr(path)?;
+            let (addr, addr_len) = match path_to_sockaddr(path) {
+                Ok(v) => v,
+                Err(e) => {
+                    unsafe { closesocket(socket) };
+                    return Err(e);
+                }
+            };
             let result = unsafe { connect(socket, &addr as *const _ as *const SOCKADDR, addr_len) };
 
             if result == -1 {
@@ -300,7 +306,13 @@ mod windows_impl {
                 SetHandleInformation(socket as HANDLE, HANDLE_FLAG_INHERIT, 0);
             }
 
-            let (addr, addr_len) = path_to_sockaddr(path)?;
+            let (addr, addr_len) = match path_to_sockaddr(path) {
+                Ok(v) => v,
+                Err(e) => {
+                    unsafe { closesocket(socket) };
+                    return Err(e);
+                }
+            };
             let bind_result =
                 unsafe { bind(socket, &addr as *const _ as *const SOCKADDR, addr_len) };
 
