@@ -242,7 +242,7 @@ pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {
             .is_ok()
 }
 
-#[cfg(any(windows, not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn wait_for_daemon_up(config: &DaemonConfig, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     loop {
@@ -294,7 +294,7 @@ fn daemon_runtime_dir(config: &DaemonConfig) -> Result<PathBuf, String> {
         .ok_or_else(|| "daemon lock path has no parent".to_string())
 }
 
-#[cfg(any(windows, not(any(test, feature = "test-support"))))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn spawn_daemon_run_detached(config: &DaemonConfig) -> Result<(), String> {
     // Use current_git_ai_exe() instead of current_exe() to resolve through
     // symlinks. When the current exe is the git shim (e.g. ~/.local/bin/git),
