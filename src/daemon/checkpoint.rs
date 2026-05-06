@@ -469,25 +469,12 @@ fn get_previous_content_from_head(
     file_path: &str,
     head_tree_id: &Option<String>,
 ) -> String {
-    if let Some(tree_id) = head_tree_id.as_ref() {
-        let head_tree = repo.find_tree(tree_id.clone()).ok();
-        if let Some(tree) = head_tree {
-            match tree.get_path(std::path::Path::new(file_path)) {
-                Ok(entry) => {
-                    if let Ok(blob) = repo.find_blob(entry.id()) {
-                        let blob_content = blob.content().unwrap_or_default();
-                        String::from_utf8_lossy(&blob_content).to_string()
-                    } else {
-                        String::new()
-                    }
-                }
-                Err(_) => String::new(),
-            }
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
+    let Some(tree_id) = head_tree_id.as_ref() else {
+        return String::new();
+    };
+    match repo.read_file_blob_at_tree(tree_id, std::path::Path::new(file_path)) {
+        Ok(content) => String::from_utf8_lossy(&content).to_string(),
+        Err(_) => String::new(),
     }
 }
 

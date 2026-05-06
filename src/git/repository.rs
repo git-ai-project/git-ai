@@ -525,9 +525,16 @@ impl<'a> Commit<'a> {
     }
 
     pub fn tree(&self) -> Result<Tree<'a>, GitAiError> {
+        let reader = crate::git::fast_reader::FastObjectReader::new(&self.repo.git_common_dir);
+        if let Some(tree_oid) = reader.try_read_commit_tree_oid(&self.oid) {
+            return Ok(Tree {
+                repo: self.repo,
+                oid: tree_oid,
+            });
+        }
+
         let mut args = self.repo.global_args_for_exec();
         args.push("rev-parse".to_string());
-        // args.push("-q".to_string());
         args.push("--verify".to_string());
         args.push(format!("{}^{}", self.oid, "{tree}"));
         let output = exec_git(&args)?;
@@ -713,12 +720,17 @@ impl<'a> Tree<'a> {
 
     // Retrieve a tree entry contained in a tree or in any of its subtrees, given its relative path.
     pub fn get_path(&self, path: &Path) -> Result<TreeEntry<'a>, GitAiError> {
-        // Use `git ls-tree -z -d <tree-oid> -- <path>` to get exactly the entry for the path.
-        // -z ensures NUL-terminated records; -d shows the directory itself instead of listing contents
+        let reader = crate::git::fast_reader::FastObjectReader::new(&self.repo.git_common_dir);
+        if let Some(blob_oid) = reader.try_tree_entry_for_path(&self.oid, path) {
+            return Ok(TreeEntry {
+                _repo: std::marker::PhantomData,
+                oid: blob_oid,
+            });
+        }
+
         let mut args = self.repo.global_args_for_exec();
         args.push("ls-tree".to_string());
         args.push("-z".to_string());
-        // Use recursive to locate files in nested paths and return blob entries
         args.push("-r".to_string());
         args.push(self.oid.clone());
         args.push("--".to_string());
@@ -779,8 +791,17 @@ pub struct Blob<'a> {
 }
 
 impl<'a> Blob<'a> {
-    // Get the content of this blob.
+    #[allow(dead_code)]
+    pub fn id(&self) -> String {
+        self.oid.clone()
+    }
+
     pub fn content(&self) -> Result<Vec<u8>, GitAiError> {
+        let reader = crate::git::fast_reader::FastObjectReader::new(&self.repo.git_common_dir);
+        if let Some(data) = reader.try_read_blob(&self.oid) {
+            return Ok(data);
+        }
+
         let mut args = self.repo.global_args_for_exec();
         args.push("cat-file".to_string());
         args.push("blob".to_string());
@@ -810,6 +831,22 @@ impl<'a> Reference<'a> {
     }
 
     pub fn target(&self) -> Result<String, GitAiError> {
+        use crate::git::fast_reader::{FastRefReader, HeadKind};
+        let reader = FastRefReader::new(&self.repo.git_dir, &self.repo.git_common_dir);
+        if self.ref_name == "HEAD" {
+            match reader.try_read_head() {
+                Some(HeadKind::Detached(oid)) => return Ok(oid),
+                Some(HeadKind::Symbolic(refname)) => {
+                    if let Some(sha) = reader.try_resolve_ref(&refname) {
+                        return Ok(sha);
+                    }
+                }
+                None => {}
+            }
+        } else if let Some(sha) = reader.try_resolve_ref(&self.ref_name) {
+            return Ok(sha);
+        }
+
         let mut args = self.repo.global_args_for_exec();
         args.push("rev-parse".to_string());
         args.push(self.ref_name.clone());
@@ -1032,6 +1069,11 @@ impl Repository {
 
     // Internal util to get the git object type for a given OID
     fn object_type(&self, oid: &str) -> Result<String, GitAiError> {
+        let reader = crate::git::fast_reader::FastObjectReader::new(&self.git_common_dir);
+        if let Some(typ) = reader.try_read_object_type(oid) {
+            return Ok(typ);
+        }
+
         let mut args = self.global_args_for_exec();
         args.push("cat-file".to_string());
         args.push("-t".to_string());
@@ -1044,9 +1086,26 @@ impl Repository {
     // If HEAD is a symbolic ref, return the refname (e.g., "refs/heads/main").
     // Otherwise, return "HEAD".
     pub fn head<'a>(&'a self) -> Result<Reference<'a>, GitAiError> {
+        use crate::git::fast_reader::{FastRefReader, HeadKind};
+        let reader = FastRefReader::new(&self.git_dir, &self.git_common_dir);
+        match reader.try_read_head() {
+            Some(HeadKind::Symbolic(refname)) => {
+                return Ok(Reference {
+                    repo: self,
+                    ref_name: refname,
+                });
+            }
+            Some(HeadKind::Detached(_)) => {
+                return Ok(Reference {
+                    repo: self,
+                    ref_name: "HEAD".to_string(),
+                });
+            }
+            None => {}
+        }
+
         let mut args = self.global_args_for_exec();
         args.push("symbolic-ref".to_string());
-        // args.push("-q".to_string());
         args.push("HEAD".to_string());
 
         let output = exec_git(&args);
@@ -1484,6 +1543,35 @@ impl Repository {
             )));
         }
         Ok(Tree { repo: self, oid })
+    }
+
+    /// Read file content from a tree, using fast filesystem reads with git CLI fallback.
+    pub fn read_file_blob_at_tree(
+        &self,
+        tree_oid: &str,
+        path: &Path,
+    ) -> Result<Vec<u8>, GitAiError> {
+        let reader = crate::git::fast_reader::FastObjectReader::new(&self.git_common_dir);
+        if let Some(blob_oid) = reader.try_tree_entry_for_path(tree_oid, path) {
+            if let Some(content) = reader.try_read_blob(&blob_oid) {
+                return Ok(content);
+            }
+            let blob = Blob {
+                repo: self,
+                oid: blob_oid,
+            };
+            return blob.content();
+        }
+        let tree = Tree {
+            repo: self,
+            oid: tree_oid.to_string(),
+        };
+        let entry = tree.get_path(path)?;
+        let blob = Blob {
+            repo: self,
+            oid: entry.id(),
+        };
+        blob.content()
     }
 
     /// Get the content of a file at a specific commit

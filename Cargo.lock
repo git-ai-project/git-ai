@@ -1095,6 +1095,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "filetime",
+ "flate2",
  "futures",
  "git-ai",
  "gix-config",
