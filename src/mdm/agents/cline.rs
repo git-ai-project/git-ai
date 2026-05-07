@@ -112,7 +112,9 @@ impl ClineInstaller {
         params: &HookInstallerParams,
         dry_run: bool,
     ) -> Result<Option<String>, GitAiError> {
-        fs::create_dir_all(hooks_dir)?;
+        if !dry_run {
+            fs::create_dir_all(hooks_dir)?;
+        }
 
         let script_content = render_script(&params.binary_path);
         let mut all_diffs = String::new();
@@ -413,6 +415,13 @@ mod tests {
                 "{path:?} should not be written under dry-run"
             );
         }
+        // The hooks dir itself must NOT be created under dry-run, otherwise
+        // a subsequent check_hooks would report tool_installed = true purely
+        // because the dry-run side-effected the filesystem.
+        assert!(
+            !hooks_dir.exists(),
+            "hooks dir should not be created under dry-run; got: {hooks_dir:?}"
+        );
     }
 
     #[test]
