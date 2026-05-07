@@ -38,6 +38,7 @@ mod ci_local_skip_push;
 mod ci_partial_clone;
 mod ci_squash_rebase;
 mod claude_code;
+mod cline;
 mod codex;
 mod commit_post_stats_benchmark;
 mod config_pattern_detection;
