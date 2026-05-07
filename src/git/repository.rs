@@ -2620,8 +2620,7 @@ pub fn exec_git_allow_nonzero_with_profile(
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args);
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
+    configure_internal_git_command(&mut cmd);
 
     #[cfg(windows)]
     {
@@ -2631,6 +2630,12 @@ pub fn exec_git_allow_nonzero_with_profile(
     }
 
     cmd.output().map_err(GitAiError::IoError)
+}
+
+fn configure_internal_git_command(cmd: &mut Command) {
+    cmd.env("LC_ALL", "C");
+    cmd.env_remove("GIT_EXTERNAL_DIFF");
+    cmd.env_remove("GIT_DIFF_OPTS");
 }
 
 /// Helper to execute a git command with an explicit internal profile.
@@ -2674,8 +2679,7 @@ pub fn exec_git_stdin_with_profile(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
+    configure_internal_git_command(&mut cmd);
 
     #[cfg(windows)]
     {
@@ -2999,6 +3003,21 @@ mod tests {
 
         assert_eq!(forwarded[0], "-c");
         assert!(forwarded[1].starts_with("core.hooksPath="));
+    }
+
+    #[test]
+    fn internal_git_command_forces_c_locale() {
+        let mut cmd = Command::new("git");
+        configure_internal_git_command(&mut cmd);
+
+        let lc_all = cmd.get_envs().find_map(|(key, value)| {
+            if key == std::ffi::OsStr::new("LC_ALL") {
+                value.and_then(|value| value.to_str())
+            } else {
+                None
+            }
+        });
+        assert_eq!(lc_all, Some("C"));
     }
 
     #[test]
