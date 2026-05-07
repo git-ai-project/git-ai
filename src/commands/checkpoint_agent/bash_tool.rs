@@ -362,6 +362,11 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "Shell" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::KimiCode => match tool_name {
+            "WriteFile" | "StrReplaceFile" => ToolClass::FileEdit,
+            "Shell" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
     }
 }
 
@@ -379,6 +384,7 @@ pub enum Agent {
     Pi,
     Windsurf,
     Cursor,
+    KimiCode,
 }
 
 // ---------------------------------------------------------------------------
@@ -1292,6 +1298,20 @@ mod tests {
         );
         assert_eq!(classify_tool(Agent::Cursor, "Shell"), ToolClass::Bash);
         assert_eq!(classify_tool(Agent::Cursor, "Read"), ToolClass::Skip);
+
+        // KimiCode (Moonshot AI / kimi-cli)
+        assert_eq!(
+            classify_tool(Agent::KimiCode, "WriteFile"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(
+            classify_tool(Agent::KimiCode, "StrReplaceFile"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(classify_tool(Agent::KimiCode, "Shell"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::KimiCode, "ReadFile"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::KimiCode, "Grep"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::KimiCode, "Bash"), ToolClass::Skip);
     }
 
     #[test]
