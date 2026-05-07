@@ -250,7 +250,7 @@ mod tests {
                     vec![PathBuf::from("/Users/me/project/src/main.rs")]
                 );
             }
-            _ => panic!("Expected PreFileEdit, got {:?}", &events[0]),
+            _ => panic!("Expected PreFileEdit"),
         }
     }
 
