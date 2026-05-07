@@ -265,7 +265,7 @@ mod tests {
                 );
                 assert!(e.dirty_files.is_none());
             }
-            _ => panic!("Expected PreFileEdit, got {:?}", &events[0]),
+            _ => panic!("Expected PreFileEdit"),
         }
     }
 

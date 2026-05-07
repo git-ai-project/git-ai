@@ -56,7 +56,7 @@ fn test_augment_routes_save_file_to_post_file_edit() {
                 "transcript_source should be None until an Augment reader lands"
             );
         }
-        _ => panic!("Expected PostFileEdit, got {:?}", &events[0]),
+        _ => panic!("Expected PostFileEdit"),
     }
 }
 
