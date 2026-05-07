@@ -1,5 +1,6 @@
 //! Amp agent implementation with sweep discovery.
 
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -114,19 +115,16 @@ impl Agent for AmpAgent {
                 continue;
             };
 
-            let session_id = format!("amp:{}", file_stem);
-
-            // Use file stem as external_thread_id to avoid parsing every file during discovery
+            let session_id = generate_session_id(&file_stem, "amp");
             let session = DiscoveredSession {
                 session_id,
-                agent_type: "amp".to_string(),
+                tool: "amp".to_string(),
                 transcript_path: path,
                 transcript_format: TranscriptFormat::AmpThreadJson,
                 watermark_type: WatermarkType::RecordIndex,
                 initial_watermark: Box::new(RecordIndexWatermark::new(0)),
-                model: None,
-                tool: Some("Amp".to_string()),
-                external_thread_id: Some(file_stem),
+                external_session_id: file_stem,
+                external_parent_session_id: None,
             };
 
             sessions.push(session);

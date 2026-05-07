@@ -60,9 +60,9 @@ fn test_agent_usage_attrs_include_repo_url_when_remote_exists() {
         attrs.prompt_id
     );
     assert!(
-        matches!(&attrs.external_prompt_id, Some(Some(p)) if p == "test-session-123"),
-        "attrs.external_prompt_id should match agent_id.id, got: {:?}",
-        attrs.external_prompt_id
+        matches!(&attrs.external_session_id, Some(Some(p)) if p == "test-session-123"),
+        "attrs.external_session_id should match agent_id.id, got: {:?}",
+        attrs.external_session_id
     );
 }
 

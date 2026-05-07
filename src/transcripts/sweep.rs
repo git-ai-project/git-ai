@@ -20,28 +20,29 @@ pub enum SweepStrategy {
 /// A session discovered during a sweep.
 pub struct DiscoveredSession {
     pub session_id: String,
-    pub agent_type: String,
+    pub tool: String,
     pub transcript_path: PathBuf,
     pub transcript_format: TranscriptFormat,
     pub watermark_type: WatermarkType,
     pub initial_watermark: Box<dyn WatermarkStrategy>,
-    pub model: Option<String>,
-    pub tool: Option<String>,
-    pub external_thread_id: Option<String>,
+    pub external_session_id: String,
+    pub external_parent_session_id: Option<String>,
 }
 
 impl std::fmt::Debug for DiscoveredSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DiscoveredSession")
             .field("session_id", &self.session_id)
-            .field("agent_type", &self.agent_type)
+            .field("tool", &self.tool)
             .field("transcript_path", &self.transcript_path)
             .field("transcript_format", &self.transcript_format)
             .field("watermark_type", &self.watermark_type)
             .field("initial_watermark", &"<watermark>")
-            .field("model", &self.model)
-            .field("tool", &self.tool)
-            .field("external_thread_id", &self.external_thread_id)
+            .field("external_session_id", &self.external_session_id)
+            .field(
+                "external_parent_session_id",
+                &self.external_parent_session_id,
+            )
             .finish()
     }
 }
@@ -57,14 +58,13 @@ impl Clone for DiscoveredSession {
 
         Self {
             session_id: self.session_id.clone(),
-            agent_type: self.agent_type.clone(),
+            tool: self.tool.clone(),
             transcript_path: self.transcript_path.clone(),
             transcript_format: self.transcript_format,
             watermark_type: self.watermark_type,
             initial_watermark: cloned_watermark,
-            model: self.model.clone(),
-            tool: self.tool.clone(),
-            external_thread_id: self.external_thread_id.clone(),
+            external_session_id: self.external_session_id.clone(),
+            external_parent_session_id: self.external_parent_session_id.clone(),
         }
     }
 }

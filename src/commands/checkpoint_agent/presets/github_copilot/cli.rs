@@ -55,7 +55,7 @@ pub(super) fn parse_cli_hooks(
             id: session_id.clone(),
             model: "unknown".to_string(),
         },
-        session_id,
+        external_session_id: session_id,
         trace_id: trace_id.to_string(),
         cwd: PathBuf::from(cwd),
         metadata,

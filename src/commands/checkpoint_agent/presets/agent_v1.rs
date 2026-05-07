@@ -57,7 +57,7 @@ impl AgentPreset for AgentV1Preset {
                             id: "human".to_string(),
                             model: "human".to_string(),
                         },
-                        session_id: "human".to_string(),
+                        external_session_id: "human".to_string(),
                         trace_id: trace_id.to_string(),
                         cwd,
                         metadata: HashMap::new(),
@@ -90,7 +90,7 @@ impl AgentPreset for AgentV1Preset {
                             id: conversation_id.clone(),
                             model,
                         },
-                        session_id: conversation_id,
+                        external_session_id: conversation_id,
                         trace_id: trace_id.to_string(),
                         cwd,
                         metadata: HashMap::new(),
@@ -129,7 +129,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "human");
-                assert_eq!(e.context.session_id, "human");
+                assert_eq!(e.context.external_session_id, "human");
                 assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
                 assert_eq!(
                     e.file_paths,
@@ -159,7 +159,7 @@ mod tests {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "my-agent");
                 assert_eq!(e.context.agent_id.model, "gpt-4");
-                assert_eq!(e.context.session_id, "conv-123");
+                assert_eq!(e.context.external_session_id, "conv-123");
                 assert_eq!(
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/lib.rs")]

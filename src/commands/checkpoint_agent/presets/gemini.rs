@@ -3,6 +3,7 @@ use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     PresetContext, TranscriptFormat, TranscriptSource,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
@@ -40,7 +41,7 @@ impl AgentPreset for GeminiPreset {
                 .flatten()
                 .unwrap_or_else(|| "unknown".to_string()),
             },
-            session_id,
+            external_session_id: session_id,
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd),
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]),
@@ -49,8 +50,9 @@ impl AgentPreset for GeminiPreset {
         let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(transcript_path),
             format: TranscriptFormat::GeminiJsonl,
-            session_id: context.session_id.clone(),
-            external_thread_id: None,
+            session_id: generate_session_id(&context.external_session_id, "gemini"),
+            external_session_id: context.external_session_id.clone(),
+            external_parent_session_id: None,
         });
 
         // Gemini uses "BeforeTool" instead of "PreToolUse"
@@ -112,7 +114,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "gemini");
-                assert_eq!(e.context.session_id, "gemini-sess-1");
+                assert_eq!(e.context.external_session_id, "gemini-sess-1");
                 assert_eq!(e.context.trace_id, "t_test123456789a");
                 assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
                 assert_eq!(

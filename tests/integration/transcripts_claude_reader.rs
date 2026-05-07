@@ -2,6 +2,7 @@
 
 use git_ai::transcripts::agent::Agent;
 use git_ai::transcripts::agents::ClaudeAgent;
+use git_ai::transcripts::agents::claude::ClaudeAgent as ClaudeAgentImpl;
 use git_ai::transcripts::watermark::ByteOffsetWatermark;
 use std::fs::{self, File};
 use std::io::Write;
@@ -124,4 +125,127 @@ fn test_claude_reader_file_not_found() {
             _ => panic!("Expected Fatal error, got {:?}", e),
         }
     }
+}
+
+#[test]
+fn test_claude_transcript_ids_extracted_from_fixture() {
+    let fixture = fixture_path("claude_with_ids.jsonl");
+    let agent = ClaudeAgent::new();
+    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let batch = agent
+        .read_incremental(&fixture, watermark, "sess-parent-abc")
+        .unwrap();
+
+    assert_eq!(batch.events.len(), 5);
+
+    // Event 0: user message — has uuid, no tool_use
+    let (eid, pid, tid) = agent.extract_event_ids(&batch.events[0]);
+    assert_eq!(
+        eid,
+        Some("aaa11111-1111-1111-1111-111111111111".to_string())
+    );
+    assert_eq!(pid, None);
+    assert_eq!(tid, None);
+
+    // Event 1: assistant text — has uuid + parentUuid, no tool_use
+    let (eid, pid, tid) = agent.extract_event_ids(&batch.events[1]);
+    assert_eq!(
+        eid,
+        Some("bbb22222-2222-2222-2222-222222222222".to_string())
+    );
+    assert_eq!(
+        pid,
+        Some("aaa11111-1111-1111-1111-111111111111".to_string())
+    );
+    assert_eq!(tid, None);
+
+    // Event 2: assistant with tool_use — has uuid + parentUuid + tool_use id
+    let (eid, pid, tid) = agent.extract_event_ids(&batch.events[2]);
+    assert_eq!(
+        eid,
+        Some("ccc33333-3333-3333-3333-333333333333".to_string())
+    );
+    assert_eq!(
+        pid,
+        Some("bbb22222-2222-2222-2222-222222222222".to_string())
+    );
+    assert_eq!(tid, Some("toolu_01AbCdEfGhIjKlMnOp".to_string()));
+
+    // Event 3: user with tool_result — has uuid + parentUuid + tool_use_id
+    let (eid, pid, tid) = agent.extract_event_ids(&batch.events[3]);
+    assert_eq!(
+        eid,
+        Some("ddd44444-4444-4444-4444-444444444444".to_string())
+    );
+    assert_eq!(
+        pid,
+        Some("ccc33333-3333-3333-3333-333333333333".to_string())
+    );
+    assert_eq!(tid, Some("toolu_01AbCdEfGhIjKlMnOp".to_string()));
+
+    // Event 4: assistant text (final) — has uuid + parentUuid, no tool_use
+    let (eid, pid, tid) = agent.extract_event_ids(&batch.events[4]);
+    assert_eq!(
+        eid,
+        Some("eee55555-5555-5555-5555-555555555555".to_string())
+    );
+    assert_eq!(
+        pid,
+        Some("ddd44444-4444-4444-4444-444444444444".to_string())
+    );
+    assert_eq!(tid, None);
+}
+
+#[test]
+fn test_claude_subagent_parent_detection_from_path() {
+    let subagent_path = PathBuf::from(
+        "/home/user/.claude/projects/proj/sess-parent-abc/subagents/agent-a1b2c3d4e5f6.jsonl",
+    );
+    assert_eq!(
+        ClaudeAgentImpl::detect_subagent_parent(&subagent_path),
+        Some("sess-parent-abc".to_string())
+    );
+
+    let normal_path = PathBuf::from("/home/user/.claude/projects/proj/sess-parent-abc.jsonl");
+    assert_eq!(ClaudeAgentImpl::detect_subagent_parent(&normal_path), None);
+
+    let edge_path = PathBuf::from("subagents/agent-foo.jsonl");
+    assert_eq!(ClaudeAgentImpl::detect_subagent_parent(&edge_path), None);
+}
+
+#[test]
+fn test_claude_subagent_transcript_reads_with_correct_ids() {
+    let subagent_fixture =
+        fixture_path("claude_subagent/sess-parent-abc/subagents/agent-a1b2c3d4e5f6.jsonl");
+    let agent = ClaudeAgent::new();
+    let watermark = Box::new(ByteOffsetWatermark::new(0));
+    let batch = agent
+        .read_incremental(&subagent_fixture, watermark, "agent-a1b2c3d4e5f6")
+        .unwrap();
+
+    assert_eq!(batch.events.len(), 3);
+
+    // Subagent event has tool_use in content
+    let (eid, pid, tid) = agent.extract_event_ids(&batch.events[1]);
+    assert_eq!(
+        eid,
+        Some("sub22222-2222-2222-2222-222222222222".to_string())
+    );
+    assert_eq!(
+        pid,
+        Some("sub11111-1111-1111-1111-111111111111".to_string())
+    );
+    assert_eq!(tid, Some("toolu_sub_search_01".to_string()));
+
+    // tool_result event
+    let (eid, pid, tid) = agent.extract_event_ids(&batch.events[2]);
+    assert_eq!(
+        eid,
+        Some("sub33333-3333-3333-3333-333333333333".to_string())
+    );
+    assert_eq!(
+        pid,
+        Some("sub22222-2222-2222-2222-222222222222".to_string())
+    );
+    assert_eq!(tid, Some("toolu_sub_search_01".to_string()));
 }

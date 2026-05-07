@@ -3,6 +3,7 @@ use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     PresetContext, TranscriptFormat, TranscriptSource,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
@@ -314,7 +315,7 @@ impl AgentPreset for AmpPreset {
                     })
                     .unwrap_or_else(|| "unknown".to_string()),
             },
-            session_id,
+            external_session_id: session_id,
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd),
             metadata,
@@ -323,8 +324,9 @@ impl AgentPreset for AmpPreset {
         let transcript_source = resolved_transcript_path.map(|path| TranscriptSource {
             path,
             format: TranscriptFormat::AmpThreadJson,
-            session_id: context.session_id.clone(),
-            external_thread_id: None,
+            session_id: generate_session_id(&context.external_session_id, "amp"),
+            external_session_id: context.external_session_id.clone(),
+            external_parent_session_id: None,
         });
 
         let event = match (is_pre, is_bash) {
@@ -382,7 +384,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "amp");
-                assert_eq!(e.context.session_id, "T-thread-123");
+                assert_eq!(e.context.external_session_id, "T-thread-123");
                 assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
                 assert_eq!(
                     e.file_paths,
@@ -460,7 +462,7 @@ mod tests {
         let events = AmpPreset.parse(&input, "t_test").unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert_eq!(e.context.session_id, "T-thread-456");
+                assert_eq!(e.context.external_session_id, "T-thread-456");
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -478,7 +480,7 @@ mod tests {
         let events = AmpPreset.parse(&input, "t_test").unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert_eq!(e.context.session_id, "tu-fallback");
+                assert_eq!(e.context.external_session_id, "tu-fallback");
             }
             _ => panic!("Expected PreFileEdit"),
         }

@@ -1,5 +1,6 @@
 //! Claude Code agent implementation with sweep discovery.
 
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -73,11 +74,21 @@ impl ClaudeAgent {
 
     /// Extract session ID from a Claude conversation file path.
     ///
-    /// Claude files are typically named like: `<uuid>.jsonl` under `projects/<project-dir>/`
-    fn extract_session_id(path: &Path) -> Option<String> {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("claude:{}", s))
+    /// Detect if a path is a subagent transcript and extract the parent session UUID.
+    ///
+    /// Subagent path pattern: `<project>/<parent-uuid>/subagents/agent-<id>.jsonl`
+    pub fn detect_subagent_parent(path: &Path) -> Option<String> {
+        let components: Vec<_> = path.components().collect();
+        for (i, component) in components.iter().enumerate() {
+            if let std::path::Component::Normal(s) = component
+                && s.to_str() == Some("subagents")
+                && i > 0
+                && let std::path::Component::Normal(parent) = components[i - 1]
+            {
+                return parent.to_str().map(|s| s.to_string());
+            }
+        }
+        None
     }
 }
 
@@ -102,22 +113,25 @@ impl Agent for ClaudeAgent {
         let mut sessions = Vec::new();
 
         for path in paths {
-            let Some(session_id) = Self::extract_session_id(&path) else {
+            let Some(external_session_id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+            else {
                 continue;
             };
+            let session_id = generate_session_id(&external_session_id, "claude");
+            let external_parent_session_id = Self::detect_subagent_parent(&path);
 
-            // Don't parse file content here - just filesystem scanning.
-            // Model will be extracted later during first read_incremental() if needed.
             let session = DiscoveredSession {
                 session_id,
-                agent_type: "claude".to_string(),
+                tool: "claude".to_string(),
                 transcript_path: path,
                 transcript_format: TranscriptFormat::ClaudeJsonl,
                 watermark_type: WatermarkType::ByteOffset,
                 initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
-                model: None,
-                tool: Some("Claude Code".to_string()),
-                external_thread_id: None,
+                external_session_id,
+                external_parent_session_id,
             };
 
             sessions.push(session);
@@ -226,6 +240,37 @@ impl Agent for ClaudeAgent {
             new_watermark,
         })
     }
+
+    fn extract_event_ids(
+        &self,
+        event: &serde_json::Value,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let event_id = event.get("uuid").and_then(|v| v.as_str()).map(String::from);
+        let parent_id = event
+            .get("parentUuid")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let tool_use_id = event
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find_map(|block| match block.get("type").and_then(|t| t.as_str()) {
+                        Some("tool_use") => {
+                            block.get("id").and_then(|v| v.as_str()).map(String::from)
+                        }
+                        Some("tool_result") => block
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        _ => None,
+                    })
+            });
+
+        (event_id, parent_id, tool_use_id)
+    }
 }
 
 #[cfg(test)]
@@ -233,11 +278,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_session_id() {
-        let path =
-            PathBuf::from("/home/user/.config/Claude/conversations/conversation_abc-123.jsonl");
-        let session_id = ClaudeAgent::extract_session_id(&path);
-        assert_eq!(session_id, Some("claude:conversation_abc-123".to_string()));
+    fn test_detect_subagent_parent() {
+        let subagent_path = PathBuf::from(
+            "/home/user/.claude/projects/-home-user-myproject/cf28d639-11e1-4851-b914-d16eb53d907b/subagents/agent-a20c8d201882f84b6.jsonl",
+        );
+        assert_eq!(
+            ClaudeAgent::detect_subagent_parent(&subagent_path),
+            Some("cf28d639-11e1-4851-b914-d16eb53d907b".to_string())
+        );
+
+        let main_session_path = PathBuf::from(
+            "/home/user/.claude/projects/-home-user-myproject/cf28d639-11e1-4851-b914-d16eb53d907b.jsonl",
+        );
+        assert_eq!(
+            ClaudeAgent::detect_subagent_parent(&main_session_path),
+            None
+        );
+
+        let no_parent_path = PathBuf::from("/subagents/agent-xyz.jsonl");
+        assert_eq!(ClaudeAgent::detect_subagent_parent(&no_parent_path), None);
     }
 
     #[test]
@@ -447,5 +506,82 @@ mod tests {
             .map(|e| e["id"].as_u64().unwrap())
             .collect();
         assert_eq!(ids, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn test_extract_event_ids_assistant_with_tool_use() {
+        let agent = ClaudeAgent::new();
+        let event = serde_json::json!({
+            "type": "assistant",
+            "uuid": "e55c8481-4ee9-429d-a11a-2cbf9a87b688",
+            "parentUuid": "d75bc9bf-0326-433e-9f4f-1e5fc8c415d0",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "toolu_013JnBoRSqxCShSX", "name": "Edit", "input": {}}
+                ]
+            }
+        });
+        let (eid, pid, tid) = agent.extract_event_ids(&event);
+        assert_eq!(
+            eid,
+            Some("e55c8481-4ee9-429d-a11a-2cbf9a87b688".to_string())
+        );
+        assert_eq!(
+            pid,
+            Some("d75bc9bf-0326-433e-9f4f-1e5fc8c415d0".to_string())
+        );
+        assert_eq!(tid, Some("toolu_013JnBoRSqxCShSX".to_string()));
+    }
+
+    #[test]
+    fn test_extract_event_ids_user_with_tool_result() {
+        let agent = ClaudeAgent::new();
+        let event = serde_json::json!({
+            "type": "user",
+            "uuid": "abc-123",
+            "parentUuid": "def-456",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_xyz", "content": "ok"}
+                ]
+            }
+        });
+        let (eid, pid, tid) = agent.extract_event_ids(&event);
+        assert_eq!(eid, Some("abc-123".to_string()));
+        assert_eq!(pid, Some("def-456".to_string()));
+        assert_eq!(tid, Some("toolu_xyz".to_string()));
+    }
+
+    #[test]
+    fn test_extract_event_ids_text_only() {
+        let agent = ClaudeAgent::new();
+        let event = serde_json::json!({
+            "type": "assistant",
+            "uuid": "msg-1",
+            "parentUuid": null,
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Hello"}
+                ]
+            }
+        });
+        let (eid, pid, tid) = agent.extract_event_ids(&event);
+        assert_eq!(eid, Some("msg-1".to_string()));
+        assert_eq!(pid, None);
+        assert_eq!(tid, None);
+    }
+
+    #[test]
+    fn test_extract_event_ids_summary_event() {
+        let agent = ClaudeAgent::new();
+        let event = serde_json::json!({
+            "type": "summary",
+            "summary": "Did something",
+            "leafUuid": "leaf-1"
+        });
+        let (eid, pid, tid) = agent.extract_event_ids(&event);
+        assert_eq!(eid, None);
+        assert_eq!(pid, None);
+        assert_eq!(tid, None);
     }
 }

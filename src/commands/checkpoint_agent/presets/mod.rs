@@ -28,7 +28,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresetContext {
     pub agent_id: AgentId,
-    pub session_id: String,
+    pub external_session_id: String,
     pub trace_id: String,
     pub cwd: PathBuf,
     pub metadata: HashMap<String, String>,
@@ -97,12 +97,12 @@ pub struct TranscriptSource {
     pub path: PathBuf,
     pub format: TranscriptFormat,
     /// Session ID for this transcript (used to query/create session in DB).
-    /// Defaults to empty string for backward compatibility.
-    #[serde(default)]
     pub session_id: String,
     /// External thread/conversation ID (agent-specific identifier).
+    pub external_session_id: String,
+    /// Parent session ID for subagent transcripts.
     #[serde(default)]
-    pub external_thread_id: Option<String>,
+    pub external_parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,5 +1,6 @@
 //! Gemini agent implementation with sweep discovery.
 
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -63,15 +64,6 @@ impl GeminiAgent {
 
         paths
     }
-
-    /// Extract session ID from a Gemini session file path.
-    ///
-    /// Session ID format: `gemini:{file_stem}`
-    fn extract_session_id(path: &Path) -> Option<String> {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("gemini:{}", s))
-    }
 }
 
 impl Default for GeminiAgent {
@@ -94,20 +86,25 @@ impl Agent for GeminiAgent {
         let mut sessions = Vec::new();
 
         for path in paths {
-            let Some(session_id) = Self::extract_session_id(&path) else {
+            // Gemini session_id from the hook payload matches the file stem
+            let Some(external_session_id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+            else {
                 continue;
             };
+            let session_id = generate_session_id(&external_session_id, "gemini");
 
             let session = DiscoveredSession {
                 session_id,
-                agent_type: "gemini".to_string(),
+                tool: "gemini".to_string(),
                 transcript_path: path,
                 transcript_format: TranscriptFormat::GeminiJsonl,
                 watermark_type: WatermarkType::ByteOffset,
                 initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
-                model: None,
-                tool: Some("Gemini".to_string()),
-                external_thread_id: None,
+                external_session_id,
+                external_parent_session_id: None,
             };
 
             sessions.push(session);

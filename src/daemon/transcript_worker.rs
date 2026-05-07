@@ -33,7 +33,7 @@ pub(super) enum Priority {
 pub(super) struct ProcessingTask {
     pub(super) priority: Priority,
     pub(super) session_id: String,
-    pub(super) agent_type: String, // NEW: needed to get the right Agent impl
+    pub(super) tool: String,
     pub(super) canonical_path: PathBuf,
     pub(super) retry_count: u32,
     #[cfg_attr(test, serde(skip))]
@@ -68,13 +68,13 @@ impl TranscriptWorkerHandle {
     pub fn notify_checkpoint(
         &self,
         session_id: String,
-        agent_type: String,
+        tool: String,
         trace_id: String,
         transcript_path: PathBuf,
     ) {
         let notification = CheckpointNotification {
             session_id,
-            agent_type,
+            tool,
             trace_id,
             transcript_path,
         };
@@ -85,8 +85,8 @@ impl TranscriptWorkerHandle {
 #[derive(Debug, Clone)]
 struct CheckpointNotification {
     session_id: String,
-    agent_type: String, // NEW: extracted from CheckpointRequest
-    #[allow(dead_code)] // May be used in future for enhanced telemetry
+    tool: String,
+    #[allow(dead_code)]
     trace_id: String,
     transcript_path: PathBuf,
 }
@@ -184,7 +184,7 @@ impl TranscriptWorker {
             self.priority_queue.push(ProcessingTask {
                 priority: Priority::Low,
                 session_id: session.session_id,
-                agent_type: session.agent_type,
+                tool: session.tool,
                 canonical_path: session.canonical_path,
                 retry_count: 0,
                 next_retry_at: None,
@@ -207,7 +207,7 @@ impl TranscriptWorker {
         self.priority_queue.push(ProcessingTask {
             priority: Priority::Immediate,
             session_id: notification.session_id,
-            agent_type: notification.agent_type, // NEW: pass through agent_type
+            tool: notification.tool,
             canonical_path,
             retry_count: 0,
             next_retry_at: None,
@@ -296,9 +296,9 @@ impl TranscriptWorker {
                 message: format!("session not found: {}", task.session_id),
             })?;
 
-        let agent = crate::transcripts::agent::get_agent(&task.agent_type).ok_or_else(|| {
+        let agent = crate::transcripts::agent::get_agent(&task.tool).ok_or_else(|| {
             TranscriptError::Fatal {
-                message: format!("unknown agent type: {}", task.agent_type),
+                message: format!("unknown agent type: {}", task.tool),
             }
         })?;
 
@@ -309,6 +309,8 @@ impl TranscriptWorker {
         let mut total_events = 0usize;
         let attrs_sparse = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
             .session_id(session.session_id.clone())
+            .external_session_id(session.external_session_id.clone())
+            .external_parent_session_id_opt(session.external_parent_session_id.clone())
             .to_sparse();
 
         loop {
@@ -325,8 +327,9 @@ impl TranscriptWorker {
                 .events
                 .into_iter()
                 .map(|raw_event| {
+                    let (eid, pid, tid) = agent.extract_event_ids(&raw_event);
                     MetricEvent::from_values(
-                        SessionEventValues::new(raw_event),
+                        SessionEventValues::with_ids(raw_event, eid, pid, tid),
                         attrs_sparse.clone(),
                     )
                 })

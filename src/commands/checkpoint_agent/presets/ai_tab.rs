@@ -57,7 +57,7 @@ impl AgentPreset for AiTabPreset {
                 id: session_id.clone(),
                 model,
             },
-            session_id,
+            external_session_id: session_id,
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd),
             metadata: HashMap::from([("tool".to_string(), tool)]),
@@ -113,7 +113,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "supermaven");
-                assert_eq!(e.context.session_id, "ai_tab-comp-123");
+                assert_eq!(e.context.external_session_id, "ai_tab-comp-123");
                 assert_eq!(e.context.agent_id.model, "supermaven-v1");
                 assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
                 assert_eq!(
@@ -146,7 +146,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "copilot");
-                assert_eq!(e.context.session_id, "ai_tab-comp-456");
+                assert_eq!(e.context.external_session_id, "ai_tab-comp-456");
                 assert_eq!(
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/lib.rs")]
@@ -219,7 +219,7 @@ mod tests {
         let events = AiTabPreset.parse(&input, "t_test").unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert!(e.context.session_id.starts_with("ai_tab-"));
+                assert!(e.context.external_session_id.starts_with("ai_tab-"));
             }
             _ => panic!("Expected PreFileEdit"),
         }

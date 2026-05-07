@@ -7439,7 +7439,7 @@ impl ActorDaemonCoordinator {
                     && let Some(transcript_source) = &request.transcript_source
                 {
                     let session_id = transcript_source.session_id.clone();
-                    let agent_type = request
+                    let tool = request
                         .agent_id
                         .as_ref()
                         .map(|aid| aid.tool.clone())
@@ -7447,20 +7447,15 @@ impl ActorDaemonCoordinator {
                     let trace_id = request.trace_id.clone();
 
                     if let Some(db) = &self.transcripts_db
-                        && let Err(e) = Self::ensure_session_exists(
-                            db,
-                            &session_id,
-                            &agent_type,
-                            transcript_source,
-                            request.agent_id.as_ref(),
-                        )
+                        && let Err(e) =
+                            Self::ensure_session_exists(db, &session_id, &tool, transcript_source)
                     {
                         tracing::warn!(session_id = %session_id, error = %e, "failed to ensure session exists");
                     }
 
                     worker.notify_checkpoint(
                         session_id,
-                        agent_type,
+                        tool,
                         trace_id,
                         transcript_source.path.clone(),
                     );
@@ -7608,9 +7603,8 @@ impl ActorDaemonCoordinator {
     fn ensure_session_exists(
         db: &crate::transcripts::db::TranscriptsDatabase,
         session_id: &str,
-        agent_type: &str,
+        tool: &str,
         transcript_source: &crate::commands::checkpoint_agent::presets::TranscriptSource,
-        agent_id: Option<&crate::authorship::working_log::AgentId>,
     ) -> Result<(), String> {
         // Check if session exists
         if db
@@ -7646,21 +7640,15 @@ impl ActorDaemonCoordinator {
                 as Box<dyn crate::transcripts::watermark::WatermarkStrategy>,
         };
 
-        // Extract model and tool from agent_id if available
-        let (model, tool) = agent_id
-            .map(|aid| (Some(aid.model.clone()), Some(aid.tool.clone())))
-            .unwrap_or((None, None));
-
         let record = crate::transcripts::db::SessionRecord {
             session_id: session_id.to_string(),
-            agent_type: agent_type.to_string(),
+            tool: tool.to_string(),
             transcript_path: transcript_source.path.display().to_string(),
             transcript_format: format!("{:?}", transcript_source.format),
             watermark_type: format!("{:?}", watermark_type),
             watermark_value: initial_watermark.serialize(),
-            model,
-            tool,
-            external_thread_id: transcript_source.external_thread_id.clone(),
+            external_session_id: transcript_source.external_session_id.clone(),
+            external_parent_session_id: transcript_source.external_parent_session_id.clone(),
             first_seen_at: now,
             last_processed_at: 0,
             last_known_size: 0,

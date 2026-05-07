@@ -3,6 +3,7 @@ use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     PresetContext, TranscriptFormat, TranscriptSource,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
@@ -78,17 +79,23 @@ impl AgentPreset for ClaudePreset {
                 .flatten()
                 .unwrap_or_else(|| "unknown".to_string()),
             },
-            session_id: session_id.clone(),
+            external_session_id: session_id.clone(),
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd),
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]),
         };
 
+        let transcript_path_buf = PathBuf::from(transcript_path);
+        let external_parent_session_id =
+            crate::transcripts::agents::claude::ClaudeAgent::detect_subagent_parent(
+                &transcript_path_buf,
+            );
         let transcript_source = Some(TranscriptSource {
-            path: PathBuf::from(transcript_path),
+            path: transcript_path_buf,
             format: TranscriptFormat::ClaudeJsonl,
-            session_id: session_id.clone(),
-            external_thread_id: Some(session_id.clone()),
+            session_id: generate_session_id(&session_id, "claude"),
+            external_session_id: session_id.clone(),
+            external_parent_session_id,
         });
 
         let event = match (hook_event, is_bash) {
@@ -147,7 +154,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "claude");
-                assert_eq!(e.context.session_id, "sess-1");
+                assert_eq!(e.context.external_session_id, "sess-1");
                 assert_eq!(e.context.trace_id, "t_test123456789a");
                 assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
                 assert_eq!(
@@ -174,7 +181,8 @@ mod tests {
                 assert!(e.transcript_source.is_some());
                 if let Some(ts) = &e.transcript_source {
                     assert_eq!(ts.format, TranscriptFormat::ClaudeJsonl);
-                    assert_eq!(ts.session_id, "sess-1");
+                    assert_eq!(ts.session_id, generate_session_id("sess-1", "claude"));
+                    assert_eq!(ts.external_session_id, "sess-1");
                 }
             }
             _ => panic!("Expected PostFileEdit"),
@@ -222,7 +230,10 @@ mod tests {
         let events = ClaudePreset.parse(&input, "t_test123456789a").unwrap();
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
-                assert_eq!(e.context.session_id, "cb947e5b-246e-4253-a953-631f7e464c6b");
+                assert_eq!(
+                    e.context.external_session_id,
+                    "cb947e5b-246e-4253-a953-631f7e464c6b"
+                );
             }
             _ => panic!("Expected PostFileEdit"),
         }

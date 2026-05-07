@@ -3,6 +3,7 @@ use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     PresetContext, TranscriptFormat, TranscriptSource,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::error::GitAiError;
 use std::collections::HashMap;
@@ -103,7 +104,7 @@ impl AgentPreset for WindsurfPreset {
                 id: trajectory_id.clone(),
                 model,
             },
-            session_id: trajectory_id,
+            external_session_id: trajectory_id,
             trace_id: trace_id.to_string(),
             cwd: cwd_path,
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.clone())]),
@@ -112,8 +113,9 @@ impl AgentPreset for WindsurfPreset {
         let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(&transcript_path),
             format: TranscriptFormat::WindsurfJsonl,
-            session_id: context.session_id.clone(),
-            external_thread_id: None,
+            session_id: generate_session_id(&context.external_session_id, "windsurf"),
+            external_session_id: context.external_session_id.clone(),
+            external_parent_session_id: None,
         });
 
         let is_bash = matches!(
@@ -228,7 +230,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "windsurf");
-                assert_eq!(e.context.session_id, "traj-123");
+                assert_eq!(e.context.external_session_id, "traj-123");
                 assert_eq!(e.context.agent_id.model, "gpt-4");
                 assert_eq!(
                     e.file_paths,

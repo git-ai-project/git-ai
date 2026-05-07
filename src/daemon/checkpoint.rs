@@ -100,7 +100,7 @@ pub fn build_agent_usage_attrs(
         .session_id(session_id)
         .tool(&agent_id.tool)
         .model(&agent_id.model)
-        .external_prompt_id(&agent_id.id)
+        .external_session_id(&agent_id.id)
         .custom_attributes_map(crate::config::Config::fresh().custom_attributes());
 
     if let Some(repo) = repo {
@@ -144,7 +144,7 @@ fn build_checkpoint_attrs(
         attrs = attrs
             .tool(&agent_id.tool)
             .model(&agent_id.model)
-            .external_prompt_id(&agent_id.id);
+            .external_session_id(&agent_id.id);
     }
 
     // Attach custom attributes using Config::fresh() to support runtime config updates

@@ -200,7 +200,7 @@ impl AgentPreset for FirebenderPreset {
                 id: format!("firebender-{}", session_id),
                 model,
             },
-            session_id: session_id.clone(),
+            external_session_id: session_id.clone(),
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd_str),
             metadata: HashMap::new(),

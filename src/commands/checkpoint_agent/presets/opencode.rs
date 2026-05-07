@@ -2,6 +2,7 @@ use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     PresetContext, TranscriptFormat, TranscriptSource,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
@@ -153,18 +154,31 @@ impl OpenCodePreset {
         // Try sqlite first
         let db_path = Self::resolve_sqlite_db_path(&opencode_path);
         if let Some(db_path) = db_path {
+            let parent_id = Self::lookup_parent_session(&db_path, session_id);
             return Some((
                 TranscriptSource {
                     path: db_path,
                     format: TranscriptFormat::OpenCodeSqlite,
-                    session_id: session_id.to_string(),
-                    external_thread_id: Some(session_id.to_string()),
+                    session_id: generate_session_id(session_id, "opencode"),
+                    external_session_id: session_id.to_string(),
+                    external_parent_session_id: parent_id,
                 },
                 opencode_path,
             ));
         }
 
         None
+    }
+
+    fn lookup_parent_session(db_path: &Path, session_id: &str) -> Option<String> {
+        let conn = crate::transcripts::agents::opencode::open_sqlite_readonly(db_path).ok()?;
+        conn.query_row(
+            "SELECT parent_id FROM session WHERE id = ?",
+            [session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
     }
 
     fn opencode_data_path() -> Result<PathBuf, GitAiError> {
@@ -293,7 +307,7 @@ impl AgentPreset for OpenCodePreset {
                 id: session_id.clone(),
                 model: extracted_model.unwrap_or_else(|| "unknown".to_string()),
             },
-            session_id,
+            external_session_id: session_id,
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(&cwd),
             metadata,
@@ -356,7 +370,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "opencode");
-                assert_eq!(e.context.session_id, "oc-sess-123");
+                assert_eq!(e.context.external_session_id, "oc-sess-123");
                 assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
                 assert!(!e.file_paths.is_empty());
                 assert_eq!(

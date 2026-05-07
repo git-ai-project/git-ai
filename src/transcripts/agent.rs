@@ -39,6 +39,17 @@ pub trait Agent: Send + Sync {
         watermark: Box<dyn WatermarkStrategy>,
         session_id: &str,
     ) -> Result<TranscriptBatch, TranscriptError>;
+
+    /// Extract per-event external IDs from a raw transcript event.
+    ///
+    /// Returns (external_event_id, external_parent_event_id, external_tool_use_id).
+    /// Agents that don't have event-level identifiers return (None, None, None).
+    fn extract_event_ids(
+        &self,
+        _event: &serde_json::Value,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        (None, None, None)
+    }
 }
 
 const ALL_AGENT_TYPES: &[&str] = &[

@@ -4,6 +4,7 @@ use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     PresetContext, TranscriptFormat, TranscriptSource,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
@@ -123,7 +124,7 @@ impl AgentPreset for CodexPreset {
                 id: session_id.clone(),
                 model,
             },
-            session_id,
+            external_session_id: session_id,
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd),
             metadata,
@@ -132,8 +133,9 @@ impl AgentPreset for CodexPreset {
         let transcript_source = transcript_path.map(|tp| TranscriptSource {
             path: PathBuf::from(tp),
             format: TranscriptFormat::CodexJsonl,
-            session_id: context.session_id.clone(),
-            external_thread_id: None,
+            session_id: generate_session_id(&context.external_session_id, "codex"),
+            external_session_id: context.external_session_id.clone(),
+            external_parent_session_id: None,
         });
 
         let event = match hook_event {
@@ -222,7 +224,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "codex");
-                assert_eq!(e.context.session_id, "codex-sess-1");
+                assert_eq!(e.context.external_session_id, "codex-sess-1");
                 assert_eq!(e.context.agent_id.model, "o3");
                 assert_eq!(e.tool_use_id, "tu-1");
             }
@@ -271,7 +273,7 @@ mod tests {
         let events = CodexPreset.parse(&input, "t_test123456789a").unwrap();
         match &events[0] {
             ParsedHookEvent::PostBashCall(e) => {
-                assert_eq!(e.context.session_id, "thread-abc");
+                assert_eq!(e.context.external_session_id, "thread-abc");
                 assert!(e.transcript_source.is_none());
             }
             _ => panic!("Expected PostBashCall"),

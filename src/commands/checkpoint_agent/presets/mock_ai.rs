@@ -51,7 +51,7 @@ impl AgentPreset for MockAiPreset {
                 id: mock_agent_id,
                 model: "unknown".to_string(),
             },
-            session_id: "mock_ai_session".to_string(),
+            external_session_id: "mock_ai_session".to_string(),
             trace_id: trace_id.to_string(),
             cwd,
             metadata: HashMap::new(),

@@ -3,6 +3,7 @@ use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     PresetContext, TranscriptFormat, TranscriptSource,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
@@ -148,7 +149,7 @@ impl AgentPreset for DroidPreset {
                 id: session_id.clone(),
                 model: extracted_model,
             },
-            session_id,
+            external_session_id: session_id,
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd),
             metadata,
@@ -157,8 +158,9 @@ impl AgentPreset for DroidPreset {
         let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(&resolved_transcript_path),
             format: TranscriptFormat::DroidJsonl,
-            session_id: context.session_id.clone(),
-            external_thread_id: Some(context.session_id.clone()),
+            session_id: generate_session_id(&context.external_session_id, "droid"),
+            external_session_id: context.external_session_id.clone(),
+            external_parent_session_id: None,
         });
 
         // PreToolUse
@@ -238,7 +240,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "droid");
-                assert_eq!(e.context.session_id, "droid-sess-1");
+                assert_eq!(e.context.external_session_id, "droid-sess-1");
                 assert_eq!(e.context.trace_id, "t_test123456789a");
                 assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
                 assert_eq!(
@@ -391,7 +393,7 @@ mod tests {
         let events = DroidPreset.parse(&input, "t_test123456789a").unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert!(e.context.session_id.starts_with("droid-"));
+                assert!(e.context.external_session_id.starts_with("droid-"));
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -438,7 +440,7 @@ mod tests {
         let events = DroidPreset.parse(&input, "t_test123456789a").unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert_eq!(e.context.session_id, "droid-sess-2");
+                assert_eq!(e.context.external_session_id, "droid-sess-2");
                 assert_eq!(
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
