@@ -52,7 +52,7 @@ fn test_hermes_routes_write_file_to_post_file_edit() {
                 "transcript_source should be None until a Hermes reader lands"
             );
         }
-        _ => panic!("Expected PostFileEdit, got {:?}", &events[0]),
+        _ => panic!("Expected PostFileEdit"),
     }
 }
 
