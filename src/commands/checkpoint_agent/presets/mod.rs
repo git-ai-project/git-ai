@@ -12,6 +12,7 @@ mod firebender;
 mod gemini;
 mod github_copilot;
 mod human;
+mod kiro;
 mod known_human;
 mod mock_ai;
 mod mock_known_human;
@@ -155,6 +156,7 @@ pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
         "cursor" => Ok(Box::new(cursor::CursorPreset)),
         "cursor-background" => Ok(Box::new(cursor::CursorBackgroundPreset)),
         "github-copilot" => Ok(Box::new(github_copilot::GithubCopilotPreset)),
+        "kiro" => Ok(Box::new(kiro::KiroPreset)),
         "amp" => Ok(Box::new(amp::AmpPreset)),
         "ai_tab" => Ok(Box::new(ai_tab::AiTabPreset)),
         "firebender" => Ok(Box::new(firebender::FirebenderPreset)),
