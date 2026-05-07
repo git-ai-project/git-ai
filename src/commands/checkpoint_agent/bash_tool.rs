@@ -362,6 +362,11 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
             "Shell" => ToolClass::Bash,
             _ => ToolClass::Skip,
         },
+        Agent::Hermes => match tool_name {
+            "write_file" | "patch" => ToolClass::FileEdit,
+            "terminal" => ToolClass::Bash,
+            _ => ToolClass::Skip,
+        },
     }
 }
 
@@ -379,6 +384,7 @@ pub enum Agent {
     Pi,
     Windsurf,
     Cursor,
+    Hermes,
 }
 
 // ---------------------------------------------------------------------------
@@ -1292,6 +1298,22 @@ mod tests {
         );
         assert_eq!(classify_tool(Agent::Cursor, "Shell"), ToolClass::Bash);
         assert_eq!(classify_tool(Agent::Cursor, "Read"), ToolClass::Skip);
+
+        // Hermes (NousResearch hermes-agent: snake_case tool names)
+        assert_eq!(
+            classify_tool(Agent::Hermes, "write_file"),
+            ToolClass::FileEdit
+        );
+        assert_eq!(classify_tool(Agent::Hermes, "patch"), ToolClass::FileEdit);
+        assert_eq!(classify_tool(Agent::Hermes, "terminal"), ToolClass::Bash);
+        assert_eq!(classify_tool(Agent::Hermes, "read_file"), ToolClass::Skip);
+        assert_eq!(
+            classify_tool(Agent::Hermes, "search_files"),
+            ToolClass::Skip
+        );
+        // Claude-shaped names must NOT match.
+        assert_eq!(classify_tool(Agent::Hermes, "Write"), ToolClass::Skip);
+        assert_eq!(classify_tool(Agent::Hermes, "Bash"), ToolClass::Skip);
     }
 
     #[test]

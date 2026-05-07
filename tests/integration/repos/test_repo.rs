@@ -829,6 +829,7 @@ fn is_known_checkpoint_preset(arg: &str) -> bool {
             | "gemini"
             | "github-copilot"
             | "amp"
+            | "hermes"
             | "windsurf"
             | "opencode"
             | "pi"
