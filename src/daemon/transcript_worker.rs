@@ -4,6 +4,7 @@
 //! 1. **Checkpoint notifications** (Immediate priority, <100ms) - fired when `git-ai checkpoint` is called
 //! 2. **Periodic sweeps** (Low priority, every 30min) - agent-specific discovery of all sessions
 
+use crate::config;
 use crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle;
 use crate::metrics::{EventAttributes, MetricEvent, PosEncoded, SessionEventValues};
 use crate::transcripts::db::TranscriptsDatabase;
@@ -130,6 +131,8 @@ impl TranscriptWorker {
     async fn run(mut self) {
         tracing::info!("transcript worker started");
 
+        let sweep_enabled = config::Config::get().get_feature_flags().transcript_sweep;
+
         let mut processing_ticker = interval(PROCESSING_TICK_INTERVAL);
         let mut sweep_ticker = interval(Duration::from_secs(30 * 60)); // NEW: 30 minutes
 
@@ -138,7 +141,7 @@ impl TranscriptWorker {
         sweep_ticker.tick().await;
 
         // Run initial sweep on startup
-        if let Err(e) = self.run_sweep().await {
+        if sweep_enabled && let Err(e) = self.run_sweep().await {
             tracing::error!(error = %e, "initial sweep failed");
         }
 
@@ -153,7 +156,9 @@ impl TranscriptWorker {
                     self.process_next_task().await;
                 }
                 _ = sweep_ticker.tick() => {  // NEW: sweep ticker
-                    if let Err(e) = self.run_sweep().await {
+                    if sweep_enabled
+                        && let Err(e) = self.run_sweep().await
+                    {
                         tracing::error!(error = %e, "sweep failed");
                     }
                 }

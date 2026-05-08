@@ -83,6 +83,7 @@ define_feature_flags!(
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
     transcript_streaming: transcript_streaming, debug = true, release = true,
+    transcript_sweep: transcript_sweep, debug = true, release = false,
 );
 
 impl FeatureFlags {
@@ -138,6 +139,7 @@ mod tests {
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
             assert!(flags.transcript_streaming);
+            assert!(flags.transcript_sweep);
         }
         #[cfg(not(debug_assertions))]
         {
@@ -146,6 +148,7 @@ mod tests {
             assert!(!flags.git_hooks_enabled);
             assert!(!flags.git_hooks_externally_managed);
             assert!(flags.transcript_streaming);
+            assert!(!flags.transcript_sweep);
         }
     }
 
@@ -204,6 +207,7 @@ mod tests {
             git_hooks_enabled: false,
             git_hooks_externally_managed: false,
             transcript_streaming: true,
+            transcript_sweep: true,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -212,6 +216,7 @@ mod tests {
         assert!(serialized.contains("git_hooks_enabled"));
         assert!(serialized.contains("git_hooks_externally_managed"));
         assert!(serialized.contains("transcript_streaming"));
+        assert!(serialized.contains("transcript_sweep"));
     }
 
     #[test]
@@ -222,6 +227,7 @@ mod tests {
             git_hooks_enabled: true,
             git_hooks_externally_managed: false,
             transcript_streaming: true,
+            transcript_sweep: true,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
@@ -232,6 +238,7 @@ mod tests {
             flags.git_hooks_externally_managed
         );
         assert_eq!(cloned.transcript_streaming, flags.transcript_streaming);
+        assert_eq!(cloned.transcript_sweep, flags.transcript_sweep);
     }
 
     #[test]
