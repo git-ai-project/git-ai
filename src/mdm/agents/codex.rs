@@ -11,6 +11,8 @@ use toml::map::Map;
 
 const CODEX_CHECKPOINT_CMD: &str = "checkpoint codex --hook-input stdin";
 const CODEX_HOOK_EVENTS: [&str; 3] = ["PreToolUse", "PostToolUse", "Stop"];
+const CODEX_HOOKS_FEATURE_KEY: &str = "hooks";
+const LEGACY_CODEX_HOOKS_FEATURE_KEY: &str = "codex_hooks";
 
 pub struct CodexInstaller;
 
@@ -96,11 +98,42 @@ impl CodexInstaller {
     }
 
     fn config_hooks_enabled(config: &TomlValue) -> bool {
+        if let Some(enabled) = Self::config_hooks_feature(config, CODEX_HOOKS_FEATURE_KEY) {
+            return enabled;
+        }
+
+        Self::config_hooks_feature(config, LEGACY_CODEX_HOOKS_FEATURE_KEY) == Some(true)
+    }
+
+    fn config_has_inline_hooks(config: &TomlValue) -> bool {
+        config
+            .get(CODEX_HOOKS_FEATURE_KEY)
+            .and_then(|value| value.as_table())
+            .map(|hooks| !hooks.is_empty())
+            .unwrap_or(false)
+    }
+
+    fn remove_legacy_hooks_feature(features: &mut Map<String, TomlValue>) {
+        features.remove(LEGACY_CODEX_HOOKS_FEATURE_KEY);
+    }
+
+    fn set_canonical_hooks_feature(features: &mut Map<String, TomlValue>) {
+        features.insert(
+            CODEX_HOOKS_FEATURE_KEY.to_string(),
+            TomlValue::Boolean(true),
+        );
+    }
+
+    fn remove_hooks_features(features: &mut Map<String, TomlValue>) {
+        features.remove(CODEX_HOOKS_FEATURE_KEY);
+        features.remove(LEGACY_CODEX_HOOKS_FEATURE_KEY);
+    }
+
+    fn config_hooks_feature(config: &TomlValue, key: &str) -> Option<bool> {
         config
             .get("features")
-            .and_then(|v| v.get("codex_hooks"))
+            .and_then(|v| v.get(key))
             .and_then(|v| v.as_bool())
-            == Some(true)
     }
 
     fn config_with_installed_hooks(
@@ -113,12 +146,13 @@ impl CodexInstaller {
             .ok_or_else(|| GitAiError::Generic("Codex config root must be a table".to_string()))?;
 
         if let Some(features) = root.get_mut("features").and_then(|v| v.as_table_mut()) {
-            features.insert("codex_hooks".to_string(), TomlValue::Boolean(true));
+            Self::remove_legacy_hooks_feature(features);
+            Self::set_canonical_hooks_feature(features);
         } else {
             root.insert(
                 "features".to_string(),
                 TomlValue::Table(Map::from_iter([(
-                    "codex_hooks".to_string(),
+                    CODEX_HOOKS_FEATURE_KEY.to_string(),
                     TomlValue::Boolean(true),
                 )])),
             );
@@ -347,14 +381,26 @@ impl CodexInstaller {
 
     fn remove_feature_flag_if_unused(
         config: &TomlValue,
-        keep_codex_hooks_enabled: bool,
+        keep_hooks_enabled: bool,
     ) -> Result<TomlValue, GitAiError> {
         let mut merged = config.clone();
         let root = merged
             .as_table_mut()
             .ok_or_else(|| GitAiError::Generic("Codex config root must be a table".to_string()))?;
 
-        if keep_codex_hooks_enabled {
+        if keep_hooks_enabled {
+            if let Some(features) = root.get_mut("features").and_then(|v| v.as_table_mut()) {
+                Self::remove_legacy_hooks_feature(features);
+                Self::set_canonical_hooks_feature(features);
+            } else {
+                root.insert(
+                    "features".to_string(),
+                    TomlValue::Table(Map::from_iter([(
+                        CODEX_HOOKS_FEATURE_KEY.to_string(),
+                        TomlValue::Boolean(true),
+                    )])),
+                );
+            }
             return Ok(merged);
         }
 
@@ -362,7 +408,7 @@ impl CodexInstaller {
             .get_mut("features")
             .and_then(|value| value.as_table_mut())
         {
-            features.remove("codex_hooks");
+            Self::remove_hooks_features(features);
             if features.is_empty() {
                 root.remove("features");
             }
@@ -519,10 +565,10 @@ impl HookInstaller for CodexInstaller {
         let config_without_notify =
             Self::remove_notify_if_git_ai(&existing_config)?.unwrap_or(existing_config.clone());
         let (merged_hooks, hooks_changed) = Self::remove_codex_hooks_from_json(&existing_hooks)?;
-        let merged_config = Self::remove_feature_flag_if_unused(
-            &config_without_notify,
-            Self::hooks_json_has_any_entries(&merged_hooks),
-        )?;
+        let keep_hooks_enabled = Self::hooks_json_has_any_entries(&merged_hooks)
+            || Self::config_has_inline_hooks(&config_without_notify);
+        let merged_config =
+            Self::remove_feature_flag_if_unused(&config_without_notify, keep_hooks_enabled)?;
 
         let config_changed = merged_config != existing_config;
         if !config_changed && !hooks_changed {
@@ -600,6 +646,32 @@ mod tests {
                 None => std::env::remove_var("USERPROFILE"),
             }
         }
+    }
+
+    fn assert_canonical_hooks_feature(config: &TomlValue) {
+        assert_eq!(
+            CodexInstaller::config_hooks_feature(config, CODEX_HOOKS_FEATURE_KEY),
+            Some(true),
+            "canonical hooks feature flag should be enabled"
+        );
+        assert_eq!(
+            CodexInstaller::config_hooks_feature(config, LEGACY_CODEX_HOOKS_FEATURE_KEY),
+            None,
+            "legacy codex_hooks feature flag should not be emitted"
+        );
+    }
+
+    fn assert_no_hooks_features(config: &TomlValue) {
+        assert_eq!(
+            CodexInstaller::config_hooks_feature(config, CODEX_HOOKS_FEATURE_KEY),
+            None,
+            "canonical hooks feature flag should be removed"
+        );
+        assert_eq!(
+            CodexInstaller::config_hooks_feature(config, LEGACY_CODEX_HOOKS_FEATURE_KEY),
+            None,
+            "legacy codex_hooks feature flag should be removed"
+        );
     }
 
     #[test]
@@ -703,17 +775,61 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
         let merged =
             CodexInstaller::config_with_installed_hooks(&existing, &test_binary_path()).unwrap();
         assert!(CodexInstaller::notify_args_from_config(&merged).is_none());
-        assert_eq!(
-            merged
-                .get("features")
-                .and_then(|value| value.get("codex_hooks"))
-                .and_then(|value| value.as_bool()),
-            Some(true)
-        );
+        assert_canonical_hooks_feature(&merged);
         assert_eq!(
             merged.get("model").and_then(|value| value.as_str()),
             Some("gpt-5"),
             "other config should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_config_with_installed_hooks_migrates_legacy_feature_flag() {
+        let existing = CodexInstaller::parse_config_toml(
+            r#"
+model = "gpt-5"
+[features]
+codex_hooks = true
+shell_snapshot = false
+"#,
+        )
+        .unwrap();
+
+        let merged =
+            CodexInstaller::config_with_installed_hooks(&existing, &test_binary_path()).unwrap();
+        assert_canonical_hooks_feature(&merged);
+        assert_eq!(
+            merged
+                .get("features")
+                .and_then(|value| value.get("shell_snapshot"))
+                .and_then(|value| value.as_bool()),
+            Some(false),
+            "unrelated feature flags should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_config_hooks_enabled_accepts_legacy_unless_canonical_is_set() {
+        let legacy = CodexInstaller::parse_config_toml(
+            r#"
+[features]
+codex_hooks = true
+"#,
+        )
+        .unwrap();
+        assert!(CodexInstaller::config_hooks_enabled(&legacy));
+
+        let canonical_disabled = CodexInstaller::parse_config_toml(
+            r#"
+[features]
+hooks = false
+codex_hooks = true
+"#,
+        )
+        .unwrap();
+        assert!(
+            !CodexInstaller::config_hooks_enabled(&canonical_disabled),
+            "canonical hooks=false should take precedence over legacy codex_hooks=true"
         );
     }
 
@@ -829,13 +945,7 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
             let content = fs::read_to_string(&config_path).unwrap();
             let parsed = CodexInstaller::parse_config_toml(&content).unwrap();
             assert!(CodexInstaller::notify_args_from_config(&parsed).is_none());
-            assert_eq!(
-                parsed
-                    .get("features")
-                    .and_then(|value| value.get("codex_hooks"))
-                    .and_then(|value| value.as_bool()),
-                Some(true)
-            );
+            assert_canonical_hooks_feature(&parsed);
 
             let hooks_json: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
@@ -882,14 +992,7 @@ notify = ["/usr/local/bin/git-ai", "checkpoint", "codex", "--hook-input"]
                 CodexInstaller::notify_args_from_config(&parsed).is_none(),
                 "git-ai notify should be removed during migration"
             );
-            assert_eq!(
-                parsed
-                    .get("features")
-                    .and_then(|v| v.get("codex_hooks"))
-                    .and_then(|v| v.as_bool()),
-                Some(true),
-                "install should enable codex_hooks feature flag"
-            );
+            assert_canonical_hooks_feature(&parsed);
 
             let hooks_content = fs::read_to_string(&hooks_path).unwrap();
             let hooks_json: serde_json::Value = serde_json::from_str(&hooks_content).unwrap();
@@ -945,6 +1048,7 @@ notify = ["/Users/svarlamov/.git-ai/bin/git-ai", "checkpoint", "codex", "--via-c
                 CodexInstaller::notify_args_from_config(&parsed).is_none(),
                 "legacy git-ai notify should be removed during migration"
             );
+            assert_canonical_hooks_feature(&parsed);
         });
     }
 
@@ -985,12 +1089,14 @@ notify = ["notify-send", "Codex finished"]
                 "non-git-ai notify must be preserved"
             );
             assert_eq!(
-                parsed
-                    .get("features")
-                    .and_then(|v| v.get("codex_hooks"))
-                    .and_then(|v| v.as_bool()),
+                CodexInstaller::config_hooks_feature(&parsed, CODEX_HOOKS_FEATURE_KEY),
                 Some(true),
-                "install should still enable codex_hooks"
+                "install should still enable hooks"
+            );
+            assert_eq!(
+                CodexInstaller::config_hooks_feature(&parsed, LEGACY_CODEX_HOOKS_FEATURE_KEY),
+                None,
+                "install should not emit legacy codex_hooks"
             );
 
             let hooks_content = fs::read_to_string(&hooks_path).unwrap();
@@ -1035,6 +1141,9 @@ notify = ["notify-send", "Codex finished"]
                 .install_hooks(&params, true)
                 .expect("dry-run install should succeed");
             assert!(diff.is_some(), "dry-run should still produce a diff");
+            let diff = diff.unwrap();
+            assert!(diff.contains("hooks = true"));
+            assert!(!diff.contains("codex_hooks = true"));
 
             // The file must NOT have been modified.
             let after = fs::read_to_string(&config_path).unwrap();
@@ -1202,10 +1311,136 @@ codex_hooks = true
             let parsed =
                 CodexInstaller::parse_config_toml(&fs::read_to_string(&config_path).unwrap())
                     .unwrap();
+            assert_no_hooks_features(&parsed);
+            let hooks_json: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
             assert!(
-                parsed.get("features").is_none(),
-                "codex_hooks feature flag should be removed when no hooks remain"
+                !CodexInstaller::hooks_have_codex_commands(&hooks_json, false),
+                "git-ai Codex hooks should be removed"
             );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_uninstall_hooks_migrates_feature_flag_when_custom_hooks_json_remains() {
+        with_temp_home(|home| {
+            let codex_dir = home.join(".codex");
+            fs::create_dir_all(&codex_dir).unwrap();
+            let config_path = codex_dir.join("config.toml");
+            let hooks_path = codex_dir.join("hooks.json");
+            fs::write(
+                &config_path,
+                r#"
+model = "gpt-5"
+[features]
+codex_hooks = true
+"#,
+            )
+            .unwrap();
+            fs::write(
+                &hooks_path,
+                serde_json::to_string_pretty(&json!({
+                    "hooks": {
+                        "PreToolUse": [{
+                            "hooks": [
+                                { "type": "command", "command": "/usr/local/bin/git-ai checkpoint codex --hook-input stdin" },
+                                { "type": "command", "command": "echo keep" }
+                            ]
+                        }],
+                        "PostToolUse": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/git-ai checkpoint codex --hook-input stdin" }] }],
+                        "Stop": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/git-ai checkpoint codex --hook-input stdin" }] }],
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            let installer = CodexInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            let diff = installer
+                .uninstall_hooks(&params, false)
+                .expect("uninstall should succeed");
+            assert!(diff.is_some(), "uninstall should report a diff");
+
+            let parsed =
+                CodexInstaller::parse_config_toml(&fs::read_to_string(&config_path).unwrap())
+                    .unwrap();
+            assert_canonical_hooks_feature(&parsed);
+
+            let hooks_json: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
+            assert!(
+                !CodexInstaller::hooks_have_codex_commands(&hooks_json, false),
+                "git-ai Codex hooks should be removed"
+            );
+            assert_eq!(
+                hooks_json["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str(),
+                Some("echo keep"),
+                "custom hook command should be preserved"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_uninstall_hooks_keeps_feature_flag_for_inline_hooks() {
+        with_temp_home(|home| {
+            let codex_dir = home.join(".codex");
+            fs::create_dir_all(&codex_dir).unwrap();
+            let config_path = codex_dir.join("config.toml");
+            let hooks_path = codex_dir.join("hooks.json");
+            fs::write(
+                &config_path,
+                r#"
+model = "gpt-5"
+[features]
+codex_hooks = true
+
+[hooks]
+managed_dir = "/tmp/codex-hooks"
+"#,
+            )
+            .unwrap();
+            fs::write(
+                &hooks_path,
+                serde_json::to_string_pretty(&json!({
+                    "hooks": {
+                        "PreToolUse": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/git-ai checkpoint codex --hook-input stdin" }] }],
+                        "PostToolUse": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/git-ai checkpoint codex --hook-input stdin" }] }],
+                        "Stop": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/git-ai checkpoint codex --hook-input stdin" }] }],
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            let installer = CodexInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            let diff = installer
+                .uninstall_hooks(&params, false)
+                .expect("uninstall should succeed");
+            assert!(diff.is_some(), "uninstall should report a diff");
+
+            let parsed =
+                CodexInstaller::parse_config_toml(&fs::read_to_string(&config_path).unwrap())
+                    .unwrap();
+            assert_canonical_hooks_feature(&parsed);
+            assert_eq!(
+                parsed
+                    .get("hooks")
+                    .and_then(|value| value.get("managed_dir"))
+                    .and_then(|value| value.as_str()),
+                Some("/tmp/codex-hooks"),
+                "inline hooks table should be preserved"
+            );
+
             let hooks_json: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&hooks_path).unwrap()).unwrap();
             assert!(
@@ -1238,6 +1473,10 @@ codex_hooks = true
             let hooks_path = codex_dir.join("hooks.json");
             assert!(config_path.exists(), "config.toml should be created");
             assert!(hooks_path.exists(), "hooks.json should be created");
+            let config =
+                CodexInstaller::parse_config_toml(&fs::read_to_string(&config_path).unwrap())
+                    .unwrap();
+            assert_canonical_hooks_feature(&config);
 
             // Verify hooks.json has the expected structure
             let hooks_json: serde_json::Value =
