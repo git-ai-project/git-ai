@@ -34,7 +34,7 @@ tasks:
       Install a git-ai debug build for local dev on the system so that all git commands will route through it.
       Installs to the same location as real release builds, so it overrides system-wide. It also runs `git-ai install`
       and restarts the daemon to ensure all latest code changes are fully installed and propagated system-wide.
-      Use this for trying out changes locally -- do not use any other approaches for runing git-ai locally. They will
+      Use this for trying out changes locally -- do not use any other approaches for running git-ai locally. They will
       not work, interfere, and break things.
     cmds:
       - cmd: powershell -NonInteractive -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1
