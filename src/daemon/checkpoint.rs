@@ -1,9 +1,9 @@
 use crate::authorship::attribution_tracker::{
     Attribution, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 #[cfg(not(any(test, feature = "test-support")))]
 use crate::authorship::authorship_log_serialization::generate_short_hash;
-use crate::authorship::authorship_log_serialization::{generate_session_id, generate_trace_id};
 use crate::authorship::imara_diff_utils::{
     LineChangeTag, compute_line_changes, normalize_line_endings,
 };
@@ -262,9 +262,7 @@ fn execute_resolved_checkpoint(
         hash_compute_start.elapsed()
     );
 
-    // Generate trace_id for this checkpoint - links all metrics events from this checkpoint together
-    // This allows server-side analysis of multi-file edits, tool invocations, and checkpoint chains
-    let trace_id = generate_trace_id();
+    let trace_id = checkpoint_request.trace_id.clone();
 
     let entries_start = Instant::now();
     let (entries, file_stats) = smol::block_on(get_checkpoint_entries(

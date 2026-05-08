@@ -4,6 +4,7 @@
 //! 1. **Checkpoint notifications** (Immediate priority, <100ms) - fired when `git-ai checkpoint` is called
 //! 2. **Periodic sweeps** (Low priority, every 30min) - agent-specific discovery of all sessions
 
+use crate::authorship::authorship_log_serialization::generate_trace_id;
 use crate::config;
 use crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle;
 use crate::metrics::{EventAttributes, MetricEvent, PosEncoded, SessionEventValues};
@@ -35,6 +36,7 @@ pub(super) struct ProcessingTask {
     pub(super) priority: Priority,
     pub(super) session_id: String,
     pub(super) tool: String,
+    pub(super) trace_id: Option<String>,
     pub(super) canonical_path: PathBuf,
     pub(super) retry_count: u32,
     #[cfg_attr(test, serde(skip))]
@@ -87,7 +89,6 @@ impl TranscriptWorkerHandle {
 struct CheckpointNotification {
     session_id: String,
     tool: String,
-    #[allow(dead_code)]
     trace_id: String,
     transcript_path: PathBuf,
 }
@@ -190,6 +191,7 @@ impl TranscriptWorker {
                 priority: Priority::Low,
                 session_id: session.session_id,
                 tool: session.tool,
+                trace_id: None,
                 canonical_path: session.canonical_path,
                 retry_count: 0,
                 next_retry_at: None,
@@ -213,6 +215,7 @@ impl TranscriptWorker {
             priority: Priority::Immediate,
             session_id: notification.session_id,
             tool: notification.tool,
+            trace_id: Some(notification.trace_id),
             canonical_path,
             retry_count: 0,
             next_retry_at: None,
@@ -312,11 +315,10 @@ impl TranscriptWorker {
         let mut current_watermark = watermark_type.deserialize(&session.watermark_value)?;
         let path = PathBuf::from(&session.transcript_path);
         let mut total_events = 0usize;
-        let attrs_sparse = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+        let base_attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
             .session_id(session.session_id.clone())
             .external_session_id(session.external_session_id.clone())
-            .external_parent_session_id_opt(session.external_parent_session_id.clone())
-            .to_sparse();
+            .external_parent_session_id_opt(session.external_parent_session_id.clone());
 
         loop {
             let batch = agent.read_incremental(&path, current_watermark, &session.session_id)?;
@@ -333,9 +335,11 @@ impl TranscriptWorker {
                 .into_iter()
                 .map(|raw_event| {
                     let (eid, pid, tid) = agent.extract_event_ids(&raw_event);
+                    let trace_id = task.trace_id.clone().unwrap_or_else(generate_trace_id);
+                    let attrs_sparse = base_attrs.clone().trace_id(trace_id).to_sparse();
                     MetricEvent::from_values(
                         SessionEventValues::with_ids(raw_event, eid, pid, tid),
-                        attrs_sparse.clone(),
+                        attrs_sparse,
                     )
                 })
                 .collect();
