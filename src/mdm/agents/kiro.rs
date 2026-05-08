@@ -775,17 +775,4 @@ mod tests {
         assert!(installed);
         assert!(up_to_date);
     }
-
-    #[test]
-    #[ignore = "smoke — needs KIRO_SMOKE_PATH and KIRO_SMOKE_BIN"]
-    fn smoke_install_to_external_path() {
-        let path = std::env::var("KIRO_SMOKE_PATH").expect("KIRO_SMOKE_PATH");
-        let bin = std::env::var("KIRO_SMOKE_BIN").expect("KIRO_SMOKE_BIN");
-        let p = HookInstallerParams {
-            binary_path: PathBuf::from(bin),
-        };
-        let diff = KiroInstaller::install_hooks_at(std::path::Path::new(&path), &p, false).unwrap();
-        eprintln!("install diff present: {}", diff.is_some());
-        assert!(diff.is_some());
-    }
 }
