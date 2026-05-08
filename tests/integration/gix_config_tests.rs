@@ -144,7 +144,7 @@ fn test_config_get_regexp_subsection() {
 #[test]
 fn test_config_get_regexp_no_matches() {
     let repo = TestRepo::new();
-    let pattern = "nonexistant";
+    let pattern = "nonexistent";
     let git_ai_repo =
         GitAiRepository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let result = git_ai_repo

@@ -128,7 +128,7 @@ pub fn rewrite_authorship_if_needed(
 ) -> Result<(), GitAiError> {
     match last_event {
         RewriteLogEvent::Commit { commit } => {
-            // This is going to become the regualar post-commit
+            // This is going to become the regular post-commit
             post_commit::post_commit(
                 repo,
                 commit.base_commit.clone(),
@@ -146,7 +146,7 @@ pub fn rewrite_authorship_if_needed(
             )?;
 
             tracing::debug!(
-                "Ammended commit {} now has authorship log {}",
+                "Amended commit {} now has authorship log {}",
                 &commit_amend.original_commit,
                 &commit_amend.amended_commit_sha
             );

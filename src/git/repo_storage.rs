@@ -85,7 +85,7 @@ impl RepoStorage {
         Ok(())
     }
 
-    /* Working Log Persistance */
+    /* Working Log Persistence */
 
     pub fn has_working_log(&self, sha: &str) -> bool {
         self.working_logs.join(sha).exists()
@@ -199,7 +199,7 @@ impl RepoStorage {
         Ok(())
     }
 
-    /* Rewrite Log Persistance */
+    /* Rewrite Log Persistence */
 
     /// Append a rewrite event to the rewrite log file and return the full log
     pub fn append_rewrite_event(
