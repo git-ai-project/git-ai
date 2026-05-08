@@ -45,6 +45,10 @@ use std::path::{Path, PathBuf};
 
 const KIRO_CHECKPOINT_CMD: &str = "checkpoint kiro --hook-input stdin";
 const KIRO_HOOK_EVENTS: [&str; 2] = ["preToolUse", "postToolUse"];
+/// Name we set on the freshly-created agent JSON.  Mirrors the file
+/// stem (`default.json`) and matches the upstream
+/// `DEFAULT_AGENT_NAME` constant in `aws/amazon-q-developer-cli`.
+const KIRO_DEFAULT_AGENT_NAME: &str = "default";
 
 /// Returns true only for git-ai hooks belonging to *this* preset
 /// (`git-ai checkpoint kiro ...`). The shared
@@ -150,6 +154,21 @@ impl KiroInstaller {
         let desired_cmd = Self::desired_command(&params.binary_path);
 
         let mut merged = existing.clone();
+
+        // The upstream `AgentConfigV2025_08_22` struct (in
+        // `aws/amazon-q-developer-cli`) requires `name` as a non-default
+        // field. When creating a fresh agent file, populate it so Kiro
+        // can deserialize the result. Existing user files keep whatever
+        // name is already there.
+        if let Some(root) = merged.as_object_mut()
+            && !root.contains_key("name")
+        {
+            root.insert(
+                "name".to_string(),
+                Value::String(KIRO_DEFAULT_AGENT_NAME.to_string()),
+            );
+        }
+
         let mut hooks_value = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));
         if !hooks_value.is_object() {
             return Err(GitAiError::Generic(
@@ -459,6 +478,16 @@ mod tests {
         assert!(diff.is_some(), "fresh install should produce a diff");
 
         let cfg = read_agent(&path);
+
+        // Required `name` field per upstream `AgentConfigV2025_08_22`
+        // schema in aws/amazon-q-developer-cli — without this, Kiro
+        // refuses to deserialize the agent file.
+        assert_eq!(
+            cfg.get("name").and_then(|v| v.as_str()),
+            Some(KIRO_DEFAULT_AGENT_NAME),
+            "fresh agent file must include the upstream-required `name` field"
+        );
+
         for event in &KIRO_HOOK_EVENTS {
             assert_eq!(count_kiro_entries(&cfg, event), 1);
             let entries = cfg
@@ -476,6 +505,23 @@ mod tests {
                 "matcher should be omitted; preset filters tools internally"
             );
         }
+    }
+
+    #[test]
+    fn s1b_fresh_install_does_not_overwrite_existing_name() {
+        // If the user has already configured an agent file with a
+        // custom name, our installer must NOT clobber it.
+        let (_td, path) = setup_test_env();
+        fs::write(&path, r#"{"name": "my-custom-agent"}"#).unwrap();
+
+        KiroInstaller::install_hooks_at(&path, &params(), false).unwrap();
+
+        let cfg = read_agent(&path);
+        assert_eq!(
+            cfg.get("name").and_then(|v| v.as_str()),
+            Some("my-custom-agent"),
+            "user-set name must be preserved"
+        );
     }
 
     #[test]
@@ -728,5 +774,18 @@ mod tests {
         let (installed, up_to_date) = KiroInstaller::hook_status(&v, &cmd);
         assert!(installed);
         assert!(up_to_date);
+    }
+
+    #[test]
+    #[ignore = "smoke — needs KIRO_SMOKE_PATH and KIRO_SMOKE_BIN"]
+    fn smoke_install_to_external_path() {
+        let path = std::env::var("KIRO_SMOKE_PATH").expect("KIRO_SMOKE_PATH");
+        let bin = std::env::var("KIRO_SMOKE_BIN").expect("KIRO_SMOKE_BIN");
+        let p = HookInstallerParams {
+            binary_path: PathBuf::from(bin),
+        };
+        let diff = KiroInstaller::install_hooks_at(std::path::Path::new(&path), &p, false).unwrap();
+        eprintln!("install diff present: {}", diff.is_some());
+        assert!(diff.is_some());
     }
 }
