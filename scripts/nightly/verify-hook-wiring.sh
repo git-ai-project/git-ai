@@ -30,8 +30,9 @@ case "$AGENT" in
     HOOKS="$HOME/.codex/hooks.json"
     [ -f "$CONFIG" ] || fail "config.toml not found at $CONFIG"
     [ -f "$HOOKS" ] || fail "hooks.json not found at $HOOKS"
-    grep -q 'hooks = true' "$CONFIG" \
+    grep -qP '^hooks = true' "$CONFIG" \
       || fail "hooks feature flag not enabled in $CONFIG"
+
     grep -q 'checkpoint codex --hook-input stdin' "$HOOKS" \
       || fail "checkpoint codex hook not found in $HOOKS"
     pass "Codex hooks configured in $CONFIG and $HOOKS"
