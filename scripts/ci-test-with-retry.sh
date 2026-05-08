@@ -45,7 +45,7 @@ run_retry_with_timeout() {
 
 # Run the full test suite, capturing output
 OUTPUT_FILE=$(mktemp)
-cargo test -- --test-threads="$TEST_THREADS" 2>&1 | tee "$OUTPUT_FILE"
+cargo test --no-fail-fast -- --test-threads="$TEST_THREADS" 2>&1 | tee "$OUTPUT_FILE"
 FIRST_EXIT=${PIPESTATUS[0]}
 
 if [ "$FIRST_EXIT" -eq 0 ]; then
