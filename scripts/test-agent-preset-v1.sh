@@ -29,3 +29,23 @@ echo '{
   "model": "claude-3-sonnet-20240229",
   "conversation_id": "conv_12345"
 }' | cargo run -- checkpoint agent-v1 --hook-input stdin
+
+echo -e "\n=== Pre Bash Call Checkpoint Example (before shell command) ==="
+echo '{
+  "type": "pre_bash_call",
+  "repo_working_dir": "'$(pwd)'",
+  "tool_use_id": "tu_67890",
+  "agent_name": "my-agent",
+  "model": "gpt-4",
+  "conversation_id": "conv_12345"
+}' | cargo run -- checkpoint agent-v1 --hook-input stdin
+
+echo -e "\n=== Post Bash Call Checkpoint Example (after shell command) ==="
+echo '{
+  "type": "post_bash_call",
+  "repo_working_dir": "'$(pwd)'",
+  "tool_use_id": "tu_67890",
+  "agent_name": "my-agent",
+  "model": "gpt-4",
+  "conversation_id": "conv_12345"
+}' | cargo run -- checkpoint agent-v1 --hook-input stdin

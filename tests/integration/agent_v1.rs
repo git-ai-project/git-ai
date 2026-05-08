@@ -298,3 +298,79 @@ fn test_agent_v1_relative_dirty_files_e2e_attribution() {
         "AI added line".ai(),
     ]);
 }
+
+#[test]
+fn test_agent_v1_pre_bash_call_checkpoint() {
+    let hook_input = json!({
+        "type": "pre_bash_call",
+        "repo_working_dir": "/Users/test/project",
+        "tool_use_id": "tu-abc",
+        "agent_name": "test-agent",
+        "model": "test-model",
+        "conversation_id": "conv-789"
+    })
+    .to_string();
+
+    let events = parse_agent_v1(&hook_input).unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreBashCall(e) => {
+            assert_eq!(e.context.agent_id.tool, "test-agent");
+            assert_eq!(e.context.agent_id.id, "conv-789");
+            assert_eq!(e.context.agent_id.model, "test-model");
+            assert_eq!(e.context.external_session_id, "conv-789");
+            assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
+            assert_eq!(e.tool_use_id, "tu-abc");
+        }
+        _ => panic!("Expected PreBashCall for pre_bash_call checkpoint"),
+    }
+}
+
+#[test]
+fn test_agent_v1_post_bash_call_checkpoint() {
+    let hook_input = json!({
+        "type": "post_bash_call",
+        "repo_working_dir": "/Users/test/project",
+        "tool_use_id": "tu-abc",
+        "agent_name": "test-agent",
+        "model": "test-model",
+        "conversation_id": "conv-789"
+    })
+    .to_string();
+
+    let events = parse_agent_v1(&hook_input).unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PostBashCall(e) => {
+            assert_eq!(e.context.agent_id.tool, "test-agent");
+            assert_eq!(e.context.agent_id.id, "conv-789");
+            assert_eq!(e.context.agent_id.model, "test-model");
+            assert_eq!(e.context.external_session_id, "conv-789");
+            assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
+            assert_eq!(e.tool_use_id, "tu-abc");
+            assert!(e.transcript_source.is_none());
+        }
+        _ => panic!("Expected PostBashCall for post_bash_call checkpoint"),
+    }
+}
+
+#[test]
+fn test_agent_v1_pre_bash_call_optional_fields_default() {
+    let hook_input = json!({
+        "type": "pre_bash_call",
+        "repo_working_dir": "/Users/test/project",
+        "agent_name": "test-agent",
+        "model": "unknown",
+        "conversation_id": "conv-789"
+    })
+    .to_string();
+
+    let events = parse_agent_v1(&hook_input).unwrap();
+    assert_eq!(events.len(), 1);
+    match &events[0] {
+        ParsedHookEvent::PreBashCall(e) => {
+            assert_eq!(e.tool_use_id, "bash");
+        }
+        _ => panic!("Expected PreBashCall"),
+    }
+}
