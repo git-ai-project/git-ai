@@ -29,7 +29,7 @@ On daemon startup (`run_daemon()` entry), before acquiring the lock:
    - Log warning: "Dropping root privileges to user {uid}"
 3. If `geteuid() == 0` but no `SUDO_UID`:
    - True root login (no real user to drop to)
-   - Refuse to start unless `--allow-root` flag is passed
+   - Refuse to start unless `daemon_allow_root` feature flag is enabled
    - Error: "Refusing to start daemon as root without a real user to de-escalate to. Use --allow-root to override."
 
 #### Windows
@@ -43,7 +43,7 @@ On daemon startup, before acquiring the lock:
    - Parent process waits up to 3 seconds for child to signal readiness (child acquires lock = ready)
    - Parent exits with success
 3. If elevated but no linked token (true admin account, not UAC-elevated):
-   - Refuse to start unless `--allow-root` flag is passed
+   - Refuse to start unless `daemon_allow_root` feature flag is enabled
    - Error: "Refusing to start daemon with administrator privileges. Use --allow-root to override."
 
 The `--respawned` internal flag prevents infinite re-spawn loops: if the child is still elevated after respawn (shouldn't happen, but defensively), it proceeds without another respawn attempt.
@@ -100,7 +100,7 @@ On every `ensure_daemon_running()` call:
 ```
 1. Am I elevated?
    ├─ Yes + can de-escalate → de-escalate, continue as real user
-   ├─ Yes + true root/admin + no --allow-root → refuse with error
+   ├─ Yes + true root/admin + daemon_allow_root=false → refuse with error
    └─ No → continue
 2. Try to connect to running daemon
    ├─ Connected → done (normal path)
@@ -116,24 +116,26 @@ On every `ensure_daemon_running()` call:
    └─ No → generic "daemon already running" error
 ```
 
-## New CLI Interface
+## Configuration
 
-### Flags
+### Feature Flag: `daemon_allow_root`
 
-- `git-ai bg start --allow-root` — Allow daemon startup as root/administrator without de-escalation
-- `git-ai bg run --allow-root` — Same, for direct run mode
-- `git-ai bg run --respawned` — Internal flag (Windows only) to prevent re-spawn loops after de-escalation
+Controlled via the standard feature flag system (`define_feature_flags!` macro):
 
-### Config
+- **Config file**: `~/.git-ai/config.json` → `"feature_flags": { "daemon_allow_root": true }`
+- **Environment variable**: `GIT_AI_DAEMON_ALLOW_ROOT=true`
+- **Default**: `false` (both debug and release)
 
-Optional `config.json` field:
-```json
-{
-  "daemon_allow_root": true
-}
-```
+This is preferred over a CLI flag because:
+1. The daemon restarts itself (after updates, on `Restart` exit action, via `ensure_daemon_running()`)
+2. All restart paths would need to thread a `--allow-root` flag through spawn logic
+3. A feature flag is read from `Config::get()` at the privilege check site — works everywhere automatically
 
-Equivalent to always passing `--allow-root`. Intended for CI/container environments where root is expected.
+Intended for CI/container environments where root is expected.
+
+### Internal Flag: `--respawned`
+
+`git-ai bg run --respawned` — Internal flag (Windows only) to prevent infinite re-spawn loops after de-escalation. Not user-facing.
 
 ## Platform-Specific Implementation Notes
 
@@ -173,7 +175,7 @@ Returns `kinfo_proc` with `kp_eproc.e_ucred.cr_uid`.
 
 ## Testing Strategy
 
-- Integration tests: Use `GIT_AI_TEST_CONFIG_PATCH` with `"daemon_allow_root": true` to bypass refusal in test environments that run as root
+- Integration tests: Use `GIT_AI_DAEMON_ALLOW_ROOT=true` env var or `GIT_AI_TEST_CONFIG_PATCH` with feature_flags override to bypass refusal in test environments that run as root
 - Unit tests for privilege detection functions (mock `geteuid()` return values via feature flag or env var)
 - Manual testing matrix:
   - macOS: `sudo git-ai bg start` → verify de-escalation
@@ -184,8 +186,8 @@ Returns `kinfo_proc` with `kp_eproc.e_ucred.cr_uid`.
 
 ## Edge Cases
 
-- **Docker containers running as root**: Typically no `SUDO_UID`. Users should set `daemon_allow_root: true` in config or pass `--allow-root`.
-- **CI systems**: Same as Docker — use config flag.
+- **Docker containers running as root**: Typically no `SUDO_UID`. Users should set `GIT_AI_DAEMON_ALLOW_ROOT=true` or add to config feature_flags.
+- **CI systems**: Same as Docker — use `GIT_AI_DAEMON_ALLOW_ROOT=true` env var.
 - **`su` without SUDO_UID**: De-escalation won't trigger (no env var to read). Layers 2-4 handle this: relaxed perms allow connection, and if that fails, actionable error explains the fix.
-- **Windows service context**: Not a split token, so no linked token. `--allow-root` required. Services typically run under a dedicated service account anyway.
+- **Windows service context**: Not a split token, so no linked token. `daemon_allow_root` feature flag required. Services typically run under a dedicated service account anyway.
 - **Race condition on lock cleanup (Layer 4)**: Between checking PID death and removing lock, another process could start. Mitigate by re-attempting lock acquisition immediately after cleanup — if it fails again, another process won the race (which is fine).
