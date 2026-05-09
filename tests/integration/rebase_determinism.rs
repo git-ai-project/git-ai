@@ -63,11 +63,7 @@ fn setup_divergent_fixture(repo: &TestRepo) {
     repo.git_with_env(&["commit", "-m", "Initial base commit"], FROZEN_ENV, None)
         .unwrap();
 
-    let base_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let base_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Create and advance main branch (modifies ONLY main_file.rs)
     let default_branch = repo.current_branch();
@@ -81,7 +77,10 @@ fn setup_divergent_fixture(repo: &TestRepo) {
 
     // Create dev branch from base (modifies ONLY dev_file.rs with AI)
     repo.git(&["checkout", "-b", "dev", &base_sha]).unwrap();
-    dev_file.set_contents(crate::lines!["fn base_dev() {}", "fn dev_addition() {}".ai()]);
+    dev_file.set_contents(crate::lines![
+        "fn base_dev() {}",
+        "fn dev_addition() {}".ai()
+    ]);
     repo.git_with_env(&["add", "."], FROZEN_ENV, None).unwrap();
     repo.git_with_env(&["commit", "-m", "Dev adds AI feature"], FROZEN_ENV, None)
         .unwrap();
@@ -108,21 +107,14 @@ fn setup_multicommit_fixture(repo: &TestRepo) {
     repo.git_with_env(&["commit", "-m", "Base library"], FROZEN_ENV, None)
         .unwrap();
 
-    let base_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let base_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Main branch: 2 commits (modifies ONLY main_mod.rs)
     let default_branch = repo.current_branch();
     if default_branch != "main" {
         repo.git(&["branch", "-M", "main"]).unwrap();
     }
-    main_mod.set_contents(crate::lines![
-        "// Main module",
-        "pub fn main_fn_1() {}"
-    ]);
+    main_mod.set_contents(crate::lines!["// Main module", "pub fn main_fn_1() {}"]);
     repo.git_with_env(&["add", "."], FROZEN_ENV, None).unwrap();
     repo.git_with_env(&["commit", "-m", "Main commit 1"], FROZEN_ENV, None)
         .unwrap();
@@ -162,8 +154,12 @@ fn setup_multicommit_fixture(repo: &TestRepo) {
     let mut helper = repo.filename("helper.rs");
     helper.set_contents(crate::lines!["pub fn helper() {}".ai()]);
     repo.git_with_env(&["add", "."], FROZEN_ENV, None).unwrap();
-    repo.git_with_env(&["commit", "-m", "Dev commit 3: new file"], FROZEN_ENV, None)
-        .unwrap();
+    repo.git_with_env(
+        &["commit", "-m", "Dev commit 3: new file"],
+        FROZEN_ENV,
+        None,
+    )
+    .unwrap();
 }
 
 /// Get the N most-recent commit SHAs ordered oldest→newest.
@@ -214,8 +210,8 @@ fn test_rebase_tree_equivalence_and_sha_determinism() {
     let note = repo1
         .read_authorship_note(ai_commit_sha)
         .expect("git-ai rebase should create authorship note");
-    let log = AuthorshipLog::deserialize_from_string(&note)
-        .expect("note should parse as AuthorshipLog");
+    let log =
+        AuthorshipLog::deserialize_from_string(&note).expect("note should parse as AuthorshipLog");
     assert!(
         !log.attestations.is_empty(),
         "rebase should preserve AI attestations"
@@ -223,10 +219,7 @@ fn test_rebase_tree_equivalence_and_sha_determinism() {
 
     // Verify line-level attribution correctness
     let mut main_file = repo1.filename("main_file.rs");
-    main_file.assert_lines_and_blame(crate::lines![
-        "fn base_main() {}",
-        "fn main_addition() {}",
-    ]);
+    main_file.assert_lines_and_blame(crate::lines!["fn base_main() {}", "fn main_addition() {}",]);
 
     let mut dev_file = repo1.filename("dev_file.rs");
     dev_file.assert_lines_and_blame(crate::lines![
@@ -273,8 +266,7 @@ fn test_rebase_tree_equivalence_and_sha_determinism() {
         "TREE CORRUPTION: git-ai rebase produced different tree hash ({}) \
          than native git rebase ({}). This means git-ai modified file \
          contents beyond what Git naturally does during rebase.",
-        ai_tree_after,
-        native_tree_after
+        ai_tree_after, native_tree_after
     );
 
     // 3. With frozen env, commit SHAs should be deterministic and identical
@@ -283,8 +275,7 @@ fn test_rebase_tree_equivalence_and_sha_determinism() {
         "SHA DETERMINISM FAILURE: git-ai rebase produced commit SHA {} \
          but native rebase produced {}. With frozen environment variables, \
          identical trees and parents should produce identical SHAs.",
-        ai_commit_sha,
-        native_commit_sha
+        ai_commit_sha, native_commit_sha
     );
 
     // 4. Run git-ai rebase again to verify determinism across multiple runs
@@ -303,8 +294,7 @@ fn test_rebase_tree_equivalence_and_sha_determinism() {
         "SHA INSTABILITY: git-ai rebase produced different commit SHA {} \
          on second run (first run: {}). Rebase should be deterministic with \
          frozen environment.",
-        repeat_commits[0],
-        ai_commits[0]
+        repeat_commits[0], ai_commits[0]
     );
 }
 
@@ -393,7 +383,8 @@ fn test_multicommit_rebase_tree_equivalence_and_sha_determinism() {
     // 1. Each rebased commit's tree must match native rebase
     for (i, (ai_tree, native_tree)) in ai_trees.iter().zip(&native_trees).enumerate() {
         assert_eq!(
-            ai_tree, native_tree,
+            ai_tree,
+            native_tree,
             "TREE MISMATCH at commit {}: git-ai produced {} but native git produced {}",
             i + 1,
             ai_tree,
@@ -404,7 +395,8 @@ fn test_multicommit_rebase_tree_equivalence_and_sha_determinism() {
     // 2. Each rebased commit's SHA must match (determinism)
     for (i, (ai_sha, native_sha)) in ai_commits.iter().zip(&native_commits).enumerate() {
         assert_eq!(
-            ai_sha, native_sha,
+            ai_sha,
+            native_sha,
             "SHA MISMATCH at commit {}: git-ai produced {} but native git produced {}. \
              With frozen environment, SHAs should be identical.",
             i + 1,
@@ -429,8 +421,7 @@ fn test_multicommit_rebase_tree_equivalence_and_sha_determinism() {
         "INSTABILITY: git-ai rebase produced different SHAs on second run.\n\
          First run:  {:?}\n\
          Second run: {:?}",
-        ai_commits,
-        repeat_commits
+        ai_commits, repeat_commits
     );
 }
 
@@ -454,11 +445,7 @@ fn test_line_number_mapping_through_rebase() {
     repo.git_with_env(&["commit", "-m", "Base 10 lines"], FROZEN_ENV, None)
         .unwrap();
 
-    let base_sha = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap()
-        .trim()
-        .to_string();
+    let base_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Main: prepend 3 lines (shifts everything down)
     let default_branch = repo.current_branch();
@@ -582,9 +569,7 @@ fn test_rebase_file_deletion_recreation_tree_equivalence() {
     // Base: create temp.txt
     let mut temp = repo1.filename("temp.txt");
     temp.set_contents(crate::lines!["temporary content"]);
-    repo1
-        .git_with_env(&["add", "."], FROZEN_ENV, None)
-        .unwrap();
+    repo1.git_with_env(&["add", "."], FROZEN_ENV, None).unwrap();
     repo1
         .git_with_env(&["commit", "-m", "Add temp.txt"], FROZEN_ENV, None)
         .unwrap();
@@ -600,22 +585,24 @@ fn test_rebase_file_deletion_recreation_tree_equivalence() {
     if default_branch != "main" {
         repo1.git(&["branch", "-M", "main"]).unwrap();
     }
-    repo1.git_with_env(&["rm", "temp.txt"], FROZEN_ENV, None).unwrap();
+    repo1
+        .git_with_env(&["rm", "temp.txt"], FROZEN_ENV, None)
+        .unwrap();
     repo1
         .git_with_env(&["commit", "-m", "Delete temp.txt"], FROZEN_ENV, None)
         .unwrap();
 
     // Dev: recreate temp.txt with different AI content
     repo1.git(&["checkout", "-b", "dev", &base_sha]).unwrap();
-    repo1.git_with_env(&["rm", "temp.txt"], FROZEN_ENV, None).unwrap();
+    repo1
+        .git_with_env(&["rm", "temp.txt"], FROZEN_ENV, None)
+        .unwrap();
     repo1
         .git_with_env(&["commit", "-m", "Dev deletes temp.txt"], FROZEN_ENV, None)
         .unwrap();
 
     temp.set_contents(crate::lines!["new AI content".ai()]);
-    repo1
-        .git_with_env(&["add", "."], FROZEN_ENV, None)
-        .unwrap();
+    repo1.git_with_env(&["add", "."], FROZEN_ENV, None).unwrap();
     repo1
         .git_with_env(&["commit", "-m", "Dev recreates with AI"], FROZEN_ENV, None)
         .unwrap();
@@ -644,9 +631,7 @@ fn test_rebase_file_deletion_recreation_tree_equivalence() {
 
     let mut temp2 = repo2.filename("temp.txt");
     temp2.set_contents(crate::lines!["temporary content"]);
-    repo2
-        .git_og_with_env(&["add", "."], FROZEN_ENV)
-        .unwrap();
+    repo2.git_og_with_env(&["add", "."], FROZEN_ENV).unwrap();
     repo2
         .git_og_with_env(&["commit", "-m", "Add temp.txt"], FROZEN_ENV)
         .unwrap();
@@ -679,9 +664,7 @@ fn test_rebase_file_deletion_recreation_tree_equivalence() {
         .unwrap();
 
     temp2.set_contents(crate::lines!["new AI content"]);
-    repo2
-        .git_og_with_env(&["add", "."], FROZEN_ENV)
-        .unwrap();
+    repo2.git_og_with_env(&["add", "."], FROZEN_ENV).unwrap();
     repo2
         .git_og_with_env(&["commit", "-m", "Dev recreates with AI"], FROZEN_ENV)
         .unwrap();
@@ -704,13 +687,13 @@ fn test_rebase_file_deletion_recreation_tree_equivalence() {
     assert_eq!(
         ai_final_tree, native_final_tree,
         "TREE MISMATCH after file deletion+recreation: git-ai produced {} but native produced {}",
-        ai_final_tree,
-        native_final_tree
+        ai_final_tree, native_final_tree
     );
 
     for (i, (ai_sha, native_sha)) in ai_commits.iter().zip(&native_commits).enumerate() {
         assert_eq!(
-            ai_sha, native_sha,
+            ai_sha,
+            native_sha,
             "SHA MISMATCH at commit {} after file deletion+recreation",
             i + 1
         );

@@ -110,6 +110,7 @@ fn should_apply_post_repo_refs(cmd: &NormalizedCommand, analysis: &AnalysisResul
                 | crate::daemon::domain::SemanticEvent::Reset { .. }
                 | crate::daemon::domain::SemanticEvent::RebaseComplete { .. }
                 | crate::daemon::domain::SemanticEvent::RebaseAbort { .. }
+                | crate::daemon::domain::SemanticEvent::SyntheticRebase { .. }
                 | crate::daemon::domain::SemanticEvent::CherryPickComplete { .. }
                 | crate::daemon::domain::SemanticEvent::CherryPickAbort { .. }
                 | crate::daemon::domain::SemanticEvent::PullCompleted { .. }

@@ -17,6 +17,8 @@ pub mod log;
 pub mod login;
 pub mod logout;
 pub mod personal_dashboard;
+pub mod rebase_recover;
+pub mod rebase_validation;
 pub mod show;
 pub mod show_prompt;
 pub mod squash_authorship;

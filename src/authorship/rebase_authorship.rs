@@ -199,13 +199,27 @@ pub fn rewrite_authorship_if_needed(
                 repo,
                 &rebase_complete.original_commits,
             );
-            rewrite_authorship_after_rebase_v2(
-                repo,
-                &rebase_complete.original_head,
-                &rebase_complete.original_commits,
-                &rebase_complete.new_commits,
-                &commit_author,
-            )?;
+
+            // Feature flag: use v3 implementation if enabled
+            let config = crate::config::Config::get();
+            if config.feature_flags().rebase_v3 {
+                tracing::debug!("Using rebase_v3 implementation");
+                crate::authorship::rebase_v3::rewrite_authorship_after_rebase_v3(
+                    repo,
+                    &rebase_complete.original_head,
+                    &rebase_complete.original_commits,
+                    &rebase_complete.new_commits,
+                    &commit_author,
+                )?;
+            } else {
+                rewrite_authorship_after_rebase_v2(
+                    repo,
+                    &rebase_complete.original_head,
+                    &rebase_complete.original_commits,
+                    &rebase_complete.new_commits,
+                    &commit_author,
+                )?;
+            }
 
             migrate_working_log_after_rebase(
                 repo,
@@ -1093,6 +1107,53 @@ fn pair_commits_for_rewrite(
     pairs
 }
 
+/// Park orphaned notes when rebase produces no new commits but originals had attribution.
+/// This ensures metadata is never lost and provides a deterministic recovery path.
+fn park_orphaned_notes_for_recovery(
+    repo: &Repository,
+    original_head: &str,
+    original_commits: &[String],
+) -> Result<(), GitAiError> {
+    // Check if any original commits actually have notes
+    let has_notes = original_commits
+        .iter()
+        .any(|sha| crate::git::refs::show_authorship_note(repo, sha).is_some());
+
+    if !has_notes {
+        tracing::debug!("No notes found on original commits, skipping orphaned notes parking");
+        return Ok(());
+    }
+
+    // Create recovery ref pointing to current notes tree
+    let recovery_ref = format!("refs/git-ai/orphaned-notes/{}", original_head);
+
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "update-ref".to_string(),
+        recovery_ref.clone(),
+        "refs/notes/ai".to_string(),
+    ]);
+
+    crate::git::repository::exec_git(&args)?;
+
+    eprintln!(
+        "[git-ai] Rebase produced no new commits. Original attribution saved to {}",
+        recovery_ref
+    );
+    eprintln!(
+        "[git-ai] To recover: git-ai rebase recover --from {}",
+        original_head
+    );
+
+    tracing::debug!(
+        "Parked {} orphaned notes at {}",
+        original_commits.len(),
+        recovery_ref
+    );
+
+    Ok(())
+}
+
 pub fn rewrite_authorship_after_rebase_v2(
     repo: &Repository,
     original_head: &str,
@@ -1102,8 +1163,13 @@ pub fn rewrite_authorship_after_rebase_v2(
 ) -> Result<(), GitAiError> {
     let rewrite_start = std::time::Instant::now();
     let mut timing_phases: Vec<(String, u128)> = Vec::new();
+
     // Handle edge case: no commits to process
+    // If original commits had notes but rebase produced no new commits, park the orphaned notes
     if new_commits.is_empty() {
+        if !original_commits.is_empty() {
+            park_orphaned_notes_for_recovery(repo, original_head, original_commits)?;
+        }
         return Ok(());
     }
 
@@ -1963,6 +2029,16 @@ pub fn rewrite_authorship_after_rebase_v2(
             summary.push_str(&format!("  {}={}ms\n", name, ms));
         }
         let _ = std::fs::write(&timing_path, summary);
+    }
+
+    // Post-rebase verification: Check if attribution was preserved
+    if let Ok(result) = crate::commands::rebase_validation::verify_rebase_attribution(
+        repo,
+        original_commits,
+        new_commits,
+    ) && result.has_attribution_loss()
+    {
+        crate::commands::rebase_validation::display_verification_results(&result);
     }
 
     Ok(())

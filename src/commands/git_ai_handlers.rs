@@ -215,6 +215,9 @@ pub fn handle_git_ai(args: &[String]) {
         "push-authorship-notes" | "push_authorship_notes" => {
             handle_push_authorship_notes_internal(&args[1..]);
         }
+        "rebase" => {
+            handle_rebase_subcommand(&args[1..]);
+        }
         _ => {
             println!("Unknown git-ai command: {}", args[0]);
             std::process::exit(1);
@@ -257,6 +260,9 @@ fn print_help() {
     eprintln!("    --json                 Output in JSON format");
     eprintln!("  status             Show uncommitted AI authorship status (debug)");
     eprintln!("    --json                 Output in JSON format");
+    eprintln!("  rebase recover --from <SHA>");
+    eprintln!("                     Recover attribution from orphaned notes or backup");
+    eprintln!("    --from <SHA>          Original HEAD SHA before rebase that lost notes");
     eprintln!("  show <rev|range>   Display authorship logs for a revision or range");
     eprintln!("  show-prompt <id>   Display a prompt record by its ID");
     eprintln!("    --commit <rev>        Look in a specific commit only");
@@ -1107,4 +1113,61 @@ fn exit_with_log_status(status: std::process::ExitStatus) -> ! {
         }
     }
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Handle `git-ai rebase` subcommands.
+fn handle_rebase_subcommand(args: &[String]) {
+    if args.is_empty() {
+        eprintln!("Usage: git-ai rebase <subcommand>");
+        eprintln!();
+        eprintln!("Subcommands:");
+        eprintln!("  recover --from <SHA>    Recover attribution from orphaned notes or backup");
+        std::process::exit(1);
+    }
+
+    match args[0].as_str() {
+        "recover" => {
+            handle_rebase_recover(&args[1..]);
+        }
+        _ => {
+            eprintln!("Unknown rebase subcommand: {}", args[0]);
+            eprintln!("Try: git-ai rebase recover --from <SHA>");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Handle `git-ai rebase recover` command.
+fn handle_rebase_recover(args: &[String]) {
+    // Parse --from <SHA> argument
+    let from_sha = if args.len() >= 2 && args[0] == "--from" {
+        &args[1]
+    } else {
+        eprintln!("Usage: git-ai rebase recover --from <SHA>");
+        eprintln!();
+        eprintln!("Recovers attribution from orphaned notes or backup snapshots.");
+        eprintln!("The <SHA> should be the original HEAD before the rebase.");
+        std::process::exit(1);
+    };
+
+    // Find repository
+    let repo = match find_repository(&[]) {
+        Ok(repo) => repo,
+        Err(e) => {
+            eprintln!("Error: Not a git repository: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Run recovery
+    match crate::commands::rebase_recover::recover_attribution(&repo, from_sha) {
+        Ok(()) => {
+            // Success message already printed by recover_attribution
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("[git-ai] Recovery failed: {}", e);
+            std::process::exit(1);
+        }
+    }
 }

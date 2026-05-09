@@ -6451,6 +6451,64 @@ impl ActorDaemonCoordinator {
                         self.clear_pending_rebase_original_head_for_worktree(worktree)?;
                     }
                 }
+                crate::daemon::domain::SemanticEvent::SyntheticRebase {
+                    old_head,
+                    new_head,
+                    ref_name,
+                } => {
+                    // Synthetic rebase detected via plumbing commands (commit-tree + update-ref).
+                    // Used by tools like Graphite that bypass git-rebase porcelain.
+                    let repository = repository_for_rewrite_context(cmd, "synthetic_rebase")?;
+
+                    // For synthetic rebases, we don't have reflog entries, so we use the
+                    // semantic event heads directly. The merge base serves as the "onto" point.
+                    let onto_head = repository
+                        .merge_base(old_head.to_string(), new_head.to_string())
+                        .unwrap_or_else(|_| new_head.clone());
+
+                    tracing::info!(
+                        old_head = %old_head,
+                        new_head = %new_head,
+                        ref_name = %ref_name,
+                        onto = %onto_head,
+                        sid = %cmd.root_sid,
+                        "synthetic rebase detected via plumbing commands"
+                    );
+
+                    if let Some((original_commits, new_commits)) =
+                        maybe_rebase_mappings_from_repository(
+                            &repository,
+                            old_head,
+                            new_head,
+                            Some(onto_head.as_str()),
+                            "synthetic_rebase",
+                        )?
+                    {
+                        let original_count = original_commits.len();
+                        let new_count = new_commits.len();
+                        out.push(RewriteLogEvent::rebase_complete(RebaseCompleteEvent::new(
+                            old_head.clone(),
+                            new_head.clone(),
+                            false, // Not interactive
+                            original_commits,
+                            new_commits,
+                        )));
+                        tracing::info!(
+                            sid = %cmd.root_sid,
+                            "synthetic rebase: mapped {} original -> {} new commits",
+                            original_count,
+                            new_count
+                        );
+                    } else {
+                        tracing::warn!(
+                            old_head = %old_head,
+                            new_head = %new_head,
+                            ref_name = %ref_name,
+                            sid = %cmd.root_sid,
+                            "synthetic rebase: commit mapping produced no commits"
+                        );
+                    }
+                }
                 crate::daemon::domain::SemanticEvent::RebaseAbort { head } => {
                     if !head.is_empty() {
                         out.push(RewriteLogEvent::rebase_abort(RebaseAbortEvent::new(

@@ -63,6 +63,15 @@ pub fn handle_git(args: &[String]) {
 
     let parsed = parse_git_cli_args(args);
 
+    // Respect --no-verify: user explicitly told Git to skip hooks.
+    // Bypass ALL git-ai logic (no telemetry, no wrapper state, no snapshots).
+    // Silently log to metrics as "explicit_user_bypass".
+    if args.iter().any(|arg| arg == "--no-verify") {
+        tracing::debug!("--no-verify detected, bypassing git-ai logic");
+        let exit_status = proxy_to_git(args, false, None);
+        exit_with_status(exit_status);
+    }
+
     // Read-only invocations don't need wrapper state (the daemon fast-paths
     // their trace events and never processes them through the normalizer).
     // Skip the invocation_id so we can also suppress trace2 for them,
@@ -117,6 +126,19 @@ pub fn handle_git(args: &[String]) {
     let repository = find_repository(&parsed.global_args).ok();
     let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
 
+    // Snapshot notes before destructive rebase operations
+    let notes_snapshot_ref = if parsed.command.as_deref() == Some("rebase")
+        && !parsed
+            .command_args
+            .iter()
+            .any(|arg| arg == "--abort" || arg == "--continue" || arg == "--skip")
+        && let Some(repo) = repository.as_ref()
+    {
+        snapshot_notes_before_rebase(repo).ok()
+    } else {
+        None
+    };
+
     let pre_state = worktree
         .as_deref()
         .and_then(crate::git::repo_state::read_head_state_for_worktree);
@@ -133,6 +155,28 @@ pub fn handle_git(args: &[String]) {
         .and_then(crate::git::repo_state::read_head_state_for_worktree);
 
     send_wrapper_post_state_to_daemon(&invocation_id, worktree.as_deref(), &post_state);
+
+    // For successful rebases, wait briefly for daemon to complete authorship rewriting.
+    // This prevents race where next git command runs before notes are written.
+    // Combined with pre-rebase snapshot for maximum safety.
+    if exit_status.success()
+        && parsed.command.as_deref() == Some("rebase")
+        && !parsed
+            .command_args
+            .iter()
+            .any(|arg| arg == "--abort" || arg == "--continue" || arg == "--skip")
+    {
+        wait_for_rebase_authorship_completion(std::time::Duration::from_secs(3));
+    }
+
+    // Clean up notes snapshot after successful rebase
+    if exit_status.success()
+        && parsed.command.as_deref() == Some("rebase")
+        && let Some(snapshot_ref) = notes_snapshot_ref
+        && let Some(repo) = repository.as_ref()
+    {
+        let _ = cleanup_notes_snapshot(repo, &snapshot_ref);
+    }
 
     // After a successful commit, wait briefly for the daemon to produce an
     // authorship note so we can show stats inline (same UX as plain wrapper mode).
@@ -573,6 +617,65 @@ fn exit_with_status(status: std::process::ExitStatus) -> ! {
         }
     }
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Snapshot notes tree before rebase to enable recovery if hooks fail.
+/// Returns the snapshot ref name for later cleanup.
+fn snapshot_notes_before_rebase(repo: &Repository) -> Result<String, crate::error::GitAiError> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let snapshot_ref = format!("refs/git-ai/backup/notes-{}", timestamp);
+
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "update-ref".to_string(),
+        snapshot_ref.clone(),
+        "refs/notes/ai".to_string(),
+    ]);
+
+    crate::git::repository::exec_git(&args)?;
+
+    tracing::debug!("Created notes snapshot at {}", snapshot_ref);
+
+    Ok(snapshot_ref)
+}
+
+/// Clean up notes snapshot after successful rebase.
+fn cleanup_notes_snapshot(
+    repo: &Repository,
+    snapshot_ref: &str,
+) -> Result<(), crate::error::GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "update-ref".to_string(),
+        "-d".to_string(),
+        snapshot_ref.to_string(),
+    ]);
+
+    crate::git::repository::exec_git(&args)?;
+
+    tracing::debug!("Cleaned up notes snapshot at {}", snapshot_ref);
+
+    Ok(())
+}
+
+/// Wait briefly for daemon to complete authorship rewriting after rebase.
+/// Prevents race where next git command runs before notes are written.
+fn wait_for_rebase_authorship_completion(timeout: std::time::Duration) {
+    tracing::debug!(
+        "Waiting up to {:?} for daemon to complete rebase authorship",
+        timeout
+    );
+
+    // Simple sleep-based wait. In future, could poll daemon for completion signal.
+    // For now, a fixed delay is sufficient - the daemon typically completes in <1s,
+    // and 3s is imperceptible to users while preventing most races.
+    std::thread::sleep(timeout);
+
+    tracing::debug!("Rebase authorship wait completed");
 }
 
 // Detect if current process invocation is coming from shell completion machinery

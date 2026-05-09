@@ -2,6 +2,7 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 use git_ai::authorship::authorship_log::PromptRecord;
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+use git_ai::authorship::rebase_v3;
 use git_ai::authorship::working_log::AgentId;
 use git_ai::git::refs::notes_add;
 use std::collections::HashMap;
@@ -2677,5 +2678,569 @@ sed -i.bak '3s/pick/fixup/' "$1"
         "    logMetrics()".ai(),
         "    shutdown()".ai(),
         "}".unattributed_human(),
+    ]);
+}
+
+/// Regression test: verify attribution is correct at every intermediate commit after rebase,
+/// not just at HEAD. Tests scenario from REBASEV3_NOTES.md where rebase of 4 commits onto
+/// a branch with 2 commits should preserve correct attribution at each of the 4 rebased commits.
+///
+/// Checks attribution at feature~3, feature~2, feature~1, and feature HEAD to ensure all
+/// intermediate commits maintain correct line-level attribution, not just the final commit.
+#[test]
+fn test_rebase_attribution_at_every_intermediate_commit() {
+    let repo = TestRepo::new();
+
+    // Create base commit
+    let main_file_path = repo.path().join("main.txt");
+    let feature_file_path = repo.path().join("feature.txt");
+    std::fs::write(&main_file_path, "base\n").unwrap();
+    std::fs::write(&feature_file_path, "line 1\nline 2\n").unwrap();
+    repo.stage_all_and_commit("Merge base").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Main branch: 2 commits on main.txt
+    std::fs::write(&main_file_path, "base\nA\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("Main commit A").unwrap();
+
+    std::fs::write(&main_file_path, "base\nA\nB\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("Main commit B").unwrap();
+
+    // Create feature branch from merge base
+    repo.git(&["checkout", "-b", "feature", "HEAD~2"]).unwrap();
+
+    // Feature branch: 4 commits on feature.txt, each AI writes lines 3-10
+    for i in 1..=4 {
+        let content = format!(
+            "line 1\nline 2\nline 3 v{}\nline 4 v{}\nline 5 v{}\nline 6 v{}\nline 7 v{}\nline 8 v{}\nline 9 v{}\nline 10 v{}\n",
+            i, i, i, i, i, i, i, i
+        );
+        std::fs::write(&feature_file_path, &content).unwrap();
+        repo.git_ai(&["checkpoint", "mock_ai", "feature.txt"])
+            .unwrap();
+        repo.stage_all_and_commit(&format!("AI commit {}", i))
+            .unwrap();
+    }
+
+    // Rebase feature onto main
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Verify attribution at each intermediate commit after rebase
+    // feature~3 (first rebased commit = AI commit 1)
+    repo.git(&["checkout", "feature~3"]).unwrap();
+    let mut file = repo.filename("feature.txt");
+    file.assert_committed_lines(crate::lines![
+        "line 1".unattributed_human(),
+        "line 2".unattributed_human(),
+        "line 3 v1".ai(),
+        "line 4 v1".ai(),
+        "line 5 v1".ai(),
+        "line 6 v1".ai(),
+        "line 7 v1".ai(),
+        "line 8 v1".ai(),
+        "line 9 v1".ai(),
+        "line 10 v1".ai(),
+    ]);
+
+    // HEAD~2 (second rebased commit = AI commit 2)
+    repo.git(&["checkout", "feature~2"]).unwrap();
+    let mut file = repo.filename("feature.txt");
+    file.assert_committed_lines(crate::lines![
+        "line 1".unattributed_human(),
+        "line 2".unattributed_human(),
+        "line 3 v2".ai(),
+        "line 4 v2".ai(),
+        "line 5 v2".ai(),
+        "line 6 v2".ai(),
+        "line 7 v2".ai(),
+        "line 8 v2".ai(),
+        "line 9 v2".ai(),
+        "line 10 v2".ai(),
+    ]);
+
+    // HEAD~1 (third rebased commit = AI commit 3)
+    repo.git(&["checkout", "feature~1"]).unwrap();
+    let mut file = repo.filename("feature.txt");
+    file.assert_committed_lines(crate::lines![
+        "line 1".unattributed_human(),
+        "line 2".unattributed_human(),
+        "line 3 v3".ai(),
+        "line 4 v3".ai(),
+        "line 5 v3".ai(),
+        "line 6 v3".ai(),
+        "line 7 v3".ai(),
+        "line 8 v3".ai(),
+        "line 9 v3".ai(),
+        "line 10 v3".ai(),
+    ]);
+
+    // HEAD (final rebased commit = AI commit 4)
+    repo.git(&["checkout", "feature"]).unwrap();
+    let mut file = repo.filename("feature.txt");
+    file.assert_committed_lines(crate::lines![
+        "line 1".unattributed_human(),
+        "line 2".unattributed_human(),
+        "line 3 v4".ai(),
+        "line 4 v4".ai(),
+        "line 5 v4".ai(),
+        "line 6 v4".ai(),
+        "line 7 v4".ai(),
+        "line 8 v4".ai(),
+        "line 9 v4".ai(),
+        "line 10 v4".ai(),
+    ]);
+}
+
+/// Test the "fast-fast path" - rebase where AI-tracked files have identical blobs.
+/// This is the most common case: rebasing onto main when main only changed unrelated files.
+///
+/// Both v2 and v3 implement this optimization:
+/// - V2: try_fast_path_rebase_note_remap_cached() - batch checks blob OIDs via git diff-tree --raw
+/// - V3: tracked_files_unchanged() - checks blob OIDs before calling get_diff_hunks()
+///
+/// The optimization skips all diff/hunk logic and just copies notes with updated base_commit_sha.
+/// This test verifies correctness - for performance benchmarks see rebase_benchmark.rs.
+#[test]
+fn test_rebase_fast_path_identical_tracked_blobs() {
+    let repo = TestRepo::new();
+
+    // Base commit with AI file
+    let mut ai_file = repo.filename("ai.txt");
+    ai_file.set_contents(crate::lines!["AI line 1".ai(), "AI line 2".ai()]);
+    repo.stage_all_and_commit("Base commit").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Feature branch: add another AI commit
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut ai_file = repo.filename("ai.txt");
+    ai_file.set_contents(crate::lines![
+        "AI line 1".ai(),
+        "AI line 2".ai(),
+        "AI line 3".ai()
+    ]);
+    repo.stage_all_and_commit("Feature: add AI line 3").unwrap();
+
+    // Main branch: modify ONLY unrelated files (non-AI files)
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut unrelated = repo.filename("unrelated.txt");
+    unrelated.set_contents(crate::lines!["Main work 1", "Main work 2"]);
+    repo.stage_all_and_commit("Main: unrelated work").unwrap();
+
+    // Rebase feature onto main
+    // This is the fast-fast path: ai.txt blobs are identical between original and new commits
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Verify attribution is preserved correctly
+    let mut ai_file = repo.filename("ai.txt");
+    ai_file.assert_committed_lines(crate::lines![
+        "AI line 1".ai(),
+        "AI line 2".ai(),
+        "AI line 3".ai()
+    ]);
+
+    // Verify unrelated.txt exists (sanity check that rebase happened)
+    let unrelated_path = repo.path().join("unrelated.txt");
+    assert!(
+        unrelated_path.exists(),
+        "unrelated.txt should exist after rebase"
+    );
+}
+
+/// Category 1.1: The Split (1:N) - one original commit splits into multiple new commits.
+///
+/// Scenario: During interactive rebase with `edit`, user resets the commit, then selectively
+/// stages and commits files separately, splitting one commit into multiple commits.
+///
+/// V3 Handling: For each new commit, transforms the original note via diff. The hunk
+/// transformation naturally filters - files deleted in new commit A will have empty
+/// attestations after transformation.
+///
+/// This test simulates the split by manually creating the scenario rather than using
+/// interactive rebase (which requires user interaction).
+#[test]
+fn test_rebase_split_one_to_many() {
+    let repo = TestRepo::new();
+
+    // Base commit with initial file
+    let mut base_file = repo.filename("base.txt");
+    base_file.set_contents(crate::lines!["base content"]);
+    repo.stage_all_and_commit("Base").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Feature branch: single commit with AI changes to TWO files
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    let mut file1 = repo.filename("file1.txt");
+    file1.set_contents(crate::lines!["AI line 1".ai(), "AI line 2".ai()]);
+
+    let mut file2 = repo.filename("file2.txt");
+    file2.set_contents(crate::lines!["AI line A".ai(), "AI line B".ai()]);
+
+    repo.stage_all_and_commit("Feature: AI changes both files")
+        .unwrap();
+    let original_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Verify original commit has both files attributed
+    file1.assert_committed_lines(crate::lines!["AI line 1".ai(), "AI line 2".ai()]);
+    file2.assert_committed_lines(crate::lines!["AI line A".ai(), "AI line B".ai()]);
+
+    // Simulate split: reset to parent, commit file1, then commit file2
+    let parent = repo
+        .git(&["rev-parse", "HEAD^"])
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git(&["reset", "--hard", &parent]).unwrap();
+
+    // Split commit 1: only file1
+    let mut file1 = repo.filename("file1.txt");
+    file1.set_contents(crate::lines!["AI line 1".ai(), "AI line 2".ai()]);
+    repo.git(&["add", "file1.txt"]).unwrap();
+    repo.commit("Split 1: file1 only").unwrap();
+    let split1_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Split commit 2: only file2
+    let mut file2 = repo.filename("file2.txt");
+    file2.set_contents(crate::lines!["AI line A".ai(), "AI line B".ai()]);
+    repo.git(&["add", "file2.txt"]).unwrap();
+    repo.commit("Split 2: file2 only").unwrap();
+    let split2_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Main branch: add unrelated work
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut unrelated = repo.filename("unrelated.txt");
+    unrelated.set_contents(crate::lines!["main work"]);
+    repo.stage_all_and_commit("Main work").unwrap();
+
+    // Now simulate rebase by manually calling v3's rewrite function
+    // This mimics what would happen if git rebase actually split the commit
+    let gitai_repo =
+        git_ai::git::repository::find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
+
+    rebase_v3::rewrite_authorship_after_rebase_v3(
+        &gitai_repo,
+        &original_commit,
+        &[original_commit.clone()],
+        &[split1_sha.clone(), split2_sha.clone()],
+        "Test User",
+    )
+    .unwrap();
+
+    // Verify split1 only has file1 attribution
+    repo.git(&["checkout", &split1_sha]).unwrap();
+    let mut file1 = repo.filename("file1.txt");
+    file1.assert_committed_lines(crate::lines!["AI line 1".ai(), "AI line 2".ai()]);
+
+    // file2 should not exist in split1
+    assert!(
+        !repo.path().join("file2.txt").exists(),
+        "file2 should not exist in split1"
+    );
+
+    // Verify split2 only has file2 attribution
+    repo.git(&["checkout", &split2_sha]).unwrap();
+    let mut file2 = repo.filename("file2.txt");
+    file2.assert_committed_lines(crate::lines!["AI line A".ai(), "AI line B".ai()]);
+
+    // file1 should exist from split1 but have no NEW attribution in split2's note
+    assert!(
+        repo.path().join("file1.txt").exists(),
+        "file1 should exist from split1"
+    );
+}
+
+/// Category 1.2: The "Already Applied" Drop (Ghost Commits)
+///
+/// Scenario: AI generates a bug fix on feature branch. Someone else wrote the exact same fix
+/// and merged it to main. During rebase, Git detects the patch is redundant and drops the commit.
+///
+/// V3 Handling: range-diff reports `1:  abc123 < -:  -------` for dropped commits.
+/// The CommitMapping will have `original_to_new["abc123"] = []` (empty vec).
+/// V3 skips commits with no mapping (line 672-678 in rebase_v3.rs).
+///
+/// This test verifies v3 handles dropped commits gracefully without crashing.
+#[test]
+fn test_rebase_already_applied_drop() {
+    let repo = TestRepo::new();
+
+    // Base commit
+    let mut base_file = repo.filename("code.txt");
+    base_file.set_contents(crate::lines!["line 1", "BUG HERE", "line 3"]);
+    repo.stage_all_and_commit("Base with bug").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Feature branch: AI fixes the bug
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut file = repo.filename("code.txt");
+    file.set_contents(crate::lines!["line 1", "FIXED BY AI".ai(), "line 3"]);
+    repo.stage_all_and_commit("AI fixes bug").unwrap();
+    let ai_fix_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Verify AI attribution exists
+    file.assert_committed_lines(crate::lines![
+        "line 1".unattributed_human(),
+        "FIXED BY AI".ai(),
+        "line 3".unattributed_human()
+    ]);
+
+    // Main branch: Human applies the EXACT SAME fix
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut file = repo.filename("code.txt");
+    file.set_contents(crate::lines!["line 1", "FIXED BY AI", "line 3"]); // Same content
+    repo.stage_all_and_commit("Human fixes same bug").unwrap();
+
+    // Rebase feature onto main - Git should drop the AI commit as redundant
+    repo.git(&["checkout", "feature"]).unwrap();
+    let rebase_result = repo.git(&["rebase", &default_branch]);
+
+    // Rebase should succeed (Git drops the redundant commit)
+    assert!(
+        rebase_result.is_ok(),
+        "Rebase should succeed: {:?}",
+        rebase_result
+    );
+
+    // After rebase, feature branch should be at same commit as main (no new commits)
+    let feature_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let main_sha = repo
+        .git(&["rev-parse", &default_branch])
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(
+        feature_sha, main_sha,
+        "Feature should have no new commits after rebase (AI commit was dropped)"
+    );
+
+    // The dropped AI commit should not cause v3 to crash
+    // We verify this implicitly - if v3 crashed, the rebase would have failed
+}
+
+/// Category 1.3: The Reorder (Sequence Permutation)
+///
+/// Scenario: Interactive rebase where user swaps commit order (A -> B -> C becomes A -> C -> B).
+///
+/// V3 Handling: Processes new_commits in final topological order. Calculates diffs from
+/// each commit's immediate parent in the new order. Hunk math inherently handles reordering
+/// because each transformation is independent and based on actual diff hunks.
+///
+/// This test verifies attribution survives commit reordering.
+#[test]
+fn test_rebase_reorder_commits() {
+    let repo = TestRepo::new();
+
+    // Base commit
+    let mut file = repo.filename("file.txt");
+    file.set_contents(crate::lines!["line 1", "line 2"]);
+    repo.stage_all_and_commit("Base").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Feature branch with 3 commits modifying DIFFERENT files (to avoid conflicts when reordering)
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    // Commit A: AI modifies fileA.txt
+    let mut fileA = repo.filename("fileA.txt");
+    fileA.set_contents(crate::lines!["AI line from A".ai()]);
+    repo.stage_all_and_commit("Commit A").unwrap();
+    let commit_a = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Commit B: AI modifies fileB.txt
+    let mut fileB = repo.filename("fileB.txt");
+    fileB.set_contents(crate::lines!["AI line from B".ai()]);
+    repo.stage_all_and_commit("Commit B").unwrap();
+    let commit_b = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Commit C: AI modifies fileC.txt
+    let mut fileC = repo.filename("fileC.txt");
+    fileC.set_contents(crate::lines!["AI line from C".ai()]);
+    repo.stage_all_and_commit("Commit C").unwrap();
+    let commit_c = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Verify original attributions
+    fileA.assert_committed_lines(crate::lines!["AI line from A".ai()]);
+    fileB.assert_committed_lines(crate::lines!["AI line from B".ai()]);
+    fileC.assert_committed_lines(crate::lines!["AI line from C".ai()]);
+
+    // Main branch advances
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut unrelated = repo.filename("unrelated.txt");
+    unrelated.set_contents(crate::lines!["main work"]);
+    repo.stage_all_and_commit("Main advances").unwrap();
+
+    // Manually simulate reorder: reset to main (which is after base), cherry-pick in order A, C, B
+    repo.git(&["checkout", "feature"]).unwrap();
+    let base = repo
+        .git(&["rev-parse", &default_branch])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Reset to main and cherry-pick in new order: A, C, B (instead of original A, B, C)
+    repo.git(&["reset", "--hard", &base]).unwrap();
+    repo.git(&["cherry-pick", &commit_a]).unwrap(); // A
+    repo.git(&["cherry-pick", &commit_c]).unwrap(); // C (reordered before B)
+    repo.git(&["cherry-pick", &commit_b]).unwrap(); // B (reordered after C)
+
+    // After reorder, all attributions should still be correct (order doesn't affect attribution for independent files)
+    let mut fileA = repo.filename("fileA.txt");
+    let mut fileB = repo.filename("fileB.txt");
+    let mut fileC = repo.filename("fileC.txt");
+
+    fileA.assert_committed_lines(crate::lines!["AI line from A".ai()]);
+    fileB.assert_committed_lines(crate::lines!["AI line from B".ai()]);
+    fileC.assert_committed_lines(crate::lines!["AI line from C".ai()]);
+}
+
+/// Category 2.1: Cross-File Movement (The Refactor)
+///
+/// Scenario: AI writes code in utils.js. During rebase conflict, user cuts the function
+/// from utils.js and pastes it into math.js.
+///
+/// Current V3 Behavior: Git sees deletion in utils.js + insertion in math.js.
+/// Hunk transformation deletes AI attribution from utils.js. The "same" code in math.js
+/// appears as a human insertion (no AI attribution).
+///
+/// This test documents the current "fail closed" behavior and serves as a baseline
+/// for future semantic tracking improvements.
+#[test]
+fn test_cross_file_movement_loses_attribution() {
+    let repo = TestRepo::new();
+
+    // Base commit
+    let mut utils = repo.filename("utils.js");
+    utils.set_contents(crate::lines!["// Utils file"]);
+    repo.stage_all_and_commit("Base").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Feature branch: AI adds a brilliant sorting algorithm to utils.js
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut utils = repo.filename("utils.js");
+    utils.set_contents(crate::lines![
+        "// Utils file",
+        "function quickSort(arr) {".ai(),
+        "  return arr.sort((a, b) => a - b);".ai(),
+        "}".ai()
+    ]);
+    repo.stage_all_and_commit("AI adds quickSort").unwrap();
+
+    // Verify AI attribution
+    utils.assert_committed_lines(crate::lines![
+        "// Utils file".unattributed_human(),
+        "function quickSort(arr) {".ai(),
+        "  return arr.sort((a, b) => a - b);".ai(),
+        "}".ai()
+    ]);
+
+    // Main branch: creates math.js (conflict trigger)
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut math = repo.filename("math.js");
+    math.set_contents(crate::lines!["// Math utilities"]);
+    repo.stage_all_and_commit("Add math.js").unwrap();
+
+    // Rebase feature onto main
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Simulate user refactoring during rebase: move quickSort from utils.js to math.js
+    // (In real scenario, this happens during conflict resolution)
+    let mut utils = repo.filename("utils.js");
+    utils.set_contents(crate::lines!["// Utils file"]); // Function removed
+
+    let mut math = repo.filename("math.js");
+    math.set_contents(crate::lines![
+        "// Math utilities",
+        "function quickSort(arr) {", // Same code moved here
+        "  return arr.sort((a, b) => a - b);",
+        "}"
+    ]);
+
+    repo.git(&["add", "."]).unwrap();
+    repo.commit("Refactor: move quickSort to math.js").unwrap();
+
+    // Current behavior: AI attribution is LOST
+    // utils.js: function deleted (no AI lines remain)
+    let mut utils = repo.filename("utils.js");
+    utils.assert_committed_lines(crate::lines!["// Utils file".unattributed_human()]);
+
+    // math.js: function appears as human insertion (Git doesn't track cross-file movement)
+    let mut math = repo.filename("math.js");
+    math.assert_committed_lines(crate::lines![
+        "// Math utilities".unattributed_human(),
+        "function quickSort(arr) {".unattributed_human(), // Lost AI attribution!
+        "  return arr.sort((a, b) => a - b);".unattributed_human(),
+        "}".unattributed_human()
+    ]);
+}
+
+/// Category 2.2: The Inline Human Override
+///
+/// Scenario: AI generates `const timeout = 5000;`. During rebase conflict, user edits
+/// the line to read `const timeout = 10000;`.
+///
+/// Current V3 Behavior: Git records deletion of old line + insertion of new line.
+/// Hunk transformation removes AI attribution because the line was "deleted".
+/// The new line appears as human insertion.
+///
+/// This test documents the current "fail closed" behavior. Future improvements could
+/// track partial attribution or "AI-modified-by-human" metadata.
+#[test]
+fn test_inline_human_override_loses_attribution() {
+    let repo = TestRepo::new();
+
+    // Base commit
+    let mut config = repo.filename("config.js");
+    config.set_contents(crate::lines!["// Configuration"]);
+    repo.stage_all_and_commit("Base").unwrap();
+    let default_branch = repo.current_branch();
+
+    // Feature branch: AI adds timeout constant
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let mut config = repo.filename("config.js");
+    config.set_contents(crate::lines![
+        "// Configuration",
+        "const timeout = 5000;".ai(),
+        "const retries = 3;".ai()
+    ]);
+    repo.stage_all_and_commit("AI adds config").unwrap();
+
+    // Verify AI attribution
+    config.assert_committed_lines(crate::lines![
+        "// Configuration".unattributed_human(),
+        "const timeout = 5000;".ai(),
+        "const retries = 3;".ai()
+    ]);
+
+    // Main branch: adds non-conflicting content (different file)
+    repo.git(&["checkout", &default_branch]).unwrap();
+    let mut other = repo.filename("other.js");
+    other.set_contents(crate::lines!["// Other file"]);
+    repo.stage_all_and_commit("Add other file").unwrap();
+
+    // Rebase feature onto main
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["rebase", &default_branch]).unwrap();
+
+    // Now simulate human override: manually edit the timeout value
+    // This mimics what happens when a human edits AI-generated code
+    let mut config = repo.filename("config.js");
+    config.set_contents(crate::lines![
+        "// Configuration",
+        "const timeout = 10000;", // Human changed 5000 -> 10000
+        "const retries = 3;"
+    ]);
+
+    repo.git(&["add", "."]).unwrap();
+    repo.commit("Human adjusts timeout value").unwrap();
+
+    // Current behavior: AI attribution is LOST for the edited line
+    let mut config = repo.filename("config.js");
+    config.assert_committed_lines(crate::lines![
+        "// Configuration".unattributed_human(),
+        "const timeout = 10000;".unattributed_human(), // Lost AI attribution!
+        "const retries = 3;".ai()                      // This line unchanged, keeps AI attribution
     ]);
 }

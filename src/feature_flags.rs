@@ -84,6 +84,7 @@ define_feature_flags!(
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
     transcript_streaming: transcript_streaming, debug = true, release = false,
+    rebase_v3: rebase_v3, debug = false, release = false,
 );
 
 impl FeatureFlags {
@@ -213,6 +214,7 @@ mod tests {
             git_hooks_enabled: false,
             git_hooks_externally_managed: false,
             transcript_streaming: true,
+            rebase_v3: false,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -233,6 +235,7 @@ mod tests {
             git_hooks_enabled: true,
             git_hooks_externally_managed: false,
             transcript_streaming: true,
+            rebase_v3: false,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);

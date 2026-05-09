@@ -135,6 +135,13 @@ pub enum SemanticEvent {
     RebaseAbort {
         head: String,
     },
+    /// Synthetic rebase detected via plumbing commands (commit-tree + update-ref).
+    /// Used by tools like Graphite that bypass git-rebase porcelain.
+    SyntheticRebase {
+        old_head: String,
+        new_head: String,
+        ref_name: String,
+    },
     CherryPickComplete {
         original_head: String,
         new_head: String,
