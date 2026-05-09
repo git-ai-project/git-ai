@@ -1109,7 +1109,7 @@ fn pair_commits_for_rewrite(
 
 /// Park orphaned notes when rebase produces no new commits but originals had attribution.
 /// This ensures metadata is never lost and provides a deterministic recovery path.
-fn park_orphaned_notes_for_recovery(
+pub(crate) fn park_orphaned_notes_for_recovery(
     repo: &Repository,
     original_head: &str,
     original_commits: &[String],

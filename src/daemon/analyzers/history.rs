@@ -140,7 +140,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
                     // Used by tools like Graphite: commit-tree + update-ref instead of git rebase
                     if ref_name.starts_with("refs/heads/")
                         && old_oid != new_oid
-                        && looks_like_synthetic_rebase(&old_oid, &new_oid)
+                        && looks_like_synthetic_rebase(&old_oid, &new_oid, cmd)
                     {
                         events.push(SemanticEvent::SyntheticRebase {
                             old_head: old_oid.clone(),
@@ -557,7 +557,7 @@ fn infer_reset_kind(args: &[String]) -> ResetKind {
 ///
 /// This heuristic is simple and catches most synthetic rebases. False positives are acceptable
 /// since v3 rebase attribution is idempotent - processing a non-rebase won't cause harm.
-fn looks_like_synthetic_rebase(old_oid: &str, new_oid: &str) -> bool {
+fn looks_like_synthetic_rebase(old_oid: &str, new_oid: &str, cmd: &NormalizedCommand) -> bool {
     // Fast path: if OIDs are the same, definitely not a rebase
     if old_oid == new_oid {
         return false;
@@ -568,19 +568,19 @@ fn looks_like_synthetic_rebase(old_oid: &str, new_oid: &str) -> bool {
         return false;
     }
 
-    // For now, we use a simple heuristic: any non-trivial ref update on a branch
-    // is potentially a synthetic rebase. This is conservative (catches more than
-    // just rebases) but safe - v3's rebase attribution will handle false positives
-    // gracefully by detecting that commits are already correctly attributed.
+    // Check if commit-tree was used in this command invocation.
+    // This is the hallmark of plumbing-based rebases (Graphite, Sapling, etc.).
+    // Tools that do synthetic rebases typically:
+    //   1. git merge-tree --write-tree (compute new tree)
+    //   2. git commit-tree (create new commit)
+    //   3. git update-ref (move branch pointer) <-- we're analyzing this command
     //
-    // Future enhancement: Could call `git merge-base --is-ancestor` to check if
-    // this is truly a non-fast-forward, non-rewind update. But that requires
-    // executing git commands, which is expensive for every update-ref call.
-    //
-    // The key insight: Graphite's synthetic rebases will ALWAYS trigger this,
-    // and false positives (like branch creation) won't hurt because v3 will
-    // simply find no original commits to map from.
-    true
+    // By checking observed_child_commands for "commit-tree", we avoid false positives
+    // on regular branch updates (fast-forward, force push, branch creation) while
+    // catching actual synthetic rebases.
+    cmd.observed_child_commands
+        .iter()
+        .any(|child| child == "commit-tree")
 }
 
 fn is_valid_git_oid(oid: &str) -> bool {

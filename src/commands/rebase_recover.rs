@@ -17,6 +17,13 @@ use crate::git::repository::Repository;
 /// * `repo` - Git repository
 /// * `original_head` - SHA of original HEAD before rebase (source of orphaned notes)
 pub fn recover_attribution(repo: &Repository, original_head: &str) -> Result<(), GitAiError> {
+    if original_head.len() < 8 {
+        return Err(GitAiError::Generic(format!(
+            "SHA too short (need at least 8 characters): '{}'",
+            original_head
+        )));
+    }
+
     eprintln!(
         "[git-ai] Attempting attribution recovery from {}...",
         &original_head[..8]

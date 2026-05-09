@@ -65,11 +65,31 @@ pub fn handle_git(args: &[String]) {
 
     // Respect --no-verify: user explicitly told Git to skip hooks.
     // Bypass ALL git-ai logic (no telemetry, no wrapper state, no snapshots).
-    // Silently log to metrics as "explicit_user_bypass".
-    if args.iter().any(|arg| arg == "--no-verify") {
-        tracing::debug!("--no-verify detected, bypassing git-ai logic");
-        let exit_status = proxy_to_git(args, false, None);
-        exit_with_status(exit_status);
+    // Only check for --no-verify on commands that actually support it, and ensure
+    // it's not being passed as a value to another option (e.g., git commit -m "--no-verify").
+    if let Some(command) = &parsed.command {
+        let commands_with_no_verify = ["commit", "merge", "push", "am", "cherry-pick"];
+        if commands_with_no_verify.contains(&command.as_str()) {
+            // Check if --no-verify appears as a standalone flag (not after -m, --message, etc.)
+            let mut skip_next = false;
+            for arg in args.iter() {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                // Skip values to options that take arguments
+                if arg == "-m" || arg == "--message" || arg == "-F" || arg == "--file" {
+                    skip_next = true;
+                    continue;
+                }
+                // Found actual --no-verify flag
+                if arg == "--no-verify" {
+                    tracing::debug!("--no-verify detected, bypassing git-ai logic");
+                    let exit_status = proxy_to_git(args, false, None);
+                    exit_with_status(exit_status);
+                }
+            }
+        }
     }
 
     // Read-only invocations don't need wrapper state (the daemon fast-paths

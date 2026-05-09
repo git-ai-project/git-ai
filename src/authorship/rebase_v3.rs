@@ -643,6 +643,16 @@ pub fn rewrite_authorship_after_rebase_v3(
 
     // Early exit: no commits to process
     if new_commits.is_empty() {
+        if !original_commits.is_empty() {
+            // Park orphaned notes for recovery (same as v2)
+            // This happens when rebase produces no new commits (e.g., already-applied patches)
+            crate::authorship::rebase_authorship::park_orphaned_notes_for_recovery(
+                repo,
+                _original_head,
+                original_commits,
+            )
+            .ok(); // Non-fatal: don't fail the rebase if parking fails
+        }
         tracing::debug!("rebase_v3: No new commits, nothing to do");
         return Ok(());
     }
