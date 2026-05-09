@@ -243,6 +243,7 @@ impl DaemonProcess {
             .env("GIT_AI_DAEMON_HOME", test_home)
             .env("GIT_AI_DAEMON_CONTROL_SOCKET", &control_socket_path)
             .env("GIT_AI_DAEMON_TRACE_SOCKET", &trace_socket_path)
+            .env("GIT_AI_ALLOW_ROOT", "true")
             .stdout(Stdio::null())
             .stderr(
                 stderr_log

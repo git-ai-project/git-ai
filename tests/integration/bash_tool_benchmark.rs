@@ -62,6 +62,7 @@ impl BenchDaemon {
             .env("GIT_AI_DAEMON_CONTROL_SOCKET", &control_socket)
             .env("GIT_AI_DAEMON_TRACE_SOCKET", &trace_socket)
             .env("GIT_AI_TEST_DB_PATH", &test_db)
+            .env("GIT_AI_ALLOW_ROOT", "true")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

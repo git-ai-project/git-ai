@@ -400,6 +400,7 @@ fn configure_test_daemon_env(
     command.env("GIT_AI_DAEMON_HOME", daemon_home);
     command.env("GIT_AI_DAEMON_CONTROL_SOCKET", control_socket_path);
     command.env("GIT_AI_DAEMON_TRACE_SOCKET", trace_socket_path);
+    command.env("GIT_AI_ALLOW_ROOT", "true");
 }
 
 struct DaemonGuard {

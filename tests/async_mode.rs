@@ -77,6 +77,7 @@ fn configure_test_daemon_env(command: &mut Command, repo: &TestRepo) {
         daemon_control_socket_path(repo),
     );
     command.env("GIT_AI_DAEMON_TRACE_SOCKET", daemon_trace_socket_path(repo));
+    command.env("GIT_AI_ALLOW_ROOT", "true");
 }
 
 fn write_daemon_config(repo: &TestRepo) {
@@ -87,7 +88,8 @@ fn write_daemon_config(repo: &TestRepo) {
         "git_path": real_git_executable(),
         "disable_auto_updates": true,
         "feature_flags": {
-            "git_hooks_enabled": false
+            "git_hooks_enabled": false,
+            "allow_root": true
         },
         "quiet": false
     });

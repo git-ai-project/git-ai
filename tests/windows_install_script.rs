@@ -172,6 +172,7 @@ fn configure_install_env(command: &mut Command, repo: &TestRepo) {
         "GIT_AI_DAEMON_TRACE_SOCKET",
         repo.daemon_trace_socket_path(),
     );
+    command.env("GIT_AI_ALLOW_ROOT", "true");
 }
 
 fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> CommandResult {
