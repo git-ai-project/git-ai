@@ -149,7 +149,7 @@ pub fn check_pid_status(pid: u32) -> PidStatus {
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if handle != 0 {
+    if !handle.is_null() {
         unsafe { CloseHandle(handle) };
         PidStatus::Alive
     } else {
@@ -171,7 +171,7 @@ fn is_elevated_windows() -> bool {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     unsafe {
-        let mut token_handle = 0;
+        let mut token_handle = std::ptr::null_mut();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle) == 0 {
             return false;
         }
@@ -203,12 +203,14 @@ fn respawn_deescalated_windows() -> Result<(), String> {
     };
 
     unsafe {
-        let mut token_handle = 0;
+        let mut token_handle = std::ptr::null_mut();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle) == 0 {
             return Err("failed to open process token".to_string());
         }
 
-        let mut linked_token = TOKEN_LINKED_TOKEN { LinkedToken: 0 };
+        let mut linked_token = TOKEN_LINKED_TOKEN {
+            LinkedToken: std::ptr::null_mut(),
+        };
         let mut return_length = 0u32;
         let result = GetTokenInformation(
             token_handle,
@@ -219,7 +221,7 @@ fn respawn_deescalated_windows() -> Result<(), String> {
         );
         CloseHandle(token_handle);
 
-        if result == 0 || linked_token.LinkedToken == 0 {
+        if result == 0 || linked_token.LinkedToken.is_null() {
             return Err("failed to get linked token".to_string());
         }
 
@@ -244,7 +246,7 @@ fn respawn_deescalated_windows() -> Result<(), String> {
             std::ptr::null(),
             cmd_line_wide.as_ptr() as *mut _,
             0,
-            std::ptr::null(),
+            std::ptr::null_mut(),
             std::ptr::null(),
             &startup_info,
             &mut process_info,
