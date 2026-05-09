@@ -31,10 +31,7 @@ pub fn check_and_deescalate_privileges() -> PrivilegeAction {
     if let (Some(uid), Some(gid)) = (sudo_uid, sudo_gid)
         && uid != 0
     {
-        eprintln!(
-            "[git-ai] dropping root privileges to uid={} gid={}",
-            uid, gid
-        );
+        eprintln!("[git-ai] dropping root privileges to invoking user");
 
         unsafe {
             let gid_c = gid as libc::gid_t;
