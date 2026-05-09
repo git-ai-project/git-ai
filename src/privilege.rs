@@ -58,6 +58,12 @@ pub fn check_and_deescalate_privileges() -> PrivilegeAction {
             }
         }
 
+        // Update HOME to the real user's home directory so DaemonConfig
+        // paths resolve correctly after de-escalation.
+        if let Some(home) = lookup_home_dir(uid) {
+            unsafe { std::env::set_var("HOME", &home) };
+        }
+
         // Clear SUDO_* env vars now that we've dropped privileges
         unsafe {
             std::env::remove_var("SUDO_UID");
@@ -81,6 +87,28 @@ pub fn check_and_deescalate_privileges() -> PrivilegeAction {
                 .to_string(),
         )
     }
+}
+
+#[cfg(unix)]
+fn lookup_home_dir(uid: u32) -> Option<String> {
+    use std::ffi::CStr;
+    let mut buf = vec![0u8; 4096];
+    let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let ret = unsafe {
+        libc::getpwuid_r(
+            uid as libc::uid_t,
+            &mut pwd,
+            buf.as_mut_ptr() as *mut _,
+            buf.len(),
+            &mut result,
+        )
+    };
+    if ret != 0 || result.is_null() {
+        return None;
+    }
+    let home = unsafe { CStr::from_ptr(pwd.pw_dir) };
+    home.to_str().ok().map(|s| s.to_string())
 }
 
 #[cfg(unix)]
@@ -225,8 +253,8 @@ fn respawn_deescalated_windows() -> Result<(), String> {
             return Err("failed to get linked token".to_string());
         }
 
-        let exe_path =
-            std::env::current_exe().map_err(|e| format!("failed to get current exe: {}", e))?;
+        let exe_path = crate::utils::current_git_ai_exe()
+            .map_err(|e| format!("failed to get current git-ai exe: {}", e))?;
         let args: Vec<String> = std::env::args().collect();
         let mut cmd_line = format!("\"{}\"", exe_path.display());
         for arg in &args[1..] {

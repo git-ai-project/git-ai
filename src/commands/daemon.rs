@@ -179,6 +179,16 @@ fn handle_run(args: &[String]) -> Result<(), String> {
     if has_flag(args, "--mode") {
         return Err("--mode is no longer supported; daemon always runs in write mode".to_string());
     }
+
+    // De-escalate privileges BEFORE resolving DaemonConfig, so paths resolve
+    // relative to the real user's HOME (not root's).
+    match crate::privilege::check_and_deescalate_privileges() {
+        crate::privilege::PrivilegeAction::Continue => {}
+        crate::privilege::PrivilegeAction::Refuse(msg) => {
+            return Err(msg);
+        }
+    }
+
     let config = daemon_config_from_env_or_default_paths()?;
     let runtime_dir = daemon_runtime_dir(&config)?;
     std::env::set_current_dir(&runtime_dir).map_err(|e| {

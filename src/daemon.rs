@@ -8432,14 +8432,6 @@ pub(crate) fn daemon_run_pending_self_update() -> DaemonSelfUpdateOutcome {
 pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction, GitAiError> {
     sanitize_git_env_for_daemon();
     disable_trace2_for_daemon_process();
-
-    match crate::privilege::check_and_deescalate_privileges() {
-        crate::privilege::PrivilegeAction::Continue => {}
-        crate::privilege::PrivilegeAction::Refuse(msg) => {
-            return Err(GitAiError::Generic(msg));
-        }
-    }
-
     config.ensure_parent_dirs()?;
     let _lock = DaemonLock::acquire(&config.lock_path)?;
     let _active_guard = DaemonProcessActiveGuard::enter();
