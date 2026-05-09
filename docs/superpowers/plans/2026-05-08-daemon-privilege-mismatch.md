@@ -4,7 +4,7 @@
 
 **Goal:** Prevent the daemon from entering an unrecoverable broken state when started by a privileged user and accessed by a non-privileged user.
 
-**Architecture:** Four-layer defense: (1) privilege de-escalation at daemon startup, (2) relaxed socket/lock permissions, (3) privilege mismatch detection with actionable errors, (4) dead process auto-recovery. A new `daemon_allow_root` feature flag controls whether true-root operation is permitted.
+**Architecture:** Four-layer defense: (1) privilege de-escalation at daemon startup, (2) relaxed socket/lock permissions, (3) privilege mismatch detection with actionable errors, (4) dead process auto-recovery. A new `allow_root` feature flag controls whether true-root operation is permitted.
 
 **Tech Stack:** Rust, `libc` crate (Unix privilege ops), `windows-sys` crate (Windows token APIs), existing `DaemonConfig`/`DaemonLock` infrastructure.
 
@@ -15,7 +15,7 @@
 | File | Responsibility |
 |------|---------------|
 | `src/privilege.rs` (create) | Cross-platform privilege detection and de-escalation logic |
-| `src/feature_flags.rs` (modify) | Add `daemon_allow_root` feature flag |
+| `src/feature_flags.rs` (modify) | Add `allow_root` feature flag |
 | `src/daemon.rs` (modify:8429-8435) | Call privilege check before lock acquisition in `run_daemon()` |
 | `src/daemon.rs` (modify:3456-3465) | Relax socket permissions from 0o600 to 0o660 |
 | `src/commands/daemon.rs` (modify:103-114,294-308) | Replace opaque "lock held" error with Layer 3+4 logic |
@@ -25,7 +25,7 @@
 
 ---
 
-### Task 1: Add `daemon_allow_root` Feature Flag
+### Task 1: Add `allow_root` Feature Flag
 
 **Files:**
 - Modify: `src/feature_flags.rs:80-87`
@@ -42,7 +42,7 @@ define_feature_flags!(
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
     transcript_streaming: transcript_streaming, debug = true, release = true,
     transcript_sweep: transcript_sweep, debug = true, release = false,
-    daemon_allow_root: daemon_allow_root, debug = false, release = false,
+    allow_root: allow_root, debug = false, release = false,
 );
 ```
 
@@ -55,7 +55,7 @@ Expected: PASS (the test checks debug defaults, new flag defaults to false)
 
 ```bash
 git add src/feature_flags.rs
-git commit -m "feat: add daemon_allow_root feature flag (default false)"
+git commit -m "feat: add allow_root feature flag (default false)"
 ```
 
 ---
@@ -90,14 +90,14 @@ pub fn check_and_deescalate_privileges() -> PrivilegeAction {
     }
 
     // True root (no SUDO_UID). Check feature flag.
-    if Config::get().get_feature_flags().daemon_allow_root {
-        eprintln!("[git-ai] warning: daemon running as root (daemon_allow_root=true)");
+    if Config::get().get_feature_flags().allow_root {
+        eprintln!("[git-ai] warning: daemon running as root (allow_root=true)");
         return PrivilegeAction::Continue;
     }
 
     PrivilegeAction::Refuse(
         "Refusing to start daemon as root without a real user to de-escalate to. \
-         Set GIT_AI_DAEMON_ALLOW_ROOT=true or add daemon_allow_root to config feature_flags to override."
+         Set GIT_AI_ALLOW_ROOT=true or add allow_root to config feature_flags to override."
             .to_string(),
     )
 }
@@ -163,13 +163,13 @@ pub fn check_and_deescalate_privileges() -> PrivilegeAction {
     // We're elevated. Try to respawn with linked token.
     // If --respawned flag is set, we already tried — don't loop.
     if std::env::args().any(|a| a == "--respawned") {
-        if Config::get().get_feature_flags().daemon_allow_root {
-            eprintln!("[git-ai] warning: daemon running with administrator privileges (daemon_allow_root=true)");
+        if Config::get().get_feature_flags().allow_root {
+            eprintln!("[git-ai] warning: daemon running with administrator privileges (allow_root=true)");
             return PrivilegeAction::Continue;
         }
         return PrivilegeAction::Refuse(
             "Refusing to start daemon with administrator privileges. \
-             Set GIT_AI_DAEMON_ALLOW_ROOT=true or add daemon_allow_root to config feature_flags to override."
+             Set GIT_AI_ALLOW_ROOT=true or add allow_root to config feature_flags to override."
                 .to_string(),
         );
     }
@@ -181,16 +181,16 @@ pub fn check_and_deescalate_privileges() -> PrivilegeAction {
         }
         Err(e) => {
             // No linked token available (true admin, not UAC split)
-            if Config::get().get_feature_flags().daemon_allow_root {
+            if Config::get().get_feature_flags().allow_root {
                 eprintln!(
-                    "[git-ai] warning: could not de-escalate ({}), running as administrator (daemon_allow_root=true)",
+                    "[git-ai] warning: could not de-escalate ({}), running as administrator (allow_root=true)",
                     e
                 );
                 return PrivilegeAction::Continue;
             }
             PrivilegeAction::Refuse(format!(
                 "Refusing to start daemon with administrator privileges (de-escalation failed: {}). \
-                 Set GIT_AI_DAEMON_ALLOW_ROOT=true or add daemon_allow_root to config feature_flags to override.",
+                 Set GIT_AI_ALLOW_ROOT=true or add allow_root to config feature_flags to override.",
                 e
             ))
         }

@@ -84,7 +84,7 @@ define_feature_flags!(
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,
     transcript_streaming: transcript_streaming, debug = true, release = true,
     transcript_sweep: transcript_sweep, debug = true, release = false,
-    daemon_allow_root: daemon_allow_root, debug = false, release = false,
+    allow_root: allow_root, debug = false, release = false,
 );
 
 impl FeatureFlags {
@@ -209,7 +209,7 @@ mod tests {
             git_hooks_externally_managed: false,
             transcript_streaming: true,
             transcript_sweep: true,
-            daemon_allow_root: false,
+            allow_root: false,
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
@@ -230,7 +230,7 @@ mod tests {
             git_hooks_externally_managed: false,
             transcript_streaming: true,
             transcript_sweep: true,
-            daemon_allow_root: false,
+            allow_root: false,
         };
         let cloned = flags.clone();
         assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);

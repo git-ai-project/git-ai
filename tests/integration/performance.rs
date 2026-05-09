@@ -21,7 +21,7 @@ fn setup() {
         git_hooks_externally_managed: false,
         transcript_streaming: true,
         transcript_sweep: true,
-        daemon_allow_root: false,
+        allow_root: false,
     };
 
     git_ai::config::Config::set_test_feature_flags(test_flags.clone());

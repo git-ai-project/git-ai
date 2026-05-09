@@ -70,14 +70,14 @@ pub fn check_and_deescalate_privileges() -> PrivilegeAction {
     }
 
     // True root (SUDO_UID=0, unparseable, or absent) — check feature flag
-    let allow_root = Config::get().get_feature_flags().daemon_allow_root;
+    let allow_root = Config::get().get_feature_flags().allow_root;
     if allow_root {
-        eprintln!("[git-ai] WARNING: running as root with daemon_allow_root=true");
+        eprintln!("[git-ai] WARNING: running as root with allow_root=true");
         PrivilegeAction::Continue
     } else {
         PrivilegeAction::Refuse(
             "git-ai daemon refuses to run as root. \
-             Set GIT_AI_DAEMON_ALLOW_ROOT=true to override."
+             Set GIT_AI_ALLOW_ROOT=true to override."
                 .to_string(),
         )
     }
@@ -105,14 +105,14 @@ pub fn check_and_deescalate_privileges() -> PrivilegeAction {
 
     // If --respawned is present, we already tried de-escalation
     if std::env::args().any(|arg| arg == "--respawned") {
-        let allow_root = Config::get().get_feature_flags().daemon_allow_root;
+        let allow_root = Config::get().get_feature_flags().allow_root;
         if allow_root {
-            eprintln!("[git-ai] WARNING: running elevated with daemon_allow_root=true");
+            eprintln!("[git-ai] WARNING: running elevated with allow_root=true");
             return PrivilegeAction::Continue;
         } else {
             return PrivilegeAction::Refuse(
                 "git-ai daemon refuses to run elevated. \
-                 Set GIT_AI_DAEMON_ALLOW_ROOT=true to override."
+                 Set GIT_AI_ALLOW_ROOT=true to override."
                     .to_string(),
             );
         }
@@ -125,17 +125,17 @@ pub fn check_and_deescalate_privileges() -> PrivilegeAction {
             std::process::exit(0);
         }
         Err(_) => {
-            let allow_root = Config::get().get_feature_flags().daemon_allow_root;
+            let allow_root = Config::get().get_feature_flags().allow_root;
             if allow_root {
                 eprintln!(
-                    "[git-ai] WARNING: running elevated with daemon_allow_root=true \
+                    "[git-ai] WARNING: running elevated with allow_root=true \
                      (de-escalation failed)"
                 );
                 PrivilegeAction::Continue
             } else {
                 PrivilegeAction::Refuse(
                     "git-ai daemon refuses to run elevated and de-escalation failed. \
-                     Set GIT_AI_DAEMON_ALLOW_ROOT=true to override."
+                     Set GIT_AI_ALLOW_ROOT=true to override."
                         .to_string(),
                 )
             }
