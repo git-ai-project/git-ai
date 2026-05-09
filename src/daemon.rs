@@ -3458,8 +3458,8 @@ fn set_socket_owner_only(path: &Path) -> Result<(), GitAiError> {
     {
         use std::os::unix::fs::PermissionsExt;
         // 0o660: allows same-user processes at different privilege levels to connect
-        // (e.g., root-started daemon accessible by non-root user). Safe because
-        // ~/.git-ai/ directory is already 0700.
+        // (e.g., root-started daemon accessible by non-root user). Access is
+        // bounded by parent directory permissions (home dir / .git-ai tree).
         fs::set_permissions(path, fs::Permissions::from_mode(0o660))?;
     }
     #[cfg(not(unix))]
