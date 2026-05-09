@@ -21,45 +21,52 @@ pub fn check_and_deescalate_privileges() -> PrivilegeAction {
     }
 
     // We are running as root. Try to de-escalate via SUDO_UID/SUDO_GID.
-    let sudo_uid = std::env::var("SUDO_UID").ok().and_then(|v| v.parse::<u32>().ok());
-    let sudo_gid = std::env::var("SUDO_GID").ok().and_then(|v| v.parse::<u32>().ok());
+    let sudo_uid = std::env::var("SUDO_UID")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok());
+    let sudo_gid = std::env::var("SUDO_GID")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok());
 
-    if let (Some(uid), Some(gid)) = (sudo_uid, sudo_gid) {
-        if uid != 0 {
-            eprintln!("[git-ai] dropping root privileges to uid={} gid={}", uid, gid);
+    if let (Some(uid), Some(gid)) = (sudo_uid, sudo_gid)
+        && uid != 0
+    {
+        eprintln!(
+            "[git-ai] dropping root privileges to uid={} gid={}",
+            uid, gid
+        );
 
-            unsafe {
-                let gid_c = gid as libc::gid_t;
-                if libc::setgroups(1, &gid_c) != 0 {
-                    return PrivilegeAction::Refuse(format!(
-                        "failed to setgroups: {}",
-                        std::io::Error::last_os_error()
-                    ));
-                }
-                if libc::setgid(gid_c) != 0 {
-                    return PrivilegeAction::Refuse(format!(
-                        "failed to setgid: {}",
-                        std::io::Error::last_os_error()
-                    ));
-                }
-                if libc::setuid(uid as libc::uid_t) != 0 {
-                    return PrivilegeAction::Refuse(format!(
-                        "failed to setuid: {}",
-                        std::io::Error::last_os_error()
-                    ));
-                }
+        unsafe {
+            let gid_c = gid as libc::gid_t;
+            if libc::setgroups(1, &gid_c) != 0 {
+                return PrivilegeAction::Refuse(format!(
+                    "failed to setgroups: {}",
+                    std::io::Error::last_os_error()
+                ));
             }
-
-            // Clear SUDO_* env vars now that we've dropped privileges
-            unsafe {
-                std::env::remove_var("SUDO_UID");
-                std::env::remove_var("SUDO_GID");
-                std::env::remove_var("SUDO_USER");
-                std::env::remove_var("SUDO_COMMAND");
+            if libc::setgid(gid_c) != 0 {
+                return PrivilegeAction::Refuse(format!(
+                    "failed to setgid: {}",
+                    std::io::Error::last_os_error()
+                ));
             }
-
-            return PrivilegeAction::Continue;
+            if libc::setuid(uid as libc::uid_t) != 0 {
+                return PrivilegeAction::Refuse(format!(
+                    "failed to setuid: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
         }
+
+        // Clear SUDO_* env vars now that we've dropped privileges
+        unsafe {
+            std::env::remove_var("SUDO_UID");
+            std::env::remove_var("SUDO_GID");
+            std::env::remove_var("SUDO_USER");
+            std::env::remove_var("SUDO_COMMAND");
+        }
+
+        return PrivilegeAction::Continue;
     }
 
     // True root (SUDO_UID=0, unparseable, or absent) — check feature flag
@@ -159,7 +166,7 @@ pub fn check_pid_status(pid: u32) -> PidStatus {
 fn is_elevated_windows() -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::Security::{
-        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -188,10 +195,10 @@ fn is_elevated_windows() -> bool {
 fn respawn_deescalated_windows() -> Result<(), String> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::Security::{
-        GetTokenInformation, TokenLinkedToken, TOKEN_LINKED_TOKEN, TOKEN_QUERY,
+        GetTokenInformation, TOKEN_LINKED_TOKEN, TOKEN_QUERY, TokenLinkedToken,
     };
     use windows_sys::Win32::System::Threading::{
-        CreateProcessWithTokenW, GetCurrentProcess, OpenProcessToken, LOGON_WITH_PROFILE,
+        CreateProcessWithTokenW, GetCurrentProcess, LOGON_WITH_PROFILE, OpenProcessToken,
         PROCESS_INFORMATION, STARTUPINFOW,
     };
 
@@ -216,8 +223,8 @@ fn respawn_deescalated_windows() -> Result<(), String> {
             return Err("failed to get linked token".to_string());
         }
 
-        let exe_path = std::env::current_exe()
-            .map_err(|e| format!("failed to get current exe: {}", e))?;
+        let exe_path =
+            std::env::current_exe().map_err(|e| format!("failed to get current exe: {}", e))?;
         let args: Vec<String> = std::env::args().collect();
         let mut cmd_line = format!("\"{}\"", exe_path.display());
         for arg in &args[1..] {

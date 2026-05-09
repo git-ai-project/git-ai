@@ -308,7 +308,9 @@ fn diagnose_blocked_daemon(config: &DaemonConfig) -> Result<(), String> {
             {
                 Err(format!(
                     "Daemon (pid {}) is running as a different user. To fix:\n  sudo kill {} && rm -f \"{}\"",
-                    pid, pid, config.lock_path.display()
+                    pid,
+                    pid,
+                    config.lock_path.display()
                 ))
             }
             #[cfg(windows)]
@@ -319,22 +321,18 @@ fn diagnose_blocked_daemon(config: &DaemonConfig) -> Result<(), String> {
                 ))
             }
         }
-        crate::privilege::PidStatus::Alive => {
-            Err(format!(
-                "daemon startup blocked: lock held at {} by process {} (alive but not responding on sockets)",
-                config.lock_path.display(),
-                pid
-            ))
-        }
+        crate::privilege::PidStatus::Alive => Err(format!(
+            "daemon startup blocked: lock held at {} by process {} (alive but not responding on sockets)",
+            config.lock_path.display(),
+            pid
+        )),
     }
 }
 
 fn force_remove_stale_files(config: &DaemonConfig) -> bool {
     let mut ok = true;
-    if config.lock_path.exists() {
-        if std::fs::remove_file(&config.lock_path).is_err() {
-            ok = false;
-        }
+    if config.lock_path.exists() && std::fs::remove_file(&config.lock_path).is_err() {
+        ok = false;
     }
     let _ = std::fs::remove_file(&config.control_socket_path);
     let _ = std::fs::remove_file(&config.trace_socket_path);
