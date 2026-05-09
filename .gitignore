@@ -41,3 +41,9 @@ fuzz/corpus/
 .worktrees/
 .claude/worktrees/
 
+# Documentation files (development notes, not for commit)
+PR_*.md
+*_IMPLEMENTATION*.md
+*_SUMMARY.md
+*_DESIGN.md
+*_RECOVERY.md
