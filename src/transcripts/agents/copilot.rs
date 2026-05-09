@@ -1,5 +1,6 @@
 //! GitHub Copilot agent implementation with sweep discovery.
 
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -60,15 +61,6 @@ impl CopilotAgent {
         paths
     }
 
-    /// Extract session ID from a Copilot transcript file path.
-    ///
-    /// Copilot files are typically named like: `<uuid>.json` or `<uuid>.jsonl`
-    fn extract_session_id(path: &Path) -> Option<String> {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("copilot:{}", s))
-    }
-
     /// Determine transcript format from file path.
     fn determine_format(path: &Path) -> TranscriptFormat {
         if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
@@ -100,9 +92,15 @@ impl Agent for CopilotAgent {
         let mut sessions = Vec::new();
 
         for path in paths {
-            let Some(session_id) = Self::extract_session_id(&path) else {
+            // Copilot chat_session_id from the hook payload matches the file stem
+            let Some(external_session_id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+            else {
                 continue;
             };
+            let session_id = generate_session_id(&external_session_id, "github-copilot");
 
             // Determine format from file extension (no I/O, just checking path)
             let format = Self::determine_format(&path);
@@ -124,14 +122,13 @@ impl Agent for CopilotAgent {
 
             let session = DiscoveredSession {
                 session_id,
-                agent_type: "copilot".to_string(),
+                tool: "github-copilot".to_string(),
                 transcript_path: path,
                 transcript_format: format,
                 watermark_type,
                 initial_watermark,
-                model: None,
-                tool: Some("GitHub Copilot".to_string()),
-                external_thread_id: None,
+                external_session_id,
+                external_parent_session_id: None,
             };
 
             sessions.push(session);
@@ -348,13 +345,6 @@ fn read_event_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_extract_session_id() {
-        let path = PathBuf::from("/home/user/.config/github-copilot/sessions/abc-123.json");
-        let session_id = CopilotAgent::extract_session_id(&path);
-        assert_eq!(session_id, Some("copilot:abc-123".to_string()));
-    }
 
     #[test]
     fn test_sweep_strategy() {

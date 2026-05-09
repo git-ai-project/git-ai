@@ -3,7 +3,7 @@
 //! Runs inside the daemon process using tokio. Accumulates telemetry envelopes
 //! and CAS payloads, then flushes them to their destinations every 3 seconds.
 
-use crate::api::{ApiClient, ApiContext, CasObject, CasUploadRequest, upload_metrics_with_retry};
+use crate::api::{ApiClient, ApiContext, CasObject, CasUploadRequest};
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
 use crate::metrics::db::MetricsDatabase;
@@ -306,16 +306,16 @@ fn flush_metrics(events: &[MetricEvent]) {
     let using_default_api = api_base_url == crate::config::DEFAULT_API_BASE_URL;
     let should_upload = !using_default_api || client.is_logged_in() || client.has_api_key();
 
+    let mut upload_failed = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+
     for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
-        let batch = MetricsBatch::new(chunk.to_vec());
-        if should_upload {
-            match upload_metrics_with_retry(&client, &batch, "daemon_telemetry") {
-                Ok(()) => continue,
-                Err(_) => {
-                    store_metrics_in_db(chunk);
-                    continue;
-                }
+        if should_upload && !upload_failed && std::time::Instant::now() < deadline {
+            let batch = MetricsBatch::new(chunk.to_vec());
+            if client.upload_metrics(&batch).is_ok() {
+                continue;
             }
+            upload_failed = true;
         }
         store_metrics_in_db(chunk);
     }

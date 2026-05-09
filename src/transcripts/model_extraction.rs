@@ -146,16 +146,10 @@ fn extract_model_from_opencode_sqlite(
     path: &Path,
     session_id: Option<&str>,
 ) -> Result<Option<String>, TranscriptError> {
-    let conn = match rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
+    let conn = match crate::transcripts::agents::opencode::open_sqlite_readonly(path) {
         Ok(c) => c,
         Err(_) => return Ok(None),
     };
-
-    // Cap SQLite page cache to ~2MB to prevent unbounded memory growth on large databases
-    let _ = conn.execute_batch("PRAGMA cache_size = -2000;");
 
     // OpenCode stores model info in two places depending on message role:
     //   User messages:     data.model.modelID  (nested object)

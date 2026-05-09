@@ -129,22 +129,6 @@ fn test_repository_path_methods() {
 }
 
 #[test]
-fn test_canonical_workdir() {
-    let test_repo = TestRepo::new();
-    let repo = find_repository(&[
-        "-C".to_string(),
-        test_repo.path().to_str().unwrap().to_string(),
-    ])
-    .unwrap();
-
-    let canonical = repo.canonical_workdir();
-    assert!(
-        canonical.is_absolute(),
-        "Canonical workdir should be absolute"
-    );
-}
-
-#[test]
 fn test_path_is_in_workdir() {
     let test_repo = TestRepo::new();
     let repo = find_repository(&[
@@ -311,49 +295,6 @@ fn test_head_target() {
         target, commit.commit_sha,
         "HEAD target should match commit SHA"
     );
-}
-
-#[test]
-fn test_reference_is_branch() {
-    let test_repo = TestRepo::new();
-
-    // Create commit
-    let mut file = test_repo.filename("test.txt");
-    file.set_contents(crate::lines!["content".human()]);
-    test_repo.stage_all_and_commit("Initial commit").unwrap();
-
-    let repo = find_repository(&[
-        "-C".to_string(),
-        test_repo.path().to_str().unwrap().to_string(),
-    ])
-    .unwrap();
-
-    let head = repo.head().unwrap();
-    assert!(head.is_branch(), "HEAD should be a branch");
-}
-
-#[test]
-fn test_find_reference() {
-    let test_repo = TestRepo::new();
-
-    // Create commit
-    let mut file = test_repo.filename("test.txt");
-    file.set_contents(crate::lines!["content".human()]);
-    test_repo.stage_all_and_commit("Initial commit").unwrap();
-
-    let repo = find_repository(&[
-        "-C".to_string(),
-        test_repo.path().to_str().unwrap().to_string(),
-    ])
-    .unwrap();
-
-    // Get full ref name from HEAD
-    let head = repo.head().unwrap();
-    let ref_name = head.name().unwrap();
-
-    // Find reference by name
-    let found_ref = repo.find_reference(ref_name);
-    assert!(found_ref.is_ok(), "Should find reference by full name");
 }
 
 // ============================================================================
@@ -993,105 +934,19 @@ fn test_commit_range_length() {
     .unwrap();
 
     // Create commit range
-    let range = git_ai::git::repository::CommitRange::new(
+    let range = git_ai::git::repository::CommitRange::new_infer_refname(
         &repo,
         first.commit_sha.clone(),
         third.commit_sha.clone(),
-        "HEAD".to_string(),
+        Some("HEAD".to_string()),
     )
     .unwrap();
 
-    let length = range.length();
+    let length = range.all_commits().len();
     assert_eq!(
         length, 2,
         "Range should contain 2 commits (second and third)"
     );
-}
-
-#[test]
-fn test_commit_range_iteration() {
-    let test_repo = TestRepo::new();
-
-    // Create commits
-    let mut file = test_repo.filename("test.txt");
-    file.set_contents(crate::lines!["line1".human()]);
-    let first = test_repo.stage_all_and_commit("First").unwrap();
-
-    file.set_contents(crate::lines!["line1".human(), "line2".human()]);
-    let second = test_repo.stage_all_and_commit("Second").unwrap();
-
-    file.set_contents(crate::lines![
-        "line1".human(),
-        "line2".human(),
-        "line3".human()
-    ]);
-    let third = test_repo.stage_all_and_commit("Third").unwrap();
-
-    let repo = find_repository(&[
-        "-C".to_string(),
-        test_repo.path().to_str().unwrap().to_string(),
-    ])
-    .unwrap();
-
-    let range = git_ai::git::repository::CommitRange::new(
-        &repo,
-        first.commit_sha,
-        third.commit_sha.clone(),
-        "HEAD".to_string(),
-    )
-    .unwrap();
-
-    let commits: Vec<_> = range.into_iter().collect();
-    assert_eq!(commits.len(), 2, "Should iterate over 2 commits");
-
-    // Commits should be in reverse chronological order (newest first)
-    assert_eq!(
-        commits[0].id(),
-        third.commit_sha,
-        "First commit should be newest"
-    );
-    assert_eq!(
-        commits[1].id(),
-        second.commit_sha,
-        "Second commit should be middle"
-    );
-}
-
-#[test]
-fn test_commit_range_all_commits() {
-    let test_repo = TestRepo::new();
-
-    // Create commits
-    let mut file = test_repo.filename("test.txt");
-    file.set_contents(crate::lines!["line1".human()]);
-    let first = test_repo.stage_all_and_commit("First").unwrap();
-
-    file.set_contents(crate::lines!["line1".human(), "line2".human()]);
-    test_repo.stage_all_and_commit("Second").unwrap();
-
-    file.set_contents(crate::lines![
-        "line1".human(),
-        "line2".human(),
-        "line3".human()
-    ]);
-    let third = test_repo.stage_all_and_commit("Third").unwrap();
-
-    let repo = find_repository(&[
-        "-C".to_string(),
-        test_repo.path().to_str().unwrap().to_string(),
-    ])
-    .unwrap();
-
-    let range = git_ai::git::repository::CommitRange::new(
-        &repo,
-        first.commit_sha,
-        third.commit_sha,
-        "HEAD".to_string(),
-    )
-    .unwrap();
-
-    let all_commits = range.all_commits();
-    assert_eq!(all_commits.len(), 2, "Should have 2 commits");
 }
 
 // ============================================================================
@@ -1414,113 +1269,6 @@ fn test_is_not_bare_repository() {
 }
 
 // ============================================================================
-// Author and Signature Tests
-// ============================================================================
-
-#[test]
-fn test_commit_author() {
-    let test_repo = TestRepo::new();
-
-    // Create commit
-    let mut file = test_repo.filename("test.txt");
-    file.set_contents(crate::lines!["content".human()]);
-    let commit = test_repo.stage_all_and_commit("Test commit").unwrap();
-
-    let repo = find_repository(&[
-        "-C".to_string(),
-        test_repo.path().to_str().unwrap().to_string(),
-    ])
-    .unwrap();
-
-    let commit_obj = repo.find_commit(commit.commit_sha).unwrap();
-    let author = commit_obj.author();
-
-    assert!(author.is_ok(), "Should get commit author");
-
-    let author = author.unwrap();
-    assert_eq!(author.name(), Some("Test User"), "Author name should match");
-    assert_eq!(
-        author.email(),
-        Some("test@example.com"),
-        "Author email should match"
-    );
-}
-
-#[test]
-fn test_commit_committer() {
-    let test_repo = TestRepo::new();
-
-    // Create commit
-    let mut file = test_repo.filename("test.txt");
-    file.set_contents(crate::lines!["content".human()]);
-    let commit = test_repo.stage_all_and_commit("Test commit").unwrap();
-
-    let repo = find_repository(&[
-        "-C".to_string(),
-        test_repo.path().to_str().unwrap().to_string(),
-    ])
-    .unwrap();
-
-    let commit_obj = repo.find_commit(commit.commit_sha).unwrap();
-    let committer = commit_obj.committer();
-
-    assert!(committer.is_ok(), "Should get commit committer");
-
-    let committer = committer.unwrap();
-    assert_eq!(
-        committer.name(),
-        Some("Test User"),
-        "Committer name should match"
-    );
-}
-
-#[test]
-fn test_commit_time() {
-    let test_repo = TestRepo::new();
-
-    // Create commit
-    let mut file = test_repo.filename("test.txt");
-    file.set_contents(crate::lines!["content".human()]);
-    let commit = test_repo.stage_all_and_commit("Test commit").unwrap();
-
-    let repo = find_repository(&[
-        "-C".to_string(),
-        test_repo.path().to_str().unwrap().to_string(),
-    ])
-    .unwrap();
-
-    let commit_obj = repo.find_commit(commit.commit_sha).unwrap();
-    let time = commit_obj.time();
-
-    assert!(time.is_ok(), "Should get commit time");
-
-    let time = time.unwrap();
-    assert!(time.seconds() > 0, "Commit time should be after epoch");
-}
-
-#[test]
-fn test_signature_when() {
-    let test_repo = TestRepo::new();
-
-    // Create commit
-    let mut file = test_repo.filename("test.txt");
-    file.set_contents(crate::lines!["content".human()]);
-    let commit = test_repo.stage_all_and_commit("Test commit").unwrap();
-
-    let repo = find_repository(&[
-        "-C".to_string(),
-        test_repo.path().to_str().unwrap().to_string(),
-    ])
-    .unwrap();
-
-    let commit_obj = repo.find_commit(commit.commit_sha).unwrap();
-    let author = commit_obj.author().unwrap();
-    let time = author.when();
-
-    assert!(time.seconds() > 0, "Author time should be after epoch");
-}
-
-// ============================================================================
 // Working Directory Operations Tests
 // ============================================================================
 
@@ -1554,57 +1302,6 @@ fn test_global_args_for_exec() {
         args.contains(&"--no-pager".to_string()),
         "Global args should include --no-pager"
     );
-}
-
-#[test]
-fn test_git_command_execution() {
-    let test_repo = TestRepo::new();
-
-    // Create commit
-    let mut file = test_repo.filename("test.txt");
-    file.set_contents(crate::lines!["content".human()]);
-    test_repo.stage_all_and_commit("Test").unwrap();
-
-    let repo = find_repository(&[
-        "-C".to_string(),
-        test_repo.path().to_str().unwrap().to_string(),
-    ])
-    .unwrap();
-
-    // Execute git command
-    let result = repo.git(&["rev-parse", "HEAD"]);
-    assert!(result.is_ok(), "Should execute git command");
-
-    let output = result.unwrap();
-    assert!(!output.is_empty(), "Output should not be empty");
-}
-
-// ============================================================================
-// References Iterator Tests
-// ============================================================================
-
-#[test]
-fn test_references_iterator() {
-    let test_repo = TestRepo::new();
-
-    // Create commit
-    let mut file = test_repo.filename("test.txt");
-    file.set_contents(crate::lines!["content".human()]);
-    test_repo.stage_all_and_commit("Test").unwrap();
-
-    let repo = find_repository(&[
-        "-C".to_string(),
-        test_repo.path().to_str().unwrap().to_string(),
-    ])
-    .unwrap();
-
-    let refs = repo.references();
-    assert!(refs.is_ok(), "Should get references iterator");
-
-    let refs = refs.unwrap();
-    let ref_list: Vec<_> = refs.collect();
-
-    assert!(!ref_list.is_empty(), "Should have at least one reference");
 }
 
 #[test]
@@ -1791,13 +1488,10 @@ crate::reuse_tests_in_worktree!(
     test_find_repository_in_nested_subdirectory,
     test_find_repository_for_bare_repo,
     test_repository_path_methods,
-    test_canonical_workdir,
     test_path_is_in_workdir,
     test_head_on_main_branch,
     test_head_on_feature_branch,
     test_head_target,
-    test_reference_is_branch,
-    test_find_reference,
     test_find_commit,
     test_commit_summary,
     test_commit_body,
@@ -1824,8 +1518,6 @@ crate::reuse_tests_in_worktree!(
     test_get_default_remote,
     test_get_default_remote_no_remotes,
     test_commit_range_length,
-    test_commit_range_iteration,
-    test_commit_range_all_commits,
     test_merge_base_linear_history,
     test_merge_base_with_branches,
     test_get_file_content,
@@ -1839,14 +1531,8 @@ crate::reuse_tests_in_worktree!(
     test_revparse_invalid_ref,
     test_is_bare_repository,
     test_is_not_bare_repository,
-    test_commit_author,
-    test_commit_committer,
-    test_commit_time,
-    test_signature_when,
     test_find_repository_in_path,
     test_global_args_for_exec,
-    test_git_command_execution,
-    test_references_iterator,
     test_resolve_author_spec,
     test_resolve_author_spec_not_found,
     test_empty_repository,

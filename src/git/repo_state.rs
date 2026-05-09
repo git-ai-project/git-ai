@@ -78,31 +78,8 @@ pub fn common_dir_for_repo_path(path: &Path) -> Option<PathBuf> {
 }
 
 fn read_ref_oid_from_paths(refname: &str, git_dir: &Path, common_dir: &Path) -> Option<String> {
-    for base in [common_dir, git_dir] {
-        let path = base.join(refname);
-        if let Ok(contents) = fs::read_to_string(&path) {
-            let candidate = contents.trim();
-            if is_valid_git_oid(candidate) {
-                return Some(candidate.to_string());
-            }
-        }
-    }
-
-    let packed_refs_path = common_dir.join("packed-refs");
-    let contents = fs::read_to_string(packed_refs_path).ok()?;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
-            continue;
-        }
-        let mut parts = line.split_whitespace();
-        let oid = parts.next()?;
-        let name = parts.next()?;
-        if name == refname && is_valid_git_oid(oid) {
-            return Some(oid.to_string());
-        }
-    }
-    None
+    let reader = crate::git::fast_reader::FastRefReader::new(git_dir, common_dir);
+    reader.try_resolve_ref(refname)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,31 +194,27 @@ pub fn resolve_worktree_head_reflog_old_oid_for_new_head(
 }
 
 pub fn read_head_state_for_worktree(worktree: &Path) -> Option<HeadState> {
+    use crate::git::fast_reader::{FastRefReader, HeadKind};
     let git_dir = git_dir_for_worktree(worktree)?;
     let common_dir = common_dir_for_git_dir(&git_dir)?;
-    let head_contents = fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    let head_contents = head_contents.trim();
-    if let Some(reference) = head_contents.strip_prefix("ref:") {
-        let reference = reference.trim();
-        let branch = reference
-            .strip_prefix("refs/heads/")
-            .map(|value| value.to_string());
-        let detached = branch.is_none();
-        let head = read_ref_oid_from_paths(reference, &git_dir, &common_dir);
-        return Some(HeadState {
-            head,
-            branch,
-            detached,
-        });
-    }
-    if is_valid_git_oid(head_contents) {
-        return Some(HeadState {
-            head: Some(head_contents.to_string()),
+    let reader = FastRefReader::new(&git_dir, &common_dir);
+    match reader.try_read_head()? {
+        HeadKind::Symbolic(refname) => {
+            let branch = refname.strip_prefix("refs/heads/").map(|s| s.to_string());
+            let detached = branch.is_none();
+            let head = reader.try_resolve_ref(&refname);
+            Some(HeadState {
+                head,
+                branch,
+                detached,
+            })
+        }
+        HeadKind::Detached(oid) => Some(HeadState {
+            head: Some(oid),
             branch: None,
             detached: true,
-        });
+        }),
     }
-    None
 }
 
 pub fn resolve_squash_source_head_from_git_dir(git_dir: &Path) -> Option<String> {

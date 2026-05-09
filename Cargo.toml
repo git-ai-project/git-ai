@@ -1,6 +1,6 @@
 [package]
 name = "git-ai"
-version = "1.3.5"
+version = "1.4.5"
 edition = "2024"
 default-run = "git-ai"
 
@@ -29,7 +29,8 @@ url = "2.5"
 glob = "0.3"
 ignore = "0.4"
 ratatui = "0.30"
-zip = { version = "8.5", default-features = false, features = ["deflate"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+flate2 = "1.1"
 crossterm = "0.29"
 keyring = { version = "3", features = ["sync-secret-service", "apple-native", "windows-native"], optional = true }
 once_cell = "1.21"

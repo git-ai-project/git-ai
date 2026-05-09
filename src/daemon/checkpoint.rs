@@ -1,18 +1,15 @@
 use crate::authorship::attribution_tracker::{
     Attribution, AttributionTracker, INITIAL_ATTRIBUTION_TS, LineAttribution,
 };
-use crate::authorship::authorship_log::PromptRecord;
-use crate::authorship::authorship_log_serialization::{
-    generate_session_id, generate_short_hash, generate_trace_id,
-};
+use crate::authorship::authorship_log_serialization::generate_session_id;
+#[cfg(not(any(test, feature = "test-support")))]
+use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::imara_diff_utils::{
     LineChangeTag, compute_line_changes, normalize_line_endings,
 };
 use crate::authorship::working_log::CheckpointKind;
 use crate::authorship::working_log::{Checkpoint, WorkingLogEntry};
-use crate::commands::blame::{GitAiBlameOptions, OLDEST_AI_BLAME_DATE};
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
-use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
 use crate::git::repository::Repository;
@@ -90,6 +87,41 @@ pub struct ResolvedCheckpointExecution {
     pub dirty_files: HashMap<String, String>,
 }
 
+/// Build EventAttributes for AgentUsage events.
+/// When repo is available, includes repo_url and branch. Always includes tool, model,
+/// session_id, and custom attributes.
+pub fn build_agent_usage_attrs(
+    repo: Option<&Repository>,
+    agent_id: &AgentId,
+) -> crate::metrics::EventAttributes {
+    let session_id = generate_session_id(&agent_id.id, &agent_id.tool);
+
+    let mut attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+        .session_id(session_id)
+        .tool(&agent_id.tool)
+        .model(&agent_id.model)
+        .external_session_id(&agent_id.id)
+        .custom_attributes_map(crate::config::Config::fresh().custom_attributes());
+
+    if let Some(repo) = repo {
+        if let Ok(Some(remote_name)) = repo.get_default_remote()
+            && let Ok(remotes) = repo.remotes_with_urls()
+            && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
+            && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
+        {
+            attrs = attrs.repo_url(normalized);
+        }
+
+        if let Ok(head_ref) = repo.head()
+            && let Ok(short_branch) = head_ref.shorthand()
+        {
+            attrs = attrs.branch(short_branch);
+        }
+    }
+
+    attrs
+}
+
 /// Build EventAttributes with repo metadata.
 /// Reused for both AgentUsage and Checkpoint events.
 fn build_checkpoint_attrs(
@@ -109,12 +141,10 @@ fn build_checkpoint_attrs(
 
     // Add AI-specific attributes
     if let Some(agent_id) = agent_id {
-        let prompt_id = generate_short_hash(&agent_id.id, &agent_id.tool);
         attrs = attrs
             .tool(&agent_id.tool)
             .model(&agent_id.model)
-            .prompt_id(prompt_id)
-            .external_prompt_id(&agent_id.id);
+            .external_session_id(&agent_id.id);
     }
 
     // Attach custom attributes using Config::fresh() to support runtime config updates
@@ -232,9 +262,7 @@ fn execute_resolved_checkpoint(
         hash_compute_start.elapsed()
     );
 
-    // Generate trace_id for this checkpoint - links all metrics events from this checkpoint together
-    // This allows server-side analysis of multi-file edits, tool invocations, and checkpoint chains
-    let trace_id = generate_trace_id();
+    let trace_id = checkpoint_request.trace_id.clone();
 
     let entries_start = Instant::now();
     let (entries, file_stats) = smol::block_on(get_checkpoint_entries(
@@ -472,25 +500,12 @@ fn get_previous_content_from_head(
     file_path: &str,
     head_tree_id: &Option<String>,
 ) -> String {
-    if let Some(tree_id) = head_tree_id.as_ref() {
-        let head_tree = repo.find_tree(tree_id.clone()).ok();
-        if let Some(tree) = head_tree {
-            match tree.get_path(std::path::Path::new(file_path)) {
-                Ok(entry) => {
-                    if let Ok(blob) = repo.find_blob(entry.id()) {
-                        let blob_content = blob.content().unwrap_or_default();
-                        String::from_utf8_lossy(&blob_content).to_string()
-                    } else {
-                        String::new()
-                    }
-                }
-                Err(_) => String::new(),
-            }
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
+    let Some(tree_id) = head_tree_id.as_ref() else {
+        return String::new();
+    };
+    match repo.read_file_blob_at_tree(tree_id, std::path::Path::new(file_path)) {
+        Ok(content) => String::from_utf8_lossy(&content).to_string(),
+        Err(_) => String::new(),
     }
 }
 
@@ -555,14 +570,11 @@ fn get_checkpoint_entry_for_file(
     ai_touched_files: Arc<HashSet<String>>,
     file_content_hash: String,
     author_id: Arc<String>,
-    head_commit_sha: Arc<Option<String>>,
     head_tree_id: Arc<Option<String>>,
     initial_attributions: Arc<HashMap<String, Vec<LineAttribution>>>,
     initial_snapshot_contents: Arc<HashMap<String, String>>,
     ts: u128,
 ) -> Result<Option<(WorkingLogEntry, FileLineStats)>, GitAiError> {
-    let feature_flag_inter_commit_move = Config::get().get_feature_flags().inter_commit_move;
-
     let file_start = Instant::now();
     let initial_attrs_for_file = initial_attributions
         .get(&file_path)
@@ -638,57 +650,10 @@ fn get_checkpoint_entry_for_file(
         let mut prev_line_attributions = initial_attrs_for_file.clone();
         let mut blamed_lines: HashSet<u32> = HashSet::new();
 
-        // Get blame for lines not in INITIAL
-        let blame_start = Instant::now();
-        let mut ai_blame_opts = GitAiBlameOptions::default();
-        #[allow(clippy::field_reassign_with_default)]
-        {
-            ai_blame_opts.no_output = true;
-            ai_blame_opts.return_human_authors_as_human = true;
-            ai_blame_opts.use_prompt_hashes_as_names = true;
-            ai_blame_opts.newest_commit = head_commit_sha.as_ref().clone();
-            ai_blame_opts.oldest_date = Some(*OLDEST_AI_BLAME_DATE);
-        }
-        let ai_blame = if feature_flag_inter_commit_move {
-            repo.blame(&file_path, &ai_blame_opts).ok()
-        } else {
-            // When skipping blame, default all lines to "human"
-            let total_lines = previous_content.lines().count() as u32;
-            let mut line_authors: HashMap<u32, String> = HashMap::new();
-            for line_num in 1..=total_lines {
-                line_authors.insert(line_num, CheckpointKind::Human.to_str());
-            }
-            let prompt_records: HashMap<String, PromptRecord> = HashMap::new();
-            Some((line_authors, prompt_records))
-        };
-
-        tracing::debug!(
-            "[BENCHMARK] Blame for {} took {:?}",
-            file_path,
-            blame_start.elapsed()
-        );
-
-        // Add blame results for lines NOT covered by INITIAL
-        if let Some((blames, _)) = ai_blame {
-            for (line, author) in blames {
-                blamed_lines.insert(line);
-                // Skip if INITIAL already has this line
-                if initial_covered_lines.contains(&line) {
-                    continue;
-                }
-
-                // Skip human-authored lines - they should remain human
-                if author == CheckpointKind::Human.to_str() {
-                    continue;
-                }
-
-                prev_line_attributions.push(LineAttribution {
-                    start_line: line,
-                    end_line: line,
-                    author_id: author.clone(),
-                    overrode: None,
-                });
-            }
+        // Default all previous-content lines to "human" (no cross-commit blame)
+        let prev_total_lines = previous_content.lines().count() as u32;
+        for line_num in 1..=prev_total_lines {
+            blamed_lines.insert(line_num);
         }
 
         // For AI checkpoints, attribute any lines NOT in INITIAL and NOT returned by ai_blame
@@ -862,7 +827,6 @@ async fn get_checkpoint_entries(
                 .and_then(|h| h.target().ok())
                 .and_then(|oid| repo.find_commit(oid).ok())
         });
-    let head_commit_sha = head_commit.as_ref().map(|c| c.id().to_string());
     let head_tree_id = head_commit
         .as_ref()
         .and_then(|c| c.tree().ok())
@@ -877,7 +841,6 @@ async fn get_checkpoint_entries(
     let previous_file_state_by_file = Arc::new(previous_file_state_by_file);
     let ai_touched_files = Arc::new(ai_touched_files);
     let author_id = Arc::new(author_id);
-    let head_commit_sha = Arc::new(head_commit_sha);
     let head_tree_id = Arc::new(head_tree_id);
     let initial_attributions = Arc::new(initial_attributions);
     let initial_snapshot_contents = Arc::new(initial_snapshot_contents);
@@ -893,7 +856,6 @@ async fn get_checkpoint_entries(
         let previous_file_state_by_file = Arc::clone(&previous_file_state_by_file);
         let ai_touched_files = Arc::clone(&ai_touched_files);
         let author_id = Arc::clone(&author_id);
-        let head_commit_sha = Arc::clone(&head_commit_sha);
         let head_tree_id = Arc::clone(&head_tree_id);
         let blob_sha = file_content_hashes
             .get(&file_path)
@@ -918,7 +880,6 @@ async fn get_checkpoint_entries(
                     ai_touched_files,
                     blob_sha,
                     author_id.clone(),
-                    head_commit_sha.clone(),
                     head_tree_id.clone(),
                     initial_attributions.clone(),
                     initial_snapshot_contents.clone(),

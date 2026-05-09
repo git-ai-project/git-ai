@@ -3,6 +3,7 @@ use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     PresetContext, TranscriptFormat, TranscriptSource,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
@@ -109,7 +110,7 @@ impl AgentPreset for CursorPreset {
                 id: conversation_id.clone(),
                 model: model.clone(),
             },
-            session_id: conversation_id.clone(),
+            external_session_id: conversation_id.clone(),
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(&cwd),
             metadata,
@@ -118,42 +119,38 @@ impl AgentPreset for CursorPreset {
         let transcript_source = transcript_path.map(|tp| TranscriptSource {
             path: PathBuf::from(tp),
             format: TranscriptFormat::CursorJsonl,
-            session_id: conversation_id.clone(),
-            external_thread_id: Some(conversation_id.clone()),
+            session_id: generate_session_id(&conversation_id, "cursor"),
+            external_session_id: conversation_id.clone(),
+            external_parent_session_id: None,
         });
 
         let is_pre = hook_event_name == "preToolUse";
+        let tool_use_id = parse::optional_str(&data, "tool_use_id")
+            .unwrap_or("bash")
+            .to_string();
 
         let event = match (tool_class, is_pre) {
-            (ToolClass::Bash, true) => {
-                let tool_use_id = parse::optional_str(&data, "tool_use_id")
-                    .unwrap_or("bash")
-                    .to_string();
-                ParsedHookEvent::PreBashCall(PreBashCall {
-                    context,
-                    tool_use_id,
-                })
-            }
-            (ToolClass::Bash, false) => {
-                let tool_use_id = parse::optional_str(&data, "tool_use_id")
-                    .unwrap_or("bash")
-                    .to_string();
-                ParsedHookEvent::PostBashCall(PostBashCall {
-                    context,
-                    tool_use_id,
-                    transcript_source,
-                })
-            }
+            (ToolClass::Bash, true) => ParsedHookEvent::PreBashCall(PreBashCall {
+                context,
+                tool_use_id,
+            }),
+            (ToolClass::Bash, false) => ParsedHookEvent::PostBashCall(PostBashCall {
+                context,
+                tool_use_id,
+                transcript_source,
+            }),
             (ToolClass::FileEdit, true) => ParsedHookEvent::PreFileEdit(PreFileEdit {
                 context,
                 file_paths,
                 dirty_files: None,
+                tool_use_id: Some(tool_use_id),
             }),
             (ToolClass::FileEdit, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
                 context,
                 file_paths,
                 dirty_files: None,
                 transcript_source,
+                tool_use_id: Some(tool_use_id),
             }),
             (ToolClass::Skip, _) => unreachable!("Skip handled above"),
         };
@@ -237,7 +234,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "cursor");
-                assert_eq!(e.context.session_id, "conv-123");
+                assert_eq!(e.context.external_session_id, "conv-123");
                 assert_eq!(e.context.trace_id, "t_test123456789a");
                 assert_eq!(e.context.agent_id.model, "claude-3-5-sonnet");
                 assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
@@ -265,7 +262,8 @@ mod tests {
                 assert!(e.transcript_source.is_some());
                 if let Some(ts) = &e.transcript_source {
                     assert_eq!(ts.format, TranscriptFormat::CursorJsonl);
-                    assert_eq!(ts.session_id, "conv-123");
+                    assert_eq!(ts.session_id, generate_session_id("conv-123", "cursor"));
+                    assert_eq!(ts.external_session_id, "conv-123");
                 }
             }
             _ => panic!("Expected PostFileEdit"),
@@ -403,7 +401,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "cursor");
-                assert_eq!(e.context.session_id, "conv-shell");
+                assert_eq!(e.context.external_session_id, "conv-shell");
                 assert_eq!(e.context.agent_id.model, "composer-2");
                 assert_eq!(
                     e.context.cwd,

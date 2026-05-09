@@ -119,7 +119,7 @@ function Invoke-CargoCaptured {
 }
 
 $fullRun = Invoke-CargoCaptured `
-    -Arguments @("test", "--", "--test-threads=$TestThreads") `
+    -Arguments @("test", "--no-fail-fast", "--", "--test-threads=$TestThreads") `
     -TimeoutSeconds $FullRunTimeoutSeconds `
     -Label "cargo test"
 

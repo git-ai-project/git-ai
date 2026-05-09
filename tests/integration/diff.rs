@@ -221,6 +221,20 @@ fn single_prompt_id(commit: &NewCommit) -> String {
     session_ids[0].clone()
 }
 
+fn session_id_from_prompt(prompt_id: &str) -> Option<String> {
+    if prompt_id.starts_with("s_") {
+        Some(
+            prompt_id
+                .split("::")
+                .next()
+                .unwrap_or(prompt_id)
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 fn prompt_id_for_line_in_commit(commit: &NewCommit, file_path: &str, line: u32) -> Option<String> {
     let file_attestation = commit
         .authorship_log
@@ -247,6 +261,7 @@ struct JsonHunk {
     end_line: u32,
     file_path: String,
     prompt_id: Option<String>,
+    session_id: Option<String>,
 }
 
 impl JsonHunk {
@@ -264,6 +279,7 @@ impl JsonHunk {
                 .prompt_id
                 .as_ref()
                 .map(|id| id.split("::").next().unwrap_or(id).to_string()),
+            session_id: self.session_id.clone(),
         }
     }
 }
@@ -301,6 +317,7 @@ fn parse_json_hunks(json: &Value, file_path: &str, hunk_kind: &str) -> Vec<JsonH
                 .expect("file_path should be a string")
                 .to_string(),
             prompt_id: hunk["prompt_id"].as_str().map(ToString::to_string),
+            session_id: hunk["session_id"].as_str().map(ToString::to_string),
         })
         .collect();
 
@@ -1734,6 +1751,7 @@ fn test_diff_json_blame_deletions_rename_with_edit_uses_old_path() {
             start_line: 2,
             end_line: 2,
             file_path: "rename_blame_new.txt".to_string(),
+            session_id: session_id_from_prompt(&old_line_prompt),
             prompt_id: Some(old_line_prompt),
         }],
         "deletion blame should resolve against the old path after rename+edit"
@@ -2303,6 +2321,7 @@ fn test_diff_json_deleted_hunks_line_level_exact_mapping() {
             end_line: 2,
             file_path: "deletion_exact.txt".to_string(),
             prompt_id: Some(source_prompt_id.clone()),
+            session_id: Some(source_prompt_id.clone()),
         },
         JsonHunk {
             commit_sha: deletion_commit.commit_sha.clone(),
@@ -2313,6 +2332,7 @@ fn test_diff_json_deleted_hunks_line_level_exact_mapping() {
             end_line: 3,
             file_path: "deletion_exact.txt".to_string(),
             prompt_id: None,
+            session_id: None,
         },
         JsonHunk {
             commit_sha: deletion_commit.commit_sha.clone(),
@@ -2322,7 +2342,8 @@ fn test_diff_json_deleted_hunks_line_level_exact_mapping() {
             start_line: 4,
             end_line: 4,
             file_path: "deletion_exact.txt".to_string(),
-            prompt_id: Some(source_prompt_id),
+            prompt_id: Some(source_prompt_id.clone()),
+            session_id: Some(source_prompt_id),
         },
     ];
     // Strip trace IDs from actual hunks for comparison (sessions format includes trace IDs)
@@ -2390,7 +2411,8 @@ fn test_diff_json_deleted_hunks_exact_replacement_from_known_origin_commit() {
             start_line: 1,
             end_line: 1,
             file_path: "replacement_exact.txt".to_string(),
-            prompt_id: Some(prompt_a),
+            prompt_id: Some(prompt_a.clone()),
+            session_id: Some(prompt_a),
         }]
     );
     assert_eq!(
@@ -2403,7 +2425,8 @@ fn test_diff_json_deleted_hunks_exact_replacement_from_known_origin_commit() {
             start_line: 1,
             end_line: 1,
             file_path: "replacement_exact.txt".to_string(),
-            prompt_id: Some(prompt_b),
+            prompt_id: Some(prompt_b.clone()),
+            session_id: Some(prompt_b),
         }]
     );
 
@@ -2478,6 +2501,7 @@ fn test_diff_json_deleted_hunks_strict_mixed_origins_and_contiguous_segments() {
             end_line: 1,
             file_path: "mixed_origin_exact.txt".to_string(),
             prompt_id: None,
+            session_id: None,
         }]
     );
     assert_eq!(
@@ -2491,6 +2515,7 @@ fn test_diff_json_deleted_hunks_strict_mixed_origins_and_contiguous_segments() {
                 start_line: 1,
                 end_line: 1,
                 file_path: "mixed_origin_exact.txt".to_string(),
+                session_id: session_id_from_prompt(&prompt_a_line_1),
                 prompt_id: Some(prompt_a_line_1),
             },
             JsonHunk {
@@ -2502,6 +2527,7 @@ fn test_diff_json_deleted_hunks_strict_mixed_origins_and_contiguous_segments() {
                 end_line: 2,
                 file_path: "mixed_origin_exact.txt".to_string(),
                 prompt_id: None,
+                session_id: None,
             },
             JsonHunk {
                 commit_sha: commit_c.commit_sha.clone(),
@@ -2511,6 +2537,7 @@ fn test_diff_json_deleted_hunks_strict_mixed_origins_and_contiguous_segments() {
                 start_line: 3,
                 end_line: 4,
                 file_path: "mixed_origin_exact.txt".to_string(),
+                session_id: session_id_from_prompt(&prompt_b),
                 prompt_id: Some(prompt_b),
             },
             JsonHunk {
@@ -2521,6 +2548,7 @@ fn test_diff_json_deleted_hunks_strict_mixed_origins_and_contiguous_segments() {
                 start_line: 5,
                 end_line: 5,
                 file_path: "mixed_origin_exact.txt".to_string(),
+                session_id: session_id_from_prompt(&prompt_a_line_5),
                 prompt_id: Some(prompt_a_line_5),
             },
         ]
@@ -2598,6 +2626,7 @@ fn test_diff_json_deleted_hunks_same_content_but_different_origins() {
                 start_line: 2,
                 end_line: 2,
                 file_path: "duplicate_content_exact.txt".to_string(),
+                session_id: session_id_from_prompt(&prompt_a),
                 prompt_id: Some(prompt_a),
             },
             JsonHunk {
@@ -2608,6 +2637,7 @@ fn test_diff_json_deleted_hunks_same_content_but_different_origins() {
                 start_line: 4,
                 end_line: 4,
                 file_path: "duplicate_content_exact.txt".to_string(),
+                session_id: session_id_from_prompt(&prompt_b),
                 prompt_id: Some(prompt_b),
             },
         ]

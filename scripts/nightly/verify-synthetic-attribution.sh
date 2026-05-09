@@ -77,24 +77,30 @@ SCHEMA=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d.g
 
 pass "schema_version = $SCHEMA"
 
-# ── 4. Prompts non-empty ──────────────────────────────────────────────────────
-PROMPT_COUNT=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(len(d.get('prompts', {})))" "$META_JSON")
-[ "$PROMPT_COUNT" -gt 0 ] \
-  || fail "No prompt sessions in authorship note — synthetic checkpoint data was not stored (check git-ai checkpoint pipeline)"
+# ── 4. Sessions non-empty ─────────────────────────────────────────────────────
+SESSION_COUNT=$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+prompts = len(d.get('prompts', {}))
+sessions = len(d.get('sessions', {}))
+print(prompts + sessions)
+" "$META_JSON")
+[ "$SESSION_COUNT" -gt 0 ] \
+  || fail "No prompt/session entries in authorship note — synthetic checkpoint data was not stored (check git-ai checkpoint pipeline)"
 
-pass "$PROMPT_COUNT prompt session(s) recorded"
+pass "$SESSION_COUNT AI session(s) recorded"
 
 # ── 5. Transcript messages captured ───────────────────────────────────────────
 MSG_COUNT=$(python3 -c "
 import json, sys
 d = json.load(open(sys.argv[1]))
-total = sum(len(r.get('messages', [])) for r in d.get('prompts', {}).values())
+total = sum(len(r.get('messages', [])) for r in list(d.get('prompts', {}).values()) + list(d.get('sessions', {}).values()))
 print(total)
 " "$META_JSON")
 if [ "$MSG_COUNT" -gt 0 ]; then
-  pass "Transcript captured: $MSG_COUNT message(s) recorded across all prompt sessions"
+  pass "Transcript captured: $MSG_COUNT message(s) recorded across all sessions"
 else
-  warn "No transcript messages in authorship note — conversation capture is only available in live agent runs, not synthetic checkpoints"
+  warn "No transcript messages in authorship note — sessions format does not embed transcripts inline"
 fi
 
 # ── 6. git-ai stats reports AI additions ──────────────────────────────────────

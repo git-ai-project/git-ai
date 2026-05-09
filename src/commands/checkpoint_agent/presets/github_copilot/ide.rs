@@ -3,6 +3,7 @@ use super::super::{
     ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit, PresetContext,
     TranscriptFormat, TranscriptSource,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::ToolClass;
 use crate::error::GitAiError;
@@ -58,7 +59,7 @@ pub(super) fn parse_legacy_extension_hooks(
                 id: session_id.clone(),
                 model: "unknown".to_string(),
             },
-            session_id,
+            external_session_id: session_id,
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd),
             metadata: HashMap::new(),
@@ -68,6 +69,7 @@ pub(super) fn parse_legacy_extension_hooks(
             context,
             file_paths: will_edit_filepaths,
             dirty_files,
+            tool_use_id: None,
         })]);
     }
 
@@ -112,7 +114,7 @@ pub(super) fn parse_legacy_extension_hooks(
             .flatten()
             .unwrap_or_else(|| "unknown".to_string()),
         },
-        session_id,
+        external_session_id: session_id,
         trace_id: trace_id.to_string(),
         cwd: PathBuf::from(cwd),
         metadata,
@@ -121,8 +123,9 @@ pub(super) fn parse_legacy_extension_hooks(
     let transcript_source = Some(TranscriptSource {
         path: PathBuf::from(chat_session_path),
         format: TranscriptFormat::CopilotSessionJson,
-        session_id: context.session_id.clone(),
-        external_thread_id: None,
+        session_id: generate_session_id(&context.external_session_id, "github-copilot"),
+        external_session_id: context.external_session_id.clone(),
+        external_parent_session_id: None,
     });
 
     Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
@@ -130,6 +133,7 @@ pub(super) fn parse_legacy_extension_hooks(
         file_paths: edited_filepaths,
         dirty_files,
         transcript_source,
+        tool_use_id: None,
     })])
 }
 
@@ -230,7 +234,7 @@ pub(super) fn parse_vscode_native_hooks(
                 })
                 .unwrap_or_else(|| "unknown".to_string()),
         },
-        session_id,
+        external_session_id: session_id,
         trace_id: trace_id.to_string(),
         cwd: PathBuf::from(cwd),
         metadata,
@@ -239,8 +243,9 @@ pub(super) fn parse_vscode_native_hooks(
     let transcript_source = transcript_path.map(|tp| TranscriptSource {
         path: PathBuf::from(tp),
         format: transcript_format,
-        session_id: context.session_id.clone(),
-        external_thread_id: None,
+        session_id: generate_session_id(&context.external_session_id, "github-copilot"),
+        external_session_id: context.external_session_id.clone(),
+        external_parent_session_id: None,
     });
 
     if hook_event_name == "PreToolUse" {
@@ -266,6 +271,7 @@ pub(super) fn parse_vscode_native_hooks(
                 context,
                 file_paths: extracted_paths,
                 dirty_files: Some(empty_dirty_files),
+                tool_use_id: Some(tool_use_id),
             })]);
         }
 
@@ -280,6 +286,7 @@ pub(super) fn parse_vscode_native_hooks(
             context,
             file_paths: extracted_paths,
             dirty_files,
+            tool_use_id: Some(tool_use_id),
         })]);
     }
 
@@ -304,6 +311,7 @@ pub(super) fn parse_vscode_native_hooks(
         file_paths: extracted_paths,
         dirty_files,
         transcript_source,
+        tool_use_id: Some(tool_use_id),
     })])
 }
 
@@ -453,7 +461,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "github-copilot");
-                assert_eq!(e.context.session_id, "sess-123");
+                assert_eq!(e.context.external_session_id, "sess-123");
                 assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
                 assert_eq!(
                     e.file_paths,
@@ -505,7 +513,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "github-copilot");
-                assert_eq!(e.context.session_id, "sess-123");
+                assert_eq!(e.context.external_session_id, "sess-123");
                 assert_eq!(
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
@@ -558,7 +566,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "github-copilot");
-                assert_eq!(e.context.session_id, "sess-456");
+                assert_eq!(e.context.external_session_id, "sess-456");
                 assert_eq!(
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
@@ -726,7 +734,7 @@ mod tests {
             .unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert_eq!(e.context.session_id, "unknown");
+                assert_eq!(e.context.external_session_id, "unknown");
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -816,7 +824,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert_eq!(e.context.session_id, "sess-789");
+                assert_eq!(e.context.external_session_id, "sess-789");
             }
             _ => panic!("Expected PreFileEdit"),
         }

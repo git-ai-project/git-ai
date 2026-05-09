@@ -1,5 +1,6 @@
 //! Continue CLI agent implementation with sweep discovery.
 
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -47,15 +48,6 @@ impl ContinueAgent {
 
         paths
     }
-
-    /// Extract session ID from a Continue session file path.
-    ///
-    /// Continue files are typically named like: `<session-name>.json`
-    fn extract_session_id(path: &Path) -> Option<String> {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("continue:{}", s))
-    }
 }
 
 impl Default for ContinueAgent {
@@ -78,20 +70,25 @@ impl Agent for ContinueAgent {
         let mut sessions = Vec::new();
 
         for path in paths {
-            let Some(session_id) = Self::extract_session_id(&path) else {
+            // Continue session_id from the hook payload matches the file stem
+            let Some(external_session_id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+            else {
                 continue;
             };
+            let session_id = generate_session_id(&external_session_id, "continue-cli");
 
             let session = DiscoveredSession {
                 session_id,
-                agent_type: "continue-cli".to_string(),
+                tool: "continue-cli".to_string(),
                 transcript_path: path,
                 transcript_format: TranscriptFormat::ContinueJson,
                 watermark_type: WatermarkType::RecordIndex,
                 initial_watermark: Box::new(RecordIndexWatermark::new(0)),
-                model: None,
-                tool: Some("Continue".to_string()),
-                external_thread_id: None,
+                external_session_id,
+                external_parent_session_id: None,
             };
 
             sessions.push(session);

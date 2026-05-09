@@ -4,6 +4,8 @@
 //! 1. **Checkpoint notifications** (Immediate priority, <100ms) - fired when `git-ai checkpoint` is called
 //! 2. **Periodic sweeps** (Low priority, every 30min) - agent-specific discovery of all sessions
 
+use crate::authorship::authorship_log_serialization::{generate_session_id, generate_trace_id};
+use crate::config;
 use crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle;
 use crate::metrics::{EventAttributes, MetricEvent, PosEncoded, SessionEventValues};
 use crate::transcripts::db::TranscriptsDatabase;
@@ -33,7 +35,8 @@ pub(super) enum Priority {
 pub(super) struct ProcessingTask {
     pub(super) priority: Priority,
     pub(super) session_id: String,
-    pub(super) agent_type: String, // NEW: needed to get the right Agent impl
+    pub(super) tool: String,
+    pub(super) trace_id: Option<String>,
     pub(super) canonical_path: PathBuf,
     pub(super) retry_count: u32,
     #[cfg_attr(test, serde(skip))]
@@ -68,13 +71,13 @@ impl TranscriptWorkerHandle {
     pub fn notify_checkpoint(
         &self,
         session_id: String,
-        agent_type: String,
+        tool: String,
         trace_id: String,
         transcript_path: PathBuf,
     ) {
         let notification = CheckpointNotification {
             session_id,
-            agent_type,
+            tool,
             trace_id,
             transcript_path,
         };
@@ -85,8 +88,7 @@ impl TranscriptWorkerHandle {
 #[derive(Debug, Clone)]
 struct CheckpointNotification {
     session_id: String,
-    agent_type: String, // NEW: extracted from CheckpointRequest
-    #[allow(dead_code)] // May be used in future for enhanced telemetry
+    tool: String,
     trace_id: String,
     transcript_path: PathBuf,
 }
@@ -130,6 +132,8 @@ impl TranscriptWorker {
     async fn run(mut self) {
         tracing::info!("transcript worker started");
 
+        let sweep_enabled = config::Config::get().get_feature_flags().transcript_sweep;
+
         let mut processing_ticker = interval(PROCESSING_TICK_INTERVAL);
         let mut sweep_ticker = interval(Duration::from_secs(30 * 60)); // NEW: 30 minutes
 
@@ -138,7 +142,7 @@ impl TranscriptWorker {
         sweep_ticker.tick().await;
 
         // Run initial sweep on startup
-        if let Err(e) = self.run_sweep().await {
+        if sweep_enabled && let Err(e) = self.run_sweep().await {
             tracing::error!(error = %e, "initial sweep failed");
         }
 
@@ -153,7 +157,9 @@ impl TranscriptWorker {
                     self.process_next_task().await;
                 }
                 _ = sweep_ticker.tick() => {  // NEW: sweep ticker
-                    if let Err(e) = self.run_sweep().await {
+                    if sweep_enabled
+                        && let Err(e) = self.run_sweep().await
+                    {
                         tracing::error!(error = %e, "sweep failed");
                     }
                 }
@@ -184,7 +190,8 @@ impl TranscriptWorker {
             self.priority_queue.push(ProcessingTask {
                 priority: Priority::Low,
                 session_id: session.session_id,
-                agent_type: session.agent_type,
+                tool: session.tool,
+                trace_id: None,
                 canonical_path: session.canonical_path,
                 retry_count: 0,
                 next_retry_at: None,
@@ -207,7 +214,8 @@ impl TranscriptWorker {
         self.priority_queue.push(ProcessingTask {
             priority: Priority::Immediate,
             session_id: notification.session_id,
-            agent_type: notification.agent_type, // NEW: pass through agent_type
+            tool: notification.tool,
+            trace_id: Some(notification.trace_id),
             canonical_path,
             retry_count: 0,
             next_retry_at: None,
@@ -296,9 +304,9 @@ impl TranscriptWorker {
                 message: format!("session not found: {}", task.session_id),
             })?;
 
-        let agent = crate::transcripts::agent::get_agent(&task.agent_type).ok_or_else(|| {
+        let agent = crate::transcripts::agent::get_agent(&task.tool).ok_or_else(|| {
             TranscriptError::Fatal {
-                message: format!("unknown agent type: {}", task.agent_type),
+                message: format!("unknown agent type: {}", task.tool),
             }
         })?;
 
@@ -307,9 +315,16 @@ impl TranscriptWorker {
         let mut current_watermark = watermark_type.deserialize(&session.watermark_value)?;
         let path = PathBuf::from(&session.transcript_path);
         let mut total_events = 0usize;
-        let attrs_sparse = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+        let parent_session_id = session
+            .external_parent_session_id
+            .as_ref()
+            .map(|ext_pid| generate_session_id(ext_pid, &session.tool));
+        let base_attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
             .session_id(session.session_id.clone())
-            .to_sparse();
+            .tool(&session.tool)
+            .external_session_id(session.external_session_id.clone())
+            .external_parent_session_id_opt(session.external_parent_session_id.clone())
+            .parent_session_id_opt(parent_session_id);
 
         loop {
             let batch = agent.read_incremental(&path, current_watermark, &session.session_id)?;
@@ -325,9 +340,12 @@ impl TranscriptWorker {
                 .events
                 .into_iter()
                 .map(|raw_event| {
+                    let (eid, pid, tid) = agent.extract_event_ids(&raw_event);
+                    let trace_id = task.trace_id.clone().unwrap_or_else(generate_trace_id);
+                    let attrs_sparse = base_attrs.clone().trace_id(trace_id).to_sparse();
                     MetricEvent::from_values(
-                        SessionEventValues::new(raw_event),
-                        attrs_sparse.clone(),
+                        SessionEventValues::with_ids(raw_event, eid, pid, tid),
+                        attrs_sparse,
                     )
                 })
                 .collect();

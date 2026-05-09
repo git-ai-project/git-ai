@@ -2,6 +2,7 @@ use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     PresetContext, TranscriptFormat, TranscriptSource,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
@@ -138,7 +139,7 @@ impl AgentPreset for PiPreset {
                 id: session_id.clone(),
                 model: model_final,
             },
-            session_id,
+            external_session_id: session_id,
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(&cwd),
             metadata,
@@ -149,8 +150,9 @@ impl AgentPreset for PiPreset {
             Some(TranscriptSource {
                 path,
                 format: TranscriptFormat::PiJsonl,
-                session_id: context.session_id.clone(),
-                external_thread_id: None,
+                session_id: generate_session_id(&context.external_session_id, "pi"),
+                external_session_id: context.external_session_id.clone(),
+                external_parent_session_id: None,
             })
         };
 
@@ -168,6 +170,7 @@ impl AgentPreset for PiPreset {
                     context,
                     file_paths: will_edit_filepaths.into_iter().map(PathBuf::from).collect(),
                     dirty_files: dirty,
+                    tool_use_id: tool_use_id.clone(),
                 })
             }
             PiHookEvent::AfterEdit => {
@@ -181,6 +184,7 @@ impl AgentPreset for PiPreset {
                     file_paths: edited_filepaths.into_iter().map(PathBuf::from).collect(),
                     dirty_files: dirty,
                     transcript_source,
+                    tool_use_id,
                 })
             }
             PiHookEvent::BeforeCommand => ParsedHookEvent::PreBashCall(PreBashCall {
@@ -231,7 +235,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "pi");
-                assert_eq!(e.context.session_id, "pi-sess-123");
+                assert_eq!(e.context.external_session_id, "pi-sess-123");
                 assert_eq!(e.context.agent_id.model, "claude-sonnet-4-5");
                 assert_eq!(e.context.cwd, PathBuf::from("/tmp/project"));
                 assert_eq!(
@@ -302,7 +306,7 @@ mod tests {
         match &events[0] {
             ParsedHookEvent::PreBashCall(e) => {
                 assert_eq!(e.context.agent_id.tool, "pi");
-                assert_eq!(e.context.session_id, "pi-sess-789");
+                assert_eq!(e.context.external_session_id, "pi-sess-789");
                 assert_eq!(e.tool_use_id, "tu-abc123");
             }
             _ => panic!("Expected PreBashCall"),

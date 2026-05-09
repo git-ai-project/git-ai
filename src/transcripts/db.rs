@@ -33,7 +33,7 @@ const MIGRATIONS: &[&str] = &[
         last_error TEXT
     );
 
-    CREATE INDEX IF NOT EXISTS idx_sessions_agent_type ON sessions(agent_type);
+    CREATE INDEX IF NOT EXISTS idx_sessions_tool ON sessions(tool);
     CREATE INDEX IF NOT EXISTS idx_sessions_last_processed ON sessions(last_processed_at);
     CREATE INDEX IF NOT EXISTS idx_sessions_errors ON sessions(processing_errors) WHERE processing_errors > 0;
     CREATE INDEX IF NOT EXISTS idx_sessions_transcript_path ON sessions(transcript_path);
@@ -47,20 +47,50 @@ const MIGRATIONS: &[&str] = &[
 
     INSERT INTO schema_version (version) VALUES (1);
     "#,
+    // Version 2: Recreate sessions with external_session_id/external_parent_session_id,
+    // drop model/tool columns and processing_stats table.
+    // No data migration needed — transcripts feature has not shipped to production yet.
+    r#"
+    DROP TABLE IF EXISTS processing_stats;
+    DROP TABLE IF EXISTS sessions;
+
+    CREATE TABLE sessions (
+        session_id TEXT PRIMARY KEY,
+        tool TEXT NOT NULL,
+        transcript_path TEXT NOT NULL,
+        transcript_format TEXT NOT NULL,
+        watermark_type TEXT NOT NULL,
+        watermark_value TEXT NOT NULL,
+        external_session_id TEXT NOT NULL,
+        external_parent_session_id TEXT,
+        first_seen_at INTEGER NOT NULL,
+        last_processed_at INTEGER NOT NULL,
+        last_known_size INTEGER NOT NULL DEFAULT 0,
+        last_modified INTEGER,
+        processing_errors INTEGER DEFAULT 0,
+        last_error TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_sessions_tool ON sessions(tool);
+    CREATE INDEX IF NOT EXISTS idx_sessions_last_processed ON sessions(last_processed_at);
+    CREATE INDEX IF NOT EXISTS idx_sessions_errors ON sessions(processing_errors) WHERE processing_errors > 0;
+    CREATE INDEX IF NOT EXISTS idx_sessions_transcript_path ON sessions(transcript_path);
+
+    INSERT INTO schema_version (version) VALUES (2);
+    "#,
 ];
 
 /// Record representing a session in the database.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub session_id: String,
-    pub agent_type: String,
+    pub tool: String,
     pub transcript_path: String,
     pub transcript_format: String,
     pub watermark_type: String,
     pub watermark_value: String,
-    pub model: Option<String>,
-    pub tool: Option<String>,
-    pub external_thread_id: Option<String>,
+    pub external_session_id: String,
+    pub external_parent_session_id: Option<String>,
     pub first_seen_at: i64,
     pub last_processed_at: i64,
     pub last_known_size: i64,
@@ -172,89 +202,57 @@ impl TranscriptsDatabase {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        // Begin transaction to ensure both inserts succeed or both fail
-        conn.execute_batch("BEGIN")
-            .map_err(|e| TranscriptError::Fatal {
-                message: format!("Failed to begin transaction: {}", e),
-            })?;
+        conn.execute(
+            r#"
+            INSERT INTO sessions (
+                session_id, tool, transcript_path, transcript_format,
+                watermark_type, watermark_value, external_session_id,
+                external_parent_session_id,
+                first_seen_at, last_processed_at, last_known_size, last_modified,
+                processing_errors, last_error
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "#,
+            params![
+                record.session_id,
+                record.tool,
+                record.transcript_path,
+                record.transcript_format,
+                record.watermark_type,
+                record.watermark_value,
+                record.external_session_id,
+                record.external_parent_session_id,
+                record.first_seen_at,
+                record.last_processed_at,
+                record.last_known_size,
+                record.last_modified,
+                record.processing_errors,
+                record.last_error,
+            ],
+        )
+        .map_err(|e| TranscriptError::Fatal {
+            message: format!("Failed to insert session: {}", e),
+        })?;
 
-        let result = (|| {
-            conn.execute(
-                r#"
-                INSERT INTO sessions (
-                    session_id, agent_type, transcript_path, transcript_format,
-                    watermark_type, watermark_value, model, tool, external_thread_id,
-                    first_seen_at, last_processed_at, last_known_size, last_modified,
-                    processing_errors, last_error
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-                "#,
-                params![
-                    record.session_id,
-                    record.agent_type,
-                    record.transcript_path,
-                    record.transcript_format,
-                    record.watermark_type,
-                    record.watermark_value,
-                    record.model,
-                    record.tool,
-                    record.external_thread_id,
-                    record.first_seen_at,
-                    record.last_processed_at,
-                    record.last_known_size,
-                    record.last_modified,
-                    record.processing_errors,
-                    record.last_error,
-                ],
-            )
-            .map_err(|e| TranscriptError::Fatal {
-                message: format!("Failed to insert session: {}", e),
-            })?;
-
-            // Initialize stats record
-            conn.execute(
-                "INSERT INTO processing_stats (session_id, total_events, total_bytes) VALUES (?1, 0, 0)",
-                params![record.session_id],
-            )
-            .map_err(|e| TranscriptError::Fatal {
-                message: format!("Failed to insert processing stats: {}", e),
-            })?;
-
-            Ok(())
-        })();
-
-        match result {
-            Ok(_) => {
-                conn.execute_batch("COMMIT")
-                    .map_err(|e| TranscriptError::Fatal {
-                        message: format!("Failed to commit transaction: {}", e),
-                    })?;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
+        Ok(())
     }
 
     /// Helper to map a row to a SessionRecord.
     fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<SessionRecord> {
         Ok(SessionRecord {
             session_id: row.get(0)?,
-            agent_type: row.get(1)?,
+            tool: row.get(1)?,
             transcript_path: row.get(2)?,
             transcript_format: row.get(3)?,
             watermark_type: row.get(4)?,
             watermark_value: row.get(5)?,
-            model: row.get(6)?,
-            tool: row.get(7)?,
-            external_thread_id: row.get(8)?,
-            first_seen_at: row.get(9)?,
-            last_processed_at: row.get(10)?,
-            last_known_size: row.get(11)?,
-            last_modified: row.get(12)?,
-            processing_errors: row.get(13)?,
-            last_error: row.get(14)?,
+            external_session_id: row.get(6)?,
+            external_parent_session_id: row.get(7)?,
+            first_seen_at: row.get(8)?,
+            last_processed_at: row.get(9)?,
+            last_known_size: row.get(10)?,
+            last_modified: row.get(11)?,
+            processing_errors: row.get(12)?,
+            last_error: row.get(13)?,
         })
     }
 
@@ -266,8 +264,9 @@ impl TranscriptsDatabase {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         conn.query_row(
             r#"
-            SELECT session_id, agent_type, transcript_path, transcript_format,
-                   watermark_type, watermark_value, model, tool, external_thread_id,
+            SELECT session_id, tool, transcript_path, transcript_format,
+                   watermark_type, watermark_value, external_session_id,
+                   external_parent_session_id,
                    first_seen_at, last_processed_at, last_known_size, last_modified,
                    processing_errors, last_error
             FROM sessions WHERE session_id = ?1
@@ -376,54 +375,22 @@ impl TranscriptsDatabase {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        // Begin transaction to delete both session and stats
-        conn.execute_batch("BEGIN")
-            .map_err(|e| TranscriptError::Fatal {
-                message: format!("Failed to begin transaction: {}", e),
-            })?;
-
-        let result = (|| {
-            // Delete processing stats first (foreign key constraint)
-            conn.execute(
-                "DELETE FROM processing_stats WHERE session_id = ?1",
+        let rows_changed = conn
+            .execute(
+                "DELETE FROM sessions WHERE session_id = ?1",
                 params![session_id],
             )
             .map_err(|e| TranscriptError::Fatal {
-                message: format!("Failed to delete processing stats: {}", e),
+                message: format!("Failed to delete session: {}", e),
             })?;
 
-            // Delete session
-            let rows_changed = conn
-                .execute(
-                    "DELETE FROM sessions WHERE session_id = ?1",
-                    params![session_id],
-                )
-                .map_err(|e| TranscriptError::Fatal {
-                    message: format!("Failed to delete session: {}", e),
-                })?;
-
-            if rows_changed == 0 {
-                return Err(TranscriptError::Fatal {
-                    message: format!("Session not found: {}", session_id),
-                });
-            }
-
-            Ok(())
-        })();
-
-        match result {
-            Ok(_) => {
-                conn.execute_batch("COMMIT")
-                    .map_err(|e| TranscriptError::Fatal {
-                        message: format!("Failed to commit transaction: {}", e),
-                    })?;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
+        if rows_changed == 0 {
+            return Err(TranscriptError::Fatal {
+                message: format!("Session not found: {}", session_id),
+            });
         }
+
+        Ok(())
     }
 
     /// Get all session records.
@@ -435,8 +402,9 @@ impl TranscriptsDatabase {
         let mut stmt = conn
             .prepare(
                 r#"
-            SELECT session_id, agent_type, transcript_path, transcript_format,
-                   watermark_type, watermark_value, model, tool, external_thread_id,
+            SELECT session_id, tool, transcript_path, transcript_format,
+                   watermark_type, watermark_value, external_session_id,
+                   external_parent_session_id,
                    first_seen_at, last_processed_at, last_known_size, last_modified,
                    processing_errors, last_error
             FROM sessions
@@ -478,14 +446,13 @@ mod tests {
     fn create_test_session(session_id: &str) -> SessionRecord {
         SessionRecord {
             session_id: session_id.to_string(),
-            agent_type: "claude-code".to_string(),
+            tool: "claude".to_string(),
             transcript_path: "/path/to/transcript.jsonl".to_string(),
             transcript_format: "jsonl".to_string(),
             watermark_type: "ByteOffset".to_string(),
             watermark_value: "0".to_string(),
-            model: Some("claude-3".to_string()),
-            tool: Some("claude-code".to_string()),
-            external_thread_id: Some("thread-123".to_string()),
+            external_session_id: "thread-123".to_string(),
+            external_parent_session_id: None,
             first_seen_at: 1704067200,
             last_processed_at: 1704067200,
             last_known_size: 0,
@@ -610,14 +577,13 @@ mod tests {
 
         let session = SessionRecord {
             session_id: "session-null".to_string(),
-            agent_type: "test".to_string(),
+            tool: "claude".to_string(),
             transcript_path: "/path".to_string(),
             transcript_format: "jsonl".to_string(),
             watermark_type: "ByteOffset".to_string(),
             watermark_value: "0".to_string(),
-            model: None,
-            tool: None,
-            external_thread_id: None,
+            external_session_id: "session-null".to_string(),
+            external_parent_session_id: None,
             first_seen_at: 1704067200,
             last_processed_at: 1704067200,
             last_known_size: 0,
@@ -629,29 +595,9 @@ mod tests {
         db.insert_session(&session).unwrap();
 
         let retrieved = db.get_session("session-null").unwrap().unwrap();
-        assert_eq!(retrieved.model, None);
-        assert_eq!(retrieved.tool, None);
-        assert_eq!(retrieved.external_thread_id, None);
+        assert_eq!(retrieved.external_session_id, "session-null");
         assert_eq!(retrieved.last_modified, None);
         assert_eq!(retrieved.last_error, None);
-    }
-
-    #[test]
-    fn test_processing_stats_created() {
-        let (db, _temp) = create_test_db();
-        let session = create_test_session("session-1");
-        db.insert_session(&session).unwrap();
-
-        // Verify stats record exists
-        let conn = db.conn.lock().unwrap();
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM processing_stats WHERE session_id = ?1",
-                params!["session-1"],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 1);
     }
 
     #[test]
@@ -661,9 +607,13 @@ mod tests {
 
         let conn = db.conn.lock().unwrap();
         let version: u32 = conn
-            .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
+            .query_row(
+                "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
-        assert_eq!(version, 1); // Current schema version
+        assert_eq!(version, 2); // Current schema version
     }
 
     #[test]
@@ -811,20 +761,6 @@ mod tests {
 
         // Verify it's gone
         assert!(db.get_session("session-1").unwrap().is_none());
-
-        // Verify stats are also gone
-        let conn = db
-            .conn
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM processing_stats WHERE session_id = ?1",
-                params!["session-1"],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 0);
     }
 
     #[test]
@@ -842,32 +778,20 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_session_transaction_rollback() {
+    fn test_insert_session_duplicate_fails() {
         let (db, _temp) = create_test_db();
 
-        // First insert a session successfully
         let session = create_test_session("session-1");
         db.insert_session(&session).unwrap();
 
-        // Try to insert a duplicate session_id (should fail on sessions table)
+        // Try to insert a duplicate session_id (should fail)
         let duplicate = create_test_session("session-1");
         let result = db.insert_session(&duplicate);
         assert!(result.is_err());
 
-        // Verify stats table wasn't left with an orphaned entry
-        let conn = db
-            .conn
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let stats_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM processing_stats WHERE session_id = ?1",
-                params!["session-1"],
-                |row| row.get(0),
-            )
-            .unwrap();
-        // Should only have one entry from the successful insert
-        assert_eq!(stats_count, 1);
+        // Original session still intact
+        let retrieved = db.get_session("session-1").unwrap().unwrap();
+        assert_eq!(retrieved.session_id, "session-1");
     }
 
     #[test]

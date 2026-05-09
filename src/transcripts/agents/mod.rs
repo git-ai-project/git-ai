@@ -1,12 +1,12 @@
 mod amp;
-mod claude;
+pub mod claude;
 mod codex;
 mod continue_cli;
 mod copilot;
 mod cursor;
 mod droid;
 mod gemini;
-mod opencode;
+pub mod opencode;
 mod pi;
 mod windsurf;
 

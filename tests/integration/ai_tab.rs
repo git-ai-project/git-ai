@@ -49,7 +49,7 @@ fn test_ai_tab_before_edit_checkpoint_includes_dirty_files() {
         ParsedHookEvent::PreFileEdit(e) => {
             assert_eq!(e.context.agent_id.tool, "github-copilot-tab");
             assert_eq!(e.context.agent_id.model, "default");
-            assert_eq!(e.context.session_id, "ai_tab-checkpoint-123");
+            assert_eq!(e.context.external_session_id, "ai_tab-checkpoint-123");
             assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
             assert!(!e.file_paths.is_empty());
             assert!(e.dirty_files.is_some());
@@ -87,7 +87,7 @@ fn test_ai_tab_after_edit_checkpoint_includes_dirty_files_and_paths() {
         ParsedHookEvent::PostFileEdit(e) => {
             assert_eq!(e.context.agent_id.tool, "github-copilot-tab");
             assert_eq!(e.context.agent_id.model, "default");
-            assert_eq!(e.context.session_id, "ai_tab-checkpoint-456");
+            assert_eq!(e.context.external_session_id, "ai_tab-checkpoint-456");
             assert_eq!(e.context.cwd, PathBuf::from("/Users/test/project"));
             assert!(!e.file_paths.is_empty());
             assert!(e.dirty_files.is_some());

@@ -3,6 +3,7 @@ use super::{
     AgentPreset, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     PresetContext, TranscriptFormat, TranscriptSource,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::{self, Agent, ToolClass};
 use crate::error::GitAiError;
@@ -35,7 +36,7 @@ impl AgentPreset for ContinueCliPreset {
                     .unwrap_or("unknown")
                     .to_string(),
             },
-            session_id: session_id.clone(),
+            external_session_id: session_id.clone(),
             trace_id: trace_id.to_string(),
             cwd: PathBuf::from(cwd),
             metadata: HashMap::from([("transcript_path".to_string(), transcript_path.to_string())]),
@@ -44,8 +45,9 @@ impl AgentPreset for ContinueCliPreset {
         let transcript_source = Some(TranscriptSource {
             path: PathBuf::from(transcript_path),
             format: TranscriptFormat::ContinueJson,
-            session_id: session_id.clone(),
-            external_thread_id: Some(session_id.clone()),
+            session_id: generate_session_id(&session_id, "continue-cli"),
+            external_session_id: session_id.clone(),
+            external_parent_session_id: None,
         });
 
         let is_pre = hook_event == Some("PreToolUse");
@@ -59,6 +61,7 @@ impl AgentPreset for ContinueCliPreset {
                 context,
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
                 dirty_files: None,
+                tool_use_id: Some(tool_use_id.to_string()),
             }),
             (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
                 context,
@@ -70,6 +73,7 @@ impl AgentPreset for ContinueCliPreset {
                 file_paths: parse::file_paths_from_tool_input(&data, cwd),
                 dirty_files: None,
                 transcript_source,
+                tool_use_id: Some(tool_use_id.to_string()),
             }),
         };
 
@@ -106,7 +110,7 @@ mod tests {
             ParsedHookEvent::PreFileEdit(e) => {
                 assert_eq!(e.context.agent_id.tool, "continue-cli");
                 assert_eq!(e.context.agent_id.model, "claude-3-sonnet");
-                assert_eq!(e.context.session_id, "cont-sess-1");
+                assert_eq!(e.context.external_session_id, "cont-sess-1");
                 assert_eq!(
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/main.rs")]
@@ -127,7 +131,11 @@ mod tests {
                 assert!(e.transcript_source.is_some());
                 if let Some(ts) = &e.transcript_source {
                     assert_eq!(ts.format, TranscriptFormat::ContinueJson);
-                    assert_eq!(ts.session_id, "cont-sess-1");
+                    assert_eq!(
+                        ts.session_id,
+                        generate_session_id("cont-sess-1", "continue-cli")
+                    );
+                    assert_eq!(ts.external_session_id, "cont-sess-1");
                 }
             }
             _ => panic!("Expected PostFileEdit"),

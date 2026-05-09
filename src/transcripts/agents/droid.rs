@@ -1,5 +1,6 @@
 //! Droid agent implementation with sweep discovery.
 
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -64,15 +65,6 @@ impl DroidAgent {
             }
         }
     }
-
-    /// Extract session ID from a Droid conversation file path.
-    ///
-    /// Droid files are typically named like: `<uuid>.jsonl`
-    fn extract_session_id(path: &Path) -> Option<String> {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("droid:{}", s))
-    }
 }
 
 impl Default for DroidAgent {
@@ -96,22 +88,25 @@ impl Agent for DroidAgent {
         let mut sessions = Vec::new();
 
         for path in paths {
-            let Some(session_id) = Self::extract_session_id(&path) else {
+            // Droid session_id from the hook payload matches the file stem
+            let Some(external_session_id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+            else {
                 continue;
             };
+            let session_id = generate_session_id(&external_session_id, "droid");
 
-            // Don't parse file content here - just filesystem scanning.
-            // Model will be extracted later during first read_incremental() if needed.
             let session = DiscoveredSession {
                 session_id,
-                agent_type: "droid".to_string(),
+                tool: "droid".to_string(),
                 transcript_path: path,
                 transcript_format: TranscriptFormat::DroidJsonl,
                 watermark_type: WatermarkType::Hybrid,
                 initial_watermark: Box::new(HybridWatermark::new(0, 0, None)),
-                model: None,
-                tool: Some("Droid".to_string()),
-                external_thread_id: None,
+                external_session_id,
+                external_parent_session_id: None,
             };
 
             sessions.push(session);
@@ -367,13 +362,6 @@ mod tests {
             .map(|e| e["id"].as_u64().unwrap())
             .collect();
         assert_eq!(ids, vec![3, 4, 5]);
-    }
-
-    #[test]
-    fn test_extract_session_id() {
-        let path = PathBuf::from("/home/user/.factory/sessions/project-name/abc-123.jsonl");
-        let session_id = DroidAgent::extract_session_id(&path);
-        assert_eq!(session_id, Some("droid:abc-123".to_string()));
     }
 
     #[test]

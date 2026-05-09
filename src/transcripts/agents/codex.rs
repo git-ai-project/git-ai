@@ -1,5 +1,6 @@
 //! Codex agent implementation with sweep discovery.
 
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -113,18 +114,6 @@ impl CodexAgent {
             }
         }
     }
-
-    fn extract_session_id(path: &Path) -> Option<String> {
-        let stem = path.file_stem()?.to_str()?;
-        // Filename: rollout-2026-02-06T20-35-49-019c35bd-ad8e-7422-834c-3605bc4ee7ac
-        // UUID is always 36 chars (with hyphens) at the end
-        if stem.len() >= 36 {
-            let uuid = &stem[stem.len() - 36..];
-            Some(format!("codex:{}", uuid))
-        } else {
-            None
-        }
-    }
 }
 
 impl Default for CodexAgent {
@@ -147,20 +136,26 @@ impl Agent for CodexAgent {
         let mut sessions = Vec::new();
 
         for path in paths {
-            let Some(session_id) = Self::extract_session_id(&path) else {
+            // Codex filename: rollout-2026-02-06T20-35-49-019c35bd-ad8e-7422-834c-3605bc4ee7ac
+            // The hook payload sends the UUID as session_id/thread_id (last 36 chars)
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
+            if stem.len() < 36 {
+                continue;
+            }
+            let external_session_id = stem[stem.len() - 36..].to_string();
+            let session_id = generate_session_id(&external_session_id, "codex");
 
             sessions.push(DiscoveredSession {
                 session_id,
-                agent_type: "codex".to_string(),
+                tool: "codex".to_string(),
                 transcript_path: path,
                 transcript_format: TranscriptFormat::CodexJsonl,
                 watermark_type: WatermarkType::ByteOffset,
                 initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
-                model: None,
-                tool: Some("Codex".to_string()),
-                external_thread_id: None,
+                external_session_id,
+                external_parent_session_id: None,
             });
         }
 

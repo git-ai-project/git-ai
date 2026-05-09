@@ -38,7 +38,6 @@ The `define_feature_flags!` macro at lines 54-61 becomes:
 ```rust
 define_feature_flags!(
     rewrite_stash: rewrite_stash, debug = true, release = true,
-    inter_commit_move: checkpoint_inter_commit_move, debug = false, release = false,
     auth_keyring: auth_keyring, debug = false, release = false,
     git_hooks_enabled: git_hooks_enabled, debug = false, release = false,
     git_hooks_externally_managed: git_hooks_externally_managed, debug = false, release = false,

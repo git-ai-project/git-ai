@@ -286,6 +286,99 @@ fn test_claude_code_plan_raw_event_fidelity() {
     assert_eq!(result.events, expected);
 }
 
+#[test]
+#[serial_test::serial]
+fn test_claude_subagent_checkpoint_sets_parent_session_id() {
+    use crate::repos::test_repo::TestRepo;
+
+    let repo = TestRepo::new();
+    let repo_root = repo.canonical_path();
+    let file_path = repo_root.join("src").join("main.rs");
+    std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    std::fs::write(&file_path, "fn main() {}\n").unwrap();
+
+    let subagent_path = repo_root
+        .join(".claude")
+        .join("projects")
+        .join("proj")
+        .join("parent-uuid-abc")
+        .join("subagents")
+        .join("agent-xyz123.jsonl");
+    std::fs::create_dir_all(subagent_path.parent().unwrap()).unwrap();
+    std::fs::write(&subagent_path, "{\"type\":\"user\",\"message\":{\"content\":\"test\"},\"timestamp\":\"2026-01-01T00:00:00Z\"}\n").unwrap();
+
+    let hook_input = json!({
+        "hook_event_name": "PostToolUse",
+        "session_id": "agent-xyz123",
+        "cwd": repo_root.to_string_lossy().to_string(),
+        "transcript_path": subagent_path.to_string_lossy().to_string(),
+        "tool_name": "Edit",
+        "tool_use_id": "toolu_test_001",
+        "tool_input": {
+            "file_path": file_path.to_string_lossy().to_string()
+        }
+    })
+    .to_string();
+
+    let preset = resolve_preset("claude").unwrap();
+    let events = preset.parse(&hook_input, "t_test").unwrap();
+
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            let ts = e
+                .transcript_source
+                .as_ref()
+                .expect("should have transcript source");
+            assert_eq!(
+                ts.external_parent_session_id,
+                Some("parent-uuid-abc".to_string()),
+                "Claude subagent checkpoint should detect parent session from path"
+            );
+            assert_eq!(ts.external_session_id, "agent-xyz123",);
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
+}
+
+#[test]
+fn test_claude_normal_session_checkpoint_has_no_parent() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let transcript_path = temp_dir.path().join("normal-session-uuid.jsonl");
+    std::fs::write(&transcript_path, "{\"type\":\"user\",\"message\":{\"content\":\"test\"},\"timestamp\":\"2026-01-01T00:00:00Z\"}\n").unwrap();
+
+    let hook_input = json!({
+        "hook_event_name": "PostToolUse",
+        "session_id": "normal-session-uuid",
+        "cwd": "/tmp/project",
+        "transcript_path": transcript_path.to_string_lossy().to_string(),
+        "tool_name": "Edit",
+        "tool_use_id": "toolu_test_002",
+        "tool_input": {
+            "file_path": "/tmp/project/src/main.rs"
+        }
+    })
+    .to_string();
+
+    let preset = resolve_preset("claude").unwrap();
+    let events = preset.parse(&hook_input, "t_test").unwrap();
+
+    match &events[0] {
+        ParsedHookEvent::PostFileEdit(e) => {
+            let ts = e
+                .transcript_source
+                .as_ref()
+                .expect("should have transcript source");
+            assert_eq!(
+                ts.external_parent_session_id, None,
+                "Normal (non-subagent) Claude session should have no parent"
+            );
+        }
+        _ => panic!("Expected PostFileEdit"),
+    }
+}
+
 crate::reuse_tests_in_worktree!(
     test_claude_code_raw_event_fidelity,
     test_claude_code_thinking_raw_event_fidelity,

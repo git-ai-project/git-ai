@@ -48,7 +48,10 @@ fn test_continue_cli_preset_extracts_model_from_hook_input() {
         ParsedHookEvent::PostFileEdit(e) => {
             assert_eq!(e.context.agent_id.model, "claude-3.5-sonnet");
             assert_eq!(e.context.agent_id.tool, "continue-cli");
-            assert_eq!(e.context.session_id, "2dbfd673-096d-4773-b5f3-9023894a7355");
+            assert_eq!(
+                e.context.external_session_id,
+                "2dbfd673-096d-4773-b5f3-9023894a7355"
+            );
         }
         _ => panic!("Expected PostFileEdit"),
     }

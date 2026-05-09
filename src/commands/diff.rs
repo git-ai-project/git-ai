@@ -148,6 +148,8 @@ pub struct DiffJsonHunk {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub human_id: Option<String>,
 }
 
@@ -1251,6 +1253,13 @@ fn build_json_hunk_segments(
             return;
         }
         let content_hash = hash_hunk_content(current_contents);
+        let session_id = current_prompt_id.as_ref().and_then(|id| {
+            if id.starts_with("s_") {
+                Some(extract_session_id(id).to_string())
+            } else {
+                None
+            }
+        });
         segments.push(DiffJsonHunk {
             commit_sha: current_commit_sha.clone(),
             content_hash,
@@ -1260,6 +1269,7 @@ fn build_json_hunk_segments(
             end_line: *current_end,
             file_path: diff_hunk.file_path.clone(),
             prompt_id: current_prompt_id.clone(),
+            session_id,
             human_id: current_human_id.clone(),
         });
         *current_start = 0;
@@ -2627,6 +2637,7 @@ index abc123..def456 100644
                 end_line: 6,
                 file_path: "f.rs".to_string(),
                 prompt_id: None,
+                session_id: None,
                 human_id: None,
             }],
             commits: BTreeMap::new(),

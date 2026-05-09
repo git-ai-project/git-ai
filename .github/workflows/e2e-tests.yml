@@ -8,9 +8,8 @@ on:
   workflow_dispatch:
 
 env:
-  # Async mode is now fully supported by the e2e tests: a per-test daemon
-  # is started in setup() and the wrapper polls for authorship notes.
-  GIT_AI_ASYNC_MODE: "true"
+  GIT_AI_TEST_FORCE_TTY: "1"
+  GIT_AI_POST_COMMIT_TIMEOUT_MS: "30000"
 
 jobs:
   e2e-tests:

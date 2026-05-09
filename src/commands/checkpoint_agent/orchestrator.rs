@@ -269,14 +269,18 @@ fn execute_pre_file_edit(e: PreFileEdit) -> Result<Vec<CheckpointRequest>, GitAi
             }
         }
     }
+    let mut metadata = e.context.metadata;
+    if let Some(tuid) = e.tool_use_id {
+        metadata.entry("tool_use_id".to_string()).or_insert(tuid);
+    }
     Ok(split_files_into_requests(
         files,
         e.context.trace_id,
         CheckpointKind::Human,
-        None,
+        Some(e.context.agent_id),
         PreparedPathRole::WillEdit,
         None,
-        e.context.metadata,
+        metadata,
     ))
 }
 
@@ -296,6 +300,10 @@ fn execute_post_file_edit(
         "ai_tab" => CheckpointKind::AiTab,
         _ => CheckpointKind::AiAgent,
     };
+    let mut metadata = e.context.metadata;
+    if let Some(tuid) = e.tool_use_id {
+        metadata.entry("tool_use_id".to_string()).or_insert(tuid);
+    }
     Ok(split_files_into_requests(
         files,
         e.context.trace_id,
@@ -303,7 +311,7 @@ fn execute_post_file_edit(
         Some(e.context.agent_id),
         PreparedPathRole::Edited,
         e.transcript_source,
-        e.context.metadata,
+        metadata,
     ))
 }
 
@@ -348,7 +356,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
 
     let dirty_paths = match bash_tool::handle_bash_pre_tool_use_with_context(
         &repo_work_dir,
-        &e.context.session_id,
+        &e.context.external_session_id,
         &e.tool_use_id,
         &e.context.agent_id,
         Some(&e.context.metadata),
@@ -358,7 +366,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
             tracing::debug!(
                 "Bash pre-hook snapshot failed for {} session {}: {}",
                 e.context.agent_id.tool,
-                e.context.session_id,
+                e.context.external_session_id,
                 error
             );
             return Ok(vec![]);
@@ -370,6 +378,10 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
     }
 
     let files = build_checkpoint_files(&dirty_paths)?;
+    let mut metadata = e.context.metadata;
+    metadata
+        .entry("tool_use_id".to_string())
+        .or_insert(e.tool_use_id);
     Ok(split_files_into_requests(
         files,
         e.context.trace_id,
@@ -377,7 +389,7 @@ fn execute_pre_bash_call(e: PreBashCall) -> Result<Vec<CheckpointRequest>, GitAi
         None,
         PreparedPathRole::WillEdit,
         None,
-        e.context.metadata,
+        metadata,
     ))
 }
 
@@ -387,8 +399,11 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
     let repo = discover_repository_in_path_no_git_exec(e.context.cwd.as_path())?;
     let repo_work_dir = repo.workdir()?;
 
-    let bash_result =
-        bash_tool::handle_bash_post_tool_use(&repo_work_dir, &e.context.session_id, &e.tool_use_id);
+    let bash_result = bash_tool::handle_bash_post_tool_use(
+        &repo_work_dir,
+        &e.context.external_session_id,
+        &e.tool_use_id,
+    );
 
     let file_paths: Vec<PathBuf> = match &bash_result {
         Ok(result) => match &result.action {
@@ -408,6 +423,10 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
     };
 
     let files = build_checkpoint_files(&file_paths)?;
+    let mut metadata = e.context.metadata;
+    metadata
+        .entry("tool_use_id".to_string())
+        .or_insert(e.tool_use_id);
     Ok(split_files_into_requests(
         files,
         e.context.trace_id,
@@ -415,6 +434,6 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
         Some(e.context.agent_id),
         PreparedPathRole::Edited,
         e.transcript_source,
-        e.context.metadata,
+        metadata,
     ))
 }

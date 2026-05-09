@@ -58,7 +58,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, oneshot};
@@ -1358,33 +1358,31 @@ fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiE
         return Ok(());
     }
 
+    let repo_work_dir = &request.files[0].repo_work_dir;
+    let repo = match discover_repository_in_path_no_git_exec(repo_work_dir) {
+        Ok(repo) => repo,
+        Err(e) => {
+            if request.checkpoint_kind.is_ai()
+                && let Some(ref agent_id) = request.agent_id
+                && crate::daemon::checkpoint::should_emit_agent_usage(agent_id)
+            {
+                let attrs = crate::daemon::checkpoint::build_agent_usage_attrs(None, agent_id);
+                let values = crate::metrics::AgentUsageValues::new();
+                crate::metrics::record(values, attrs);
+            }
+            return Err(e);
+        }
+    };
+    let author = repo.git_author_identity().formatted_or_unknown();
+
     if request.checkpoint_kind.is_ai()
         && let Some(ref agent_id) = request.agent_id
         && crate::daemon::checkpoint::should_emit_agent_usage(agent_id)
     {
-        let prompt_id = crate::authorship::authorship_log_serialization::generate_short_hash(
-            &agent_id.id,
-            &agent_id.tool,
-        );
-        let session_id = crate::authorship::authorship_log_serialization::generate_session_id(
-            &agent_id.id,
-            &agent_id.tool,
-        );
-        let attrs = crate::metrics::EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
-            .session_id(session_id)
-            .tool(&agent_id.tool)
-            .model(&agent_id.model)
-            .prompt_id(prompt_id)
-            .external_prompt_id(&agent_id.id)
-            .custom_attributes_map(crate::config::Config::get().custom_attributes());
-
+        let attrs = crate::daemon::checkpoint::build_agent_usage_attrs(Some(&repo), agent_id);
         let values = crate::metrics::AgentUsageValues::new();
         crate::metrics::record(values, attrs);
     }
-
-    let repo_work_dir = &request.files[0].repo_work_dir;
-    let repo = discover_repository_in_path_no_git_exec(repo_work_dir)?;
-    let author = repo.git_author_identity().formatted_or_unknown();
 
     let resolved = resolve_checkpoint_request(&repo, &request)?;
     let Some(resolved) = resolved else {
@@ -3856,6 +3854,9 @@ pub struct ActorDaemonCoordinator {
     pending_rebase_original_head_by_worktree: Mutex<HashMap<String, String>>,
     pending_cherry_pick_sources_by_worktree: Mutex<HashMap<String, Vec<String>>>,
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
+    /// Files with an in-flight AI edit (PreFileEdit received, PostFileEdit not yet completed).
+    /// Outer key: family. Inner key: absolute file path string. Value: registration timestamp (nanos).
+    pending_ai_edits_by_family: Mutex<HashMap<String, HashMap<String, u128>>>,
     family_sequencers_by_family: Mutex<HashMap<String, FamilySequencerState>>,
     pending_root_slots_by_root: Mutex<HashMap<String, PendingRootSlot>>,
     recent_replay_prerequisites_by_family:
@@ -3884,6 +3885,7 @@ pub struct ActorDaemonCoordinator {
     wrapper_states: Mutex<HashMap<String, WrapperStateEntry>>,
     wrapper_state_notify: Notify,
     shutting_down: AtomicBool,
+    shutdown_action: AtomicU8,
     shutdown_notify: Notify,
     shutdown_condvar: std::sync::Condvar,
     shutdown_condvar_mutex: Mutex<()>,
@@ -3893,6 +3895,38 @@ struct WrapperStateEntry {
     pre_repo: Option<RepoContext>,
     post_repo: Option<RepoContext>,
     received_at_ns: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DaemonExitAction {
+    Stop,
+    Restart,
+    RestartAfterUpdate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DaemonSelfUpdateOutcome {
+    Installed,
+    NoUpdate,
+    Failed,
+}
+
+impl DaemonExitAction {
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::Stop => 0,
+            Self::Restart => 1,
+            Self::RestartAfterUpdate => 2,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Restart,
+            2 => Self::RestartAfterUpdate,
+            _ => Self::Stop,
+        }
+    }
 }
 
 enum TracePayloadApplyOutcome {
@@ -3915,6 +3949,7 @@ impl ActorDaemonCoordinator {
             pending_rebase_original_head_by_worktree: Mutex::new(HashMap::new()),
             pending_cherry_pick_sources_by_worktree: Mutex::new(HashMap::new()),
             inflight_effects_by_family: Mutex::new(HashMap::new()),
+            pending_ai_edits_by_family: Mutex::new(HashMap::new()),
             family_sequencers_by_family: Mutex::new(HashMap::new()),
             pending_root_slots_by_root: Mutex::new(HashMap::new()),
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
@@ -3949,6 +3984,7 @@ impl ActorDaemonCoordinator {
             wrapper_states: Mutex::new(HashMap::new()),
             wrapper_state_notify: Notify::new(),
             shutting_down: AtomicBool::new(false),
+            shutdown_action: AtomicU8::new(DaemonExitAction::Stop.as_u8()),
             shutdown_notify: Notify::new(),
             shutdown_condvar: std::sync::Condvar::new(),
             shutdown_condvar_mutex: Mutex::new(()),
@@ -3978,6 +4014,30 @@ impl ActorDaemonCoordinator {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         self.shutdown_condvar.notify_all();
+    }
+
+    fn request_stop(&self) {
+        self.shutdown_action
+            .store(DaemonExitAction::Stop.as_u8(), Ordering::SeqCst);
+        self.request_shutdown();
+    }
+
+    fn request_restart(&self) {
+        self.shutdown_action
+            .store(DaemonExitAction::Restart.as_u8(), Ordering::SeqCst);
+        self.request_shutdown();
+    }
+
+    fn request_restart_after_update(&self) {
+        self.shutdown_action.store(
+            DaemonExitAction::RestartAfterUpdate.as_u8(),
+            Ordering::SeqCst,
+        );
+        self.request_shutdown();
+    }
+
+    fn shutdown_action(&self) -> DaemonExitAction {
+        DaemonExitAction::from_u8(self.shutdown_action.load(Ordering::SeqCst))
     }
 
     async fn wait_for_shutdown(&self) {
@@ -4050,6 +4110,19 @@ impl ActorDaemonCoordinator {
         if let Ok(mut map) = self.queued_trace_payloads_by_root.lock() {
             map.retain(|_, count| *count > 0);
         }
+        // Clean expired pending AI edit entries (older than 10s).
+        {
+            const PENDING_AI_EDIT_TIMEOUT_NS: u128 = 10_000_000_000;
+            let gc_now_ns = now_unix_nanos();
+            if let Ok(mut map) = self.pending_ai_edits_by_family.lock() {
+                for family_map in map.values_mut() {
+                    family_map.retain(|_, registered_at| {
+                        gc_now_ns.saturating_sub(*registered_at) < PENDING_AI_EDIT_TIMEOUT_NS
+                    });
+                }
+                map.retain(|_, family_map| !family_map.is_empty());
+            }
+        }
         // Clean wrapper_states entries older than 60s — these represent wrapper
         // pre/post states that were never consumed by a matching trace2 event.
         let stale_threshold_ns = 60_000_000_000u128; // 60 seconds in nanoseconds
@@ -4057,6 +4130,49 @@ impl ActorDaemonCoordinator {
         if let Ok(mut map) = self.wrapper_states.lock() {
             map.retain(|_, entry| now_ns.saturating_sub(entry.received_at_ns) < stale_threshold_ns);
         }
+    }
+
+    fn canonicalize_path(path: &str) -> String {
+        std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string())
+    }
+
+    fn register_pending_ai_edits(&self, family: &str, file_paths: &[String]) {
+        let now_ns = now_unix_nanos();
+        if let Ok(mut map) = self.pending_ai_edits_by_family.lock() {
+            let family_map = map.entry(family.to_string()).or_default();
+            for file in file_paths {
+                family_map.insert(Self::canonicalize_path(file), now_ns);
+            }
+        }
+    }
+
+    fn clear_pending_ai_edits(&self, family: &str, file_paths: &[String]) {
+        if let Ok(mut map) = self.pending_ai_edits_by_family.lock()
+            && let Some(family_map) = map.get_mut(family)
+        {
+            for file in file_paths {
+                family_map.remove(&Self::canonicalize_path(file));
+            }
+            if family_map.is_empty() {
+                map.remove(family);
+            }
+        }
+    }
+
+    fn file_has_pending_ai_edit(&self, family: &str, file_path: &str) -> bool {
+        const PENDING_AI_EDIT_TIMEOUT_NS: u128 = 10_000_000_000; // 10 seconds
+        let now_ns = now_unix_nanos();
+        let canonical = Self::canonicalize_path(file_path);
+        if let Ok(map) = self.pending_ai_edits_by_family.lock()
+            && let Some(family_map) = map.get(family)
+        {
+            return family_map.get(&canonical).is_some_and(|registered_at| {
+                now_ns.saturating_sub(*registered_at) < PENDING_AI_EDIT_TIMEOUT_NS
+            });
+        }
+        false
     }
 
     fn trace_command_participates_in_family_sequencer(primary_command: Option<&str>) -> bool {
@@ -5707,7 +5823,7 @@ impl ActorDaemonCoordinator {
                     }
                 }
                 FamilySequencerEntry::Checkpoint {
-                    request,
+                    mut request,
                     respond_to,
                 } => {
                     let repo_wd = request
@@ -5720,8 +5836,67 @@ impl ActorDaemonCoordinator {
                         .iter()
                         .map(|f| f.path.to_string_lossy().to_string())
                         .collect();
-                    let checkpoint_kind_str = format!("{:?}", request.checkpoint_kind);
-                    let is_human_checkpoint = request.checkpoint_kind == CheckpointKind::Human;
+                    let checkpoint_kind = request.checkpoint_kind;
+                    let checkpoint_path_role = request.path_role;
+                    let checkpoint_has_agent = request.agent_id.is_some();
+                    let checkpoint_kind_str = format!("{:?}", checkpoint_kind);
+                    let is_human_checkpoint = checkpoint_kind == CheckpointKind::Human;
+
+                    // Register pending AI edit state when an AI agent fires its
+                    // pre-edit snapshot. This signals that an AI edit is in-flight.
+                    // Identified by: WillEdit path_role + agent_id present (only AI
+                    // agent presets have an agent_id on their pre-edit checkpoints).
+                    if checkpoint_path_role == PreparedPathRole::WillEdit && checkpoint_has_agent {
+                        self.register_pending_ai_edits(family, &checkpoint_file_paths);
+                    }
+
+                    // Filter out files with pending AI edits from KnownHuman checkpoints.
+                    // These are spurious IDE save events that fire between pre/post-edit.
+                    if checkpoint_kind == CheckpointKind::KnownHuman {
+                        let pending_files: Vec<String> = checkpoint_file_paths
+                            .iter()
+                            .filter(|f| self.file_has_pending_ai_edit(family, f))
+                            .cloned()
+                            .collect();
+                        if !pending_files.is_empty() {
+                            request.files.retain(|f| {
+                                let path_str = f.path.to_string_lossy().to_string();
+                                !pending_files.contains(&path_str)
+                            });
+                            tracing::debug!(
+                                "[KnownHuman] Filtered {} file(s) with pending AI edits",
+                                pending_files.len()
+                            );
+                            if request.files.is_empty() {
+                                let log_entry = TestCompletionLogEntry {
+                                    seq: 0,
+                                    family_key: family.to_string(),
+                                    kind: "checkpoint".to_string(),
+                                    primary_command: Some("checkpoint".to_string()),
+                                    test_sync_session: None,
+                                    exit_code: None,
+                                    sync_tracked: true,
+                                    status: "suppressed".to_string(),
+                                    error: None,
+                                };
+                                let _ = self.maybe_append_test_completion_log(family, &log_entry);
+                                if let Some(respond_to) = respond_to {
+                                    let _ = respond_to.send(Ok(0));
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Recompute file paths after potential KnownHuman filtering so
+                    // watermark computation and clear_pending_ai_edits use the actual
+                    // files that will be checkpointed.
+                    let checkpoint_file_paths: Vec<String> = request
+                        .files
+                        .iter()
+                        .map(|f| f.path.to_string_lossy().to_string())
+                        .collect();
+
                     let should_log_completion = true; // Always log for test sync
                     tracing::info!(kind = %checkpoint_kind_str, repo = %repo_wd, "checkpoint start");
                     let checkpoint_start = std::time::Instant::now();
@@ -5786,6 +5961,12 @@ impl ActorDaemonCoordinator {
                         );
                     }
                     if result.is_ok() {
+                        // Clear pending AI edit state once the PostFileEdit completes.
+                        if checkpoint_kind.is_ai()
+                            && checkpoint_path_role == PreparedPathRole::Edited
+                        {
+                            self.clear_pending_ai_edits(family, &checkpoint_file_paths);
+                        }
                         let per_file = if !checkpoint_file_paths.is_empty() {
                             compute_watermarks_from_stat(&repo_wd, &checkpoint_file_paths)
                         } else {
@@ -7316,7 +7497,7 @@ impl ActorDaemonCoordinator {
                     && let Some(transcript_source) = &request.transcript_source
                 {
                     let session_id = transcript_source.session_id.clone();
-                    let agent_type = request
+                    let tool = request
                         .agent_id
                         .as_ref()
                         .map(|aid| aid.tool.clone())
@@ -7324,20 +7505,15 @@ impl ActorDaemonCoordinator {
                     let trace_id = request.trace_id.clone();
 
                     if let Some(db) = &self.transcripts_db
-                        && let Err(e) = Self::ensure_session_exists(
-                            db,
-                            &session_id,
-                            &agent_type,
-                            transcript_source,
-                            request.agent_id.as_ref(),
-                        )
+                        && let Err(e) =
+                            Self::ensure_session_exists(db, &session_id, &tool, transcript_source)
                     {
                         tracing::warn!(session_id = %session_id, error = %e, "failed to ensure session exists");
                     }
 
                     worker.notify_checkpoint(
                         session_id,
-                        agent_type,
+                        tool,
                         trace_id,
                         transcript_source.path.clone(),
                     );
@@ -7485,9 +7661,8 @@ impl ActorDaemonCoordinator {
     fn ensure_session_exists(
         db: &crate::transcripts::db::TranscriptsDatabase,
         session_id: &str,
-        agent_type: &str,
+        tool: &str,
         transcript_source: &crate::commands::checkpoint_agent::presets::TranscriptSource,
-        agent_id: Option<&crate::authorship::working_log::AgentId>,
     ) -> Result<(), String> {
         // Check if session exists
         if db
@@ -7523,21 +7698,15 @@ impl ActorDaemonCoordinator {
                 as Box<dyn crate::transcripts::watermark::WatermarkStrategy>,
         };
 
-        // Extract model and tool from agent_id if available
-        let (model, tool) = agent_id
-            .map(|aid| (Some(aid.model.clone()), Some(aid.tool.clone())))
-            .unwrap_or((None, None));
-
         let record = crate::transcripts::db::SessionRecord {
             session_id: session_id.to_string(),
-            agent_type: agent_type.to_string(),
+            tool: tool.to_string(),
             transcript_path: transcript_source.path.display().to_string(),
             transcript_format: format!("{:?}", transcript_source.format),
             watermark_type: format!("{:?}", watermark_type),
             watermark_value: initial_watermark.serialize(),
-            model,
-            tool,
-            external_thread_id: transcript_source.external_thread_id.clone(),
+            external_session_id: transcript_source.external_session_id.clone(),
+            external_parent_session_id: transcript_source.external_parent_session_id.clone(),
             first_seen_at: now,
             last_processed_at: 0,
             last_known_size: 0,
@@ -7842,7 +8011,7 @@ fn handle_control_connection_actor_reader<R: Read + Write>(
         reader.get_mut().write_all(b"\n")?;
         reader.get_mut().flush()?;
         if shutdown_after_response {
-            coordinator.request_shutdown();
+            coordinator.request_stop();
         }
     }
     Ok(())
@@ -8268,7 +8437,7 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
         match check_for_update_available() {
             Ok(DaemonUpdateCheckResult::UpdateReady) => {
                 tracing::info!("update check: newer version available, requesting shutdown");
-                coordinator.request_shutdown();
+                coordinator.request_restart_after_update();
                 return;
             }
             Ok(DaemonUpdateCheckResult::NoUpdate) => {
@@ -8282,7 +8451,7 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
         let uptime_ns = now_unix_nanos().saturating_sub(started_at_ns);
         if uptime_ns >= daemon_max_uptime_ns() {
             tracing::info!("uptime exceeded max, requesting restart");
-            coordinator.request_shutdown();
+            coordinator.request_restart();
             return;
         }
     }
@@ -8293,7 +8462,7 @@ fn daemon_update_check_loop(coordinator: Arc<ActorDaemonCoordinator>, started_at
 /// On Unix the installer atomically replaces the binary via `mv`; on Windows
 /// the installer is spawned as a detached process that polls until the exe is
 /// unlocked.
-pub(crate) fn daemon_run_pending_self_update() {
+pub(crate) fn daemon_run_pending_self_update() -> DaemonSelfUpdateOutcome {
     use crate::commands::upgrade::{
         DaemonUpdateCheckResult, check_and_install_update_if_available,
     };
@@ -8301,17 +8470,21 @@ pub(crate) fn daemon_run_pending_self_update() {
     match check_and_install_update_if_available() {
         Ok(DaemonUpdateCheckResult::UpdateReady) => {
             tracing::info!("self-update: installation completed successfully");
+            DaemonSelfUpdateOutcome::Installed
         }
         Ok(DaemonUpdateCheckResult::NoUpdate) => {
             tracing::info!("self-update: no update to install");
+            DaemonSelfUpdateOutcome::NoUpdate
         }
         Err(err) => {
             tracing::warn!(%err, "self-update: installation failed");
+            crate::commands::upgrade::clear_cached_update_state();
+            DaemonSelfUpdateOutcome::Failed
         }
     }
 }
 
-pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
+pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction, GitAiError> {
     sanitize_git_env_for_daemon();
     disable_trace2_for_daemon_process();
     config.ensure_parent_dirs()?;
@@ -8496,9 +8669,10 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), GitAiError> {
     remove_socket_if_exists(&config.control_socket_path)?;
     remove_pid_metadata(&config)?;
 
-    tracing::info!("daemon shutdown complete");
+    let action = coordinator.shutdown_action();
+    tracing::info!(?action, "daemon shutdown complete");
 
-    Ok(())
+    Ok(action)
 }
 
 fn checkpoint_control_timeout_uses_ci_or_test_budget() -> bool {
@@ -8977,6 +9151,29 @@ mod tests {
             normalize_commit_carryover_snapshot(Some(&carryover), Some(&committed)).unwrap();
 
         assert_eq!(normalized.get("example.txt"), carryover.get("example.txt"));
+    }
+
+    #[test]
+    fn explicit_stop_overrides_prior_restart_intent() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let coordinator = ActorDaemonCoordinator::new();
+
+            coordinator.request_restart_after_update();
+            assert_eq!(
+                coordinator.shutdown_action(),
+                DaemonExitAction::RestartAfterUpdate
+            );
+
+            coordinator.request_stop();
+
+            assert!(coordinator.is_shutting_down());
+            assert_eq!(coordinator.shutdown_action(), DaemonExitAction::Stop);
+        });
     }
 
     // -----------------------------------------------------------------------

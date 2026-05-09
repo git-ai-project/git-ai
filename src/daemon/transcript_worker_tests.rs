@@ -11,7 +11,8 @@ fn test_priority_queue_ordering_immediate_first() {
     heap.push(ProcessingTask {
         session_id: "low".to_string(),
         priority: Priority::Low,
-        agent_type: "test".to_string(),
+        tool: "test".to_string(),
+        trace_id: None,
         canonical_path: PathBuf::from("/test"),
         retry_count: 0,
         next_retry_at: None,
@@ -19,7 +20,8 @@ fn test_priority_queue_ordering_immediate_first() {
     heap.push(ProcessingTask {
         session_id: "immediate".to_string(),
         priority: Priority::Immediate,
-        agent_type: "test".to_string(),
+        tool: "test".to_string(),
+        trace_id: None,
         canonical_path: PathBuf::from("/test"),
         retry_count: 0,
         next_retry_at: None,
@@ -50,7 +52,8 @@ fn test_priority_queue_ordering_multiple_same_priority() {
     heap.push(ProcessingTask {
         session_id: "immediate-2".to_string(),
         priority: Priority::Immediate,
-        agent_type: "test".to_string(),
+        tool: "test".to_string(),
+        trace_id: None,
         canonical_path: PathBuf::from("/test"),
         retry_count: 0,
         next_retry_at: None,
@@ -58,7 +61,8 @@ fn test_priority_queue_ordering_multiple_same_priority() {
     heap.push(ProcessingTask {
         session_id: "low-1".to_string(),
         priority: Priority::Low,
-        agent_type: "test".to_string(),
+        tool: "test".to_string(),
+        trace_id: None,
         canonical_path: PathBuf::from("/test"),
         retry_count: 0,
         next_retry_at: None,
@@ -66,7 +70,8 @@ fn test_priority_queue_ordering_multiple_same_priority() {
     heap.push(ProcessingTask {
         session_id: "immediate-1".to_string(),
         priority: Priority::Immediate,
-        agent_type: "test".to_string(),
+        tool: "test".to_string(),
+        trace_id: None,
         canonical_path: PathBuf::from("/test"),
         retry_count: 0,
         next_retry_at: None,
@@ -94,7 +99,8 @@ fn test_retry_delay_prevents_immediate_reprocessing() {
     let task = ProcessingTask {
         session_id: "retry-test".to_string(),
         priority: Priority::Immediate,
-        agent_type: "test".to_string(),
+        tool: "test".to_string(),
+        trace_id: None,
         canonical_path: PathBuf::from("/test"),
         retry_count: 1,
         next_retry_at: Some(next_retry_at),
@@ -135,7 +141,8 @@ fn test_retry_delay_allows_processing_after_delay() {
     let task = ProcessingTask {
         session_id: "retry-past".to_string(),
         priority: Priority::Immediate,
-        agent_type: "test".to_string(),
+        tool: "test".to_string(),
+        trace_id: None,
         canonical_path: PathBuf::from("/test"),
         retry_count: 1,
         next_retry_at: Some(past_retry_at),

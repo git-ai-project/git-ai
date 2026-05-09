@@ -268,14 +268,13 @@ fn test_sweep_deduplication_via_session_id() {
     let now = chrono::Utc::now().timestamp();
     let record = git_ai::transcripts::db::SessionRecord {
         session_id: session_id.to_string(),
-        agent_type: "claude".to_string(),
+        tool: "claude".to_string(),
         transcript_path: transcript_path.display().to_string(),
         transcript_format: "ClaudeJsonl".to_string(),
         watermark_type: "ByteOffset".to_string(),
         watermark_value: "0".to_string(),
-        model: Some("claude-sonnet-4".to_string()),
-        tool: Some("Claude Code".to_string()),
-        external_thread_id: None,
+        external_session_id: "test-ext-session".to_string(),
+        external_parent_session_id: None,
         first_seen_at: now,
         last_processed_at: 0,
         last_known_size: 0,
@@ -310,14 +309,13 @@ fn test_behind_detection_on_file_growth() {
     let now = chrono::Utc::now().timestamp();
     let record = git_ai::transcripts::db::SessionRecord {
         session_id: "test_session".to_string(),
-        agent_type: "claude".to_string(),
+        tool: "claude".to_string(),
         transcript_path: transcript_path.display().to_string(),
         transcript_format: "ClaudeJsonl".to_string(),
         watermark_type: "ByteOffset".to_string(),
         watermark_value: "100".to_string(), // Simulating partial processing
-        model: Some("claude-sonnet-4".to_string()),
-        tool: Some("Claude Code".to_string()),
-        external_thread_id: None,
+        external_session_id: "test-ext-session".to_string(),
+        external_parent_session_id: None,
         first_seen_at: now,
         last_processed_at: now,
         last_known_size: initial_size,
@@ -389,14 +387,13 @@ fn test_watermark_persistence_after_processing() {
     let now = chrono::Utc::now().timestamp();
     let record = git_ai::transcripts::db::SessionRecord {
         session_id: "test_session".to_string(),
-        agent_type: "claude".to_string(),
+        tool: "claude".to_string(),
         transcript_path: transcript_path.display().to_string(),
         transcript_format: "ClaudeJsonl".to_string(),
         watermark_type: "ByteOffset".to_string(),
         watermark_value: "0".to_string(),
-        model: None,
-        tool: Some("Claude Code".to_string()),
-        external_thread_id: None,
+        external_session_id: "test-ext-session".to_string(),
+        external_parent_session_id: None,
         first_seen_at: now,
         last_processed_at: 0,
         last_known_size: 0,

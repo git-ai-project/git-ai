@@ -1,5 +1,6 @@
 //! Cursor agent implementation with sweep discovery.
 
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy, TranscriptFormat};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -48,15 +49,6 @@ impl CursorAgent {
 
         paths
     }
-
-    /// Extract session ID from a Cursor conversation file path.
-    ///
-    /// Cursor files are typically named like: `<uuid>.jsonl`
-    fn extract_session_id(path: &Path) -> Option<String> {
-        path.file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| format!("cursor:{}", s))
-    }
 }
 
 impl Default for CursorAgent {
@@ -80,22 +72,25 @@ impl Agent for CursorAgent {
         let mut sessions = Vec::new();
 
         for path in paths {
-            let Some(session_id) = Self::extract_session_id(&path) else {
+            // Cursor conversation_id is the file stem
+            let Some(external_session_id) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+            else {
                 continue;
             };
+            let session_id = generate_session_id(&external_session_id, "cursor");
 
-            // Don't parse file content here - just filesystem scanning.
-            // Model will be extracted later during first read_incremental() if needed.
             let session = DiscoveredSession {
                 session_id,
-                agent_type: "cursor".to_string(),
+                tool: "cursor".to_string(),
                 transcript_path: path,
                 transcript_format: TranscriptFormat::CursorJsonl,
                 watermark_type: WatermarkType::ByteOffset,
                 initial_watermark: Box::new(ByteOffsetWatermark::new(0)),
-                model: None,
-                tool: Some("Cursor".to_string()),
-                external_thread_id: None,
+                external_session_id,
+                external_parent_session_id: None,
             };
 
             sessions.push(session);
@@ -209,15 +204,6 @@ impl Agent for CursorAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_extract_session_id() {
-        let path = PathBuf::from(
-            "/home/user/.config/Cursor/User/globalStorage/conversations/abc-123.jsonl",
-        );
-        let session_id = CursorAgent::extract_session_id(&path);
-        assert_eq!(session_id, Some("cursor:abc-123".to_string()));
-    }
 
     #[test]
     fn test_sweep_strategy() {

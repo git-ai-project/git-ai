@@ -60,7 +60,7 @@ fn test_codex_preset_structured_hook_input() {
         ParsedHookEvent::PostFileEdit(e) => {
             assert_eq!(e.context.agent_id.tool, "codex");
             assert_eq!(
-                e.context.session_id, "session-abc-123",
+                e.context.external_session_id, "session-abc-123",
                 "session_id should be preferred when present"
             );
             assert_eq!(
@@ -96,7 +96,7 @@ fn test_codex_preset_bash_pre_tool_use_skips_checkpoint_after_capturing_snapshot
     match &events[0] {
         ParsedHookEvent::PreBashCall(e) => {
             assert_eq!(e.context.agent_id.tool, "codex");
-            assert_eq!(e.context.session_id, "session-bash-pre");
+            assert_eq!(e.context.external_session_id, "session-bash-pre");
             assert_eq!(e.tool_use_id, "bash-use-1");
             assert!(
                 e.context.metadata.contains_key("transcript_path"),
@@ -129,7 +129,7 @@ fn test_codex_preset_bash_pre_tool_use_supports_camel_case_hook_event_name() {
     match &events[0] {
         ParsedHookEvent::PreBashCall(e) => {
             assert_eq!(e.context.agent_id.tool, "codex");
-            assert_eq!(e.context.session_id, "session-bash-pre-camel");
+            assert_eq!(e.context.external_session_id, "session-bash-pre-camel");
             assert_eq!(e.tool_use_id, "bash-use-camel-1");
         }
         _ => panic!("Expected PreBashCall for camel-case PreToolUse"),
@@ -159,7 +159,7 @@ fn test_codex_preset_bash_post_tool_use_detects_changed_files() {
         ParsedHookEvent::PostBashCall(e) => {
             assert!(e.transcript_source.is_some());
             assert_eq!(e.context.agent_id.tool, "codex");
-            assert_eq!(e.context.session_id, "session-bash-post");
+            assert_eq!(e.context.external_session_id, "session-bash-post");
             assert_eq!(e.tool_use_id, "bash-use-2");
         }
         _ => panic!("Expected PostBashCall"),

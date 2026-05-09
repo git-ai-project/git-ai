@@ -55,7 +55,7 @@ impl SweepCoordinator {
                         self.insert_new_session(&session)?;
                         sessions_to_process.push(SessionToProcess {
                             session_id: session.session_id.clone(),
-                            agent_type: session.agent_type.clone(),
+                            tool: session.tool.clone(),
                             canonical_path: Self::canonicalize_path(&session.transcript_path),
                         });
                     }
@@ -64,7 +64,7 @@ impl SweepCoordinator {
                         if self.is_session_behind(&session, &existing)? {
                             sessions_to_process.push(SessionToProcess {
                                 session_id: session.session_id.clone(),
-                                agent_type: session.agent_type.clone(),
+                                tool: session.tool.clone(),
                                 canonical_path: Self::canonicalize_path(&session.transcript_path),
                             });
                         }
@@ -99,14 +99,13 @@ impl SweepCoordinator {
         let now = Utc::now().timestamp();
         let record = SessionRecord {
             session_id: session.session_id.clone(),
-            agent_type: session.agent_type.clone(),
+            tool: session.tool.clone(),
             transcript_path: session.transcript_path.display().to_string(),
             transcript_format: session.transcript_format.to_string(),
             watermark_type: session.watermark_type.to_string(),
             watermark_value: session.initial_watermark.serialize(),
-            model: session.model.clone(),
-            tool: session.tool.clone(),
-            external_thread_id: session.external_thread_id.clone(),
+            external_session_id: session.external_session_id.clone(),
+            external_parent_session_id: session.external_parent_session_id.clone(),
             first_seen_at: now,
             last_processed_at: 0,
             last_known_size: 0,
@@ -136,6 +135,6 @@ impl SweepCoordinator {
 #[derive(Debug, Clone)]
 pub struct SessionToProcess {
     pub session_id: String,
-    pub agent_type: String,
+    pub tool: String,
     pub canonical_path: PathBuf,
 }
