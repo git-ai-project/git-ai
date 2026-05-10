@@ -1,0 +1,4 @@
+Feature	Feature_Parent	Title	Description	Display	Level	Directory_	Attributes
+s38	S38	L64	L255	I2	i2	S72	i4
+Feature	Feature
+Complete		git-ai	git-ai binary and git shim	1	1	GITAI_DIR	0

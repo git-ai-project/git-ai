@@ -1,0 +1,7 @@
+Directory	Directory_Parent	DefaultDir
+s72	S72	l255
+Directory	Directory
+TARGETDIR		SourceDir
+ProgramFiles64Folder	TARGETDIR	.
+GITAI_ROOT	ProgramFiles64Folder	git-ai
+GITAI_DIR	GITAI_ROOT	bin

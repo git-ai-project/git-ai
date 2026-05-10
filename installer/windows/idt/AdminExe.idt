@@ -1,0 +1,10 @@
+Action	Condition	Sequence
+s72	S255	I2
+AdminExecuteSequence	Action
+CostInitialize		800
+FileCost		900
+CostFinalize		1000
+InstallValidate		1400
+InstallInitialize		1500
+InstallFiles		4000
+InstallFinalize		6600
