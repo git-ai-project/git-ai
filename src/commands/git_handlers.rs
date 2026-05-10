@@ -186,7 +186,7 @@ pub fn handle_git(args: &[String]) {
             .iter()
             .any(|arg| arg == "--abort" || arg == "--continue" || arg == "--skip")
     {
-        wait_for_rebase_authorship_completion(std::time::Duration::from_secs(3));
+        wait_for_rebase_authorship_completion(std::time::Duration::from_millis(200));
     }
 
     // Clean up notes snapshot after successful rebase
@@ -684,18 +684,13 @@ fn cleanup_notes_snapshot(
 
 /// Wait briefly for daemon to complete authorship rewriting after rebase.
 /// Prevents race where next git command runs before notes are written.
-fn wait_for_rebase_authorship_completion(timeout: std::time::Duration) {
-    tracing::debug!(
-        "Waiting up to {:?} for daemon to complete rebase authorship",
-        timeout
-    );
-
-    // Simple sleep-based wait. In future, could poll daemon for completion signal.
-    // For now, a fixed delay is sufficient - the daemon typically completes in <1s,
-    // and 3s is imperceptible to users while preventing most races.
-    std::thread::sleep(timeout);
-
-    tracing::debug!("Rebase authorship wait completed");
+///
+/// CURRENTLY DISABLED: The sleep was causing 10x performance regression in benchmarks
+/// (3s × 3 rebases = 9s overhead). The pre-rebase notes snapshot (combined with recovery
+/// command) provides safety against attribution loss. Re-enable with proper detection if
+/// real-world race conditions are observed.
+fn wait_for_rebase_authorship_completion(_timeout: std::time::Duration) {
+    tracing::debug!("Rebase authorship wait disabled - relying on pre-rebase snapshot for safety");
 }
 
 // Detect if current process invocation is coming from shell completion machinery
