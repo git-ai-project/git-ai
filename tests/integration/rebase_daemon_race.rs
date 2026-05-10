@@ -329,16 +329,16 @@ fn test_daemon_mode_rebase_events_logged_after_processing() {
         .expect("read rewrite log");
 
     for event in events {
-        if let RewriteLogEvent::RebaseComplete { rebase_complete } = event {
-            if rebase_complete.new_head == new_head {
-                // This is our rebase event - verify all commits have notes
-                for commit in &rebase_complete.new_commits {
-                    assert!(
-                        has_authorship_note(&repo, commit),
-                        "Daemon should have processed note for commit {} before logging event",
-                        commit
-                    );
-                }
+        if let RewriteLogEvent::RebaseComplete { rebase_complete } = event
+            && rebase_complete.new_head == new_head
+        {
+            // This is our rebase event - verify all commits have notes
+            for commit in &rebase_complete.new_commits {
+                assert!(
+                    has_authorship_note(&repo, commit),
+                    "Daemon should have processed note for commit {} before logging event",
+                    commit
+                );
             }
         }
     }

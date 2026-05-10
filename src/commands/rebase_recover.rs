@@ -124,16 +124,16 @@ fn recover_from_backup_refs(repo: &Repository, _original_head: &str) -> Result<(
         .filter_map(|ref_name| {
             // Extract timestamp from refs/git-ai/backup/notes-<timestamp>
             let parts: Vec<&str> = ref_name.split('-').collect();
-            if let Some(ts_str) = parts.last() {
-                if let Ok(ts) = ts_str.parse::<u64>() {
-                    return Some((ref_name.clone(), ts));
-                }
+            if let Some(ts_str) = parts.last()
+                && let Ok(ts) = ts_str.parse::<u64>()
+            {
+                return Some((ref_name.clone(), ts));
             }
             None
         })
         .collect();
 
-    refs_with_timestamps.sort_by(|a, b| b.1.cmp(&a.1)); // Newest first
+    refs_with_timestamps.sort_by_key(|b| std::cmp::Reverse(b.1)); // Newest first
 
     if refs_with_timestamps.is_empty() {
         return Err(GitAiError::Generic(
@@ -317,6 +317,7 @@ fn delete_ref(repo: &Repository, ref_name: &str) -> Result<(), GitAiError> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]

@@ -2924,7 +2924,7 @@ fn test_rebase_split_one_to_many() {
     rebase_v3::rewrite_authorship_after_rebase_v3(
         &gitai_repo,
         &original_commit,
-        &[original_commit.clone()],
+        std::slice::from_ref(&original_commit),
         &[split1_sha.clone(), split2_sha.clone()],
         "Test User",
     )
@@ -2978,7 +2978,7 @@ fn test_rebase_already_applied_drop() {
     let mut file = repo.filename("code.txt");
     file.set_contents(crate::lines!["line 1", "FIXED BY AI".ai(), "line 3"]);
     repo.stage_all_and_commit("AI fixes bug").unwrap();
-    let ai_fix_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let _ai_fix_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Verify AI attribution exists
     file.assert_committed_lines(crate::lines![
@@ -3043,27 +3043,27 @@ fn test_rebase_reorder_commits() {
     repo.git(&["checkout", "-b", "feature"]).unwrap();
 
     // Commit A: AI modifies fileA.txt
-    let mut fileA = repo.filename("fileA.txt");
-    fileA.set_contents(crate::lines!["AI line from A".ai()]);
+    let mut file_a = repo.filename("fileA.txt");
+    file_a.set_contents(crate::lines!["AI line from A".ai()]);
     repo.stage_all_and_commit("Commit A").unwrap();
     let commit_a = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Commit B: AI modifies fileB.txt
-    let mut fileB = repo.filename("fileB.txt");
-    fileB.set_contents(crate::lines!["AI line from B".ai()]);
+    let mut file_b = repo.filename("fileB.txt");
+    file_b.set_contents(crate::lines!["AI line from B".ai()]);
     repo.stage_all_and_commit("Commit B").unwrap();
     let commit_b = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Commit C: AI modifies fileC.txt
-    let mut fileC = repo.filename("fileC.txt");
-    fileC.set_contents(crate::lines!["AI line from C".ai()]);
+    let mut file_c = repo.filename("fileC.txt");
+    file_c.set_contents(crate::lines!["AI line from C".ai()]);
     repo.stage_all_and_commit("Commit C").unwrap();
     let commit_c = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Verify original attributions
-    fileA.assert_committed_lines(crate::lines!["AI line from A".ai()]);
-    fileB.assert_committed_lines(crate::lines!["AI line from B".ai()]);
-    fileC.assert_committed_lines(crate::lines!["AI line from C".ai()]);
+    file_a.assert_committed_lines(crate::lines!["AI line from A".ai()]);
+    file_b.assert_committed_lines(crate::lines!["AI line from B".ai()]);
+    file_c.assert_committed_lines(crate::lines!["AI line from C".ai()]);
 
     // Main branch advances
     repo.git(&["checkout", &default_branch]).unwrap();
@@ -3086,13 +3086,13 @@ fn test_rebase_reorder_commits() {
     repo.git(&["cherry-pick", &commit_b]).unwrap(); // B (reordered after C)
 
     // After reorder, all attributions should still be correct (order doesn't affect attribution for independent files)
-    let mut fileA = repo.filename("fileA.txt");
-    let mut fileB = repo.filename("fileB.txt");
-    let mut fileC = repo.filename("fileC.txt");
+    let mut file_a = repo.filename("fileA.txt");
+    let mut file_b = repo.filename("fileB.txt");
+    let mut file_c = repo.filename("fileC.txt");
 
-    fileA.assert_committed_lines(crate::lines!["AI line from A".ai()]);
-    fileB.assert_committed_lines(crate::lines!["AI line from B".ai()]);
-    fileC.assert_committed_lines(crate::lines!["AI line from C".ai()]);
+    file_a.assert_committed_lines(crate::lines!["AI line from A".ai()]);
+    file_b.assert_committed_lines(crate::lines!["AI line from B".ai()]);
+    file_c.assert_committed_lines(crate::lines!["AI line from C".ai()]);
 }
 
 /// Category 2.1: Cross-File Movement (The Refactor)

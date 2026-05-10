@@ -99,14 +99,13 @@ pub fn validate_rebase_preconditions(
     }
 
     // Check 3: Working logs exist for HEAD
-    if let Ok(head_ref) = repository.head() {
-        if let Ok(head_sha) = head_ref.target() {
-            if !working_logs_exist_for(repository, &head_sha)? {
-                warnings.push(RebaseValidationWarning::MissingWorkingLogs {
-                    head_sha: head_sha.clone(),
-                });
-            }
-        }
+    if let Ok(head_ref) = repository.head()
+        && let Ok(head_sha) = head_ref.target()
+        && !working_logs_exist_for(repository, &head_sha)?
+    {
+        warnings.push(RebaseValidationWarning::MissingWorkingLogs {
+            head_sha: head_sha.clone(),
+        });
     }
 
     // Check 4: Working log directory integrity
@@ -209,15 +208,12 @@ fn count_pending_checkpoints(repository: &Repository) -> Result<usize, GitAiErro
     let mut count = 0;
     if let Ok(entries) = std::fs::read_dir(working_logs_base) {
         for entry in entries.flatten() {
-            if let Ok(metadata) = entry.metadata() {
-                if metadata.is_dir() {
-                    // Check if this directory has any log files
-                    if let Ok(log_entries) = std::fs::read_dir(entry.path()) {
-                        if log_entries.count() > 0 {
-                            count += 1;
-                        }
-                    }
-                }
+            if let Ok(metadata) = entry.metadata()
+                && metadata.is_dir()
+                && let Ok(log_entries) = std::fs::read_dir(entry.path())
+                && log_entries.count() > 0
+            {
+                count += 1;
             }
         }
     }

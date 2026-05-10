@@ -404,10 +404,10 @@ fn parse_diff_tree_output(diff_output: &str) -> DiffParseResult {
             current_file = Some(file_path.to_string());
         } else if line.starts_with("@@") {
             // Hunk header
-            if let Some(ref file) = current_file {
-                if let Some(hunk) = parse_hunk_header(line) {
-                    hunks_by_file.entry(file.clone()).or_default().push(hunk);
-                }
+            if let Some(ref file) = current_file
+                && let Some(hunk) = parse_hunk_header(line)
+            {
+                hunks_by_file.entry(file.clone()).or_default().push(hunk);
             }
         }
     }
@@ -862,35 +862,35 @@ pub fn rewrite_authorship_after_rebase_v3(
             let mut file_line_attrs: HashMap<String, Vec<LineAttribution>> = HashMap::new();
 
             for original_commit in original_commits_for_new {
-                if let Some(note_content) = refs::show_authorship_note(repo, original_commit) {
-                    if let Ok(log) = AuthorshipLog::deserialize_from_string(&note_content) {
-                        // Merge metadata (prompts, humans, sessions)
-                        for (hash, prompt) in log.metadata.prompts {
-                            merged_log.metadata.prompts.entry(hash).or_insert(prompt);
-                        }
-                        for (hash, human) in log.metadata.humans {
-                            merged_log.metadata.humans.entry(hash).or_insert(human);
-                        }
-                        for (session_id, session) in log.metadata.sessions {
-                            merged_log
-                                .metadata
-                                .sessions
-                                .entry(session_id)
-                                .or_insert(session);
-                        }
+                if let Some(note_content) = refs::show_authorship_note(repo, original_commit)
+                    && let Ok(log) = AuthorshipLog::deserialize_from_string(&note_content)
+                {
+                    // Merge metadata (prompts, humans, sessions)
+                    for (hash, prompt) in log.metadata.prompts {
+                        merged_log.metadata.prompts.entry(hash).or_insert(prompt);
+                    }
+                    for (hash, human) in log.metadata.humans {
+                        merged_log.metadata.humans.entry(hash).or_insert(human);
+                    }
+                    for (session_id, session) in log.metadata.sessions {
+                        merged_log
+                            .metadata
+                            .sessions
+                            .entry(session_id)
+                            .or_insert(session);
+                    }
 
-                        // Convert attestations to line attributions and collect by file
-                        for file_attestation in &log.attestations {
-                            for entry in &file_attestation.entries {
-                                let attrs = line_ranges_to_line_attributions(
-                                    &entry.line_ranges,
-                                    &entry.hash,
-                                );
-                                file_line_attrs
-                                    .entry(file_attestation.file_path.clone())
-                                    .or_default()
-                                    .extend(attrs);
-                            }
+                    // Convert attestations to line attributions and collect by file
+                    for file_attestation in &log.attestations {
+                        for entry in &file_attestation.entries {
+                            let attrs = line_ranges_to_line_attributions(
+                                &entry.line_ranges,
+                                &entry.hash,
+                            );
+                            file_line_attrs
+                                .entry(file_attestation.file_path.clone())
+                                .or_default()
+                                .extend(attrs);
                         }
                     }
                 }

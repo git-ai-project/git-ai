@@ -39,7 +39,7 @@ fn test_orphaned_notes_parked_when_no_new_commits() {
     // In real scenarios, this happens when build_rebase_commit_mappings returns empty
 
     // Check that orphaned notes ref exists
-    let orphaned_ref = format!("refs/git-ai/orphaned-notes/{}", original_head);
+    let _orphaned_ref = format!("refs/git-ai/orphaned-notes/{}", original_head);
 
     // For now, we can't easily trigger the orphaned notes scenario without deeper integration
     // This test documents the expected behavior and can be expanded when recovery command exists
@@ -114,7 +114,7 @@ fn test_original_commits_and_notes_still_exist_after_rebase() {
     assert!(cat_result.is_ok(), "Original commit should still exist");
 
     // Original commit's note should still exist (can check via git notes)
-    let note_result = repo.git_og(&["notes", "--ref=ai", "show", &original_sha]);
+    let _note_result = repo.git_og(&["notes", "--ref=ai", "show", &original_sha]);
     // Note: This might fail if notes weren't copied, which is fine - that's what we're testing
 }
 
