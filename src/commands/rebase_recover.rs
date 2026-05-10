@@ -9,7 +9,7 @@ use crate::git::repository::Repository;
 /// Recover attribution after a rebase that lost notes.
 ///
 /// This command attempts to restore attribution by:
-/// 1. Reading orphaned notes from refs/git-ai/orphaned-notes/<original-head>
+/// 1. Reading orphaned notes from `refs/git-ai/orphaned-notes/<original-head>`
 /// 2. Mapping original commits to current HEAD commits by content
 /// 3. Copying notes from original commits to new commits
 ///
