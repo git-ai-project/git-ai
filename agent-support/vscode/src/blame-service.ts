@@ -119,7 +119,7 @@ export class BlameService {
         'working-log',
         `checkpoints=${await this.statFileToken(path.join(workingLogPath, 'checkpoints.jsonl'))}`,
         `initial=${await this.statFileToken(path.join(workingLogPath, 'INITIAL'))}`,
-        `blobs=${await this.statDirectoryToken(path.join(workingLogPath, 'blobs'))}`,
+        `blobs=${await this.statBlobsDirectoryToken(path.join(workingLogPath, 'blobs'))}`,
       ].join(':');
     } catch (error) {
       console.warn('[git-ai] Failed to compute working log cache token:', error);
@@ -147,21 +147,10 @@ export class BlameService {
     }
   }
 
-  private async statDirectoryToken(directoryPath: string): Promise<string> {
+  private async statBlobsDirectoryToken(directoryPath: string): Promise<string> {
     try {
-      const entries = await fs.readdir(directoryPath, { withFileTypes: true });
-      const tokens: string[] = [];
-
-      for (const entry of entries) {
-        if (!entry.isFile()) {
-          continue;
-        }
-
-        const entryPath = path.join(directoryPath, entry.name);
-        tokens.push(`${entry.name}=${await this.statFileToken(entryPath)}`);
-      }
-
-      return tokens.length > 0 ? tokens.sort().join(',') : 'empty';
+      const stat = await fs.stat(directoryPath, { bigint: true });
+      return `dir:${stat.mtimeNs}`;
     } catch (error) {
       if (this.isMissingPathError(error)) {
         return 'missing';
