@@ -417,6 +417,7 @@ pub mod checkpoint_pos {
     pub const LINES_ADDED_SLOC: usize = 5; // u32 - for this file
     pub const LINES_DELETED_SLOC: usize = 6; // u32 - for this file
     pub const TOOL_USE_ID: usize = 7; // String - nullable
+    pub const EDIT_KIND: usize = 8; // String - nullable ("file_edit" | "bash")
 }
 
 /// Values for Event ID 4: checkpoint
@@ -435,6 +436,7 @@ pub mod checkpoint_pos {
 /// | 5 | lines_added_sloc | u32 |
 /// | 6 | lines_deleted_sloc | u32 |
 /// | 7 | external_tool_use_id | String (nullable) |
+/// | 8 | edit_kind | String (nullable) |
 #[derive(Debug, Clone, Default)]
 pub struct CheckpointValues {
     pub checkpoint_ts: PosField<u64>,
@@ -445,6 +447,7 @@ pub struct CheckpointValues {
     pub lines_added_sloc: PosField<u32>,
     pub lines_deleted_sloc: PosField<u32>,
     pub external_tool_use_id: PosField<String>,
+    pub edit_kind: PosField<String>,
 }
 
 impl CheckpointValues {
@@ -539,6 +542,17 @@ impl CheckpointValues {
         self.external_tool_use_id = Some(None);
         self
     }
+
+    pub fn edit_kind(mut self, value: impl Into<String>) -> Self {
+        self.edit_kind = Some(Some(value.into()));
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn edit_kind_null(mut self) -> Self {
+        self.edit_kind = Some(None);
+        self
+    }
 }
 
 impl PosEncoded for CheckpointValues {
@@ -581,6 +595,11 @@ impl PosEncoded for CheckpointValues {
             checkpoint_pos::TOOL_USE_ID,
             string_to_json(&self.external_tool_use_id),
         );
+        sparse_set(
+            &mut map,
+            checkpoint_pos::EDIT_KIND,
+            string_to_json(&self.edit_kind),
+        );
 
         map
     }
@@ -595,6 +614,7 @@ impl PosEncoded for CheckpointValues {
             lines_added_sloc: sparse_get_u32(arr, checkpoint_pos::LINES_ADDED_SLOC),
             lines_deleted_sloc: sparse_get_u32(arr, checkpoint_pos::LINES_DELETED_SLOC),
             external_tool_use_id: sparse_get_string(arr, checkpoint_pos::TOOL_USE_ID),
+            edit_kind: sparse_get_string(arr, checkpoint_pos::EDIT_KIND),
         }
     }
 }
@@ -1072,6 +1092,98 @@ mod tests {
         let values = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
 
         assert_eq!(values.external_tool_use_id, None); // not set
+    }
+
+    #[test]
+    fn test_checkpoint_values_with_edit_kind() {
+        let values = CheckpointValues::new()
+            .checkpoint_ts(1704067200)
+            .kind("ai_agent")
+            .file_path("src/main.rs")
+            .edit_kind("file_edit");
+
+        assert_eq!(values.edit_kind, Some(Some("file_edit".to_string())));
+    }
+
+    #[test]
+    fn test_checkpoint_values_edit_kind_null() {
+        let values = CheckpointValues::new()
+            .checkpoint_ts(1704067200)
+            .kind("ai_agent")
+            .edit_kind_null();
+
+        assert_eq!(values.edit_kind, Some(None));
+    }
+
+    #[test]
+    fn test_checkpoint_values_to_sparse_with_edit_kind() {
+        use super::PosEncoded;
+
+        let values = CheckpointValues::new()
+            .checkpoint_ts(1700000000)
+            .kind("ai_agent")
+            .file_path("tests/test.rs")
+            .edit_kind("bash");
+
+        let sparse = PosEncoded::to_sparse(&values);
+
+        assert_eq!(sparse.get("0"), Some(&Value::Number(1700000000.into())));
+        assert_eq!(
+            sparse.get("1"),
+            Some(&Value::String("ai_agent".to_string()))
+        );
+        assert_eq!(sparse.get("8"), Some(&Value::String("bash".to_string())));
+    }
+
+    #[test]
+    fn test_checkpoint_values_from_sparse_with_edit_kind() {
+        use super::PosEncoded;
+
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::Number(1704067200.into()));
+        sparse.insert("1".to_string(), Value::String("ai_agent".to_string()));
+        sparse.insert("2".to_string(), Value::String("lib.rs".to_string()));
+        sparse.insert("8".to_string(), Value::String("file_edit".to_string()));
+
+        let values = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(values.checkpoint_ts, Some(Some(1704067200)));
+        assert_eq!(values.kind, Some(Some("ai_agent".to_string())));
+        assert_eq!(values.edit_kind, Some(Some("file_edit".to_string())));
+    }
+
+    #[test]
+    fn test_checkpoint_values_roundtrip_with_edit_kind() {
+        use super::PosEncoded;
+
+        let original = CheckpointValues::new()
+            .checkpoint_ts(1700000000)
+            .kind("ai_agent")
+            .file_path("src/lib.rs")
+            .lines_added(50)
+            .edit_kind("bash");
+
+        let sparse = PosEncoded::to_sparse(&original);
+        let restored = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(restored.checkpoint_ts, Some(Some(1700000000)));
+        assert_eq!(restored.kind, Some(Some("ai_agent".to_string())));
+        assert_eq!(restored.file_path, Some(Some("src/lib.rs".to_string())));
+        assert_eq!(restored.lines_added, Some(Some(50)));
+        assert_eq!(restored.edit_kind, Some(Some("bash".to_string())));
+    }
+
+    #[test]
+    fn test_checkpoint_values_edit_kind_not_set() {
+        use super::PosEncoded;
+
+        let mut sparse = SparseArray::new();
+        sparse.insert("0".to_string(), Value::Number(1700000000.into()));
+        sparse.insert("1".to_string(), Value::String("human".to_string()));
+
+        let values = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
+
+        assert_eq!(values.edit_kind, None);
     }
 }
 
