@@ -11,6 +11,7 @@ Deterministic, enterprise-ready installers for git-ai. Zero third-party dependen
 | Linux (Debian/Ubuntu) | `.deb` | dpkg-deb | `/usr/lib/git-ai/bin/` | `sudo dpkg -i git-ai.deb` |
 | Linux (RHEL/Fedora) | `.rpm` | rpmbuild | `/usr/lib/git-ai/bin/` | `sudo rpm -i git-ai.rpm` |
 | macOS/Linux | Homebrew | brew | Homebrew `bin/` | `brew install git-ai-project/tap/git-ai` |
+| NixOS/Linux/macOS | Nix flake | nix | Nix store | `nix profile install github:git-ai-project/git-ai` |
 
 ## PATH Precedence
 
@@ -19,6 +20,7 @@ Each installer ensures `git-ai` takes priority over the system `git`:
 - **Windows**: MSI prepends to the system `PATH` environment variable
 - **macOS**: pkg prepends to `/etc/paths` (read by `path_helper(8)`)
 - **Linux**: deb/rpm add `/etc/profile.d/git-ai.sh` which exports the path
+- **Nix**: The flake's git wrapper uses `exec -a git` to set argv[0], handled by Nix store PATH
 
 ## Enterprise Rollout
 
@@ -73,6 +75,83 @@ brew install git-ai-project/tap/git-ai
 brew upgrade git-ai
 brew uninstall git-ai
 ```
+
+### Nix (NixOS / Home Manager / nix profile)
+
+The repository includes a comprehensive `flake.nix` at the project root with NixOS modules, Home Manager modules, and an overlay.
+
+#### NixOS module (system-wide)
+
+```nix
+# flake.nix
+{
+  inputs.git-ai.url = "github:git-ai-project/git-ai";
+
+  outputs = { self, nixpkgs, git-ai, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      modules = [
+        git-ai.nixosModules.default
+        {
+          programs.git-ai = {
+            enable = true;
+            setGitAlias = true;  # places git-ai's git wrapper before system git in PATH
+            settings = {
+              promptStorage = "local";
+              disableAutoUpdates = true;  # managed by Nix
+            };
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+#### Home Manager (per-user)
+
+```nix
+# home.nix
+{
+  imports = [ inputs.git-ai.homeManagerModules.default ];
+
+  programs.git-ai = {
+    enable = true;
+    package = inputs.git-ai.packages.${system}.minimal;  # without git wrapper
+    settings.promptStorage = "notes";
+  };
+}
+```
+
+#### Direct install (developer workstations)
+
+```bash
+# Install to user profile
+nix profile install github:git-ai-project/git-ai
+
+# Run without installing
+nix run github:git-ai-project/git-ai -- status
+
+# Upgrade
+nix profile upgrade git-ai
+
+# Uninstall
+nix profile remove git-ai
+```
+
+#### Overlay (importing into other flakes)
+
+```nix
+{
+  inputs.git-ai.url = "github:git-ai-project/git-ai";
+
+  outputs = { self, nixpkgs, git-ai, ... }: {
+    # Makes pkgs.git-ai and pkgs.git-ai-unwrapped available
+    nixpkgs.overlays = [ git-ai.overlays.default ];
+  };
+}
+```
+
+Package variants: `default` (with git wrapper + git-og), `minimal` (without git wrapper), `unwrapped` (bare binary only).
 
 ## Design Principles
 
