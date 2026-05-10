@@ -173,6 +173,21 @@ pub fn handle_git_ai(args: &[String]) {
         "squash-authorship" => {
             commands::squash_authorship::handle_squash_authorship(&args[1..]);
         }
+        "rebase" => {
+            let sub = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            match sub {
+                "recover" => {
+                    commands::rebase_recover::handle_rebase_recover(&args[2..]);
+                }
+                _ => {
+                    eprintln!("Usage: git-ai rebase <subcommand>");
+                    eprintln!();
+                    eprintln!("Subcommands:");
+                    eprintln!("  recover   Restore authorship notes from a pre-rebase snapshot");
+                    std::process::exit(1);
+                }
+            }
+        }
         "ci" => {
             commands::ci_handlers::handle_ci(&args[1..]);
         }
