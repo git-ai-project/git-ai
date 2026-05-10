@@ -358,9 +358,100 @@ jobs:
           path: release/git-ai-macos-x64.pkg
           retention-days: 30
 
+  build-linux-packages:
+    name: Build Linux Packages (deb/rpm)
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: success()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install rpmbuild
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - name: Download Linux x64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-linux-x64
+          path: artifacts
+
+      - name: Download Linux ARM64 binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: git-ai-linux-arm64
+          path: artifacts
+
+      - name: Build deb for amd64
+        run: |
+          VERSION=$(echo "${{ needs.build.outputs.version }}" | sed 's/^v//')
+          chmod +x artifacts/git-ai-linux-x64
+          ./installer/linux/build-deb.sh \
+            --binary artifacts/git-ai-linux-x64 \
+            --arch amd64 \
+            --version "$VERSION" \
+            --output "release/git-ai_${VERSION}_amd64.deb"
+
+      - name: Build deb for arm64
+        run: |
+          VERSION=$(echo "${{ needs.build.outputs.version }}" | sed 's/^v//')
+          chmod +x artifacts/git-ai-linux-arm64
+          ./installer/linux/build-deb.sh \
+            --binary artifacts/git-ai-linux-arm64 \
+            --arch arm64 \
+            --version "$VERSION" \
+            --output "release/git-ai_${VERSION}_arm64.deb"
+
+      - name: Build rpm for x86_64
+        run: |
+          VERSION=$(echo "${{ needs.build.outputs.version }}" | sed 's/^v//')
+          ./installer/linux/build-rpm.sh \
+            --binary artifacts/git-ai-linux-x64 \
+            --arch x86_64 \
+            --version "$VERSION" \
+            --output "release/git-ai-${VERSION}-1.x86_64.rpm"
+
+      - name: Build rpm for aarch64
+        run: |
+          VERSION=$(echo "${{ needs.build.outputs.version }}" | sed 's/^v//')
+          ./installer/linux/build-rpm.sh \
+            --binary artifacts/git-ai-linux-arm64 \
+            --arch aarch64 \
+            --version "$VERSION" \
+            --output "release/git-ai-${VERSION}-1.aarch64.rpm"
+
+      - name: Upload deb amd64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-linux-amd64-deb
+          path: release/*.deb
+          retention-days: 30
+
+      - name: Upload deb arm64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-linux-arm64-deb
+          path: release/*arm64.deb
+          retention-days: 30
+
+      - name: Upload rpm x86_64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-linux-x86_64-rpm
+          path: release/*.x86_64.rpm
+          retention-days: 30
+
+      - name: Upload rpm aarch64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: git-ai-linux-aarch64-rpm
+          path: release/*.aarch64.rpm
+          retention-days: 30
+
   create-release:
     name: Create Release
-    needs: [build, build-macos-intel, build-msi, build-pkg]
+    needs: [build, build-macos-intel, build-msi, build-pkg, build-linux-packages]
     runs-on: ubuntu-latest
     if: success() && inputs.dry_run != true
 
@@ -410,8 +501,8 @@ jobs:
       - name: Create checksums
         run: |
           cd release
-          if ls git-ai-* 1> /dev/null 2>&1; then
-            sha256sum git-ai-* > SHA256SUMS
+          if ls git-ai-* git-ai_* 1> /dev/null 2>&1; then
+            sha256sum git-ai-* git-ai_* 2>/dev/null | sort > SHA256SUMS
           else
             echo "No binaries found to create checksums for"
             touch SHA256SUMS
@@ -470,6 +561,7 @@ jobs:
         with:
           subject-path: |
             release/git-ai-*
+            release/git-ai_*
             release/install.sh
             release/install.ps1
             release/SHA256SUMS
@@ -508,6 +600,10 @@ jobs:
             ### Downloads
             - **Linux (x64)**: `git-ai-linux-x64`
             - **Linux (ARM64)**: `git-ai-linux-arm64`
+            - **Linux deb (amd64)**: `git-ai_*_amd64.deb`
+            - **Linux deb (arm64)**: `git-ai_*_arm64.deb`
+            - **Linux rpm (x86_64)**: `git-ai-*-1.x86_64.rpm`
+            - **Linux rpm (aarch64)**: `git-ai-*-1.aarch64.rpm`
             - **Windows (x64)**: `git-ai-windows-x64.exe`
             - **Windows (ARM64)**: `git-ai-windows-arm64.exe`
             - **Windows MSI (x64)**: `git-ai-windows-x64.msi`
@@ -529,6 +625,7 @@ jobs:
             ```
           files: |
             release/git-ai-*
+            release/git-ai_*
             release/SHA256SUMS
             release/install.sh
             release/install.ps1
