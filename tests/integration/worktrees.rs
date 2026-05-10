@@ -273,6 +273,10 @@ crate::worktree_test_wrappers! {
         repo.git(&["checkout", "feature"]).unwrap();
         repo.git(&["rebase", "integration"]).unwrap();
 
+        // Wait briefly for daemon to complete rebase authorship processing in async mode.
+        // Without the global post-rebase sleep, wrapper+daemon tests need explicit sync.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
         file.assert_lines_and_blame(crate::lines!["base".human(), "feature ai line".ai()]);
     }
 }
