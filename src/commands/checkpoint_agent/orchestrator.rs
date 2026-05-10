@@ -304,6 +304,9 @@ fn execute_post_file_edit(
     if let Some(tuid) = e.tool_use_id {
         metadata.entry("tool_use_id".to_string()).or_insert(tuid);
     }
+    metadata
+        .entry("edit_kind".to_string())
+        .or_insert_with(|| "file_edit".to_string());
     Ok(split_files_into_requests(
         files,
         e.context.trace_id,
@@ -427,6 +430,9 @@ fn execute_post_bash_call(e: PostBashCall) -> Result<Vec<CheckpointRequest>, Git
     metadata
         .entry("tool_use_id".to_string())
         .or_insert(e.tool_use_id);
+    metadata
+        .entry("edit_kind".to_string())
+        .or_insert_with(|| "bash".to_string());
     Ok(split_files_into_requests(
         files,
         e.context.trace_id,

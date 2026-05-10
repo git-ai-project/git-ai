@@ -349,6 +349,11 @@ fn execute_resolved_checkpoint(
             .get("tool_use_id")
             .map(|s| s.as_str());
 
+        let edit_kind = checkpoint_request
+            .metadata
+            .get("edit_kind")
+            .map(|s| s.as_str());
+
         for (entry, file_stat) in entries.iter().zip(file_stats.iter()) {
             let mut values = crate::metrics::CheckpointValues::new()
                 .checkpoint_ts(checkpoint.timestamp)
@@ -359,9 +364,11 @@ fn execute_resolved_checkpoint(
                 .lines_added_sloc(file_stat.additions_sloc)
                 .lines_deleted_sloc(file_stat.deletions_sloc);
 
-            // Add tool_use_id if available
             if let Some(tuid) = tool_use_id {
                 values = values.external_tool_use_id(tuid);
+            }
+            if let Some(ek) = edit_kind {
+                values = values.edit_kind(ek);
             }
 
             let file_attrs = attrs.clone().author(&checkpoint.author);
