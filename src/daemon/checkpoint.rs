@@ -104,12 +104,8 @@ pub fn build_agent_usage_attrs(
         .custom_attributes_map(crate::config::Config::fresh().custom_attributes());
 
     if let Some(repo) = repo {
-        if let Ok(Some(remote_name)) = repo.get_default_remote()
-            && let Ok(remotes) = repo.remotes_with_urls()
-            && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
-            && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
-        {
-            attrs = attrs.repo_url(normalized);
+        if let Some(url) = crate::repo_url::resolve_repo_url_from_repo(repo) {
+            attrs = attrs.repo_url(url);
         }
 
         if let Ok(head_ref) = repo.head()
@@ -151,12 +147,8 @@ fn build_checkpoint_attrs(
     attrs = attrs.custom_attributes_map(crate::config::Config::fresh().custom_attributes());
 
     // Add repo URL
-    if let Ok(Some(remote_name)) = repo.get_default_remote()
-        && let Ok(remotes) = repo.remotes_with_urls()
-        && let Some((_, url)) = remotes.into_iter().find(|(n, _)| n == &remote_name)
-        && let Ok(normalized) = crate::repo_url::normalize_repo_url(&url)
-    {
-        attrs = attrs.repo_url(normalized);
+    if let Some(url) = crate::repo_url::resolve_repo_url_from_repo(repo) {
+        attrs = attrs.repo_url(url);
     }
 
     // Add branch

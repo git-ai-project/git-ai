@@ -78,6 +78,12 @@ const MIGRATIONS: &[&str] = &[
 
     INSERT INTO schema_version (version) VALUES (2);
     "#,
+    // Version 3: Add repo_work_dir column for session-level repo context.
+    r#"
+    ALTER TABLE sessions ADD COLUMN repo_work_dir TEXT;
+
+    INSERT INTO schema_version (version) VALUES (3);
+    "#,
 ];
 
 /// Record representing a session in the database.
@@ -97,6 +103,7 @@ pub struct SessionRecord {
     pub last_modified: Option<i64>,
     pub processing_errors: i64,
     pub last_error: Option<String>,
+    pub repo_work_dir: Option<String>,
 }
 
 /// SQLite database for transcript tracking.
@@ -209,8 +216,8 @@ impl TranscriptsDatabase {
                 watermark_type, watermark_value, external_session_id,
                 external_parent_session_id,
                 first_seen_at, last_processed_at, last_known_size, last_modified,
-                processing_errors, last_error
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                processing_errors, last_error, repo_work_dir
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             "#,
             params![
                 record.session_id,
@@ -227,6 +234,7 @@ impl TranscriptsDatabase {
                 record.last_modified,
                 record.processing_errors,
                 record.last_error,
+                record.repo_work_dir,
             ],
         )
         .map_err(|e| TranscriptError::Fatal {
@@ -253,6 +261,7 @@ impl TranscriptsDatabase {
             last_modified: row.get(11)?,
             processing_errors: row.get(12)?,
             last_error: row.get(13)?,
+            repo_work_dir: row.get(14)?,
         })
     }
 
@@ -268,7 +277,7 @@ impl TranscriptsDatabase {
                    watermark_type, watermark_value, external_session_id,
                    external_parent_session_id,
                    first_seen_at, last_processed_at, last_known_size, last_modified,
-                   processing_errors, last_error
+                   processing_errors, last_error, repo_work_dir
             FROM sessions WHERE session_id = ?1
             "#,
             params![session_id],
@@ -340,6 +349,28 @@ impl TranscriptsDatabase {
         Ok(())
     }
 
+    /// Update the repo_work_dir for a session.
+    pub fn update_repo_work_dir(
+        &self,
+        session_id: &str,
+        repo_work_dir: &str,
+    ) -> Result<(), TranscriptError> {
+        let conn = self
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        conn.execute(
+            "UPDATE sessions SET repo_work_dir = ?1 WHERE session_id = ?2",
+            params![repo_work_dir, session_id],
+        )
+        .map_err(|e| TranscriptError::Fatal {
+            message: format!("Failed to update repo_work_dir: {}", e),
+        })?;
+
+        Ok(())
+    }
+
     /// Record an error for a session.
     pub fn record_error(
         &self,
@@ -406,7 +437,7 @@ impl TranscriptsDatabase {
                    watermark_type, watermark_value, external_session_id,
                    external_parent_session_id,
                    first_seen_at, last_processed_at, last_known_size, last_modified,
-                   processing_errors, last_error
+                   processing_errors, last_error, repo_work_dir
             FROM sessions
             "#,
             )
@@ -459,6 +490,7 @@ mod tests {
             last_modified: Some(1704067200),
             processing_errors: 0,
             last_error: None,
+            repo_work_dir: None,
         }
     }
 
@@ -590,6 +622,7 @@ mod tests {
             last_modified: None,
             processing_errors: 0,
             last_error: None,
+            repo_work_dir: None,
         };
 
         db.insert_session(&session).unwrap();
@@ -598,6 +631,7 @@ mod tests {
         assert_eq!(retrieved.external_session_id, "session-null");
         assert_eq!(retrieved.last_modified, None);
         assert_eq!(retrieved.last_error, None);
+        assert_eq!(retrieved.repo_work_dir, None);
     }
 
     #[test]
@@ -613,7 +647,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 2); // Current schema version
+        assert_eq!(version, 3); // Current schema version
     }
 
     #[test]

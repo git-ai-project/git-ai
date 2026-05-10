@@ -14,6 +14,7 @@ fn test_priority_queue_ordering_immediate_first() {
         tool: "test".to_string(),
         trace_id: None,
         canonical_path: PathBuf::from("/test"),
+        repo_work_dir: None,
         retry_count: 0,
         next_retry_at: None,
     });
@@ -23,6 +24,7 @@ fn test_priority_queue_ordering_immediate_first() {
         tool: "test".to_string(),
         trace_id: None,
         canonical_path: PathBuf::from("/test"),
+        repo_work_dir: None,
         retry_count: 0,
         next_retry_at: None,
     });
@@ -55,6 +57,7 @@ fn test_priority_queue_ordering_multiple_same_priority() {
         tool: "test".to_string(),
         trace_id: None,
         canonical_path: PathBuf::from("/test"),
+        repo_work_dir: None,
         retry_count: 0,
         next_retry_at: None,
     });
@@ -64,6 +67,7 @@ fn test_priority_queue_ordering_multiple_same_priority() {
         tool: "test".to_string(),
         trace_id: None,
         canonical_path: PathBuf::from("/test"),
+        repo_work_dir: None,
         retry_count: 0,
         next_retry_at: None,
     });
@@ -73,6 +77,7 @@ fn test_priority_queue_ordering_multiple_same_priority() {
         tool: "test".to_string(),
         trace_id: None,
         canonical_path: PathBuf::from("/test"),
+        repo_work_dir: None,
         retry_count: 0,
         next_retry_at: None,
     });
@@ -102,6 +107,7 @@ fn test_retry_delay_prevents_immediate_reprocessing() {
         tool: "test".to_string(),
         trace_id: None,
         canonical_path: PathBuf::from("/test"),
+        repo_work_dir: None,
         retry_count: 1,
         next_retry_at: Some(next_retry_at),
     };
@@ -144,6 +150,7 @@ fn test_retry_delay_allows_processing_after_delay() {
         tool: "test".to_string(),
         trace_id: None,
         canonical_path: PathBuf::from("/test"),
+        repo_work_dir: None,
         retry_count: 1,
         next_retry_at: Some(past_retry_at),
     };

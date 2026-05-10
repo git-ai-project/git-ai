@@ -262,6 +262,34 @@ impl Agent for CodexAgent {
             new_watermark,
         })
     }
+
+    fn infer_cwd(&self, transcript_path: &Path) -> Option<PathBuf> {
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+
+        let file = File::open(transcript_path).ok()?;
+        let reader = BufReader::new(file);
+
+        // Codex has cwd in session_meta or turn_context payload events
+        for line in reader.lines().take(20) {
+            let line = line.ok()?;
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+                // Check payload.cwd (session_meta and turn_context)
+                if let Some(cwd) = obj
+                    .get("payload")
+                    .and_then(|p| p.get("cwd"))
+                    .and_then(|v| v.as_str())
+                    && !cwd.is_empty()
+                {
+                    return Some(PathBuf::from(cwd));
+                }
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]

@@ -7446,9 +7446,16 @@ impl ActorDaemonCoordinator {
                         .unwrap_or_else(|| "unknown".to_string());
                     let trace_id = request.trace_id.clone();
 
+                    let repo_work_dir = request.files.first().map(|f| f.repo_work_dir.clone());
+
                     if let Some(db) = &self.transcripts_db
-                        && let Err(e) =
-                            Self::ensure_session_exists(db, &session_id, &tool, transcript_source)
+                        && let Err(e) = Self::ensure_session_exists(
+                            db,
+                            &session_id,
+                            &tool,
+                            transcript_source,
+                            repo_work_dir.as_deref(),
+                        )
                     {
                         tracing::warn!(session_id = %session_id, error = %e, "failed to ensure session exists");
                     }
@@ -7458,6 +7465,7 @@ impl ActorDaemonCoordinator {
                         tool,
                         trace_id,
                         transcript_source.path.clone(),
+                        repo_work_dir,
                     );
                 }
 
@@ -7605,6 +7613,7 @@ impl ActorDaemonCoordinator {
         session_id: &str,
         tool: &str,
         transcript_source: &crate::commands::checkpoint_agent::presets::TranscriptSource,
+        repo_work_dir: Option<&std::path::Path>,
     ) -> Result<(), String> {
         // Check if session exists
         if db
@@ -7655,6 +7664,7 @@ impl ActorDaemonCoordinator {
             last_modified: None,
             processing_errors: 0,
             last_error: None,
+            repo_work_dir: repo_work_dir.map(|p| p.display().to_string()),
         };
 
         db.insert_session(&record).map_err(|e| e.to_string())?;

@@ -50,6 +50,14 @@ pub trait Agent: Send + Sync {
     ) -> (Option<String>, Option<String>, Option<String>) {
         (None, None, None)
     }
+
+    /// Infer the working directory from the transcript file content.
+    ///
+    /// Reads the first few lines of the transcript looking for a `cwd` field.
+    /// Returns None if the agent format doesn't include cwd or it can't be found.
+    fn infer_cwd(&self, _transcript_path: &Path) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 const ALL_AGENT_TYPES: &[&str] = &[

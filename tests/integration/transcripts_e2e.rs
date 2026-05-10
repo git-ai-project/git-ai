@@ -52,6 +52,7 @@ fn test_session_database_basic() {
         last_modified: None,
         processing_errors: 0,
         last_error: None,
+        repo_work_dir: None,
     };
 
     // Insert
@@ -156,6 +157,7 @@ fn test_multiple_sessions_isolation() {
             last_modified: None,
             processing_errors: 0,
             last_error: None,
+            repo_work_dir: None,
         };
         db.insert_session(&session).unwrap();
     }
@@ -200,6 +202,7 @@ fn test_database_persistence() {
             last_modified: None,
             processing_errors: 0,
             last_error: None,
+            repo_work_dir: None,
         };
         db.insert_session(&session).unwrap();
     }
@@ -236,6 +239,7 @@ fn test_error_tracking() {
         last_modified: None,
         processing_errors: 0,
         last_error: None,
+        repo_work_dir: None,
     };
 
     db.insert_session(&session).unwrap();
@@ -277,6 +281,7 @@ fn test_full_pipeline_claude_session_ids_flow_through() {
         last_modified: None,
         processing_errors: 0,
         last_error: None,
+        repo_work_dir: None,
     };
     db.insert_session(&session).unwrap();
 
@@ -365,6 +370,7 @@ fn test_full_pipeline_opencode_session_ids_flow_through() {
         last_modified: None,
         processing_errors: 0,
         last_error: None,
+        repo_work_dir: None,
     };
     db.insert_session(&session).unwrap();
 
@@ -446,6 +452,7 @@ fn test_subagent_session_record_has_parent_link() {
         last_modified: None,
         processing_errors: 0,
         last_error: None,
+        repo_work_dir: None,
     };
     db.insert_session(&session).unwrap();
 

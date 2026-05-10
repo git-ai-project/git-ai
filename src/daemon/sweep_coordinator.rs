@@ -97,6 +97,12 @@ impl SweepCoordinator {
 
     fn insert_new_session(&self, session: &DiscoveredSession) -> Result<(), TranscriptError> {
         let now = Utc::now().timestamp();
+
+        let agent = crate::transcripts::agent::get_agent(&session.tool);
+        let inferred_cwd = agent
+            .as_ref()
+            .and_then(|a| a.infer_cwd(&session.transcript_path));
+
         let record = SessionRecord {
             session_id: session.session_id.clone(),
             tool: session.tool.clone(),
@@ -112,6 +118,7 @@ impl SweepCoordinator {
             last_modified: None,
             processing_errors: 0,
             last_error: None,
+            repo_work_dir: inferred_cwd.map(|p| p.display().to_string()),
         };
 
         self.transcripts_db.insert_session(&record)?;

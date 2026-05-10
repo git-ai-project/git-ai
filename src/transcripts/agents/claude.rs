@@ -271,6 +271,29 @@ impl Agent for ClaudeAgent {
 
         (event_id, parent_id, tool_use_id)
     }
+
+    fn infer_cwd(&self, transcript_path: &Path) -> Option<PathBuf> {
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+
+        let file = File::open(transcript_path).ok()?;
+        let reader = BufReader::new(file);
+
+        // Check up to 50 lines for a top-level "cwd" field
+        for line in reader.lines().take(50) {
+            let line = line.ok()?;
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line)
+                && let Some(cwd) = obj.get("cwd").and_then(|v| v.as_str())
+                && !cwd.is_empty()
+            {
+                return Some(PathBuf::from(cwd));
+            }
+        }
+        None
+    }
 }
 
 #[cfg(test)]

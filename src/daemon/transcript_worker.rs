@@ -38,6 +38,7 @@ pub(super) struct ProcessingTask {
     pub(super) tool: String,
     pub(super) trace_id: Option<String>,
     pub(super) canonical_path: PathBuf,
+    pub(super) repo_work_dir: Option<PathBuf>,
     pub(super) retry_count: u32,
     #[cfg_attr(test, serde(skip))]
     pub(super) next_retry_at: Option<std::time::Instant>,
@@ -74,12 +75,14 @@ impl TranscriptWorkerHandle {
         tool: String,
         trace_id: String,
         transcript_path: PathBuf,
+        repo_work_dir: Option<PathBuf>,
     ) {
         let notification = CheckpointNotification {
             session_id,
             tool,
             trace_id,
             transcript_path,
+            repo_work_dir,
         };
         let _ = self.checkpoint_tx.send(notification);
     }
@@ -91,6 +94,7 @@ struct CheckpointNotification {
     tool: String,
     trace_id: String,
     transcript_path: PathBuf,
+    repo_work_dir: Option<PathBuf>,
 }
 
 /// Worker that processes transcript changes.
@@ -193,6 +197,7 @@ impl TranscriptWorker {
                 tool: session.tool,
                 trace_id: None,
                 canonical_path: session.canonical_path,
+                repo_work_dir: None,
                 retry_count: 0,
                 next_retry_at: None,
             });
@@ -217,6 +222,7 @@ impl TranscriptWorker {
             tool: notification.tool,
             trace_id: Some(notification.trace_id),
             canonical_path,
+            repo_work_dir: notification.repo_work_dir,
             retry_count: 0,
             next_retry_at: None,
         });
@@ -319,12 +325,33 @@ impl TranscriptWorker {
             .external_parent_session_id
             .as_ref()
             .map(|ext_pid| generate_session_id(ext_pid, &session.tool));
-        let base_attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
+
+        // Resolve repo_work_dir with priority: task (hook) > DB > infer from transcript
+        let resolved_work_dir = task
+            .repo_work_dir
+            .clone()
+            .or_else(|| session.repo_work_dir.as_ref().map(PathBuf::from))
+            .or_else(|| agent.infer_cwd(&path));
+
+        // Persist inferred cwd to DB if session didn't already have one
+        if session.repo_work_dir.is_none()
+            && let Some(ref work_dir) = resolved_work_dir
+        {
+            let _ = db.update_repo_work_dir(&session.session_id, &work_dir.display().to_string());
+        }
+
+        let mut base_attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
             .session_id(session.session_id.clone())
             .tool(&session.tool)
             .external_session_id(session.external_session_id.clone())
             .external_parent_session_id_opt(session.external_parent_session_id.clone())
             .parent_session_id_opt(parent_session_id);
+
+        if let Some(ref work_dir) = resolved_work_dir
+            && let Some(url) = crate::repo_url::resolve_repo_url_from_path(work_dir)
+        {
+            base_attrs = base_attrs.repo_url(url);
+        }
 
         loop {
             let batch = agent.read_incremental(&path, current_watermark, &session.session_id)?;
