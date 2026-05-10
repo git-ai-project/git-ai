@@ -883,10 +883,8 @@ pub fn rewrite_authorship_after_rebase_v3(
                     // Convert attestations to line attributions and collect by file
                     for file_attestation in &log.attestations {
                         for entry in &file_attestation.entries {
-                            let attrs = line_ranges_to_line_attributions(
-                                &entry.line_ranges,
-                                &entry.hash,
-                            );
+                            let attrs =
+                                line_ranges_to_line_attributions(&entry.line_ranges, &entry.hash);
                             file_line_attrs
                                 .entry(file_attestation.file_path.clone())
                                 .or_default()
