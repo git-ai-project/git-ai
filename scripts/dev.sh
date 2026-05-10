@@ -72,4 +72,11 @@ chmod +x "$HOME/.git-ai/bin/git-ai"
 echo "Running install hooks..."
 ~/.git-ai/bin/git-ai install
 
+# Install developer pre-commit hook (for format/lint checks)
+if [ -f "scripts/pre-commit" ]; then
+    echo "Installing developer pre-commit hook..."
+    ln -sf "../../scripts/pre-commit" ".git/hooks/pre-commit"
+    echo "✅ Pre-commit hook installed (bypass with --no-verify)"
+fi
+
 echo "Done!"

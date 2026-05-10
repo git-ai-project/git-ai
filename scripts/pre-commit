@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Pre-commit hook to ensure code quality before committing
+# Install: ./scripts/install-hooks.sh
+#
+# This hook runs the same checks as CI to catch issues early.
+# To bypass temporarily: git commit --no-verify
+
+set -e
+
+echo "[pre-commit] Running code quality checks..."
+
+# Check if task command is available
+if ! command -v task &> /dev/null; then
+    echo "⚠️  'task' command not found. Install from: https://taskfile.dev"
+    echo "    Falling back to direct cargo commands..."
+    USE_TASK=false
+else
+    USE_TASK=true
+fi
+
+# 1. Check formatting
+echo "[pre-commit] Checking code formatting..."
+if [ "$USE_TASK" = true ]; then
+    if ! task format:check; then
+        echo "❌ Code is not formatted. Run: task fmt"
+        exit 1
+    fi
+else
+    if ! cargo fmt --all -- --check; then
+        echo "❌ Code is not formatted. Run: cargo fmt --all"
+        exit 1
+    fi
+fi
+
+# 2. Run clippy
+echo "[pre-commit] Running clippy..."
+if [ "$USE_TASK" = true ]; then
+    if ! task lint; then
+        echo "❌ Clippy found issues. Fix them before committing."
+        exit 1
+    fi
+else
+    if ! cargo clippy --all-targets -- -D warnings; then
+        echo "❌ Clippy found issues. Fix them before committing."
+        exit 1
+    fi
+fi
+
+# 3. Check documentation
+echo "[pre-commit] Checking documentation..."
+if [ "$USE_TASK" = true ]; then
+    if ! task doc 2>&1 | grep -q "Finished"; then
+        echo "❌ Documentation build failed."
+        exit 1
+    fi
+else
+    if ! RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --quiet 2>&1; then
+        echo "❌ Documentation warnings found."
+        exit 1
+    fi
+fi
+
+echo "✅ All pre-commit checks passed!"

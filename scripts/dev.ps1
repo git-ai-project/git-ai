@@ -138,4 +138,13 @@ Write-Host 'Running install hooks...'
 & $GitAiExe install
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install developer pre-commit hook (for format/lint checks)
+if (Test-Path -LiteralPath "scripts\pre-commit") {
+    Write-Host 'Installing developer pre-commit hook...'
+    $hookPath = ".git\hooks\pre-commit"
+    # Windows doesn't support symlinks well, so copy the file
+    Copy-Item -Force "scripts\pre-commit" $hookPath
+    Write-Host '✅ Pre-commit hook installed (bypass with --no-verify)'
+}
+
 Write-Host 'Done!'
