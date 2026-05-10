@@ -1,0 +1,18 @@
+#!/bin/bash
+# Ensure /Library/git-ai/bin is first in system PATH for all users.
+# /etc/paths is read by path_helper(8) which runs in every new shell.
+
+INSTALL_DIR="/Library/git-ai/bin"
+PATHS_FILE="/etc/paths"
+
+# Remove any existing entry (idempotent)
+if [ -f "$PATHS_FILE" ]; then
+    grep -v "^${INSTALL_DIR}$" "$PATHS_FILE" > "${PATHS_FILE}.tmp"
+    mv "${PATHS_FILE}.tmp" "$PATHS_FILE"
+fi
+
+# Prepend our directory
+echo "$INSTALL_DIR" | cat - "$PATHS_FILE" > "${PATHS_FILE}.tmp"
+mv "${PATHS_FILE}.tmp" "$PATHS_FILE"
+
+exit 0
