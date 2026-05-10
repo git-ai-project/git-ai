@@ -1143,6 +1143,10 @@ fn test_stash_pop_conflict_preserves_ai_attribution_without_new_checkpoint() {
         .stage_all_and_commit("resolved conflict")
         .expect("commit should succeed");
 
+    // Wait briefly for daemon to complete stash hook processing in async mode.
+    // Without the global post-command sleeps, wrapper+daemon tests need explicit sync.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
     // The AI lines from the stash should still be attributed to AI
     // This will fail if the post_stash_hook bailed on exit code 1
     // and never restored attribution from refs/notes/ai-stash
