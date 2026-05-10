@@ -426,7 +426,7 @@ fn test_checkout_pathspec_multiple_files() {
 /// "ours") before the VA merge so byte offsets are computed on clean content.
 #[test]
 fn test_checkout_merge_conflict_preserves_ai_attribution() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_dedicated_daemon();
 
     // Initial commit: single line that both branches will modify, guaranteeing a
     // conflict when we later do `checkout --merge`.

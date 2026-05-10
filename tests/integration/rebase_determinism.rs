@@ -182,7 +182,7 @@ fn get_commit_chain(repo: &TestRepo, n: usize) -> Vec<String> {
 #[test]
 fn test_rebase_tree_equivalence_and_sha_determinism() {
     // === Run 1: git-ai rebase ===
-    let repo1 = TestRepo::new();
+    let repo1 = TestRepo::new_dedicated_daemon();
     setup_divergent_fixture(&repo1);
 
     let dev_tree_before_rebase = repo1
@@ -228,7 +228,7 @@ fn test_rebase_tree_equivalence_and_sha_determinism() {
     ]);
 
     // === Run 2: native git rebase (bypassing git-ai hooks) ===
-    let repo2 = TestRepo::new();
+    let repo2 = TestRepo::new_dedicated_daemon();
     setup_divergent_fixture(&repo2);
 
     let native_tree_before = repo2
@@ -429,7 +429,7 @@ fn test_multicommit_rebase_tree_equivalence_and_sha_determinism() {
 /// After rebasing, AI-attributed lines should still map to the correct content.
 #[test]
 fn test_line_number_mapping_through_rebase() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_dedicated_daemon();
 
     // Ensure deterministic git config
     repo.git(&["config", "core.autocrlf", "false"]).unwrap();

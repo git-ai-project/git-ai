@@ -49,7 +49,7 @@ fn test_github_copilot_human_checkpoint_before_edit() {
 /// Test that human checkpoint with will_edit_filepaths scopes the attribution correctly
 #[test]
 fn test_github_copilot_human_checkpoint_scoped_to_files() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_dedicated_daemon();
     let mut file1 = repo.filename("file1.ts");
     let mut file2 = repo.filename("file2.ts");
 

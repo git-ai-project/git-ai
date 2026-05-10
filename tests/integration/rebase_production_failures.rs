@@ -275,7 +275,7 @@ fn test_interactive_rebase_squash_merges_notes() {
 /// This is a complex rebase that can confuse working log lookup.
 #[test]
 fn test_rebase_onto_different_base() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_dedicated_daemon();
 
     // Create initial state: base → old-main → new-main (diverged)
     //                              → feature (branches from base)

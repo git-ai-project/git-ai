@@ -3031,7 +3031,7 @@ fn test_rebase_already_applied_drop() {
 /// This test verifies attribution survives commit reordering.
 #[test]
 fn test_rebase_reorder_commits() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::new_dedicated_daemon();
 
     // Base commit
     let mut file = repo.filename("file.txt");
