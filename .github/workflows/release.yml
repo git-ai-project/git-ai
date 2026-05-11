@@ -696,6 +696,9 @@ jobs:
           docker run --rm -v "$(pwd)/installer:/installer" fedora:latest bash -c '
             set -euo pipefail
 
+            echo "=== Installing git dependency ==="
+            dnf install -y git --setopt=install_weak_deps=False -q
+
             echo "=== Installing rpm ==="
             rpm -i /installer/*.x86_64.rpm
 
