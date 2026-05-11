@@ -1,0 +1,340 @@
+digraph rebase_v3_ideal {
+    rankdir=TB;
+    compound=true;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fillcolor="#f9f9f9"];
+    edge [fontname="Helvetica", fontsize=8];
+
+    // =============================================
+    // CLI ENTRY POINTS (unchanged)
+    // =============================================
+    subgraph cluster_entry {
+        label="CLI Entry Points (src/main.rs)";
+        style=filled;
+        fillcolor="#e8f4fd";
+
+        main [label="main()\nargv[0] dispatch", shape=diamond, fillcolor="#bbdefb"];
+        git_proxy_mode [label="argv[0] == \"git\"\n(production symlink)", fillcolor="#c8e6c9"];
+        debug_env [label="GIT_AI=git env var\n(debug builds only)", fillcolor="#fff9c4", style="rounded,filled,dashed"];
+    }
+
+    main -> git_proxy_mode [label="argv[0]=git"];
+    main -> debug_env [label="debug && GIT_AI=git"];
+    debug_env -> git_proxy_mode;
+
+    // =============================================
+    // GIT PROXY (simplified — unchanged from current)
+    // =============================================
+    subgraph cluster_wrapper {
+        label="Git Proxy (src/commands/git_handlers.rs)";
+        style=filled;
+        fillcolor="#f3e5f5";
+
+        handle_git [label="handle_git(args)"];
+        send_pre [label="send_wrapper_pre_state_to_daemon()\n{invocation_id, worktree, head}"];
+        proxy_to_git [label="proxy_to_git(args)\n→ real git (signal forwarding)"];
+        send_post [label="send_wrapper_post_state_to_daemon()\n{invocation_id, worktree, head}"];
+    }
+
+    git_proxy_mode -> handle_git;
+    handle_git -> send_pre [label="mutating cmd\n+ daemon connected"];
+    send_pre -> proxy_to_git;
+    proxy_to_git -> send_post;
+
+    // =============================================
+    // DAEMON (simplified — trace + normalize unchanged)
+    // =============================================
+    subgraph cluster_daemon {
+        label="Daemon — Background Process";
+        style=filled;
+        fillcolor="#fff3e0";
+
+        trace_ingest [label="Trace2 Ingest\n+ Normalizer\n→ NormalizedCommand"];
+        wrapper_overlay [label="apply_wrapper_state_overlay()\n(merge pre/post from wrapper)"];
+        side_effects [label="maybe_apply_side_effects_for_applied_command()"];
+    }
+
+    send_pre -> trace_ingest [style=dotted, color=blue, label="IPC"];
+    send_post -> trace_ingest [style=dotted, color=blue, label="IPC"];
+    proxy_to_git -> trace_ingest [style=dotted, color=blue, label="GIT_TRACE2"];
+    trace_ingest -> wrapper_overlay;
+    wrapper_overlay -> side_effects;
+
+    // =============================================
+    // SEMANTIC EVENT DETECTION (simplified)
+    // All sources produce the same (onto, original, new) triple
+    // =============================================
+    subgraph cluster_event_detection {
+        label="Rewrite Event Detection\n(all sources normalize to the same triple)";
+        style=filled;
+        fillcolor="#e8f5e9";
+
+        detect_rewrite [label="detect_rewrite_triple()\n→ Option<RewriteTriple>", fillcolor="#c8e6c9"];
+
+        subgraph cluster_sources {
+            label="Event Sources";
+            style=filled;
+            fillcolor="#c8e6c9";
+
+            src_rebase [label="git rebase"];
+            src_pull_rebase [label="git pull --rebase"];
+            src_cherry_pick [label="git cherry-pick"];
+            src_amend [label="git commit --amend"];
+            src_reset [label="git reset (non-ancestor)"];
+            src_ref_update [label="ref update (Graphite, etc.)"];
+            src_merge_squash [label="git merge --squash + commit"];
+        }
+
+        triple [label="RewriteTriple {\n  onto: CommitId,\n  original_head: CommitId,\n  new_head: CommitId\n}", shape=note, fillcolor="#a5d6a7"];
+    }
+
+    side_effects -> detect_rewrite;
+    src_rebase -> detect_rewrite;
+    src_pull_rebase -> detect_rewrite;
+    src_cherry_pick -> detect_rewrite;
+    src_amend -> detect_rewrite;
+    src_reset -> detect_rewrite;
+    src_ref_update -> detect_rewrite;
+    src_merge_squash -> detect_rewrite;
+    detect_rewrite -> triple;
+
+    // =============================================
+    // CONFLICT STATE (simplified)
+    // Only stores triple for --continue resume
+    // =============================================
+    subgraph cluster_conflict {
+        label="Conflict State (exit_code != 0)";
+        style=filled;
+        fillcolor="#fff9c4";
+
+        conflict_detect [label="exit_code != 0\n&& is rewrite command?", shape=diamond, fillcolor="#fff176"];
+        store_pending [label="store pending triple\nfor --continue"];
+        abort_detect [label="--abort?", shape=diamond, fillcolor="#fff176"];
+        clear_pending [label="clear pending triple"];
+    }
+
+    side_effects -> conflict_detect [label="non-zero exit"];
+    conflict_detect -> store_pending [label="yes, new start"];
+    conflict_detect -> abort_detect [label="control mode"];
+    abort_detect -> clear_pending [label="yes"];
+
+    // =============================================
+    // ===== NEW: UNIFIED REWRITE HANDLER v3 =====
+    // =============================================
+    subgraph cluster_v3 {
+        label="handle_rewrite_op_v3() — UNIFIED REWRITE HANDLER\n\nReplaces: rewrite_authorship_after_rebase_v2, rewrite_authorship_after_cherry_pick,\nrewrite_authorship_after_commit_amend, prepare_working_log_after_squash,\nbuild_rebase_commit_mappings, pair_commits_for_rewrite, stable_rebase_heads_from_worktree,\ntry_fast_path_rebase_note_remap_cached, etc.";
+        style="filled,bold";
+        fillcolor="#e3f2fd";
+        color="#1565c0";
+        penwidth=2;
+
+        v3_entry [label="handle_rewrite_op_v3(\n  repo,\n  triple: RewriteTriple\n)", fillcolor="#90caf9", style="rounded,filled,bold"];
+
+        // =============================================
+        // STEP 1: RANGE-DIFF (commit mapping)
+        // =============================================
+        subgraph cluster_range_diff {
+            label="Step 1: Commit Mapping via range-diff";
+            style=filled;
+            fillcolor="#bbdefb";
+
+            range_diff_cmd [label="git range-diff --no-color\n  onto..original_head\n  onto..new_head"];
+            parse_range_diff [label="parse_range_diff_output()\n→ Vec<CommitMapping>"];
+            commit_mapping [label="CommitMapping {\n  kind: MappingKind,\n  original: Option<Vec<CommitId>>,\n  new: Option<Vec<CommitId>>,\n  patch_diff: Option<PatchDiff>\n}", shape=note, fillcolor="#90caf9"];
+            mapping_kind [label="MappingKind {\n  Identical,   // = (copy note as-is)\n  Modified,    // ! (hunk transfer)\n  Deleted,     // < (no-op, attribution lost)\n  Added,       // > (check conflict attrs)\n  ManyToOne,   // squash\n  OneToMany    // split\n}", shape=note, fillcolor="#90caf9"];
+        }
+
+        v3_entry -> range_diff_cmd;
+        range_diff_cmd -> parse_range_diff;
+        parse_range_diff -> commit_mapping;
+        commit_mapping -> mapping_kind [style=dotted];
+
+        // =============================================
+        // STEP 2: PER-MAPPING DISPATCH
+        // =============================================
+        subgraph cluster_dispatch {
+            label="Step 2: Per-Mapping Attribution Transfer";
+            style=filled;
+            fillcolor="#c8e6c9";
+
+            dispatch [label="for mapping in mappings:", shape=diamond, fillcolor="#a5d6a7"];
+
+            // Identical
+            case_identical [label="Identical (=)\ncopy_note(original, new)\n(zero diff, just remap SHA)", fillcolor="#e8f5e9"];
+
+            // Modified
+            case_modified [label="Modified (!)\ntransfer_attribution_via_hunks(\n  original, new\n)", fillcolor="#fff9c4"];
+
+            // Deleted
+            case_deleted [label="Deleted (<)\nno-op\n(commit dropped → attribution dropped)", fillcolor="#ffebee"];
+
+            // Added
+            case_added [label="Added (>)\ncheck_conflict_resolution_attribution(\n  new_commit\n)\n(working log / checkpoints)", fillcolor="#f3e5f5"];
+
+            // ManyToOne (squash)
+            case_squash [label="ManyToOne (squash)\nmerge_attributions(\n  originals[], new\n)", fillcolor="#fff3e0"];
+
+            // OneToMany (split)
+            case_split [label="OneToMany (split)\nsplit_attributions(\n  original, news[]\n)", fillcolor="#fce4ec"];
+        }
+
+        commit_mapping -> dispatch;
+        dispatch -> case_identical [label="="];
+        dispatch -> case_modified [label="!"];
+        dispatch -> case_deleted [label="<"];
+        dispatch -> case_added [label=">"];
+        dispatch -> case_squash [label="N:1"];
+        dispatch -> case_split [label="1:N"];
+
+        // =============================================
+        // STEP 3: HUNK-LEVEL ATTRIBUTION TRANSFER
+        // (the core algorithm — shared by Modified, Squash, Split)
+        // =============================================
+        subgraph cluster_hunk_transfer {
+            label="Step 3: Hunk-Level Attribution Transfer\n(shared algorithm for Modified/Squash/Split)";
+            style=filled;
+            fillcolor="#fff8e1";
+
+            diff_trees [label="git diff-tree -p original new\n(or for squash: diff each original\nagainst the new combined tree)"];
+            load_attrs [label="load_attribution_for_commit(original)\n→ per-file line attributions\n(from git notes refs/notes/ai)"];
+            hunk_walk [label="walk hunks in diff:"];
+
+            subgraph cluster_hunk_ops {
+                label="Hunk Operations";
+                style=filled;
+                fillcolor="#ffecb3";
+
+                hunk_copy [label="Context lines (unchanged)\n→ attribution COPIED as-is"];
+                hunk_delete [label="Deleted lines (-)\n→ attribution REMOVED"];
+                hunk_add [label="Added lines (+)\n→ check source:"];
+                hunk_add_conflict [label="From conflict resolution?\n→ checkpoint attribution\n(AI / Human / Untracked)"];
+                hunk_add_rebase [label="From rebase mechanics?\n(content change during rebase)\n→ Untracked"];
+                hunk_add_split [label="From split original?\n→ COPY attribution\nfrom source lines"];
+            }
+
+            hunk_walk -> hunk_copy;
+            hunk_walk -> hunk_delete;
+            hunk_walk -> hunk_add;
+            hunk_add -> hunk_add_conflict [label="working log\nexists"];
+            hunk_add -> hunk_add_rebase [label="no checkpoint\ndata"];
+            hunk_add -> hunk_add_split [label="split mapping"];
+
+            build_new_note [label="build_authorship_note(\n  new_commit,\n  transferred_attributions\n)"];
+            write_note [label="git notes --ref=ai add\n  -f new_commit"];
+        }
+
+        case_modified -> diff_trees;
+        case_squash -> diff_trees;
+        case_split -> diff_trees;
+        diff_trees -> load_attrs;
+        load_attrs -> hunk_walk;
+        hunk_copy -> build_new_note;
+        hunk_delete -> build_new_note;
+        hunk_add_conflict -> build_new_note;
+        hunk_add_rebase -> build_new_note;
+        hunk_add_split -> build_new_note;
+        build_new_note -> write_note;
+
+        // Identical just copies
+        case_identical -> write_note [label="copy existing note\nto new SHA"];
+
+        // Added checks working log
+        case_added -> write_note [label="attribution from\ncheckpoints if any"];
+
+        // =============================================
+        // STEP 4: WORKING LOG MIGRATION
+        // =============================================
+        subgraph cluster_wl {
+            label="Step 4: Working Log Migration";
+            style=filled;
+            fillcolor="#e0f2f1";
+
+            wl_migrate [label="migrate_working_log(\n  original_head → new_head\n)\n(rename or merge INITIAL attrs)"];
+        }
+
+        write_note -> wl_migrate [style=invis];
+
+        // =============================================
+        // STEP 5: PERSIST & LOG
+        // =============================================
+        subgraph cluster_persist {
+            label="Step 5: Persist";
+            style=filled;
+            fillcolor="#f5f5f5";
+
+            append_log [label="storage.append_rewrite_event(\n  RewriteEvent::V3 {\n    triple,\n    mappings_summary\n  }\n)"];
+        }
+
+        wl_migrate -> append_log;
+    }
+
+    triple -> v3_entry [penwidth=2, color="#1565c0"];
+
+    // =============================================
+    // PERFORMANCE CHARACTERISTICS
+    // =============================================
+    subgraph cluster_perf {
+        label="Performance Budget (≤50% of native git time)";
+        style=filled;
+        fillcolor="#efebe9";
+
+        perf_breakdown [label="Subprocess calls (total):\n\n1. git range-diff (1 call, O(n) commits)\n2. git diff-tree -p (1 call per modified pair)\n3. git notes --ref=ai show (batch: 1 cat-file call)\n4. git notes --ref=ai add (1 per new commit)\n\nAll batch-able. No reflog parsing.\nNo ancestry validation.\nNo merge-base computation.\nNo blame fallback.", shape=note, fillcolor="#d7ccc8"];
+    }
+
+    // =============================================
+    // COMPARISON: WHAT'S ELIMINATED
+    // =============================================
+    subgraph cluster_eliminated {
+        label="ELIMINATED from current architecture\n(replaced by range-diff + unified handler)";
+        style="filled,dashed";
+        fillcolor="#ffebee";
+        color="#c62828";
+
+        elim_segment [label="resolve_rebase_segment_for_worktree()\nreflog-based segment detection", fillcolor="#ffcdd2", style="rounded,filled,dashed"];
+        elim_processed [label="processed_rebase_new_heads()\nrewrite_log scan for dedup", fillcolor="#ffcdd2", style="rounded,filled,dashed"];
+        elim_branch_ref [label="resolve_explicit_rebase_branch_ref()\nargv branch resolution", fillcolor="#ffcdd2", style="rounded,filled,dashed"];
+        elim_merge_base [label="repository.merge_base()\noriginal_equivalent_for_rewritten_commit()", fillcolor="#ffcdd2", style="rounded,filled,dashed"];
+        elim_walk [label="walk_commits_to_base()\nwalk_first_parent_commits()\nis_ancestor()", fillcolor="#ffcdd2", style="rounded,filled,dashed"];
+        elim_pair [label="pair_commits_for_rewrite()\n(manual SHA-matching heuristics)", fillcolor="#ffcdd2", style="rounded,filled,dashed"];
+        elim_fast_path [label="try_fast_path_rebase_note_remap_cached()\n(optimization now free via = mapping)", fillcolor="#ffcdd2", style="rounded,filled,dashed"];
+        elim_note_cache [label="load_rebase_note_cache()\n(complex batch-load with\nredundancy elimination)", fillcolor="#ffcdd2", style="rounded,filled,dashed"];
+        elim_va [label="VirtualAttributions::new_for_base_commit()\n(blame-based fallback reconstruction)", fillcolor="#ffcdd2", style="rounded,filled,dashed"];
+        elim_separate_fns [label="rewrite_authorship_after_rebase_v2()\nrewrite_authorship_after_cherry_pick()\nrewrite_authorship_after_commit_amend()\nprepare_working_log_after_squash()\nprepare_working_log_after_squash_from_final_state()\n(5 separate code paths → 1)", fillcolor="#ffcdd2", style="rounded,filled,dashed"];
+        elim_stable_heads [label="stable_rebase_heads_from_worktree()\n(reflog + fallback + Fix #1079)", fillcolor="#ffcdd2", style="rounded,filled,dashed"];
+    }
+
+    // =============================================
+    // DATA MODEL
+    // =============================================
+    subgraph cluster_data_model {
+        label="Core Data Model (v3)";
+        style=filled;
+        fillcolor="#f5f5f5";
+
+        dm_triple [label="RewriteTriple {\n  onto: CommitId,\n  original_head: CommitId,\n  new_head: CommitId\n}", shape=note, fillcolor="#e3f2fd"];
+        dm_mapping [label="CommitMapping {\n  kind: MappingKind,\n  originals: Vec<CommitId>,\n  news: Vec<CommitId>,\n  files_changed: Vec<PathBuf>\n}", shape=note, fillcolor="#e3f2fd"];
+        dm_line_attr [label="LineAttribution {\n  line_range: Range<usize>,\n  source: AttributionSource\n}", shape=note, fillcolor="#e3f2fd"];
+        dm_attr_source [label="AttributionSource {\n  AI { agent, model, session },\n  KnownHuman { identity },\n  Untracked\n}", shape=note, fillcolor="#e3f2fd"];
+        dm_rewrite_event [label="RewriteEvent::V3 {\n  triple: RewriteTriple,\n  mappings: Vec<CommitMapping>,\n  timestamp: u64,\n  author: String\n}", shape=note, fillcolor="#e3f2fd"];
+    }
+
+    dm_triple -> dm_mapping [label="range-diff\nproduces"];
+    dm_mapping -> dm_line_attr [label="each file has"];
+    dm_line_attr -> dm_attr_source [label="source"];
+    dm_triple -> dm_rewrite_event [label="persisted as"];
+    dm_mapping -> dm_rewrite_event;
+
+    // =============================================
+    // INVARIANTS
+    // =============================================
+    subgraph cluster_invariants {
+        label="Invariants (enforced by design)";
+        style=filled;
+        fillcolor="#e8eaf6";
+
+        inv1 [label="1. For any hunk h with attribution A:\n   if h is COPIED → attribution A is preserved\n   if h is SPLIT → A is applied to each fragment\n   if h is DELETED → A is removed", shape=note, fillcolor="#c5cae9"];
+        inv2 [label="2. Conflict resolution hunks:\n   if checkpointed (AI/Human) → attributed\n   if not checkpointed → Untracked", shape=note, fillcolor="#c5cae9"];
+        inv3 [label="3. Performance:\n   wall_time(v3) ≤ 0.5 × wall_time(native_git_op)\n   Achieved via: 1 range-diff + N diff-trees\n   (N = modified commit count, typically small)", shape=note, fillcolor="#c5cae9"];
+        inv4 [label="4. Correctness:\n   range-diff is git's own commit matching.\n   No heuristic pairing. No ancestry guessing.\n   Git tells us exactly what mapped where.", shape=note, fillcolor="#c5cae9"];
+    }
+}
