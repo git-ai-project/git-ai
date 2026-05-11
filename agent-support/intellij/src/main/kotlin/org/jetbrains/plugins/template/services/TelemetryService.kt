@@ -49,11 +49,31 @@ class TelemetryService : Disposable {
         private const val PLUGIN_EVENT_TAG = "git_ai_plugin_event"
 
         fun getInstance(): TelemetryService = service()
+
+        /**
+         * Returns the TelemetryService instance or null if service instantiation fails.
+         * Use this from call sites where telemetry failures must never propagate.
+         */
+        fun getInstanceOrNull(): TelemetryService? {
+            return try {
+                service()
+            } catch (_: Throwable) {
+                null
+            }
+        }
     }
 
     init {
-        initializePostHog()
-        initializeSentry()
+        try {
+            initializePostHog()
+        } catch (_: Throwable) {
+            // Silently ignore – telemetry must never surface errors to the user
+        }
+        try {
+            initializeSentry()
+        } catch (_: Throwable) {
+            // Silently ignore – telemetry must never surface errors to the user
+        }
     }
 
     private fun initializePostHog() {
@@ -159,7 +179,11 @@ class TelemetryService : Disposable {
      * Captures the plugin startup event.
      */
     fun captureStartupEvent() {
-        captureEvent("intellij_plugin_startup", getCommonProperties())
+        try {
+            captureEvent("intellij_plugin_startup", getCommonProperties())
+        } catch (_: Throwable) {
+            // Non-critical – never surface to user
+        }
     }
 
     /**
@@ -178,89 +202,105 @@ class TelemetryService : Disposable {
         searchedPaths: List<String>,
         currentPath: String?
     ) {
-        val context = mutableMapOf<String, Any>(
-            "error_type" to "git_ai_not_found"
-        )
-        exitCode?.let { context["exit_code"] = it }
-        output?.let { context["output"] = it.take(500) }
-        if (searchedPaths.isNotEmpty()) {
-            context["searched_paths"] = searchedPaths.joinToString(",")
-        }
-        currentPath?.let { context["path_env"] = it.take(500) }
-
-        captureEvent("git_ai_error", getCommonProperties() + context)
-
-        val message = buildString {
-            append("git-ai CLI not found")
-            exitCode?.let { append(" (exit code: $it)") }
+        try {
+            val context = mutableMapOf<String, Any>(
+                "error_type" to "git_ai_not_found"
+            )
+            exitCode?.let { context["exit_code"] = it }
+            output?.let { context["output"] = it.take(500) }
             if (searchedPaths.isNotEmpty()) {
-                append(". Searched: ${searchedPaths.joinToString(", ")}")
+                context["searched_paths"] = searchedPaths.joinToString(",")
             }
+            currentPath?.let { context["path_env"] = it.take(500) }
+
+            captureEvent("git_ai_error", getCommonProperties() + context)
+
+            val message = buildString {
+                append("git-ai CLI not found")
+                exitCode?.let { append(" (exit code: $it)") }
+                if (searchedPaths.isNotEmpty()) {
+                    append(". Searched: ${searchedPaths.joinToString(", ")}")
+                }
+            }
+            captureSentryMessage(message, SentryLevel.WARNING, context)
+        } catch (_: Throwable) {
+            // Non-critical – never surface to user
         }
-        captureSentryMessage(message, SentryLevel.WARNING, context)
     }
 
     /**
      * Reports a version mismatch where git-ai is below minimum required version.
      */
     fun reportVersionMismatch(foundVersion: String, requiredVersion: String) {
-        val context = mapOf(
-            "error_type" to "version_mismatch",
-            "found_version" to foundVersion,
-            "required_version" to requiredVersion
-        )
-        captureEvent("git_ai_error", getCommonProperties() + context)
-        captureSentryMessage(
-            "git-ai version mismatch: found $foundVersion, required $requiredVersion",
-            SentryLevel.WARNING,
-            context
-        )
+        try {
+            val context = mapOf(
+                "error_type" to "version_mismatch",
+                "found_version" to foundVersion,
+                "required_version" to requiredVersion
+            )
+            captureEvent("git_ai_error", getCommonProperties() + context)
+            captureSentryMessage(
+                "git-ai version mismatch: found $foundVersion, required $requiredVersion",
+                SentryLevel.WARNING,
+                context
+            )
+        } catch (_: Throwable) {
+            // Non-critical – never surface to user
+        }
     }
 
     /**
      * Reports a checkpoint failure.
      */
     fun reportCheckpointFailure(exitCode: Int, output: String) {
-        val context = mapOf(
-            "error_type" to "checkpoint_failure",
-            "exit_code" to exitCode.toString(),
-            "output" to output.take(500) // Limit output size
-        )
-        captureEvent("git_ai_error", getCommonProperties() + context)
-        captureSentryMessage(
-            "git-ai checkpoint failed with exit code $exitCode",
-            SentryLevel.ERROR,
-            context
-        )
+        try {
+            val context = mapOf(
+                "error_type" to "checkpoint_failure",
+                "exit_code" to exitCode.toString(),
+                "output" to output.take(500) // Limit output size
+            )
+            captureEvent("git_ai_error", getCommonProperties() + context)
+            captureSentryMessage(
+                "git-ai checkpoint failed with exit code $exitCode",
+                SentryLevel.ERROR,
+                context
+            )
+        } catch (_: Throwable) {
+            // Non-critical – never surface to user
+        }
     }
 
     /**
      * Reports a checkpoint timeout (exceeded 30s).
      */
     fun reportCheckpointTimeout() {
-        val context = mapOf("error_type" to "checkpoint_timeout")
-        captureEvent("git_ai_error", getCommonProperties() + context)
-        captureSentryMessage("git-ai checkpoint timed out after 30 seconds", SentryLevel.ERROR, context)
+        try {
+            val context = mapOf("error_type" to "checkpoint_timeout")
+            captureEvent("git_ai_error", getCommonProperties() + context)
+            captureSentryMessage("git-ai checkpoint timed out after 30 seconds", SentryLevel.ERROR, context)
+        } catch (_: Throwable) {
+            // Non-critical – never surface to user
+        }
     }
 
     /**
      * Captures a general error/exception.
      */
     fun captureError(throwable: Throwable, context: Map<String, String> = emptyMap()) {
-        val eventContext = mapOf("error_type" to "exception") + context
-        captureEvent("git_ai_error", getCommonProperties() + eventContext)
+        try {
+            val eventContext = mapOf("error_type" to "exception") + context
+            captureEvent("git_ai_error", getCommonProperties() + eventContext)
 
-        if (sentryInitialized) {
-            try {
+            if (sentryInitialized) {
                 Sentry.captureException(throwable) { scope ->
                     scope.setTag(PLUGIN_EVENT_TAG, "true")
                     context.forEach { (key, value) ->
                         scope.setExtra(key, value)
                     }
                 }
-            } catch (e: Exception) {
-                logger.warn("Failed to capture exception in Sentry: ${e.message}")
             }
+        } catch (_: Throwable) {
+            // Non-critical – never surface to user
         }
     }
 
@@ -298,18 +338,16 @@ class TelemetryService : Disposable {
     override fun dispose() {
         try {
             posthog?.shutdown()
-            logger.info("PostHog shut down")
-        } catch (e: Exception) {
-            logger.warn("Error shutting down PostHog: ${e.message}")
+        } catch (_: Throwable) {
+            // Silently ignore – shutdown errors are non-critical
         }
 
         try {
             if (sentryInitialized) {
                 Sentry.close()
-                logger.info("Sentry closed")
             }
-        } catch (e: Exception) {
-            logger.warn("Error closing Sentry: ${e.message}")
+        } catch (_: Throwable) {
+            // Silently ignore – shutdown errors are non-critical
         }
     }
 }

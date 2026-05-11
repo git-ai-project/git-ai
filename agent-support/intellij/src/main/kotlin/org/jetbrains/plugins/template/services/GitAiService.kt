@@ -193,7 +193,7 @@ class GitAiService {
                     - curl -fsSL https://install.usegitai.com | sh
                     - Or ensure git-ai is in your PATH
                 """.trimIndent())
-                TelemetryService.getInstance().reportGitAiNotFound(
+                TelemetryService.getInstanceOrNull()?.reportGitAiNotFound(
                     exitCode = null,
                     output = null,
                     searchedPaths = lastSearchedPaths,
@@ -229,7 +229,7 @@ class GitAiService {
                     PATH: $currentPath
                     Resolved path: $gitAiPath
                 """.trimIndent())
-                TelemetryService.getInstance().reportGitAiNotFound(
+                TelemetryService.getInstanceOrNull()?.reportGitAiNotFound(
                     exitCode = process.exitValue(),
                     output = if (errorOutput.isNotEmpty()) errorOutput else output,
                     searchedPaths = lastSearchedPaths,
@@ -249,7 +249,7 @@ class GitAiService {
 
             if (version < minVersion) {
                 logger.warn("git-ai version $version is below minimum required version $minVersion")
-                TelemetryService.getInstance().reportVersionMismatch(version.toString(), minVersion.toString())
+                TelemetryService.getInstanceOrNull()?.reportVersionMismatch(version.toString(), minVersion.toString())
                 return false
             }
 
@@ -262,7 +262,7 @@ class GitAiService {
                 Searched locations: ${lastSearchedPaths.joinToString(", ")}
                 PATH: $currentPath
             """.trimIndent(), e)
-            TelemetryService.getInstance().captureError(e, mapOf(
+            TelemetryService.getInstanceOrNull()?.captureError(e, mapOf(
                 "context" to "git_ai_availability_check",
                 "searched_paths" to lastSearchedPaths.joinToString(","),
                 "current_path" to currentPath
@@ -315,7 +315,7 @@ class GitAiService {
             if (!completed) {
                 process.destroyForcibly()
                 logger.warn("git-ai checkpoint timed out")
-                TelemetryService.getInstance().reportCheckpointTimeout()
+                TelemetryService.getInstanceOrNull()?.reportCheckpointTimeout()
                 return false
             }
 
@@ -332,7 +332,7 @@ class GitAiService {
                     Stdout: $output
                     Stderr: $errorOutput
                 """.trimIndent())
-                TelemetryService.getInstance().reportCheckpointFailure(exitCode, combinedOutput)
+                TelemetryService.getInstanceOrNull()?.reportCheckpointFailure(exitCode, combinedOutput)
                 return false
             }
 
@@ -343,7 +343,7 @@ class GitAiService {
             true
         } catch (e: Exception) {
             logger.warn("Failed to create checkpoint: ${e.message}", e)
-            TelemetryService.getInstance().captureError(e, mapOf("context" to "checkpoint_creation"))
+            TelemetryService.getInstanceOrNull()?.captureError(e, mapOf("context" to "checkpoint_creation"))
             false
         }
     }
