@@ -51,7 +51,6 @@ pub enum RewriteLogEvent {
 }
 
 impl RewriteLogEvent {
-    #[allow(dead_code)]
     pub fn merge(
         source_branch: String,
         target_branch: String,
@@ -112,14 +111,6 @@ impl RewriteLogEvent {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn revert_mixed(event: RevertMixedEvent) -> Self {
-        Self::RevertMixed {
-            revert_mixed: event,
-        }
-    }
-
-    #[allow(dead_code)]
     pub fn reset(event: ResetEvent) -> Self {
         Self::Reset { reset: event }
     }
@@ -136,16 +127,8 @@ impl RewriteLogEvent {
         }
     }
 
-    #[allow(dead_code)]
     pub fn stash(event: StashEvent) -> Self {
         Self::Stash { stash: event }
-    }
-
-    #[allow(dead_code)]
-    pub fn authorship_logs_synced(event: AuthorshipLogsSyncedEvent) -> Self {
-        Self::AuthorshipLogsSynced {
-            authorship_logs_synced: event,
-        }
     }
 }
 
@@ -160,7 +143,6 @@ pub struct MergeEvent {
 }
 
 impl MergeEvent {
-    #[allow(dead_code)]
     pub fn new(
         source_branch: String,
         target_branch: String,
@@ -215,15 +197,6 @@ pub struct RebaseStartEvent {
 }
 
 impl RebaseStartEvent {
-    #[allow(dead_code)]
-    pub fn new(original_head: String, is_interactive: bool) -> Self {
-        Self {
-            original_head,
-            is_interactive,
-            onto_head: None,
-        }
-    }
-
     pub fn new_with_onto(
         original_head: String,
         is_interactive: bool,
@@ -332,16 +305,7 @@ pub struct RevertMixedEvent {
     pub affected_files: Vec<String>,
 }
 
-impl RevertMixedEvent {
-    #[allow(dead_code)]
-    pub fn new(reverted_commit: String, success: bool, affected_files: Vec<String>) -> Self {
-        Self {
-            reverted_commit,
-            success,
-            affected_files,
-        }
-    }
-}
+impl RevertMixedEvent {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -361,7 +325,6 @@ pub struct ResetEvent {
 }
 
 impl ResetEvent {
-    #[allow(dead_code)]
     pub fn new(
         kind: ResetKind,
         keep: bool,
@@ -455,19 +418,7 @@ pub struct AuthorshipLogsSyncedEvent {
     pub timestamp: u64,
 }
 
-impl AuthorshipLogsSyncedEvent {
-    #[allow(dead_code)]
-    pub fn new(synced: Vec<String>, origin: Vec<String>) -> Self {
-        Self {
-            synced,
-            origin,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        }
-    }
-}
+impl AuthorshipLogsSyncedEvent {}
 
 /// Stash operation types
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -487,7 +438,6 @@ pub enum StashOperation {
 }
 
 /// Serialize events to JSONL format (newest events first)
-#[allow(dead_code)]
 pub fn serialize_events_to_jsonl(events: &[RewriteLogEvent]) -> Result<String, serde_json::Error> {
     let mut lines = Vec::new();
 
