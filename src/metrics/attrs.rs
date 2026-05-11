@@ -62,11 +62,6 @@ pub struct EventAttributes {
 }
 
 impl EventAttributes {
-    #[allow(dead_code)]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Create with required git_ai_version field set.
     pub fn with_version(version: impl Into<String>) -> Self {
         Self {
@@ -75,28 +70,9 @@ impl EventAttributes {
         }
     }
 
-    // Builder methods for git_ai_version
-    #[allow(dead_code)]
-    pub fn git_ai_version(mut self, value: impl Into<String>) -> Self {
-        self.git_ai_version = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn git_ai_version_null(mut self) -> Self {
-        self.git_ai_version = Some(None);
-        self
-    }
-
     // Builder methods for repo_url
     pub fn repo_url(mut self, value: impl Into<String>) -> Self {
         self.repo_url = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn repo_url_null(mut self) -> Self {
-        self.repo_url = Some(None);
         self
     }
 
@@ -106,21 +82,9 @@ impl EventAttributes {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn author_null(mut self) -> Self {
-        self.author = Some(None);
-        self
-    }
-
     // Builder methods for commit_sha
     pub fn commit_sha(mut self, value: impl Into<String>) -> Self {
         self.commit_sha = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn commit_sha_null(mut self) -> Self {
-        self.commit_sha = Some(None);
         self
     }
 
@@ -130,21 +94,9 @@ impl EventAttributes {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn base_commit_sha_null(mut self) -> Self {
-        self.base_commit_sha = Some(None);
-        self
-    }
-
     // Builder methods for branch
     pub fn branch(mut self, value: impl Into<String>) -> Self {
         self.branch = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn branch_null(mut self) -> Self {
-        self.branch = Some(None);
         self
     }
 
@@ -154,21 +106,9 @@ impl EventAttributes {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn tool_null(mut self) -> Self {
-        self.tool = Some(None);
-        self
-    }
-
     // Builder methods for model
     pub fn model(mut self, value: impl Into<String>) -> Self {
         self.model = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn model_null(mut self) -> Self {
-        self.model = Some(None);
         self
     }
 
@@ -180,21 +120,9 @@ impl EventAttributes {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn session_id_null(mut self) -> Self {
-        self.session_id = Some(None);
-        self
-    }
-
     // Builder methods for trace_id
     pub fn trace_id(mut self, value: impl Into<String>) -> Self {
         self.trace_id = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn trace_id_null(mut self) -> Self {
-        self.trace_id = Some(None);
         self
     }
 
@@ -217,12 +145,6 @@ impl EventAttributes {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn external_session_id_null(mut self) -> Self {
-        self.external_session_id = Some(None);
-        self
-    }
-
     pub fn external_session_id_opt(self, value: Option<String>) -> Self {
         match value {
             Some(v) => self.external_session_id(v),
@@ -236,12 +158,6 @@ impl EventAttributes {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn external_parent_session_id_null(mut self) -> Self {
-        self.external_parent_session_id = Some(None);
-        self
-    }
-
     pub fn external_parent_session_id_opt(self, value: Option<String>) -> Self {
         match value {
             Some(v) => self.external_parent_session_id(v),
@@ -252,12 +168,6 @@ impl EventAttributes {
     // Builder methods for custom_attributes
     pub fn custom_attributes(mut self, value: impl Into<String>) -> Self {
         self.custom_attributes = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn custom_attributes_null(mut self) -> Self {
-        self.custom_attributes = Some(None);
         self
     }
 
@@ -363,8 +273,7 @@ mod tests {
             .commit_sha("commit-123")
             .base_commit_sha("base-commit-123")
             .branch("main")
-            .tool("claude-code")
-            .model_null();
+            .tool("claude-code");
 
         assert_eq!(attrs.git_ai_version, Some(Some("1.0.0".to_string())));
         assert_eq!(
@@ -379,15 +288,13 @@ mod tests {
         );
         assert_eq!(attrs.branch, Some(Some("main".to_string())));
         assert_eq!(attrs.tool, Some(Some("claude-code".to_string())));
-        assert_eq!(attrs.model, Some(None)); // explicitly null
+        assert_eq!(attrs.model, None);
         assert_eq!(attrs.prompt_id, None); // tombstoned - never written
     }
 
     #[test]
     fn test_event_attributes_to_sparse() {
-        let attrs = EventAttributes::with_version("1.0.0")
-            .tool("test-tool")
-            .model_null();
+        let attrs = EventAttributes::with_version("1.0.0").tool("test-tool");
 
         let sparse = attrs.to_sparse();
 
@@ -401,7 +308,7 @@ mod tests {
             sparse.get("20"),
             Some(&Value::String("test-tool".to_string()))
         );
-        assert_eq!(sparse.get("21"), Some(&Value::Null)); // explicitly null
+        assert_eq!(sparse.get("21"), None); // not set
         assert_eq!(sparse.get("22"), None); // tombstoned - never written
     }
 
@@ -448,31 +355,6 @@ mod tests {
         assert_eq!(attrs.model, Some(Some("gpt-4".to_string())));
         assert_eq!(attrs.prompt_id, None); // tombstoned
         assert_eq!(attrs.external_session_id, Some(Some("ext-789".to_string())));
-    }
-
-    #[test]
-    fn test_event_attributes_all_nulls() {
-        let attrs = EventAttributes::new()
-            .git_ai_version_null()
-            .repo_url_null()
-            .author_null()
-            .commit_sha_null()
-            .base_commit_sha_null()
-            .branch_null()
-            .tool_null()
-            .model_null()
-            .external_session_id_null();
-
-        assert_eq!(attrs.git_ai_version, Some(None));
-        assert_eq!(attrs.repo_url, Some(None));
-        assert_eq!(attrs.author, Some(None));
-        assert_eq!(attrs.commit_sha, Some(None));
-        assert_eq!(attrs.base_commit_sha, Some(None));
-        assert_eq!(attrs.branch, Some(None));
-        assert_eq!(attrs.tool, Some(None));
-        assert_eq!(attrs.model, Some(None));
-        assert_eq!(attrs.prompt_id, None); // tombstoned - no setter available
-        assert_eq!(attrs.external_session_id, Some(None));
     }
 
     #[test]
@@ -523,7 +405,6 @@ mod tests {
     fn test_event_attributes_roundtrip() {
         let original = EventAttributes::with_version("2.5.0")
             .repo_url("https://gitlab.com/org/repo")
-            .author_null()
             .commit_sha("sha123")
             .tool("copilot");
 
@@ -535,7 +416,7 @@ mod tests {
             restored.repo_url,
             Some(Some("https://gitlab.com/org/repo".to_string()))
         );
-        assert_eq!(restored.author, Some(None)); // explicitly null
+        assert_eq!(restored.author, None); // not set
         assert_eq!(restored.commit_sha, Some(Some("sha123".to_string())));
         assert_eq!(restored.tool, Some(Some("copilot".to_string())));
         assert_eq!(restored.base_commit_sha, None); // not set
@@ -574,12 +455,6 @@ mod tests {
     }
 
     #[test]
-    fn test_event_attributes_git_ai_version_builder() {
-        let attrs = EventAttributes::new().git_ai_version("4.0.0");
-        assert_eq!(attrs.git_ai_version, Some(Some("4.0.0".to_string())));
-    }
-
-    #[test]
     fn test_event_attributes_sparse_positions() {
         // Verify the position constants match expected values
         use super::attr_pos::*;
@@ -606,16 +481,6 @@ mod tests {
 
         assert_eq!(attrs.session_id, Some(Some("session-123".to_string())));
         assert_eq!(attrs.trace_id, Some(Some("trace-456".to_string())));
-    }
-
-    #[test]
-    fn test_event_attributes_session_id_null() {
-        let attrs = EventAttributes::with_version("1.0.0")
-            .session_id_null()
-            .trace_id_null();
-
-        assert_eq!(attrs.session_id, Some(None));
-        assert_eq!(attrs.trace_id, Some(None));
     }
 
     #[test]
@@ -654,25 +519,6 @@ mod tests {
         assert_eq!(attrs.git_ai_version, Some(Some("2.0.0".to_string())));
         assert_eq!(attrs.session_id, Some(Some("session-123".to_string())));
         assert_eq!(attrs.trace_id, Some(None)); // null
-    }
-
-    #[test]
-    fn test_event_attributes_roundtrip_with_session_fields() {
-        let original = EventAttributes::with_version("2.5.0")
-            .session_id("session-roundtrip")
-            .trace_id_null()
-            .tool("copilot");
-
-        let sparse = original.to_sparse();
-        let restored = EventAttributes::from_sparse(&sparse);
-
-        assert_eq!(restored.git_ai_version, Some(Some("2.5.0".to_string())));
-        assert_eq!(
-            restored.session_id,
-            Some(Some("session-roundtrip".to_string()))
-        );
-        assert_eq!(restored.trace_id, Some(None)); // explicitly null
-        assert_eq!(restored.tool, Some(Some("copilot".to_string())));
     }
 
     #[test]
