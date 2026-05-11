@@ -2,7 +2,10 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
-use git_ai::commands::diff::{DiffCommandOptions, DiffJsonHunk, build_diff_artifacts_with_note};
+use git_ai::commands::diff::{
+    DiffCommandOptions, DiffJsonHunk, build_diff_artifacts_from_hunks,
+    build_diff_artifacts_with_note, get_diff_with_line_numbers,
+};
 use git_ai::git::repository::Repository as GitAiRepository;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::TestRepo;
@@ -45,11 +48,14 @@ fn test_commit_hunks_basic_ai_attribution() {
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
-    let artifacts = build_diff_artifacts_with_note(
+
+    // Use build_diff_artifacts_from_hunks (the optimized post-commit path)
+    let diff_hunks =
+        get_diff_with_line_numbers(&git_repo, &parent_sha, &commit.commit_sha).unwrap();
+    let artifacts = build_diff_artifacts_from_hunks(
         &git_repo,
-        &parent_sha,
+        diff_hunks,
         &commit.commit_sha,
-        &DiffCommandOptions::default(),
         Some(&commit.authorship_log),
     )
     .unwrap();
@@ -83,6 +89,31 @@ fn test_commit_hunks_basic_ai_attribution() {
         .filter(|h| h.hunk_kind == "deletion")
         .collect();
     assert_eq!(deletion_hunks.len(), 0);
+
+    // Verify parity with build_diff_artifacts_with_note
+    let artifacts_old = build_diff_artifacts_with_note(
+        &git_repo,
+        &parent_sha,
+        &commit.commit_sha,
+        &DiffCommandOptions::default(),
+        Some(&commit.authorship_log),
+    )
+    .unwrap();
+    assert_eq!(artifacts.json_hunks.len(), artifacts_old.json_hunks.len());
+    for (a, b) in artifacts
+        .json_hunks
+        .iter()
+        .zip(artifacts_old.json_hunks.iter())
+    {
+        assert_eq!(a.file_path, b.file_path);
+        assert_eq!(a.hunk_kind, b.hunk_kind);
+        assert_eq!(a.start_line, b.start_line);
+        assert_eq!(a.end_line, b.end_line);
+        assert_eq!(a.content_hash, b.content_hash);
+        assert_eq!(a.prompt_id, b.prompt_id);
+        assert_eq!(a.human_id, b.human_id);
+        assert_eq!(a.commit_sha, b.commit_sha);
+    }
 }
 
 #[test]
@@ -114,11 +145,12 @@ fn test_commit_hunks_mixed_attribution() {
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
-    let artifacts = build_diff_artifacts_with_note(
+    let diff_hunks =
+        get_diff_with_line_numbers(&git_repo, &parent_sha, &commit.commit_sha).unwrap();
+    let artifacts = build_diff_artifacts_from_hunks(
         &git_repo,
-        &parent_sha,
+        diff_hunks,
         &commit.commit_sha,
-        &DiffCommandOptions::default(),
         Some(&commit.authorship_log),
     )
     .unwrap();
@@ -179,11 +211,12 @@ fn test_commit_hunks_multiple_files() {
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
-    let artifacts = build_diff_artifacts_with_note(
+    let diff_hunks =
+        get_diff_with_line_numbers(&git_repo, &parent_sha, &commit.commit_sha).unwrap();
+    let artifacts = build_diff_artifacts_from_hunks(
         &git_repo,
-        &parent_sha,
+        diff_hunks,
         &commit.commit_sha,
-        &DiffCommandOptions::default(),
         Some(&commit.authorship_log),
     )
     .unwrap();
@@ -237,11 +270,12 @@ fn test_commit_hunks_deletions_unattributed() {
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
-    let artifacts = build_diff_artifacts_with_note(
+    let diff_hunks =
+        get_diff_with_line_numbers(&git_repo, &parent_sha, &commit.commit_sha).unwrap();
+    let artifacts = build_diff_artifacts_from_hunks(
         &git_repo,
-        &parent_sha,
+        diff_hunks,
         &commit.commit_sha,
-        &DiffCommandOptions::default(),
         Some(&commit.authorship_log),
     )
     .unwrap();
@@ -296,11 +330,12 @@ fn test_commit_hunks_consecutive_same_attribution_merges() {
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
-    let artifacts = build_diff_artifacts_with_note(
+    let diff_hunks =
+        get_diff_with_line_numbers(&git_repo, &parent_sha, &commit.commit_sha).unwrap();
+    let artifacts = build_diff_artifacts_from_hunks(
         &git_repo,
-        &parent_sha,
+        diff_hunks,
         &commit.commit_sha,
-        &DiffCommandOptions::default(),
         Some(&commit.authorship_log),
     )
     .unwrap();
@@ -338,11 +373,12 @@ fn test_commit_hunks_attribution_boundaries_split() {
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
-    let artifacts = build_diff_artifacts_with_note(
+    let diff_hunks =
+        get_diff_with_line_numbers(&git_repo, &parent_sha, &commit.commit_sha).unwrap();
+    let artifacts = build_diff_artifacts_from_hunks(
         &git_repo,
-        &parent_sha,
+        diff_hunks,
         &commit.commit_sha,
-        &DiffCommandOptions::default(),
         Some(&commit.authorship_log),
     )
     .unwrap();
@@ -383,11 +419,12 @@ fn test_commit_hunks_session_id_extraction() {
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
-    let artifacts = build_diff_artifacts_with_note(
+    let diff_hunks =
+        get_diff_with_line_numbers(&git_repo, &parent_sha, &commit.commit_sha).unwrap();
+    let artifacts = build_diff_artifacts_from_hunks(
         &git_repo,
-        &parent_sha,
+        diff_hunks,
         &commit.commit_sha,
-        &DiffCommandOptions::default(),
         Some(&commit.authorship_log),
     )
     .unwrap();
@@ -432,11 +469,11 @@ fn test_commit_hunks_empty_diff() {
     let commit_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     let git_repo = get_repo(&repo);
-    let artifacts = build_diff_artifacts_with_note(
+    let diff_hunks = get_diff_with_line_numbers(&git_repo, &first.commit_sha, &commit_sha).unwrap();
+    let artifacts = build_diff_artifacts_from_hunks(
         &git_repo,
-        &first.commit_sha,
+        diff_hunks,
         &commit_sha,
-        &DiffCommandOptions::default(),
         None, // no authorship log for empty commit
     )
     .unwrap();
@@ -465,11 +502,12 @@ fn test_commit_hunks_content_hash_correctness() {
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
-    let artifacts = build_diff_artifacts_with_note(
+    let diff_hunks =
+        get_diff_with_line_numbers(&git_repo, &parent_sha, &commit.commit_sha).unwrap();
+    let artifacts = build_diff_artifacts_from_hunks(
         &git_repo,
-        &parent_sha,
+        diff_hunks,
         &commit.commit_sha,
-        &DiffCommandOptions::default(),
         Some(&commit.authorship_log),
     )
     .unwrap();
@@ -510,11 +548,12 @@ fn test_commit_hunks_interleaved_attributions() {
 
     let git_repo = get_repo(&repo);
     let parent_sha = get_parent_sha(&repo);
-    let artifacts = build_diff_artifacts_with_note(
+    let diff_hunks =
+        get_diff_with_line_numbers(&git_repo, &parent_sha, &commit.commit_sha).unwrap();
+    let artifacts = build_diff_artifacts_from_hunks(
         &git_repo,
-        &parent_sha,
+        diff_hunks,
         &commit.commit_sha,
-        &DiffCommandOptions::default(),
         Some(&commit.authorship_log),
     )
     .unwrap();

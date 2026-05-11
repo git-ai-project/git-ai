@@ -515,6 +515,58 @@ pub fn line_range_overlap_len(range: &LineRange, added_lines: &[u32]) -> u32 {
     }
 }
 
+/// Like `stats_for_commit_stats` but accepts pre-computed diff hunks and authorship log,
+/// avoiding redundant git subprocess calls in the post-commit hook path.
+pub fn stats_for_commit_stats_from_hunks(
+    repo: &Repository,
+    commit_sha: &str,
+    ignore_patterns: &[String],
+    hunks: &[crate::commands::diff::DiffHunk],
+    authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
+) -> Result<CommitStats, GitAiError> {
+    let commit_obj = repo.revparse_single(commit_sha)?.peel_to_commit()?;
+    let parent_count = commit_obj.parent_count()?;
+    let is_merge_commit = parent_count > 1;
+
+    let ignore_matcher = build_ignore_matcher(ignore_patterns);
+
+    let mut git_diff_added_lines = 0u32;
+    let mut git_diff_deleted_lines = 0u32;
+    let mut added_lines_by_file: HashMap<String, Vec<u32>> = HashMap::new();
+
+    for hunk in hunks {
+        if should_ignore_file_with_matcher(&hunk.file_path, &ignore_matcher) {
+            continue;
+        }
+        git_diff_added_lines += hunk.added_lines.len() as u32;
+        git_diff_deleted_lines += hunk.deleted_lines.len() as u32;
+
+        if !is_merge_commit && !hunk.added_lines.is_empty() {
+            added_lines_by_file
+                .entry(hunk.file_path.clone())
+                .or_default()
+                .extend(hunk.added_lines.iter().copied());
+        }
+    }
+
+    for lines in added_lines_by_file.values_mut() {
+        lines.sort_unstable();
+        lines.dedup();
+    }
+
+    let (ai_accepted, known_human_accepted, ai_accepted_by_tool) =
+        accepted_lines_from_attestations(authorship_log, &added_lines_by_file, is_merge_commit);
+
+    Ok(stats_from_authorship_log(
+        authorship_log,
+        git_diff_added_lines,
+        git_diff_deleted_lines,
+        ai_accepted,
+        known_human_accepted,
+        &ai_accepted_by_tool,
+    ))
+}
+
 /// Get git diff statistics between commit and its parent
 /// Uses the same diff engine as git ai diff to properly handle renames
 pub fn get_git_diff_stats(
