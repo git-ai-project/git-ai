@@ -26,18 +26,6 @@ pub struct MetricsUploadResponse {
     pub errors: Vec<MetricsUploadError>,
 }
 
-impl MetricsUploadResponse {
-    /// Get indices of successfully uploaded events
-    #[allow(dead_code)]
-    pub fn successful_indices(&self, batch_size: usize) -> Vec<usize> {
-        let error_indices: std::collections::HashSet<_> =
-            self.errors.iter().map(|e| e.index).collect();
-        (0..batch_size)
-            .filter(|i| !error_indices.contains(i))
-            .collect()
-    }
-}
-
 /// Upload metrics batch with retry logic.
 ///
 /// Returns Ok(()) on success (200 response, even with partial errors).
@@ -153,54 +141,5 @@ impl ApiClient {
                 status_code, body
             ))),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_successful_indices() {
-        let response = MetricsUploadResponse {
-            errors: vec![
-                MetricsUploadError {
-                    index: 1,
-                    error: "error".to_string(),
-                },
-                MetricsUploadError {
-                    index: 3,
-                    error: "error".to_string(),
-                },
-            ],
-        };
-
-        let successful = response.successful_indices(5);
-        assert_eq!(successful, vec![0, 2, 4]);
-    }
-
-    #[test]
-    fn test_successful_indices_empty_errors() {
-        let response = MetricsUploadResponse { errors: vec![] };
-        let successful = response.successful_indices(3);
-        assert_eq!(successful, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn test_successful_indices_all_errors() {
-        let response = MetricsUploadResponse {
-            errors: vec![
-                MetricsUploadError {
-                    index: 0,
-                    error: "error".to_string(),
-                },
-                MetricsUploadError {
-                    index: 1,
-                    error: "error".to_string(),
-                },
-            ],
-        };
-        let successful = response.successful_indices(2);
-        assert!(successful.is_empty());
     }
 }

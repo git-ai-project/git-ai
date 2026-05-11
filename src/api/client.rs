@@ -232,48 +232,6 @@ impl ApiContext {
         }
     }
 
-    /// Create a new API context explicitly without authentication
-    /// Use this when you need to ensure no auth token is sent
-    /// Uses Config::fresh() to support runtime config updates (daemon mode)
-    #[allow(dead_code)]
-    pub fn without_auth(base_url: Option<String>) -> Self {
-        let cfg = config::Config::fresh();
-        let api_key = cfg.api_key().map(|s| s.to_string());
-        let author_identity = if api_key.is_some() {
-            resolve_git_identity()
-        } else {
-            None
-        };
-        Self {
-            base_url: base_url.unwrap_or_else(Self::default_base_url),
-            auth_token: None,
-            api_key,
-            author_identity,
-            timeout_secs: Some(30),
-        }
-    }
-
-    /// Create a new API context with authentication
-    /// If base_url is None, uses api_base_url from config (which can be set via config file, env var, or defaults)
-    /// Uses Config::fresh() to support runtime config updates (daemon mode)
-    #[allow(dead_code)]
-    pub fn with_auth(base_url: Option<String>, auth_token: String) -> Self {
-        let cfg = config::Config::fresh();
-        let api_key = cfg.api_key().map(|s| s.to_string());
-        let author_identity = if api_key.is_some() {
-            resolve_git_identity()
-        } else {
-            None
-        };
-        Self {
-            base_url: base_url.unwrap_or_else(Self::default_base_url),
-            auth_token: Some(auth_token),
-            api_key,
-            author_identity,
-            timeout_secs: Some(30),
-        }
-    }
-
     /// Set a custom timeout
     pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
         self.timeout_secs = Some(timeout_secs);
@@ -363,12 +321,6 @@ impl ApiClient {
         &self.context
     }
 
-    /// Get a mutable reference to the API context
-    #[allow(dead_code)]
-    pub fn context_mut(&mut self) -> &mut ApiContext {
-        &mut self.context
-    }
-
     /// Check if user is logged in (has an auth token)
     pub fn is_logged_in(&self) -> bool {
         self.context.auth_token.is_some()
@@ -389,56 +341,36 @@ mod tests {
     // ============= ApiContext Tests =============
 
     #[test]
-    fn test_api_context_without_auth() {
-        let ctx = ApiContext::without_auth(Some("https://example.com".to_string()));
+    fn test_api_context_new() {
+        let ctx = ApiContext::new(Some("https://example.com".to_string()));
         assert!(ctx.auth_token.is_none());
         assert_eq!(ctx.base_url, "https://example.com");
     }
 
     #[test]
-    fn test_api_context_with_auth() {
-        let ctx = ApiContext::with_auth(
-            Some("https://example.com".to_string()),
-            "test_token".to_string(),
-        );
-        assert_eq!(ctx.auth_token, Some("test_token".to_string()));
-        assert_eq!(ctx.base_url, "https://example.com");
-    }
-
-    #[test]
     fn test_api_context_with_timeout() {
-        let ctx =
-            ApiContext::without_auth(Some("https://example.com".to_string())).with_timeout(60);
+        let ctx = ApiContext::new(Some("https://example.com".to_string())).with_timeout(60);
         assert_eq!(ctx.timeout_secs, Some(60));
     }
 
     #[test]
     fn test_api_context_default_timeout() {
-        let ctx = ApiContext::without_auth(Some("https://example.com".to_string()));
+        let ctx = ApiContext::new(Some("https://example.com".to_string()));
         assert_eq!(ctx.timeout_secs, Some(30));
     }
 
     // ============= ApiClient Tests =============
 
     #[test]
-    fn test_api_client_is_logged_in_true() {
-        let ctx =
-            ApiContext::with_auth(Some("https://example.com".to_string()), "token".to_string());
-        let client = ApiClient::new(ctx);
-        assert!(client.is_logged_in());
-    }
-
-    #[test]
     fn test_api_client_is_logged_in_false() {
-        let ctx = ApiContext::without_auth(Some("https://example.com".to_string()));
+        let ctx = ApiContext::new(Some("https://example.com".to_string()));
         let client = ApiClient::new(ctx);
         assert!(!client.is_logged_in());
     }
 
     #[test]
     fn test_api_client_context_access() {
-        let ctx =
-            ApiContext::with_auth(Some("https://example.com".to_string()), "token".to_string());
+        let ctx = ApiContext::new(Some("https://example.com".to_string()));
         let client = ApiClient::new(ctx);
         assert_eq!(client.context().base_url, "https://example.com");
     }
@@ -447,21 +379,21 @@ mod tests {
 
     #[test]
     fn test_build_url_simple() {
-        let ctx = ApiContext::without_auth(Some("https://example.com".to_string()));
+        let ctx = ApiContext::new(Some("https://example.com".to_string()));
         let url = ctx.build_url("/api/test").unwrap();
         assert_eq!(url, "https://example.com/api/test");
     }
 
     #[test]
     fn test_build_url_with_trailing_slash() {
-        let ctx = ApiContext::without_auth(Some("https://example.com/".to_string()));
+        let ctx = ApiContext::new(Some("https://example.com/".to_string()));
         let url = ctx.build_url("api/test").unwrap();
         assert_eq!(url, "https://example.com/api/test");
     }
 
     #[test]
     fn test_build_url_invalid_base() {
-        let ctx = ApiContext::without_auth(Some("not-a-url".to_string()));
+        let ctx = ApiContext::new(Some("not-a-url".to_string()));
         let result = ctx.build_url("/api/test");
         assert!(result.is_err());
     }
