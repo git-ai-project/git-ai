@@ -709,7 +709,6 @@ impl<'a> Tree<'a> {
         self.oid.clone()
     }
 
-    #[allow(dead_code)]
     #[allow(clippy::should_implement_trait)]
     pub fn clone(&self) -> Tree<'a> {
         Tree {
@@ -791,7 +790,6 @@ pub struct Blob<'a> {
 }
 
 impl<'a> Blob<'a> {
-    #[allow(dead_code)]
     pub fn id(&self) -> String {
         self.oid.clone()
     }
@@ -1393,7 +1391,6 @@ impl Repository {
     }
 
     // Write an in-memory buffer to the ODB as a blob.
-    #[allow(dead_code)]
     pub fn remote_head(&self, remote_name: &str) -> Result<String, GitAiError> {
         let mut args = self.global_args_for_exec();
         args.push("symbolic-ref".to_string());
@@ -1446,7 +1443,6 @@ impl Repository {
         Ok(remotes.first().map(|s| s.to_string()))
     }
 
-    #[allow(dead_code)]
     pub fn push_authorship(&self, remote_name: &str) -> Result<(), GitAiError> {
         push_authorship_notes(self, remote_name)
     }
@@ -1568,7 +1564,6 @@ impl Repository {
 
     /// Get the content of a file at a specific commit
     /// Uses `git show <commit>:<path>` for efficient single-call retrieval
-    #[allow(dead_code)]
     pub fn get_file_content(
         &self,
         file_path: &str,
@@ -2302,7 +2297,6 @@ fn repository_object_hash_kind_for_path_no_git_exec(
     }
 }
 
-#[allow(dead_code)]
 pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
     let workdir = git_dir
         .parent()

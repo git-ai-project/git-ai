@@ -294,7 +294,6 @@ impl PersistedWorkingLog {
         Ok(fs::read_to_string(blob_path)?)
     }
 
-    #[allow(dead_code)]
     pub fn persist_file_version(&self, content: &str) -> Result<String, GitAiError> {
         // Create SHA256 hash of the content
         let mut hasher = Sha256::new();
@@ -558,7 +557,6 @@ impl PersistedWorkingLog {
         Ok(touched_files)
     }
 
-    #[allow(dead_code)]
     pub fn all_ai_touched_files(&self) -> Result<HashSet<String>, GitAiError> {
         let checkpoints = self.read_all_checkpoints()?;
         let mut touched_files = HashSet::new();

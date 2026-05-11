@@ -285,7 +285,6 @@ impl AttributionTracker {
     }
 
     /// Create a new attribution tracker with custom configuration
-    #[allow(dead_code)]
     pub fn with_config(config: AttributionConfig) -> Self {
         AttributionTracker { config }
     }
