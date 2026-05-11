@@ -1,4 +1,3 @@
-pub mod bundle;
 pub mod cas;
 pub mod client;
 pub mod metrics;
