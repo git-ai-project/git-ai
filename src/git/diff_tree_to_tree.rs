@@ -4,7 +4,6 @@ use crate::git::status::MAX_PATHSPEC_ARGS;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiffStatus {
     Added,
@@ -32,7 +31,6 @@ impl DiffStatus {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DiffFile {
     path: Option<PathBuf>,
@@ -45,18 +43,15 @@ impl DiffFile {
         self.path.as_deref()
     }
 
-    #[allow(dead_code)]
     pub fn mode(&self) -> &str {
         &self.mode
     }
 
-    #[allow(dead_code)]
     pub fn id(&self) -> &str {
         &self.oid
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DiffDelta {
     status: DiffStatus,
@@ -75,14 +70,8 @@ impl DiffDelta {
         &self.new_file
     }
 
-    #[allow(dead_code)]
     pub fn status(&self) -> DiffStatus {
         self.status
-    }
-
-    #[allow(dead_code)]
-    pub fn similarity(&self) -> u32 {
-        self.similarity
     }
 }
 
@@ -95,12 +84,10 @@ impl Diff {
         self.deltas.iter()
     }
 
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.deltas.len()
     }
 
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.deltas.is_empty()
     }
@@ -273,15 +260,7 @@ fn parse_diff_raw(data: &[u8]) -> Result<Vec<DiffDelta>, GitAiError> {
         // Construct the old_file and new_file
         let old_file = DiffFile {
             path: old_path
-                .or_else(|| {
-                    // For deletions, the old file path is the path
-                    #[allow(clippy::if_same_then_else)]
-                    if matches!(status, DiffStatus::Deleted) {
-                        Some(new_path.clone())
-                    } else {
-                        Some(new_path.clone())
-                    }
-                })
+                .or_else(|| Some(new_path.clone()))
                 .map(PathBuf::from),
             mode: old_mode.to_string(),
             oid: old_hash.to_string(),
