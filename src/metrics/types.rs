@@ -32,7 +32,6 @@ pub trait EventValues: Sized {
     fn into_sparse(self) -> SparseArray {
         self.to_sparse()
     }
-    #[allow(dead_code)]
     fn from_sparse(arr: &SparseArray) -> Self;
 }
 
@@ -93,17 +92,6 @@ impl MetricEvent {
             }),
             event_id: V::event_id() as u16,
             values: values.into_sparse(),
-            attrs,
-        }
-    }
-
-    /// Create with explicit timestamp (for deserialization/testing).
-    #[allow(dead_code)]
-    pub fn with_timestamp<V: EventValues>(timestamp: u32, values: &V, attrs: SparseArray) -> Self {
-        Self {
-            timestamp,
-            event_id: V::event_id() as u16,
-            values: values.to_sparse(),
             attrs,
         }
     }
@@ -175,20 +163,6 @@ mod tests {
             event.attrs.get("0"),
             Some(&Value::String("1.0.0".to_string()))
         );
-    }
-
-    #[test]
-    fn test_metric_event_with_timestamp() {
-        use crate::metrics::events::CommittedValues;
-
-        let values = CommittedValues::new().human_additions(50);
-        let mut attrs = SparseArray::new();
-        attrs.insert("0".to_string(), Value::String("1.0.0".to_string()));
-
-        let event = MetricEvent::with_timestamp(1700000000, &values, attrs);
-
-        assert_eq!(event.timestamp, 1700000000);
-        assert_eq!(event.event_id, 1);
     }
 
     #[test]
