@@ -824,6 +824,63 @@ pub fn build_diff_artifacts_with_note(
     })
 }
 
+/// Build diff artifacts from pre-computed hunks, avoiding redundant git subprocess calls.
+/// Used by the post-commit hook path where the caller already has the hunks from a single
+/// `get_diff_with_line_numbers` call.
+pub fn build_diff_artifacts_from_hunks(
+    repo: &Repository,
+    hunks: Vec<DiffHunk>,
+    to_commit: &str,
+    authorship_log: Option<&AuthorshipLog>,
+) -> Result<DiffBuildArtifacts, GitAiError> {
+    let effective_patterns = effective_ignore_patterns(repo, &[], &[]);
+    let ignore_matcher = build_ignore_matcher(&effective_patterns);
+
+    let mut hunks = hunks;
+    hunks.retain(|hunk| {
+        !hunk.file_path.is_empty()
+            && !should_ignore_file_with_matcher(&hunk.file_path, &ignore_matcher)
+    });
+
+    let included_files: HashSet<String> = hunks.iter().map(|h| h.file_path.clone()).collect();
+    let line_contents = build_line_content_map(&hunks);
+
+    let (annotations_by_file, attributions, line_details, prompts, sessions, humans, mut commits) =
+        if let Some(note) = authorship_log {
+            build_line_attribution_from_note(to_commit, &hunks, note)
+        } else {
+            (
+                BTreeMap::new(),
+                HashMap::new(),
+                HashMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+                BTreeMap::new(),
+            )
+        };
+
+    let json_hunks = build_json_hunks(
+        repo,
+        &hunks,
+        &line_details,
+        &line_contents,
+        to_commit,
+        &mut commits,
+    )?;
+
+    Ok(DiffBuildArtifacts {
+        attributions,
+        annotations_by_file,
+        prompts,
+        sessions,
+        humans,
+        json_hunks,
+        commits,
+        included_files,
+    })
+}
+
 #[allow(clippy::type_complexity)]
 fn build_line_attribution_data(
     repo: &Repository,
