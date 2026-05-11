@@ -24,20 +24,7 @@ impl LineRange {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn overlaps(&self, other: &LineRange) -> bool {
-        match (self, other) {
-            (LineRange::Single(l1), LineRange::Single(l2)) => l1 == l2,
-            (LineRange::Single(l), LineRange::Range(start, end)) => *l >= *start && *l <= *end,
-            (LineRange::Range(start, end), LineRange::Single(l)) => *l >= *start && *l <= *end,
-            (LineRange::Range(start1, end1), LineRange::Range(start2, end2)) => {
-                start1 <= end2 && start2 <= end1
-            }
-        }
-    }
-
     /// Remove a line or range from this range, returning the remaining parts
-    #[allow(dead_code)]
     pub fn remove(&self, to_remove: &LineRange) -> Vec<LineRange> {
         match (self, to_remove) {
             (LineRange::Single(l), LineRange::Single(r)) => {
@@ -125,7 +112,6 @@ impl LineRange {
         ranges
     }
 
-    #[allow(dead_code)]
     pub fn expand(&self) -> Vec<u32> {
         match self {
             LineRange::Single(l) => vec![*l],
@@ -137,7 +123,6 @@ impl LineRange {
     /// - For insertions: offset is positive (shift lines down/forward)
     /// - For deletions: offset is negative (shift lines up/backward)
     /// - insertion_point: the line number where the change occurred
-    #[allow(dead_code)]
     pub fn shift(&self, insertion_point: u32, offset: i32) -> Option<LineRange> {
         // Helper: apply offset to a line number, returning None if result is negative
         let apply_offset = |line: u32| -> Option<u32> {
