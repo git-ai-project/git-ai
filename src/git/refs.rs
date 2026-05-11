@@ -306,7 +306,6 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
 /// Batch-attach existing note blobs to commits without rewriting blob contents.
 ///
 /// Each entry is (commit_sha, existing_note_blob_oid).
-#[allow(dead_code)]
 pub fn notes_add_blob_batch(
     repo: &Repository,
     entries: &[(String, String)],
@@ -531,7 +530,6 @@ pub fn get_authorship(repo: &Repository, commit_sha: &str) -> Option<AuthorshipL
     Some(authorship_log)
 }
 
-#[allow(dead_code)]
 pub fn get_reference_as_working_log(
     repo: &Repository,
     commit_sha: &str,
