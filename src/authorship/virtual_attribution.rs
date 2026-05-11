@@ -243,12 +243,6 @@ impl VirtualAttributions {
         )))
     }
 
-    /// Add a single pathspec to the virtual attributions
-    #[allow(dead_code)]
-    pub async fn add_pathspec(&mut self, pathspec: &str) -> Result<(), GitAiError> {
-        self.add_pathspecs_concurrent(&[pathspec.to_string()]).await
-    }
-
     /// Add multiple pathspecs concurrently
     async fn add_pathspecs_concurrent(&mut self, pathspecs: &[String]) -> Result<(), GitAiError> {
         const MAX_CONCURRENT: usize = 30;
@@ -306,7 +300,6 @@ impl VirtualAttributions {
     }
 
     /// Get both character and line attributions for a file
-    #[allow(dead_code)]
     pub fn get_attributions(
         &self,
         file_path: &str,
