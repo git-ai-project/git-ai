@@ -451,6 +451,32 @@ impl CodexInstaller {
             })
             .unwrap_or(false)
     }
+
+    fn hooks_json_has_git_ai_entries(hooks_json: &JsonValue) -> bool {
+        CODEX_HOOK_EVENTS.iter().any(|event_name| {
+            hooks_json
+                .get("hooks")
+                .and_then(|hooks| hooks.get(*event_name))
+                .and_then(|value| value.as_array())
+                .map(|blocks| {
+                    blocks.iter().any(|block| {
+                        block
+                            .get("hooks")
+                            .and_then(|value| value.as_array())
+                            .map(|hooks| {
+                                hooks.iter().any(|hook| {
+                                    hook.get("command")
+                                        .and_then(|value| value.as_str())
+                                        .map(Self::is_git_ai_codex_command)
+                                        .unwrap_or(false)
+                                })
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        })
+    }
 }
 
 impl HookInstaller for CodexInstaller {
@@ -486,9 +512,14 @@ impl HookInstaller for CodexInstaller {
         };
 
         let desired_config = Self::config_with_installed_hooks(&config, &params.binary_path)?;
-        let hooks_installed =
-            Self::config_hooks_feature_enabled(&config) && Self::config_has_inline_hooks(&config);
-        let hooks_up_to_date = config == desired_config;
+        let has_inline_hooks = Self::config_has_inline_hooks(&config);
+        let has_legacy_hooks_json = Self::hooks_json_path().exists()
+            && Self::parse_hooks_json(&fs::read_to_string(Self::hooks_json_path())?)
+                .map(|json| Self::hooks_json_has_git_ai_entries(&json))
+                .unwrap_or(false);
+        let hooks_installed = Self::config_hooks_feature_enabled(&config)
+            && (has_inline_hooks || has_legacy_hooks_json);
+        let hooks_up_to_date = config == desired_config && !has_legacy_hooks_json;
 
         Ok(HookCheckResult {
             tool_installed: true,
@@ -1605,6 +1636,56 @@ codex_hooks = true
                     .and_then(|v| v.as_bool()),
                 Some(true),
                 "should set hooks feature flag"
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn test_check_hooks_detects_legacy_hooks_json_installation() {
+        with_temp_home(|home| {
+            let codex_dir = home.join(".codex");
+            fs::create_dir_all(&codex_dir).unwrap();
+            let config_path = codex_dir.join("config.toml");
+            let hooks_json_path = codex_dir.join("hooks.json");
+            fs::write(
+                &config_path,
+                r#"
+model = "gpt-5"
+[features]
+codex_hooks = true
+"#,
+            )
+            .unwrap();
+            fs::write(
+                &hooks_json_path,
+                serde_json::to_string_pretty(&json!({
+                    "hooks": {
+                        "PreToolUse": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/git-ai checkpoint codex --hook-input stdin" }] }],
+                        "PostToolUse": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/git-ai checkpoint codex --hook-input stdin" }] }],
+                        "Stop": [{ "hooks": [{ "type": "command", "command": "/usr/local/bin/git-ai checkpoint codex --hook-input stdin" }] }],
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            let installer = CodexInstaller;
+            let params = HookInstallerParams {
+                binary_path: test_binary_path(),
+            };
+
+            let check = installer
+                .check_hooks(&params)
+                .expect("check should succeed");
+            assert!(check.tool_installed);
+            assert!(
+                check.hooks_installed,
+                "should detect legacy hooks.json installation"
+            );
+            assert!(
+                !check.hooks_up_to_date,
+                "legacy format should not be considered up-to-date"
             );
         });
     }
