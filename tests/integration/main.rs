@@ -24,6 +24,7 @@ mod blame_comprehensive;
 mod blame_flags;
 mod blame_subdirectory;
 mod checkout_switch;
+mod checkpoint_debug_log;
 mod checkpoint_explicit_paths;
 mod checkpoint_perf;
 mod checkpoint_size;

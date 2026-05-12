@@ -21,6 +21,7 @@ fn setup() {
         git_hooks_externally_managed: false,
         transcript_streaming: true,
         transcript_sweep: true,
+        checkpoint_debug_log: false,
     };
 
     git_ai::config::Config::set_test_feature_flags(test_flags.clone());

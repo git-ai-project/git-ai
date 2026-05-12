@@ -4,6 +4,7 @@ use crate::commands::checkpoint_agent::presets::{
     KnownHumanEdit, ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit,
     TranscriptSource, UntrackedEdit,
 };
+use crate::config;
 use crate::daemon::checkpoint::PreparedPathRole;
 use crate::error::GitAiError;
 use crate::git::repo_state::{
@@ -13,6 +14,7 @@ use crate::git::repository::discover_repository_in_path_no_git_exec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +40,16 @@ pub struct CheckpointRequest {
     pub path_role: PreparedPathRole,
     pub transcript_source: Option<TranscriptSource>,
     pub metadata: HashMap<String, String>,
+}
+
+#[derive(Serialize)]
+struct CheckpointDebugLogEntry<'a> {
+    timestamp: String,
+    preset_name: &'a str,
+    hook_input: &'a str,
+    trace_id: &'a str,
+    event_count: usize,
+    requests: &'a [CheckpointRequest],
 }
 
 struct RepoContext {
@@ -191,12 +203,13 @@ pub fn execute_preset_checkpoint(
     let trace_id = generate_trace_id();
     let preset = super::presets::resolve_preset(preset_name)?;
     let events = preset.parse(hook_input, &trace_id)?;
+    let events_len = events.len();
 
     if perf {
         eprintln!(
             "[perf] orchestrator: parse={:.1}ms (events={})",
             t0.elapsed().as_secs_f64() * 1000.0,
-            events.len(),
+            events_len,
         );
     }
 
@@ -215,7 +228,84 @@ pub fn execute_preset_checkpoint(
         }
         requests.extend(new_requests);
     }
+
+    if config::Config::get()
+        .get_feature_flags()
+        .checkpoint_debug_log
+    {
+        write_checkpoint_debug_log(preset_name, hook_input, &trace_id, events_len, &requests);
+    }
+
     Ok(requests)
+}
+
+fn write_checkpoint_debug_log(
+    preset_name: &str,
+    hook_input: &str,
+    trace_id: &str,
+    event_count: usize,
+    requests: &[CheckpointRequest],
+) {
+    let Some(internal_dir) = config::internal_dir_path() else {
+        return;
+    };
+
+    let log_dir = internal_dir.join("checkpoint-debug-logs");
+    let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let log_path = log_dir.join(format!("{}.log", date));
+
+    if let Err(e) = fs::create_dir_all(&log_dir) {
+        eprintln!("[checkpoint_debug_log] failed to create dir: {}", e);
+        return;
+    }
+
+    cleanup_old_debug_logs(&log_dir);
+
+    let entry = CheckpointDebugLogEntry {
+        timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        preset_name,
+        hook_input,
+        trace_id,
+        event_count,
+        requests,
+    };
+
+    let Ok(line) = serde_json::to_string(&entry) else {
+        return;
+    };
+
+    let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    else {
+        return;
+    };
+
+    let _ = file
+        .write_all(line.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .and_then(|_| file.flush());
+}
+
+fn cleanup_old_debug_logs(log_dir: &Path) {
+    let Ok(entries) = fs::read_dir(log_dir) else {
+        return;
+    };
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(14);
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if let Ok(file_date) = chrono::NaiveDate::parse_from_str(stem, "%Y-%m-%d")
+            && file_date < cutoff.date_naive()
+        {
+            let _ = fs::remove_file(&path);
+        }
+    }
 }
 
 fn execute_event(
