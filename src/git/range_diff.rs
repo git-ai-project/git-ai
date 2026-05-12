@@ -60,7 +60,7 @@ pub fn parse_range_diff_output(output: &str) -> Result<Vec<CommitMapping>, GitAi
 
     for line in output.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with("    ") {
+        if trimmed.is_empty() || line.starts_with("    ") {
             continue;
         }
 
@@ -73,18 +73,18 @@ pub fn parse_range_diff_output(output: &str) -> Result<Vec<CommitMapping>, GitAi
 }
 
 fn parse_range_diff_line(line: &str) -> Option<CommitMapping> {
-    // Find the operator token: ` = `, ` ! `, ` < `, ` > `
-    let (op, left_part, right_part) = if let Some(idx) = line.find(" = ") {
-        ('=', &line[..idx], &line[idx + 3..])
-    } else if let Some(idx) = line.find(" ! ") {
-        ('!', &line[..idx], &line[idx + 3..])
-    } else if let Some(idx) = line.find(" < ") {
-        ('<', &line[..idx], &line[idx + 3..])
-    } else if let Some(idx) = line.find(" > ") {
-        ('>', &line[..idx], &line[idx + 3..])
-    } else {
-        return None;
-    };
+    let candidates = [
+        line.find(" = ").map(|i| (i, '=')),
+        line.find(" ! ").map(|i| (i, '!')),
+        line.find(" < ").map(|i| (i, '<')),
+        line.find(" > ").map(|i| (i, '>')),
+    ];
+    let &(idx, op) = candidates
+        .iter()
+        .filter_map(|x| x.as_ref())
+        .min_by_key(|(i, _)| *i)?;
+    let left_part = &line[..idx];
+    let right_part = &line[idx + 3..];
 
     let left_sha = extract_sha(left_part);
     let right_sha = extract_sha(right_part);
@@ -216,6 +216,16 @@ mod tests {
             mappings[0].new.as_deref(),
             Some("f6e5d4c3b2a1f6e5d4c3b2a1f6e5d4c3b2a1f6e5")
         );
+    }
+
+    #[test]
+    fn parse_operator_in_subject() {
+        let output = "1:  abc1234 ! 1:  def5678 set x = 5\n";
+        let mappings = parse_range_diff_output(output).unwrap();
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].kind, MappingKind::Modified);
+        assert_eq!(mappings[0].original.as_deref(), Some("abc1234"));
+        assert_eq!(mappings[0].new.as_deref(), Some("def5678"));
     }
 
     #[test]
