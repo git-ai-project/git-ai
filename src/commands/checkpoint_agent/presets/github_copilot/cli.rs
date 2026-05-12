@@ -56,7 +56,7 @@ pub(super) fn parse_cli_hooks(
 
     let context = PresetContext {
         agent_id: AgentId {
-            tool: "github-copilot".to_string(),
+            tool: "github-copilot-cli".to_string(),
             id: session_id.clone(),
             model: session_state_path
                 .as_ref()
@@ -197,7 +197,7 @@ mod tests {
             .unwrap();
         match &events[0] {
             ParsedHookEvent::PreBashCall(e) => {
-                assert_eq!(e.context.agent_id.tool, "github-copilot");
+                assert_eq!(e.context.agent_id.tool, "github-copilot-cli");
                 assert_eq!(
                     e.context.metadata.get("source"),
                     Some(&"copilot-cli".to_string())
