@@ -35,8 +35,8 @@ impl CopilotAgent {
 
         // Standard locations for Copilot transcripts (legacy)
         let search_dirs = vec![
-            dirs::config_dir().map(|p| p.join("github-copilot/sessions")),
-            dirs::config_dir().map(|p| p.join("github-copilot/events")),
+            crate::utils::dirs::config_dir().map(|p| p.join("github-copilot/sessions")),
+            crate::utils::dirs::config_dir().map(|p| p.join("github-copilot/events")),
         ];
 
         for dir_opt in search_dirs {
@@ -88,15 +88,15 @@ impl CopilotAgent {
     fn vscode_workspace_storage_roots() -> Vec<PathBuf> {
         let mut roots = Vec::new();
         #[cfg(target_os = "macos")]
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::utils::dirs::home_dir() {
             roots.push(home.join("Library/Application Support/Code/User/workspaceStorage"));
         }
         #[cfg(target_os = "linux")]
-        if let Some(config) = dirs::config_dir() {
+        if let Some(config) = crate::utils::dirs::config_dir() {
             roots.push(config.join("Code/User/workspaceStorage"));
         }
         #[cfg(target_os = "windows")]
-        if let Some(appdata) = dirs::config_dir() {
+        if let Some(appdata) = crate::utils::dirs::config_dir() {
             roots.push(appdata.join("Code/User/workspaceStorage"));
         }
         roots

@@ -4,3 +4,9 @@
 #
 # For local Linux development, install mold and set:
 #   RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

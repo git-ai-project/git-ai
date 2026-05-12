@@ -1,0 +1,101 @@
+{
+  "value": {
+    "type": "array",
+    "range": {
+      "start": 0,
+      "end": 55,
+    },
+    "elements": [
+      {
+        "type": "string",
+        "range": {
+          "start": 1,
+          "end": 7,
+        },
+        "value": "test"
+      },
+      {
+        "type": "number",
+        "range": {
+          "start": 9,
+          "end": 10,
+        },
+        "value": "5"
+      },
+      {
+        "type": "object",
+        "range": {
+          "start": 12,
+          "end": 25,
+        },
+        "properties": [
+          {
+            "type": "objectProp",
+            "range": {
+              "start": 14,
+              "end": 23,
+            },
+            "name": {
+              "type": "string",
+              "range": {
+                "start": 14,
+                "end": 20,
+              },
+              "value": "prop"
+            },
+            "value": {
+              "type": "number",
+              "range": {
+                "start": 22,
+                "end": 23,
+              },
+              "value": "4"
+            }
+          }
+        ]
+      },
+      {
+        "type": "array",
+        "range": {
+          "start": 27,
+          "end": 35,
+        },
+        "elements": [
+          {
+            "type": "string",
+            "range": {
+              "start": 28,
+              "end": 34,
+            },
+            "value": "test"
+          }
+        ]
+      },
+      {
+        "type": "boolean",
+        "range": {
+          "start": 37,
+          "end": 41,
+        },
+        "value": "true"
+      },
+      {
+        "type": "boolean",
+        "range": {
+          "start": 43,
+          "end": 48,
+        },
+        "value": "false"
+      },
+      {
+        "type": "null",
+        "range": {
+          "start": 50,
+          "end": 54,
+        }
+      }
+    ]
+  },
+  "comments": [
+  ]
+}

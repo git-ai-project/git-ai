@@ -38,7 +38,7 @@ impl AmpAgent {
             if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
                 return Ok(PathBuf::from(xdg).join("amp/threads"));
             }
-            if let Some(home) = dirs::home_dir() {
+            if let Some(home) = crate::utils::dirs::home_dir() {
                 return Ok(home.join(".local/share/amp/threads"));
             }
         }
@@ -48,7 +48,7 @@ impl AmpAgent {
             if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
                 return Ok(PathBuf::from(xdg).join("amp/threads"));
             }
-            if let Some(home) = dirs::home_dir() {
+            if let Some(home) = crate::utils::dirs::home_dir() {
                 return Ok(home.join(".local/share/amp/threads"));
             }
         }

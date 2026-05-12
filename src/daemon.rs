@@ -4936,7 +4936,7 @@ impl ActorDaemonCoordinator {
                         let coord = coordinator.clone();
                         let future = coord.ingest_trace_payload_fast(ordered_payload);
                         let caught = std::panic::AssertUnwindSafe(future);
-                        match futures::FutureExt::catch_unwind(caught).await {
+                        match crate::utils::catch_unwind(caught).await {
                             Ok(Ok(())) => Ok(()),
                             Ok(Err(error)) => {
                                 tracing::error!(
@@ -5759,7 +5759,7 @@ impl ActorDaemonCoordinator {
                             Ok::<_, GitAiError>((applied, side_effect))
                         };
                         let caught = std::panic::AssertUnwindSafe(future);
-                        futures::FutureExt::catch_unwind(caught).await
+                        crate::utils::catch_unwind(caught).await
                     };
                     match side_effect_result {
                         Ok(Ok((applied, side_effect_result))) => {
@@ -5916,7 +5916,7 @@ impl ActorDaemonCoordinator {
                             }
                         };
                         let caught = std::panic::AssertUnwindSafe(future);
-                        futures::FutureExt::catch_unwind(caught).await
+                        crate::utils::catch_unwind(caught).await
                     };
                     let result = match checkpoint_request {
                         Ok(inner) => inner,

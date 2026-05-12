@@ -1,4 +1,3 @@
-use dirs;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -51,7 +50,7 @@ fn detect_pattern_type(value: &str) -> PatternType {
 fn resolve_path_to_remotes(path: &str) -> Result<Vec<String>, String> {
     // Expand ~ to home directory
     let expanded_path = if path.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::utils::dirs::home_dir() {
             format!("{}{}", home.to_string_lossy(), &path[1..])
         } else {
             path.to_string()

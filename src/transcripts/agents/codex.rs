@@ -78,7 +78,7 @@ impl CodexAgent {
     fn scan_session_files() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        let codex_home = match dirs::home_dir() {
+        let codex_home = match crate::utils::dirs::home_dir() {
             Some(home) => home.join(".codex"),
             None => return paths,
         };

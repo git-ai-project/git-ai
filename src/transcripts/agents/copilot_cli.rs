@@ -24,7 +24,7 @@ impl CopilotCliAgent {
     }
 
     fn session_state_base_dir() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".copilot/session-state"))
+        crate::utils::dirs::home_dir().map(|h| h.join(".copilot/session-state"))
     }
 }
 

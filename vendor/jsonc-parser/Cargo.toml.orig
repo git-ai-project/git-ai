@@ -1,0 +1,28 @@
+[package]
+name = "jsonc-parser"
+version = "0.32.1"
+authors = ["David Sherret <dsherret@gmail.com>"]
+edition = "2024"
+license = "MIT"
+description = "JSONC parser."
+repository = "https://github.com/dprint/jsonc-parser"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[dependencies]
+indexmap = { version = "2.2.6", optional = true }
+serde = { version = "1.0", optional = true, features = ["derive"] }
+serde_json = { version = "1.0", optional = true }
+unicode-width = { version = "0.2.0", optional = true }
+
+[features]
+cst = []
+preserve_order = ["indexmap"]
+serde = ["dep:serde"]
+serde_json = ["dep:serde_json"]
+error_unicode_width = ["unicode-width"]
+
+[dev-dependencies]
+pretty_assertions = "1.0.0"
+serde_json = "1.0"

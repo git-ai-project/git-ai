@@ -36,7 +36,7 @@ impl CodexPreset {
             return Some(tp.to_string());
         }
 
-        let codex_home = dirs::home_dir()?.join(".codex");
+        let codex_home = crate::utils::dirs::home_dir()?.join(".codex");
         crate::transcripts::agents::CodexAgent::find_rollout_path_for_session_in_home(
             session_id,
             &codex_home,

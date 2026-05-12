@@ -148,7 +148,7 @@ pub(super) fn parse_cli_hooks(
 }
 
 fn resolve_copilot_cli_session_path(session_id: &str) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
+    let home = crate::utils::dirs::home_dir()?;
     let path = home
         .join(".copilot/session-state")
         .join(session_id)

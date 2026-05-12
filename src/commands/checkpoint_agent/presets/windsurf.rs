@@ -83,7 +83,7 @@ impl AgentPreset for WindsurfPreset {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
-                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+                let home = crate::utils::dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
                 format!(
                     "{}/.windsurf/transcripts/{}.jsonl",
                     home.display(),

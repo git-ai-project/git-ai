@@ -31,7 +31,7 @@ impl ContinueAgent {
     fn scan_session_files() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::utils::dirs::home_dir() {
             let pattern = home
                 .join(".continue/sessions/**/*.json")
                 .to_string_lossy()

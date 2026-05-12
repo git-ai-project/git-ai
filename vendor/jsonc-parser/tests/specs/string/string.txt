@@ -1,0 +1,29 @@
+{
+  "value": {
+    "type": "array",
+    "range": {
+      "start": 0,
+      "end": 48,
+    },
+    "elements": [
+      {
+        "type": "string",
+        "range": {
+          "start": 4,
+          "end": 23,
+        },
+        "value": "testing" testing"
+      },
+      {
+        "type": "string",
+        "range": {
+          "start": 27,
+          "end": 46,
+        },
+        "value": "testing\\ testing"
+      }
+    ]
+  },
+  "comments": [
+  ]
+}

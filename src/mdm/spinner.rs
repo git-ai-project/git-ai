@@ -1,87 +1,109 @@
-use indicatif::{ProgressBar, ProgressStyle};
+use std::io::Write;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
-/// Spinner UI component for showing progress
 pub struct Spinner {
-    pb: ProgressBar,
+    running: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
 }
+
+const FRAMES: &[&str] = &[
+    "\u{2807}", "\u{280b}", "\u{2819}", "\u{2838}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}",
+    "\u{280f}", "\u{2839}",
+];
 
 impl Spinner {
     pub fn new(message: &str) -> Self {
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} {msg}")
-                .unwrap()
-                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-        );
-        pb.set_message(message.to_string());
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
-        Self { pb }
+        let running = Arc::new(AtomicBool::new(true));
+        let r = running.clone();
+        let msg = message.to_string();
+        let handle = thread::spawn(move || {
+            let mut i = 0;
+            while r.load(Ordering::Relaxed) {
+                let frame = FRAMES[i % FRAMES.len()];
+                eprint!("\r\x1b[32m{}\x1b[0m {}", frame, msg);
+                let _ = std::io::stderr().flush();
+                i += 1;
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+        Self {
+            running,
+            handle: Some(handle),
+        }
     }
 
-    pub fn start(&self) {
-        // Spinner starts automatically when created
-    }
+    pub fn start(&self) {}
 
     #[allow(dead_code)]
-    pub fn update_message(&self, message: &str) {
-        self.pb.set_message(message.to_string());
-    }
+    pub fn update_message(&self, _message: &str) {}
 
     #[allow(dead_code)]
     pub async fn wait_for(&self, duration_ms: u64) {
-        smol::Timer::after(std::time::Duration::from_millis(duration_ms)).await;
+        tokio::time::sleep(Duration::from_millis(duration_ms)).await;
+    }
+
+    fn stop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+        eprint!("\r\x1b[2K");
+        let _ = std::io::stderr().flush();
     }
 
     pub fn success(&self, message: &str) {
-        // Clear spinner and show success with green checkmark and bold green text
-        self.pb.finish_and_clear();
-        println!("\x1b[1;32m✓ {}\x1b[0m", message);
+        self.finish();
+        println!("\x1b[1;32m\u{2713} {}\x1b[0m", message);
     }
 
     pub fn pending(&self, message: &str) {
-        // Clear spinner and show pending with yellow warning triangle and bold yellow text
-        self.pb.finish_and_clear();
-        println!("\x1b[1;33m⚠ {}\x1b[0m", message);
+        self.finish();
+        println!("\x1b[1;33m\u{26a0} {}\x1b[0m", message);
     }
 
     pub fn error(&self, message: &str) {
-        // Clear spinner and show error with red X and bold red text
-        self.pb.finish_and_clear();
-        println!("\x1b[1;31m✗ {}\x1b[0m", message);
+        self.finish();
+        println!("\x1b[1;31m\u{2717} {}\x1b[0m", message);
     }
 
     #[allow(dead_code)]
     pub fn skipped(&self, message: &str) {
-        // Clear spinner and show skipped with gray circle and gray text
-        self.pb.finish_and_clear();
-        println!("\x1b[90m○ {}\x1b[0m", message);
+        self.finish();
+        println!("\x1b[90m\u{25cb} {}\x1b[0m", message);
+    }
+
+    fn finish(&self) {
+        self.running.store(false, Ordering::Relaxed);
+        thread::sleep(Duration::from_millis(15));
+        eprint!("\r\x1b[2K");
+        let _ = std::io::stderr().flush();
     }
 }
 
-/// Print a formatted diff using colors
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 pub fn print_diff(diff_text: &str) {
-    // Print a formatted diff using colors
     for line in diff_text.lines() {
         if line.starts_with("+++") || line.starts_with("---") {
-            // File headers in bold
             println!("\x1b[1m{}\x1b[0m", line);
         } else if line.starts_with('+') {
-            // Additions in green
             println!("\x1b[32m{}\x1b[0m", line);
         } else if line.starts_with('-') {
-            // Deletions in red
             println!("\x1b[31m{}\x1b[0m", line);
         } else if line.starts_with("@@") {
-            // Hunk headers in cyan
             println!("\x1b[36m{}\x1b[0m", line);
         } else {
-            // Context lines normal
             println!("{}", line);
         }
     }
-    println!(); // Blank line after diff
+    println!();
 }
 
 #[cfg(test)]
@@ -91,14 +113,12 @@ mod tests {
     #[test]
     fn test_spinner_creation() {
         let spinner = Spinner::new("Testing spinner");
-        // Just verify it doesn't panic
         spinner.start();
     }
 
     #[test]
     fn test_spinner_success_output() {
         let spinner = Spinner::new("Processing");
-        // Verify success message doesn't panic
         spinner.success("Operation completed successfully");
     }
 

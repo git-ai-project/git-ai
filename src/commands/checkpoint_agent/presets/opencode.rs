@@ -184,7 +184,7 @@ impl OpenCodePreset {
     fn opencode_data_path() -> Result<PathBuf, GitAiError> {
         #[cfg(target_os = "macos")]
         {
-            let home = dirs::home_dir().ok_or_else(|| {
+            let home = crate::utils::dirs::home_dir().ok_or_else(|| {
                 GitAiError::Generic("Could not determine home directory".to_string())
             })?;
             Ok(home.join(".local").join("share").join("opencode"))
@@ -195,7 +195,7 @@ impl OpenCodePreset {
             if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
                 Ok(PathBuf::from(xdg_data).join("opencode"))
             } else {
-                let home = dirs::home_dir().ok_or_else(|| {
+                let home = crate::utils::dirs::home_dir().ok_or_else(|| {
                     GitAiError::Generic("Could not determine home directory".to_string())
                 })?;
                 Ok(home.join(".local").join("share").join("opencode"))

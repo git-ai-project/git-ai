@@ -1,0 +1,79 @@
+{
+  "value": null,
+  "comments": [
+    {
+      "pos": 0,
+      "comments": [
+        {
+          "type": "line",
+          "range": {
+            "start": 0,
+            "end": 10,
+          },
+          "value": " testing"
+        },
+        {
+          "type": "block",
+          "range": {
+            "start": 11,
+            "end": 21,
+          },
+          "value": " test "
+        },
+        {
+          "type": "line",
+          "range": {
+            "start": 22,
+            "end": 29,
+          },
+          "value": " test"
+        },
+        {
+          "type": "line",
+          "range": {
+            "start": 30,
+            "end": 47,
+          },
+          "value": "test /* test */"
+        }
+      ]
+    },
+    {
+      "pos": 48,
+      "comments": [
+        {
+          "type": "line",
+          "range": {
+            "start": 0,
+            "end": 10,
+          },
+          "value": " testing"
+        },
+        {
+          "type": "block",
+          "range": {
+            "start": 11,
+            "end": 21,
+          },
+          "value": " test "
+        },
+        {
+          "type": "line",
+          "range": {
+            "start": 22,
+            "end": 29,
+          },
+          "value": " test"
+        },
+        {
+          "type": "line",
+          "range": {
+            "start": 30,
+            "end": 47,
+          },
+          "value": "test /* test */"
+        }
+      ]
+    }
+  ]
+}

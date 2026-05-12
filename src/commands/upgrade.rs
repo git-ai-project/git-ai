@@ -365,10 +365,9 @@ fn fetch_and_verify_checksums(
 ) -> Result<HashMap<String, String>, String> {
     let endpoint = format!("/worker/releases/{}/download/SHA256SUMS", channel);
 
-    let (_agent, request) =
-        ApiContext::http_get(&format!("{}{}", api_base_url, endpoint), Some(30));
-    let response =
-        crate::http::send(request).map_err(|e| format!("Failed to fetch SHA256SUMS: {}", e))?;
+    let response = ApiContext::http_get(&format!("{}{}", api_base_url, endpoint), Some(30))
+        .send()
+        .map_err(|e| format!("Failed to fetch SHA256SUMS: {}", e))?;
 
     if response.status_code != 200 {
         return Err(format!(
@@ -405,9 +404,8 @@ fn fetch_and_verify_install_script(
 
     let endpoint = format!("/worker/releases/{}/download/{}", channel, script_name);
 
-    let (_agent, request) =
-        ApiContext::http_get(&format!("{}{}", api_base_url, endpoint), Some(30));
-    let response = crate::http::send(request)
+    let response = ApiContext::http_get(&format!("{}{}", api_base_url, endpoint), Some(30))
+        .send()
         .map_err(|e| format!("Failed to fetch {}: {}", script_name, e))?;
 
     if response.status_code != 200 {
@@ -509,7 +507,7 @@ fn run_install_script(script_content: &str, tag: &str, silent: bool) -> Result<(
         // binary and shims are in use and need to be replaced. The installer will wait
         // for the files to be released before proceeding.
         let pid = std::process::id();
-        let log_dir = dirs::home_dir()
+        let log_dir = crate::utils::dirs::home_dir()
             .ok_or_else(|| "Could not determine home directory".to_string())?
             .join(".git-ai")
             .join("upgrade-logs");

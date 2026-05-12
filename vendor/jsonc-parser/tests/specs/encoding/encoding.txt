@@ -1,0 +1,38 @@
+{
+  "value": {
+    "type": "string",
+    "range": {
+      "start": 16,
+      "end": 23,
+    },
+    "value": "2: ß"
+  },
+  "comments": [
+    {
+      "pos": 0,
+      "comments": [
+        {
+          "type": "line",
+          "range": {
+            "start": 0,
+            "end": 15,
+          },
+          "value": " 3 bytes: ℝ"
+        }
+      ]
+    },
+    {
+      "pos": 16,
+      "comments": [
+        {
+          "type": "line",
+          "range": {
+            "start": 0,
+            "end": 15,
+          },
+          "value": " 3 bytes: ℝ"
+        }
+      ]
+    }
+  ]
+}

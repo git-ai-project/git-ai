@@ -203,7 +203,7 @@ impl AgentPreset for DroidPreset {
 /// where encoded_cwd replaces '/' with '-'.
 fn droid_session_paths(session_id: &str, cwd: &str) -> (PathBuf, PathBuf) {
     let encoded_cwd = cwd.replace('/', "-");
-    let base = dirs::home_dir()
+    let base = crate::utils::dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("~"))
         .join(".factory")
         .join("sessions")

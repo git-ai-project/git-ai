@@ -516,14 +516,9 @@ fn flush_sentry_and_posthog(
             });
             ph_event["timestamp"] = json!(msg.timestamp);
 
-            let agent = crate::http::build_agent(Some(30));
-            let request = agent
-                .post(&endpoint)
-                .set("Content-Type", "application/json");
-            let _ = crate::http::send_with_body(
-                request,
-                &serde_json::to_string(&ph_event).unwrap_or_default(),
-            );
+            let _ = crate::http::Request::post(&endpoint, Some(30))
+                .header("Content-Type", "application/json")
+                .send_string(&serde_json::to_string(&ph_event).unwrap_or_default());
         }
     }
 }
@@ -597,11 +592,11 @@ struct SentryClient {
 
 impl SentryClient {
     fn from_dsn(dsn: &str) -> Option<Self> {
-        let url = url::Url::parse(dsn).ok()?;
-        let public_key = url.username().to_string();
-        let host = url.host_str()?;
-        let project_id = url.path().trim_start_matches('/');
-        let scheme = url.scheme();
+        let (scheme, rest) = dsn.split_once("://")?;
+        let (authority, path) = rest.split_once('/')?;
+        let (userinfo, host) = authority.rsplit_once('@')?;
+        let public_key = userinfo.split(':').next()?.to_string();
+        let project_id = path.trim_end_matches('/');
         let endpoint = format!("{}://{}/api/{}/store/", scheme, host, project_id);
         Some(SentryClient {
             endpoint,
@@ -617,12 +612,10 @@ impl SentryClient {
         );
 
         let body = serde_json::to_string(&event)?;
-        let agent = crate::http::build_agent(Some(30));
-        let request = agent
-            .post(&self.endpoint)
-            .set("X-Sentry-Auth", &auth_header)
-            .set("Content-Type", "application/json");
-        let response = crate::http::send_with_body(request, &body)?;
+        let response = crate::http::Request::post(&self.endpoint, Some(30))
+            .header("X-Sentry-Auth", &auth_header)
+            .header("Content-Type", "application/json")
+            .send_string(&body)?;
 
         let status = response.status_code;
         if (200..300).contains(&status) {

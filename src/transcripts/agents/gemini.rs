@@ -32,7 +32,7 @@ impl GeminiAgent {
     fn scan_session_files() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        if let Some(gemini_tmp) = dirs::home_dir().map(|p| p.join(".gemini/tmp"))
+        if let Some(gemini_tmp) = crate::utils::dirs::home_dir().map(|p| p.join(".gemini/tmp"))
             && gemini_tmp.exists()
         {
             let Ok(project_dirs) = fs::read_dir(&gemini_tmp) else {

@@ -38,7 +38,7 @@ pub struct SkillsInstallResult {
 
 /// Get the ~/.agents/skills directory path
 fn agents_skills_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".agents").join("skills"))
+    crate::utils::dirs::home_dir().map(|h| h.join(".agents").join("skills"))
 }
 
 fn claude_skills_dir() -> Option<PathBuf> {
@@ -47,7 +47,7 @@ fn claude_skills_dir() -> Option<PathBuf> {
 
 /// Get the ~/.cursor/skills directory path
 fn cursor_skills_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".cursor").join("skills"))
+    crate::utils::dirs::home_dir().map(|h| h.join(".cursor").join("skills"))
 }
 
 /// Link a skill directory to the target location.

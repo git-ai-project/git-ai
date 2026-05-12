@@ -175,10 +175,9 @@ fn refresh_alias_cache(
     family_key: &str,
     alias_cache: &Mutex<HashMap<String, AliasCacheEntry>>,
 ) {
-    let aliases = match discover_repository_in_path_no_git_exec(worktree).and_then(|repo| {
-        repo.get_git_config_file()
-            .map(|cfg| read_all_aliases_from_config(&cfg))
-    }) {
+    let aliases = match discover_repository_in_path_no_git_exec(worktree)
+        .and_then(|repo| read_all_aliases_via_git(&repo))
+    {
         Ok(aliases) => aliases,
         Err(_) => {
             // Clear refresh_in_progress so a future attempt can retry.
@@ -202,24 +201,20 @@ fn refresh_alias_cache(
     }
 }
 
-fn read_all_aliases_from_config(config: &gix_config::File<'_>) -> HashMap<String, String> {
-    let mut aliases = HashMap::new();
-    let Some(sections) = config.sections_by_name("alias") else {
-        return aliases;
-    };
-    for section in sections {
-        let body = section.body();
-        for key in body.value_names() {
-            let key_str = key.to_string();
-            if key_str.is_empty() {
-                continue;
-            }
-            if let Some(value) = body.value(&key_str) {
-                aliases.insert(key_str.to_ascii_lowercase(), value.to_string());
-            }
-        }
-    }
-    aliases
+fn read_all_aliases_via_git(
+    repo: &crate::git::repository::Repository,
+) -> Result<HashMap<String, String>, GitAiError> {
+    repo.config_get_regexp(r"^alias\.").map(|map| {
+        map.into_iter()
+            .map(|(key, value)| {
+                let alias_name = key
+                    .strip_prefix("alias.")
+                    .unwrap_or(&key)
+                    .to_ascii_lowercase();
+                (alias_name, value)
+            })
+            .collect()
+    })
 }
 
 fn is_builtin_primary_command(command: &str) -> bool {

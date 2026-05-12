@@ -337,7 +337,7 @@ pub fn prepare_working_log_after_squash(
     // Use merge_base to limit blame range for performance
     let repo_clone = repo.clone();
     let merge_base_clone = merge_base.clone();
-    let source_va = smol::block_on(async {
+    let source_va = crate::utils::block_on(async {
         VirtualAttributions::new_for_base_commit(
             repo_clone,
             source_head_sha.to_string(),
@@ -348,7 +348,7 @@ pub fn prepare_working_log_after_squash(
     })?;
 
     let repo_clone = repo.clone();
-    let target_va = smol::block_on(async {
+    let target_va = crate::utils::block_on(async {
         VirtualAttributions::new_for_base_commit(
             repo_clone,
             target_branch_head_sha.to_string(),
@@ -429,7 +429,7 @@ pub fn prepare_working_log_after_squash_from_final_state(
 
     let repo_clone = repo.clone();
     let merge_base_clone = merge_base.clone();
-    let source_va = smol::block_on(async {
+    let source_va = crate::utils::block_on(async {
         VirtualAttributions::new_for_base_commit(
             repo_clone,
             source_head_sha.to_string(),
@@ -440,7 +440,7 @@ pub fn prepare_working_log_after_squash_from_final_state(
     })?;
 
     let repo_clone = repo.clone();
-    let target_va = smol::block_on(async {
+    let target_va = crate::utils::block_on(async {
         VirtualAttributions::new_for_base_commit(
             repo_clone,
             target_branch_head_sha.to_string(),
@@ -654,7 +654,7 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     // Use merge_base to limit blame range for performance
     let repo_clone = repo.clone();
     let merge_base_clone = merge_base.clone();
-    let source_va = smol::block_on(async {
+    let source_va = crate::utils::block_on(async {
         VirtualAttributions::new_for_base_commit(
             repo_clone,
             source_head_sha.to_string(),
@@ -665,7 +665,7 @@ pub fn rewrite_authorship_after_squash_or_rebase(
     })?;
 
     let repo_clone = repo.clone();
-    let target_va = smol::block_on(async {
+    let target_va = crate::utils::block_on(async {
         VirtualAttributions::new_for_base_commit(
             repo_clone,
             target_branch_head_sha.clone(),
@@ -1315,7 +1315,7 @@ pub fn rewrite_authorship_after_rebase_v2(
         let original_head_clone = original_head.to_string();
         let pathspecs_clone = pathspecs.clone();
 
-        let current_va = smol::block_on(async {
+        let current_va = crate::utils::block_on(async {
             crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
                 repo_clone,
                 original_head_clone,
@@ -2061,7 +2061,7 @@ pub fn rewrite_authorship_after_cherry_pick(
     let source_head_clone = source_head.clone();
     let pathspecs_clone = pathspecs.clone();
 
-    let mut current_va = smol::block_on(async {
+    let mut current_va = crate::utils::block_on(async {
         crate::authorship::virtual_attribution::VirtualAttributions::new_for_base_commit(
             repo_clone,
             source_head_clone,
@@ -2868,17 +2868,17 @@ fn batch_read_blob_contents_parallel(
         .map(|c| c.to_vec())
         .collect();
 
-    let results = smol::block_on(async {
-        let semaphore = std::sync::Arc::new(smol::lock::Semaphore::new(MAX_PARALLEL_BLOB_READS));
+    let results = crate::utils::block_on(async {
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_BLOB_READS));
         let mut tasks = Vec::new();
 
         for chunk in chunks {
             let args = global_args.clone();
             let sem = std::sync::Arc::clone(&semaphore);
 
-            let task = smol::spawn(async move {
-                let _permit = sem.acquire().await;
-                smol::unblock(move || {
+            let task = tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                tokio::task::spawn_blocking(move || {
                     let mut cat_args = args;
                     cat_args.push("cat-file".to_string());
                     cat_args.push("--batch".to_string());
@@ -2887,17 +2887,18 @@ fn batch_read_blob_contents_parallel(
                     parse_cat_file_batch_output_with_oids(&output.stdout)
                 })
                 .await
+                .unwrap()
             });
 
             tasks.push(task);
         }
 
-        futures::future::join_all(tasks).await
+        crate::utils::join_all(tasks).await
     });
 
     let mut merged = HashMap::new();
     for result in results {
-        merged.extend(result?);
+        merged.extend(result.unwrap()?);
     }
     Ok(merged)
 }
@@ -2949,7 +2950,7 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
     let repo_clone = repo.clone();
     let pathspecs_vec: Vec<String> = pathspecs.iter().cloned().collect();
     let working_va = if let Some(snapshot) = final_state_override {
-        smol::block_on(async {
+        crate::utils::block_on(async {
             VirtualAttributions::from_working_log_for_commit_snapshot(
                 repo_clone,
                 original_commit.to_string(),
@@ -2965,7 +2966,7 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
             .await
         })?
     } else {
-        smol::block_on(async {
+        crate::utils::block_on(async {
             VirtualAttributions::from_working_log_for_commit(
                 repo_clone,
                 original_commit.to_string(),
@@ -3270,7 +3271,7 @@ pub fn reconstruct_working_log_after_reset(
     let pathspecs_clone = pathspecs.clone();
 
     let old_head_va = if has_captured_snapshot {
-        smol::block_on(async {
+        crate::utils::block_on(async {
             crate::authorship::virtual_attribution::VirtualAttributions::from_working_log_for_commit_snapshot(
                 repo_clone,
                 old_head_clone,
@@ -3282,7 +3283,7 @@ pub fn reconstruct_working_log_after_reset(
             .await
         })?
     } else {
-        smol::block_on(async {
+        crate::utils::block_on(async {
             crate::authorship::virtual_attribution::VirtualAttributions::from_working_log_for_commit(
                 repo_clone,
                 old_head_clone,
@@ -3884,7 +3885,7 @@ pub fn filter_pathspecs_to_ai_touched_files(
     commit_shas: &[String],
     pathspecs: &[String],
 ) -> Result<Vec<String>, GitAiError> {
-    let touched_files = smol::block_on(load_ai_touched_files_for_commits(
+    let touched_files = crate::utils::block_on(load_ai_touched_files_for_commits(
         repo,
         commit_shas.to_vec(),
     ))?;

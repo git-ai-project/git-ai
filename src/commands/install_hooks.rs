@@ -330,8 +330,8 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     persist_install_config(&binary_path, dry_run)?;
     let params = HookInstallerParams { binary_path };
 
-    // Run async operations with smol and convert result
-    let statuses = smol::block_on(async_run_install(&params, dry_run, verbose, install_skills))?;
+    let statuses =
+        crate::utils::block_on(async_run_install(&params, dry_run, verbose, install_skills))?;
 
     // Clean up legacy envelope logs directory and related artifacts.
     // These are no longer used — all telemetry now routes through the daemon.
@@ -439,8 +439,7 @@ pub fn run_uninstall(args: &[String]) -> Result<HashMap<String, String>, GitAiEr
     let binary_path = get_current_binary_path()?;
     let params = HookInstallerParams { binary_path };
 
-    // Run async operations with smol and convert result
-    let statuses = smol::block_on(async_run_uninstall(&params, dry_run, verbose))?;
+    let statuses = crate::utils::block_on(async_run_uninstall(&params, dry_run, verbose))?;
     Ok(to_hashmap(statuses))
 }
 
@@ -1042,7 +1041,7 @@ async fn async_run_uninstall(
 /// All telemetry now flows through the daemon control socket, so the per-PID
 /// log file system under `~/.git-ai/internal/logs/` is no longer needed.
 fn cleanup_legacy_envelope_logs() {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::utils::dirs::home_dir() else {
         return;
     };
     let internal = home.join(".git-ai").join("internal");

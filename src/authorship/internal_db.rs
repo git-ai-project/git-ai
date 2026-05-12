@@ -2,7 +2,6 @@
 // It has been superseded by use-case-specific databases.
 
 use crate::error::GitAiError;
-use dirs;
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -184,7 +183,7 @@ impl InternalDatabase {
             return Ok(PathBuf::from(test_path));
         }
 
-        let home = dirs::home_dir()
+        let home = crate::utils::dirs::home_dir()
             .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
         Ok(home.join(".git-ai").join("internal").join("db"))
     }

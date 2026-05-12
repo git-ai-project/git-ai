@@ -29,7 +29,7 @@ impl DroidAgent {
         let mut paths = Vec::new();
 
         // Droid transcripts are stored in ~/.factory/sessions/<project-dir>/<uuid>.jsonl
-        let search_dirs = vec![dirs::home_dir().map(|p| p.join(".factory/sessions"))];
+        let search_dirs = vec![crate::utils::dirs::home_dir().map(|p| p.join(".factory/sessions"))];
 
         for dir_opt in search_dirs {
             if let Some(sessions_dir) = dir_opt

@@ -97,7 +97,7 @@ impl MetricsDatabase {
             return Ok(PathBuf::from(test_path));
         }
 
-        let home = dirs::home_dir()
+        let home = crate::utils::dirs::home_dir()
             .ok_or_else(|| GitAiError::Generic("Could not determine home directory".to_string()))?;
         Ok(home.join(".git-ai").join("internal").join("metrics-db"))
     }

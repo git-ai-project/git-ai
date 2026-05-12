@@ -6,6 +6,90 @@ use std::process::{Command, Stdio};
 
 static IS_TERMINAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
+pub mod dirs {
+    use std::path::PathBuf;
+
+    pub fn home_dir() -> Option<PathBuf> {
+        #[cfg(windows)]
+        {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(PathBuf::from)
+        }
+        #[cfg(not(windows))]
+        {
+            std::env::var_os("HOME").map(PathBuf::from)
+        }
+    }
+
+    pub fn config_dir() -> Option<PathBuf> {
+        #[cfg(target_os = "macos")]
+        {
+            home_dir().map(|h| h.join("Library/Application Support"))
+        }
+        #[cfg(target_os = "linux")]
+        {
+            std::env::var_os("XDG_CONFIG_HOME")
+                .map(PathBuf::from)
+                .or_else(|| home_dir().map(|h| h.join(".config")))
+        }
+        #[cfg(windows)]
+        {
+            std::env::var_os("APPDATA").map(PathBuf::from)
+        }
+    }
+}
+
+pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        tokio::task::block_in_place(|| handle.block_on(f))
+    } else {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build tokio runtime")
+            .block_on(f)
+    }
+}
+
+pub async fn join_all<F>(futures: Vec<F>) -> Vec<F::Output>
+where
+    F: std::future::Future,
+{
+    let mut results = Vec::with_capacity(futures.len());
+    for f in futures {
+        results.push(f.await);
+    }
+    results
+}
+
+pub async fn catch_unwind<F>(future: F) -> Result<F::Output, Box<dyn std::any::Any + Send>>
+where
+    F: std::future::Future + std::panic::UnwindSafe,
+{
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    struct CatchUnwindFuture<Fut>(Fut);
+
+    impl<Fut: std::future::Future + std::panic::UnwindSafe> std::future::Future
+        for CatchUnwindFuture<Fut>
+    {
+        type Output = Result<Fut::Output, Box<dyn std::any::Any + Send>>;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let inner = unsafe { self.map_unchecked_mut(|s| &mut s.0) };
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.poll(cx))) {
+                Ok(Poll::Pending) => Poll::Pending,
+                Ok(Poll::Ready(output)) => Poll::Ready(Ok(output)),
+                Err(cause) => Poll::Ready(Err(cause)),
+            }
+        }
+    }
+
+    CatchUnwindFuture(future).await
+}
+
 /// Print a git diff in a readable format
 ///
 /// Prints the diff between two commits/trees showing which files changed and their status.

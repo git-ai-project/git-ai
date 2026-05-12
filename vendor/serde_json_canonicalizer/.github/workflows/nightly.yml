@@ -1,0 +1,64 @@
+name: Nightly build
+
+on:
+  workflow_dispatch:
+  schedule:
+    # run this workflow every day at 1:42 AM UTC
+    - cron: '42 1 * * *'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: All tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install Rust stable
+        uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+          rustflags: "-D warnings -C debuginfo=1"
+
+      - name: Install node
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: 22
+
+      - name: Clippy
+        shell: bash
+        run: |
+          cargo clippy --all-targets --all-features --workspace -- -D warnings
+
+      - name: Check formatting
+        uses: actions-rust-lang/rustfmt@559aa3035a47390ba96088dffa783b5d26da9326 # v1.1.1
+
+      - name: Unit tests
+        shell: bash
+        run: |
+          cargo test --workspace
+
+      - name: Generate numbers
+        shell: bash
+        run: |
+          cd tests/resources/generated-numbers
+          node numgen.js
+
+      - name: Test on generated numbers
+        shell: bash
+        run: |
+          cargo test --tests generated_numbers -- --nocapture --include-ignored

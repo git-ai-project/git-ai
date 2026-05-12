@@ -13,7 +13,7 @@ pub async fn load_ai_touched_files_for_commits(
 ) -> Result<HashSet<String>, GitAiError> {
     let repo = repo.clone();
 
-    smol::unblock(move || {
+    tokio::task::spawn_blocking(move || {
         if commit_shas.is_empty() {
             return Ok(HashSet::new());
         }
@@ -42,6 +42,7 @@ pub async fn load_ai_touched_files_for_commits(
         Ok(all_files)
     })
     .await
+    .unwrap()
 }
 
 /// Return true if any of the provided commits has an authorship note attached.
@@ -194,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_load_ai_touched_files_for_specific_commits() {
-        smol::block_on(async {
+        crate::utils::block_on(async {
             let repo = find_repository_in_path(".").unwrap();
 
             fetch_authorship_notes(&repo, "origin").unwrap();
@@ -249,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_load_ai_touched_files_for_nonexistent_commit() {
-        smol::block_on(async {
+        crate::utils::block_on(async {
             let repo = find_repository_in_path(".").unwrap();
 
             // Use a fake SHA that doesn't exist
@@ -272,7 +273,7 @@ mod tests {
 
     #[test]
     fn test_load_ai_touched_files_empty_commits() {
-        smol::block_on(async {
+        crate::utils::block_on(async {
             let repo = find_repository_in_path(".").unwrap();
 
             let files = load_ai_touched_files_for_commits(&repo, vec![])

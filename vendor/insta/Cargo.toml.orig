@@ -1,0 +1,74 @@
+[package]
+name = "insta"
+version = "1.47.2"
+license = "Apache-2.0"
+authors = ["Armin Ronacher <armin.ronacher@active-4.com>"]
+description = "A snapshot testing library for Rust"
+edition = "2021"
+rust-version = "1.66.0"
+homepage = "https://insta.rs/"
+repository = "https://github.com/mitsuhiko/insta"
+keywords = ["snapshot", "testing", "jest", "approval"]
+categories = ["development-tools::testing"]
+readme = "README.md"
+exclude = ["assets/*"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["colors"]
+
+# when the redactions feature is enabled values can be redacted in serialized
+# snapshots.
+redactions = ["pest", "pest_derive", "serde"]
+
+# Enables support for running filters on snapshot
+filters = ["regex"]
+
+# Glob support
+glob = ["walkdir", "globset"]
+
+# Color support
+colors = ["console"]
+
+# Serialization formats
+csv = ["dep:csv", "serde"]
+json = ["serde"]
+ron = ["dep:ron", "serde"]
+toml = ["dep:toml_edit", "dep:toml_writer", "serde"]
+yaml = ["serde"]
+
+# internal feature exclusive to cargo-insta
+_cargo_insta_internal = ["clap"]
+
+[dependencies]
+csv = { version = "1.1.6", optional = true }
+# Needs pinning in Cargo.lock because of MSRV (0.16.1+ requires 1.71)
+console = { version = "0.16", optional = true, default-features = false, features = ["std"] }
+pest = { version = "2.1.3", optional = true }
+pest_derive = { version = "2.1.0", optional = true }
+ron = { version = "0.12.0", optional = true }
+toml_edit = { version = "0.25.0", optional = true, features = [
+  "serde",
+  "parse",
+  "display",
+] }
+toml_writer = { version = "1", optional = true }
+globset = { version = "0.4.6", optional = true }
+walkdir = { version = "2.3.1", optional = true }
+similar = { version = "2.1.0", features = ["inline"] }
+regex = { version = "1.6.0", default-features = false, optional = true, features = [
+  "std",
+  "unicode",
+] }
+serde = { version = "1.0.117", optional = true }
+once_cell = "1.20.2"
+clap = { workspace = true, optional = true }
+tempfile = "3"
+
+[dev-dependencies]
+rustc_version = "0.4.0"
+serde = { version = "1.0.117", features = ["derive"] }
+similar-asserts = "1.4.2"

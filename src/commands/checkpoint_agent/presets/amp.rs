@@ -206,7 +206,7 @@ impl AmpPreset {
                 return Ok(PathBuf::from(xdg_data).join("amp").join("threads"));
             }
 
-            let home = dirs::home_dir().ok_or_else(|| {
+            let home = crate::utils::dirs::home_dir().ok_or_else(|| {
                 GitAiError::Generic("Could not determine home directory".to_string())
             })?;
             Ok(home
@@ -225,7 +225,7 @@ impl AmpPreset {
                 return Ok(PathBuf::from(app_data).join("amp").join("threads"));
             }
 
-            let home = dirs::home_dir().ok_or_else(|| {
+            let home = crate::utils::dirs::home_dir().ok_or_else(|| {
                 GitAiError::Generic("Could not determine home directory".to_string())
             })?;
             Ok(home

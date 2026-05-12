@@ -127,7 +127,7 @@ impl VirtualAttributions {
     ) -> Result<Vec<(String, String, PromptRecord)>, GitAiError> {
         const MAX_CONCURRENT: usize = 30;
 
-        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let mut tasks = Vec::new();
 
         for missing_id in missing_ids {
@@ -135,32 +135,27 @@ impl VirtualAttributions {
             let repo = self.repo.clone();
             let semaphore = Arc::clone(&semaphore);
 
-            let task = smol::spawn(async move {
-                // Acquire semaphore permit to limit concurrency
-                let _permit = semaphore.acquire().await;
+            let task = tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
 
-                // Wrap blocking git operations in smol::unblock
-                smol::unblock(move || {
+                tokio::task::spawn_blocking(move || {
                     Self::find_prompt_in_history_static(&repo, &missing_id)
                         .map(|(commit_sha, prompt)| (missing_id.clone(), commit_sha, prompt))
                 })
                 .await
+                .unwrap()
             });
 
             tasks.push(task);
         }
 
         // Await all tasks concurrently
-        let results = futures::future::join_all(tasks).await;
+        let results = crate::utils::join_all(tasks).await;
 
-        // Process results and collect successful prompts
         let mut prompts = Vec::new();
         for result in results {
-            match result {
-                Ok((id, commit_sha, prompt)) => prompts.push((id, commit_sha, prompt)),
-                Err(_) => {
-                    // Error finding prompt, skip it
-                }
+            if let Ok(Ok((id, commit_sha, prompt))) = result {
+                prompts.push((id, commit_sha, prompt));
             }
         }
 
@@ -198,7 +193,7 @@ impl VirtualAttributions {
     ) -> Result<Vec<(String, SessionRecord)>, GitAiError> {
         const MAX_CONCURRENT: usize = 30;
 
-        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let mut tasks = Vec::new();
 
         for missing_id in missing_ids {
@@ -206,20 +201,24 @@ impl VirtualAttributions {
             let repo = self.repo.clone();
             let semaphore = Arc::clone(&semaphore);
 
-            let task = smol::spawn(async move {
-                let _permit = semaphore.acquire().await;
-                smol::unblock(move || {
+            let task = tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                tokio::task::spawn_blocking(move || {
                     Self::find_session_in_history_static(&repo, &missing_id)
                         .map(|record| (missing_id, record))
                 })
                 .await
+                .unwrap()
             });
 
             tasks.push(task);
         }
 
-        let results = futures::future::join_all(tasks).await;
-        let sessions: Vec<_> = results.into_iter().filter_map(Result::ok).collect();
+        let results = crate::utils::join_all(tasks).await;
+        let sessions: Vec<_> = results
+            .into_iter()
+            .filter_map(|r| r.ok().and_then(|r| r.ok()))
+            .collect();
         Ok(sessions)
     }
 
@@ -253,7 +252,7 @@ impl VirtualAttributions {
     async fn add_pathspecs_concurrent(&mut self, pathspecs: &[String]) -> Result<(), GitAiError> {
         const MAX_CONCURRENT: usize = 30;
 
-        let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let mut tasks = Vec::new();
 
         for pathspec in pathspecs {
@@ -264,12 +263,10 @@ impl VirtualAttributions {
             let blame_start_commit = self.blame_start_commit.clone();
             let semaphore = Arc::clone(&semaphore);
 
-            let task = smol::spawn(async move {
-                // Acquire semaphore permit to limit concurrency
-                let _permit = semaphore.acquire().await;
+            let task = tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
 
-                // Wrap blocking git operations in smol::unblock
-                smol::unblock(move || {
+                tokio::task::spawn_blocking(move || {
                     compute_attributions_for_file(
                         &repo,
                         &base_commit,
@@ -279,25 +276,22 @@ impl VirtualAttributions {
                     )
                 })
                 .await
+                .unwrap()
             });
 
             tasks.push(task);
         }
 
-        // Await all tasks
-        let results = futures::future::join_all(tasks).await;
+        let results = crate::utils::join_all(tasks).await;
 
-        // Process results and store in HashMap
         for result in results {
-            match result {
+            match result.unwrap() {
                 Ok(Some((file_path, content, char_attrs, line_attrs))) => {
                     self.attributions
                         .insert(file_path.clone(), (char_attrs, line_attrs));
                     self.file_contents.insert(file_path, content);
                 }
-                Ok(None) => {
-                    // File had no changes or couldn't be processed, skip
-                }
+                Ok(None) => {}
                 Err(e) => return Err(e),
             }
         }

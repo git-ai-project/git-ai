@@ -1,0 +1,75 @@
+[package]
+name = "rand"
+version = "0.10.1"
+authors = ["The Rand Project Developers", "The Rust Project Developers"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/rust-random/rand"
+documentation = "https://docs.rs/rand"
+homepage = "https://rust-random.github.io/book"
+description = """
+Random number generators and other randomness functionality.
+"""
+keywords = ["random", "rng"]
+categories = ["algorithms", "no-std"]
+autobenches = true
+edition = "2024"
+rust-version = "1.85"
+include = ["src/", "LICENSE-*", "README.md", "CHANGELOG.md", "COPYRIGHT"]
+
+[package.metadata.docs.rs]
+# To build locally:
+# RUSTDOCFLAGS="--cfg docsrs -Zunstable-options --generate-link-to-definition" cargo +nightly doc --all --all-features --no-deps --open
+all-features = true
+rustdoc-args = ["--generate-link-to-definition"]
+
+[package.metadata.playground]
+features = ["serde"]
+
+[features]
+# Meta-features:
+default = ["std", "std_rng", "sys_rng", "thread_rng"]
+serde = ["dep:serde"]
+
+# Option (enabled by default): without "std" rand uses libcore; this option
+# enables functionality expected to be available on a standard platform.
+std = ["alloc", "getrandom?/std"]
+
+# Option: "alloc" enables support for Vec and Box when not using "std"
+alloc = []
+
+# Option: enable SysRng
+sys_rng = ["dep:getrandom", "getrandom/sys_rng"]
+
+# Option (requires nightly Rust): experimental SIMD support
+simd_support = []
+
+# Option (enabled by default): enable StdRng
+std_rng = ["dep:chacha20"]
+
+# Option: enable ThreadRng and rng()
+thread_rng = ["std", "std_rng", "sys_rng"]
+
+# Option: enable rand::rngs::ChaCha*Rng
+chacha = ["dep:chacha20"]
+
+# Option: use unbiased sampling for algorithms supporting this option: Uniform distribution.
+# By default, bias affecting no more than one in  2^48 samples is accepted.
+# Note: enabling this option is expected to affect reproducibility of results.
+unbiased = []
+
+# Deprecated option: enable logging
+log = []
+
+[dependencies]
+rand_core = { version = "0.10.0", default-features = false }
+serde = { version = "1.0.103", features = ["derive"], optional = true }
+chacha20 = { version = "0.10.0", default-features = false, features = ["rng"], optional = true }
+getrandom = { version = "0.4.0", optional = true }
+
+[dev-dependencies]
+rand_pcg = "0.10"
+# Only to test serde
+postcard = {version = "1.1.3", default-features = false, features = ["alloc"]}
+rayon = "1.7"
+serde_json = "1.0.140"

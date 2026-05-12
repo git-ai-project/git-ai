@@ -225,7 +225,7 @@ fn create_authorship_log_for_range(
         tracing::debug!("Start is empty tree - using only end commit attributions");
 
         let repo_clone = repo.clone();
-        let mut end_va = smol::block_on(async {
+        let mut end_va = crate::utils::block_on(async {
             VirtualAttributions::new_for_base_commit(
                 repo_clone,
                 end_sha.to_string(),
@@ -257,7 +257,7 @@ fn create_authorship_log_for_range(
     // avoiding expensive traversal of the entire repository history
     let repo_clone = repo.clone();
     let start_sha_limit = Some(start_sha.to_string());
-    let mut start_va = smol::block_on(async {
+    let mut start_va = crate::utils::block_on(async {
         VirtualAttributions::new_for_base_commit(
             repo_clone,
             start_sha.to_string(),
@@ -271,7 +271,7 @@ fn create_authorship_log_for_range(
     // Pass start_sha as blame_start_commit to limit blame scope to the range
     let repo_clone = repo.clone();
     let start_sha_limit = Some(start_sha.to_string());
-    let mut end_va = smol::block_on(async {
+    let mut end_va = crate::utils::block_on(async {
         VirtualAttributions::new_for_base_commit(
             repo_clone,
             end_sha.to_string(),

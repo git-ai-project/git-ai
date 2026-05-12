@@ -1,0 +1,36 @@
+{
+  "value": {
+    "type": "object",
+    "range": {
+      "start": 0,
+      "end": 11,
+    },
+    "properties": [
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 2,
+          "end": 8,
+        },
+        "name": {
+          "type": "string",
+          "range": {
+            "start": 2,
+            "end": 5,
+          },
+          "value": "p"
+        },
+        "value": {
+          "type": "number",
+          "range": {
+            "start": 7,
+            "end": 8,
+          },
+          "value": "1"
+        }
+      }
+    ]
+  },
+  "comments": [
+  ]
+}

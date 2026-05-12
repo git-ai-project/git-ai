@@ -1,0 +1,11 @@
+{
+    "number": 5,
+    "string": "str\\test",
+    "object": {
+        "obj": 5
+    },
+    "array": [],
+    "true": true,
+    "false": false,
+    "null": null
+}

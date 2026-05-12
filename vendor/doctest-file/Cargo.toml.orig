@@ -1,0 +1,29 @@
+[package]
+name         = "doctest-file"
+version      = "1.1.1"
+edition      = "2021"
+rust-version = "1.65"
+
+authors      = ["Goat"]
+description  = "Sources doctests from dedicated files into Rustdoc documentation while hiding select lines"
+license      = "0BSD"
+readme       = "README.md"
+repository   = "https://codeberg.org/Goat7658/doctest-file"
+
+autoexamples = false
+
+[lib]
+proc-macro = true
+
+[[example]]
+name       = "basic"
+path       = "examples/basic/lib.rs"
+crate-type = ["lib"]
+
+[[example]]
+name       = "anchors"
+path       = "examples/anchors/lib.rs"
+crate-type = ["lib"]
+
+[profile.dev]
+opt-level = 1

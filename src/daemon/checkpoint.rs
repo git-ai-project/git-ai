@@ -13,7 +13,6 @@ use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
 use crate::error::GitAiError;
 use crate::git::repo_storage::PersistedWorkingLog;
 use crate::git::repository::Repository;
-use futures::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -257,7 +256,7 @@ fn execute_resolved_checkpoint(
     let trace_id = checkpoint_request.trace_id.clone();
 
     let entries_start = Instant::now();
-    let (entries, file_stats) = smol::block_on(get_checkpoint_entries(
+    let (entries, file_stats) = crate::utils::block_on(get_checkpoint_entries(
         kind,
         author,
         repo,
@@ -433,22 +432,20 @@ fn save_current_file_states(
     let blobs_dir = working_log.dir.join("blobs");
     let dirty_files = working_log.dirty_files.clone();
 
-    let file_content_hashes = smol::block_on(async {
-        let semaphore = Arc::new(smol::lock::Semaphore::new(8));
+    let file_content_hashes = crate::utils::block_on(async {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
         let blobs_dir = Arc::new(blobs_dir);
         let dirty_files = Arc::new(dirty_files);
 
-        let futures = files.iter().map(|file_path| {
+        let tasks: Vec<_> = files.iter().map(|file_path| {
             let file_path = file_path.clone();
             let blobs_dir = Arc::clone(&blobs_dir);
             let dirty_files = Arc::clone(&dirty_files);
             let semaphore = Arc::clone(&semaphore);
 
-            async move {
-                // Acquire semaphore permit
-                let _permit = semaphore.acquire().await;
+            tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
 
-                // Read file content - check dirty_files first, then filesystem
                 let content = if let Some(ref dirty_map) = *dirty_files {
                     dirty_map.get(&file_path).cloned()
                 } else {
@@ -461,30 +458,24 @@ fn save_current_file_states(
                     ))
                 })?;
 
-                // Create SHA256 hash of the content
                 let mut hasher = Sha256::new();
                 hasher.update(content.as_bytes());
                 let sha = format!("{:x}", hasher.finalize());
 
-                // Ensure blobs directory exists
                 std::fs::create_dir_all(&*blobs_dir)?;
 
-                // Write content to blob file
                 let blob_path = blobs_dir.join(&sha);
                 std::fs::write(blob_path, content)?;
 
                 Ok::<(String, String), GitAiError>((file_path, sha))
-            }
-        });
+            })
+        }).collect();
 
-        // Collect results from all concurrent operations
-        let results: Vec<Result<(String, String), GitAiError>> =
-            stream::iter(futures).buffer_unordered(8).collect().await;
+        let results = crate::utils::join_all(tasks).await;
 
-        // Convert results into HashMap
         let mut file_content_hashes = HashMap::new();
         for result in results {
-            let (file_path, content_hash) = result?;
+            let (file_path, content_hash) = result.unwrap()?;
             file_content_hashes.insert(file_path, content_hash);
         }
 
@@ -834,7 +825,7 @@ async fn get_checkpoint_entries(
     const MAX_CONCURRENT: usize = 30;
 
     // Create a semaphore to limit concurrent tasks
-    let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
 
     // Move other repeated allocations outside the loop
     let previous_file_state_by_file = Arc::new(previous_file_state_by_file);
@@ -864,12 +855,12 @@ async fn get_checkpoint_entries(
         let initial_snapshot_contents = Arc::clone(&initial_snapshot_contents);
         let semaphore = Arc::clone(&semaphore);
 
-        let task = smol::spawn(async move {
+        let task = tokio::spawn(async move {
             // Acquire semaphore permit to limit concurrency
-            let _permit = semaphore.acquire().await;
+            let _permit = semaphore.acquire().await.unwrap();
 
-            // Wrap all the blocking git operations in smol::unblock
-            smol::unblock(move || {
+            // Wrap all the blocking git operations in tokio::task::spawn_blocking
+            tokio::task::spawn_blocking(move || {
                 get_checkpoint_entry_for_file(
                     file_path,
                     kind,
@@ -898,7 +889,7 @@ async fn get_checkpoint_entries(
 
     // Await all tasks concurrently
     let await_start = Instant::now();
-    let results = futures::future::join_all(tasks).await;
+    let results = crate::utils::join_all(tasks).await;
     tracing::debug!(
         "[BENCHMARK] Awaiting {} tasks took {:?}",
         results.len(),
@@ -911,12 +902,12 @@ async fn get_checkpoint_entries(
     let mut entries = Vec::new();
     let mut file_stats = Vec::new();
     for result in results {
-        match result {
+        match result.unwrap().unwrap() {
             Ok(Some((entry, stats))) => {
                 entries.push(entry);
                 file_stats.push(stats);
             }
-            Ok(None) => {} // File had no changes
+            Ok(None) => {}
             Err(e) => return Err(e),
         }
     }

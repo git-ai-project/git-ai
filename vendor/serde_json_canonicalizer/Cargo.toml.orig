@@ -1,0 +1,17 @@
+[package]
+name = "serde_json_canonicalizer"
+version = "0.3.2"
+edition = "2021"
+license = "MIT"
+description = "JSON Canonicalization Scheme (JCS - RFC 8785) implementation"
+repository = "https://github.com/evik42/serde-json-canonicalizer"
+documentation = "https://docs.rs/serde_json_canonicalizer/"
+
+[dependencies]
+ryu-js = "1.0.1"
+serde = "1.0"
+serde_json = { version = "1.0", features = [ "float_roundtrip" ] }
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }  # for doctests
+test-case = "3.1.0"

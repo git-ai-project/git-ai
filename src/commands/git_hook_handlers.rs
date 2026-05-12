@@ -124,10 +124,9 @@ pub fn remove_repo_hooks(
     let local_config_path = repo_local_config_path(repo);
     let prior_state = read_repo_hook_state(&state_path)?;
 
-    let current_local_hooks =
-        read_hooks_path_from_config(&local_config_path, gix_config::Source::Local)
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
+    let current_local_hooks = read_hooks_path_from_config(&local_config_path, ())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
 
     let local_points_to_managed = current_local_hooks
         .as_deref()
@@ -149,7 +148,7 @@ pub fn remove_repo_hooks(
         if let Some(restored_hooks_path) = restored_local_hooks {
             changed |= set_hooks_path_in_config(
                 &local_config_path,
-                gix_config::Source::Local,
+                (),
                 &restored_hooks_path.to_string_lossy(),
                 dry_run,
             )?;
@@ -282,51 +281,51 @@ fn test_global_git_config_override() -> &'static std::sync::Mutex<Option<PathBuf
     TEST_GLOBAL_CONFIG_OVERRIDE.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-fn load_config(
-    path: &Path,
-    source: gix_config::Source,
-) -> Result<gix_config::File<'static>, GitAiError> {
-    if path.exists() {
-        return gix_config::File::from_path_no_includes(path.to_path_buf(), source)
-            .map_err(|e| GitAiError::GixError(e.to_string()));
+fn read_hooks_path_from_config(path: &Path, _source: ()) -> Option<String> {
+    if !path.exists() {
+        return None;
     }
-    Ok(gix_config::File::default())
-}
-
-fn write_config(path: &Path, cfg: &gix_config::File<'_>) -> Result<(), GitAiError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    let args = vec![
+        "config".to_string(),
+        "--file".to_string(),
+        path.to_string_lossy().to_string(),
+        "--get".to_string(),
+        CONFIG_KEY_CORE_HOOKS_PATH.to_string(),
+    ];
+    let output = crate::git::repository::exec_git(&args).ok()?;
+    let value = String::from_utf8(output.stdout).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
     }
-    let bytes = cfg.to_bstring();
-    fs::write(path, bytes.as_slice())?;
-    Ok(())
-}
-
-fn read_hooks_path_from_config(path: &Path, source: gix_config::Source) -> Option<String> {
-    load_config(path, source).ok().and_then(|cfg| {
-        cfg.string(CONFIG_KEY_CORE_HOOKS_PATH)
-            .map(|v| v.to_string())
-    })
 }
 
 fn set_hooks_path_in_config(
     path: &Path,
-    source: gix_config::Source,
+    _source: (),
     value: &str,
     dry_run: bool,
 ) -> Result<bool, GitAiError> {
-    let mut cfg = load_config(path, source)?;
-    let current = cfg
-        .string(CONFIG_KEY_CORE_HOOKS_PATH)
-        .map(|v| v.to_string());
+    let current = read_hooks_path_from_config(path, ());
     if current.as_deref() == Some(value) {
         return Ok(false);
     }
 
     if !dry_run {
-        cfg.set_raw_value(&CONFIG_KEY_CORE_HOOKS_PATH, value)
-            .map_err(|e| GitAiError::GixError(e.to_string()))?;
-        write_config(path, &cfg)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let args = vec![
+            "config".to_string(),
+            "--file".to_string(),
+            path.to_string_lossy().to_string(),
+            CONFIG_KEY_CORE_HOOKS_PATH.to_string(),
+            value.to_string(),
+        ];
+        crate::git::repository::exec_git(&args)
+            .map_err(|e| GitAiError::Generic(format!("Failed to set config: {}", e)))?;
     }
 
     Ok(true)
@@ -334,16 +333,20 @@ fn set_hooks_path_in_config(
 
 fn unset_hooks_path_in_local_config(repo: &Repository, dry_run: bool) -> Result<bool, GitAiError> {
     let local_config_path = repo_local_config_path(repo);
-    if read_hooks_path_from_config(&local_config_path, gix_config::Source::Local).is_none() {
+    if read_hooks_path_from_config(&local_config_path, ()).is_none() {
         return Ok(false);
     }
 
     if !dry_run {
-        let mut cfg = load_config(&local_config_path, gix_config::Source::Local)?;
-        if let Ok(mut hooks_path_values) = cfg.raw_values_mut_by("core", None, "hooksPath") {
-            hooks_path_values.delete_all();
-        }
-        write_config(&local_config_path, &cfg)?;
+        let args = vec![
+            "config".to_string(),
+            "--file".to_string(),
+            local_config_path.to_string_lossy().to_string(),
+            "--unset".to_string(),
+            CONFIG_KEY_CORE_HOOKS_PATH.to_string(),
+        ];
+        crate::git::repository::exec_git(&args)
+            .map_err(|e| GitAiError::Generic(format!("Failed to unset config: {}", e)))?;
     }
 
     Ok(true)
@@ -592,13 +595,11 @@ fn should_forward_repo_state_first(repo: Option<&Repository>) -> Option<PathBuf>
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from),
-        ForwardMode::GlobalFallback => {
-            read_hooks_path_from_config(&global_git_config_path(), gix_config::Source::User)
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        }
+        ForwardMode::GlobalFallback => read_hooks_path_from_config(&global_git_config_path(), ())
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from),
         ForwardMode::None => None,
     }?;
 

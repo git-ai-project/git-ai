@@ -3,7 +3,6 @@ use crate::authorship::authorship_log::{
 };
 use crate::authorship::working_log::CheckpointKind;
 use crate::git::repository::Repository;
-use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -725,18 +724,11 @@ pub fn generate_session_id(agent_id: &str, tool: &str) -> String {
     format!("s_{}", &hex[..14])
 }
 
-/// Generate a trace ID: "t_" + 14 random hex chars = 16 chars total.
-/// Unique per checkpoint call (not deterministic). Used for per-checkpoint granularity
-/// in attestation keys.
 pub fn generate_trace_id() -> String {
-    let mut rng = rand::rng();
-    let hex: String = (0..14)
-        .map(|_| {
-            let idx: u8 = rng.random_range(0..16);
-            char::from_digit(idx as u32, 16).unwrap()
-        })
-        .collect();
-    format!("t_{}", hex)
+    let mut bytes = [0u8; 7];
+    getrandom::fill(&mut bytes).expect("getrandom failed");
+    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    format!("t_{}", &hex[..14])
 }
 
 #[cfg(test)]

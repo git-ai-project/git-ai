@@ -410,7 +410,7 @@ pub fn home_dir() -> PathBuf {
             return PathBuf::from(home);
         }
 
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+        crate::utils::dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
     }
 
     #[cfg(not(windows))]
@@ -421,7 +421,7 @@ pub fn home_dir() -> PathBuf {
             return PathBuf::from(home);
         }
 
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+        crate::utils::dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
     }
 }
 

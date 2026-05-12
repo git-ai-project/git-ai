@@ -32,7 +32,7 @@ impl ClaudeAgent {
         let base_dir = if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
             Some(PathBuf::from(config_dir))
         } else {
-            dirs::home_dir().map(|p| p.join(".claude"))
+            crate::utils::dirs::home_dir().map(|p| p.join(".claude"))
         };
 
         // Search paths:
@@ -40,7 +40,7 @@ impl ClaudeAgent {
         // 2. ~/.config/claude/projects/**/*.jsonl
         let search_dirs = vec![
             base_dir.as_ref().map(|p| p.join("projects")),
-            dirs::config_dir().map(|p| p.join("claude/projects")),
+            crate::utils::dirs::config_dir().map(|p| p.join("claude/projects")),
         ];
 
         for dir_opt in search_dirs {
@@ -367,7 +367,7 @@ mod tests {
     fn test_scan_discovers_real_claude_files() {
         let paths = ClaudeAgent::scan_conversation_files();
         // On this machine we have files in ~/.claude/projects/
-        if dirs::home_dir()
+        if crate::utils::dirs::home_dir()
             .map(|h| h.join(".claude/projects").exists())
             .unwrap_or(false)
         {

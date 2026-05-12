@@ -1,0 +1,410 @@
+{
+  "value": {
+    "type": "object",
+    "range": {
+      "start": 5,
+      "end": 102,
+    },
+    "properties": [
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 21,
+          "end": 37,
+        },
+        "name": {
+          "type": "string",
+          "range": {
+            "start": 21,
+            "end": 24,
+          },
+          "value": "a"
+        },
+        "value": {
+          "type": "number",
+          "range": {
+            "start": 36,
+            "end": 37,
+          },
+          "value": "5"
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 52,
+          "end": 69,
+        },
+        "name": {
+          "type": "string",
+          "range": {
+            "start": 52,
+            "end": 55,
+          },
+          "value": "b"
+        },
+        "value": {
+          "type": "array",
+          "range": {
+            "start": 62,
+            "end": 69,
+          },
+          "elements": [
+          ]
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 85,
+          "end": 94,
+        },
+        "name": {
+          "type": "string",
+          "range": {
+            "start": 85,
+            "end": 88,
+          },
+          "value": "c"
+        },
+        "value": {
+          "type": "null",
+          "range": {
+            "start": 90,
+            "end": 94,
+          }
+        }
+      }
+    ]
+  },
+  "comments": [
+    {
+      "pos": 0,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 0,
+            "end": 5,
+          },
+          "value": "1"
+        }
+      ]
+    },
+    {
+      "pos": 5,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 0,
+            "end": 5,
+          },
+          "value": "1"
+        }
+      ]
+    },
+    {
+      "pos": 6,
+      "comments": [
+        {
+          "type": "line",
+          "range": {
+            "start": 7,
+            "end": 11,
+          },
+          "value": " 2"
+        },
+        {
+          "type": "block",
+          "range": {
+            "start": 16,
+            "end": 21,
+          },
+          "value": "3"
+        }
+      ]
+    },
+    {
+      "pos": 21,
+      "comments": [
+        {
+          "type": "line",
+          "range": {
+            "start": 7,
+            "end": 11,
+          },
+          "value": " 2"
+        },
+        {
+          "type": "block",
+          "range": {
+            "start": 16,
+            "end": 21,
+          },
+          "value": "3"
+        }
+      ]
+    },
+    {
+      "pos": 24,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 24,
+            "end": 29,
+          },
+          "value": "4"
+        }
+      ]
+    },
+    {
+      "pos": 29,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 24,
+            "end": 29,
+          },
+          "value": "4"
+        }
+      ]
+    },
+    {
+      "pos": 30,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 31,
+            "end": 36,
+          },
+          "value": "5"
+        }
+      ]
+    },
+    {
+      "pos": 36,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 31,
+            "end": 36,
+          },
+          "value": "5"
+        }
+      ]
+    },
+    {
+      "pos": 37,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 37,
+            "end": 42,
+          },
+          "value": "6"
+        }
+      ]
+    },
+    {
+      "pos": 42,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 37,
+            "end": 42,
+          },
+          "value": "6"
+        }
+      ]
+    },
+    {
+      "pos": 43,
+      "comments": [
+        {
+          "type": "line",
+          "range": {
+            "start": 44,
+            "end": 47,
+          },
+          "value": "7"
+        }
+      ]
+    },
+    {
+      "pos": 52,
+      "comments": [
+        {
+          "type": "line",
+          "range": {
+            "start": 44,
+            "end": 47,
+          },
+          "value": "7"
+        }
+      ]
+    },
+    {
+      "pos": 56,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 57,
+            "end": 62,
+          },
+          "value": "8"
+        }
+      ]
+    },
+    {
+      "pos": 62,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 57,
+            "end": 62,
+          },
+          "value": "8"
+        }
+      ]
+    },
+    {
+      "pos": 63,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 63,
+            "end": 68,
+          },
+          "value": "9"
+        }
+      ]
+    },
+    {
+      "pos": 68,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 63,
+            "end": 68,
+          },
+          "value": "9"
+        }
+      ]
+    },
+    {
+      "pos": 69,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 69,
+            "end": 75,
+          },
+          "value": "10"
+        }
+      ]
+    },
+    {
+      "pos": 75,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 69,
+            "end": 75,
+          },
+          "value": "10"
+        }
+      ]
+    },
+    {
+      "pos": 76,
+      "comments": [
+        {
+          "type": "line",
+          "range": {
+            "start": 76,
+            "end": 80,
+          },
+          "value": "11"
+        }
+      ]
+    },
+    {
+      "pos": 85,
+      "comments": [
+        {
+          "type": "line",
+          "range": {
+            "start": 76,
+            "end": 80,
+          },
+          "value": "11"
+        }
+      ]
+    },
+    {
+      "pos": 94,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 95,
+            "end": 101,
+          },
+          "value": "13"
+        }
+      ]
+    },
+    {
+      "pos": 101,
+      "comments": [
+        {
+          "type": "block",
+          "range": {
+            "start": 95,
+            "end": 101,
+          },
+          "value": "13"
+        }
+      ]
+    },
+    {
+      "pos": 102,
+      "comments": [
+        {
+          "type": "line",
+          "range": {
+            "start": 103,
+            "end": 108,
+          },
+          "value": " 14"
+        }
+      ]
+    },
+    {
+      "pos": 108,
+      "comments": [
+        {
+          "type": "line",
+          "range": {
+            "start": 103,
+            "end": 108,
+          },
+          "value": " 14"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "value": {
+    "type": "object",
+    "range": {
+      "start": 0,
+      "end": 2,
+    },
+    "properties": [
+    ]
+  },
+  "comments": [
+  ]
+}

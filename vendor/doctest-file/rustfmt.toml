@@ -1,0 +1,14 @@
+unstable_features            = true
+
+max_width                    = 98
+use_small_heuristics         = "Max"
+fn_single_line               = true
+overflow_delimited_expr      = true
+use_field_init_shorthand     = true
+
+reorder_modules              = false
+imports_granularity          = "One"
+group_imports                = "One"
+
+enum_discrim_align_threshold = 36
+struct_field_align_threshold = 36

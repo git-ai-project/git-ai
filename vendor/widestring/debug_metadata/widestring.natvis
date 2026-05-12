@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+  <Type Name="widestring::ucstr::U16CStr">
+    <DisplayString>{(char16_t*)this,su}</DisplayString>
+    <StringView>(char16_t*)this,su</StringView>
+  </Type>
+
+  <Type Name="widestring::ucstr::U32CStr">
+    <DisplayString>{(char32_t*)this,s32}</DisplayString>
+    <StringView>(char32_t*)this,s32</StringView>
+  </Type>
+
+  <Type Name="widestring::ucstring::U16CString">
+    <DisplayString>{(char16_t*)inner.data_ptr,[inner.length]su}</DisplayString>
+    <StringView>(char16_t*)inner.data_ptr,[inner.length]su</StringView>
+    <Expand>
+      <Item Name="[len]" ExcludeView="simple">inner.length</Item>
+      <Synthetic Name="[chars]">
+        <Expand>
+          <ArrayItems>
+            <Size>inner.length</Size>
+            <ValuePointer>(char16_t*)inner.data_ptr</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <Type Name="widestring::ucstring::U32CString">
+    <DisplayString>{(char32_t*)inner.data_ptr,[inner.length]s32}</DisplayString>
+    <StringView>(char32_t*)inner.data_ptr,[inner.length]s32</StringView>
+    <Expand>
+      <Item Name="[len]" ExcludeView="simple">inner.length</Item>
+      <Synthetic Name="[chars]">
+        <Expand>
+          <ArrayItems>
+            <Size>inner.length</Size>
+            <ValuePointer>(char32_t*)inner.data_ptr</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <Type Name="widestring::ustring::U16String">
+    <DisplayString>{(char16_t*)inner.buf.inner.ptr.pointer.pointer,[inner.len]su}</DisplayString>
+    <StringView>(char16_t*)inner.buf.inner.ptr.pointer.pointer,[inner.len]su</StringView>
+    <Expand>
+      <Item Name="[len]" ExcludeView="simple">inner.len</Item>
+      <Synthetic Name="[chars]">
+        <Expand>
+          <ArrayItems>
+            <Size>inner.len</Size>
+            <ValuePointer>(char16_t*)inner.buf.inner.ptr.pointer.pointer</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <Type Name="widestring::ustring::U32String">
+    <DisplayString>{(char32_t*)inner.buf.inner.ptr.pointer.pointer,[inner.len]s32}</DisplayString>
+    <StringView>(char32_t*)inner.buf.inner.ptr.pointer.pointer,[inner.len]s32</StringView>
+    <Expand>
+      <Item Name="[len]" ExcludeView="simple">inner.len</Item>
+      <Synthetic Name="[chars]">
+        <Expand>
+          <ArrayItems>
+            <Size>inner.len</Size>
+            <ValuePointer>(char32_t*)inner.buf.inner.ptr.pointer.pointer</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <Type Name="widestring::utfstring::Utf16String">
+    <DisplayString>{(char16_t*)inner.buf.inner.ptr.pointer.pointer,[inner.len]su}</DisplayString>
+    <StringView>(char16_t*)inner.buf.inner.ptr.pointer.pointer,[inner.len]su</StringView>
+    <Expand>
+      <Item Name="[len]" ExcludeView="simple">inner.len</Item>
+      <Synthetic Name="[chars]">
+        <Expand>
+          <ArrayItems>
+            <Size>inner.len</Size>
+            <ValuePointer>(char16_t*)inner.buf.inner.ptr.pointer.pointer</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <Type Name="widestring::utfstring::Utf32String">
+    <DisplayString>{(char32_t*)inner.buf.inner.ptr.pointer.pointer,[inner.len]s32}</DisplayString>
+    <StringView>{(char32_t*)inner.buf.inner.ptr.pointer.pointer,[inner.len]s32}</StringView>
+    <Expand>
+      <Item Name="[len]" ExcludeView="simple">inner.len</Item>
+      <Synthetic Name="[chars]">
+        <Expand>
+          <ArrayItems>
+            <Size>inner.len</Size>
+            <ValuePointer>(char32_t*)inner.buf.inner.ptr.pointer.pointer</ValuePointer>
+          </ArrayItems>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+</AutoVisualizer>

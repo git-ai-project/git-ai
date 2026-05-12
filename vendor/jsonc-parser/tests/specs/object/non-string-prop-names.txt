@@ -1,0 +1,151 @@
+{
+  "value": {
+    "type": "object",
+    "range": {
+      "start": 0,
+      "end": 108,
+    },
+    "properties": [
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 6,
+          "end": 20,
+        },
+        "name": {
+          "type": "word",
+          "range": {
+            "start": 6,
+            "end": 12,
+          },
+          "value": "myProp"
+        },
+        "value": {
+          "type": "string",
+          "range": {
+            "start": 14,
+            "end": 20,
+          },
+          "value": "test"
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 26,
+          "end": 39,
+        },
+        "name": {
+          "type": "word",
+          "range": {
+            "start": 26,
+            "end": 31,
+          },
+          "value": "other"
+        },
+        "value": {
+          "type": "string",
+          "range": {
+            "start": 33,
+            "end": 39,
+          },
+          "value": "asdf"
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 45,
+          "end": 62,
+        },
+        "name": {
+          "type": "word",
+          "range": {
+            "start": 45,
+            "end": 54,
+          },
+          "value": "asdf-test"
+        },
+        "value": {
+          "type": "string",
+          "range": {
+            "start": 56,
+            "end": 62,
+          },
+          "value": "test"
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 68,
+          "end": 77,
+        },
+        "name": {
+          "type": "word",
+          "range": {
+            "start": 68,
+            "end": 73,
+          },
+          "value": "oo43o"
+        },
+        "value": {
+          "type": "number",
+          "range": {
+            "start": 76,
+            "end": 77,
+          },
+          "value": "5"
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 83,
+          "end": 92,
+        },
+        "name": {
+          "type": "word",
+          "range": {
+            "start": 83,
+            "end": 88,
+          },
+          "value": "jnm44"
+        },
+        "value": {
+          "type": "number",
+          "range": {
+            "start": 91,
+            "end": 92,
+          },
+          "value": "3"
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 98,
+          "end": 106,
+        },
+        "name": {
+          "type": "word",
+          "range": {
+            "start": 98,
+            "end": 101,
+          },
+          "value": "456"
+        },
+        "value": {
+          "type": "number",
+          "range": {
+            "start": 104,
+            "end": 106,
+          },
+          "value": "34"
+        }
+      }
+    ]
+  },
+  "comments": [
+  ]
+}
