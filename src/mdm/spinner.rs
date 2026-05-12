@@ -1,6 +1,6 @@
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -9,7 +9,10 @@ pub struct Spinner {
     handle: Option<thread::JoinHandle<()>>,
 }
 
-const FRAMES: &[&str] = &["\u{2807}", "\u{280b}", "\u{2819}", "\u{2838}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280f}", "\u{2839}"];
+const FRAMES: &[&str] = &[
+    "\u{2807}", "\u{280b}", "\u{2819}", "\u{2838}", "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}",
+    "\u{280f}", "\u{2839}",
+];
 
 impl Spinner {
     pub fn new(message: &str) -> Self {

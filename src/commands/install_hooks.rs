@@ -330,7 +330,8 @@ pub fn run(args: &[String]) -> Result<HashMap<String, String>, GitAiError> {
     persist_install_config(&binary_path, dry_run)?;
     let params = HookInstallerParams { binary_path };
 
-    let statuses = crate::utils::block_on(async_run_install(&params, dry_run, verbose, install_skills))?;
+    let statuses =
+        crate::utils::block_on(async_run_install(&params, dry_run, verbose, install_skills))?;
 
     // Clean up legacy envelope logs directory and related artifacts.
     // These are no longer used — all telemetry now routes through the daemon.

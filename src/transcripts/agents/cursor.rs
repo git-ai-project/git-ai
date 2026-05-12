@@ -29,8 +29,10 @@ impl CursorAgent {
         let mut paths = Vec::new();
 
         // Standard location for Cursor transcripts
-        let search_dirs =
-            vec![crate::utils::dirs::config_dir().map(|p| p.join("Cursor/User/globalStorage/conversations"))];
+        let search_dirs = vec![
+            crate::utils::dirs::config_dir()
+                .map(|p| p.join("Cursor/User/globalStorage/conversations")),
+        ];
 
         for dir_opt in search_dirs {
             if let Some(dir) = dir_opt

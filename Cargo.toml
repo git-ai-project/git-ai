@@ -25,8 +25,6 @@ ignore = "0.4"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 keyring = { version = "3", features = ["sync-secret-service", "apple-native", "windows-native"], optional = true }
-gix-config = "0.53.0"
-gix-index = "0.48.0"
 getrandom = "0.4"
 regex = "1.12"
 toml = "0.9"

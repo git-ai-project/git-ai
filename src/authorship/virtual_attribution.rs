@@ -215,7 +215,10 @@ impl VirtualAttributions {
         }
 
         let results = crate::utils::join_all(tasks).await;
-        let sessions: Vec<_> = results.into_iter().filter_map(|r| r.ok().and_then(|r| r.ok())).collect();
+        let sessions: Vec<_> = results
+            .into_iter()
+            .filter_map(|r| r.ok().and_then(|r| r.ok()))
+            .collect();
         Ok(sessions)
     }
 

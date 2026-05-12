@@ -204,8 +204,8 @@ impl ApiContext {
         let url = self.build_url(endpoint)?;
         let body_json = serde_json::to_string(body).map_err(GitAiError::JsonError)?;
 
-        let mut request = Self::http_post(&url, self.timeout_secs)
-            .header("Content-Type", "application/json");
+        let mut request =
+            Self::http_post(&url, self.timeout_secs).header("Content-Type", "application/json");
 
         if let Some(api_key) = &self.api_key {
             request = request.header("X-API-Key", api_key);

@@ -1,6 +1,0 @@
-{
-    "name": "Build",
-    "description": "Heapless Test Suite",
-    "iconName": "rust",
-    "categories": ["Rust"]
-}

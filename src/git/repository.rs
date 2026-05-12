@@ -12,8 +12,6 @@ use crate::git::sync_authorship::push_authorship_notes;
 use crate::utils::is_interactive_terminal;
 use unicode_normalization::UnicodeNormalization;
 
-use gix_index::entry::Stage;
-use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1227,45 +1225,52 @@ impl Repository {
 
     // List all remotes with their URLs as tuples (name, url)
     pub fn remotes_with_urls(&self) -> Result<Vec<(String, String)>, GitAiError> {
-        let config = self.get_git_config_file()?;
-        let mut remotes = Vec::new();
+        let mut args = self.global_args_for_exec();
+        args.push("remote".to_string());
+        args.push("-v".to_string());
+        let output = exec_git(&args)?;
+        let stdout =
+            String::from_utf8(output.stdout).map_err(|e| GitAiError::Generic(e.to_string()))?;
 
-        for section in config.sections() {
-            if !section.header().name().eq_ignore_ascii_case(b"remote") {
+        let mut remotes = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for line in stdout.lines() {
+            // Format: "origin\thttps://... (fetch)" or "origin\thttps://... (push)"
+            let Some((name, rest)) = line.split_once('\t') else {
+                continue;
+            };
+            // Take only the fetch URL (avoid duplicates from push lines)
+            if !rest.ends_with("(fetch)") {
                 continue;
             }
-            let Some(name) = section.header().subsection_name() else {
-                continue;
-            };
-            let Some(url) = section.body().value("url") else {
-                continue;
-            };
-            remotes.push((name.to_string(), url.to_string()));
+            let url = rest.trim_end_matches(" (fetch)");
+            if seen.insert(name.to_string()) {
+                remotes.push((name.to_string(), url.to_string()));
+            }
         }
 
         Ok(remotes)
     }
 
-    fn load_optional_config_file(
-        path: &Path,
-        source: gix_config::Source,
-    ) -> Result<Option<gix_config::File<'static>>, GitAiError> {
-        if !path.exists() {
-            return Ok(None);
-        }
-        gix_config::File::from_path_no_includes(path.to_path_buf(), source)
-            .map(Some)
-            .map_err(|e| GitAiError::GixError(e.to_string()))
-    }
-
-    pub(crate) fn get_git_config_file(&self) -> Result<gix_config::File<'static>, GitAiError> {
-        git_config_file_for_repo_paths(self.path(), self.common_dir())
-    }
-
-    /// Get config value for a given key as a String.
+    /// Get config value for a given key as a String using git CLI.
     pub fn config_get_str(&self, key: &str) -> Result<Option<String>, GitAiError> {
-        self.get_git_config_file()
-            .map(|cfg| cfg.string(key).map(|cow| cow.to_string()))
+        let mut args = self.global_args_for_exec();
+        args.push("config".to_string());
+        args.push("--get".to_string());
+        args.push(key.to_string());
+        match exec_git(&args) {
+            Ok(output) => {
+                let value = String::from_utf8(output.stdout)
+                    .map_err(|e| GitAiError::Generic(e.to_string()))?;
+                let trimmed = value.trim_end_matches('\n');
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed.to_string()))
+                }
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     /// Get the effective git user identity for this repository.
@@ -1330,43 +1335,27 @@ impl Repository {
         GitAuthorIdentity { name, email }
     }
 
-    /// Get all config values matching a regex pattern.
-    ///
-    /// Regular expression matching is currently case-sensitive
-    /// and done against a canonicalized version of the key
-    /// in which section and variable names are lowercased, but subsection names are not.
+    /// Get all config values matching a regex pattern using git CLI.
     ///
     /// Returns a HashMap of key -> value for all matching config entries.
     pub fn config_get_regexp(
         &self,
         pattern: &str,
     ) -> Result<std::collections::HashMap<String, String>, GitAiError> {
-        let re = Regex::new(pattern)
-            .map_err(|e| GitAiError::Generic(format!("Invalid regex pattern: {}", e)))?;
-
-        let config = self.get_git_config_file()?;
+        let mut args = self.global_args_for_exec();
+        args.push("config".to_string());
+        args.push("--get-regexp".to_string());
+        args.push(pattern.to_string());
         let mut matches: HashMap<String, String> = HashMap::new();
-
-        for section in config.sections() {
-            let section_name = section.header().name().to_string().to_lowercase();
-            let subsection = section.header().subsection_name();
-
-            for value_name in section.body().value_names() {
-                let value_name_str = value_name.to_string().to_lowercase();
-                let full_key = if let Some(sub) = subsection {
-                    format!("{}.{}.{}", section_name, sub, value_name_str)
-                } else {
-                    format!("{}.{}", section_name, value_name_str)
-                };
-
-                if re.is_match(&full_key)
-                    && let Some(value) = section.body().value(value_name).map(|c| c.to_string())
-                {
-                    matches.insert(full_key, value);
+        if let Ok(output) = exec_git(&args) {
+            let stdout =
+                String::from_utf8(output.stdout).map_err(|e| GitAiError::Generic(e.to_string()))?;
+            for line in stdout.lines() {
+                if let Some((key, value)) = line.split_once(' ') {
+                    matches.insert(key.to_string(), value.to_string());
                 }
             }
         }
-
         Ok(matches)
     }
 
@@ -1629,19 +1618,24 @@ impl Repository {
 
     /// Get blob OIDs for all stage-0 entries currently present in the index.
     pub fn get_all_staged_file_blob_oids(&self) -> Result<HashMap<String, String>, GitAiError> {
-        let mut staged_blobs = HashMap::new();
-        let object_hash = repository_object_hash_kind_for_path_no_git_exec(self.path())?;
-        let index_path = self.path().join("index");
-        let index = gix_index::File::at(index_path, object_hash, true, Default::default())
-            .map_err(|err| GitAiError::GixError(err.to_string()))?;
+        let mut args = self.global_args_for_exec();
+        args.extend(["ls-files", "--stage", "-z"].iter().map(|s| s.to_string()));
+        let output = exec_git(&args)?;
+        let stdout =
+            String::from_utf8(output.stdout).map_err(|e| GitAiError::Utf8Error(e.utf8_error()))?;
 
-        for entry in index.entries() {
-            if entry.stage() != Stage::Unconflicted {
+        let mut staged_blobs = HashMap::new();
+        for entry in stdout.split('\0') {
+            if entry.is_empty() {
                 continue;
             }
-            let file_path = entry.path(&index).to_string();
-            if !file_path.trim().is_empty() {
-                staged_blobs.insert(file_path, entry.id.to_string());
+            // Format: "<mode> <oid> <stage>\t<path>"
+            let Some((meta, path)) = entry.split_once('\t') else {
+                continue;
+            };
+            let parts: Vec<&str> = meta.split_whitespace().collect();
+            if parts.len() >= 3 && parts[2] == "0" {
+                staged_blobs.insert(path.to_string(), parts[1].to_string());
             }
         }
 
@@ -2211,93 +2205,34 @@ fn discover_repository_paths_no_git_exec(
     )))
 }
 
-fn git_config_file_for_repo_paths(
-    git_dir: &Path,
-    git_common_dir: &Path,
-) -> Result<gix_config::File<'static>, GitAiError> {
-    let mut config =
-        gix_config::File::from_globals().map_err(|e| GitAiError::GixError(e.to_string()))?;
-
-    let home = crate::utils::dirs::home_dir();
-    let options = gix_config::file::init::Options {
-        includes: gix_config::file::includes::Options::follow(
-            gix_config::path::interpolate::Context {
-                home_dir: home.as_deref(),
-                ..Default::default()
-            },
-            gix_config::file::includes::conditional::Context {
-                git_dir: Some(git_dir),
-                branch_name: None,
-            },
-        ),
-        ..Default::default()
-    };
-
-    config
-        .resolve_includes(options)
-        .map_err(|e| GitAiError::GixError(e.to_string()))?;
-
-    let local_config_path = git_common_dir.join("config");
-    let local_config =
-        Repository::load_optional_config_file(&local_config_path, gix_config::Source::Local)?;
-    let worktree_config_enabled = local_config
-        .as_ref()
-        .and_then(|cfg| cfg.boolean("extensions.worktreeConfig"))
-        .and_then(Result::ok)
-        .unwrap_or(false);
-
-    if let Some(mut local_config) = local_config {
-        local_config
-            .resolve_includes(options)
-            .map_err(|e| GitAiError::GixError(e.to_string()))?;
-        config.append(local_config);
-    }
-
-    if worktree_config_enabled {
-        let worktree_config_path = git_dir.join("config.worktree");
-        if let Some(mut worktree_config) = Repository::load_optional_config_file(
-            &worktree_config_path,
-            gix_config::Source::Worktree,
-        )? {
-            worktree_config
-                .resolve_includes(options)
-                .map_err(|e| GitAiError::GixError(e.to_string()))?;
-            config.append(worktree_config);
-        }
-    }
-
-    config.append(
-        gix_config::File::from_environment_overrides()
-            .map_err(|e| GitAiError::GixError(e.to_string()))?,
-    );
-
-    Ok(config)
-}
-
 pub fn config_get_str_for_path_no_git_exec(
     path: &Path,
     key: &str,
 ) -> Result<Option<String>, GitAiError> {
     let paths = discover_repository_paths_no_git_exec(path)?;
-    git_config_file_for_repo_paths(&paths.git_dir, &paths.git_common_dir)
-        .map(|cfg| cfg.string(key).map(|cow| cow.to_string()))
-}
-
-fn repository_object_hash_kind_for_path_no_git_exec(
-    path: &Path,
-) -> Result<gix_index::hash::Kind, GitAiError> {
-    match config_get_str_for_path_no_git_exec(path, "extensions.objectformat")?
-        .as_deref()
-        .map(str::trim)
-    {
-        None | Some("") | Some("sha1") => Ok(gix_index::hash::Kind::Sha1),
-        Some("sha256") => Err(GitAiError::Generic(
-            "SHA-256 repositories are not supported while reading the git index".to_string(),
-        )),
-        Some(other) => Err(GitAiError::Generic(format!(
-            "Unsupported git object format '{}' while reading index",
-            other
-        ))),
+    let workdir = paths
+        .git_common_dir
+        .parent()
+        .unwrap_or(&paths.git_common_dir);
+    let args = vec![
+        "-C".to_string(),
+        workdir.to_string_lossy().to_string(),
+        "config".to_string(),
+        "--get".to_string(),
+        key.to_string(),
+    ];
+    match exec_git(&args) {
+        Ok(output) => {
+            let value =
+                String::from_utf8(output.stdout).map_err(|e| GitAiError::Generic(e.to_string()))?;
+            let trimmed = value.trim_end_matches('\n');
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        Err(_) => Ok(None),
     }
 }
 

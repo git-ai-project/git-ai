@@ -33,9 +33,10 @@ impl Request {
         Self {
             method: "GET".to_string(),
             url: url.to_string(),
-            headers: vec![
-                ("User-Agent".to_string(), format!("git-ai/{}", env!("CARGO_PKG_VERSION"))),
-            ],
+            headers: vec![(
+                "User-Agent".to_string(),
+                format!("git-ai/{}", env!("CARGO_PKG_VERSION")),
+            )],
             timeout: timeout_secs.map(Duration::from_secs),
         }
     }
@@ -44,9 +45,10 @@ impl Request {
         Self {
             method: "POST".to_string(),
             url: url.to_string(),
-            headers: vec![
-                ("User-Agent".to_string(), format!("git-ai/{}", env!("CARGO_PKG_VERSION"))),
-            ],
+            headers: vec![(
+                "User-Agent".to_string(),
+                format!("git-ai/{}", env!("CARGO_PKG_VERSION")),
+            )],
             timeout: timeout_secs.map(Duration::from_secs),
         }
     }
@@ -134,14 +136,17 @@ fn read_response(stream: &mut impl Read) -> Result<Response, String> {
     let mut tmp = [0u8; 4096];
 
     loop {
-        let n = stream.read(&mut tmp).map_err(|e| format!("Read failed: {}", e))?;
+        let n = stream
+            .read(&mut tmp)
+            .map_err(|e| format!("Read failed: {}", e))?;
         if n == 0 {
             break;
         }
         buf.extend_from_slice(&tmp[..n]);
     }
 
-    let header_end = find_header_end(&buf).ok_or("Malformed HTTP response: no header terminator")?;
+    let header_end =
+        find_header_end(&buf).ok_or("Malformed HTTP response: no header terminator")?;
     let header_str =
         std::str::from_utf8(&buf[..header_end]).map_err(|_| "Non-UTF8 HTTP headers")?;
 
@@ -152,9 +157,7 @@ fn read_response(stream: &mut impl Read) -> Result<Response, String> {
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|p| p + 4)
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
 }
 
 fn parse_status_line(headers: &str) -> Result<u16, String> {
@@ -179,24 +182,18 @@ fn extract_body(buf: &[u8], header_end: usize, headers: &str) -> Vec<u8> {
 }
 
 fn is_chunked(headers: &str) -> bool {
-    headers
-        .lines()
-        .any(|line| {
-            line.to_ascii_lowercase()
-                .starts_with("transfer-encoding:")
-                && line.to_ascii_lowercase().contains("chunked")
-        })
+    headers.lines().any(|line| {
+        line.to_ascii_lowercase().starts_with("transfer-encoding:")
+            && line.to_ascii_lowercase().contains("chunked")
+    })
 }
 
 fn decode_chunked(data: &[u8]) -> Vec<u8> {
     let mut result = Vec::new();
     let mut pos = 0;
 
-    loop {
-        let line_end = match data[pos..].windows(2).position(|w| w == b"\r\n") {
-            Some(p) => pos + p,
-            None => break,
-        };
+    while let Some(p) = data[pos..].windows(2).position(|w| w == b"\r\n") {
+        let line_end = pos + p;
 
         let size_str = match std::str::from_utf8(&data[pos..line_end]) {
             Ok(s) => s.trim(),
@@ -260,10 +257,5 @@ fn parse_url(url: &str) -> Result<(String, String, u16, String), String> {
         None => (host_port, default_port),
     };
 
-    Ok((
-        scheme.to_string(),
-        host.to_string(),
-        port,
-        path.to_string(),
-    ))
+    Ok((scheme.to_string(), host.to_string(), port, path.to_string()))
 }

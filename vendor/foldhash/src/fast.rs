@@ -3,7 +3,7 @@
 use core::hash::{BuildHasher, Hasher};
 
 use crate::seed::{gen_per_hasher_seed, GlobalSeed, SharedSeed};
-use crate::{folded_multiply, hash_bytes_long, hash_bytes_short, rotate_right, ARBITRARY3};
+use crate::{folded_multiply, hash_bytes_long, hash_bytes_medium, rotate_right, ARBITRARY3};
 
 /// A [`Hasher`] instance implementing foldhash, optimized for speed.
 ///
@@ -11,23 +11,29 @@ use crate::{folded_multiply, hash_bytes_long, hash_bytes_short, rotate_right, AR
 /// most likely want to use [`RandomState`], [`SeedableRandomState`] or
 /// [`FixedState`] to create [`FoldHasher`]s.
 #[derive(Clone)]
-pub struct FoldHasher<'a> {
+pub struct FoldHasher {
     accumulator: u64,
     sponge: u128,
     sponge_len: u8,
-    seeds: &'a [u64; 6],
+    fold_seed: u64,
+    expand_seed: u64,
+    expand_seed2: u64,
+    expand_seed3: u64,
 }
 
-impl<'a> FoldHasher<'a> {
+impl FoldHasher {
     /// Initializes this [`FoldHasher`] with the given per-hasher seed and
     /// [`SharedSeed`].
     #[inline]
-    pub const fn with_seed(per_hasher_seed: u64, shared_seed: &'a SharedSeed) -> FoldHasher<'a> {
+    pub fn with_seed(per_hasher_seed: u64, shared_seed: &SharedSeed) -> FoldHasher {
         FoldHasher {
             accumulator: per_hasher_seed,
             sponge: 0,
             sponge_len: 0,
-            seeds: &shared_seed.seeds,
+            fold_seed: shared_seed.seeds[0],
+            expand_seed: shared_seed.seeds[1],
+            expand_seed2: shared_seed.seeds[2],
+            expand_seed3: shared_seed.seeds[3],
         }
     }
 
@@ -37,7 +43,7 @@ impl<'a> FoldHasher<'a> {
         if self.sponge_len as usize + bits > 128 {
             let lo = self.sponge as u64;
             let hi = (self.sponge >> 64) as u64;
-            self.accumulator = folded_multiply(lo ^ self.accumulator, hi ^ self.seeds[0]);
+            self.accumulator = folded_multiply(lo ^ self.accumulator, hi ^ self.fold_seed);
             self.sponge = x.into();
             self.sponge_len = bits as u8;
         } else {
@@ -47,7 +53,7 @@ impl<'a> FoldHasher<'a> {
     }
 }
 
-impl<'a> Hasher for FoldHasher<'a> {
+impl Hasher for FoldHasher {
     #[inline(always)]
     fn write(&mut self, bytes: &[u8]) {
         // We perform overlapping reads in the byte hash which could lead to
@@ -56,14 +62,41 @@ impl<'a> Hasher for FoldHasher<'a> {
         // which costs only a single cycle (or none if executed with
         // instruction-level parallelism).
         let len = bytes.len();
-        self.accumulator = rotate_right(self.accumulator, len as u32);
+        let base_seed = rotate_right(self.accumulator, len as u32);
         if len <= 16 {
-            self.accumulator = hash_bytes_short(bytes, self.accumulator, self.seeds);
-        } else {
-            unsafe {
-                // SAFETY: we checked that the length is > 16 bytes.
-                self.accumulator = hash_bytes_long(bytes, self.accumulator, self.seeds);
+            let mut s0 = base_seed;
+            let mut s1 = self.expand_seed;
+            // XOR the input into s0, s1, then multiply and fold.
+            if len >= 8 {
+                s0 ^= u64::from_ne_bytes(bytes[0..8].try_into().unwrap());
+                s1 ^= u64::from_ne_bytes(bytes[len - 8..].try_into().unwrap());
+            } else if len >= 4 {
+                s0 ^= u32::from_ne_bytes(bytes[0..4].try_into().unwrap()) as u64;
+                s1 ^= u32::from_ne_bytes(bytes[len - 4..].try_into().unwrap()) as u64;
+            } else if len > 0 {
+                let lo = bytes[0];
+                let mid = bytes[len / 2];
+                let hi = bytes[len - 1];
+                s0 ^= lo as u64;
+                s1 ^= ((hi as u64) << 8) | mid as u64;
             }
+            self.accumulator = folded_multiply(s0, s1);
+        } else if len < 256 {
+            self.accumulator = hash_bytes_medium(
+                bytes,
+                base_seed,
+                base_seed.wrapping_add(self.expand_seed),
+                self.fold_seed,
+            );
+        } else {
+            self.accumulator = hash_bytes_long(
+                bytes,
+                base_seed,
+                base_seed.wrapping_add(self.expand_seed),
+                base_seed.wrapping_add(self.expand_seed2),
+                base_seed.wrapping_add(self.expand_seed3),
+                self.fold_seed,
+            );
         }
     }
 
@@ -91,7 +124,7 @@ impl<'a> Hasher for FoldHasher<'a> {
     fn write_u128(&mut self, i: u128) {
         let lo = i as u64;
         let hi = (i >> 64) as u64;
-        self.accumulator = folded_multiply(lo ^ self.accumulator, hi ^ self.seeds[0]);
+        self.accumulator = folded_multiply(lo ^ self.accumulator, hi ^ self.fold_seed);
     }
 
     #[inline(always)]
@@ -103,19 +136,12 @@ impl<'a> Hasher for FoldHasher<'a> {
         self.write_num(i as u64);
     }
 
-    #[cfg(feature = "nightly")]
-    #[inline(always)]
-    fn write_str(&mut self, s: &str) {
-        // Our write function already handles length differences.
-        self.write(s.as_bytes())
-    }
-
     #[inline(always)]
     fn finish(&self) -> u64 {
         if self.sponge_len > 0 {
             let lo = self.sponge as u64;
             let hi = (self.sponge >> 64) as u64;
-            folded_multiply(lo ^ self.accumulator, hi ^ self.seeds[0])
+            folded_multiply(lo ^ self.accumulator, hi ^ self.fold_seed)
         } else {
             self.accumulator
         }
@@ -123,7 +149,7 @@ impl<'a> Hasher for FoldHasher<'a> {
 }
 
 /// A [`BuildHasher`] for [`fast::FoldHasher`](FoldHasher) that is randomly initialized.
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct RandomState {
     per_hasher_seed: u64,
     global_seed: GlobalSeed,
@@ -140,10 +166,10 @@ impl Default for RandomState {
 }
 
 impl BuildHasher for RandomState {
-    type Hasher = FoldHasher<'static>;
+    type Hasher = FoldHasher;
 
     #[inline(always)]
-    fn build_hasher(&self) -> FoldHasher<'static> {
+    fn build_hasher(&self) -> FoldHasher {
         FoldHasher::with_seed(self.per_hasher_seed, self.global_seed.get())
     }
 }
@@ -153,7 +179,7 @@ impl BuildHasher for RandomState {
 ///
 /// This can be useful for e.g. testing, but the downside is that this type
 /// has a size of 16 bytes rather than the 8 bytes [`RandomState`] is.
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct SeedableRandomState {
     per_hasher_seed: u64,
     shared_seed: &'static SharedSeed,
@@ -198,10 +224,10 @@ impl SeedableRandomState {
 }
 
 impl BuildHasher for SeedableRandomState {
-    type Hasher = FoldHasher<'static>;
+    type Hasher = FoldHasher;
 
     #[inline(always)]
-    fn build_hasher(&self) -> FoldHasher<'static> {
+    fn build_hasher(&self) -> FoldHasher {
         FoldHasher::with_seed(self.per_hasher_seed, self.shared_seed)
     }
 }
@@ -209,7 +235,7 @@ impl BuildHasher for SeedableRandomState {
 /// A [`BuildHasher`] for [`fast::FoldHasher`](FoldHasher) that always has the same fixed seed.
 ///
 /// Not recommended unless you absolutely need determinism.
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct FixedState {
     per_hasher_seed: u64,
 }
@@ -235,10 +261,10 @@ impl Default for FixedState {
 }
 
 impl BuildHasher for FixedState {
-    type Hasher = FoldHasher<'static>;
+    type Hasher = FoldHasher;
 
     #[inline(always)]
-    fn build_hasher(&self) -> FoldHasher<'static> {
+    fn build_hasher(&self) -> FoldHasher {
         FoldHasher::with_seed(self.per_hasher_seed, SharedSeed::global_fixed())
     }
 }
