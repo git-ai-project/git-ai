@@ -207,7 +207,9 @@ impl Agent for CopilotCliAgent {
             if trimmed.is_empty() {
                 continue;
             }
-            let json: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+            let Some(json) = serde_json::from_str::<serde_json::Value>(trimmed).ok() else {
+                continue;
+            };
             if json.get("type").and_then(|v| v.as_str()) == Some("session.start") {
                 return json
                     .get("data")

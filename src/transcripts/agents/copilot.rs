@@ -131,7 +131,7 @@ impl CopilotAgent {
 
 /// Decode percent-encoded characters in a URI path (e.g., %20 -> space).
 fn percent_decode_path(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
+    let mut decoded_bytes = Vec::with_capacity(input.len());
     let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -139,14 +139,14 @@ fn percent_decode_path(input: &str) -> String {
             && i + 2 < bytes.len()
             && let Ok(byte) = u8::from_str_radix(&input[i + 1..i + 3], 16)
         {
-            result.push(byte as char);
+            decoded_bytes.push(byte);
             i += 3;
             continue;
         }
-        result.push(bytes[i] as char);
+        decoded_bytes.push(bytes[i]);
         i += 1;
     }
-    result
+    String::from_utf8(decoded_bytes).unwrap_or_else(|_| input.to_string())
 }
 
 impl Default for CopilotAgent {
@@ -826,6 +826,8 @@ mod tests {
             percent_decode_path("/path%2Fwith%2Fencoded"),
             "/path/with/encoded"
         );
+        // Multi-byte UTF-8: é = %C3%A9
+        assert_eq!(percent_decode_path("/caf%C3%A9/project"), "/café/project");
     }
 
     #[test]
