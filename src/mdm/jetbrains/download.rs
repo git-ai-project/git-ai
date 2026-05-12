@@ -17,9 +17,8 @@ pub fn download_plugin_from_marketplace(
 
     tracing::debug!("JetBrains: Downloading plugin from {}", url);
 
-    let agent = crate::http::build_agent(Some(120));
-    let request = agent.get(&url);
-    let response = crate::http::send(request)
+    let response = crate::http::Request::get(&url, Some(120))
+        .send()
         .map_err(|e| GitAiError::Generic(format!("Failed to download plugin: {}", e)))?;
 
     if response.status_code == 404 {

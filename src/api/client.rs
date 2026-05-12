@@ -4,7 +4,6 @@ use crate::error::GitAiError;
 use crate::git::repository::{exec_git, parse_git_var_identity};
 use crate::http;
 use std::sync::{LazyLock, Mutex};
-use url::Url;
 
 static REFRESH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -112,34 +111,14 @@ impl ApiContext {
         config::Config::fresh().api_base_url().to_string()
     }
 
-    /// Create a GET request with common headers (User-Agent, X-Distinct-ID)
-    /// Use this for all HTTP GET requests to ensure consistent headers.
-    /// The returned (Agent, Request) pair uses the system's native certificate store.
-    pub fn http_get(url: &str, timeout_secs: Option<u64>) -> (ureq::Agent, ureq::Request) {
-        let agent = http::build_agent(timeout_secs);
-        let request = agent
-            .get(url)
-            .set(
-                "User-Agent",
-                &format!("git-ai/{}", env!("CARGO_PKG_VERSION")),
-            )
-            .set("X-Distinct-ID", &config::get_or_create_distinct_id());
-        (agent, request)
+    pub fn http_get(url: &str, timeout_secs: Option<u64>) -> http::Request {
+        http::Request::get(url, timeout_secs)
+            .header("X-Distinct-ID", &config::get_or_create_distinct_id())
     }
 
-    /// Create a POST request with common headers (User-Agent, X-Distinct-ID)
-    /// Use this for all HTTP POST requests to ensure consistent headers.
-    /// The returned (Agent, Request) pair uses the system's native certificate store.
-    pub fn http_post(url: &str, timeout_secs: Option<u64>) -> (ureq::Agent, ureq::Request) {
-        let agent = http::build_agent(timeout_secs);
-        let request = agent
-            .post(url)
-            .set(
-                "User-Agent",
-                &format!("git-ai/{}", env!("CARGO_PKG_VERSION")),
-            )
-            .set("X-Distinct-ID", &config::get_or_create_distinct_id());
-        (agent, request)
+    pub fn http_post(url: &str, timeout_secs: Option<u64>) -> http::Request {
+        http::Request::post(url, timeout_secs)
+            .header("X-Distinct-ID", &config::get_or_create_distinct_id())
     }
 
     /// Create a new API context, automatically using stored credentials if available
@@ -210,14 +189,10 @@ impl ApiContext {
         self
     }
 
-    /// Build the full URL for an endpoint
     fn build_url(&self, endpoint: &str) -> Result<String, GitAiError> {
-        let base = Url::parse(&self.base_url)
-            .map_err(|e| GitAiError::Generic(format!("Invalid base URL: {}", e)))?;
-        let url = base
-            .join(endpoint)
-            .map_err(|e| GitAiError::Generic(format!("Invalid endpoint URL: {}", e)))?;
-        Ok(url.to_string())
+        let base = self.base_url.trim_end_matches('/');
+        let ep = endpoint.trim_start_matches('/');
+        Ok(format!("{}/{}", base, ep))
     }
 
     /// Make a POST request with JSON body
@@ -229,20 +204,21 @@ impl ApiContext {
         let url = self.build_url(endpoint)?;
         let body_json = serde_json::to_string(body).map_err(GitAiError::JsonError)?;
 
-        let (_agent, mut request) = Self::http_post(&url, self.timeout_secs);
-        request = request.set("Content-Type", "application/json");
+        let mut request = Self::http_post(&url, self.timeout_secs)
+            .header("Content-Type", "application/json");
 
         if let Some(api_key) = &self.api_key {
-            request = request.set("X-API-Key", api_key);
+            request = request.header("X-API-Key", api_key);
             if let Some(identity) = &self.author_identity {
-                request = request.set("X-Author-Identity", identity);
+                request = request.header("X-Author-Identity", identity);
             }
         }
         if let Some(token) = &self.auth_token {
-            request = request.set("Authorization", &format!("Bearer {}", token));
+            request = request.header("Authorization", &format!("Bearer {}", token));
         }
 
-        http::send_with_body(request, &body_json)
+        request
+            .send_string(&body_json)
             .map_err(|e| GitAiError::Generic(format!("HTTP request failed: {}", e)))
     }
 
@@ -250,19 +226,21 @@ impl ApiContext {
     pub fn get(&self, endpoint: &str) -> Result<http::Response, GitAiError> {
         let url = self.build_url(endpoint)?;
 
-        let (_agent, mut request) = Self::http_get(&url, self.timeout_secs);
+        let mut request = Self::http_get(&url, self.timeout_secs);
 
         if let Some(api_key) = &self.api_key {
-            request = request.set("X-API-Key", api_key);
+            request = request.header("X-API-Key", api_key);
             if let Some(identity) = &self.author_identity {
-                request = request.set("X-Author-Identity", identity);
+                request = request.header("X-Author-Identity", identity);
             }
         }
         if let Some(token) = &self.auth_token {
-            request = request.set("Authorization", &format!("Bearer {}", token));
+            request = request.header("Authorization", &format!("Bearer {}", token));
         }
 
-        http::send(request).map_err(|e| GitAiError::Generic(format!("HTTP request failed: {}", e)))
+        request
+            .send()
+            .map_err(|e| GitAiError::Generic(format!("HTTP request failed: {}", e)))
     }
 }
 
@@ -383,7 +361,7 @@ mod tests {
     fn test_build_url_invalid_base() {
         let ctx = ApiContext::without_auth(Some("not-a-url".to_string()));
         let result = ctx.build_url("/api/test");
-        assert!(result.is_err());
+        assert_eq!(result.unwrap(), "not-a-url/api/test");
     }
 
     // ============= Mutex Thread Safety Tests =============
