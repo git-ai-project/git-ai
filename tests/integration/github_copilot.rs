@@ -579,7 +579,8 @@ fn test_copilot_preset_vscode_non_edit_tool_is_filtered() {
         "cwd": "/Users/test/project",
         "toolName": "copilot_findTextInFiles",
         "toolInput": { "query": "hello" },
-        "sessionId": "copilot-session-search"
+        "sessionId": "copilot-session-search",
+        "transcript_path": "/Users/test/Library/Application Support/Code/User/workspaceStorage/ws-id/GitHub.copilot-chat/transcripts/session.jsonl"
     })
     .to_string();
 
@@ -590,6 +591,27 @@ fn test_copilot_preset_vscode_non_edit_tool_is_filtered() {
             .unwrap_err()
             .to_string()
             .contains("unsupported tool_name")
+    );
+}
+
+#[test]
+fn test_copilot_preset_cli_non_edit_tool_is_filtered() {
+    let hook_input = json!({
+        "hookEventName": "PreToolUse",
+        "cwd": "/Users/test/project",
+        "toolName": "view",
+        "toolInput": { "path": "/Users/test/project/file.ts" },
+        "sessionId": "copilot-session-view"
+    })
+    .to_string();
+
+    let result = parse_copilot(&hook_input);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("non-edit tool"),
+        "Expected non-edit tool error, got: {}",
+        err_msg
     );
 }
 

@@ -14,6 +14,7 @@ pub fn extract_model(
         | TranscriptFormat::CopilotEventStreamJsonl
         | TranscriptFormat::GeminiJsonl => extract_model_from_jsonl_tail(path),
         TranscriptFormat::CopilotSessionJson => extract_model_from_copilot_session_json(path),
+        TranscriptFormat::CopilotCliSessionJsonl => extract_model_from_copilot_cli_events(path),
         TranscriptFormat::AmpThreadJson => extract_model_from_amp_thread_json(path),
         TranscriptFormat::OpenCodeSqlite => extract_model_from_opencode_sqlite(path, session_id),
         // Droid uses extract_model_from_droid_settings() with the settings path instead
@@ -91,6 +92,56 @@ fn extract_model_from_jsonl_tail(path: &Path) -> Result<Option<String>, Transcri
     Ok(None)
 }
 
+/// Extracts the model from VS Code Copilot's `models.json` debug log.
+/// Given a transcript path like `.../transcripts/{session_id}.jsonl`,
+/// derives `.../debug-logs/{session_id}/models.json` and reads the default model.
+pub fn extract_model_from_copilot_models_json(
+    transcript_path: &Path,
+) -> Result<Option<String>, TranscriptError> {
+    let session_id = transcript_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if session_id.is_empty() {
+        return Ok(None);
+    }
+
+    // transcript: .../transcripts/{session_id}.jsonl
+    // models:     .../debug-logs/{session_id}/models.json
+    let transcripts_dir = match transcript_path.parent() {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let copilot_chat_dir = match transcripts_dir.parent() {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    let models_path = copilot_chat_dir
+        .join("debug-logs")
+        .join(session_id)
+        .join("models.json");
+
+    let content = match std::fs::read_to_string(&models_path) {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+
+    let models: Vec<serde_json::Value> = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+
+    let model = models.iter().find_map(|m| {
+        if m.get("is_chat_default").and_then(|v| v.as_bool()) == Some(true) {
+            m.get("id").and_then(|v| v.as_str()).map(String::from)
+        } else {
+            None
+        }
+    });
+
+    Ok(model)
+}
+
 fn extract_model_from_copilot_session_json(path: &Path) -> Result<Option<String>, TranscriptError> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -140,6 +191,55 @@ fn extract_model_from_amp_thread_json(path: &Path) -> Result<Option<String>, Tra
         });
 
     Ok(model)
+}
+
+fn extract_model_from_copilot_cli_events(path: &Path) -> Result<Option<String>, TranscriptError> {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
+        Err(_) => return Ok(None),
+    };
+
+    let file_size = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(_) => return Ok(None),
+    };
+
+    if file_size == 0 {
+        return Ok(None);
+    }
+
+    let read_size = std::cmp::min(51200, file_size);
+    let seek_pos = file_size - read_size;
+
+    if file.seek(SeekFrom::Start(seek_pos)).is_err() {
+        return Ok(None);
+    }
+
+    let reader = BufReader::new(file);
+    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
+
+    for line in lines.iter().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+
+        if json.get("type").and_then(|v| v.as_str()) == Some("session.model_change")
+            && let Some(model) = json
+                .get("data")
+                .and_then(|d| d.get("newModel"))
+                .and_then(|v| v.as_str())
+        {
+            return Ok(Some(model.to_string()));
+        }
+    }
+
+    Ok(None)
 }
 
 fn extract_model_from_opencode_sqlite(
@@ -273,6 +373,20 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_model_copilot_cli() {
+        let path = fixture_path("copilot_cli_session_events.jsonl");
+        let result = extract_model(&path, TranscriptFormat::CopilotCliSessionJsonl, None).unwrap();
+        assert_eq!(result, Some("gpt-4.1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_copilot_cli_no_model() {
+        let path = fixture_path("copilot_cli_session_no_model.jsonl");
+        let result = extract_model(&path, TranscriptFormat::CopilotCliSessionJsonl, None).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
     fn test_extract_model_missing_file() {
         let path = PathBuf::from("/nonexistent/path/to/file.jsonl");
         let result = extract_model(&path, TranscriptFormat::ClaudeJsonl, None).unwrap();
@@ -318,5 +432,21 @@ mod tests {
 
         let result = extract_model(file.path(), TranscriptFormat::ClaudeJsonl, None).unwrap();
         assert_eq!(result, Some("claude-opus-4-6".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_copilot_vscode_models_json() {
+        let path = fixture_path(
+            "copilot_vscode_workspace/GitHub.copilot-chat/transcripts/test-session-abc.jsonl",
+        );
+        let result = extract_model_from_copilot_models_json(&path).unwrap();
+        assert_eq!(result, Some("gpt-4.1".to_string()));
+    }
+
+    #[test]
+    fn test_extract_model_copilot_vscode_models_json_missing() {
+        let path = PathBuf::from("/nonexistent/transcripts/fake-session.jsonl");
+        let result = extract_model_from_copilot_models_json(&path).unwrap();
+        assert_eq!(result, None);
     }
 }

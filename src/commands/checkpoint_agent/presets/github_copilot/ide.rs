@@ -222,15 +222,21 @@ pub(super) fn parse_vscode_native_hooks(
             model: transcript_path
                 .as_ref()
                 .and_then(|tp| {
+                    let path = Path::new(tp.as_str());
                     let sweep_format = match transcript_format {
                         TranscriptFormat::CopilotEventStreamJsonl => {
                             crate::transcripts::sweep::TranscriptFormat::CopilotEventStreamJsonl
                         }
                         _ => crate::transcripts::sweep::TranscriptFormat::CopilotSessionJson,
                     };
-                    model_extraction::extract_model(Path::new(tp.as_str()), sweep_format, None)
+                    model_extraction::extract_model(path, sweep_format, None)
                         .ok()
                         .flatten()
+                        .or_else(|| {
+                            model_extraction::extract_model_from_copilot_models_json(path)
+                                .ok()
+                                .flatten()
+                        })
                 })
                 .unwrap_or_else(|| "unknown".to_string()),
         },
@@ -305,6 +311,13 @@ pub(super) fn parse_vscode_native_hooks(
             tool_name
         )));
     }
+
+    // Workaround: VS Code Copilot fires PostToolUse before the file is written to disk.
+    // https://github.com/microsoft/vscode/issues/315926
+    tracing::debug!(
+        "Sleeping 80ms for VS Code Copilot PostToolUse file-write race (vscode#315926)"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(80));
 
     Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
         context,
@@ -872,6 +885,75 @@ mod tests {
                 ));
             }
             _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_vscode_apply_patch_real_payload() {
+        let pre_input = json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "bad0027f-a716-4b05-82dc-c186eb655967",
+            "transcript_path": "/Users/svarlamov/Library/Application Support/Code/User/workspaceStorage/e89dd309cf385022c02e2f1c9e8c403f/GitHub.copilot-chat/transcripts/bad0027f-a716-4b05-82dc-c186eb655967.jsonl",
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "explanation": "Change the warning message from 'oops' to 'oopsies'",
+                "input": "*** Begin Patch\n*** Update File: /Users/svarlamov/testing-git-ai-sessions-v2-apr-20/testing-git-1/jokes-cli.ts\n@@ rl.question(\"Which joke do you want to hear (1-3)? (Press Enter for a random joke) \", (answer) => {\n-      console.warn(\"oops\");\n+      console.warn(\"oopsies\");\n*** End Patch"
+            },
+            "tool_use_id": "call_lEov1CG9mTy45oPQYT0VST80__vscode-1778541016875",
+            "cwd": "/Users/svarlamov/testing-git-ai-sessions-v2-apr-20/testing-git-1"
+        })
+        .to_string();
+
+        let events = GithubCopilotPreset
+            .parse(&pre_input, "t_test123456789a")
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from(
+                        "/Users/svarlamov/testing-git-ai-sessions-v2-apr-20/testing-git-1/jokes-cli.ts"
+                    )]
+                );
+                assert_eq!(
+                    e.tool_use_id.as_deref(),
+                    Some("call_lEov1CG9mTy45oPQYT0VST80__vscode-1778541016875")
+                );
+            }
+            other => panic!("Expected PreFileEdit, got {:?}", other),
+        }
+
+        let post_input = json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "bad0027f-a716-4b05-82dc-c186eb655967",
+            "transcript_path": "/Users/svarlamov/Library/Application Support/Code/User/workspaceStorage/e89dd309cf385022c02e2f1c9e8c403f/GitHub.copilot-chat/transcripts/bad0027f-a716-4b05-82dc-c186eb655967.jsonl",
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "explanation": "Change the warning message from 'oops' to 'oopsies'",
+                "input": "*** Begin Patch\n*** Update File: /Users/svarlamov/testing-git-ai-sessions-v2-apr-20/testing-git-1/jokes-cli.ts\n@@ rl.question(\"Which joke do you want to hear (1-3)? (Press Enter for a random joke) \", (answer) => {\n-      console.warn(\"oops\");\n+      console.warn(\"oopsies\");\n*** End Patch"
+            },
+            "tool_response": "",
+            "tool_use_id": "call_lEov1CG9mTy45oPQYT0VST80__vscode-1778541016875",
+            "cwd": "/Users/svarlamov/testing-git-ai-sessions-v2-apr-20/testing-git-1"
+        })
+        .to_string();
+
+        let events = GithubCopilotPreset
+            .parse(&post_input, "t_test123456789a")
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from(
+                        "/Users/svarlamov/testing-git-ai-sessions-v2-apr-20/testing-git-1/jokes-cli.ts"
+                    )]
+                );
+                assert!(e.transcript_source.is_some());
+            }
+            other => panic!("Expected PostFileEdit, got {:?}", other),
         }
     }
 }

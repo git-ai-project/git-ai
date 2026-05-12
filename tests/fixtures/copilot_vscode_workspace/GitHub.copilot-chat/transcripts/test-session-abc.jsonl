@@ -1,0 +1,5 @@
+{"type":"session.start","data":{"sessionId":"test-session-abc","version":1,"producer":"copilot-agent","copilotVersion":"0.47.0","vscodeVersion":"1.119.0","startTime":"2026-05-11T23:13:12.819Z"},"id":"ev-1","timestamp":"2026-05-11T23:13:12.819Z","parentId":null}
+{"type":"user.message","data":{"content":"Fix the bug","attachments":[]},"id":"ev-2","timestamp":"2026-05-11T23:13:12.820Z","parentId":"ev-1"}
+{"type":"assistant.turn_start","data":{"turnId":"0"},"id":"ev-3","timestamp":"2026-05-11T23:13:12.821Z","parentId":"ev-2"}
+{"type":"tool.execution_start","data":{"toolCallId":"call_abc123","toolName":"read_file","arguments":{"filePath":"/Users/test/project/src/app.ts","startLine":1,"endLine":20}},"id":"ev-4","timestamp":"2026-05-11T23:13:13.000Z","parentId":"ev-3"}
+{"type":"tool.execution_complete","data":{"toolCallId":"call_abc123","success":true},"id":"ev-5","timestamp":"2026-05-11T23:13:13.050Z","parentId":"ev-4"}

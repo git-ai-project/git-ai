@@ -1,0 +1,3 @@
+{"type":"session.start","data":{"sessionId":"abc12345-0000-1111-2222-333344445555","version":1,"producer":"copilot-agent","copilotVersion":"1.0.45","startTime":"2026-05-12T00:21:05.216Z","context":{"cwd":"/Users/test/project","gitRoot":"/Users/test/project","branch":"main"}},"id":"evt-001","timestamp":"2026-05-12T00:21:05.216Z","parentId":null}
+{"type":"user.message","data":{"content":"hello","attachments":[]},"id":"evt-002","timestamp":"2026-05-12T00:21:06.000Z","parentId":"evt-001"}
+{"type":"assistant.message","data":{"messageId":"msg-1","content":"Hi! How can I help?"},"id":"evt-003","timestamp":"2026-05-12T00:21:07.000Z","parentId":"evt-002"}

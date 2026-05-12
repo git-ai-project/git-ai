@@ -84,6 +84,7 @@ pub enum TranscriptFormat {
     AmpThreadJson,
     OpenCodeSqlite,
     PiJsonl,
+    CopilotCliSessionJsonl,
 }
 
 impl std::fmt::Display for TranscriptFormat {
@@ -101,6 +102,7 @@ impl std::fmt::Display for TranscriptFormat {
             Self::AmpThreadJson => write!(f, "AmpThreadJson"),
             Self::OpenCodeSqlite => write!(f, "OpenCodeSqlite"),
             Self::PiJsonl => write!(f, "PiJsonl"),
+            Self::CopilotCliSessionJsonl => write!(f, "CopilotCliSessionJsonl"),
         }
     }
 }
@@ -115,7 +117,8 @@ impl TranscriptFormat {
             | Self::WindsurfJsonl
             | Self::CodexJsonl
             | Self::PiJsonl
-            | Self::CopilotEventStreamJsonl => WatermarkType::ByteOffset,
+            | Self::CopilotEventStreamJsonl
+            | Self::CopilotCliSessionJsonl => WatermarkType::ByteOffset,
             Self::DroidJsonl => WatermarkType::Hybrid,
             Self::CopilotSessionJson | Self::ContinueJson | Self::AmpThreadJson => {
                 WatermarkType::RecordIndex

@@ -8,6 +8,7 @@ use crate::transcripts::watermark::{
     ByteOffsetWatermark, RecordIndexWatermark, WatermarkStrategy, WatermarkType,
 };
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -32,11 +33,9 @@ impl CopilotAgent {
     fn scan_transcript_files() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        // Standard locations for Copilot transcripts
+        // Standard locations for Copilot transcripts (legacy)
         let search_dirs = vec![
-            // Session JSON files
             dirs::config_dir().map(|p| p.join("github-copilot/sessions")),
-            // Event stream JSONL files
             dirs::config_dir().map(|p| p.join("github-copilot/events")),
         ];
 
@@ -49,7 +48,6 @@ impl CopilotAgent {
                     let path = entry.path();
                     if path.is_file() {
                         let ext = path.extension().and_then(|s| s.to_str());
-                        // Accept both .json (session files) and .jsonl (event streams)
                         if ext == Some("json") || ext == Some("jsonl") {
                             paths.push(path);
                         }
@@ -58,7 +56,67 @@ impl CopilotAgent {
             }
         }
 
+        // VS Code workspace storage: event stream JSONL transcripts
+        for workspace_storage_root in Self::vscode_workspace_storage_roots() {
+            if !workspace_storage_root.exists() {
+                continue;
+            }
+            let Ok(workspaces) = fs::read_dir(&workspace_storage_root) else {
+                continue;
+            };
+            for entry in workspaces.flatten() {
+                let transcripts_dir = entry.path().join("GitHub.copilot-chat").join("transcripts");
+                if !transcripts_dir.is_dir() {
+                    continue;
+                }
+                let Ok(files) = fs::read_dir(&transcripts_dir) else {
+                    continue;
+                };
+                for file_entry in files.flatten() {
+                    let path = file_entry.path();
+                    if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                        paths.push(path);
+                    }
+                }
+            }
+        }
+
         paths
+    }
+
+    /// Returns the VS Code workspace storage root directories to scan.
+    fn vscode_workspace_storage_roots() -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        #[cfg(target_os = "macos")]
+        if let Some(home) = dirs::home_dir() {
+            roots.push(home.join("Library/Application Support/Code/User/workspaceStorage"));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(config) = dirs::config_dir() {
+            roots.push(config.join("Code/User/workspaceStorage"));
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(appdata) = dirs::config_dir() {
+            roots.push(appdata.join("Code/User/workspaceStorage"));
+        }
+        roots
+    }
+
+    /// Infer CWD from a VS Code workspace storage transcript path by reading
+    /// the sibling `workspace.json` file.
+    fn infer_cwd_from_workspace_json(transcript_path: &Path) -> Option<PathBuf> {
+        // transcript: .../workspaceStorage/{hash}/GitHub.copilot-chat/transcripts/{id}.jsonl
+        // workspace.json: .../workspaceStorage/{hash}/workspace.json
+        let workspace_hash_dir = transcript_path.parent()?.parent()?.parent()?;
+        let workspace_json = workspace_hash_dir.join("workspace.json");
+        let content = fs::read_to_string(&workspace_json).ok()?;
+        let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+        let folder_uri = json.get("folder")?.as_str()?;
+        // folder is a file:// URI
+        let path_str = folder_uri.strip_prefix("file://")?;
+        let decoded = percent_decode_path(path_str);
+        let p = PathBuf::from(decoded);
+        Some(p)
     }
 
     /// Determine transcript format from file path.
@@ -69,6 +127,26 @@ impl CopilotAgent {
             TranscriptFormat::CopilotSessionJson
         }
     }
+}
+
+/// Decode percent-encoded characters in a URI path (e.g., %20 -> space).
+fn percent_decode_path(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&input[i + 1..i + 3], 16)
+        {
+            result.push(byte as char);
+            i += 3;
+            continue;
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
 }
 
 impl Default for CopilotAgent {
@@ -151,6 +229,51 @@ impl Agent for CopilotAgent {
         } else {
             read_session_json(path, watermark, session_id, batch_limit)
         }
+    }
+
+    fn extract_event_ids(
+        &self,
+        event: &serde_json::Value,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let id = event.get("id").and_then(|v| v.as_str()).map(String::from);
+        let parent_id = event
+            .get("parentId")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        (id, parent_id, None)
+    }
+
+    fn infer_cwd(&self, transcript_path: &Path) -> Option<PathBuf> {
+        // Try workspace.json first (VS Code workspace storage layout)
+        if let Some(cwd) = Self::infer_cwd_from_workspace_json(transcript_path) {
+            return Some(cwd);
+        }
+
+        // Fallback: scan first few lines for file paths in tool calls
+        let file = fs::File::open(transcript_path).ok()?;
+        let reader = BufReader::new(file);
+        for line in reader.lines().take(20).map_while(Result::ok) {
+            let Some(json) = serde_json::from_str::<serde_json::Value>(&line).ok() else {
+                continue;
+            };
+            if json.get("type").and_then(|v| v.as_str()) == Some("tool.execution_start")
+                && let Some(file_path) = json
+                    .get("data")
+                    .and_then(|d| d.get("arguments"))
+                    .and_then(|a| a.get("filePath"))
+                    .and_then(|v| v.as_str())
+            {
+                let p = Path::new(file_path);
+                let mut candidate = p.parent();
+                while let Some(dir) = candidate {
+                    if dir.join(".git").exists() {
+                        return Some(dir.to_path_buf());
+                    }
+                    candidate = dir.parent();
+                }
+            }
+        }
+        None
     }
 }
 
@@ -644,5 +767,87 @@ mod tests {
         assert_eq!(result.events[0]["data"]["content"], "Hello");
         assert_eq!(result.events[1]["type"], "assistant.message");
         assert_eq!(result.events[1]["data"]["modelId"], "copilot/gpt-4");
+    }
+
+    #[test]
+    fn test_extract_event_ids() {
+        let agent = CopilotAgent::new();
+        let event: serde_json::Value = serde_json::from_str(
+            r#"{"type":"user.message","id":"ev-123","parentId":"ev-000","timestamp":"2026-05-11T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let (id, parent_id, third) = agent.extract_event_ids(&event);
+        assert_eq!(id, Some("ev-123".to_string()));
+        assert_eq!(parent_id, Some("ev-000".to_string()));
+        assert_eq!(third, None);
+    }
+
+    #[test]
+    fn test_extract_event_ids_null_parent() {
+        let agent = CopilotAgent::new();
+        let event: serde_json::Value =
+            serde_json::from_str(r#"{"type":"session.start","id":"ev-001","parentId":null}"#)
+                .unwrap();
+        let (id, parent_id, _) = agent.extract_event_ids(&event);
+        assert_eq!(id, Some("ev-001".to_string()));
+        assert_eq!(parent_id, None);
+    }
+
+    #[test]
+    fn test_infer_cwd_from_workspace_json() {
+        use std::path::PathBuf;
+
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/copilot_vscode_workspace/GitHub.copilot-chat/transcripts/test-session-abc.jsonl");
+        let result = CopilotAgent::infer_cwd_from_workspace_json(&fixture);
+        assert_eq!(result, Some(PathBuf::from("/Users/test/project")));
+    }
+
+    #[test]
+    fn test_infer_cwd_trait_method() {
+        use std::path::PathBuf;
+
+        let agent = CopilotAgent::new();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/copilot_vscode_workspace/GitHub.copilot-chat/transcripts/test-session-abc.jsonl");
+        let result = agent.infer_cwd(&fixture);
+        // workspace.json says file:///Users/test/project
+        assert_eq!(result, Some(PathBuf::from("/Users/test/project")));
+    }
+
+    #[test]
+    fn test_percent_decode_path() {
+        assert_eq!(
+            percent_decode_path("/Users/test%20user/my%20project"),
+            "/Users/test user/my project"
+        );
+        assert_eq!(percent_decode_path("/normal/path"), "/normal/path");
+        assert_eq!(
+            percent_decode_path("/path%2Fwith%2Fencoded"),
+            "/path/with/encoded"
+        );
+    }
+
+    #[test]
+    fn test_read_vscode_event_stream_fixture() {
+        use std::path::PathBuf;
+
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/copilot_vscode_event_stream.jsonl");
+        let agent = CopilotAgent::new();
+        let watermark = Box::new(ByteOffsetWatermark::new(0));
+        let result = agent
+            .read_incremental(&fixture, watermark, "test-session")
+            .unwrap();
+
+        assert_eq!(result.events.len(), 13);
+        assert_eq!(result.events[0]["type"], "session.start");
+        assert_eq!(
+            result.events[0]["data"]["sessionId"],
+            "5fcddc54-3ba1-4fc4-88ac-86bd2ce74c19"
+        );
+        assert_eq!(result.events[1]["type"], "user.message");
+        assert_eq!(result.events[6]["type"], "tool.execution_start");
+        assert_eq!(result.events[6]["data"]["toolName"], "read_file");
     }
 }

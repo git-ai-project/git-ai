@@ -1,10 +1,13 @@
 use super::super::parse;
 use super::super::{
     ParsedHookEvent, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit, PresetContext,
+    TranscriptFormat, TranscriptSource,
 };
+use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::ToolClass;
 use crate::error::GitAiError;
+use crate::transcripts::model_extraction;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -46,6 +49,8 @@ pub(super) fn parse_cli_hooks(
         .map(str::to_string)
         .unwrap_or_else(|| format!("cli-{}-{}", session_id, tool_name));
 
+    let session_state_path = resolve_copilot_cli_session_path(&session_id);
+
     let mut metadata = HashMap::new();
     metadata.insert("source".to_string(), "copilot-cli".to_string());
 
@@ -53,13 +58,32 @@ pub(super) fn parse_cli_hooks(
         agent_id: AgentId {
             tool: "github-copilot".to_string(),
             id: session_id.clone(),
-            model: "unknown".to_string(),
+            model: session_state_path
+                .as_ref()
+                .and_then(|path| {
+                    model_extraction::extract_model(
+                        path,
+                        crate::transcripts::sweep::TranscriptFormat::CopilotCliSessionJsonl,
+                        None,
+                    )
+                    .ok()
+                    .flatten()
+                })
+                .unwrap_or_else(|| "unknown".to_string()),
         },
-        external_session_id: session_id,
+        external_session_id: session_id.clone(),
         trace_id: trace_id.to_string(),
         cwd: PathBuf::from(cwd),
         metadata,
     };
+
+    let transcript_source = session_state_path.map(|path| TranscriptSource {
+        path,
+        format: TranscriptFormat::CopilotCliSessionJsonl,
+        session_id: generate_session_id(&session_id, "github-copilot-cli"),
+        external_session_id: session_id.clone(),
+        external_parent_session_id: None,
+    });
 
     match (hook_event_name, class) {
         ("PreToolUse", ToolClass::Bash) => Ok(vec![ParsedHookEvent::PreBashCall(PreBashCall {
@@ -69,7 +93,7 @@ pub(super) fn parse_cli_hooks(
         ("PostToolUse", ToolClass::Bash) => Ok(vec![ParsedHookEvent::PostBashCall(PostBashCall {
             context,
             tool_use_id,
-            transcript_source: None,
+            transcript_source,
         })]),
         ("PreToolUse", ToolClass::FileEdit) => {
             // `create` PreToolUse: synthesize empty dirty_files for the new path
@@ -115,7 +139,7 @@ pub(super) fn parse_cli_hooks(
                 context,
                 file_paths: extracted_paths,
                 dirty_files,
-                transcript_source: None,
+                transcript_source,
                 tool_use_id: Some(tool_use_id),
             })])
         }
@@ -123,14 +147,25 @@ pub(super) fn parse_cli_hooks(
     }
 }
 
+fn resolve_copilot_cli_session_path(session_id: &str) -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    let path = home
+        .join(".copilot/session-state")
+        .join(session_id)
+        .join("events.jsonl");
+    if path.exists() { Some(path) } else { None }
+}
+
 fn classify_cli_tool(tool: &str) -> ToolClass {
     match tool {
-        "bash" => ToolClass::Bash,
-        "create" | "str_replace" => ToolClass::FileEdit,
-        // Skip:
-        //   report_intent — intent logging only, no file changes.
-        //   read_bash / write_bash / stop_bash — control ops on an already-running async shell;
-        //   the originating `bash` Pre/Post brackets the file changes.
+        "bash" | "powershell" => ToolClass::Bash,
+        "create" | "str_replace" | "edit" | "str_replace_editor" | "apply_patch"
+        | "git_apply_patch" => ToolClass::FileEdit,
+        // Skip read-only and control tools:
+        //   view, read_file, grep, glob, semantic_search — read-only.
+        //   report_intent, task_complete, ask_user, update_todo — metadata/control.
+        //   read_bash / write_bash / stop_bash / list_bash — control ops on async shell.
+        //   read_powershell / write_powershell / stop_powershell / list_powershell — same for PS.
         _ => ToolClass::Skip,
     }
 }
@@ -369,13 +404,27 @@ mod tests {
 
     #[test]
     fn classify_cli_tool_matrix() {
+        // Bash tools
         assert_eq!(classify_cli_tool("bash"), ToolClass::Bash);
+        assert_eq!(classify_cli_tool("powershell"), ToolClass::Bash);
+        // File edit tools
         assert_eq!(classify_cli_tool("create"), ToolClass::FileEdit);
         assert_eq!(classify_cli_tool("str_replace"), ToolClass::FileEdit);
+        assert_eq!(classify_cli_tool("edit"), ToolClass::FileEdit);
+        assert_eq!(classify_cli_tool("str_replace_editor"), ToolClass::FileEdit);
+        assert_eq!(classify_cli_tool("apply_patch"), ToolClass::FileEdit);
+        assert_eq!(classify_cli_tool("git_apply_patch"), ToolClass::FileEdit);
+        // Skip: read-only tools
+        assert_eq!(classify_cli_tool("view"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("read_file"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("grep"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("glob"), ToolClass::Skip);
+        // Skip: control/metadata tools
         assert_eq!(classify_cli_tool("report_intent"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("read_bash"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("write_bash"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("stop_bash"), ToolClass::Skip);
+        assert_eq!(classify_cli_tool("list_bash"), ToolClass::Skip);
         assert_eq!(classify_cli_tool("nonsense"), ToolClass::Skip);
     }
 }

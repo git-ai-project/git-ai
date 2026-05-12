@@ -23,9 +23,18 @@ impl AgentPreset for GithubCopilotPreset {
         }
 
         if hook_event_name == "PreToolUse" || hook_event_name == "PostToolUse" {
-            let tool_name =
-                parse::optional_str_multi(&data, &["tool_name", "toolName"]).unwrap_or("");
-            if is_cli_tool_name(tool_name) {
+            let has_transcript_path = parse::optional_str_multi(
+                &data,
+                &[
+                    "transcript_path",
+                    "transcriptPath",
+                    "chat_session_path",
+                    "chatSessionPath",
+                ],
+            )
+            .is_some();
+
+            if !has_transcript_path {
                 return cli::parse_cli_hooks(&data, hook_event_name, trace_id);
             }
             return ide::parse_vscode_native_hooks(&data, hook_event_name, trace_id);
@@ -36,19 +45,6 @@ impl AgentPreset for GithubCopilotPreset {
             hook_event_name
         )))
     }
-}
-
-fn is_cli_tool_name(tool: &str) -> bool {
-    matches!(
-        tool,
-        "bash"
-            | "read_bash"
-            | "write_bash"
-            | "stop_bash"
-            | "create"
-            | "str_replace"
-            | "report_intent"
-    )
 }
 
 // ---------------------------------------------------------------------------
