@@ -1,0 +1,41 @@
+lints.workspace = true
+
+[package]
+name = "gix-commitgraph"
+version = "0.34.0"
+repository = "https://github.com/GitoxideLabs/gitoxide"
+documentation = "https://git-scm.com/docs/commit-graph"
+license = "MIT OR Apache-2.0"
+description = "Read-only access to the git commitgraph file format"
+authors = ["Conor Davis <gitoxide@conor.fastmail.fm>", "Sebastian Thiel <sebastian.thiel@icloud.com>"]
+edition = "2021"
+include = ["src/**/*", "LICENSE-*"]
+rust-version = "1.82"
+
+[lib]
+doctest = false
+
+[features]
+## Data structures implement `serde::Serialize` and `serde::Deserialize`
+serde = ["dep:serde", "gix-hash/serde", "bstr/serde"]
+
+[dependencies]
+gix-hash = { version = "^0.22.1", path = "../gix-hash" }
+gix-chunk = { version = "^0.7.0", path = "../gix-chunk" }
+gix-error = { version = "^0.2.0", path = "../gix-error" }
+
+bstr = { version = "1.12.0", default-features = false, features = ["std"] }
+memmap2 = "0.9.7"
+nonempty = "0.12.0"
+serde = { version = "1.0.114", optional = true, default-features = false, features = ["derive"] }
+
+document-features = { version = "0.2.0", optional = true }
+
+[dev-dependencies]
+gix-testtools = { path = "../tests/tools" }
+gix-date = { path = "../gix-date" }
+gix-hash = { path = "../gix-hash", features = ["sha256"] }
+
+[package.metadata.docs.rs]
+all-features = true
+features = ["document-features"]

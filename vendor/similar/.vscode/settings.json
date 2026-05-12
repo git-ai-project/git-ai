@@ -1,0 +1,5 @@
+{
+    "rust-analyzer.cargo.allFeatures": true,
+    "rust-analyzer.assist.importMergeBehavior": "last",
+    "rust-analyzer.checkOnSave.command": "clippy"
+}

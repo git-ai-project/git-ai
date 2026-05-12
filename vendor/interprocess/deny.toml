@@ -1,0 +1,45 @@
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-unknown-freebsd",
+    "x86_64-unknown-openbsd",
+    "x86_64-unknown-netbsd",
+]
+features = ["tokio"]
+
+[output]
+feature-depth = 3
+
+[advisories]
+ignore = []
+
+[licenses]
+allow = [
+    "0BSD",
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+highlight = "all"
+
+external-default-features = "allow"
+
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

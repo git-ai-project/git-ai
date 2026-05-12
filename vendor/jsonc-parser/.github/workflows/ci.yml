@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - '*'
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: ${{ matrix.config.kind }} ${{ matrix.config.os }}
+    runs-on: ${{ matrix.config.os }}
+    strategy:
+      matrix:
+        config:
+          - os: ubuntu-latest
+            kind: test_release
+          - os: ubuntu-latest
+            kind: test_debug
+
+    env:
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: full
+
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dsherret/rust-toolchain-file@v1
+    - uses: Swatinem/rust-cache@v2
+      with:
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+
+    - name: Test debug
+      if: matrix.config.kind == 'test_debug'
+      run: |
+        cargo test --features serde
+        cargo test --features preserve_order
+        cargo test --all-features
+    - name: Test release
+      if: matrix.config.kind == 'test_release'
+      run: cargo test --release --all-features
+
+  benchmark:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - name: Install latest nightly
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: nightly
+        override: true
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    # Run benchmark and stores the output to a file
+    - name: Run benchmark
+      run: cargo +nightly bench --features serde | tee output.txt
+    # Run `github-action-benchmark` action
+    - name: Store benchmark result
+      uses: rhysd/github-action-benchmark@v1
+      with:
+        tool: 'cargo'
+        output-file-path: output.txt
+        fail-on-alert: true
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        auto-push: ${{ github.ref == 'refs/heads/main' }}

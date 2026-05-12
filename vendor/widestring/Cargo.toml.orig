@@ -1,0 +1,37 @@
+[package]
+name = "widestring"
+# Remember to keep in sync with html_root_url crate attribute
+version = "1.2.1"
+description = "A wide string Rust library for converting to and from wide strings, such as those often used in Windows API or other FFI libaries. Both `u16` and `u32` string types are provided, including support for UTF-16 and UTF-32, malformed encoding, C-style strings, etc."
+repository = "https://github.com/VoidStarKat/widestring-rs"
+readme = "README.md"
+keywords = ["wide", "string", "win32", "utf-16", "utf-32"]
+categories = ["text-processing", "encoding", "development-tools::ffi", "no-std"]
+license = "MIT OR Apache-2.0"
+edition = "2021"
+rust-version = "1.58"
+exclude = [".git*", ".editorconfig"]
+
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+
+# Enable to use the #[debugger_visualizer] attribute. Requires Rust 1.71+
+debugger_visualizer = ["alloc"]
+
+[dev-dependencies]
+debugger_test = "0.1"
+debugger_test_parser = "0.1"
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Diagnostics_Debug",
+] }
+
+[package.metadata.docs.rs]
+rustc-args = ["--cfg", "docsrs"]
+
+[[test]]
+name = "debugger_visualizer"
+path = "tests/debugger_visualizer.rs"
+required-features = ["debugger_visualizer"]
+test = false

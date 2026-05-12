@@ -1,0 +1,198 @@
+{
+  "value": {
+    "type": "object",
+    "range": {
+      "start": 0,
+      "end": 159,
+    },
+    "properties": [
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 6,
+          "end": 17,
+        },
+        "name": {
+          "type": "string",
+          "range": {
+            "start": 6,
+            "end": 14,
+          },
+          "value": "number"
+        },
+        "value": {
+          "type": "number",
+          "range": {
+            "start": 16,
+            "end": 17,
+          },
+          "value": "5"
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 23,
+          "end": 44,
+        },
+        "name": {
+          "type": "string",
+          "range": {
+            "start": 23,
+            "end": 31,
+          },
+          "value": "string"
+        },
+        "value": {
+          "type": "string",
+          "range": {
+            "start": 33,
+            "end": 44,
+          },
+          "value": "str\\test"
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 50,
+          "end": 84,
+        },
+        "name": {
+          "type": "string",
+          "range": {
+            "start": 50,
+            "end": 58,
+          },
+          "value": "object"
+        },
+        "value": {
+          "type": "object",
+          "range": {
+            "start": 60,
+            "end": 84,
+          },
+          "properties": [
+            {
+              "type": "objectProp",
+              "range": {
+                "start": 70,
+                "end": 78,
+              },
+              "name": {
+                "type": "string",
+                "range": {
+                  "start": 70,
+                  "end": 75,
+                },
+                "value": "obj"
+              },
+              "value": {
+                "type": "number",
+                "range": {
+                  "start": 77,
+                  "end": 78,
+                },
+                "value": "5"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 90,
+          "end": 101,
+        },
+        "name": {
+          "type": "string",
+          "range": {
+            "start": 90,
+            "end": 97,
+          },
+          "value": "array"
+        },
+        "value": {
+          "type": "array",
+          "range": {
+            "start": 99,
+            "end": 101,
+          },
+          "elements": [
+          ]
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 107,
+          "end": 119,
+        },
+        "name": {
+          "type": "string",
+          "range": {
+            "start": 107,
+            "end": 113,
+          },
+          "value": "true"
+        },
+        "value": {
+          "type": "boolean",
+          "range": {
+            "start": 115,
+            "end": 119,
+          },
+          "value": "true"
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 125,
+          "end": 139,
+        },
+        "name": {
+          "type": "string",
+          "range": {
+            "start": 125,
+            "end": 132,
+          },
+          "value": "false"
+        },
+        "value": {
+          "type": "boolean",
+          "range": {
+            "start": 134,
+            "end": 139,
+          },
+          "value": "false"
+        }
+      },
+      {
+        "type": "objectProp",
+        "range": {
+          "start": 145,
+          "end": 157,
+        },
+        "name": {
+          "type": "string",
+          "range": {
+            "start": 145,
+            "end": 151,
+          },
+          "value": "null"
+        },
+        "value": {
+          "type": "null",
+          "range": {
+            "start": 153,
+            "end": 157,
+          }
+        }
+      }
+    ]
+  },
+  "comments": [
+  ]
+}

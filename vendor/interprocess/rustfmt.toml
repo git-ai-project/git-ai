@@ -1,0 +1,9 @@
+unstable_features = true
+max_width = 98 # Rustfmt is a heap of bugs disguised as functional software
+fn_single_line = true
+imports_granularity = "One"
+group_imports = "One"
+overflow_delimited_expr = true
+reorder_modules = false
+use_field_init_shorthand = true
+use_small_heuristics = "Max"

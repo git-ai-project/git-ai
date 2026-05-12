@@ -1,0 +1,148 @@
+#[cfg(any(feature = "tree-error", not(feature = "auto-chain-error")))]
+mod _impl {
+    use crate::{Error, Exn};
+    use std::fmt::Formatter;
+
+    /// Utilities
+    impl Error {
+        /// Return the error that is most likely the root cause, based on heuristics.
+        /// Note that if there is nothing but this error, i.e. no source or children, this error is returned.
+        pub fn probable_cause(&self) -> &(dyn std::error::Error + 'static) {
+            let root = self.inner.frame();
+            root.probable_cause().unwrap_or(root).error()
+        }
+
+        /// Return an iterator over all errors in the tree in breadth-first order, starting with this one.
+        pub fn sources(&self) -> impl Iterator<Item = &(dyn std::error::Error + 'static)> + '_ {
+            self.inner.frame().iter_frames().map(|f| f.error() as _)
+        }
+    }
+
+    pub(crate) enum Inner {
+        ExnAsError(Box<crate::exn::Frame>),
+        Exn(Box<crate::exn::Frame>),
+    }
+
+    impl Inner {
+        fn frame(&self) -> &crate::exn::Frame {
+            match self {
+                Inner::ExnAsError(f) | Inner::Exn(f) => f,
+            }
+        }
+    }
+
+    impl Error {
+        /// Create a new instance representing the given `error`.
+        #[track_caller]
+        pub fn from_error(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+            Error {
+                inner: Inner::ExnAsError(Exn::new(error).into()),
+            }
+        }
+    }
+
+    impl std::fmt::Display for Error {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            match &self.inner {
+                Inner::ExnAsError(err) => std::fmt::Display::fmt(err.error(), f),
+                Inner::Exn(frame) => std::fmt::Display::fmt(frame, f),
+            }
+        }
+    }
+
+    impl std::fmt::Debug for Error {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            match &self.inner {
+                Inner::ExnAsError(err) => std::fmt::Debug::fmt(err.error(), f),
+                Inner::Exn(frame) => std::fmt::Debug::fmt(frame, f),
+            }
+        }
+    }
+
+    impl std::error::Error for Error {
+        /// Return the first source of an [Exn] error, or the source of a boxed error.
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            match &self.inner {
+                Inner::ExnAsError(frame) | Inner::Exn(frame) => frame.children().first().map(|f| f.error() as _),
+            }
+        }
+    }
+
+    impl<E> From<Exn<E>> for Error
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        fn from(err: Exn<E>) -> Self {
+            Error {
+                inner: Inner::Exn(err.into()),
+            }
+        }
+    }
+}
+#[cfg(any(feature = "tree-error", not(feature = "auto-chain-error")))]
+pub(super) use _impl::Inner;
+
+#[cfg(all(feature = "auto-chain-error", not(feature = "tree-error")))]
+mod _impl {
+    use crate::{Error, Exn};
+    use std::fmt::Formatter;
+
+    /// Utilities
+    impl Error {
+        /// Return the error that is most likely the root cause, based on heuristics.
+        /// Note that if there is nothing but this error, i.e. no source or children, this error is returned.
+        pub fn probable_cause(&self) -> &(dyn std::error::Error + 'static) {
+            use std::error::Error;
+            self.inner
+                .source()
+                .unwrap_or(self as &(dyn std::error::Error + 'static))
+        }
+
+        /// Return an iterator over all errors in the tree in breadth-first order, starting with this one.
+        pub fn sources(&self) -> impl Iterator<Item = &(dyn std::error::Error + 'static)> + '_ {
+            std::iter::successors(Some(&self.inner as &(dyn std::error::Error + 'static)), |err| {
+                err.source()
+            })
+        }
+    }
+
+    impl Error {
+        /// Create a new instance representing the given `error`.
+        #[track_caller]
+        pub fn from_error(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+            Error {
+                inner: Exn::new(error).into_chain(),
+            }
+        }
+    }
+
+    impl std::fmt::Display for Error {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            std::fmt::Display::fmt(&self.inner, f)
+        }
+    }
+
+    impl std::fmt::Debug for Error {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+            std::fmt::Debug::fmt(&self.inner, f)
+        }
+    }
+
+    impl std::error::Error for Error {
+        /// Return the first source of an [Exn] error, or the source of a boxed error.
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.inner.source()
+        }
+    }
+
+    impl<E> From<Exn<E>> for Error
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        fn from(err: Exn<E>) -> Self {
+            Error {
+                inner: err.into_chain(),
+            }
+        }
+    }
+}

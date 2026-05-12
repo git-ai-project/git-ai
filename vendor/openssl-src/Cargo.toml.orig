@@ -1,0 +1,142 @@
+[package]
+name = "openssl-src"
+version = "300.6.0+3.6.2"
+authors = ["Alex Crichton <alex@alexcrichton.com>"]
+license = "MIT/Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/alexcrichton/openssl-src-rs"
+edition = "2021"
+description = """
+Source of OpenSSL and logic to build it.
+"""
+exclude = [
+  '.github',
+  'ci',
+  '.gitignore',
+  '.gitmodules',
+
+  # The current upload size limit for *.crate files is 10MB. Therefore, exclude
+  # some unused documentation to meet this constraint.
+  'openssl/fuzz/corpora/*',
+  'openssl/pyca-cryptography/*',
+  'openssl/wycheproof/*',
+  'openssl/boringssl/*',
+  'openssl/krb5/*',
+  'openssl/test/recipes/*',
+  'openssl/gost-engine/*',
+  'openssl/demos/*',
+  'openssl/tlslite-ng/*',
+  'openssl/tlsfuzzer/*',
+  'openssl/python-ecdsa/*',
+  'openssl/oqs-provider/*',
+  'openssl/cloudflare-quiche/*',
+  'openssl/pkcs11-provider/*',
+  'openssl/.ctags.d/',
+  'openssl/.git-blame-ignore-revs',
+  'openssl/.gitattributes',
+
+  'openssl/test',
+  'openssl/**/*.plantuml',
+  'openssl/dev',
+  'openssl/**/*.sh',
+  'openssl/**/*.md',
+
+  'openssl/demos',
+  'openssl/external/perl/Text-Template-1.56/Changes',
+  'openssl/external/perl/Text-Template-1.56/INSTALL',
+  'openssl/external/perl/Text-Template-1.56/MANIFEST',
+  'openssl/external/perl/Text-Template-1.56/META.json',
+  'openssl/external/perl/Text-Template-1.56/META.yml',
+  'openssl/external/perl/Text-Template-1.56/Makefile.PL',
+  'openssl/external/perl/Text-Template-1.56/README',
+  'openssl/external/perl/Text-Template-1.56/SIGNATURE',
+  'openssl/util/providers.num',
+  'openssl/util/platform_symbols/',
+  'openssl/util/write-man-symlinks',
+  'openssl/util/mk-fipsmodule-cnf.pl',
+  'openssl/util/**/*.txt',
+  'openssl/util/**/*.pl',
+  'openssl/util/**/*.sed',
+  'openssl/util/**/*.rb',
+  'openssl/util/**/*.syms',
+  'openssl/util/perl/TLSProxy',
+  'openssl/util/merge-err-lines',
+  'openssl/util/err-to-raise',
+  'openssl/util/find-doc-nits',
+  'openssl/util/find-unused-errs',
+  'openssl/util/fix-deprecation',
+  'openssl/util/fix-includes',
+  'openssl/util/indent.pro',
+  'openssl/util/check-malloc-errs',
+  'openssl/util/perl/checkhandshake.pm',
+  'openssl/util/check-format-test-negatives.c',
+  'openssl/util/check-format-test-positives.c',
+  'openssl/util/perl/OpenSSL/Test/',
+  'openssl/funding.json',
+  'openssl/fuzz/',
+  'openssl/doc/',
+  'openssl/**/*.pem',
+  'openssl/**/*.srl',
+  'openssl/**/*.crt',
+  'openssl/**/*.cnf',
+  'openssl/providers/fips-sources.checksums',
+  'openssl/providers/fips.checksum',
+  'openssl/providers/fips.module.sources',
+  'openssl/Configurations/descrip.mms.tmpl',
+
+  'openssl/apps/demoSRP/srp_verifier.txt',
+  'openssl/apps/demoSRP/srp_verifier.txt.attr',
+  'openssl/crypto/err/openssl.txt',
+  'openssl/crypto/objects/obj_xref.txt',
+  'openssl/crypto/objects/objects.txt',
+  'openssl/engines/e_afalg.txt',
+  'openssl/engines/e_capi.txt',
+  'openssl/engines/e_dasync.txt',
+  'openssl/engines/e_loader_attic.txt',
+  'openssl/engines/e_ossltest.txt',
+  'openssl/external/perl/Downloaded.txt',
+
+  # these files are still required
+  '!openssl/util/add-depends.pl',
+  '!openssl/util/mkinstallvars.pl',
+  '!openssl/util/dofile.pl',
+  '!openssl/util/mkbuildinf.pl',
+  '!openssl/util/mkdir-p.pl',
+  '!openssl/util/mkrc.pl',
+  '!openssl/util/echo.pl',
+  '!openssl/util/copy.pl',
+  '!openssl/**/build.info',
+]
+
+[features]
+default = []
+# Enables compilation of the legacy provider, which must be loaded at runtime to use various
+# uncommon or insecure algorithms.
+legacy = []
+# Enables compilation of some older algorithms: md2 (hash), rc5 (block cypher) and enabled use of
+# some weaker algorithms in SSL connections. These are generally not recommended for use.
+weak-crypto = []
+# Enables compilation of SSLv3, which is disabled by default.
+ssl3 = []
+# Enables compilation of the Camellia symmetric key block cypher. Since hardware acceleration for
+# it is not available on most systems, this is not as used as AES.
+camellia = []
+# Enables compilation of International Data Encryption Algorithm (IDEA), a symmetric key block
+# cypher sometimes used as an AES128 alternative.
+idea = []
+# Enables compilation of SEED, a symmetric key block cypher mostly used in South Korea, but
+# otherwise not widely supported.
+seed = []
+# Forces configuring Engine module support.
+force-engine = []
+# Enable kTLS support
+ktls = []
+# Disable DSO API support
+no-dso = []
+
+[workspace]
+members = ['testcrate']
+exclude = ['target']
+
+[dependencies]
+cc = "1.0.79"
