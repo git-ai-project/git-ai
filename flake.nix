@@ -12,7 +12,7 @@
 
   outputs = { self, nixpkgs, rust-overlay, flake-utils }:
     let
-      default       = import ./default.nix;
+      default = import ./default.nix;
     in
       flake-utils.lib.eachDefaultSystem (system:
         let
@@ -204,7 +204,11 @@
       # Overlay for importing into other flakes
       overlays.default = final: prev: 
         let 
-          default' = prev.callPackage default { };
+          default' = 
+            (
+              final.extend rust-overlay.overlays.default
+            ).callPackage default { }
+          ;
         in
           {
             git-ai = default'.packages.git-ai;
