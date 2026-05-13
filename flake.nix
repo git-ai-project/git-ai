@@ -13,6 +13,9 @@
   outputs = { self, nixpkgs, rust-overlay, flake-utils }:
     let
       default = import ./default.nix;
+      defaultBasedOn = pkgs:
+        (pkgs.extend (rust-overlay.overlays.default)).callPackage default { }
+      ;
     in
       flake-utils.lib.eachDefaultSystem (system:
         let
@@ -204,11 +207,7 @@
       # Overlay for importing into other flakes
       overlays.default = final: prev: 
         let 
-          default' = 
-            (
-              final.extend rust-overlay.overlays.default
-            ).callPackage default { }
-          ;
+          default' = defaultBasedOn final;
         in
           {
             git-ai = default'.packages.git-ai;
@@ -223,7 +222,7 @@
           cfg = config.programs.git-ai;
           jsonFormat = pkgs.formats.json { };
 
-          default'      = pkgs.callPackage default { };
+          default'      = defaultBasedOn pkgs;
 
           # Build the config object, filtering out null values
           configFile = filterAttrs (n: v: v != null) {
@@ -521,7 +520,7 @@
           cfg = config.programs.git-ai;
           jsonFormat = pkgs.formats.json { };
 
-          default' = pkgs.callPackage default { };
+          default' = defaultBasedOn pkgs;
 
           # Build the config object, filtering out null values
           # We use explicit null checks since Nix 'or' only works for attribute access
