@@ -223,6 +223,8 @@
           cfg = config.programs.git-ai;
           jsonFormat = pkgs.formats.json { };
 
+          default'      = pkgs.callPackage default { };
+
           # Build the config object, filtering out null values
           configFile = filterAttrs (n: v: v != null) {
             git_path =
@@ -276,7 +278,7 @@
               type = types.nullOr types.package;
               default = null;
               defaultText = literalExpression "pkgs.git";
-              description = "The base git package to wrap.\n If null, defaults to pkgs.git";
+              description = "The base git package to wrap.\n If null, defaults to pkgs.git\n Does nothing if `programs.git-ai.package` is specified";
             };
 
             installHooks = mkOption {
