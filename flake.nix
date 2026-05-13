@@ -219,8 +219,6 @@
           cfg = config.programs.git-ai;
           jsonFormat = pkgs.formats.json { };
 
-          default' = pkgs.callPackage default { };
-
           # Build the config object, filtering out null values
           configFile = filterAttrs (n: v: v != null) {
             git_path =
@@ -516,6 +514,8 @@
         let
           cfg = config.programs.git-ai;
           jsonFormat = pkgs.formats.json { };
+
+          default' = pkgs.callPackage default { };
 
           # Build the config object, filtering out null values
           # We use explicit null checks since Nix 'or' only works for attribute access
