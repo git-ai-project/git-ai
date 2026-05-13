@@ -2117,9 +2117,9 @@ dependencies = [
 
 [[package]]
 name = "jsonc-parser"
-version = "0.32.1"
+version = "0.32.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8de0ffda8def4eb16ed430641db8056c2509b20e38f2dd327bdb4c83239f88c4"
+checksum = "840785e1a8b4fdb27be18440a35a81af64820dc185c3973ff8b012d4c6282512"
 
 [[package]]
 name = "kasuari"
