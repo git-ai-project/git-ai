@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::authorship::attribution_tracker::LineAttribution;
 use crate::authorship::authorship_log::LineRange;
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
-use crate::authorship::post_commit;
 use crate::authorship::working_log::CheckpointKind;
 use crate::error::GitAiError;
 use crate::git::authorship_traversal::{
@@ -27,8 +26,7 @@ pub struct RewriteTriple {
 
 /// Unified handler for ALL rewrite operations.
 ///
-/// Replaces `rewrite_authorship_after_rebase_v2`, `rewrite_authorship_after_cherry_pick`,
-/// `rewrite_authorship_after_commit_amend`, and the squash working-log preparation.
+/// Single entry point for rebase, cherry-pick, commit amend, and merge squash rewrites.
 ///
 /// Algorithm:
 /// 1. `git range-diff onto..original onto..new` -> commit mappings
@@ -94,11 +92,13 @@ pub fn handle_rewrite_op_v3(repo: &Repository, triple: &RewriteTriple) -> Result
     Ok(())
 }
 
-/// Handle a rewrite from the existing `RewriteLogEvent` data.
-/// This is the adapter that plugs into the existing daemon dispatch.
+/// Unified entry point for all rewrite authorship operations.
+/// Routes each event type to the appropriate handler.
 pub fn handle_rewrite_from_event(
     repo: &Repository,
     event: &RewriteLogEvent,
+    author: Option<String>,
+    final_state_override: Option<&HashMap<String, String>>,
 ) -> Result<(), GitAiError> {
     match event {
         RewriteLogEvent::RebaseComplete { rebase_complete } => {
@@ -111,7 +111,6 @@ pub fn handle_rewrite_from_event(
                 &rebase_complete.original_commits,
                 &rebase_complete.new_commits,
             );
-            // Detect squash: multiple originals mapped to one new commit
             let is_squash =
                 rebase_complete.original_commits.len() > rebase_complete.new_commits.len();
             if is_squash && rebase_complete.new_commits.len() == 1 {
@@ -121,10 +120,6 @@ pub fn handle_rewrite_from_event(
                     &rebase_complete.new_commits[0],
                 )?;
             } else {
-                // Build combined content→author map from ALL original commits.
-                // This allows lines attributed in earlier commits (e.g. A) to be
-                // recognized when transferring later commits (e.g. B) whose notes
-                // only contain their own delta.
                 let content_author_map = build_content_author_map(
                     repo,
                     &rebase_complete.original_commits,
@@ -165,21 +160,43 @@ pub fn handle_rewrite_from_event(
             Ok(())
         }
         RewriteLogEvent::CommitAmend { commit_amend } => {
-            crate::git::sync_authorship::fetch_missing_notes_for_commits(
-                repo,
-                std::slice::from_ref(&commit_amend.original_commit),
-            );
-            let empty_map = HashMap::new();
-            transfer_attribution_via_diff(
+            rewrite_authorship_after_commit_amend_with_snapshot(
                 repo,
                 &commit_amend.original_commit,
                 &commit_amend.amended_commit_sha,
-                &empty_map,
+                author.unwrap_or_default(),
+                final_state_override,
             )?;
-            migrate_working_log(
+            Ok(())
+        }
+        RewriteLogEvent::MergeSquash { merge_squash } => {
+            let current_head = repo
+                .head()
+                .ok()
+                .and_then(|head| head.target().ok())
+                .map(|oid| oid.to_string());
+            if current_head.as_deref() != Some(merge_squash.base_head.as_str()) {
+                tracing::debug!(
+                    "Skipping merge --squash pre-commit prep because repo head already advanced past {}",
+                    merge_squash.base_head
+                );
+                return Ok(());
+            }
+            repo.storage
+                .delete_working_log_for_base_commit(&merge_squash.base_head)?;
+            if merge_squash.staged_file_blobs.is_empty() {
+                tracing::debug!(
+                    "Skipping immediate merge --squash pre-commit prep for {} because no staged snapshot was captured; commit replay will reconstruct from the committed final state",
+                    merge_squash.base_head
+                );
+                return Ok(());
+            }
+            prepare_working_log_after_squash(
                 repo,
-                &commit_amend.original_commit,
-                &commit_amend.amended_commit_sha,
+                &merge_squash.source_head,
+                &merge_squash.base_head,
+                &merge_squash.staged_file_blobs,
+                &author.unwrap_or_default(),
             )?;
             Ok(())
         }
@@ -1047,89 +1064,6 @@ fn migrate_working_log(
     Ok(())
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Functions consolidated from rebase_authorship.rs
-// ═══════════════════════════════════════════════════════════════════════════════
-
-// Process events in the rewrite log and call the correct rewrite functions in this file
-pub fn rewrite_authorship_if_needed(
-    repo: &Repository,
-    last_event: &RewriteLogEvent,
-    commit_author: String,
-    _full_log: &Vec<RewriteLogEvent>,
-    supress_output: bool,
-) -> Result<(), GitAiError> {
-    match last_event {
-        RewriteLogEvent::Commit { commit } => {
-            // This is going to become the regualar post-commit
-            post_commit::post_commit(
-                repo,
-                commit.base_commit.clone(),
-                commit.commit_sha.clone(),
-                commit_author,
-                supress_output,
-            )?;
-        }
-        RewriteLogEvent::CommitAmend { commit_amend } => {
-            rewrite_authorship_after_commit_amend(
-                repo,
-                &commit_amend.original_commit,
-                &commit_amend.amended_commit_sha,
-                commit_author,
-            )?;
-
-            tracing::debug!(
-                "Ammended commit {} now has authorship log {}",
-                &commit_amend.original_commit,
-                &commit_amend.amended_commit_sha
-            );
-        }
-        RewriteLogEvent::MergeSquash { merge_squash } => {
-            let current_head = repo
-                .head()
-                .ok()
-                .and_then(|head| head.target().ok())
-                .map(|oid| oid.to_string());
-            if current_head.as_deref() != Some(merge_squash.base_head.as_str()) {
-                tracing::debug!(
-                    "Skipping merge --squash pre-commit prep because repo head already advanced past {}",
-                    merge_squash.base_head
-                );
-                return Ok(());
-            }
-            // --squash always fails if repo is not clean
-            // this clears old working logs in the event you reset, make manual changes, reset, try again
-            repo.storage
-                .delete_working_log_for_base_commit(&merge_squash.base_head)?;
-            if merge_squash.staged_file_blobs.is_empty() {
-                tracing::debug!(
-                    "Skipping immediate merge --squash pre-commit prep for {} because no staged snapshot was captured; commit replay will reconstruct from the committed final state",
-                    merge_squash.base_head
-                );
-                return Ok(());
-            }
-
-            // Prepare INITIAL attributions from the squashed changes
-            prepare_working_log_after_squash(
-                repo,
-                &merge_squash.source_head,
-                &merge_squash.base_head,
-                &merge_squash.staged_file_blobs,
-                &commit_author,
-            )?;
-
-            tracing::debug!(
-                "✓ Prepared authorship attributions for merge --squash of {} into {}",
-                merge_squash.source_branch,
-                merge_squash.base_branch
-            );
-        }
-        _ => {}
-    }
-
-    Ok(())
-}
-
 /// Prepare working log after a merge --squash (before commit)
 ///
 /// This handles the case where `git merge --squash` has staged changes but hasn't committed yet.
@@ -1781,21 +1715,6 @@ pub fn parse_cat_file_batch_output_with_oids(
     }
 
     Ok(results)
-}
-
-pub fn rewrite_authorship_after_commit_amend(
-    repo: &Repository,
-    original_commit: &str,
-    amended_commit: &str,
-    _human_author: String,
-) -> Result<AuthorshipLog, GitAiError> {
-    rewrite_authorship_after_commit_amend_with_snapshot(
-        repo,
-        original_commit,
-        amended_commit,
-        _human_author,
-        None,
-    )
 }
 
 pub fn rewrite_authorship_after_commit_amend_with_snapshot(

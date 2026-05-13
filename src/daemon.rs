@@ -27,8 +27,7 @@ use crate::{
     authorship::rewrite_op_v3::{
         committed_file_snapshot_between_commits, prepare_working_log_after_squash_from_final_state,
         reconstruct_working_log_after_reset, restore_virtual_attribution_carryover,
-        restore_working_log_carryover, rewrite_authorship_after_commit_amend_with_snapshot,
-        rewrite_authorship_if_needed,
+        restore_working_log_carryover,
     },
     authorship::working_log::CheckpointKind,
     commands::checkpoint_agent::orchestrator::CheckpointRequest,
@@ -2786,7 +2785,6 @@ fn apply_rewrite_side_effect(
     // processing.  We intentionally defer the append until AFTER authorship
     // succeeds — this prevents a failed rewrite from being permanently marked
     // as processed (fix for non-conflict rebase note loss).
-    let pre_append_log = repo.storage.read_rewrite_events()?;
     match &rewrite_event {
         RewriteLogEvent::Commit { commit } => {
             let final_state_override =
@@ -2800,29 +2798,20 @@ fn apply_rewrite_side_effect(
                 final_state_override,
             )?;
         }
-        RewriteLogEvent::CommitAmend { commit_amend } => {
+        RewriteLogEvent::CommitAmend { .. }
+        | RewriteLogEvent::RebaseComplete { .. }
+        | RewriteLogEvent::CherryPickComplete { .. }
+        | RewriteLogEvent::MergeSquash { .. } => {
             let final_state_override =
                 normalized_carryover_snapshot_ref.or(committed_final_state.as_ref());
-            rewrite_authorship_after_commit_amend_with_snapshot(
+            crate::authorship::rewrite_op_v3::handle_rewrite_from_event(
                 &repo,
-                &commit_amend.original_commit,
-                &commit_amend.amended_commit_sha,
-                author.clone(),
+                &rewrite_event,
+                Some(author.clone()),
                 final_state_override,
             )?;
         }
-        RewriteLogEvent::RebaseComplete { .. } | RewriteLogEvent::CherryPickComplete { .. } => {
-            crate::authorship::rewrite_op_v3::handle_rewrite_from_event(&repo, &rewrite_event)?;
-        }
-        _ => {
-            rewrite_authorship_if_needed(
-                &repo,
-                &rewrite_event,
-                author.clone(),
-                &pre_append_log,
-                true,
-            )?;
-        }
+        _ => {}
     }
     // Append the event AFTER authorship processing succeeds.  If the
     // processing above errored, the event is not recorded and the daemon

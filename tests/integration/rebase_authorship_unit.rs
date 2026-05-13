@@ -357,7 +357,7 @@ fn rebase_complete_migrates_initial_to_new_head() {
         ),
     };
 
-    handle_rewrite_from_event(&gitai_repo, &rebase_event)
+    handle_rewrite_from_event(&gitai_repo, &rebase_event, None, None)
         .expect("rewrite_authorship_if_needed should succeed");
 
     let new_wl = gitai_repo
@@ -431,7 +431,7 @@ fn rebase_complete_no_initial_is_noop() {
         ),
     };
 
-    handle_rewrite_from_event(&gitai_repo, &rebase_event)
+    handle_rewrite_from_event(&gitai_repo, &rebase_event, None, None)
         .expect("rewrite_authorship_if_needed should succeed with no INITIAL");
 
     let new_wl = gitai_repo
@@ -567,7 +567,8 @@ fn rebase_complete_migrates_multi_file_initial() {
         ),
     };
 
-    handle_rewrite_from_event(&gitai_repo, &rebase_event).expect("rewrite should succeed");
+    handle_rewrite_from_event(&gitai_repo, &rebase_event, None, None)
+        .expect("rewrite should succeed");
 
     let migrated = gitai_repo
         .storage
@@ -693,7 +694,7 @@ fn rebase_complete_merges_initial_when_both_working_logs_exist() {
         ),
     };
 
-    handle_rewrite_from_event(&gitai_repo, &rebase_event)
+    handle_rewrite_from_event(&gitai_repo, &rebase_event, None, None)
         .expect("rewrite should succeed when both working logs exist");
 
     // v3 does not merge INITIALs when both working logs exist — it deletes the old one
@@ -831,7 +832,8 @@ fn regression_initial_preserved_through_checkpoint_commit_rebase() {
         ),
     };
 
-    handle_rewrite_from_event(&gitai_repo, &rebase_event).expect("rewrite should succeed");
+    handle_rewrite_from_event(&gitai_repo, &rebase_event, None, None)
+        .expect("rewrite should succeed");
 
     let new_wl = gitai_repo
         .storage
@@ -954,7 +956,8 @@ fn regression_initial_survives_amend_then_rebase() {
             vec![amend_sha.clone()],
         ),
     };
-    handle_rewrite_from_event(&gitai_repo, &amend_event).expect("amend rewrite should succeed");
+    handle_rewrite_from_event(&gitai_repo, &amend_event, None, None)
+        .expect("amend rewrite should succeed");
 
     let amend_initial = gitai_repo
         .storage
@@ -985,7 +988,8 @@ fn regression_initial_survives_amend_then_rebase() {
             vec![rebase_new_head.clone()],
         ),
     };
-    handle_rewrite_from_event(&gitai_repo, &rebase_event).expect("rebase rewrite should succeed");
+    handle_rewrite_from_event(&gitai_repo, &rebase_event, None, None)
+        .expect("rebase rewrite should succeed");
 
     let final_initial = gitai_repo
         .storage
@@ -1329,7 +1333,8 @@ fn regression_multi_tool_initial_with_disjoint_files_survives_rebase() {
         ),
     };
 
-    handle_rewrite_from_event(&gitai_repo, &rebase_event).expect("rewrite should succeed");
+    handle_rewrite_from_event(&gitai_repo, &rebase_event, None, None)
+        .expect("rewrite should succeed");
 
     let migrated = gitai_repo
         .storage

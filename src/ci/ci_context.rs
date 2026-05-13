@@ -207,7 +207,7 @@ impl CiContext {
                             },
                         };
                         crate::authorship::rewrite_op_v3::handle_rewrite_from_event(
-                            &self.repo, &event,
+                            &self.repo, &event, None, None,
                         )?;
                     } else {
                         println!(

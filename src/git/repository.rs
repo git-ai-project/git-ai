@@ -1,4 +1,3 @@
-use crate::authorship::rewrite_op_v3::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::repo_state::{
@@ -1034,34 +1033,24 @@ impl Repository {
         &mut self,
         rewrite_log_event: RewriteLogEvent,
         commit_author: String,
-        supress_output: bool,
+        _supress_output: bool,
         apply_side_effects: bool,
     ) {
-        let log = self
+        let _log = self
             .storage
             .append_rewrite_event(rewrite_log_event.clone())
             .expect("Error writing .git/ai/rewrite_log");
 
         if apply_side_effects {
-            let result = match &rewrite_log_event {
-                RewriteLogEvent::RebaseComplete { .. }
-                | RewriteLogEvent::CherryPickComplete { .. } => {
-                    crate::authorship::rewrite_op_v3::handle_rewrite_from_event(
-                        self,
-                        &rewrite_log_event,
-                    )
-                }
-                _ => rewrite_authorship_if_needed(
-                    self,
-                    &rewrite_log_event,
-                    commit_author,
-                    &log,
-                    supress_output,
-                ),
-            };
+            let result = crate::authorship::rewrite_op_v3::handle_rewrite_from_event(
+                self,
+                &rewrite_log_event,
+                Some(commit_author.clone()),
+                None,
+            );
             if let Err(error) = result {
                 tracing::debug!(
-                    "rewrite_authorship_if_needed failed for {:?}: {}",
+                    "handle_rewrite_from_event failed for {:?}: {}",
                     rewrite_log_event,
                     error
                 );
