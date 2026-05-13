@@ -2,7 +2,7 @@ import Foundation
 import CoreServices
 
 // MARK: - Globals
-var pendingFiles: [String: [String: String]] = [:]  // repoRoot -> [relPath: content]
+var pendingFiles: [String: [String: String]] = [:]  // repoRoot -> [absPath: content]
 var debounceItems: [String: DispatchWorkItem] = [:]  // repoRoot -> work item
 var repoRootCache: [String: String?] = [:]           // dir -> repoRoot (nil = not a repo)
 let queue = DispatchQueue(label: "io.gitai.xcode-watcher", qos: .utility)
@@ -53,14 +53,6 @@ func shouldSkip(_ path: String) -> Bool {
     let skip = ["/.git/", "/DerivedData/", "/xcuserdata/", "/.build/", ".DS_Store",
                 "/.swiftpm/", "/Pods/"]
     return skip.contains { path.contains($0) }
-}
-
-func relativePath(_ absolutePath: String, in repoRoot: String) -> String {
-    let root = repoRoot.hasSuffix("/") ? repoRoot : repoRoot + "/"
-    if absolutePath.hasPrefix(root) {
-        return String(absolutePath.dropFirst(root.count))
-    }
-    return absolutePath
 }
 
 func fireCheckpoint(repoRoot: String) {
@@ -123,9 +115,9 @@ let callback: FSEventStreamCallback = { (_, _, numEvents, eventPaths, _, _) in
         for path in candidates {
             guard let root = findRepoRoot(for: path) else { continue }
             guard let content = readFileContents(path) else { continue }
-            let relPath = relativePath(path, in: root)
+            let absolutePath = (path as NSString).standardizingPath
             if pendingFiles[root] == nil { pendingFiles[root] = [:] }
-            pendingFiles[root]![relPath] = content
+            pendingFiles[root]![absolutePath] = content
             roots.insert(root)
         }
         for root in roots { scheduleDebounce(repoRoot: root) }

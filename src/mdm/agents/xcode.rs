@@ -4,6 +4,7 @@ use crate::mdm::hook_installer::{
     HookCheckResult, HookInstaller, HookInstallerParams, InstallResult, UninstallResult,
 };
 use crate::mdm::utils::home_dir;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -152,9 +153,21 @@ impl XcodeInstaller {
 
     fn is_watcher_up_to_date() -> bool {
         match fs::read_to_string(Self::version_file_path()) {
-            Ok(version) => version.trim() == env!("CARGO_PKG_VERSION"),
+            Ok(version) => version.trim() == Self::watcher_version_marker(),
             Err(_) => false,
         }
+    }
+
+    fn watcher_version_marker() -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(XCODE_WATCHER_PACKAGE_SWIFT.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(XCODE_WATCHER_MAIN_SWIFT.as_bytes());
+        format!(
+            "{}+sha256:{:x}",
+            env!("CARGO_PKG_VERSION"),
+            hasher.finalize()
+        )
     }
 
     fn install_warning(message: impl Into<String>) -> InstallResult {
@@ -775,7 +788,7 @@ impl HookInstaller for XcodeInstaller {
             let _ = fs::set_permissions(&watcher_bin, fs::Permissions::from_mode(0o755));
         }
 
-        if let Err(e) = fs::write(Self::version_file_path(), env!("CARGO_PKG_VERSION")) {
+        if let Err(e) = fs::write(Self::version_file_path(), Self::watcher_version_marker()) {
             results.push(Self::install_warning(format!(
                 "Xcode: Unable to write watcher version file: {}",
                 e
@@ -1170,6 +1183,14 @@ mod tests {
     }
 
     #[test]
+    fn test_embedded_xcode_watcher_sends_absolute_checkpoint_paths() {
+        assert!(XCODE_WATCHER_MAIN_SWIFT.contains("pendingFiles[root]![absolutePath] = content"));
+        assert!(XCODE_WATCHER_MAIN_SWIFT.contains("\"edited_filepaths\": Array(files.keys)"));
+        assert!(XCODE_WATCHER_MAIN_SWIFT.contains("\"dirty_files\": files"));
+        assert!(!XCODE_WATCHER_MAIN_SWIFT.contains("relativePath("));
+    }
+
+    #[test]
     fn test_failure_messages_use_visibility_keywords() {
         let messages = [
             "Xcode: Unable to create build cache directory: permission denied",
@@ -1258,9 +1279,12 @@ mod tests {
         with_temp_home(|_| {
             let version_path = XcodeInstaller::version_file_path();
             fs::create_dir_all(version_path.parent().unwrap()).unwrap();
-            fs::write(&version_path, env!("CARGO_PKG_VERSION")).unwrap();
+            fs::write(&version_path, XcodeInstaller::watcher_version_marker()).unwrap();
 
             assert!(XcodeInstaller::is_watcher_up_to_date());
+
+            fs::write(&version_path, env!("CARGO_PKG_VERSION")).unwrap();
+            assert!(!XcodeInstaller::is_watcher_up_to_date());
 
             fs::write(&version_path, "0.0.0").unwrap();
             assert!(!XcodeInstaller::is_watcher_up_to_date());
