@@ -19,7 +19,18 @@ pub fn diff_ai_accepted_stats(
     oldest_commit: Option<&str>,
     ignore_patterns: &[String],
 ) -> Result<DiffAiAcceptedStats, GitAiError> {
-    let added_lines_by_file = repo.diff_added_lines(from_ref, to_ref, None)?;
+    let diff_hunks = crate::commands::diff::get_diff_with_line_numbers_ignoring_cr_at_eol(
+        repo, from_ref, to_ref,
+    )?;
+    let mut added_lines_by_file = std::collections::HashMap::new();
+    for hunk in diff_hunks {
+        if !hunk.added_lines.is_empty() {
+            added_lines_by_file
+                .entry(hunk.file_path)
+                .or_insert_with(Vec::new)
+                .extend(hunk.added_lines);
+        }
+    }
     let ignore_matcher = build_ignore_matcher(ignore_patterns);
 
     let mut stats = DiffAiAcceptedStats::default();

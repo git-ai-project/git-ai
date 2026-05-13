@@ -379,7 +379,7 @@ pub fn stats_for_commit_stats(
     commit_sha: &str,
     ignore_patterns: &[String],
 ) -> Result<CommitStats, GitAiError> {
-    use crate::commands::diff::get_diff_with_line_numbers;
+    use crate::commands::diff::get_diff_with_line_numbers_ignoring_cr_at_eol;
 
     let commit_obj = repo.revparse_single(commit_sha)?.peel_to_commit()?;
     let parent_count = commit_obj.parent_count()?;
@@ -401,7 +401,7 @@ pub fn stats_for_commit_stats(
         commit_obj.parent(0)?.id()
     };
 
-    let hunks = get_diff_with_line_numbers(repo, &from_ref, commit_sha)?;
+    let hunks = get_diff_with_line_numbers_ignoring_cr_at_eol(repo, &from_ref, commit_sha)?;
     let authorship_log = get_authorship(repo, commit_sha);
 
     stats_for_commit_stats_from_hunks(
@@ -557,7 +557,7 @@ pub fn get_git_diff_stats(
     commit_sha: &str,
     ignore_patterns: &[String],
 ) -> Result<(u32, u32), GitAiError> {
-    use crate::commands::diff::get_diff_with_line_numbers;
+    use crate::commands::diff::get_diff_with_line_numbers_ignoring_cr_at_eol;
 
     let commit_obj = repo.revparse_single(commit_sha)?.peel_to_commit()?;
     let parent_count = commit_obj.parent_count()?;
@@ -575,7 +575,7 @@ pub fn get_git_diff_stats(
     };
 
     // Use the diff engine which properly handles renames with --find-renames=1%
-    let hunks = get_diff_with_line_numbers(repo, &from_ref, commit_sha)?;
+    let hunks = get_diff_with_line_numbers_ignoring_cr_at_eol(repo, &from_ref, commit_sha)?;
 
     let ignore_matcher = build_ignore_matcher(ignore_patterns);
     let mut added_lines = 0u32;

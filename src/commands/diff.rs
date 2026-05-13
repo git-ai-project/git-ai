@@ -3,6 +3,7 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::ignore::{
     build_ignore_matcher, effective_ignore_patterns, should_ignore_file_with_matcher,
 };
+use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
 use crate::commands::blame::GitAiBlameOptions;
 use crate::error::GitAiError;
 use crate::git::refs::{get_authorship, show_authorship_note};
@@ -480,6 +481,15 @@ pub fn get_diff_with_line_numbers(
     parse_diff_hunks(&diff_text)
 }
 
+pub fn get_diff_with_line_numbers_ignoring_cr_at_eol(
+    repo: &Repository,
+    from: &str,
+    to: &str,
+) -> Result<Vec<DiffHunk>, GitAiError> {
+    let diff_text = get_diff_text(repo, from, to, true)?;
+    parse_diff_hunks_ignoring_cr_at_eol(&diff_text)
+}
+
 fn get_diff_text(
     repo: &Repository,
     from: &str,
@@ -503,23 +513,67 @@ fn get_diff_text(
 }
 
 fn parse_diff_hunks(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
+    parse_diff_hunks_internal(diff_text, false)
+}
+
+fn parse_diff_hunks_ignoring_cr_at_eol(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
+    parse_diff_hunks_internal(diff_text, true)
+}
+
+#[derive(Debug)]
+struct ParsedHunk {
+    hunk: DiffHunk,
+    deleted_no_newline: Vec<bool>,
+    added_no_newline: Vec<bool>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LastChangedLine {
+    Deleted(usize),
+    Added(usize),
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct CrComparableDiffLine {
+    content_without_cr: String,
+    no_newline_at_eof: bool,
+}
+
+fn parse_diff_hunks_internal(
+    diff_text: &str,
+    ignore_cr_at_eol: bool,
+) -> Result<Vec<DiffHunk>, GitAiError> {
     let mut hunks = Vec::new();
     let mut current_old_file: Option<String> = None;
     let mut current_file = String::new();
-    let mut current_hunk: Option<DiffHunk> = None;
+    let mut current_hunk: Option<ParsedHunk> = None;
     let mut old_line_cursor = 0u32;
     let mut new_line_cursor = 0u32;
+    let mut last_changed_line: Option<LastChangedLine> = None;
 
-    let flush_current_hunk = |hunks: &mut Vec<DiffHunk>, current_hunk: &mut Option<DiffHunk>| {
-        if let Some(hunk) = current_hunk.take() {
-            hunks.push(hunk);
+    let flush_current_hunk = |hunks: &mut Vec<DiffHunk>, current_hunk: &mut Option<ParsedHunk>| {
+        if let Some(mut parsed_hunk) = current_hunk.take() {
+            if ignore_cr_at_eol {
+                filter_cr_at_eol_only_changes(&mut parsed_hunk);
+                strip_trailing_cr_from_hunk_contents(&mut parsed_hunk.hunk);
+            }
+            if !parsed_hunk.hunk.deleted_lines.is_empty()
+                || !parsed_hunk.hunk.added_lines.is_empty()
+            {
+                hunks.push(parsed_hunk.hunk);
+            }
         }
     };
 
-    for line in diff_text.lines() {
-        if line.starts_with("diff --git ") {
+    for raw_line in diff_text.split_inclusive('\n') {
+        let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let header_line = line.strip_suffix('\r').unwrap_or(line);
+        let content_line = if ignore_cr_at_eol { line } else { header_line };
+
+        if header_line.starts_with("diff --git ") {
             flush_current_hunk(&mut hunks, &mut current_hunk);
-            if let Some((old_file, new_file)) = parse_diff_git_header_paths(line) {
+            last_changed_line = None;
+            if let Some((old_file, new_file)) = parse_diff_git_header_paths(header_line) {
                 current_old_file = Some(old_file);
                 current_file = new_file;
             } else {
@@ -530,7 +584,7 @@ fn parse_diff_hunks(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
         }
 
         if current_hunk.is_none() {
-            if let Some(path_opt) = parse_old_file_path_from_minus_header_line(line) {
+            if let Some(path_opt) = parse_old_file_path_from_minus_header_line(header_line) {
                 current_old_file = path_opt;
                 if current_file.is_empty() {
                     current_file = current_old_file.clone().unwrap_or_default();
@@ -538,7 +592,7 @@ fn parse_diff_hunks(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
                 continue;
             }
 
-            if let Some(path_opt) = parse_new_file_path_from_plus_header_line(line) {
+            if let Some(path_opt) = parse_new_file_path_from_plus_header_line(header_line) {
                 current_file = path_opt
                     .or_else(|| current_old_file.clone())
                     .unwrap_or_default();
@@ -546,39 +600,162 @@ fn parse_diff_hunks(diff_text: &str) -> Result<Vec<DiffHunk>, GitAiError> {
             }
         }
 
-        if line.starts_with("@@ ") {
+        if header_line.starts_with("@@ ") {
             flush_current_hunk(&mut hunks, &mut current_hunk);
+            last_changed_line = None;
             let old_file_path = current_old_file
                 .as_deref()
                 .filter(|old_path| *old_path != current_file.as_str());
-            if let Some(mut hunk) = parse_hunk_line(line, &current_file, old_file_path)? {
+            if let Some(mut hunk) = parse_hunk_line(header_line, &current_file, old_file_path)? {
                 old_line_cursor = hunk.old_start;
                 new_line_cursor = hunk.new_start;
                 hunk.deleted_lines.clear();
                 hunk.added_lines.clear();
-                current_hunk = Some(hunk);
+                current_hunk = Some(ParsedHunk {
+                    hunk,
+                    deleted_no_newline: Vec::new(),
+                    added_no_newline: Vec::new(),
+                });
             }
             continue;
         }
 
-        if let Some(hunk) = current_hunk.as_mut() {
-            if let Some(stripped) = line.strip_prefix('-') {
-                hunk.deleted_lines.push(old_line_cursor);
-                hunk.deleted_contents.push(stripped.to_string());
+        if let Some(parsed_hunk) = current_hunk.as_mut() {
+            if let Some(stripped) = content_line.strip_prefix('-') {
+                parsed_hunk.hunk.deleted_lines.push(old_line_cursor);
+                parsed_hunk.hunk.deleted_contents.push(stripped.to_string());
+                parsed_hunk.deleted_no_newline.push(false);
+                last_changed_line = Some(LastChangedLine::Deleted(
+                    parsed_hunk.deleted_no_newline.len() - 1,
+                ));
                 old_line_cursor += 1;
-            } else if let Some(stripped) = line.strip_prefix('+') {
-                hunk.added_lines.push(new_line_cursor);
-                hunk.added_contents.push(stripped.to_string());
+            } else if let Some(stripped) = content_line.strip_prefix('+') {
+                parsed_hunk.hunk.added_lines.push(new_line_cursor);
+                parsed_hunk.hunk.added_contents.push(stripped.to_string());
+                parsed_hunk.added_no_newline.push(false);
+                last_changed_line = Some(LastChangedLine::Added(
+                    parsed_hunk.added_no_newline.len() - 1,
+                ));
                 new_line_cursor += 1;
-            } else if line.starts_with(' ') {
+            } else if content_line.starts_with(' ') {
+                last_changed_line = None;
                 old_line_cursor += 1;
                 new_line_cursor += 1;
+            } else if header_line.starts_with("\\ No newline at end of file") {
+                match last_changed_line {
+                    Some(LastChangedLine::Deleted(idx)) => {
+                        if let Some(flag) = parsed_hunk.deleted_no_newline.get_mut(idx) {
+                            *flag = true;
+                        }
+                    }
+                    Some(LastChangedLine::Added(idx)) => {
+                        if let Some(flag) = parsed_hunk.added_no_newline.get_mut(idx) {
+                            *flag = true;
+                        }
+                    }
+                    None => {}
+                }
             }
         }
     }
 
     flush_current_hunk(&mut hunks, &mut current_hunk);
     Ok(hunks)
+}
+
+// Filter only paired delete/add lines whose content differs by a trailing CR.
+// Missing-final-newline markers are tracked separately so adding a newline at
+// EOF remains a real line change.
+fn filter_cr_at_eol_only_changes(parsed_hunk: &mut ParsedHunk) {
+    let deleted_keys: Vec<CrComparableDiffLine> = parsed_hunk
+        .hunk
+        .deleted_contents
+        .iter()
+        .zip(&parsed_hunk.deleted_no_newline)
+        .map(|(content, no_newline_at_eof)| CrComparableDiffLine {
+            content_without_cr: strip_trailing_cr(content).to_string(),
+            no_newline_at_eof: *no_newline_at_eof,
+        })
+        .collect();
+    let added_keys: Vec<CrComparableDiffLine> = parsed_hunk
+        .hunk
+        .added_contents
+        .iter()
+        .zip(&parsed_hunk.added_no_newline)
+        .map(|(content, no_newline_at_eof)| CrComparableDiffLine {
+            content_without_cr: strip_trailing_cr(content).to_string(),
+            no_newline_at_eof: *no_newline_at_eof,
+        })
+        .collect();
+
+    let mut remove_deleted = vec![false; deleted_keys.len()];
+    let mut remove_added = vec![false; added_keys.len()];
+    for op in capture_diff_slices(&deleted_keys, &added_keys) {
+        if let DiffOp::Equal {
+            old_index,
+            new_index,
+            len,
+        } = op
+        {
+            for offset in 0..len {
+                let deleted_idx = old_index + offset;
+                let added_idx = new_index + offset;
+                if is_cr_at_eol_only_change(
+                    &parsed_hunk.hunk.deleted_contents[deleted_idx],
+                    &parsed_hunk.hunk.added_contents[added_idx],
+                    parsed_hunk.deleted_no_newline[deleted_idx],
+                    parsed_hunk.added_no_newline[added_idx],
+                ) {
+                    remove_deleted[deleted_idx] = true;
+                    remove_added[added_idx] = true;
+                }
+            }
+        }
+    }
+
+    filter_vec_by_remove_flags(&mut parsed_hunk.hunk.deleted_lines, &remove_deleted);
+    filter_vec_by_remove_flags(&mut parsed_hunk.hunk.deleted_contents, &remove_deleted);
+    filter_vec_by_remove_flags(&mut parsed_hunk.deleted_no_newline, &remove_deleted);
+    filter_vec_by_remove_flags(&mut parsed_hunk.hunk.added_lines, &remove_added);
+    filter_vec_by_remove_flags(&mut parsed_hunk.hunk.added_contents, &remove_added);
+    filter_vec_by_remove_flags(&mut parsed_hunk.added_no_newline, &remove_added);
+}
+
+fn strip_trailing_cr_from_hunk_contents(hunk: &mut DiffHunk) {
+    for content in hunk
+        .deleted_contents
+        .iter_mut()
+        .chain(hunk.added_contents.iter_mut())
+    {
+        if content.ends_with('\r') {
+            content.pop();
+        }
+    }
+}
+
+fn is_cr_at_eol_only_change(
+    deleted_content: &str,
+    added_content: &str,
+    deleted_no_newline: bool,
+    added_no_newline: bool,
+) -> bool {
+    !deleted_no_newline
+        && !added_no_newline
+        && deleted_content != added_content
+        && strip_trailing_cr(deleted_content) == strip_trailing_cr(added_content)
+}
+
+fn strip_trailing_cr(content: &str) -> &str {
+    content.strip_suffix('\r').unwrap_or(content)
+}
+
+fn filter_vec_by_remove_flags<T>(items: &mut Vec<T>, remove_flags: &[bool]) {
+    let mut index = 0usize;
+    items.retain(|_| {
+        let keep = !remove_flags.get(index).copied().unwrap_or(false);
+        index += 1;
+        keep
+    });
 }
 
 fn normalize_diff_path_token(path: &str) -> String {

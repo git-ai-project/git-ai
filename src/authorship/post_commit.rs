@@ -226,8 +226,11 @@ pub fn post_commit_with_final_state(
             &parent_sha
         };
 
-        let diff_hunks =
-            crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &commit_sha)?;
+        let diff_hunks = crate::commands::diff::get_diff_with_line_numbers_ignoring_cr_at_eol(
+            repo,
+            diff_base,
+            &commit_sha,
+        )?;
 
         let computed = stats_for_commit_stats_from_hunks(
             repo,

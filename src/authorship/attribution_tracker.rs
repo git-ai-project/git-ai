@@ -220,6 +220,192 @@ fn collect_line_metadata(content: &str) -> Vec<LineMetadata> {
 }
 
 #[derive(Clone, Debug)]
+struct LineEndingSpan {
+    start: usize,
+    eol_start: usize,
+    end: usize,
+}
+
+impl LineEndingSpan {
+    fn text<'a>(&self, content: &'a str) -> &'a str {
+        &content[self.start..self.eol_start]
+    }
+
+    fn eol<'a>(&self, content: &'a str) -> &'a str {
+        &content[self.eol_start..self.end]
+    }
+
+    fn logical_key(&self, content: &str) -> LogicalLineKey {
+        LogicalLineKey {
+            text: self.text(content).to_string(),
+            has_eol: self.eol_start < self.end,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct LogicalLineKey {
+    text: String,
+    has_eol: bool,
+}
+
+fn collect_line_ending_spans(content: &str) -> Vec<LineEndingSpan> {
+    let mut spans = Vec::new();
+    let bytes = content.as_bytes();
+    let mut line_start = 0usize;
+    let mut idx = 0usize;
+
+    while idx < bytes.len() {
+        let eol_len = match bytes[idx] {
+            b'\r' if idx + 1 < bytes.len() && bytes[idx + 1] == b'\n' => 2,
+            b'\r' | b'\n' => 1,
+            _ => {
+                idx += 1;
+                continue;
+            }
+        };
+
+        spans.push(LineEndingSpan {
+            start: line_start,
+            eol_start: idx,
+            end: idx + eol_len,
+        });
+        idx += eol_len;
+        line_start = idx;
+    }
+
+    if line_start < content.len() {
+        spans.push(LineEndingSpan {
+            start: line_start,
+            eol_start: content.len(),
+            end: content.len(),
+        });
+    }
+
+    spans
+}
+
+// Build a synthetic old buffer for diffing where unchanged logical lines use
+// the new buffer's line-ending bytes. This removes pure LF/CRLF churn before
+// byte attribution runs, while still treating added final newlines as edits.
+fn rewrite_line_endings_to_match(source: &str, reference: &str) -> Option<(String, Vec<usize>)> {
+    let source_spans = collect_line_ending_spans(source);
+    let reference_spans = collect_line_ending_spans(reference);
+    if source_spans.is_empty() || reference_spans.is_empty() {
+        return None;
+    }
+
+    let source_keys: Vec<LogicalLineKey> = source_spans
+        .iter()
+        .map(|span| span.logical_key(source))
+        .collect();
+    let reference_keys: Vec<LogicalLineKey> = reference_spans
+        .iter()
+        .map(|span| span.logical_key(reference))
+        .collect();
+
+    let mut matching_reference_by_source = vec![None; source_spans.len()];
+    for op in capture_diff_slices(&source_keys, &reference_keys) {
+        if let DiffOp::Equal {
+            old_index,
+            new_index,
+            len,
+        } = op
+        {
+            for offset in 0..len {
+                matching_reference_by_source[old_index + offset] = Some(new_index + offset);
+            }
+        }
+    }
+
+    let has_rewrite =
+        matching_reference_by_source
+            .iter()
+            .enumerate()
+            .any(|(source_idx, reference_idx)| {
+                let Some(reference_idx) = reference_idx else {
+                    return false;
+                };
+                should_rewrite_line_ending(
+                    source_spans[source_idx].eol(source),
+                    reference_spans[*reference_idx].eol(reference),
+                )
+            });
+    if !has_rewrite {
+        return None;
+    }
+
+    let mut rewritten = String::with_capacity(reference.len().max(source.len()));
+    let mut offset_map = vec![0usize; source.len() + 1];
+
+    for (source_idx, source_span) in source_spans.iter().enumerate() {
+        let source_eol = source_span.eol(source);
+        let target_eol = matching_reference_by_source[source_idx]
+            .map(|reference_idx| reference_spans[reference_idx].eol(reference))
+            .filter(|reference_eol| should_rewrite_line_ending(source_eol, reference_eol))
+            .unwrap_or(source_eol);
+        push_line_with_rewritten_eol(
+            source,
+            source_span,
+            target_eol,
+            &mut rewritten,
+            &mut offset_map,
+        );
+    }
+
+    offset_map[source.len()] = rewritten.len();
+    Some((rewritten, offset_map))
+}
+
+fn should_rewrite_line_ending(source_eol: &str, reference_eol: &str) -> bool {
+    !source_eol.is_empty() && !reference_eol.is_empty() && source_eol != reference_eol
+}
+
+fn push_line_with_rewritten_eol(
+    source: &str,
+    span: &LineEndingSpan,
+    target_eol: &str,
+    rewritten: &mut String,
+    offset_map: &mut [usize],
+) {
+    let output_text_start = rewritten.len();
+    rewritten.push_str(span.text(source));
+
+    for (source_offset, mapped_offset) in offset_map
+        .iter_mut()
+        .enumerate()
+        .take(span.eol_start + 1)
+        .skip(span.start)
+    {
+        *mapped_offset = output_text_start + (source_offset - span.start);
+    }
+
+    let output_eol_start = rewritten.len();
+    rewritten.push_str(target_eol);
+    for mapped_offset in offset_map
+        .iter_mut()
+        .take(span.end + 1)
+        .skip(span.eol_start + 1)
+    {
+        *mapped_offset = output_eol_start + target_eol.len();
+    }
+}
+
+fn remap_attributions_through_offset_map(
+    attributions: &[Attribution],
+    offset_map: &[usize],
+) -> Vec<Attribution> {
+    attributions
+        .iter()
+        .filter_map(|attr| {
+            let start = *offset_map.get(attr.start)?;
+            let end = *offset_map.get(attr.end)?;
+            (start < end).then(|| Attribution::new(start, end, attr.author_id.clone(), attr.ts))
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug)]
 struct Token {
     lexeme: String,
     start: usize,
@@ -569,9 +755,22 @@ impl AttributionTracker {
         let sorted_old_storage = (!is_attribution_list_sorted(old_attributions))
             .then(|| sort_attributions_for_transform(old_attributions));
         let old_attributions = sorted_old_storage.as_deref().unwrap_or(old_attributions);
+        let line_ending_rewrite_storage = rewrite_line_endings_to_match(old_content, new_content);
+        let remapped_attributions_storage =
+            line_ending_rewrite_storage.as_ref().map(|(_, offset_map)| {
+                remap_attributions_through_offset_map(old_attributions, offset_map)
+            });
+        let old_content_for_diff = line_ending_rewrite_storage
+            .as_ref()
+            .map(|(rewritten, _)| rewritten.as_str())
+            .unwrap_or(old_content);
+        let old_attributions_for_diff = remapped_attributions_storage
+            .as_deref()
+            .unwrap_or(old_attributions);
 
         // Phase 1: Compute diff
-        let diff_result = self.compute_diffs(old_content, new_content, is_ai_checkpoint)?;
+        let diff_result =
+            self.compute_diffs(old_content_for_diff, new_content, is_ai_checkpoint)?;
 
         // Phase 2: Build deletion and insertion catalogs
         let (deletions, insertions) = self.build_diff_catalog(&diff_result.diffs);
@@ -581,17 +780,21 @@ impl AttributionTracker {
             // AI formatting/refactor checkpoints should attribute rewritten regions to AI
             // instead of preserving original ownership through move detection.
             Vec::new()
-        } else if self.should_skip_move_detection(old_content, new_content, &deletions, &insertions)
-        {
+        } else if self.should_skip_move_detection(
+            old_content_for_diff,
+            new_content,
+            &deletions,
+            &insertions,
+        ) {
             Vec::new()
         } else {
-            self.detect_moves(old_content, new_content, &deletions, &insertions)
+            self.detect_moves(old_content_for_diff, new_content, &deletions, &insertions)
         };
 
         // Phase 4: Transform attributions through the diff
         let new_attributions = self.transform_attributions(
             &diff_result.diffs,
-            old_attributions,
+            old_attributions_for_diff,
             current_author,
             &insertions,
             &move_mappings,
@@ -2663,6 +2866,32 @@ mod tests {
             new,
             "Alice",
             "LF→CRLF with same content should not re-attribute to Bob",
+        );
+    }
+
+    #[test]
+    fn ai_append_after_no_final_newline_keeps_previous_ai_checkpoint_semantics() {
+        let tracker = AttributionTracker::new();
+        let old = "Base line 1\nBase line 2";
+        let new = "Base line 1\nBase line 2\nAI line\n";
+        let old_attrs = vec![Attribution::new(0, old.len(), "Alice".into(), TEST_TS)];
+
+        assert!(
+            rewrite_line_endings_to_match(old, new).is_none(),
+            "adding a final newline before appended content is a real edit, not a CR-at-EOL rewrite"
+        );
+
+        let updated = tracker
+            .update_attributions_for_checkpoint(old, new, &old_attrs, "Bob", TEST_TS + 1, true)
+            .unwrap();
+
+        let previous_final_line_start = "Base line 1\n".len();
+        let previous_final_line_end = "Base line 1\nBase line 2".len();
+        assert_range_owned_by(
+            &updated,
+            previous_final_line_start,
+            previous_final_line_end,
+            "Bob",
         );
     }
 
