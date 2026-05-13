@@ -562,7 +562,7 @@
               default = 
                 if cfg.gitBasePackage == null
                 then default'.packages.git-ai
-                else default'.overrideAttrs { git = cfg.gitBasePackage; }
+                else (default'.override { git = cfg.gitBasePackage; }).packages.git-ai
               ;
               defaultText = literalExpression "inputs.git-ai.packages.\${pkgs.system}.default";
               description = "The git-ai package to use.";
