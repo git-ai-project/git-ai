@@ -1747,6 +1747,90 @@ fn test_ai_generated_file_then_human_full_rewrite() {
     ]);
 }
 
+/// Helper to simulate an Xcode watcher KnownHuman checkpoint via the production
+/// `known_human` preset (which sets `known_human_metadata`, enabling AI Reclaim).
+fn xcode_known_human_checkpoint(repo: &TestRepo, files: &[&str]) {
+    let cwd = repo.path().to_string_lossy().to_string();
+    let edited: Vec<String> = files.iter().map(|f| f.to_string()).collect();
+    let mut dirty: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for f in files {
+        let abs = repo.path().join(f);
+        if abs.exists() {
+            dirty.insert(f.to_string(), fs::read_to_string(&abs).unwrap_or_default());
+        }
+    }
+    let payload = serde_json::json!({
+        "editor": "xcode",
+        "editor_version": "16.0",
+        "extension_version": "1.0.0",
+        "cwd": cwd,
+        "edited_filepaths": edited,
+        "dirty_files": dirty,
+    });
+    repo.git_ai_with_stdin(
+        &["checkpoint", "known_human", "--hook-input", "stdin"],
+        payload.to_string().as_bytes(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn test_xcode_watcher_race_known_human_before_ai() {
+    // Regression test for the Xcode watcher race condition:
+    // FSEvents-based watcher fires a KnownHuman checkpoint on AI-written files
+    // BEFORE the AI tool sends its own checkpoint, causing AI code to be
+    // misattributed as human. The AI Reclaim mechanism should fix this.
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("data.txt");
+
+    fs::write(&file_path, "line1\nline2\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    fs::write(&file_path, "line1\nline2\nAI_line3\n").unwrap();
+
+    xcode_known_human_checkpoint(&repo, &["data.txt"]);
+
+    repo.git_ai(&["checkpoint", "mock_ai", "data.txt"]).unwrap();
+
+    repo.stage_all_and_commit("AI adds line3").unwrap();
+
+    let mut file = repo.filename("data.txt");
+    file.assert_lines_and_blame(crate::lines![
+        "line1".human(),
+        "line2".human(),
+        "AI_line3".ai(),
+    ]);
+}
+
+#[test]
+fn test_xcode_watcher_race_does_not_affect_different_files() {
+    // Verify that AI Reclaim only removes KnownHuman entries for files
+    // that the AI checkpoint claims, not other files.
+    let repo = TestRepo::new();
+    let file_a = repo.path().join("file_a.txt");
+    let file_b = repo.path().join("file_b.txt");
+
+    fs::write(&file_a, "original_a\n").unwrap();
+    fs::write(&file_b, "original_b\n").unwrap();
+    repo.stage_all_and_commit("Initial commit").unwrap();
+
+    fs::write(&file_a, "original_a\nAI_line\n").unwrap();
+    fs::write(&file_b, "original_b\nhuman_line\n").unwrap();
+
+    xcode_known_human_checkpoint(&repo, &["file_a.txt", "file_b.txt"]);
+
+    repo.git_ai(&["checkpoint", "mock_ai", "file_a.txt"])
+        .unwrap();
+
+    repo.stage_all_and_commit("Mixed changes").unwrap();
+
+    let mut fa = repo.filename("file_a.txt");
+    fa.assert_lines_and_blame(crate::lines!["original_a".human(), "AI_line".ai(),]);
+
+    let mut fb = repo.filename("file_b.txt");
+    fb.assert_lines_and_blame(crate::lines!["original_b".human(), "human_line".human(),]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_simple_additions_empty_repo,
     test_simple_additions_with_base_commit,

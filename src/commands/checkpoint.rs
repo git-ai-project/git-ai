@@ -53,6 +53,12 @@ const AGENT_USAGE_MIN_INTERVAL_SECS: u64 = 150;
 #[cfg(not(any(test, feature = "test-support")))]
 const KNOWN_HUMAN_MIN_SECS_AFTER_AI: u64 = 1;
 
+/// When an AI checkpoint arrives, reclaim files from any KnownHuman checkpoint
+/// that fired within this window. This handles the Xcode watcher race condition
+/// where FSEvents triggers a KnownHuman checkpoint on AI-written files before
+/// the AI tool sends its own checkpoint.
+const AI_RECLAIM_FROM_KNOWN_HUMAN_WINDOW_SECS: u64 = 10;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PreparedPathRole {
@@ -828,6 +834,45 @@ fn execute_resolved_checkpoint(
         resolved.files.len(),
         save_states_start.elapsed()
     ));
+
+    // AI Reclaim: When an AI checkpoint arrives, remove entries for the same files
+    // from recent KnownHuman checkpoints IF:
+    //   1. The KnownHuman has known_human_metadata (production checkpoint from a
+    //      real editor/watcher, not a test mock). Note: production KnownHuman
+    //      checkpoints store editor info in `known_human_metadata`, NOT in
+    //      `agent_metadata` (which is only set for AI checkpoints).
+    //   2. It occurred within the reclaim time window
+    //   3. The content hashes match (KnownHuman captured the EXACT same content)
+    // This handles the Xcode/FSEvents watcher race where the watcher fires a
+    // KnownHuman checkpoint on AI-written files before the AI tool sends its own
+    // checkpoint. By removing those entries, the AI checkpoint diffs against the
+    // pre-KnownHuman state, correctly attributing AI-written code. The KnownHuman
+    // entries remain in the persisted JSONL, but post-commit's HashMap::insert
+    // ensures the later AI entry takes precedence.
+    if kind.is_ai() {
+        let current_ts_secs = (resolved.ts / 1000) as u64;
+        for cp in &mut checkpoints {
+            if cp.kind == CheckpointKind::KnownHuman && cp.known_human_metadata.is_some() {
+                let time_diff = current_ts_secs.saturating_sub(cp.timestamp);
+                if time_diff < AI_RECLAIM_FROM_KNOWN_HUMAN_WINDOW_SECS {
+                    let before_len = cp.entries.len();
+                    cp.entries.retain(|e| {
+                        !matches!(
+                            file_content_hashes.get(&e.file),
+                            Some(ai_content_hash) if e.blob_sha == *ai_content_hash
+                        )
+                    });
+                    let removed = before_len - cp.entries.len();
+                    if removed > 0 {
+                        debug_log(&format!(
+                            "[AI Reclaim] Removed {} KnownHuman entries with matching content (time_diff={}s)",
+                            removed, time_diff
+                        ));
+                    }
+                }
+            }
+        }
+    }
 
     let hash_compute_start = Instant::now();
     let mut ordered_hashes: Vec<_> = file_content_hashes.iter().collect();

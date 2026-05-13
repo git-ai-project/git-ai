@@ -101,3 +101,4 @@ mod virtual_attribution_merge;
 mod windsurf;
 mod worktrees;
 mod wrapper_performance_targets;
+mod xcode_command;
