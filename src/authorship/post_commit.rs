@@ -56,23 +56,6 @@ fn checkpoint_entry_requires_post_processing(
             .any(|attr| attr.author_id != CheckpointKind::Human.to_str())
 }
 
-pub fn post_commit(
-    repo: &Repository,
-    base_commit: Option<String>,
-    commit_sha: String,
-    human_author: String,
-    supress_output: bool,
-) -> Result<(String, AuthorshipLog), GitAiError> {
-    post_commit_with_final_state(
-        repo,
-        base_commit,
-        commit_sha,
-        human_author,
-        supress_output,
-        None,
-    )
-}
-
 pub fn post_commit_with_final_state(
     repo: &Repository,
     base_commit: Option<String>,
