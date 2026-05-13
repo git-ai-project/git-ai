@@ -155,7 +155,7 @@
                   libiconv apple-sdk_15
                 ];
               mkCheck = attrs: rustPlatform.buildRustPackage ({
-                version = self.packages.unwrapped.version;
+                version = self.packages.${system}.unwrapped.version;
                 src = ./.;
                 cargoLock.lockFile = ./Cargo.lock;
                 OPENSSL_NO_VENDOR = "1";
