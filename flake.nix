@@ -167,7 +167,7 @@
             in
             {
               # Build check - ensures the package builds
-              build = self.packages.unwrapped;
+              build = self.packages.${system}.unwrapped;
 
               # Clippy lint check with warnings as errors
               clippy = mkCheck {
