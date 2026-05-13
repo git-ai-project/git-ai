@@ -138,7 +138,7 @@
           ) { };
           # Make app available for `nix run`
           apps.default = flake-utils.lib.mkApp {
-            drv = self.packages.git-ai;
+            drv = self.packages.${system}.git-ai;
             exePath = "/bin/git-ai";
           };
 
