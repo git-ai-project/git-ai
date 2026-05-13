@@ -1,6 +1,8 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic};
+use crate::mdm::utils::{
+    generate_diff, home_dir, is_git_ai_checkpoint_command, to_git_bash_path, write_atomic,
+};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -84,9 +86,9 @@ impl DroidInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        let binary_path = params.binary_path.to_string_lossy().to_string();
-        let pre_tool_cmd = format!("{} {}", binary_path, DROID_PRE_TOOL_CMD);
-        let post_tool_cmd = format!("{} {}", binary_path, DROID_POST_TOOL_CMD);
+        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let pre_tool_cmd = format!("{} {}", binary_path_str, DROID_PRE_TOOL_CMD);
+        let post_tool_cmd = format!("{} {}", binary_path_str, DROID_POST_TOOL_CMD);
 
         let mut merged = existing.clone();
         let mut hooks_obj = merged.get("hooks").cloned().unwrap_or_else(|| json!({}));

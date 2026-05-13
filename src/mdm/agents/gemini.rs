@@ -1,7 +1,8 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
+    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, to_git_bash_path,
+    write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -87,12 +88,9 @@ impl GeminiInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        let before_tool_cmd = format!(
-            "{} {}",
-            params.binary_path.display(),
-            GEMINI_BEFORE_TOOL_CMD
-        );
-        let after_tool_cmd = format!("{} {}", params.binary_path.display(), GEMINI_AFTER_TOOL_CMD);
+        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let before_tool_cmd = format!("{} {}", binary_path_str, GEMINI_BEFORE_TOOL_CMD);
+        let after_tool_cmd = format!("{} {}", binary_path_str, GEMINI_AFTER_TOOL_CMD);
 
         let mut merged = existing.clone();
 

@@ -1,7 +1,8 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, write_atomic,
+    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, to_git_bash_path,
+    write_atomic,
 };
 use serde_json::{Value as JsonValue, json};
 use sha2::{Digest, Sha256};
@@ -25,7 +26,7 @@ impl CodexInstaller {
     }
 
     fn desired_command(binary_path: &Path) -> String {
-        format!("{} {}", binary_path.display(), CODEX_CHECKPOINT_CMD)
+        format!("{} {}", to_git_bash_path(binary_path), CODEX_CHECKPOINT_CMD)
     }
 
     fn parse_config_toml(content: &str) -> Result<TomlValue, GitAiError> {

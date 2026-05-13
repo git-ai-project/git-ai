@@ -5,8 +5,8 @@ use crate::mdm::hook_installer::{
 use crate::mdm::utils::{
     MIN_CURSOR_VERSION, generate_diff, get_editor_version, home_dir, install_vsc_editor_extension,
     is_vsc_editor_extension_installed, parse_version, resolve_editor_cli,
-    settings_paths_for_products, should_process_settings_target, version_meets_requirement,
-    write_atomic,
+    settings_paths_for_products, should_process_settings_target, to_git_bash_path,
+    version_meets_requirement, write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -135,16 +135,9 @@ impl HookInstaller for CursorInstaller {
         };
 
         // Build commands with absolute path
-        let pre_tool_use_cmd = format!(
-            "{} {}",
-            params.binary_path.display(),
-            CURSOR_PRE_TOOL_USE_CMD
-        );
-        let post_tool_use_cmd = format!(
-            "{} {}",
-            params.binary_path.display(),
-            CURSOR_POST_TOOL_USE_CMD
-        );
+        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let pre_tool_use_cmd = format!("{} {}", binary_path_str, CURSOR_PRE_TOOL_USE_CMD);
+        let post_tool_use_cmd = format!("{} {}", binary_path_str, CURSOR_POST_TOOL_USE_CMD);
 
         // Desired hooks payload for Cursor
         let desired: Value = json!({
@@ -653,11 +646,15 @@ mod tests {
 
     #[test]
     fn test_cursor_hook_commands_no_windows_extended_path_prefix() {
+        // Simulate the production path: get_current_binary_path() calls clean_path to strip
+        // the \\?\ extended-length prefix, then we call to_git_bash_path to convert to a
+        // shell-safe path.
         let raw_path = PathBuf::from(r"\\?\C:\Users\USERNAME\.git-ai\bin\git-ai.exe");
         let binary_path = clean_path(raw_path);
+        let binary_path_str = to_git_bash_path(&binary_path);
 
-        let pre_tool_use_cmd = format!("{} {}", binary_path.display(), CURSOR_PRE_TOOL_USE_CMD);
-        let post_tool_use_cmd = format!("{} {}", binary_path.display(), CURSOR_POST_TOOL_USE_CMD);
+        let pre_tool_use_cmd = format!("{} {}", binary_path_str, CURSOR_PRE_TOOL_USE_CMD);
+        let post_tool_use_cmd = format!("{} {}", binary_path_str, CURSOR_POST_TOOL_USE_CMD);
 
         assert!(
             !pre_tool_use_cmd.contains(r"\\?\"),
