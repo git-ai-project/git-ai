@@ -4,30 +4,52 @@ use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use crate::commands::helpers::{debug_log, git_cmd};
+use crate::commands::helpers::{debug_log, discover_repo_and_gitdir, read_head_sha};
 
 pub fn handle_post_commit() {
-    let git_dir_str = match git_cmd(&["rev-parse", "--git-dir"]) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let git_dir =
-        std::fs::canonicalize(&git_dir_str).unwrap_or_else(|_| PathBuf::from(&git_dir_str));
-
-    let commit_sha = match git_cmd(&["rev-parse", "HEAD"]) {
-        Ok(s) => s,
-        Err(_) => return,
+    // Discover repo root and git dir without spawning git
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let (repo_dir, git_dir) = match discover_repo_and_gitdir(&cwd) {
+        Some(pair) => pair,
+        None => return,
     };
 
-    let parent_sha = git_cmd(&["rev-parse", "HEAD~1"]).ok();
-    let base_commit = parent_sha.as_deref().unwrap_or("initial");
+    // Read HEAD sha from filesystem (avoids a git spawn)
+    let commit_sha = match read_head_sha(&git_dir) {
+        Some(sha) => sha,
+        None => return,
+    };
 
-    let repo_dir = git_cmd(&["rev-parse", "--show-toplevel"])
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    // Read parent SHA and author from the commit object (single git spawn)
+    let output = match Command::new("/usr/bin/git")
+        .args(["cat-file", "commit", &commit_sha])
+        .current_dir(&repo_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return,
+    };
 
-    let human_author = git_cmd(&["log", "-1", "--format=%aN <%aE>"])
-        .unwrap_or_else(|_| "Unknown <unknown>".to_string());
+    let mut parent_sha: Option<String> = None;
+    let mut human_author = String::from("Unknown <unknown>");
+    for line in output.lines() {
+        if line.is_empty() {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("parent ") {
+            if parent_sha.is_none() {
+                parent_sha = Some(rest.trim().to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("author ") {
+            if let Some(email_end) = rest.find("> ") {
+                human_author = rest[..email_end + 1].to_string();
+            }
+        }
+    }
+    let base_commit_owned = parent_sha.clone().unwrap_or_else(|| "initial".to_string());
+    let base_commit = base_commit_owned.as_str();
 
     let (mut authorship_log, initial_attrs) = match generate_authorship_for_commit(
         &git_dir,
