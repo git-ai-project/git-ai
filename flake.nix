@@ -25,8 +25,8 @@
           };
 
           default'      = pkgs.callPackage default { };
-          rustToolchain = default'.utils.rustToolchain;
-          rustPlatform = default'.utils.rustPlatform;
+          rustToolchain = default'.git-ai.utils.rustToolchain;
+          rustPlatform = default'.git-ai.utils.rustPlatform;
         in
         {
           # Development shell with full Rust toolchain
@@ -136,9 +136,10 @@
           };
 
           # Main packages
-          packages = pkgs.callPackage (inputs:
-            (pkgs.callPackage default inputs).packages
-          ) { };
+          packages = default'.git-ai.packages;
+
+          scope = default';
+
           # Make app available for `nix run`
           apps.default = flake-utils.lib.mkApp {
             drv = self.packages.${system}.git-ai;
@@ -210,8 +211,8 @@
           default' = defaultBasedOn final;
         in
           {
-            git-ai = default'.packages.git-ai;
-            git-ai-unwrapped = default'.packages.unwrapped;
+            git-ai = default'.git-ai.packages.git-ai;
+            git-ai-unwrapped = default'.git-ai.packages.unwrapped;
           }
       ;
 
@@ -266,8 +267,8 @@
               type = types.package;
               default = 
                 if cfg.gitBasePackage == null
-                then default'.packages.git-ai
-                else (default'.override { git = cfg.gitBasePackage; }).packages.git-ai
+                then default'.git-ai.packages.git-ai
+                else (default'.git-ai.override { git = cfg.gitBasePackage; }).packages.git-ai
               ;
               defaultText = literalExpression "inputs.git-ai.packages.\${pkgs.system}.default";
               description = "The git-ai package to use.";
@@ -562,8 +563,8 @@
               type = types.package;
               default = 
                 if cfg.gitBasePackage == null
-                then default'.packages.git-ai
-                else (default'.override { git = cfg.gitBasePackage; }).packages.git-ai
+                then default'.git-ai.packages.git-ai
+                else (default'.git-ai.override { git = cfg.gitBasePackage; }).packages.git-ai
               ;
               defaultText = literalExpression "inputs.git-ai.packages.\${pkgs.system}.default";
               description = "The git-ai package to use.";
