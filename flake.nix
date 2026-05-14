@@ -11,353 +11,209 @@
   };
 
   outputs = { self, nixpkgs, rust-overlay, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs {
-          inherit system;
-          overlays = [ rust-overlay.overlays.default ];
-        };
-
-        # Pin Rust 1.93.0 via rust-overlay
-        rustToolchain = pkgs.rust-bin.stable."1.93.0".default.override {
-          extensions = [
-            "rust-src"
-            "rust-analyzer"
-            "llvm-tools-preview"
-          ];
-        };
-
-        # Create a custom rustPlatform using the pinned toolchain
-        rustPlatform = pkgs.makeRustPlatform {
-          cargo = rustToolchain;
-          rustc = rustToolchain;
-        };
-
-        # Build the git-ai binary using the pinned Rust toolchain
-        git-ai-unwrapped = rustPlatform.buildRustPackage {
-          pname = "git-ai";
-          version = "1.4.9";
-
-          src = ./.;
-
-          cargoLock = {
-            lockFile = ./Cargo.lock;
+    let
+      default = import ./default.nix;
+      defaultApply = pkgs: default { inherit pkgs; lib = pkgs.lib; };
+      defaultApplyExt = pkgs: defaultApply (pkgs.extend rust-overlay.overlays.default);
+    in
+      flake-utils.lib.eachDefaultSystem (system:
+        let
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [ rust-overlay.overlays.default ];
           };
 
-          # Prevent openssl-sys from vendoring OpenSSL (which requires perl).
-          # Instead, link against the system OpenSSL provided by buildInputs.
-          OPENSSL_NO_VENDOR = "1";
+          default'      = defaultApply pkgs;
+          rustToolchain = default'.git-ai.utils.rustToolchain;
+          rustPlatform = default'.git-ai.utils.rustPlatform;
+        in
+        {
+          # Development shell with full Rust toolchain
+          devShells.default = pkgs.mkShell {
+            packages = [
+              # Pinned Rust 1.93.0 toolchain (includes rustc, cargo, clippy, rustfmt, rust-analyzer)
+              rustToolchain
+            ] ++ (with pkgs; [
+              # Build dependencies
+              pkg-config
 
-          # Native build inputs needed for rusqlite with bundled SQLite
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-          ] ++ [
-            rustPlatform.bindgenHook  # For rusqlite bundled builds
-          ];
+              # Runtime dependencies for testing
+              # NOTE: git is NOT included as a package here. Instead, the
+              # shellHook creates wrapper scripts (git, git-ai, git-og) that
+              # point to the locally-built target/debug/git-ai binary, so that
+              # development builds are tested directly. Use `git-og` to bypass
+              # git-ai and call real git.
+              sqlite
 
-          # Build inputs for runtime dependencies
-          buildInputs = with pkgs; [
-            # rusqlite bundled mode compiles its own SQLite, but needs these headers
-            sqlite
-            # openssl-sys needs system OpenSSL headers and libraries
-            openssl
-          ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
-            # macOS-specific dependencies
-            libiconv
-            apple-sdk_15
-          ];
+              # Useful development tools
+              cargo-edit      # cargo add, cargo rm, cargo upgrade
+              cargo-watch     # Auto-rebuild on file changes
+              cargo-expand    # Show macro expansions
+              cargo-llvm-cov  # Code coverage via LLVM instrumentation
+              lefthook        # Git hooks manager
+              go-task         # Task runner (Taskfile.yml)
+            ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
+              libiconv
+              apple-sdk_15
+            ]);
 
-          # Tests require git and specific setup
-          doCheck = false;
+            # Environment variables for development
+            shellHook = ''
+              # Unset DEVELOPER_DIR to avoid conflict between the default stdenv
+              # SDK (14.4) and apple-sdk_15 (15.5) baked into the clang wrapper.
+              unset DEVELOPER_DIR
 
-          meta = with pkgs.lib; {
-            description = "AI-powered Git wrapper that tracks AI-generated code changes";
-            homepage = "https://github.com/acunniffe/git-ai";
-            license = licenses.gpl3Plus;
-            maintainers = [ ];
-            mainProgram = "git-ai";
-            platforms = platforms.unix;
+              # Set up development git-ai wrappers for nix develop (Nix-specific; non-Nix devs use scripts/dev.sh)
+              BUILD_TYPE="''${GIT_AI_BUILD_TYPE:-debug}"
+              GITWRAP_DIR="$HOME/.git-ai-local-dev/gitwrap/bin"
+              TARGET_DIR="''${CARGO_TARGET_DIR:-$(pwd)/target}"
+              BINARY="$TARGET_DIR/$BUILD_TYPE/git-ai"
+
+              mkdir -p "$GITWRAP_DIR"
+
+              # Create git wrapper (preserves argv[0] as "git" for passthrough mode)
+              cat > "$GITWRAP_DIR/git" <<GITEOF
+  #!/bin/bash
+  if [ ! -x "$BINARY" ]; then
+    echo "git-ai: dev binary not found at $BINARY" >&2
+    echo "Run 'cargo build' first, then retry." >&2
+    exit 1
+  fi
+  exec -a git "$BINARY" "\$@"
+  GITEOF
+              chmod +x "$GITWRAP_DIR/git"
+
+              # Create git-ai wrapper
+              cat > "$GITWRAP_DIR/git-ai" <<GITAIEOF
+  #!/bin/bash
+  if [ ! -x "$BINARY" ]; then
+    echo "git-ai: dev binary not found at $BINARY" >&2
+    echo "Run 'cargo build' first, then retry." >&2
+    exit 1
+  fi
+  exec "$BINARY" "\$@"
+  GITAIEOF
+              chmod +x "$GITWRAP_DIR/git-ai"
+
+              # Create git-og wrapper (bypasses git-ai, calls real git directly)
+              cat > "$GITWRAP_DIR/git-og" <<GITOGEOF
+  #!/bin/bash
+  exec ${pkgs.git}/bin/git "\$@"
+  GITOGEOF
+              chmod +x "$GITWRAP_DIR/git-og"
+
+              export PATH="$GITWRAP_DIR:$PATH"
+
+              # Install hooks if binary is already built
+              if [ -x "$BINARY" ]; then
+                "$GITWRAP_DIR/git-ai" install-hooks 2>/dev/null || true
+              fi
+
+              # Install lefthook git hooks (use real git, not the git-ai wrapper,
+              # since the dev binary may not be built yet)
+              PATH="${pkgs.git}/bin:$PATH" lefthook install 2>/dev/null || true
+
+              # Set up environment for development
+              export RUST_BACKTRACE=1
+              export RUST_LOG=debug
+
+              echo "git-ai development environment"
+              echo "Rust version: $(rustc --version)"
+              echo "Cargo version: $(cargo --version)"
+              echo ""
+              if [ -x "$BINARY" ]; then
+                echo "Dev binary: $BINARY (ready)"
+                echo "Hooks installed."
+              else
+                echo "Dev binary: $BINARY (not built yet)"
+                echo "Run 'cargo build' to build, then hooks will be installed on next 'nix develop'."
+              fi
+              echo ""
+              echo "git, git-ai, git-og -> wrappers in $GITWRAP_DIR"
+              echo "Set GIT_AI_BUILD_TYPE=release for release builds."
+            '';
           };
-        };
 
-        # Wrapped version that sets up the git-ai environment properly
-        git-ai-wrapped = pkgs.writeShellScriptBin "git-ai" ''
-          # Ensure config directory exists
-          mkdir -p "$HOME/.git-ai"
+          # Main packages
+          packages = default'.git-ai.packages;
 
-          # Create config.json if it doesn't exist
-          if [ ! -f "$HOME/.git-ai/config.json" ]; then
-            # Find the system git (not our wrapper)
-            GIT_PATH="${pkgs.git}/bin/git"
-            cat > "$HOME/.git-ai/config.json" <<EOF
-          {
-            "git_path": "$GIT_PATH"
-          }
-          EOF
-          fi
+          scope = default';
 
-          # Execute git-ai with all arguments
-          exec ${git-ai-unwrapped}/bin/git-ai "$@"
-        '';
-
-        # Wrapper for git command that preserves argv[0] as "git"
-        # This is critical: when symlinked as "git", the wrapper must set argv[0]
-        # to "git" so the Rust binary routes to handle_git() instead of handle_git_ai()
-        git-wrapper = pkgs.writeShellScriptBin "git" ''
-          # Ensure config directory exists
-          mkdir -p "$HOME/.git-ai"
-
-          # Create config.json if it doesn't exist
-          if [ ! -f "$HOME/.git-ai/config.json" ]; then
-            # Find the system git (not our wrapper)
-            GIT_PATH="${pkgs.git}/bin/git"
-            cat > "$HOME/.git-ai/config.json" <<EOF
-          {
-            "git_path": "$GIT_PATH"
-          }
-          EOF
-          fi
-
-          # Execute git-ai with argv[0] set to "git" to trigger passthrough mode
-          # The -a flag ensures argv[0] is "git" regardless of the actual binary path
-          exec -a git ${git-ai-unwrapped}/bin/git-ai "$@"
-        '';
-
-        # Create git-og wrapper that bypasses git-ai and calls real git directly
-        # This is needed because git interprets argv[0] as a subcommand
-        git-og = pkgs.writeShellScriptBin "git-og" ''
-          exec ${pkgs.git}/bin/git "$@"
-        '';
-
-        # Package without git wrapper - for Home Manager / environments with existing git
-        git-ai-minimal = pkgs.symlinkJoin {
-          name = "git-ai-minimal-${git-ai-unwrapped.version}";
-          paths = [ git-ai-wrapped git-ai-unwrapped git-og ];
-
-          # Create libexec symlink for Fork compatibility
-          # Fork looks for libexec relative to the git binary location
-          postBuild = ''
-            ln -s ${pkgs.git}/libexec $out/libexec
-          '';
-
-          meta = git-ai-unwrapped.meta // {
-            description = git-ai-unwrapped.meta.description + " (without git wrapper)";
+          # Make app available for `nix run`
+          apps.default = flake-utils.lib.mkApp {
+            drv = self.packages.${system}.git-ai;
+            exePath = "/bin/git-ai";
           };
-        };
 
-        # Create a complete package with git wrapper (for standalone use)
-        # The git-wrapper script ensures argv[0] is "git" when invoked as git
-        git-ai-package = pkgs.symlinkJoin {
-          name = "git-ai-${git-ai-unwrapped.version}";
-          paths = [ git-ai-wrapped git-wrapper git-ai-unwrapped git-og ];
+          # Nix flake checks: run with `nix flake check`
+          # Tests are not included here -- they require network access, Node.js,
+          # and the Graphite CLI, which are not available in the Nix sandbox.
+          # Tests run in CI via the existing test.yml workflow instead.
+          checks =
+            let
+              commonNativeBuildInputs = with pkgs; [ pkg-config ]
+                ++ [ rustPlatform.bindgenHook ];
+              commonBuildInputs = with pkgs; [ sqlite openssl ]
+                ++ lib.optionals stdenv.hostPlatform.isDarwin [
+                  libiconv apple-sdk_15
+                ];
+              mkCheck = attrs: rustPlatform.buildRustPackage ({
+                version = self.packages.${system}.unwrapped.version;
+                src = ./.;
+                cargoLock.lockFile = ./Cargo.lock;
+                OPENSSL_NO_VENDOR = "1";
+                nativeBuildInputs = commonNativeBuildInputs;
+                buildInputs = commonBuildInputs;
+                installPhase = "mkdir -p $out";
+                doCheck = false;
+              } // attrs);
+            in
+            {
+              # Build check - ensures the package builds
+              build = self.packages.${system}.unwrapped;
 
-          # Create libexec symlink for Fork compatibility
-          # Fork looks for libexec relative to the git binary location
-          postBuild = ''
-            ln -s ${pkgs.git}/libexec $out/libexec
-          '';
+              # Clippy lint check with warnings as errors
+              clippy = mkCheck {
+                pname = "git-ai-clippy";
+                buildPhase = ''
+                  cargo clippy --all-targets -- -D warnings
+                '';
+              };
 
-          meta = git-ai-unwrapped.meta // {
-            description = git-ai-unwrapped.meta.description + " (with git wrapper)";
-          };
-        };
+              # Format check
+              fmt = mkCheck {
+                pname = "git-ai-fmt";
+                buildPhase = ''
+                  cargo fmt -- --check
+                '';
+              };
 
-      in
-      {
-        # Development shell with full Rust toolchain
-        devShells.default = pkgs.mkShell {
-          packages = [
-            # Pinned Rust 1.93.0 toolchain (includes rustc, cargo, clippy, rustfmt, rust-analyzer)
-            rustToolchain
-          ] ++ (with pkgs; [
-            # Build dependencies
-            pkg-config
-
-            # Runtime dependencies for testing
-            # NOTE: git is NOT included as a package here. Instead, the
-            # shellHook creates wrapper scripts (git, git-ai, git-og) that
-            # point to the locally-built target/debug/git-ai binary, so that
-            # development builds are tested directly. Use `git-og` to bypass
-            # git-ai and call real git.
-            sqlite
-
-            # Useful development tools
-            cargo-edit      # cargo add, cargo rm, cargo upgrade
-            cargo-watch     # Auto-rebuild on file changes
-            cargo-expand    # Show macro expansions
-            cargo-llvm-cov  # Code coverage via LLVM instrumentation
-            lefthook        # Git hooks manager
-            go-task         # Task runner (Taskfile.yml)
-          ] ++ lib.optionals stdenv.hostPlatform.isDarwin [
-            libiconv
-            apple-sdk_15
-          ]);
-
-          # Environment variables for development
-          shellHook = ''
-            # Unset DEVELOPER_DIR to avoid conflict between the default stdenv
-            # SDK (14.4) and apple-sdk_15 (15.5) baked into the clang wrapper.
-            unset DEVELOPER_DIR
-
-            # Set up development git-ai wrappers for nix develop (Nix-specific; non-Nix devs use scripts/dev.sh)
-            BUILD_TYPE="''${GIT_AI_BUILD_TYPE:-debug}"
-            GITWRAP_DIR="$HOME/.git-ai-local-dev/gitwrap/bin"
-            TARGET_DIR="''${CARGO_TARGET_DIR:-$(pwd)/target}"
-            BINARY="$TARGET_DIR/$BUILD_TYPE/git-ai"
-
-            mkdir -p "$GITWRAP_DIR"
-
-            # Create git wrapper (preserves argv[0] as "git" for passthrough mode)
-            cat > "$GITWRAP_DIR/git" <<GITEOF
-#!/bin/bash
-if [ ! -x "$BINARY" ]; then
-  echo "git-ai: dev binary not found at $BINARY" >&2
-  echo "Run 'cargo build' first, then retry." >&2
-  exit 1
-fi
-exec -a git "$BINARY" "\$@"
-GITEOF
-            chmod +x "$GITWRAP_DIR/git"
-
-            # Create git-ai wrapper
-            cat > "$GITWRAP_DIR/git-ai" <<GITAIEOF
-#!/bin/bash
-if [ ! -x "$BINARY" ]; then
-  echo "git-ai: dev binary not found at $BINARY" >&2
-  echo "Run 'cargo build' first, then retry." >&2
-  exit 1
-fi
-exec "$BINARY" "\$@"
-GITAIEOF
-            chmod +x "$GITWRAP_DIR/git-ai"
-
-            # Create git-og wrapper (bypasses git-ai, calls real git directly)
-            cat > "$GITWRAP_DIR/git-og" <<GITOGEOF
-#!/bin/bash
-exec ${pkgs.git}/bin/git "\$@"
-GITOGEOF
-            chmod +x "$GITWRAP_DIR/git-og"
-
-            export PATH="$GITWRAP_DIR:$PATH"
-
-            # Install hooks if binary is already built
-            if [ -x "$BINARY" ]; then
-              "$GITWRAP_DIR/git-ai" install-hooks 2>/dev/null || true
-            fi
-
-            # Install lefthook git hooks (use real git, not the git-ai wrapper,
-            # since the dev binary may not be built yet)
-            PATH="${pkgs.git}/bin:$PATH" lefthook install 2>/dev/null || true
-
-            # Set up environment for development
-            export RUST_BACKTRACE=1
-            export RUST_LOG=debug
-
-            echo "git-ai development environment"
-            echo "Rust version: $(rustc --version)"
-            echo "Cargo version: $(cargo --version)"
-            echo ""
-            if [ -x "$BINARY" ]; then
-              echo "Dev binary: $BINARY (ready)"
-              echo "Hooks installed."
-            else
-              echo "Dev binary: $BINARY (not built yet)"
-              echo "Run 'cargo build' to build, then hooks will be installed on next 'nix develop'."
-            fi
-            echo ""
-            echo "git, git-ai, git-og -> wrappers in $GITWRAP_DIR"
-            echo "Set GIT_AI_BUILD_TYPE=release for release builds."
-          '';
-        };
-
-        # Main packages
-        packages = {
-          # Unwrapped binary (just the git-ai executable)
-          unwrapped = git-ai-unwrapped;
-
-          # Wrapped version with helper scripts
-          wrapped = git-ai-wrapped;
-
-          # Minimal package without git symlink (for Home Manager/environments with existing git)
-          minimal = git-ai-minimal;
-
-          # Complete package with git/git-og symlinks (for standalone use)
-          default = git-ai-package;
-
-          # Alias for clarity
-          git-ai = git-ai-package;
-        };
-
-        # Make app available for `nix run`
-        apps.default = flake-utils.lib.mkApp {
-          drv = git-ai-package;
-          exePath = "/bin/git-ai";
-        };
-
-        # Nix flake checks: run with `nix flake check`
-        # Tests are not included here -- they require network access, Node.js,
-        # and the Graphite CLI, which are not available in the Nix sandbox.
-        # Tests run in CI via the existing test.yml workflow instead.
-        checks =
-          let
-            commonNativeBuildInputs = with pkgs; [ pkg-config ]
-              ++ [ rustPlatform.bindgenHook ];
-            commonBuildInputs = with pkgs; [ sqlite openssl ]
-              ++ lib.optionals stdenv.hostPlatform.isDarwin [
-                libiconv apple-sdk_15
-              ];
-            mkCheck = attrs: rustPlatform.buildRustPackage ({
-              version = git-ai-unwrapped.version;
-              src = ./.;
-              cargoLock.lockFile = ./Cargo.lock;
-              OPENSSL_NO_VENDOR = "1";
-              nativeBuildInputs = commonNativeBuildInputs;
-              buildInputs = commonBuildInputs;
-              installPhase = "mkdir -p $out";
-              doCheck = false;
-            } // attrs);
-          in
-          {
-            # Build check - ensures the package builds
-            build = git-ai-unwrapped;
-
-            # Clippy lint check with warnings as errors
-            clippy = mkCheck {
-              pname = "git-ai-clippy";
-              buildPhase = ''
-                cargo clippy --all-targets -- -D warnings
-              '';
+              # Doc check with warnings as errors
+              doc = mkCheck {
+                pname = "git-ai-doc";
+                RUSTDOCFLAGS = "-D warnings";
+                buildPhase = ''
+                  cargo doc --no-deps
+                '';
+              };
             };
 
-            # Format check
-            fmt = mkCheck {
-              pname = "git-ai-fmt";
-              buildPhase = ''
-                cargo fmt -- --check
-              '';
-            };
-
-            # Doc check with warnings as errors
-            doc = mkCheck {
-              pname = "git-ai-doc";
-              RUSTDOCFLAGS = "-D warnings";
-              buildPhase = ''
-                cargo doc --no-deps
-              '';
-            };
-          };
-
-        # Formatter for `nix fmt`
-        formatter = pkgs.nixpkgs-fmt;
-      }
+          # Formatter for `nix fmt`
+          formatter = pkgs.nixpkgs-fmt;
+        }
     ) // {
       # System-independent outputs
 
       # Overlay for importing into other flakes
-      overlays.default = final: prev: {
-        git-ai = self.packages.${prev.stdenv.hostPlatform.system}.default;
-        git-ai-unwrapped = self.packages.${prev.stdenv.hostPlatform.system}.unwrapped;
-      };
+      overlays.default = final: prev: 
+        let 
+          default' = defaultApplyExt final;
+        in
+          {
+            git-ai = default'.git-ai.packages.git-ai;
+            git-ai-unwrapped = default'.git-ai.packages.unwrapped;
+          }
+      ;
 
       # NixOS module for system integration
       nixosModules.default = { config, lib, pkgs, ... }:
@@ -365,6 +221,8 @@ GITOGEOF
         let
           cfg = config.programs.git-ai;
           jsonFormat = pkgs.formats.json { };
+
+          default'      = defaultApplyExt pkgs;
 
           # Build the config object, filtering out null values
           configFile = filterAttrs (n: v: v != null) {
@@ -406,9 +264,20 @@ GITOGEOF
 
             package = mkOption {
               type = types.package;
-              default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+              default = 
+                if cfg.gitBasePackage == null
+                then default'.git-ai.packages.git-ai
+                else (default'.overrideScope (final: prev: { git = cfg.gitBasePackage; })).git-ai.packages.git-ai
+              ;
               defaultText = literalExpression "inputs.git-ai.packages.\${pkgs.system}.default";
               description = "The git-ai package to use.";
+            };
+
+            gitBasePackage = mkOption {
+              type = types.nullOr types.package;
+              default = null;
+              defaultText = literalExpression "pkgs.git";
+              description = "The base git package to wrap.\n If null, defaults to pkgs.git\n Does nothing if `programs.git-ai.package` is specified";
             };
 
             installHooks = mkOption {
@@ -651,6 +520,8 @@ GITOGEOF
           cfg = config.programs.git-ai;
           jsonFormat = pkgs.formats.json { };
 
+          default' = defaultApplyExt pkgs;
+
           # Build the config object, filtering out null values
           # We use explicit null checks since Nix 'or' only works for attribute access
           configFile = filterAttrs (n: v: v != null) {
@@ -689,9 +560,20 @@ GITOGEOF
 
             package = mkOption {
               type = types.package;
-              default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+              default = 
+                if cfg.gitBasePackage == null
+                then default'.git-ai.packages.git-ai
+                else (default'.overrideScope (final: prev: { git = cfg.gitBasePackage; })).git-ai.packages.git-ai
+              ;
               defaultText = literalExpression "inputs.git-ai.packages.\${pkgs.system}.default";
               description = "The git-ai package to use.";
+            };
+
+            gitBasePackage = mkOption {
+              type = types.nullOr types.package;
+              default = null;
+              defaultText = literalExpression "pkgs.git";
+              description = "The base git package to wrap.\n If null, defaults to pkgs.git";
             };
 
             installHooks = mkOption {
