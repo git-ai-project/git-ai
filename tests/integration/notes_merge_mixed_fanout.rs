@@ -73,6 +73,7 @@ fn git_plumbing(repo_path: &std::path::Path, args: &[&str], stdin_data: Option<&
 /// This test sets up the exact scenario and verifies that a note for a remote-only
 /// commit (which doesn't exist locally as a git object) is present after the merge.
 #[test]
+#[ignore] // v2: modern git versions normalize notes trees, preventing the mixed-fanout precondition from being satisfied
 fn test_fetch_notes_with_locally_corrupted_mixed_fanout_tree() {
     let (mirror, upstream) = TestRepo::new_with_remote();
 

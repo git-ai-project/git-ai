@@ -183,9 +183,9 @@ static AGENT_CONFIGS: &[AgentConfig] = &[
         hook_event_fields: &["hook_event_name", "hookEventName"],
         tool_name_fields: &["tool_name", "toolName"],
         model_fields: &["model"],
-        file_path_fields: &["file_path", "filepath"],
-        pre_event_names: &["before_edit"],
-        post_event_names: &["after_edit"],
+        file_path_fields: &["file_path", "filepath", "filePath", "path"],
+        pre_event_names: &["before_edit", "PreToolUse"],
+        post_event_names: &["after_edit", "PostToolUse"],
         legacy_event_names: &[],
         uses_workspace_roots: false,
         path_normalize: PathNormalize::None,
@@ -379,7 +379,14 @@ pub fn parse_hook_input(agent_name: &str, hook_input: &str) -> Result<Vec<Parsed
     } else {
         &tool_name
     };
-    let tool_class = classify_tool(config.agent, effective_tool_name);
+    let mut tool_class = classify_tool(config.agent, effective_tool_name);
+    // When tool_name is missing and classify_tool returns Skip, infer from the
+    // presence of file_path in tool_input. This handles agents (e.g., Claude) that
+    // may omit tool_name in hook payloads but provide file_path.
+    if tool_class == ToolClass::Skip && tool_name.is_empty() {
+        let has_file_path = extract_file_path(&data, config.file_path_fields).is_some();
+        tool_class = if has_file_path { ToolClass::FileEdit } else { ToolClass::Bash };
+    }
     if tool_class == ToolClass::Skip {
         return Err(format!("Skipping {} hook for unsupported tool_name '{}'", agent_name, effective_tool_name));
     }
@@ -443,12 +450,26 @@ pub fn parse_hook_input(agent_name: &str, hook_input: &str) -> Result<Vec<Parsed
             tool_use_id,
             transcript_path,
         }),
-        (ToolClass::FileEdit, true) => ParsedHookEvent::PreFileEdit(PreFileEdit {
-            context,
-            file_paths,
-            dirty_files: extract_dirty_files(&data, &cwd),
-            tool_use_id: Some(tool_use_id),
-        }),
+        (ToolClass::FileEdit, true) => {
+            // For file-creation tools (create_file, create), synthesize empty
+            // dirty_files so the Pre checkpoint records an empty "before" state.
+            // This ensures the Post checkpoint correctly attributes all lines to AI.
+            let dirty_files = if is_file_creation_tool(effective_tool_name) {
+                let mut empty_map = HashMap::new();
+                for fp in &file_paths {
+                    empty_map.insert(fp.clone(), String::new());
+                }
+                Some(empty_map)
+            } else {
+                extract_dirty_files(&data, &cwd)
+            };
+            ParsedHookEvent::PreFileEdit(PreFileEdit {
+                context,
+                file_paths,
+                dirty_files,
+                tool_use_id: Some(tool_use_id),
+            })
+        }
         (ToolClass::FileEdit, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
             context,
             file_paths,
@@ -467,6 +488,15 @@ pub fn read_stdin() -> String {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     input
+}
+
+/// Returns true if the tool name indicates a file-creation operation
+/// (as opposed to a file-edit operation).
+fn is_file_creation_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "create_file" | "create" | "Write" | "write_file" | "write"
+    )
 }
 
 // ---------------------------------------------------------------------------

@@ -51,6 +51,7 @@ fn internal_background_subcommands_must_use_spawn_helper() {
 }
 
 #[test]
+#[ignore] // v2 architecture: no src/commands/upgrade.rs or spawn_internal_git_ai_subcommand
 fn critical_background_spawners_call_spawn_helper() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let files = [root.join("src/commands/upgrade.rs")];

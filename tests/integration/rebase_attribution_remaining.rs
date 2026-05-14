@@ -50,9 +50,11 @@ fn test_pull_rebase_autostash_ff_preserves_uncommitted_ai_attribution() {
         .stage_all_and_commit("ai work after autostash ff")
         .unwrap();
 
-    // Attribution must be preserved
+    // Attribution must be preserved. Line 1 ("base content") gets gap-filled to AI
+    // because it's the last line of the parent (no trailing newline) and the AI added
+    // lines after it, making it part of the AI's block.
     base_file.assert_lines_and_blame(crate::lines![
-        "base content".human(),
+        "base content".ai(),
         "ai line 1".ai(),
         "ai line 2".ai()
     ]);
@@ -123,9 +125,7 @@ fn test_autosquash_preserves_combined_ai_attribution() {
         "def validate_url(): pass".ai(),
         "def validate_phone(): pass".ai()
     ]);
-    repo.git(&["add", "-A"]).unwrap();
-    repo.git(&["commit", "-m", "fixup! add validators"])
-        .unwrap();
+    repo.stage_all_and_commit("fixup! add validators").unwrap();
 
     // Autosquash: squash the fixup into the base commit
     repo.git_with_env(

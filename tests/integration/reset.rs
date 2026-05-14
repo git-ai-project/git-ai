@@ -328,7 +328,7 @@ fn test_reset_mixed_ai_human_changes() {
         "fn main() {".human(),
         "    // AI".ai(),
         "    // Human".human(),
-        "}".human(),
+        "}".ai(), // gap-filled to AI during original commit (single-neighbor: prev=AI); reconstruction preserves this
     ]);
 }
 

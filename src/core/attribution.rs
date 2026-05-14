@@ -72,7 +72,22 @@ pub fn update_attributions(
     // Phase 5: Merge adjacent/overlapping ranges with same metadata
     let merged = merge_attributions(transformed);
 
-    // Phase 6: Attribute lines touched by deletions that have no coverage.
+    // Phase 6a: For human/known_human checkpoints with no prior state AND no prior
+    // content (new file), attribute ALL bytes to the human author. When prev_attributions
+    // is empty and prev_content is empty, the entire new file is from the human.
+    // When prev_content is NOT empty, Equal bytes represent content from HEAD which
+    // should remain unattributed (resolved later via INITIAL from the parent commit's note).
+    let is_human_author = current_author.starts_with("h_") || current_author == "human";
+    if is_human_author && prev_attributions.is_empty() && prev_content.is_empty() && !new_content.is_empty() {
+        return vec![Attribution {
+            start: 0,
+            end: new_content.len(),
+            author_id: current_author.to_string(),
+            ts,
+        }];
+    }
+
+    // Phase 6b: Attribute lines touched by deletions that have no coverage.
     // When a Delete op occurs (AI removes text), the remaining Equal bytes on
     // that line may have no attribution. If prev_attributions was empty (no prior
     // checkpoint for this commit), those lines should be attributed to the current
@@ -894,18 +909,31 @@ fn attribute_deletion_touched_lines(
     deletion_lines.sort_unstable();
     deletion_lines.dedup();
 
-    // For each deletion-affected line, check if it has any attribution
+    // For each deletion-affected line, check if it has substantial attribution
     let mut result = merged.to_vec();
     for &line_idx in &deletion_lines {
         let (line_start, line_end) = line_ranges[line_idx];
 
-        // Check if any existing attribution covers this line
-        let has_coverage = merged
-            .iter()
-            .any(|attr| attr.end > line_start && attr.start < line_end);
+        // Check if any existing attribution covers non-whitespace bytes on this line.
+        // Whitespace-only coverage (e.g. a trailing newline from Insert) doesn't count
+        // because it doesn't represent meaningful content attribution.
+        let has_substantial_coverage = merged.iter().any(|attr| {
+            if attr.end <= line_start || attr.start >= line_end {
+                return false;
+            }
+            let overlap_start = attr.start.max(line_start);
+            let overlap_end = attr.end.min(line_end);
+            if overlap_start >= overlap_end {
+                return false;
+            }
+            // Check if the overlapping bytes contain non-whitespace
+            new_content[overlap_start..overlap_end]
+                .chars()
+                .any(|c| !c.is_whitespace())
+        });
 
-        if !has_coverage {
-            // No attribution for this line — attribute to current author
+        if !has_substantial_coverage {
+            // No substantial attribution for this line — attribute to current author
             result.push(Attribution {
                 start: line_start,
                 end: line_end,
@@ -996,11 +1024,44 @@ fn find_dominant_author(
         }
     }
 
-    // Prefer substantial overlap, fall back to any overlap (whitespace-only changes)
-    best_substantial
-        .or(best_any)
-        .map(|(author, _)| author.to_string())
-        .unwrap_or_default()
+    // Prefer substantial overlap (non-whitespace bytes covered).
+    if let Some((author, _)) = best_substantial {
+        return author.to_string();
+    }
+    // Fall back to whitespace-only overlap:
+    // - For blank lines: always accept (whitespace IS the content)
+    // - For non-blank lines with AI author: only accept if it's NOT solely a trailing
+    //   newline. A trailing newline from AI appending lines is a formatting artifact.
+    // - For non-blank lines with human (h_) author: always accept. Human trailing-newline
+    //   coverage is meaningful because it indicates the human checkpoint covered this line.
+    if let Some((author, _)) = best_any {
+        if is_blank {
+            return author.to_string();
+        }
+        let is_human_author = author.starts_with("h_") || author == "human";
+        if is_human_author {
+            return author.to_string();
+        }
+        // AI author: check if the whitespace-only coverage is solely a trailing newline.
+        // If it covers any bytes OTHER than the last byte of the line (or the last
+        // byte isn't a newline), it's meaningful (e.g. indentation changes).
+        let is_trailing_newline_only = line_end > line_start
+            && content.as_bytes().get(line_end - 1) == Some(&b'\n')
+            && sorted_attr_indices.iter().all(|&idx| {
+                let attr = &attributions[idx];
+                if attr.start >= line_end || attr.end <= line_start {
+                    return true; // Not on this line
+                }
+                let overlap_start = attr.start.max(line_start);
+                let overlap_end = attr.end.min(line_end);
+                // Only covers the trailing newline byte
+                overlap_start >= line_end - 1 && overlap_end <= line_end
+            });
+        if !is_trailing_newline_only {
+            return author.to_string();
+        }
+    }
+    String::new()
 }
 
 fn floor_char_boundary(content: &str, idx: usize) -> usize {
@@ -1224,7 +1285,7 @@ fn match_multi_char_op(ch: char, peek: Option<char>) -> Option<&'static str> {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-enum LineDiffOp {
+pub enum LineDiffOp {
     Equal {
         old_index: usize,
         new_index: usize,
@@ -1265,7 +1326,7 @@ impl<'a, T: Clone + Hash + Eq> TokenSource for SliceSource<'a, T> {
     }
 }
 
-fn diff_slices<T: Hash + Eq + Clone>(old: &[T], new: &[T]) -> Vec<LineDiffOp> {
+pub fn diff_slices<T: Hash + Eq + Clone>(old: &[T], new: &[T]) -> Vec<LineDiffOp> {
     let input = InternedInput::new(SliceSource { slice: old }, SliceSource { slice: new });
     let diff = Diff::compute(Algorithm::Myers, &input);
     hunks_to_ops(&diff, old.len())

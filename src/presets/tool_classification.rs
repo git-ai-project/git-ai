@@ -86,7 +86,9 @@ pub fn classify_tool(agent: Agent, tool_name: &str) -> ToolClass {
         },
         Agent::GithubCopilot => match tool_name {
             "copilot_replaceString" | "create_file" | "apply_patch" | "editFiles"
-            | "insert_edit" | "replace_edit" | "delete_edit" => ToolClass::FileEdit,
+            | "insert_edit" | "replace_edit" | "delete_edit"
+            | "replace_string_in_file" | "replaceStringInFile"
+            | "edit" | "create" => ToolClass::FileEdit,
             "runInTerminal" | "run_in_terminal" => ToolClass::Bash,
             // GitHub Copilot's before_edit/after_edit events may not include a tool_name;
             // default to FileEdit when tool_name is empty (the event type itself implies file edit).

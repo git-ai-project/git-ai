@@ -91,6 +91,13 @@ pub struct HumanRecord {
     pub author: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptRecord {
+    pub agent_id: AgentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_author: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InitialAttributions {
     pub files: HashMap<String, Vec<LineAttribution>>,
@@ -98,6 +105,8 @@ pub struct InitialAttributions {
     pub sessions: HashMap<String, SessionRecord>,
     #[serde(default)]
     pub humans: HashMap<String, HumanRecord>,
+    #[serde(default)]
+    pub prompts: HashMap<String, PromptRecord>,
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +359,7 @@ mod tests {
             files,
             sessions: HashMap::new(),
             humans: HashMap::new(),
+            prompts: HashMap::new(),
         };
 
         write_initial_attributions(&git_dir, base, &attrs);

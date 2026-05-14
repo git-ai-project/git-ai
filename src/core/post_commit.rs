@@ -141,6 +141,7 @@ pub fn generate_authorship_for_commit(
         &uncommitted_lines,
         &metadata,
         commit_sha,
+        parent_sha,
         repo_dir,
     );
 
@@ -706,6 +707,7 @@ fn split_attributions(
     uncommitted_lines: &HashMap<String, Vec<u32>>,
     metadata: &CollectedMetadata,
     commit_sha: &str,
+    parent_sha: &str,
     repo_dir: &Path,
 ) -> (AuthorshipLog, InitialAttributions) {
     let mut log = AuthorshipLog::new(Metadata {
@@ -831,9 +833,55 @@ fn split_attributions(
             }
         }
 
+        // Identify h_ lines at trailing-newline boundaries (the last line of the parent
+        // whose content matches but appears in committed_set only because a newline was
+        // added after it when new lines were appended). These should be treated as "soft h_"
+        // that gap-fill CAN override.
+        let mut h_lines_matching_parent: HashSet<u32> = HashSet::new();
+        if parent_sha != "initial" {
+            if let Some(parent_content) = git_show_file(repo_dir, parent_sha, file_path) {
+                let parent_lines: Vec<&str> = parent_content.lines().collect();
+                let parent_has_no_trailing_newline = !parent_content.ends_with('\n');
+                if let Some(commit_content) = git_show_file(repo_dir, commit_sha, file_path) {
+                    let commit_lines: Vec<&str> = commit_content.lines().collect();
+                    if parent_has_no_trailing_newline
+                        && !parent_lines.is_empty()
+                        && commit_lines.len() > parent_lines.len()
+                    {
+                        let last_parent_line_num = parent_lines.len() as u32;
+                        let last_parent_idx = parent_lines.len() - 1;
+                        // Check if the last parent line appears unchanged at the same position
+                        if last_parent_idx < commit_lines.len()
+                            && commit_lines[last_parent_idx] == parent_lines[last_parent_idx]
+                        {
+                            // Check if this line has h_ attribution (make it soft/gap-fillable)
+                            let h_authors_present: Vec<&str> = committed_by_author
+                                .keys()
+                                .filter(|k| k.starts_with("h_"))
+                                .copied()
+                                .collect();
+                            for h_author in &h_authors_present {
+                                if let Some(lines) = committed_by_author.get(*h_author) {
+                                    if lines.contains(&last_parent_line_num) {
+                                        h_lines_matching_parent.insert(last_parent_line_num);
+                                    }
+                                }
+                            }
+
+                            // Note: We no longer insert into explicitly_human_committed here.
+                            // The h_between check in gap_fill_committed prevents gap-fill from
+                            // bridging over h_ lines, which handles the case where the last
+                            // parent line should stay human (when there's a human-attributed
+                            // line between it and the nearest AI neighbor).
+                        }
+                    }
+                }
+            }
+        }
+
         // Gap-fill committed lines (but not lines explicitly attributed to human)
         if let Some(c_set) = committed_set {
-            gap_fill_committed(&mut committed_by_author, c_set, &explicitly_human_committed);
+            gap_fill_committed(&mut committed_by_author, c_set, &explicitly_human_committed, &h_lines_matching_parent);
         }
 
         // Build attestation entries for committed lines
@@ -945,6 +993,7 @@ fn gap_fill_committed(
     committed_by_author: &mut HashMap<&str, Vec<u32>>,
     committed_set: &HashSet<u32>,
     explicitly_human: &HashSet<u32>,
+    h_override: &HashSet<u32>,
 ) {
     // Build sorted AI-only line-author pairs for neighbor lookups.
     // We exclude h_ lines from the neighbor list so they can be reassigned.
@@ -977,7 +1026,8 @@ fn gap_fill_committed(
             continue;
         }
 
-        let is_h_line = h_lines.contains(&line);
+        // h_ lines matching parent content are treated as "soft" (can be gap-filled)
+        let is_h_line = h_lines.contains(&line) && !h_override.contains(&line);
 
         // Find nearest AI-attributed neighbor before
         let prev = ai_line_author_pairs.iter().rev().find(|(l, _)| *l < line);
@@ -993,15 +1043,19 @@ fn gap_fill_committed(
                 // h_ lines (known-human) are never gap-filled in the sandwiched case.
                 // Different authors on either side means the gap is ambiguous.
             }
-            (None, Some((_, next_author))) => {
+            (None, Some((next_line, next_author))) => {
                 // Single-neighbor: only fill truly unattributed lines (not h_)
-                if !is_h_line {
+                // Also don't fill if there's an h_ line between this line and the AI neighbor
+                let h_between = h_lines.iter().any(|&h| h > line && h < *next_line);
+                if !is_h_line && !h_between {
                     gap_fills.push((next_author, line));
                 }
             }
-            (Some((_, prev_author)), None) => {
+            (Some((prev_line, prev_author)), None) => {
                 // Single-neighbor: only fill truly unattributed lines (not h_)
-                if !is_h_line {
+                // Also don't fill if there's an h_ line between this line and the AI neighbor
+                let h_between = h_lines.iter().any(|&h| h < line && h > *prev_line);
+                if !is_h_line && !h_between {
                     gap_fills.push((prev_author, line));
                 }
             }
@@ -1112,7 +1166,7 @@ mod tests {
         committed_by_author.insert("abc123", vec![1, 2, 4, 5]);
         let committed_set: HashSet<u32> = [1, 2, 3, 4, 5].into_iter().collect();
 
-        gap_fill_committed(&mut committed_by_author, &committed_set, &HashSet::new());
+        gap_fill_committed(&mut committed_by_author, &committed_set, &HashSet::new(), &HashSet::new());
 
         let lines = committed_by_author.get("abc123").unwrap();
         assert!(lines.contains(&3));
@@ -1125,7 +1179,7 @@ mod tests {
         committed_by_author.insert("author_b", vec![4, 5]);
         let committed_set: HashSet<u32> = [1, 2, 3, 4, 5].into_iter().collect();
 
-        gap_fill_committed(&mut committed_by_author, &committed_set, &HashSet::new());
+        gap_fill_committed(&mut committed_by_author, &committed_set, &HashSet::new(), &HashSet::new());
 
         let lines_a = committed_by_author.get("author_a").unwrap();
         let lines_b = committed_by_author.get("author_b").unwrap();
@@ -1139,7 +1193,7 @@ mod tests {
         committed_by_author.insert("h_abc123", vec![1, 2, 4, 5]);
         let committed_set: HashSet<u32> = [1, 2, 3, 4, 5].into_iter().collect();
 
-        gap_fill_committed(&mut committed_by_author, &committed_set, &HashSet::new());
+        gap_fill_committed(&mut committed_by_author, &committed_set, &HashSet::new(), &HashSet::new());
 
         let lines = committed_by_author.get("h_abc123").unwrap();
         assert!(!lines.contains(&3));
@@ -1255,6 +1309,7 @@ diff --git a/bar.rs b/bar.rs
             &uncommitted_lines,
             &metadata,
             "abc",
+            "initial",
             Path::new("."),
         );
 

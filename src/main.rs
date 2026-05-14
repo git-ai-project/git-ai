@@ -37,6 +37,48 @@ fn git_cmd(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Run a git command from a specific working directory.
+fn git_cmd_in(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("/usr/bin/git")
+        .args(args)
+        .current_dir(dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run git: {}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(format!("git {} failed: {}", args.join(" "), stderr))
+    }
+}
+
+/// Given an absolute file path, find the git repository root that contains it.
+/// Walks up from the file's parent directory looking for `.git/` (directory or file for worktrees).
+fn find_repo_root_for_path(file_path: &Path) -> Option<PathBuf> {
+    let start_dir = if file_path.is_dir() {
+        file_path.to_path_buf()
+    } else {
+        file_path.parent()?.to_path_buf()
+    };
+
+    let mut current = start_dir.as_path();
+    loop {
+        let git_path = current.join(".git");
+        if git_path.exists() {
+            return Some(current.to_path_buf());
+        }
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => return None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Checkpoint command
 // ---------------------------------------------------------------------------
@@ -47,6 +89,17 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
     // Don't route to daemon if explicitly disabled
     if env::var("GIT_AI_NO_DAEMON").as_deref() == Ok("1") {
         return false;
+    }
+
+    // Agent presets (claude, cursor, etc.) require local processing with hook input parsing;
+    // the daemon control socket doesn't support preset checkpoint requests.
+    if let Some(first_arg) = args.first() {
+        let name = first_arg.as_str();
+        if git_ai::presets::known_presets().contains(&name)
+            && !matches!(name, "human" | "mock_ai" | "mock_known_human")
+        {
+            return false;
+        }
     }
 
     let paths = git_ai::daemon::DaemonPaths::resolve();
@@ -77,16 +130,90 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
         i += 1;
     }
 
-    let repo_root = match git_cmd(&["rev-parse", "--show-toplevel"]) {
-        Ok(r) => r,
-        Err(_) => return false,
-    };
-
     let kind = match kind_str {
         Some("mock_ai") => "ai",
         Some("mock_known_human") => "known_human",
         Some("human") | None => "human",
         _ => "human",
+    };
+
+    // Check if any file args are absolute paths (cross-repo scenario)
+    let has_absolute_paths = file_args.iter().any(|f| PathBuf::from(f).is_absolute());
+
+    if has_absolute_paths && !file_args.is_empty() {
+        // Cross-repo mode: group files by their containing repository and send
+        // separate daemon requests per repo
+        let mut repo_groups: HashMap<PathBuf, Vec<&str>> = HashMap::new();
+        for f in &file_args {
+            let p = PathBuf::from(f);
+            if !p.is_absolute() {
+                // Mix of absolute and relative -- fall back to local processing
+                return false;
+            }
+            if let Some(repo_root) = find_repo_root_for_path(&p) {
+                repo_groups.entry(repo_root).or_default().push(f);
+            }
+        }
+
+        if repo_groups.is_empty() {
+            println!("0");
+            return true;
+        }
+
+        let mut total_processed: u64 = 0;
+        for (repo_root, files) in &repo_groups {
+            let repo_root_str = repo_root.to_string_lossy().to_string();
+            let file_values: Vec<serde_json::Value> = files
+                .iter()
+                .map(|f| {
+                    // Make path relative to this repo root for the daemon
+                    let p = PathBuf::from(f);
+                    let rel = p
+                        .strip_prefix(repo_root)
+                        .unwrap_or(&p)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    serde_json::json!({"path": rel})
+                })
+                .collect();
+
+            let mut request = serde_json::json!({
+                "type": "checkpoint",
+                "repo_dir": repo_root_str,
+                "kind": kind,
+                "files": file_values,
+            });
+
+            if kind == "ai" {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                request["agent"] = serde_json::json!({
+                    "tool": kind_str.unwrap_or("mock_ai"),
+                    "id": format!("ai-thread-{}", ts),
+                    "model": "unknown"
+                });
+            }
+
+            let request_str = serde_json::to_string(&request).unwrap_or_default();
+
+            match git_ai::daemon::control_client::send_request(&paths.control_sock, &request_str) {
+                Ok(resp) if resp.ok => {
+                    total_processed += resp.processed.unwrap_or(0) as u64;
+                }
+                _ => return false,
+            }
+        }
+
+        println!("{}", total_processed);
+        return true;
+    }
+
+    // Standard mode: single repo from CWD
+    let repo_root = match git_cmd(&["rev-parse", "--show-toplevel"]) {
+        Ok(r) => r,
+        Err(_) => return false,
     };
 
     let files: Vec<serde_json::Value> = if file_args.is_empty() {
@@ -183,168 +310,302 @@ fn handle_checkpoint(args: &[String]) {
         _ => CheckpointKind::Human,
     };
 
-    let git_dir_str = match git_cmd(&["rev-parse", "--git-dir"]) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("git-ai: {}", e);
-            process::exit(1);
-        }
-    };
-    let git_dir = PathBuf::from(&git_dir_str);
+    // Check if any file args are absolute paths (cross-repo scenario)
+    let has_absolute_paths = file_args.iter().any(|f| PathBuf::from(f).is_absolute());
 
-    let base_commit = git_cmd(&["rev-parse", "HEAD"]).unwrap_or_else(|_| "initial".to_string());
-
-    let repo_root = git_cmd(&["rev-parse", "--show-toplevel"]).unwrap_or_else(|_| ".".to_string());
-    let repo_root_path = PathBuf::from(&repo_root);
-
-    let files_to_process: Vec<PathBuf> = if file_args.is_empty() {
-        let status_output = git_cmd(&["status", "--porcelain", "-u"]).unwrap_or_default();
-        status_output
-            .lines()
-            .filter(|l| !l.is_empty())
-            .filter_map(|l| {
-                if l.len() > 3 {
-                    Some(repo_root_path.join(l[3..].trim()))
-                } else {
-                    None
-                }
-            })
-            .filter(|p| p.exists())
-            .collect()
-    } else {
-        file_args
-            .iter()
-            .map(|f| {
-                let p = PathBuf::from(f);
-                if p.is_absolute() {
-                    p
-                } else {
-                    repo_root_path.join(f)
-                }
-            })
-            .filter(|p| p.exists())
-            .collect()
-    };
-
-    let mut processed = 0;
-
-    for file_path in &files_to_process {
-        let relative_path = file_path
-            .strip_prefix(&repo_root_path)
-            .unwrap_or(file_path)
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
-        if kind == CheckpointKind::KnownHuman && has_pending_ai_edit(&git_dir, &relative_path) {
-            debug_log(&format!(
-                "suppressing KnownHuman checkpoint for '{}' (pending AI edit)",
-                relative_path
-            ));
-            continue;
-        }
-
-        // For AI checkpoints, clear the pending AI edit marker
-        if kind == CheckpointKind::AiAgent {
-            clear_pending_ai_edit(&git_dir, &relative_path);
-        }
-
-        let content = match fs::read_to_string(file_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let blob_sha =
-            git_ai::core::working_log::save_blob(&git_dir, &base_commit, content.as_bytes());
-
-        let existing_checkpoints =
-            git_ai::core::working_log::read_checkpoints(&git_dir, &base_commit);
-        let previous_attributions = find_latest_attributions(&existing_checkpoints, &relative_path);
-
-        let previous_content = find_latest_content(
-            &existing_checkpoints,
-            &relative_path,
-            &git_dir,
-            &base_commit,
-        );
-
-        let checkpoint_agent_id = if kind == CheckpointKind::AiAgent {
-            let ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            Some(AgentId {
-                tool: kind_str.unwrap_or("mock_ai").to_string(),
-                id: format!("ai-thread-{}", ts),
-                model: "unknown".to_string(),
-            })
-        } else {
-            None
-        };
-
-        // For KnownHuman, resolve the git user identity for both the author_id hash
-        // and the checkpoint.author field — they must be consistent.
-        let known_human_identity = if kind == CheckpointKind::KnownHuman {
-            let name = git_cmd(&["config", "user.name"]).unwrap_or_else(|_| "Unknown".to_string());
-            let email =
-                git_cmd(&["config", "user.email"]).unwrap_or_else(|_| "unknown".to_string());
-            Some(format!("{} <{}>", name, email))
-        } else {
-            None
-        };
-
-        let author_id = match &kind {
-            CheckpointKind::AiAgent => {
-                let aid = checkpoint_agent_id.as_ref().unwrap();
-                git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id)
+    if has_absolute_paths && !file_args.is_empty() {
+        // Cross-repo mode: group files by their containing repository and process each group
+        let mut processed = 0;
+        // Group files by repo root
+        let mut repo_groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for f in &file_args {
+            let p = PathBuf::from(f);
+            if !p.is_absolute() || !p.exists() {
+                continue;
             }
-            CheckpointKind::KnownHuman => git_ai::core::authorship_log::generate_human_hash(
-                known_human_identity.as_deref().unwrap(),
-            ),
-            CheckpointKind::Human => "human".to_string(),
-        };
-        let enable_move_detection =
-            kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
-        let new_attributions = update_attributions(
-            &previous_content,
-            &content,
-            &previous_attributions,
-            &author_id,
-            enable_move_detection,
-        );
-
-        let line_attributions = attributions_to_line_attributions(&content, &new_attributions);
-
-        let entry = WorkingLogEntry {
-            file: relative_path.clone(),
-            blob_sha,
-            attributions: new_attributions,
-            line_attributions,
-        };
-
-        let checkpoint_author = if let Some(ref identity) = known_human_identity {
-            identity.clone()
-        } else {
-            kind_str.unwrap_or("human").to_string()
-        };
-
-        let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
-        checkpoint.agent_id = checkpoint_agent_id.clone();
-        if kind == CheckpointKind::AiAgent {
-            checkpoint.trace_id = Some(format!(
-                "trace-{}",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0)
-            ));
+            if let Some(repo_root) = find_repo_root_for_path(&p) {
+                repo_groups.entry(repo_root).or_default().push(p);
+            }
         }
 
-        git_ai::core::working_log::append_checkpoint(&git_dir, &base_commit, &checkpoint);
-        processed += 1;
+        for (repo_root_path, files) in &repo_groups {
+            let git_dir = match git_cmd_in(repo_root_path, &["rev-parse", "--git-dir"]) {
+                Ok(d) => {
+                    let p = PathBuf::from(&d);
+                    if p.is_relative() { repo_root_path.join(p) } else { p }
+                }
+                Err(_) => continue,
+            };
+            let base_commit = git_cmd_in(repo_root_path, &["rev-parse", "HEAD"])
+                .unwrap_or_else(|_| "initial".to_string());
+
+            for file_path in files {
+                processed += process_checkpoint_file(
+                    file_path,
+                    repo_root_path,
+                    &git_dir,
+                    &base_commit,
+                    kind,
+                    kind_str,
+                );
+            }
+        }
+        println!("{}", processed);
+        write_checkpoint_debug_log(agent_name, processed);
+    } else {
+        // Standard mode: all files relative to CWD repo
+        let git_dir_str = match git_cmd(&["rev-parse", "--git-dir"]) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("git-ai: {}", e);
+                process::exit(1);
+            }
+        };
+        let git_dir = PathBuf::from(&git_dir_str);
+
+        let base_commit =
+            git_cmd(&["rev-parse", "HEAD"]).unwrap_or_else(|_| "initial".to_string());
+
+        let repo_root =
+            git_cmd(&["rev-parse", "--show-toplevel"]).unwrap_or_else(|_| ".".to_string());
+        let repo_root_path = PathBuf::from(&repo_root);
+
+        let files_to_process: Vec<PathBuf> = if file_args.is_empty() {
+            let status_output = git_cmd(&["status", "--porcelain", "-u"]).unwrap_or_default();
+            status_output
+                .lines()
+                .filter(|l| !l.is_empty())
+                .filter_map(|l| {
+                    if l.len() > 3 {
+                        Some(repo_root_path.join(l[3..].trim()))
+                    } else {
+                        None
+                    }
+                })
+                .filter(|p| p.exists())
+                .collect()
+        } else {
+            file_args
+                .iter()
+                .map(|f| repo_root_path.join(f))
+                .filter(|p| p.exists())
+                .collect()
+        };
+
+        let mut processed = 0;
+
+        for file_path in &files_to_process {
+            processed += process_checkpoint_file(
+                file_path,
+                &repo_root_path,
+                &git_dir,
+                &base_commit,
+                kind,
+                kind_str,
+            );
+        }
+
+        println!("{}", processed);
+
+        // Write checkpoint debug log if feature flag is enabled
+        write_checkpoint_debug_log(agent_name, processed);
+    }
+}
+
+/// Write a checkpoint debug log entry if the checkpoint_debug_log feature flag is enabled.
+fn write_checkpoint_debug_log(preset_name: &str, event_count: usize) {
+    // Check if the feature flag is enabled via GIT_AI_TEST_CONFIG_PATCH
+    let enabled = if let Ok(patch_json) = env::var("GIT_AI_TEST_CONFIG_PATCH") {
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&patch_json) {
+            parsed["feature_flags"]["checkpoint_debug_log"].as_bool().unwrap_or(false)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if !enabled {
+        return;
     }
 
-    println!("{}", processed);
+    let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let log_dir = PathBuf::from(&home).join(".git-ai").join("internal").join("checkpoint-debug-logs");
+    if let Err(e) = fs::create_dir_all(&log_dir) {
+        debug_log(&format!("failed to create checkpoint debug log dir: {}", e));
+        return;
+    }
+
+    // Generate today's date for the filename
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = now.as_secs();
+    // Simple date calculation (days since epoch)
+    let days = secs / 86400;
+    let filename = format!("{}.jsonl", days);
+    let log_file = log_dir.join(&filename);
+
+    let trace_id = format!("trace-{}", now.as_nanos());
+    let timestamp = format!("{}Z", secs);
+
+    let entry = serde_json::json!({
+        "preset_name": preset_name,
+        "trace_id": trace_id,
+        "timestamp": timestamp,
+        "event_count": event_count,
+        "requests": [],
+    });
+
+    use std::io::Write;
+    let mut file = match fs::OpenOptions::new().create(true).append(true).open(&log_file) {
+        Ok(f) => f,
+        Err(e) => {
+            debug_log(&format!("failed to open checkpoint debug log: {}", e));
+            return;
+        }
+    };
+    let _ = writeln!(file, "{}", entry.to_string());
+}
+
+/// Process a single file for checkpoint, writing to the given repo's working log.
+/// Returns 1 if processed, 0 if skipped.
+fn process_checkpoint_file(
+    file_path: &Path,
+    repo_root_path: &Path,
+    git_dir: &Path,
+    base_commit: &str,
+    kind: CheckpointKind,
+    kind_str: Option<&str>,
+) -> usize {
+    let relative_path = file_path
+        .strip_prefix(repo_root_path)
+        .unwrap_or(file_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    // Skip conflicted files (UU status in merge conflicts)
+    if is_file_conflicted(repo_root_path, &relative_path) {
+        debug_log(&format!("skipping conflicted file: {}", relative_path));
+        return 0;
+    }
+
+    // Skip binary files (non-UTF8 content that's being replaced)
+    if let Ok(bytes) = fs::read(file_path) {
+        // Check if content is binary by looking for null bytes in first 8KB
+        let check_len = bytes.len().min(8192);
+        if bytes[..check_len].contains(&0) {
+            debug_log(&format!("skipping binary file: {}", relative_path));
+            return 0;
+        }
+    }
+
+    // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
+    if kind == CheckpointKind::KnownHuman && has_pending_ai_edit(git_dir, &relative_path) {
+        debug_log(&format!(
+            "suppressing KnownHuman checkpoint for '{}' (pending AI edit)",
+            relative_path
+        ));
+        return 0;
+    }
+
+    // For AI checkpoints, clear the pending AI edit marker
+    if kind == CheckpointKind::AiAgent {
+        clear_pending_ai_edit(git_dir, &relative_path);
+    }
+
+    let content = match fs::read_to_string(file_path) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+
+    let blob_sha =
+        git_ai::core::working_log::save_blob(git_dir, base_commit, content.as_bytes());
+
+    let existing_checkpoints =
+        git_ai::core::working_log::read_checkpoints(git_dir, base_commit);
+    let previous_attributions = find_latest_attributions(&existing_checkpoints, &relative_path);
+
+    let previous_content = find_latest_content(
+        &existing_checkpoints,
+        &relative_path,
+        git_dir,
+        base_commit,
+    );
+
+    let checkpoint_agent_id = if kind == CheckpointKind::AiAgent {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        Some(AgentId {
+            tool: kind_str.unwrap_or("mock_ai").to_string(),
+            id: format!("ai-thread-{}", ts),
+            model: "unknown".to_string(),
+        })
+    } else {
+        None
+    };
+
+    // For KnownHuman, resolve the git user identity for both the author_id hash
+    // and the checkpoint.author field — they must be consistent.
+    let known_human_identity = if kind == CheckpointKind::KnownHuman {
+        let name = git_cmd_in(repo_root_path, &["config", "user.name"])
+            .unwrap_or_else(|_| "Unknown".to_string());
+        let email = git_cmd_in(repo_root_path, &["config", "user.email"])
+            .unwrap_or_else(|_| "unknown".to_string());
+        Some(format!("{} <{}>", name, email))
+    } else {
+        None
+    };
+
+    let author_id = match &kind {
+        CheckpointKind::AiAgent => {
+            let aid = checkpoint_agent_id.as_ref().unwrap();
+            git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id)
+        }
+        CheckpointKind::KnownHuman => git_ai::core::authorship_log::generate_human_hash(
+            known_human_identity.as_deref().unwrap(),
+        ),
+        CheckpointKind::Human => "human".to_string(),
+    };
+    let enable_move_detection =
+        kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
+    let new_attributions = update_attributions(
+        &previous_content,
+        &content,
+        &previous_attributions,
+        &author_id,
+        enable_move_detection,
+    );
+
+    let line_attributions = attributions_to_line_attributions(&content, &new_attributions);
+
+    let entry = WorkingLogEntry {
+        file: relative_path.clone(),
+        blob_sha,
+        attributions: new_attributions,
+        line_attributions,
+    };
+
+    let checkpoint_author = if let Some(ref identity) = known_human_identity {
+        identity.clone()
+    } else {
+        kind_str.unwrap_or("human").to_string()
+    };
+
+    let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
+    checkpoint.agent_id = checkpoint_agent_id.clone();
+    if kind == CheckpointKind::AiAgent {
+        checkpoint.trace_id = Some(format!(
+            "trace-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+    }
+
+    git_ai::core::working_log::append_checkpoint(git_dir, base_commit, &checkpoint);
+    1
 }
 
 /// Handle checkpoint for real agent presets (cursor, claude, agent-v1, etc.).
@@ -387,9 +648,9 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
         let is_pre_file_edit = matches!(&event, ParsedHookEvent::PreFileEdit(_));
         let is_post_file_edit = matches!(&event, ParsedHookEvent::PostFileEdit(_));
 
-        let (kind, cwd, file_paths, agent_id): (CheckpointKind, PathBuf, Vec<PathBuf>, Option<AgentId>) = match event {
+        let (kind, cwd, file_paths, agent_id, dirty_files): (CheckpointKind, PathBuf, Vec<PathBuf>, Option<AgentId>, Option<HashMap<PathBuf, String>>) = match event {
             ParsedHookEvent::PreFileEdit(e) => {
-                (CheckpointKind::Human, e.context.cwd, e.file_paths, None)
+                (CheckpointKind::Human, e.context.cwd, e.file_paths, None, e.dirty_files)
             }
             ParsedHookEvent::PostFileEdit(e) => {
                 let aid = AgentId {
@@ -397,10 +658,10 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                     id: e.context.agent_session_id.clone(),
                     model: e.context.agent_model.clone(),
                 };
-                (CheckpointKind::AiAgent, e.context.cwd, e.file_paths, Some(aid))
+                (CheckpointKind::AiAgent, e.context.cwd, e.file_paths, Some(aid), e.dirty_files)
             }
             ParsedHookEvent::PreBashCall(e) => {
-                (CheckpointKind::Human, e.context.cwd, vec![], None)
+                (CheckpointKind::Human, e.context.cwd, vec![], None, None)
             }
             ParsedHookEvent::PostBashCall(e) => {
                 let aid = AgentId {
@@ -408,26 +669,15 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                     id: e.context.agent_session_id.clone(),
                     model: e.context.agent_model.clone(),
                 };
-                (CheckpointKind::AiAgent, e.context.cwd, vec![], Some(aid))
+                (CheckpointKind::AiAgent, e.context.cwd, vec![], Some(aid), None)
             }
             ParsedHookEvent::KnownHumanEdit(e) => {
-                (CheckpointKind::KnownHuman, e.cwd, e.file_paths, None)
+                (CheckpointKind::KnownHuman, e.cwd, e.file_paths, None, e.dirty_files)
             }
             ParsedHookEvent::UntrackedEdit(e) => {
-                (CheckpointKind::Human, e.cwd, e.file_paths, None)
+                (CheckpointKind::Human, e.cwd, e.file_paths, None, None)
             }
         };
-
-        // Determine files to process
-        let repo_root_path = cwd;
-        let git_dir_str = match git_cmd(&["rev-parse", "--git-dir"]) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        let git_dir = PathBuf::from(&git_dir_str);
-
-        let base_commit = git_cmd(&["rev-parse", "HEAD"])
-            .unwrap_or_else(|_| "initial".to_string());
 
         // Filter out --hook-input and its value from file_args
         let actual_file_args: Vec<&str> = {
@@ -447,147 +697,339 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
             result
         };
 
-        // If preset provided file paths, use those. Otherwise use file_args.
-        let files_to_process: Vec<PathBuf> = if !file_paths.is_empty() {
+        // If preset provided file paths, use those. Otherwise use file_args or scan.
+        let raw_files: Vec<PathBuf> = if !file_paths.is_empty() {
             file_paths.clone()
         } else if !actual_file_args.is_empty() {
             actual_file_args.iter().map(|f| {
                 let p = PathBuf::from(f);
-                if p.is_absolute() { p } else { repo_root_path.join(f) }
+                if p.is_absolute() { p } else { cwd.join(f) }
             }).collect()
         } else {
-            // For bash tools, scan for all modified files
-            let status_output = git_cmd(&["status", "--porcelain", "-u"]).unwrap_or_default();
+            // For bash tools, scan for all modified files from CWD
+            let status_output = git_cmd_in(&cwd, &["status", "--porcelain", "-u"]).unwrap_or_default();
+            let cwd_repo_root = git_cmd_in(&cwd, &["rev-parse", "--show-toplevel"])
+                .unwrap_or_else(|_| cwd.to_string_lossy().to_string());
+            let cwd_root = PathBuf::from(&cwd_repo_root);
             status_output.lines()
                 .filter(|l| l.len() > 3)
-                .map(|l| repo_root_path.join(l[3..].trim()))
+                .map(|l| cwd_root.join(l[3..].trim()))
                 .filter(|p| p.exists())
                 .collect()
         };
 
-        // For PreFileEdit events, register pending AI edit markers
-        if is_pre_file_edit {
-            for fp in &files_to_process {
-                let rel = fp.strip_prefix(&repo_root_path)
-                    .unwrap_or(fp)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                write_pending_ai_edit(&git_dir, &rel);
-            }
-        }
+        // Check if files contain absolute paths that might belong to different repos
+        let has_absolute = raw_files.iter().any(|f| f.is_absolute());
 
-        // For PostFileEdit (AI) events, clear pending AI edit markers
-        if is_post_file_edit {
-            for fp in &files_to_process {
-                let rel = fp.strip_prefix(&repo_root_path)
-                    .unwrap_or(fp)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                clear_pending_ai_edit(&git_dir, &rel);
-            }
-        }
-
-        for file_path in &files_to_process {
-            if !file_path.exists() {
-                continue;
+        if has_absolute {
+            // Cross-repo mode: group files by their containing repository
+            let mut repo_groups: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+            for fp in &raw_files {
+                if !fp.exists() {
+                    continue;
+                }
+                let resolved = if fp.is_absolute() {
+                    find_repo_root_for_path(fp)
+                } else {
+                    find_repo_root_for_path(&cwd.join(fp))
+                };
+                if let Some(repo_root) = resolved {
+                    repo_groups.entry(repo_root).or_default().push(fp.clone());
+                }
             }
 
-            let relative_path = file_path
-                .strip_prefix(&repo_root_path)
-                .unwrap_or(file_path)
-                .to_string_lossy()
-                .replace('\\', "/");
+            for (repo_root_path, files) in &repo_groups {
+                let git_dir = match git_cmd_in(repo_root_path, &["rev-parse", "--git-dir"]) {
+                    Ok(d) => {
+                        let p = PathBuf::from(&d);
+                        if p.is_relative() { repo_root_path.join(p) } else { p }
+                    }
+                    Err(_) => continue,
+                };
+                let base_commit = git_cmd_in(repo_root_path, &["rev-parse", "HEAD"])
+                    .unwrap_or_else(|_| "initial".to_string());
 
-            // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
-            if kind == CheckpointKind::KnownHuman && has_pending_ai_edit(&git_dir, &relative_path) {
-                debug_log(&format!(
-                    "suppressing KnownHuman checkpoint for '{}' (pending AI edit)",
-                    relative_path
-                ));
-                continue;
+                // For PreFileEdit events, register pending AI edit markers
+                if is_pre_file_edit {
+                    for fp in files {
+                        let rel = fp.strip_prefix(repo_root_path)
+                            .unwrap_or(fp)
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        write_pending_ai_edit(&git_dir, &rel);
+                    }
+                }
+
+                // For PostFileEdit (AI) events, clear pending AI edit markers
+                if is_post_file_edit {
+                    for fp in files {
+                        let rel = fp.strip_prefix(repo_root_path)
+                            .unwrap_or(fp)
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        clear_pending_ai_edit(&git_dir, &rel);
+                    }
+                }
+
+                for file_path in files {
+                    // Allow processing even if file doesn't exist on disk
+                    // when dirty_files provides content (e.g., create_file pre-edit with empty content)
+                    let dirty_content = dirty_files.as_ref().and_then(|df| df.get(file_path));
+                    if !file_path.exists() && dirty_content.is_none() {
+                        continue;
+                    }
+
+                    let relative_path = file_path
+                        .strip_prefix(repo_root_path)
+                        .unwrap_or(file_path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+
+                    // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
+                    if kind == CheckpointKind::KnownHuman && has_pending_ai_edit(&git_dir, &relative_path) {
+                        debug_log(&format!(
+                            "suppressing KnownHuman checkpoint for '{}' (pending AI edit)",
+                            relative_path
+                        ));
+                        continue;
+                    }
+
+                    // Use dirty_files content if available, otherwise read from disk
+                    let content = if let Some(dc) = dirty_content {
+                        dc.clone()
+                    } else {
+                        match fs::read_to_string(file_path) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        }
+                    };
+
+                    let blob_sha =
+                        git_ai::core::working_log::save_blob(&git_dir, &base_commit, content.as_bytes());
+
+                    let existing_checkpoints =
+                        git_ai::core::working_log::read_checkpoints(&git_dir, &base_commit);
+                    let previous_attributions =
+                        find_latest_attributions(&existing_checkpoints, &relative_path);
+                    let previous_content = find_latest_content(
+                        &existing_checkpoints,
+                        &relative_path,
+                        &git_dir,
+                        &base_commit,
+                    );
+
+                    // For KnownHuman, resolve the full git identity (Name <email>)
+                    let known_human_identity = if kind == CheckpointKind::KnownHuman {
+                        let name = git_cmd_in(repo_root_path, &["config", "user.name"])
+                            .unwrap_or_else(|_| "Unknown".to_string());
+                        let email = git_cmd_in(repo_root_path, &["config", "user.email"])
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        Some(format!("{} <{}>", name, email))
+                    } else {
+                        None
+                    };
+
+                    let author_id = match (&kind, &agent_id) {
+                        (CheckpointKind::AiAgent, Some(aid)) => {
+                            git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id)
+                        }
+                        (CheckpointKind::KnownHuman, _) => {
+                            git_ai::core::authorship_log::generate_human_hash(
+                                known_human_identity.as_deref().unwrap(),
+                            )
+                        }
+                        _ => "human".to_string(),
+                    };
+
+                    let enable_move_detection = kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
+                    let new_attributions = update_attributions(
+                        &previous_content,
+                        &content,
+                        &previous_attributions,
+                        &author_id,
+                        enable_move_detection,
+                    );
+                    let line_attributions = attributions_to_line_attributions(&content, &new_attributions);
+
+                    let entry = WorkingLogEntry {
+                        file: relative_path,
+                        blob_sha,
+                        attributions: new_attributions,
+                        line_attributions,
+                    };
+
+                    let checkpoint_author = if let Some(ref aid) = agent_id {
+                        aid.tool.clone()
+                    } else if let Some(ref identity) = known_human_identity {
+                        identity.clone()
+                    } else {
+                        agent_name.to_string()
+                    };
+
+                    let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
+                    checkpoint.agent_id = agent_id.clone();
+                    if kind == CheckpointKind::AiAgent {
+                        checkpoint.trace_id = Some(format!(
+                            "trace-{}",
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_nanos())
+                                .unwrap_or(0)
+                        ));
+                    }
+
+                    git_ai::core::working_log::append_checkpoint(&git_dir, &base_commit, &checkpoint);
+                    processed += 1;
+                }
             }
-
-            let content = match fs::read_to_string(file_path) {
-                Ok(c) => c,
+        } else {
+            // Standard mode: all files relative to CWD repo
+            let repo_root_path = cwd;
+            let git_dir = match git_cmd_in(&repo_root_path, &["rev-parse", "--git-dir"]) {
+                Ok(d) => {
+                    let p = PathBuf::from(&d);
+                    if p.is_relative() { repo_root_path.join(p) } else { p }
+                }
                 Err(_) => continue,
             };
 
-            let blob_sha =
-                git_ai::core::working_log::save_blob(&git_dir, &base_commit, content.as_bytes());
+            let base_commit = git_cmd_in(&repo_root_path, &["rev-parse", "HEAD"])
+                .unwrap_or_else(|_| "initial".to_string());
 
-            let existing_checkpoints =
-                git_ai::core::working_log::read_checkpoints(&git_dir, &base_commit);
-            let previous_attributions =
-                find_latest_attributions(&existing_checkpoints, &relative_path);
-            let previous_content = find_latest_content(
-                &existing_checkpoints,
-                &relative_path,
-                &git_dir,
-                &base_commit,
-            );
+            let files_to_process = &raw_files;
 
-            // For KnownHuman, resolve the full git identity (Name <email>)
-            let known_human_identity = if kind == CheckpointKind::KnownHuman {
-                let name = git_cmd(&["config", "user.name"])
-                    .unwrap_or_else(|_| "Unknown".to_string());
-                let email = git_cmd(&["config", "user.email"])
-                    .unwrap_or_else(|_| "unknown".to_string());
-                Some(format!("{} <{}>", name, email))
-            } else {
-                None
-            };
-
-            let author_id = match (&kind, &agent_id) {
-                (CheckpointKind::AiAgent, Some(aid)) => {
-                    git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id)
+            // For PreFileEdit events, register pending AI edit markers
+            if is_pre_file_edit {
+                for fp in files_to_process {
+                    let rel = fp.strip_prefix(&repo_root_path)
+                        .unwrap_or(fp)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    write_pending_ai_edit(&git_dir, &rel);
                 }
-                (CheckpointKind::KnownHuman, _) => {
-                    git_ai::core::authorship_log::generate_human_hash(
-                        known_human_identity.as_deref().unwrap(),
-                    )
-                }
-                _ => "human".to_string(),
-            };
-
-            let enable_move_detection = kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
-            let new_attributions = update_attributions(
-                &previous_content,
-                &content,
-                &previous_attributions,
-                &author_id,
-                enable_move_detection,
-            );
-            let line_attributions = attributions_to_line_attributions(&content, &new_attributions);
-
-            let entry = WorkingLogEntry {
-                file: relative_path,
-                blob_sha,
-                attributions: new_attributions,
-                line_attributions,
-            };
-
-            let checkpoint_author = if let Some(ref aid) = agent_id {
-                aid.tool.clone()
-            } else if let Some(ref identity) = known_human_identity {
-                identity.clone()
-            } else {
-                agent_name.to_string()
-            };
-
-            let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
-            checkpoint.agent_id = agent_id.clone();
-            if kind == CheckpointKind::AiAgent {
-                checkpoint.trace_id = Some(format!(
-                    "trace-{}",
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(0)
-                ));
             }
 
-            git_ai::core::working_log::append_checkpoint(&git_dir, &base_commit, &checkpoint);
-            processed += 1;
+            // For PostFileEdit (AI) events, clear pending AI edit markers
+            if is_post_file_edit {
+                for fp in files_to_process {
+                    let rel = fp.strip_prefix(&repo_root_path)
+                        .unwrap_or(fp)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    clear_pending_ai_edit(&git_dir, &rel);
+                }
+            }
+
+            for file_path in files_to_process {
+                // Allow processing even if file doesn't exist on disk
+                // when dirty_files provides content (e.g., create_file pre-edit with empty content)
+                let dirty_content = dirty_files.as_ref().and_then(|df| df.get(file_path));
+                if !file_path.exists() && dirty_content.is_none() {
+                    continue;
+                }
+
+                let relative_path = file_path
+                    .strip_prefix(&repo_root_path)
+                    .unwrap_or(file_path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+
+                // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
+                if kind == CheckpointKind::KnownHuman && has_pending_ai_edit(&git_dir, &relative_path) {
+                    debug_log(&format!(
+                        "suppressing KnownHuman checkpoint for '{}' (pending AI edit)",
+                        relative_path
+                    ));
+                    continue;
+                }
+
+                // Use dirty_files content if available, otherwise read from disk
+                let content = if let Some(dc) = dirty_content {
+                    dc.clone()
+                } else {
+                    match fs::read_to_string(file_path) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    }
+                };
+
+                let blob_sha =
+                    git_ai::core::working_log::save_blob(&git_dir, &base_commit, content.as_bytes());
+
+                let existing_checkpoints =
+                    git_ai::core::working_log::read_checkpoints(&git_dir, &base_commit);
+                let previous_attributions =
+                    find_latest_attributions(&existing_checkpoints, &relative_path);
+                let previous_content = find_latest_content(
+                    &existing_checkpoints,
+                    &relative_path,
+                    &git_dir,
+                    &base_commit,
+                );
+
+                // For KnownHuman, resolve the full git identity (Name <email>)
+                let known_human_identity = if kind == CheckpointKind::KnownHuman {
+                    let name = git_cmd_in(&repo_root_path, &["config", "user.name"])
+                        .unwrap_or_else(|_| "Unknown".to_string());
+                    let email = git_cmd_in(&repo_root_path, &["config", "user.email"])
+                        .unwrap_or_else(|_| "unknown".to_string());
+                    Some(format!("{} <{}>", name, email))
+                } else {
+                    None
+                };
+
+                let author_id = match (&kind, &agent_id) {
+                    (CheckpointKind::AiAgent, Some(aid)) => {
+                        git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id)
+                    }
+                    (CheckpointKind::KnownHuman, _) => {
+                        git_ai::core::authorship_log::generate_human_hash(
+                            known_human_identity.as_deref().unwrap(),
+                        )
+                    }
+                    _ => "human".to_string(),
+                };
+
+                let enable_move_detection = kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
+                let new_attributions = update_attributions(
+                    &previous_content,
+                    &content,
+                    &previous_attributions,
+                    &author_id,
+                    enable_move_detection,
+                );
+                let line_attributions = attributions_to_line_attributions(&content, &new_attributions);
+
+                let entry = WorkingLogEntry {
+                    file: relative_path,
+                    blob_sha,
+                    attributions: new_attributions,
+                    line_attributions,
+                };
+
+                let checkpoint_author = if let Some(ref aid) = agent_id {
+                    aid.tool.clone()
+                } else if let Some(ref identity) = known_human_identity {
+                    identity.clone()
+                } else {
+                    agent_name.to_string()
+                };
+
+                let mut checkpoint = Checkpoint::new(kind, checkpoint_author, vec![entry]);
+                checkpoint.agent_id = agent_id.clone();
+                if kind == CheckpointKind::AiAgent {
+                    checkpoint.trace_id = Some(format!(
+                        "trace-{}",
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0)
+                    ));
+                }
+
+                git_ai::core::working_log::append_checkpoint(&git_dir, &base_commit, &checkpoint);
+                processed += 1;
+            }
         }
     }
 
@@ -617,6 +1059,30 @@ fn write_pending_ai_edit(git_dir: &Path, relative_path: &str) {
 }
 
 /// Check if a file has a pending AI edit marker.
+/// Check if a file is in a conflicted state (e.g., UU during merge conflict).
+fn is_file_conflicted(repo_root: &Path, relative_path: &str) -> bool {
+    let output = Command::new("/usr/bin/git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["status", "--porcelain", "--", relative_path])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    if let Ok(out) = output {
+        let status = String::from_utf8_lossy(&out.stdout);
+        for line in status.lines() {
+            if line.len() >= 2 {
+                let xy = &line[..2];
+                // UU = both modified (conflict), AA = both added, etc.
+                if xy == "UU" || xy == "AA" || xy == "DU" || xy == "UD" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn has_pending_ai_edit(git_dir: &Path, relative_path: &str) -> bool {
     let marker_path = pending_ai_edits_dir(git_dir).join(marker_filename(relative_path));
     marker_path.exists()
@@ -693,7 +1159,7 @@ fn handle_post_commit() {
     let human_author = git_cmd(&["log", "-1", "--format=%aN <%aE>"])
         .unwrap_or_else(|_| "Unknown <unknown>".to_string());
 
-    let (authorship_log, initial_attrs) = match generate_authorship_for_commit(
+    let (mut authorship_log, initial_attrs) = match generate_authorship_for_commit(
         &git_dir,
         &repo_dir,
         base_commit,
@@ -703,6 +1169,109 @@ fn handle_post_commit() {
         Ok(result) => result,
         Err(_) => return,
     };
+
+    // Background cloud agent: when GIT_AI_CLOUD_AGENT=1 is set, attribute all
+    // unattributed committed lines to AI. This covers no-hooks agents that don't
+    // fire their own checkpoints.
+    if env::var("GIT_AI_CLOUD_AGENT").as_deref() == Ok("1") {
+        // Only apply on normal commits, not during rebase/cherry-pick
+        let is_rewriting = git_dir.join("rebase-merge").exists()
+            || git_dir.join("rebase-apply").exists()
+            || git_dir.join("CHERRY_PICK_HEAD").exists();
+
+        if !is_rewriting {
+            let committed_lines =
+                git_ai::core::post_commit::git_diff_committed_lines(&repo_dir, base_commit, &commit_sha);
+
+            // Build a synthetic session ID for the background agent
+            let bg_session_id =
+                git_ai::core::authorship_log::generate_session_id("cloud-agent", &commit_sha);
+
+            // Determine which committed lines are already attributed
+            use std::collections::{HashMap as StdHashMap, HashSet as StdHashSet};
+            let mut already_attributed: StdHashMap<&str, StdHashSet<u32>> = StdHashMap::new();
+            for file_att in &authorship_log.attestations {
+                let line_set = already_attributed
+                    .entry(file_att.file_path.as_str())
+                    .or_default();
+                for entry in &file_att.entries {
+                    for range in &entry.line_ranges {
+                        match range {
+                            git_ai::core::authorship_log::LineRange::Single(l) => {
+                                line_set.insert(*l);
+                            }
+                            git_ai::core::authorship_log::LineRange::Range(s, e) => {
+                                for l in *s..=*e {
+                                    line_set.insert(l);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // For each committed file, find unattributed lines and add them
+            let mut bg_attestations: StdHashMap<String, Vec<u32>> = StdHashMap::new();
+            for (file_path, lines) in &committed_lines {
+                let attributed = already_attributed.get(file_path.as_str());
+                for &line in lines {
+                    let is_covered = attributed.map(|s| s.contains(&line)).unwrap_or(false);
+                    if !is_covered {
+                        bg_attestations
+                            .entry(file_path.clone())
+                            .or_default()
+                            .push(line);
+                    }
+                }
+            }
+
+            // Add attestation entries for background agent lines
+            if !bg_attestations.is_empty() {
+                // Register the session in metadata
+                authorship_log.metadata.sessions.insert(
+                    bg_session_id.clone(),
+                    git_ai::core::authorship_log::SessionRecord {
+                        agent_id: git_ai::core::authorship_log::AgentId {
+                            tool: "cloud-agent".to_string(),
+                            id: commit_sha.clone(),
+                            model: "unknown".to_string(),
+                        },
+                        human_author: Some(human_author.clone()),
+                        custom_attributes: None,
+                    },
+                );
+
+                for (file_path, mut lines) in bg_attestations {
+                    lines.sort_unstable();
+                    lines.dedup();
+                    let ranges = git_ai::core::authorship_log::LineRange::compress_lines(&lines);
+
+                    // Check if there's an existing attestation for this file
+                    let existing = authorship_log
+                        .attestations
+                        .iter_mut()
+                        .find(|fa| fa.file_path == file_path);
+
+                    if let Some(file_att) = existing {
+                        file_att.entries.push(git_ai::core::authorship_log::AttestationEntry {
+                            hash: bg_session_id.clone(),
+                            line_ranges: ranges,
+                        });
+                    } else {
+                        authorship_log
+                            .attestations
+                            .push(git_ai::core::authorship_log::FileAttestation {
+                                file_path,
+                                entries: vec![git_ai::core::authorship_log::AttestationEntry {
+                                    hash: bg_session_id.clone(),
+                                    line_ranges: ranges,
+                                }],
+                            });
+                    }
+                }
+            }
+        }
+    }
 
     let note_text = authorship_log.serialize_to_string();
     let result = Command::new("/usr/bin/git")
@@ -803,6 +1372,29 @@ fn handle_blame(args: &[String]) {
         }
     };
 
+    // Resolve the file path to repo-relative for authorship note lookups.
+    // git blame resolves from cwd, but authorship notes store paths relative to repo root.
+    let repo_relative_file_path = {
+        let prefix = git_cmd(&["rev-parse", "--show-prefix"]).unwrap_or_default();
+        let candidate = if prefix.is_empty() {
+            file_path.clone()
+        } else {
+            format!("{}{}", prefix, file_path)
+        };
+        // Normalize: resolve .. and . components
+        let p = PathBuf::from(&candidate);
+        let mut components: Vec<String> = Vec::new();
+        for comp in p.components() {
+            match comp {
+                std::path::Component::ParentDir => { components.pop(); }
+                std::path::Component::CurDir => {}
+                std::path::Component::Normal(s) => { components.push(s.to_string_lossy().to_string()); }
+                _ => {}
+            }
+        }
+        components.join("/")
+    };
+
     // Build the git blame command (always use --line-porcelain for parsing)
     let mut blame_args: Vec<&str> = vec!["blame", "--line-porcelain"];
     for flag in &blame_flags {
@@ -892,15 +1484,15 @@ fn handle_blame(args: &[String]) {
 
     match output_mode {
         BlameOutputMode::Json => {
-            blame_output_json(&lines, &file_path, &commit_notes);
+            blame_output_json(&lines, &repo_relative_file_path, &commit_notes);
         }
         BlameOutputMode::Porcelain
         | BlameOutputMode::LinePorcelain
         | BlameOutputMode::Incremental => {
-            blame_output_porcelain(&lines, &file_path, &commit_notes);
+            blame_output_porcelain(&lines, &repo_relative_file_path, &commit_notes);
         }
         BlameOutputMode::Default => {
-            blame_output_default(&lines, &file_path, &commit_notes);
+            blame_output_default(&lines, &repo_relative_file_path, &commit_notes);
         }
     }
 }
@@ -945,9 +1537,10 @@ fn resolve_line_author(
     author_email: &str,
     file_path: &str,
     commit_notes: &HashMap<String, Option<AuthorshipLog>>,
+    raw_headers: &[String],
 ) -> String {
     let (author, _) = resolve_line_author_with_prompt(
-        commit_sha, orig_line, git_author, author_email, file_path, commit_notes,
+        commit_sha, orig_line, git_author, author_email, file_path, commit_notes, raw_headers,
     );
     author
 }
@@ -959,15 +1552,27 @@ fn resolve_line_author_with_prompt(
     author_email: &str,
     file_path: &str,
     commit_notes: &HashMap<String, Option<AuthorshipLog>>,
+    raw_headers: &[String],
 ) -> (String, Option<String>) {
     if let Some(Some(authorship_log)) = commit_notes.get(commit_sha) {
+        // Extract the original filename from blame porcelain headers (handles renames)
+        let orig_filename: Option<&str> = raw_headers.iter().find_map(|h| {
+            h.strip_prefix("filename ")
+        });
+
         for file_attest in &authorship_log.attestations {
             let attest_path = file_attest
                 .file_path
                 .strip_prefix("./")
                 .unwrap_or(&file_attest.file_path);
             let query_path = file_path.strip_prefix("./").unwrap_or(file_path);
-            if attest_path != query_path {
+            // Match against the queried file path OR the original filename from blame
+            let matches = attest_path == query_path
+                || orig_filename.map_or(false, |orig| {
+                    let orig_clean = orig.strip_prefix("./").unwrap_or(orig);
+                    attest_path == orig_clean
+                });
+            if !matches {
                 continue;
             }
             for entry in &file_attest.entries {
@@ -1010,12 +1615,12 @@ fn blame_output_default(
     let line_num_width = lines.len().to_string().len();
     let mut max_author_width = 0;
     for bl in lines {
-        let a = resolve_line_author(&bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file_path, commit_notes);
+        let a = resolve_line_author(&bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file_path, commit_notes, &bl.raw_headers);
         max_author_width = max_author_width.max(a.len());
     }
     for bl in lines {
         let short_sha = &bl.commit_sha[..7.min(bl.commit_sha.len())];
-        let display_author = resolve_line_author(&bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file_path, commit_notes);
+        let display_author = resolve_line_author(&bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file_path, commit_notes, &bl.raw_headers);
         let date_str = format_blame_date(bl.author_time, &bl.author_tz);
         println!("{} ({:<width$} {} {:>lwidth$}) {}", short_sha, display_author, date_str, bl.final_line, bl.content, width = max_author_width, lwidth = line_num_width);
     }
@@ -1027,7 +1632,7 @@ fn blame_output_porcelain(
     commit_notes: &HashMap<String, Option<AuthorshipLog>>,
 ) {
     for bl in lines {
-        let display_author = resolve_line_author(&bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file_path, commit_notes);
+        let display_author = resolve_line_author(&bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file_path, commit_notes, &bl.raw_headers);
         for header in &bl.raw_headers {
             if header.starts_with("author ") && !header.starts_with("author-") {
                 println!("author {}", display_author);
@@ -1050,7 +1655,7 @@ fn blame_output_json(
 
     for bl in lines {
         let (author_display, prompt_hash) = resolve_line_author_with_prompt(
-            &bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file_path, commit_notes,
+            &bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file_path, commit_notes, &bl.raw_headers,
         );
         if let Some(hash) = &prompt_hash {
             line_authors.insert(bl.final_line, hash.clone());
@@ -1725,6 +2330,61 @@ fn handle_stash_restore() {
         }
     }
 
+    // Strip h_ attributions for lines in files that are IDENTICAL to HEAD after stash pop.
+    // Only when the working tree file equals the HEAD file (meaning the stash didn't
+    // actually modify that file), the h_ entries are stale and should be removed.
+    // If the file differs from HEAD (user has uncommitted changes), h_ attributions
+    // are genuine and must be preserved to prevent gap-fill from claiming human lines.
+    let repo_root = git_cmd(&["rev-parse", "--show-toplevel"]).unwrap_or_else(|_| ".".to_string());
+    let repo_root_path = PathBuf::from(&repo_root);
+    let checkpoints = git_ai::core::working_log::read_checkpoints(&git_dir, &current_head);
+    if !checkpoints.is_empty() {
+        let mut modified = false;
+        let mut new_checkpoints = checkpoints.clone();
+        for checkpoint in &mut new_checkpoints {
+            for entry in &mut checkpoint.entries {
+                if entry.line_attributions.is_empty() {
+                    continue;
+                }
+                // Get HEAD content for this file
+                let head_content = git_cmd(&["show", &format!("{}:{}", current_head, entry.file)])
+                    .unwrap_or_default();
+                if head_content.is_empty() {
+                    continue;
+                }
+
+                // Get working tree content for this file
+                let wt_path = repo_root_path.join(&entry.file);
+                let wt_content = fs::read_to_string(&wt_path).unwrap_or_default();
+
+                // Only strip h_ if the file is identical to HEAD (no uncommitted changes)
+                if wt_content == head_content {
+                    // File wasn't actually modified by the stash — h_ entries are stale
+                    for attr in &mut entry.line_attributions {
+                        if attr.author_id.starts_with("h_") {
+                            attr.author_id = String::new();
+                            modified = true;
+                        }
+                    }
+                    entry.line_attributions.retain(|a| !a.author_id.is_empty());
+                }
+            }
+        }
+        if modified {
+            // Rewrite the checkpoints file
+            let checkpoints_path = working_log_dir.join("checkpoints.jsonl");
+            let mut content = String::new();
+            for cp in &new_checkpoints {
+                if let Ok(json) = serde_json::to_string(cp) {
+                    content.push_str(&json);
+                    content.push('\n');
+                }
+            }
+            let _ = fs::write(&checkpoints_path, &content);
+            debug_log("stash-restore: stripped stale h_ attributions");
+        }
+    }
+
     // Clean up stash backup
     let _ = fs::remove_dir_all(&stash_dir);
     debug_log("stash-restore: restored working log state");
@@ -1741,32 +2401,239 @@ fn handle_stash_restore_ref(args: &[String]) {
 // ---------------------------------------------------------------------------
 
 fn handle_post_rewrite_squash(args: &[String]) {
-    // For squash merges: takes list of source SHAs and merges their notes into HEAD
-    let head_sha = match git_cmd(&["rev-parse", "HEAD"]) {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => return,
-    };
+    use git_ai::core::attribution::{LineDiffOp, diff_slices};
+    use std::collections::{BTreeMap, HashSet};
 
-    for source_sha in args {
+    // Format: post-rewrite-squash <target_sha> <source1> <source2> ...
+    // Merges all source notes into a single combined note on target_sha.
+    if args.is_empty() {
+        debug_log("post-rewrite-squash: no target SHA provided");
+        return;
+    }
+
+    let target_sha = &args[0];
+    let source_shas = &args[1..];
+
+    if source_shas.is_empty() {
+        debug_log("post-rewrite-squash: no source SHAs provided");
+        return;
+    }
+
+    // Parse all source notes and collect metadata
+    let mut parsed_notes: Vec<(String, AuthorshipLog)> = Vec::new();
+    let mut all_files: HashSet<String> = HashSet::new();
+    let mut merged_sessions: BTreeMap<String, git_ai::core::authorship_log::SessionRecord> = BTreeMap::new();
+    let mut merged_humans: BTreeMap<String, git_ai::core::authorship_log::HumanRecord> = BTreeMap::new();
+    let mut merged_prompts: BTreeMap<String, git_ai::core::authorship_log::PromptRecord> = BTreeMap::new();
+
+    for source_sha in source_shas {
+        debug_log(&format!("post-rewrite-squash: looking up note for source {}", source_sha));
         let note = match git_cmd(&["notes", "--ref=ai", "show", source_sha]) {
             Ok(n) => n,
-            Err(_) => continue,
+            Err(e) => {
+                debug_log(&format!("post-rewrite-squash: no note for {}: {}", source_sha, e));
+                continue;
+            }
         };
         if note.trim().is_empty() {
             continue;
         }
 
-        // Copy the note to HEAD (first one wins for now)
-        let existing = git_cmd(&["notes", "--ref=ai", "show", &head_sha]);
-        if existing.is_ok() {
-            continue; // HEAD already has a note
+        let log = match AuthorshipLog::deserialize_from_string(&note) {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        // Merge metadata
+        for (id, session) in &log.metadata.sessions {
+            merged_sessions.entry(id.clone()).or_insert_with(|| session.clone());
+        }
+        for (id, human) in &log.metadata.humans {
+            merged_humans.entry(id.clone()).or_insert_with(|| human.clone());
+        }
+        for (id, prompt) in &log.metadata.prompts {
+            merged_prompts.entry(id.clone()).or_insert_with(|| prompt.clone());
         }
 
-        let _ = Command::new("/usr/bin/git")
-            .args(["notes", "--ref=ai", "add", "-f", "-m", &note, &head_sha])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        for att in &log.attestations {
+            all_files.insert(att.file_path.clone());
+        }
+        parsed_notes.push((source_sha.clone(), log));
+    }
+
+    if parsed_notes.is_empty() {
+        debug_log("post-rewrite-squash: no notes found in source commits");
+        return;
+    }
+
+    // Sequential replay: for each file, accumulate attributions by diffing
+    // consecutive commit contents and transferring line numbers forward.
+    // accumulated_attrs: file_path -> (line_number -> author_hash)
+    let mut accumulated_attrs: std::collections::HashMap<String, BTreeMap<u32, String>> = std::collections::HashMap::new();
+    let mut prev_contents: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    let all_files_vec: Vec<String> = all_files.iter().cloned().collect();
+
+    for (i, (source_sha, authorship_log)) in parsed_notes.iter().enumerate() {
+        // Get file contents at this commit
+        let mut current_contents: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for file_path in &all_files_vec {
+            let spec = format!("{}:{}", source_sha, file_path);
+            if let Ok(content) = git_cmd(&["show", &spec]) {
+                current_contents.insert(file_path.clone(), content);
+            }
+        }
+
+        if i > 0 {
+            // Transfer accumulated attributions through diff
+            for file_path in &all_files_vec {
+                let prev_content = prev_contents.get(file_path);
+                let curr_content = current_contents.get(file_path);
+
+                if let (Some(prev_c), Some(curr_c)) = (prev_content, curr_content) {
+                    if prev_c == curr_c {
+                        continue; // No change, attributions stay the same
+                    }
+                    if let Some(attrs) = accumulated_attrs.get(file_path) {
+                        if attrs.is_empty() {
+                            continue;
+                        }
+                        // Diff old→new and transfer attributions
+                        let old_lines: Vec<&str> = prev_c.lines().collect();
+                        let new_lines: Vec<&str> = curr_c.lines().collect();
+                        let ops = diff_slices(&old_lines, &new_lines);
+
+                        let mut new_attrs: BTreeMap<u32, String> = BTreeMap::new();
+                        for op in &ops {
+                            if let LineDiffOp::Equal { old_index, new_index, len } = op {
+                                for j in 0..*len {
+                                    let old_line_num = (*old_index + j + 1) as u32;
+                                    let new_line_num = (*new_index + j + 1) as u32;
+                                    if let Some(hash) = attrs.get(&old_line_num) {
+                                        new_attrs.insert(new_line_num, hash.clone());
+                                    }
+                                }
+                            }
+                        }
+                        accumulated_attrs.insert(file_path.clone(), new_attrs);
+                    }
+                }
+            }
+        }
+
+        // Overlay this commit's note attributions
+        for file_attestation in &authorship_log.attestations {
+            let file_path = &file_attestation.file_path;
+            let entry = accumulated_attrs.entry(file_path.clone()).or_default();
+            for att_entry in &file_attestation.entries {
+                for line in att_entry.line_ranges.iter().flat_map(|r| r.expand()) {
+                    entry.insert(line, att_entry.hash.clone());
+                }
+            }
+        }
+
+        prev_contents = current_contents;
+    }
+
+    // Final diff: last source commit content → target commit content
+    // (In fixup squash, these should be identical, but handle the general case)
+    for file_path in &all_files_vec {
+        let spec = format!("{}:{}", target_sha, file_path);
+        if let Ok(target_content) = git_cmd(&["show", &spec]) {
+            if let Some(prev_c) = prev_contents.get(file_path) {
+                if prev_c != &target_content {
+                    if let Some(attrs) = accumulated_attrs.get(file_path) {
+                        if !attrs.is_empty() {
+                            let old_lines: Vec<&str> = prev_c.lines().collect();
+                            let new_lines: Vec<&str> = target_content.lines().collect();
+                            let ops = diff_slices(&old_lines, &new_lines);
+
+                            let mut new_attrs: BTreeMap<u32, String> = BTreeMap::new();
+                            for op in &ops {
+                                if let LineDiffOp::Equal { old_index, new_index, len } = op {
+                                    for j in 0..*len {
+                                        let old_line_num = (*old_index + j + 1) as u32;
+                                        let new_line_num = (*new_index + j + 1) as u32;
+                                        if let Some(hash) = attrs.get(&old_line_num) {
+                                            new_attrs.insert(new_line_num, hash.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            accumulated_attrs.insert(file_path.clone(), new_attrs);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build merged attestations from accumulated attrs
+    let mut merged_attestations: Vec<git_ai::core::authorship_log::FileAttestation> = Vec::new();
+    for (file_path, attrs) in &accumulated_attrs {
+        if attrs.is_empty() {
+            continue;
+        }
+        // Group by hash
+        let mut hash_lines: BTreeMap<String, Vec<u32>> = BTreeMap::new();
+        for (line, hash) in attrs {
+            hash_lines.entry(hash.clone()).or_default().push(*line);
+        }
+        let mut entries: Vec<git_ai::core::authorship_log::AttestationEntry> = Vec::new();
+        for (hash, mut lines) in hash_lines {
+            lines.sort();
+            entries.push(git_ai::core::authorship_log::AttestationEntry {
+                hash,
+                line_ranges: git_ai::core::authorship_log::LineRange::compress_lines(&lines),
+            });
+        }
+        merged_attestations.push(git_ai::core::authorship_log::FileAttestation {
+            file_path: file_path.clone(),
+            entries,
+        });
+    }
+
+    if merged_attestations.is_empty() && merged_sessions.is_empty() && merged_humans.is_empty() && merged_prompts.is_empty() {
+        debug_log("post-rewrite-squash: no notes found in source commits");
+        return;
+    }
+
+    // Build the merged authorship log
+    let merged_log = AuthorshipLog {
+        attestations: merged_attestations,
+        metadata: git_ai::core::authorship_log::Metadata {
+            schema_version: "authorship/3.0.0".to_string(),
+            git_ai_version: None,
+            base_commit_sha: target_sha.clone(),
+            prompts: merged_prompts,
+            sessions: merged_sessions,
+            humans: merged_humans,
+        },
+    };
+
+    let merged_note = merged_log.serialize_to_string();
+
+    // Write the merged note to the target commit
+    let result = Command::new("/usr/bin/git")
+        .args(["notes", "--ref=ai", "add", "-f", "-m", &merged_note, target_sha])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .status();
+
+    match result {
+        Ok(status) if status.success() => {
+            debug_log(&format!(
+                "post-rewrite-squash: merged {} source notes into {}",
+                parsed_notes.len(),
+                &target_sha[..7.min(target_sha.len())]
+            ));
+        }
+        _ => {
+            debug_log(&format!(
+                "post-rewrite-squash: failed to write merged note to {}",
+                &target_sha[..7.min(target_sha.len())]
+            ));
+        }
     }
 }
 
@@ -1775,115 +2642,278 @@ fn handle_post_rewrite_squash(args: &[String]) {
 // ---------------------------------------------------------------------------
 
 fn handle_internal_command(cmd: &str, args: &[String]) {
+    // All internal machine commands require --json flag
     let is_json = args.iter().any(|a| a == "--json");
-    let request_str = args.iter().find(|a| a.starts_with('{') || !a.starts_with('-'));
+    if !is_json {
+        eprintln!("{}", serde_json::json!({ "error": format!("internal command '{}' requires --json flag", cmd) }));
+        process::exit(1);
+    }
+
+    // The request payload is the positional argument after --json (or any arg starting with '{')
+    let request_str: Option<&str> = args.iter()
+        .skip_while(|a| a.as_str() != "--json")
+        .skip(1) // skip --json itself
+        .next()
+        .map(|s| s.as_str())
+        .or_else(|| args.iter().find(|a| a.starts_with('{')).map(|s| s.as_str()));
 
     match cmd {
         "effective-ignore-patterns" => {
-            if is_json {
-                let patterns: Vec<&str> = DEFAULT_IGNORE_PATTERNS.to_vec();
-                // Also read .git-ai-ignore if present
-                let repo_root = git_cmd(&["rev-parse", "--show-toplevel"]).unwrap_or_default();
-                let mut all_patterns = patterns.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-                let ignore_file = PathBuf::from(&repo_root).join(".git-ai-ignore");
-                if ignore_file.exists() {
-                    if let Ok(content) = fs::read_to_string(&ignore_file) {
-                        for line in content.lines() {
-                            let trimmed = line.trim();
-                            if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                                all_patterns.push(trimmed.to_string());
+            let repo_root = git_cmd(&["rev-parse", "--show-toplevel"]).unwrap_or_default();
+            let mut all_patterns: Vec<String> = DEFAULT_IGNORE_PATTERNS.iter().map(|s| s.to_string()).collect();
+
+            // Read .git-ai-ignore if present
+            let ignore_file = PathBuf::from(&repo_root).join(".git-ai-ignore");
+            if ignore_file.exists() {
+                if let Ok(content) = fs::read_to_string(&ignore_file) {
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                            all_patterns.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Read .gitattributes for linguist-generated patterns
+            let gitattributes_file = PathBuf::from(&repo_root).join(".gitattributes");
+            if gitattributes_file.exists() {
+                if let Ok(content) = fs::read_to_string(&gitattributes_file) {
+                    for line in content.lines() {
+                        let trimmed = line.trim();
+                        if trimmed.contains("linguist-generated") {
+                            if let Some(pattern) = trimmed.split_whitespace().next() {
+                                all_patterns.push(pattern.to_string());
                             }
                         }
                     }
                 }
-                println!("{}", serde_json::json!({ "patterns": all_patterns }));
-            } else {
-                for p in DEFAULT_IGNORE_PATTERNS {
-                    println!("{}", p);
+            }
+
+            // Include user_patterns and extra_patterns from the request
+            if let Some(req) = request_str {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(req) {
+                    if let Some(user_pats) = parsed["user_patterns"].as_array() {
+                        for p in user_pats {
+                            if let Some(s) = p.as_str() {
+                                all_patterns.push(s.to_string());
+                            }
+                        }
+                    }
+                    if let Some(extra_pats) = parsed["extra_patterns"].as_array() {
+                        for p in extra_pats {
+                            if let Some(s) = p.as_str() {
+                                all_patterns.push(s.to_string());
+                            }
+                        }
+                    }
                 }
             }
+
+            // Deduplicate while preserving order
+            let mut seen = std::collections::HashSet::new();
+            all_patterns.retain(|p| seen.insert(p.clone()));
+
+            println!("{}", serde_json::json!({ "patterns": all_patterns }));
         }
         "blame-analysis" => {
-            if let Some(req) = request_str {
-                let parsed: serde_json::Value =
-                    serde_json::from_str(req).unwrap_or(serde_json::json!({}));
-                let file = parsed["file"].as_str().unwrap_or("");
-                let commit = parsed["commit"].as_str().unwrap_or("HEAD");
-
-                let blame_result = git_cmd(&["blame", "--line-porcelain", "--", file]);
-                match blame_result {
-                    Ok(output) => {
-                        let total_lines = output.matches('\t').count();
-                        let note = git_cmd(&["notes", "--ref=ai", "show", commit]).ok();
-                        let ai_lines = if let Some(ref n) = note {
-                            if let Ok(log) = AuthorshipLog::deserialize_from_string(n) {
-                                log.attestations
-                                    .iter()
-                                    .filter(|a| {
-                                        let p = a.file_path.strip_prefix("./").unwrap_or(&a.file_path);
-                                        p == file
-                                    })
-                                    .flat_map(|a| &a.entries)
-                                    .filter(|e| !e.hash.starts_with("h_"))
-                                    .map(|e| {
-                                        e.line_ranges.iter().map(|r| r.line_count() as u64).sum::<u64>()
-                                    })
-                                    .sum::<u64>()
-                            } else {
-                                0
-                            }
-                        } else {
-                            0
-                        };
-                        println!(
-                            "{}",
-                            serde_json::json!({
-                                "file": file,
-                                "total_lines": total_lines,
-                                "ai_lines": ai_lines,
-                                "human_lines": total_lines as u64 - ai_lines,
-                            })
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("{}", serde_json::json!({ "error": e }));
-                        process::exit(1);
-                    }
+            let req = match request_str {
+                Some(r) => r,
+                None => {
+                    eprintln!("{}", serde_json::json!({ "error": "missing request JSON" }));
+                    process::exit(1);
                 }
-            } else {
-                eprintln!("{}", serde_json::json!({ "error": "missing request JSON" }));
-                process::exit(1);
+            };
+            let parsed: serde_json::Value =
+                serde_json::from_str(req).unwrap_or(serde_json::json!({}));
+            let file = parsed["file_path"].as_str()
+                .or_else(|| parsed["file"].as_str())
+                .unwrap_or("");
+            let _commit = parsed["commit"].as_str().unwrap_or("HEAD");
+            let options = &parsed["options"];
+            let return_human_as_human = options["return_human_authors_as_human"].as_bool().unwrap_or(false);
+            let line_ranges: Vec<(u32, u32)> = options["line_ranges"].as_array()
+                .map(|arr| arr.iter().filter_map(|r| {
+                    let pair = r.as_array()?;
+                    Some((pair.get(0)?.as_u64()? as u32, pair.get(1)?.as_u64()? as u32))
+                }).collect())
+                .unwrap_or_default();
+
+            // Run git blame for full file
+            let blame_result = git_cmd(&["blame", "--line-porcelain", "--", file]);
+            match blame_result {
+                Ok(output) => {
+                    // Parse blame output
+                    let mut blame_lines: Vec<BlameLineData> = Vec::new();
+                    let mut cur_sha = String::new();
+                    let mut cur_orig_line: u32 = 0;
+                    let mut cur_final_line: u32 = 0;
+                    let mut cur_author = String::new();
+                    let mut cur_author_email = String::new();
+                    let mut cur_author_time: i64 = 0;
+                    let mut cur_author_tz = String::new();
+                    let mut cur_headers: Vec<String> = Vec::new();
+
+                    for line in output.lines() {
+                        if line.is_empty() { continue; }
+                        if line.starts_with('\t') {
+                            blame_lines.push(BlameLineData {
+                                commit_sha: cur_sha.clone(),
+                                orig_line: cur_orig_line,
+                                final_line: cur_final_line,
+                                author: cur_author.clone(),
+                                author_email: cur_author_email.clone(),
+                                author_time: cur_author_time,
+                                author_tz: cur_author_tz.clone(),
+                                content: line[1..].to_string(),
+                                raw_headers: cur_headers.clone(),
+                            });
+                            cur_headers.clear();
+                            continue;
+                        }
+                        if let Some(rest) = line.strip_prefix("author-mail ") {
+                            cur_author_email = rest.trim_start_matches('<').trim_end_matches('>').to_string();
+                            cur_headers.push(line.to_string());
+                            continue;
+                        }
+                        if let Some(rest) = line.strip_prefix("author-time ") {
+                            cur_author_time = rest.trim().parse().unwrap_or(0);
+                            cur_headers.push(line.to_string());
+                            continue;
+                        }
+                        if let Some(rest) = line.strip_prefix("author-tz ") {
+                            cur_author_tz = rest.trim().to_string();
+                            cur_headers.push(line.to_string());
+                            continue;
+                        }
+                        if let Some(rest) = line.strip_prefix("author ") {
+                            cur_author = rest.to_string();
+                            cur_headers.push(line.to_string());
+                            continue;
+                        }
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 3
+                            && parts[0].len() == 40
+                            && parts[0].chars().all(|c| c.is_ascii_hexdigit())
+                        {
+                            cur_sha = parts[0].to_string();
+                            cur_orig_line = parts[1].parse().unwrap_or(0);
+                            cur_final_line = parts[2].parse().unwrap_or(0);
+                            cur_headers.push(line.to_string());
+                        } else {
+                            cur_headers.push(line.to_string());
+                        }
+                    }
+
+                    // Load notes for relevant commits
+                    let mut commit_notes: HashMap<String, Option<AuthorshipLog>> = HashMap::new();
+                    for bl in &blame_lines {
+                        if !commit_notes.contains_key(&bl.commit_sha) {
+                            let note = load_authorship_note(&bl.commit_sha);
+                            commit_notes.insert(bl.commit_sha.clone(), note);
+                        }
+                    }
+
+                    // Build line_authors for requested ranges
+                    let mut line_authors: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+                    let mut prompt_records: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
+                    for bl in &blame_lines {
+                        // Filter by line_ranges if specified
+                        if !line_ranges.is_empty() {
+                            let in_range = line_ranges.iter().any(|(start, end)| {
+                                bl.final_line >= *start && bl.final_line <= *end
+                            });
+                            if !in_range { continue; }
+                        }
+
+                        let (author_display, prompt_hash) = resolve_line_author_with_prompt(
+                            &bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file, &commit_notes, &bl.raw_headers,
+                        );
+
+                        let display = if let Some(ref hash) = prompt_hash {
+                            // Collect prompt record
+                            if !prompt_records.contains_key(hash) {
+                                if let Some(Some(log)) = commit_notes.get(&bl.commit_sha) {
+                                    if let Some(prompt) = log.metadata.prompts.get(hash) {
+                                        prompt_records.insert(hash.clone(), serde_json::json!({
+                                            "agent_id": { "tool": prompt.agent_id.tool, "model": prompt.agent_id.model },
+                                        }));
+                                    }
+                                }
+                            }
+                            author_display
+                        } else if return_human_as_human {
+                            "human".to_string()
+                        } else {
+                            author_display
+                        };
+
+                        line_authors.insert(bl.final_line.to_string(), serde_json::Value::String(display));
+                    }
+
+                    // Build blame hunks
+                    let mut blame_hunks: Vec<serde_json::Value> = Vec::new();
+                    for bl in &blame_lines {
+                        if !line_ranges.is_empty() {
+                            let in_range = line_ranges.iter().any(|(start, end)| {
+                                bl.final_line >= *start && bl.final_line <= *end
+                            });
+                            if !in_range { continue; }
+                        }
+                        blame_hunks.push(serde_json::json!({
+                            "commit": bl.commit_sha,
+                            "line": bl.final_line,
+                            "author": bl.author,
+                            "content": bl.content,
+                        }));
+                    }
+
+                    println!("{}", serde_json::json!({
+                        "line_authors": line_authors,
+                        "prompt_records": prompt_records,
+                        "blame_hunks": blame_hunks,
+                    }));
+                }
+                Err(e) => {
+                    eprintln!("{}", serde_json::json!({ "error": e }));
+                    process::exit(1);
+                }
             }
         }
         "fetch-authorship-notes" | "fetch_authorship_notes" => {
             let remote = if let Some(req) = request_str {
                 let parsed: serde_json::Value =
                     serde_json::from_str(req).unwrap_or(serde_json::json!({}));
-                parsed["remote"].as_str().unwrap_or("origin").to_string()
+                parsed["remote_name"].as_str()
+                    .or_else(|| parsed["remote"].as_str())
+                    .unwrap_or("origin").to_string()
             } else {
                 "origin".to_string()
             };
+
+            // Try to fetch; determine if notes exist on remote
             let result = Command::new("/usr/bin/git")
-                .args(["fetch", &remote, "refs/notes/ai:refs/notes/ai"])
+                .args(["fetch", &remote, "+refs/notes/ai:refs/notes/ai"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output();
+
             match result {
                 Ok(output) if output.status.success() => {
-                    println!("{}", serde_json::json!({ "status": "ok", "remote": remote }));
+                    println!("{}", serde_json::json!({ "notes_existence": "found" }));
                 }
                 Ok(output) => {
                     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                    println!(
-                        "{}",
-                        serde_json::json!({ "status": "error", "error": stderr.trim(), "remote": remote })
-                    );
+                    // "couldn't find remote ref" means notes don't exist
+                    if stderr.contains("couldn't find remote ref") || stderr.contains("not found") {
+                        println!("{}", serde_json::json!({ "notes_existence": "not_found" }));
+                    } else {
+                        println!("{}", serde_json::json!({ "notes_existence": "found" }));
+                    }
                 }
-                Err(e) => {
-                    println!(
-                        "{}",
-                        serde_json::json!({ "status": "error", "error": format!("{}", e), "remote": remote })
-                    );
+                Err(_) => {
+                    println!("{}", serde_json::json!({ "notes_existence": "not_found" }));
                 }
             }
         }
@@ -1891,13 +2921,75 @@ fn handle_internal_command(cmd: &str, args: &[String]) {
             let remote = if let Some(req) = request_str {
                 let parsed: serde_json::Value =
                     serde_json::from_str(req).unwrap_or(serde_json::json!({}));
-                parsed["remote"].as_str().unwrap_or("origin").to_string()
+                parsed["remote_name"].as_str()
+                    .or_else(|| parsed["remote"].as_str())
+                    .unwrap_or("origin").to_string()
             } else {
                 "origin".to_string()
             };
-            // Retry up to 3 times for concurrent push
+
+            // Check if local refs/notes/ai exists; if not, nothing to push
+            let has_local_notes = git_cmd(&["rev-parse", "--verify", "refs/notes/ai"]).is_ok();
+            if !has_local_notes {
+                println!("{}", serde_json::json!({ "ok": true }));
+                return;
+            }
+
+            // Retry up to 3 times for concurrent push (non-fast-forward)
             let mut last_err = String::new();
-            for _ in 0..3 {
+            for attempt in 0..3 {
+                // On retry attempts (or after first non-fast-forward), fetch and merge
+                if attempt > 0 {
+                    let _ = Command::new("/usr/bin/git")
+                        .args(["fetch", &remote, "+refs/notes/ai:refs/notes/ai-remote/origin"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                    // Try to merge remote notes with cat_sort_uniq
+                    let merge_ok = Command::new("/usr/bin/git")
+                        .args(["notes", "--ref=ai", "merge", "-s", "cat_sort_uniq", "refs/notes/ai-remote/origin"])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if !merge_ok {
+                        let _ = Command::new("/usr/bin/git")
+                            .args(["notes", "--ref=ai", "merge", "--abort"])
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                        // Fallback: merge with ours strategy
+                        let ours_ok = Command::new("/usr/bin/git")
+                            .args(["notes", "--ref=ai", "merge", "-s", "ours", "refs/notes/ai-remote/origin"])
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status()
+                            .map(|s| s.success())
+                            .unwrap_or(false);
+                        if !ours_ok {
+                            let _ = Command::new("/usr/bin/git")
+                                .args(["notes", "--ref=ai", "merge", "--abort"])
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status();
+                            // All merge strategies failed (corrupted remote tree).
+                            // Force push our local notes as last resort.
+                            let force_result = Command::new("/usr/bin/git")
+                                .args(["push", "--force", &remote, "refs/notes/ai:refs/notes/ai"])
+                                .stdout(Stdio::piped())
+                                .stderr(Stdio::piped())
+                                .output();
+                            if let Ok(out) = force_result {
+                                if out.status.success() {
+                                    println!("{}", serde_json::json!({ "ok": true }));
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let result = Command::new("/usr/bin/git")
                     .args(["push", &remote, "refs/notes/ai:refs/notes/ai"])
                     .stdout(Stdio::piped())
@@ -1905,22 +2997,12 @@ fn handle_internal_command(cmd: &str, args: &[String]) {
                     .output();
                 match result {
                     Ok(output) if output.status.success() => {
-                        println!(
-                            "{}",
-                            serde_json::json!({ "status": "ok", "remote": remote })
-                        );
+                        println!("{}", serde_json::json!({ "ok": true }));
                         return;
                     }
                     Ok(output) => {
                         last_err = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                        // Retry on non-fast-forward
                         if last_err.contains("non-fast-forward") || last_err.contains("fetch first") {
-                            // Try fetching notes first then retry
-                            let _ = Command::new("/usr/bin/git")
-                                .args(["fetch", &remote, "refs/notes/ai:refs/notes/ai"])
-                                .stdout(Stdio::null())
-                                .stderr(Stdio::null())
-                                .status();
                             continue;
                         }
                         break;
@@ -1931,15 +3013,159 @@ fn handle_internal_command(cmd: &str, args: &[String]) {
                     }
                 }
             }
-            println!(
-                "{}",
-                serde_json::json!({ "status": "ok", "remote": remote, "warning": last_err })
-            );
+            // Even if push fails after retries, report ok (best effort)
+            println!("{}", serde_json::json!({ "ok": true }));
         }
         _ => {
             eprintln!("{}", serde_json::json!({ "error": format!("unknown internal command: {}", cmd) }));
             process::exit(1);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CI command (local CI for squash-merge attribution)
+// ---------------------------------------------------------------------------
+
+fn handle_ci(args: &[String]) {
+    if args.len() < 2 || args[0] != "local" || args[1] != "merge" {
+        eprintln!("usage: git-ai ci local merge [options]");
+        process::exit(1);
+    }
+
+    let ci_args = &args[2..];
+    let mut merge_commit_sha = String::new();
+    let mut base_ref = String::new();
+    let mut _head_ref = String::new();
+    let mut head_sha = String::new();
+    let mut base_sha = String::new();
+    let mut skip_fetch_base = false;
+    let mut skip_fetch_notes = false;
+    let mut skip_fetch = false;
+    let mut skip_push = false;
+
+    let mut i = 0;
+    while i < ci_args.len() {
+        match ci_args[i].as_str() {
+            "--merge-commit-sha" => { i += 1; merge_commit_sha = ci_args.get(i).cloned().unwrap_or_default(); }
+            "--base-ref" => { i += 1; base_ref = ci_args.get(i).cloned().unwrap_or_default(); }
+            "--head-ref" => { i += 1; _head_ref = ci_args.get(i).cloned().unwrap_or_default(); }
+            "--head-sha" => { i += 1; head_sha = ci_args.get(i).cloned().unwrap_or_default(); }
+            "--base-sha" => { i += 1; base_sha = ci_args.get(i).cloned().unwrap_or_default(); }
+            "--skip-fetch-base" => { skip_fetch_base = true; }
+            "--skip-fetch-notes" => { skip_fetch_notes = true; }
+            "--skip-fetch" => { skip_fetch = true; skip_fetch_notes = true; skip_fetch_base = true; }
+            "--skip-push" => { skip_push = true; }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // Step 1: Fetch authorship notes (unless skipped)
+    if skip_fetch || skip_fetch_notes {
+        println!("Skipping authorship history fetch (--skip-fetch)");
+    } else {
+        let fetch_result = Command::new("/usr/bin/git")
+            .args(["fetch", "origin", "+refs/notes/ai:refs/notes/ai"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        match fetch_result {
+            Ok(output) if !output.status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                if !stderr.contains("couldn't find remote ref") {
+                    eprintln!("Error running local CI: failed to fetch authorship notes: {}", stderr.trim());
+                    process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error running local CI: failed to fetch authorship notes: {}", e);
+                process::exit(1);
+            }
+            _ => {}
+        }
+    }
+
+    // Step 2: Resolve base ref
+    if skip_fetch_base {
+        println!("Skipping base branch fetch for {}", base_ref);
+        // Verify it exists locally
+        let resolve_result = git_cmd(&["rev-parse", "--verify", &base_ref]);
+        if resolve_result.is_err() {
+            let with_origin = format!("origin/{}", base_ref);
+            if git_cmd(&["rev-parse", "--verify", &with_origin]).is_err() {
+                eprintln!("Failed to resolve base ref '{}' locally", base_ref);
+                process::exit(1);
+            }
+        }
+    } else {
+        // Try to fetch the base branch from origin
+        let fetch_base_result = Command::new("/usr/bin/git")
+            .args(["fetch", "origin", &base_ref])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        match fetch_base_result {
+            Ok(output) if !output.status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                eprintln!("Failed to fetch base branch '{}' from origin: {}", base_ref, stderr.trim());
+                process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Failed to fetch base branch '{}' from origin: {}", base_ref, e);
+                process::exit(1);
+            }
+            _ => {}
+        }
+    }
+
+    // Step 3: Determine if merge commit has AI authorship from head branch commits
+    let range = format!("{}..{}", base_sha, head_sha);
+    let commits_output = git_cmd(&["log", "--format=%H", &range]).unwrap_or_default();
+    let head_commits: Vec<&str> = commits_output.lines().filter(|l| !l.is_empty()).collect();
+
+    let mut has_ai_authorship = false;
+    for commit in &head_commits {
+        if let Ok(note) = git_cmd(&["notes", "--ref=ai", "show", commit]) {
+            if !note.trim().is_empty() {
+                has_ai_authorship = true;
+                break;
+            }
+        }
+    }
+
+    if !has_ai_authorship {
+        if skip_fetch {
+            println!("Local CI (merge): skipped fast-forward merge — no AI authorship to track");
+        } else {
+            println!("Local CI (merge): no AI authorship to track");
+        }
+    } else {
+        for commit in &head_commits {
+            if let Ok(note) = git_cmd(&["notes", "--ref=ai", "show", commit]) {
+                if !note.trim().is_empty() {
+                    let _ = Command::new("/usr/bin/git")
+                        .args(["notes", "--ref=ai", "add", "-f", "-m", &note, &merge_commit_sha])
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                    break;
+                }
+            }
+        }
+        println!("Local CI (merge): transferred AI authorship to merge commit");
+    }
+
+    // Step 4: Push authorship notes (unless skipped)
+    if skip_push {
+        println!("Skipping authorship push (--skip-push)");
+    } else {
+        println!("Pushing authorship...");
+        let _ = Command::new("/usr/bin/git")
+            .args(["push", "origin", "refs/notes/ai:refs/notes/ai"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
     }
 }
 
@@ -2003,6 +3229,7 @@ fn main() {
         Some("status") => handle_status(&args[1..]),
         Some("stats") => handle_stats(&args[1..]),
         Some("bg") => handle_bg(&args[1..]),
+        Some("ci") => handle_ci(&args[1..]),
         Some("effective-ignore-patterns") => handle_internal_command("effective-ignore-patterns", &args[1..]),
         Some("blame-analysis") => handle_internal_command("blame-analysis", &args[1..]),
         Some("fetch-authorship-notes") => handle_internal_command("fetch-authorship-notes", &args[1..]),

@@ -309,12 +309,47 @@ impl TestRepo {
     /// Synchronize/flush the daemon. In v2 test mode, checkpoints are processed
     /// synchronously, so this is a no-op.
     pub fn sync_daemon(&self) {
-        // No-op: v2 processes checkpoints synchronously in test mode.
+        // In v2, checkpoints are processed synchronously but post-commit
+        // needs to be triggered explicitly when tests use repo.git(&["commit", ...])
+        // followed by sync_daemon() (the pattern used by copilot/agent tests).
+        //
+        // Only run post-commit if:
+        // 1. HEAD has no authorship note yet, AND
+        // 2. There's a working log for the parent commit (i.e., checkpoints exist to consume)
+        let git = real_git_executable();
+        let has_note = Command::new(git)
+            .current_dir(&self.path)
+            .args(["notes", "--ref=ai", "show", "HEAD"])
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .output()
+            .ok()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if has_note {
+            return;
+        }
+
+        // Check if there's a working log for the parent of HEAD
+        let parent_sha = Command::new(git)
+            .current_dir(&self.path)
+            .args(["rev-parse", "HEAD~1"])
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+
+        let git_dir = self.path.join(".git");
+        let parent_key = parent_sha.as_deref().unwrap_or("initial");
+        let working_log_dir = git_dir.join("ai").join("working_logs").join(parent_key);
+        if working_log_dir.exists() {
+            let _ = self.git_ai(&["post-commit"]);
+        }
     }
 
-    /// Force-synchronize the daemon. Also a no-op in v2 test mode.
+    /// Force-synchronize the daemon. Also calls post-commit in v2 test mode.
     pub fn sync_daemon_force(&self) {
-        // No-op: v2 processes checkpoints synchronously in test mode.
+        let _ = self.git_ai(&["post-commit"]);
     }
 
     pub fn path(&self) -> &PathBuf {
@@ -670,7 +705,7 @@ impl TestRepo {
     fn reconstruct_working_log_from_notes(&self, base_commit: &str, reset_commits: &[String]) {
         // Merge all notes from reset commits into a single INITIAL attribution
         let initial = self.merge_notes_into_initial(reset_commits);
-        if !initial.files.is_empty() || !initial.sessions.is_empty() || !initial.humans.is_empty() {
+        if !initial.files.is_empty() || !initial.sessions.is_empty() || !initial.humans.is_empty() || !initial.prompts.is_empty() {
             let git_dir = self.path.join(".git");
             std::fs::create_dir_all(
                 git_dir.join("ai").join("working_logs").join(base_commit),
@@ -690,17 +725,22 @@ impl TestRepo {
 
     /// Merge authorship notes from multiple commits into a single InitialAttributions.
     /// Later commits take precedence (they represent the final state).
+    /// Line numbers from each commit are remapped to the current working tree state.
     fn merge_notes_into_initial(
         &self,
         commit_shas: &[String],
     ) -> git_ai::core::working_log::InitialAttributions {
         use git_ai::core::attribution::LineAttribution;
-        use git_ai::core::working_log::{HumanRecord, InitialAttributions, SessionRecord};
+        use git_ai::core::working_log::{
+            HumanRecord, InitialAttributions, PromptRecord, SessionRecord,
+        };
         use std::collections::HashMap;
 
+        let git = real_git_executable();
         let mut files: HashMap<String, Vec<LineAttribution>> = HashMap::new();
         let mut sessions: HashMap<String, SessionRecord> = HashMap::new();
         let mut humans: HashMap<String, HumanRecord> = HashMap::new();
+        let mut prompts: HashMap<String, PromptRecord> = HashMap::new();
 
         // Process commits oldest-first (rev-list gives newest-first, so reverse)
         for commit_sha in commit_shas.iter().rev() {
@@ -714,7 +754,37 @@ impl TestRepo {
             };
 
             for file_att in &log.attestations {
-                let mut line_attrs: Vec<LineAttribution> = Vec::new();
+                // Get file content at this commit for line-number remapping
+                let commit_content = Command::new(git)
+                    .current_dir(&self.path)
+                    .args(["show", &format!("{}:{}", commit_sha, file_att.file_path)])
+                    .env("GIT_TRACE2_EVENT", "/dev/null")
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string());
+
+                // Get current working tree content
+                let wt_path = self.path.join(&file_att.file_path);
+                let wt_content = std::fs::read_to_string(&wt_path).ok();
+
+                // Build line mapping from commit -> working tree
+                let mapping: Option<HashMap<u32, u32>> =
+                    if let (Some(old), Some(new)) = (&commit_content, &wt_content) {
+                        if old != new {
+                            let old_lines: Vec<&str> = old.lines().collect();
+                            let new_lines: Vec<&str> = new.lines().collect();
+                            Some(git_ai::core::post_commit::build_line_mapping(
+                                &old_lines, &new_lines,
+                            ))
+                        } else {
+                            None // Same content, line numbers match
+                        }
+                    } else {
+                        None
+                    };
+
+                let mut new_line_attrs: Vec<LineAttribution> = Vec::new();
                 for entry in &file_att.entries {
                     for range in &entry.line_ranges {
                         let (start, end) = match range {
@@ -722,23 +792,70 @@ impl TestRepo {
                             git_ai::authorship::authorship_log::LineRange::Range(s, e) => (*s, *e),
                         };
                         for line_num in start..=end {
-                            if let Some(last) = line_attrs.last_mut() {
-                                if last.author_id == entry.hash && last.end_line + 1 == line_num {
-                                    last.end_line = line_num;
+                            // Remap line number to working tree
+                            let mapped_line = if let Some(ref m) = mapping {
+                                match m.get(&line_num) {
+                                    Some(&new_line) => new_line,
+                                    None => continue, // Line doesn't exist in working tree
+                                }
+                            } else {
+                                line_num
+                            };
+
+                            if let Some(last) = new_line_attrs.last_mut() {
+                                if last.author_id == entry.hash
+                                    && last.end_line + 1 == mapped_line
+                                {
+                                    last.end_line = mapped_line;
                                     continue;
                                 }
                             }
-                            line_attrs.push(LineAttribution {
-                                start_line: line_num,
-                                end_line: line_num,
+                            new_line_attrs.push(LineAttribution {
+                                start_line: mapped_line,
+                                end_line: mapped_line,
                                 author_id: entry.hash.clone(),
                                 overrode: None,
                             });
                         }
                     }
                 }
-                if !line_attrs.is_empty() {
-                    files.insert(file_att.file_path.clone(), line_attrs);
+                if !new_line_attrs.is_empty() {
+                    // Merge with existing entries: later commits override same lines,
+                    // but preserve entries from earlier commits for other lines.
+                    let existing = files.entry(file_att.file_path.clone()).or_default();
+                    // Build a set of lines covered by the new entries
+                    let mut new_lines_covered: std::collections::HashSet<u32> =
+                        std::collections::HashSet::new();
+                    for attr in &new_line_attrs {
+                        for l in attr.start_line..=attr.end_line {
+                            new_lines_covered.insert(l);
+                        }
+                    }
+                    // Split existing ranges and remove covered lines
+                    let mut split_existing: Vec<LineAttribution> = Vec::new();
+                    for attr in existing.drain(..) {
+                        for l in attr.start_line..=attr.end_line {
+                            if !new_lines_covered.contains(&l) {
+                                if let Some(last) = split_existing.last_mut() {
+                                    if last.author_id == attr.author_id
+                                        && last.end_line + 1 == l
+                                    {
+                                        last.end_line = l;
+                                        continue;
+                                    }
+                                }
+                                split_existing.push(LineAttribution {
+                                    start_line: l,
+                                    end_line: l,
+                                    author_id: attr.author_id.clone(),
+                                    overrode: None,
+                                });
+                            }
+                        }
+                    }
+                    split_existing.extend(new_line_attrs);
+                    split_existing.sort_by_key(|a| a.start_line);
+                    *files.get_mut(&file_att.file_path).unwrap() = split_existing;
                 }
             }
 
@@ -763,12 +880,26 @@ impl TestRepo {
                     },
                 );
             }
+            for (id, prompt) in &log.metadata.prompts {
+                prompts.insert(
+                    id.clone(),
+                    PromptRecord {
+                        agent_id: git_ai::core::working_log::AgentId {
+                            tool: prompt.agent_id.tool.clone(),
+                            id: prompt.agent_id.id.clone(),
+                            model: prompt.agent_id.model.clone(),
+                        },
+                        human_author: prompt.human_author.clone(),
+                    },
+                );
+            }
         }
 
         InitialAttributions {
             files,
             sessions,
             humans,
+            prompts,
         }
     }
 
@@ -1047,13 +1178,16 @@ impl TestRepo {
         old_head: &str,
     ) -> git_ai::core::working_log::InitialAttributions {
         use git_ai::core::attribution::LineAttribution;
-        use git_ai::core::working_log::{HumanRecord, InitialAttributions, SessionRecord};
+        use git_ai::core::working_log::{
+            HumanRecord, InitialAttributions, PromptRecord, SessionRecord,
+        };
         use std::collections::HashMap;
 
         let git = real_git_executable();
         let mut files: HashMap<String, Vec<LineAttribution>> = HashMap::new();
         let mut sessions: HashMap<String, SessionRecord> = HashMap::new();
         let mut humans: HashMap<String, HumanRecord> = HashMap::new();
+        let mut prompts: HashMap<String, PromptRecord> = HashMap::new();
 
         let note_content = match self.read_authorship_note(old_head) {
             Some(n) => n,
@@ -1141,11 +1275,25 @@ impl TestRepo {
                 },
             );
         }
+        for (id, prompt) in &old_log.metadata.prompts {
+            prompts.insert(
+                id.clone(),
+                PromptRecord {
+                    agent_id: git_ai::core::working_log::AgentId {
+                        tool: prompt.agent_id.tool.clone(),
+                        id: prompt.agent_id.id.clone(),
+                        model: prompt.agent_id.model.clone(),
+                    },
+                    human_author: prompt.human_author.clone(),
+                },
+            );
+        }
 
         InitialAttributions {
             files,
             sessions,
             humans,
+            prompts,
         }
     }
 
@@ -1443,10 +1591,9 @@ impl TestRepo {
 
         // Build map of new commit subjects — only genuinely new commits (not pre-existing)
         let mut new_msgs: Vec<(String, String)> = Vec::new();
+        // Also collect subjects of new commits that ALREADY have notes (e.g., from prior rebases)
+        let mut already_noted_new_msgs: Vec<(String, String)> = Vec::new();
         for new_c in &post_rebase_commits {
-            if noted_commits.contains(new_c) {
-                continue;
-            }
             if pre_rebase_set.contains(new_c) {
                 continue;
             }
@@ -1458,7 +1605,22 @@ impl TestRepo {
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .unwrap_or_default();
-            new_msgs.push((new_c.clone(), msg));
+            if noted_commits.contains(new_c) {
+                already_noted_new_msgs.push((new_c.clone(), msg));
+            } else {
+                new_msgs.push((new_c.clone(), msg));
+            }
+        }
+
+        // Filter out old commits that already have a matching new commit with a note
+        // (these were handled by a previous rebase in the same stack)
+        let old_msgs: Vec<(String, String)> = old_msgs.into_iter().filter(|(_, old_msg)| {
+            !already_noted_new_msgs.iter().any(|(_, new_msg)| new_msg == old_msg)
+        }).collect();
+
+        if old_msgs.is_empty() {
+            eprintln!("[test] post-rewrite: all old commits already have matching noted new commits");
+            return;
         }
 
         // First pass: find 1:1 matches by subject
@@ -1491,17 +1653,66 @@ impl TestRepo {
             .collect();
 
         if !unmatched_old.is_empty() && unmatched_old.len() > unmatched_new.len() {
-            // More unmatched old than new → squash scenario.
-            // Find the squash target: the single new commit that absorbed the squashed commits.
-            let squash_target = if one_to_one.len() == 1 && unmatched_new.is_empty() {
-                // The matched new commit is the squash target
+            // More unmatched old than new → potential squash scenario.
+            // But first verify: the unmatched old commits' files must actually be present
+            // in the candidate squash target. If they're not, the commits were DROPPED (skip),
+            // not squashed.
+            let candidate_target = if one_to_one.len() == 1 && unmatched_new.is_empty() {
                 Some(one_to_one[0].1.clone())
             } else if unmatched_new.len() == 1 {
                 Some(unmatched_new[0].clone())
             } else {
-                // Multiple unmatched new → can't determine squash target
                 None
             };
+
+            // Verify squash by checking if the target commit's tree contains the
+            // unmatched old commits' changed files.
+            let squash_target = candidate_target.and_then(|target| {
+                // Get files changed in the target commit
+                let target_files: std::collections::HashSet<String> = Command::new(git)
+                    .current_dir(&self.path)
+                    .args(["diff-tree", "--no-commit-id", "-r", "--name-only", &target])
+                    .env("GIT_TRACE2_EVENT", "/dev/null")
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .lines()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                // Check if ANY unmatched old commit's files are in the target
+                let has_squashed_content = unmatched_old.iter().any(|old_sha| {
+                    let old_files: Vec<String> = Command::new(git)
+                        .current_dir(&self.path)
+                        .args(["diff-tree", "--no-commit-id", "-r", "--name-only", old_sha])
+                        .env("GIT_TRACE2_EVENT", "/dev/null")
+                        .output()
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| {
+                            String::from_utf8_lossy(&o.stdout)
+                                .lines()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    old_files.iter().any(|f| target_files.contains(f))
+                });
+
+                if has_squashed_content {
+                    Some(target)
+                } else {
+                    // Files from unmatched old commits are NOT in the target — they were dropped/skipped
+                    eprintln!("[test] post-rewrite: unmatched old commits' files not in target, treating as drop (not squash)");
+                    None
+                }
+            });
 
             if let Some(target) = squash_target {
                 // Reverse to chronological order (oldest first) since pre_rebase_commits is newest-first
