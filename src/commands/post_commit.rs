@@ -6,6 +6,33 @@ use std::process::{Command, Stdio};
 
 use crate::commands::helpers::{debug_log, discover_repo_and_gitdir, read_head_sha};
 
+/// Check if an authorship note already exists for a commit (filesystem check, no git spawn).
+/// Looks up refs/notes/ai to find if the commit has a note blob.
+fn note_exists_for_commit(git_dir: &std::path::Path, commit_sha: &str) -> bool {
+    // Notes in refs/notes/ai are stored as a tree where the path is the commit SHA.
+    // We can check by running git notes --ref=ai show, but that's a spawn.
+    // Instead, check if the notes ref exists and use git to verify — but keep it cheap:
+    // just check if the ref exists at all. If it doesn't, definitely no notes.
+    let common_dir = {
+        let commondir_file = git_dir.join("commondir");
+        if let Ok(content) = std::fs::read_to_string(&commondir_file) {
+            let content = content.trim();
+            if std::path::Path::new(content).is_relative() {
+                git_dir.join(content)
+            } else {
+                PathBuf::from(content)
+            }
+        } else {
+            git_dir.to_path_buf()
+        }
+    };
+
+    // Fast path: check if the daemon's "note-written" marker exists for this commit.
+    // The daemon writes a marker at .git/ai/noted/<sha> after processing.
+    let marker = common_dir.join("ai").join("noted").join(commit_sha);
+    marker.exists()
+}
+
 pub fn handle_post_commit() {
     // Discover repo root and git dir without spawning git
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -19,6 +46,11 @@ pub fn handle_post_commit() {
         Some(sha) => sha,
         None => return,
     };
+
+    // If the daemon already wrote a note for this commit, skip (avoids duplicate work)
+    if note_exists_for_commit(&git_dir, &commit_sha) {
+        return;
+    }
 
     // Read parent SHA and author from the commit object (single git spawn)
     let output = match Command::new("/usr/bin/git")
@@ -186,6 +218,10 @@ pub fn handle_post_commit() {
                 "wrote authorship note for {}",
                 &commit_sha[..7.min(commit_sha.len())]
             ));
+            // Write marker so the daemon knows not to duplicate work
+            let noted_dir = git_dir.join("ai").join("noted");
+            let _ = std::fs::create_dir_all(&noted_dir);
+            let _ = std::fs::write(noted_dir.join(&commit_sha), b"");
         }
         Ok(_) => debug_log("git notes add failed"),
         Err(e) => debug_log(&format!("failed to run git notes: {}", e)),

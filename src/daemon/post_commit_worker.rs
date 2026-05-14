@@ -125,6 +125,11 @@ pub fn process_commit(repo_path: &Path) -> Result<bool, String> {
             &commit_sha[..7.min(commit_sha.len())]
         );
 
+        // Write marker so the post-commit hook knows not to duplicate work
+        let noted_dir = git_dir.join("ai").join("noted");
+        let _ = std::fs::create_dir_all(&noted_dir);
+        let _ = std::fs::write(noted_dir.join(commit_sha), b"");
+
         if let Some(initial) = initial_attrs {
             working_log::write_initial_attributions(&git_dir, commit_sha, &initial);
         }
