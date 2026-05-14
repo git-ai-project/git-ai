@@ -13,9 +13,8 @@
   outputs = { self, nixpkgs, rust-overlay, flake-utils }:
     let
       default = import ./default.nix;
-      defaultBasedOn = pkgs:
-        (pkgs.extend (rust-overlay.overlays.default)).callPackage default { }
-      ;
+      defaultApply = pkgs: default { inherit pkgs; lib = pkgs.lib; };
+      defaultApplyExt = pkgs: defaultApply (pkgs.extend rust-overlay.overlays.default);
     in
       flake-utils.lib.eachDefaultSystem (system:
         let
@@ -24,7 +23,7 @@
             overlays = [ rust-overlay.overlays.default ];
           };
 
-          default'      = pkgs.callPackage default { };
+          default'      = defaultApply pkgs;
           rustToolchain = default'.git-ai.utils.rustToolchain;
           rustPlatform = default'.git-ai.utils.rustPlatform;
         in
@@ -208,7 +207,7 @@
       # Overlay for importing into other flakes
       overlays.default = final: prev: 
         let 
-          default' = defaultBasedOn final;
+          default' = defaultApplyExt final;
         in
           {
             git-ai = default'.git-ai.packages.git-ai;
@@ -223,7 +222,7 @@
           cfg = config.programs.git-ai;
           jsonFormat = pkgs.formats.json { };
 
-          default'      = defaultBasedOn pkgs;
+          default'      = defaultApplyExt pkgs;
 
           # Build the config object, filtering out null values
           configFile = filterAttrs (n: v: v != null) {
@@ -268,7 +267,7 @@
               default = 
                 if cfg.gitBasePackage == null
                 then default'.git-ai.packages.git-ai
-                else (default'.git-ai.override { git = cfg.gitBasePackage; }).packages.git-ai
+                else (default'.overrideScope (final: prev: { git = cfg.gitBasePackage; })).git-ai.packages.git-ai
               ;
               defaultText = literalExpression "inputs.git-ai.packages.\${pkgs.system}.default";
               description = "The git-ai package to use.";
@@ -521,7 +520,7 @@
           cfg = config.programs.git-ai;
           jsonFormat = pkgs.formats.json { };
 
-          default' = defaultBasedOn pkgs;
+          default' = defaultApplyExt pkgs;
 
           # Build the config object, filtering out null values
           # We use explicit null checks since Nix 'or' only works for attribute access
@@ -564,7 +563,7 @@
               default = 
                 if cfg.gitBasePackage == null
                 then default'.git-ai.packages.git-ai
-                else (default'.git-ai.override { git = cfg.gitBasePackage; }).packages.git-ai
+                else (default'.overrideScope (final: prev: { git = cfg.gitBasePackage; })).git-ai.packages.git-ai
               ;
               defaultText = literalExpression "inputs.git-ai.packages.\${pkgs.system}.default";
               description = "The git-ai package to use.";

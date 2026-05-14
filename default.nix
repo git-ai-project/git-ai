@@ -153,7 +153,7 @@ let
       };
     };
 in
-  {pkgs, lib }: 
+  {pkgs, lib, ... }:
     lib.makeScope pkgs.newScope (self:
       { 
         git-ai =
@@ -163,12 +163,12 @@ in
               rustPlatform = self.callPackage rustPlatform' { };
               git-og = self.callPackage git-og' { };
               wrapper = self.callPackage wrapper' { };
-              wrapped = self.callPackage wrapped' { };
             };
             packages = { 
               git-ai = self.callPackage git-ai-package' { };
               default = self.callPackage git-ai-package' { };
               minimal = self.callPackage git-ai-minimal' { };
+              wrapped = self.callPackage wrapped' { };
               unwrapped = self.callPackage git-ai-unwrapped' { };
             };
           }
