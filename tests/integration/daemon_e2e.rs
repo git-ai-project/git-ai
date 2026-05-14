@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Read as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -803,6 +802,654 @@ fn test_control_socket_status() {
 
     assert_eq!(resp2["status"]["checkpoint_count"], 1);
     assert_eq!(resp2["status"]["files"][0], "test.txt");
+
+    let _ = daemon_proc.kill();
+    let _ = daemon_proc.wait();
+}
+
+#[test]
+fn test_daemon_rewrite_amend_copies_note() {
+    let binary = get_binary_path();
+    let git = real_git_executable();
+
+    let daemon_home = tempfile::tempdir().unwrap();
+    let daemon_base = daemon_home
+        .path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon");
+    fs::create_dir_all(&daemon_base).unwrap();
+
+    let socket_path = daemon_base.join("trace2.sock");
+    let pid_file = daemon_base.join("daemon.pid.json");
+
+    let mut daemon_proc = Command::new(&binary)
+        .args(["bg", "run"])
+        .env("HOME", daemon_home.path())
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn daemon");
+
+    assert!(wait_for_file(&pid_file, Duration::from_secs(5)));
+    assert!(wait_for_file(&socket_path, Duration::from_secs(5)));
+
+    let trace2_home = create_trace2_home(daemon_home.path(), &socket_path);
+
+    // Create test repo
+    let repo_dir = tempfile::tempdir().unwrap();
+    let repo_path = repo_dir.path().to_path_buf();
+
+    Command::new(git)
+        .args(["init", repo_path.to_str().unwrap()])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    for args in [
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "t@t.com"],
+    ] {
+        Command::new(git)
+            .current_dir(&repo_path)
+            .args(&args)
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .output()
+            .unwrap();
+    }
+
+    // Initial commit
+    fs::write(repo_path.join("init.txt"), "init\n").unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["add", "-A"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["commit", "-m", "initial"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+
+    // Create a commit with checkpoint + authorship note
+    fs::write(repo_path.join("hello.txt"), "Hello AI\n").unwrap();
+    Command::new(&binary)
+        .current_dir(&repo_path)
+        .args(["checkpoint", "mock_ai", "hello.txt"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["add", "-A"])
+        .env("HOME", &trace2_home)
+        .env_remove("GIT_TRACE2_EVENT")
+        .output()
+        .unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["commit", "-m", "original commit"])
+        .env("HOME", &trace2_home)
+        .env_remove("GIT_TRACE2_EVENT")
+        .output()
+        .unwrap();
+
+    // Get original commit SHA and wait for note
+    let head = Command::new(git)
+        .current_dir(&repo_path)
+        .args(["rev-parse", "HEAD"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    let orig_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    let orig_note = wait_for_note(&repo_path, &orig_sha, Duration::from_secs(10));
+    assert!(
+        orig_note.is_some(),
+        "daemon did not write note for original commit"
+    );
+
+    // Now amend the commit (with trace2 going to daemon)
+    fs::write(repo_path.join("hello.txt"), "Hello AI amended\n").unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["add", "hello.txt"])
+        .env("HOME", &trace2_home)
+        .env_remove("GIT_TRACE2_EVENT")
+        .output()
+        .unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["commit", "--amend", "-m", "amended commit"])
+        .env("HOME", &trace2_home)
+        .env_remove("GIT_TRACE2_EVENT")
+        .output()
+        .unwrap();
+
+    // Get new HEAD SHA
+    let head = Command::new(git)
+        .current_dir(&repo_path)
+        .args(["rev-parse", "HEAD"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    let new_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    assert_ne!(orig_sha, new_sha, "amend should create a new commit SHA");
+
+    // Wait for the daemon to propagate the note to the amended commit
+    let new_note = wait_for_note(&repo_path, &new_sha, Duration::from_secs(10));
+
+    let log_file = daemon_base.join("daemon.log");
+    let daemon_log = fs::read_to_string(&log_file).unwrap_or_default();
+
+    let _ = daemon_proc.kill();
+    let _ = daemon_proc.wait();
+
+    assert!(
+        new_note.is_some(),
+        "daemon did not propagate note after amend\ndaemon log:\n{}",
+        daemon_log
+    );
+    let note_content = new_note.unwrap();
+    assert!(
+        note_content.contains("authorship/3.0.0"),
+        "propagated note should contain schema version"
+    );
+}
+
+#[test]
+fn test_daemon_rewrite_rebase_copies_notes() {
+    let binary = get_binary_path();
+    let git = real_git_executable();
+
+    let daemon_home = tempfile::tempdir().unwrap();
+    let daemon_base = daemon_home
+        .path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon");
+    fs::create_dir_all(&daemon_base).unwrap();
+
+    let socket_path = daemon_base.join("trace2.sock");
+    let pid_file = daemon_base.join("daemon.pid.json");
+
+    let mut daemon_proc = Command::new(&binary)
+        .args(["bg", "run"])
+        .env("HOME", daemon_home.path())
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn daemon");
+
+    assert!(wait_for_file(&pid_file, Duration::from_secs(5)));
+    assert!(wait_for_file(&socket_path, Duration::from_secs(5)));
+
+    let trace2_home = create_trace2_home(daemon_home.path(), &socket_path);
+
+    // Create test repo
+    let repo_dir = tempfile::tempdir().unwrap();
+    let repo_path = repo_dir.path().to_path_buf();
+
+    Command::new(git)
+        .args(["init", repo_path.to_str().unwrap()])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    for args in [
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "t@t.com"],
+    ] {
+        Command::new(git)
+            .current_dir(&repo_path)
+            .args(&args)
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .output()
+            .unwrap();
+    }
+
+    // Initial commit on master
+    fs::write(repo_path.join("base.txt"), "base\n").unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["add", "-A"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["commit", "-m", "base"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+
+    // Create feature branch with a noted commit
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["checkout", "-b", "feature"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+
+    fs::write(repo_path.join("feat.txt"), "feature line\n").unwrap();
+    Command::new(&binary)
+        .current_dir(&repo_path)
+        .args(["checkpoint", "mock_ai", "feat.txt"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["add", "-A"])
+        .env("HOME", &trace2_home)
+        .env_remove("GIT_TRACE2_EVENT")
+        .output()
+        .unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["commit", "-m", "feature commit"])
+        .env("HOME", &trace2_home)
+        .env_remove("GIT_TRACE2_EVENT")
+        .output()
+        .unwrap();
+
+    let head = Command::new(git)
+        .current_dir(&repo_path)
+        .args(["rev-parse", "HEAD"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    let feature_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    // Wait for the note on the feature commit
+    let orig_note = wait_for_note(&repo_path, &feature_sha, Duration::from_secs(10));
+    assert!(
+        orig_note.is_some(),
+        "daemon did not write note for feature commit"
+    );
+
+    // Add a commit on master to create divergence
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["checkout", "master"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    fs::write(repo_path.join("main.txt"), "main line\n").unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["add", "-A"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["commit", "-m", "main commit"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+
+    // Rebase feature onto master (with trace2 events going to daemon)
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["checkout", "feature"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    Command::new(git)
+        .current_dir(&repo_path)
+        .args(["rebase", "master"])
+        .env("HOME", &trace2_home)
+        .env_remove("GIT_TRACE2_EVENT")
+        .output()
+        .unwrap();
+
+    // Get new HEAD after rebase
+    let head = Command::new(git)
+        .current_dir(&repo_path)
+        .args(["rev-parse", "HEAD"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    let new_sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    assert_ne!(
+        feature_sha, new_sha,
+        "rebase should have created a new commit"
+    );
+
+    // Wait for the daemon to copy the note to the rebased commit
+    let new_note = wait_for_note(&repo_path, &new_sha, Duration::from_secs(10));
+
+    let log_file = daemon_base.join("daemon.log");
+    let daemon_log = fs::read_to_string(&log_file).unwrap_or_default();
+
+    let _ = daemon_proc.kill();
+    let _ = daemon_proc.wait();
+
+    assert!(
+        new_note.is_some(),
+        "daemon did not propagate note after rebase\ndaemon log:\n{}",
+        daemon_log
+    );
+    let note_content = new_note.unwrap();
+    assert!(
+        note_content.contains("authorship/3.0.0"),
+        "propagated note should contain schema version"
+    );
+}
+
+#[test]
+fn test_daemon_handles_concurrent_multi_repo_commits() {
+    let binary = get_binary_path();
+    let git = real_git_executable();
+
+    let daemon_home = tempfile::tempdir().unwrap();
+    let daemon_base = daemon_home
+        .path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon");
+    fs::create_dir_all(&daemon_base).unwrap();
+
+    let socket_path = daemon_base.join("trace2.sock");
+    let pid_file = daemon_base.join("daemon.pid.json");
+
+    let mut daemon_proc = Command::new(&binary)
+        .args(["bg", "run"])
+        .env("HOME", daemon_home.path())
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn daemon");
+
+    assert!(wait_for_file(&pid_file, Duration::from_secs(5)));
+    assert!(wait_for_file(&socket_path, Duration::from_secs(5)));
+
+    let trace2_home = create_trace2_home(daemon_home.path(), &socket_path);
+
+    // Helper to initialize a repo
+    let init_repo = |name: &str| -> PathBuf {
+        let repo_dir = daemon_home.path().join(name);
+        fs::create_dir_all(&repo_dir).unwrap();
+
+        Command::new(git)
+            .args(["init", repo_dir.to_str().unwrap()])
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .output()
+            .unwrap();
+        for args in [
+            vec!["config", "user.name", "Test"],
+            vec!["config", "user.email", "t@t.com"],
+        ] {
+            Command::new(git)
+                .current_dir(&repo_dir)
+                .args(&args)
+                .env("GIT_TRACE2_EVENT", "/dev/null")
+                .output()
+                .unwrap();
+        }
+        fs::write(repo_dir.join("init.txt"), "init\n").unwrap();
+        Command::new(git)
+            .current_dir(&repo_dir)
+            .args(["add", "-A"])
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .output()
+            .unwrap();
+        Command::new(git)
+            .current_dir(&repo_dir)
+            .args(["commit", "-m", "initial"])
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .output()
+            .unwrap();
+        repo_dir
+    };
+
+    // Create 3 independent repos
+    let repo_a = init_repo("repo-a");
+    let repo_b = init_repo("repo-b");
+    let repo_c = init_repo("repo-c");
+
+    // Create checkpoints and commits in all 3 repos rapidly
+    let mut commit_shas: Vec<(PathBuf, String)> = Vec::new();
+    for (repo, label) in [(&repo_a, "a"), (&repo_b, "b"), (&repo_c, "c")] {
+        let filename = format!("{}.txt", label);
+        fs::write(repo.join(&filename), format!("Content from repo {}\n", label)).unwrap();
+
+        Command::new(&binary)
+            .current_dir(repo)
+            .args(["checkpoint", "mock_ai", &filename])
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .output()
+            .unwrap();
+
+        Command::new(git)
+            .current_dir(repo)
+            .args(["add", "-A"])
+            .env("HOME", &trace2_home)
+            .env_remove("GIT_TRACE2_EVENT")
+            .output()
+            .unwrap();
+
+        Command::new(git)
+            .current_dir(repo)
+            .args(["commit", "-m", &format!("Commit in repo {}", label)])
+            .env("HOME", &trace2_home)
+            .env_remove("GIT_TRACE2_EVENT")
+            .output()
+            .unwrap();
+
+        let head = Command::new(git)
+            .current_dir(repo)
+            .args(["rev-parse", "HEAD"])
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .output()
+            .unwrap();
+        let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        commit_shas.push((repo.clone(), sha));
+    }
+
+    // Wait for all notes to appear
+    let mut all_noted = true;
+    for (repo, sha) in &commit_shas {
+        if wait_for_note(repo, sha, Duration::from_secs(15)).is_none() {
+            all_noted = false;
+            eprintln!(
+                "note missing for commit {} in {}",
+                &sha[..7],
+                repo.display()
+            );
+        }
+    }
+
+    let log_file = daemon_base.join("daemon.log");
+    let daemon_log = fs::read_to_string(&log_file).unwrap_or_default();
+
+    let _ = daemon_proc.kill();
+    let _ = daemon_proc.wait();
+
+    assert!(
+        all_noted,
+        "daemon should write notes for commits across all 3 repos\ndaemon log:\n{}",
+        daemon_log
+    );
+}
+
+#[test]
+fn test_daemon_resolves_symlinked_repo() {
+    let binary = get_binary_path();
+    let git = real_git_executable();
+
+    let daemon_home = tempfile::tempdir().unwrap();
+    let daemon_base = daemon_home
+        .path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon");
+    fs::create_dir_all(&daemon_base).unwrap();
+
+    let socket_path = daemon_base.join("trace2.sock");
+    let pid_file = daemon_base.join("daemon.pid.json");
+
+    let mut daemon_proc = Command::new(&binary)
+        .args(["bg", "run"])
+        .env("HOME", daemon_home.path())
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn daemon");
+
+    assert!(wait_for_file(&pid_file, Duration::from_secs(5)));
+    assert!(wait_for_file(&socket_path, Duration::from_secs(5)));
+
+    let trace2_home = create_trace2_home(daemon_home.path(), &socket_path);
+
+    // Create a real repo
+    let real_repo = daemon_home.path().join("real-repo");
+    fs::create_dir_all(&real_repo).unwrap();
+
+    Command::new(git)
+        .args(["init", real_repo.to_str().unwrap()])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    for args in [
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "t@t.com"],
+    ] {
+        Command::new(git)
+            .current_dir(&real_repo)
+            .args(&args)
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .output()
+            .unwrap();
+    }
+    fs::write(real_repo.join("init.txt"), "init\n").unwrap();
+    Command::new(git)
+        .current_dir(&real_repo)
+        .args(["add", "-A"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    Command::new(git)
+        .current_dir(&real_repo)
+        .args(["commit", "-m", "initial"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+
+    // Create a symlink to the repo
+    let link_path = daemon_home.path().join("linked-repo");
+    std::os::unix::fs::symlink(&real_repo, &link_path).unwrap();
+
+    // Checkpoint via the symlinked path
+    fs::write(link_path.join("hello.txt"), "Hello via symlink\n").unwrap();
+    Command::new(&binary)
+        .current_dir(&link_path)
+        .args(["checkpoint", "mock_ai", "hello.txt"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+
+    // Commit via symlinked path with trace2
+    Command::new(git)
+        .current_dir(&link_path)
+        .args(["add", "-A"])
+        .env("HOME", &trace2_home)
+        .env_remove("GIT_TRACE2_EVENT")
+        .output()
+        .unwrap();
+    Command::new(git)
+        .current_dir(&link_path)
+        .args(["commit", "-m", "commit via symlink"])
+        .env("HOME", &trace2_home)
+        .env_remove("GIT_TRACE2_EVENT")
+        .output()
+        .unwrap();
+
+    // Get commit SHA (check via real path since that's where notes go)
+    let head = Command::new(git)
+        .current_dir(&real_repo)
+        .args(["rev-parse", "HEAD"])
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .output()
+        .unwrap();
+    let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+    // Wait for note
+    let note = wait_for_note(&real_repo, &sha, Duration::from_secs(10));
+
+    let log_file = daemon_base.join("daemon.log");
+    let daemon_log = fs::read_to_string(&log_file).unwrap_or_default();
+
+    let _ = daemon_proc.kill();
+    let _ = daemon_proc.wait();
+
+    assert!(
+        note.is_some(),
+        "daemon should write note even when commit arrives via symlinked path\ndaemon log:\n{}",
+        daemon_log
+    );
+    assert!(note.unwrap().contains("authorship/3.0.0"));
+}
+
+#[test]
+fn test_daemon_stats_via_control_socket() {
+    use std::io::Write as _;
+    use std::os::unix::net::UnixStream;
+
+    let binary = get_binary_path();
+
+    let daemon_home = tempfile::tempdir().unwrap();
+    let daemon_base = daemon_home
+        .path()
+        .join(".git-ai")
+        .join("internal")
+        .join("daemon");
+    fs::create_dir_all(&daemon_base).unwrap();
+
+    let control_path = daemon_base.join("control.sock");
+    let pid_file = daemon_base.join("daemon.pid.json");
+
+    let mut daemon_proc = Command::new(&binary)
+        .args(["bg", "run"])
+        .env("HOME", daemon_home.path())
+        .env("GIT_TRACE2_EVENT", "/dev/null")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn daemon");
+
+    assert!(wait_for_file(&pid_file, Duration::from_secs(5)));
+    assert!(wait_for_file(&control_path, Duration::from_secs(5)));
+
+    // Query stats
+    let mut client = UnixStream::connect(&control_path).expect("connect failed");
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    writeln!(client, r#"{{"type":"stats"}}"#).unwrap();
+    client.flush().unwrap();
+
+    let mut buf = [0u8; 4096];
+    let n = read_retry(&mut client, &mut buf).unwrap();
+    let resp: serde_json::Value =
+        serde_json::from_str(&String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
+
+    assert_eq!(resp["ok"], true, "stats response should be ok: {:?}", resp);
+    let stats_str = resp["stats"].as_str().expect("stats field should be a string");
+    assert!(
+        stats_str.contains("uptime:"),
+        "stats should contain uptime: {}",
+        stats_str
+    );
+    assert!(
+        stats_str.contains("commits processed:"),
+        "stats should contain commits processed"
+    );
 
     let _ = daemon_proc.kill();
     let _ = daemon_proc.wait();

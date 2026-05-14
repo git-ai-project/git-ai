@@ -264,6 +264,55 @@ impl<'a> TestFile<'a> {
     // Mutation methods
     // -------------------------------------------------------------------------
 
+    /// Like `set_contents` but does NOT stage the file (no `git add`).
+    /// Useful for testing partial staging scenarios.
+    pub fn set_contents_no_stage<T: Into<ExpectedLine>>(&mut self, lines: Vec<T>) -> &mut Self {
+        let lines: Vec<ExpectedLine> = lines.into_iter().map(|l| l.into()).collect();
+
+        // Write human lines first (with placeholders for AI lines)
+        let line_contents = lines
+            .iter()
+            .map(|s| {
+                if s.author_type == AuthorType::Ai {
+                    "||__AI LINE__ PENDING__||".to_string()
+                } else {
+                    s.contents.clone()
+                }
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        let human_kind = if lines
+            .iter()
+            .any(|l| l.author_type == AuthorType::UnattributedHuman)
+        {
+            &AuthorType::UnattributedHuman
+        } else {
+            &AuthorType::Human
+        };
+        // Write and checkpoint but don't stage
+        if let Some(parent) = self.file_path.parent()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent).expect("failed to create parent directories");
+        }
+        fs::write(&self.file_path, &line_contents).unwrap();
+        self.run_checkpoint_for_author_type(human_kind);
+
+        // Write full content with AI lines (no stage)
+        let line_contents_with_ai = lines
+            .iter()
+            .map(|s| s.contents.clone())
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        fs::write(&self.file_path, &line_contents_with_ai).unwrap();
+        self.run_checkpoint_for_author_type(&AuthorType::Ai);
+
+        self.lines = lines;
+        self
+    }
+
     pub fn set_contents<T: Into<ExpectedLine>>(&mut self, lines: Vec<T>) -> &mut Self {
         let lines: Vec<ExpectedLine> = lines.into_iter().map(|l| l.into()).collect();
 
@@ -351,9 +400,7 @@ impl<'a> TestFile<'a> {
 
     pub fn replace_at<T: Into<ExpectedLine>>(&mut self, index: usize, line: T) -> &mut Self {
         let line = line.into();
-        if index < self.lines.len() {
-            self.lines[index] = line.clone();
-        } else {
+        if index >= self.lines.len() {
             panic!(
                 "Index {} out of bounds for {} lines",
                 index,
@@ -361,7 +408,18 @@ impl<'a> TestFile<'a> {
             );
         }
 
-        self.write_and_checkpoint(&line.author_type);
+        if line.author_type == AuthorType::Ai {
+            // For AI replacements, take a pre-edit (human) checkpoint first
+            // to establish the "before" state, then write the new content
+            // and take an AI checkpoint.
+            self.run_checkpoint_for_author_type(&AuthorType::UnattributedHuman);
+            self.lines[index] = line.clone();
+            self.write_and_checkpoint(&AuthorType::Ai);
+        } else {
+            self.lines[index] = line.clone();
+            self.write_and_checkpoint(&line.author_type);
+        }
+
         self
     }
 
@@ -470,6 +528,34 @@ impl<'a> TestFile<'a> {
                 }
             }
         }
+    }
+
+    /// Return lines attributed to a specific author type.
+    /// Runs blame and filters by author type.
+    pub fn lines_by_author(&self, author_type: AuthorType) -> Vec<String> {
+        let filename = self.repo_relative_path();
+        let blame_output = match self.repo.git_ai(&["blame", &filename]) {
+            Ok(output) => output,
+            Err(_) => return Vec::new(),
+        };
+
+        blame_output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| {
+                let (author, content) = parse_blame_line(line);
+                let is_ai = is_ai_author(&author);
+                let matches = match &author_type {
+                    AuthorType::Ai => is_ai,
+                    AuthorType::Human | AuthorType::UnattributedHuman => !is_ai,
+                };
+                if matches {
+                    Some(content)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Assert only committed lines (filters out uncommitted lines).

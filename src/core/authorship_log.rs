@@ -88,6 +88,8 @@ pub struct PromptRecord {
     pub accepted_lines: u32,
     #[serde(default)]
     pub overriden_lines: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_attributes: Option<serde_json::Value>,
 }
 
 /// Record for a lightweight session (no per-prompt stats).
@@ -96,6 +98,8 @@ pub struct SessionRecord {
     pub agent_id: AgentId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub human_author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_attributes: Option<serde_json::Value>,
 }
 
 /// Record for a known human author attested by an IDE extension.
@@ -546,6 +550,7 @@ mod tests {
                 total_deletions: 2,
                 accepted_lines: 8,
                 overriden_lines: 0,
+                custom_attributes: None,
             },
         );
 

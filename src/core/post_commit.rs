@@ -153,6 +153,7 @@ pub fn generate_authorship_for_commit(
     Ok((authorship_log, initial_result))
 }
 
+
 // ---------------------------------------------------------------------------
 // Helper: read file at a given revision
 // ---------------------------------------------------------------------------
@@ -425,7 +426,7 @@ fn find_last_blob_content(
 /// Build a mapping from old line numbers to new line numbers using LCS-based diff.
 /// Returns a HashMap where key=old_line_num (1-indexed), value=new_line_num (1-indexed).
 /// Only maps lines that exist in both old and new (equal lines).
-fn build_line_mapping(old_lines: &[&str], new_lines: &[&str]) -> HashMap<u32, u32> {
+pub fn build_line_mapping(old_lines: &[&str], new_lines: &[&str]) -> HashMap<u32, u32> {
     let mut mapping = HashMap::new();
 
     // Simple LCS-based approach using two pointers with longest common subsequence
@@ -524,6 +525,7 @@ fn merge_attributions(
                     model: record.agent_id.model.clone(),
                 },
                 human_author: record.human_author.clone(),
+                custom_attributes: None,
             },
         );
     }
@@ -572,8 +574,65 @@ fn merge_attributions(
                 }
                 continue;
             }
-            // Last checkpoint wins: replace file's attributions entirely
-            file_attrs.insert(entry.file.clone(), entry.line_attributions.clone());
+            // Last checkpoint wins, but preserve initial attributions for
+            // lines that have no author (empty author_id means "unchanged").
+            let existing = file_attrs.get(&entry.file);
+            if existing.is_some()
+                && entry
+                    .line_attributions
+                    .iter()
+                    .any(|a| a.author_id.is_empty())
+            {
+                let initial_attrs = existing.unwrap().clone();
+                let mut merged: Vec<LineAttribution> = Vec::new();
+                for attr in &entry.line_attributions {
+                    if !attr.author_id.is_empty() {
+                        merged.push(attr.clone());
+                        continue;
+                    }
+                    // Split this empty-author range into individual lines and
+                    // resolve each against the initial attributions.
+                    for line in attr.start_line..=attr.end_line {
+                        let resolved_author = initial_attrs
+                            .iter()
+                            .find(|ia| {
+                                ia.start_line <= line
+                                    && ia.end_line >= line
+                                    && !ia.author_id.is_empty()
+                            })
+                            .map(|ia| ia.author_id.as_str())
+                            .unwrap_or("");
+                        if resolved_author.is_empty() {
+                            // Still empty — keep as-is (will be skipped later)
+                            merged.push(LineAttribution {
+                                start_line: line,
+                                end_line: line,
+                                author_id: String::new(),
+                                overrode: None,
+                            });
+                        } else {
+                            // Try to extend the last entry if same author
+                            if let Some(last) = merged.last_mut() {
+                                if last.author_id == resolved_author
+                                    && last.end_line + 1 == line
+                                {
+                                    last.end_line = line;
+                                    continue;
+                                }
+                            }
+                            merged.push(LineAttribution {
+                                start_line: line,
+                                end_line: line,
+                                author_id: resolved_author.to_string(),
+                                overrode: None,
+                            });
+                        }
+                    }
+                }
+                file_attrs.insert(entry.file.clone(), merged);
+            } else {
+                file_attrs.insert(entry.file.clone(), entry.line_attributions.clone());
+            }
         }
     }
 
@@ -610,6 +669,7 @@ fn register_agent_metadata(
                     model: agent_id.model.clone(),
                 },
                 human_author: Some(human_author.to_string()),
+                custom_attributes: None,
             });
     } else {
         // Legacy prompt format: 16 hex chars
@@ -628,6 +688,7 @@ fn register_agent_metadata(
                 total_deletions: 0,
                 accepted_lines: 0,
                 overriden_lines: 0,
+                custom_attributes: None,
             });
         // Mark as actively used (not INITIAL-only)
         initial_only_prompt_ids.remove(&author_id);
@@ -1126,6 +1187,7 @@ diff --git a/bar.rs b/bar.rs
             timestamp: 100,
             agent_id: None,
             trace_id: None,
+            seq: 1,
         };
 
         let cp2 = Checkpoint {
@@ -1145,6 +1207,7 @@ diff --git a/bar.rs b/bar.rs
             timestamp: 200,
             agent_id: None,
             trace_id: None,
+            seq: 2,
         };
 
         let initial = InitialAttributions::default();
@@ -1246,4 +1309,130 @@ diff --git a/my file.txt b/my file.txt
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], ("my file.txt".to_string(), vec![1, 2]));
     }
+}
+
+/// Seed INITIAL attributions from the parent commit's authorship note.
+/// Only `h_`-prefixed (known-human) entries are seeded. This protects
+/// known-human lines from being incorrectly gap-filled to AI.
+fn seed_initial_from_parent_note(
+    git_dir: &Path,
+    parent_sha: &str,
+    commit_sha: &str,
+    repo_dir: &Path,
+    initial: &mut InitialAttributions,
+) {
+    use super::attribution::LineAttribution;
+
+    let parent_note = match read_note(git_dir, parent_sha) {
+        Some(n) => n,
+        None => return,
+    };
+    let parent_log = match AuthorshipLog::deserialize_from_string(&parent_note) {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+
+    for file_att in &parent_log.attestations {
+        // Only process h_-prefixed entries (known-human)
+        for entry in &file_att.entries {
+            if !entry.hash.starts_with("h_") {
+                continue;
+            }
+
+            // Get old file content (from parent) and new file content (committed)
+            let old_content = git_show(git_dir, parent_sha, &file_att.file_path);
+            let new_content = git_show(git_dir, commit_sha, &file_att.file_path)
+                .or_else(|| std::fs::read_to_string(repo_dir.join(&file_att.file_path)).ok());
+
+            let (old_content, new_content) = match (old_content, new_content) {
+                (Some(o), Some(n)) => (o, n),
+                _ => continue,
+            };
+
+            let old_lines: Vec<&str> = old_content.lines().collect();
+            let new_lines: Vec<&str> = new_content.lines().collect();
+            let mapping = build_line_mapping(&old_lines, &new_lines);
+
+            let file_initial = initial.files.entry(file_att.file_path.clone()).or_default();
+
+            for range in &entry.line_ranges {
+                let (start, end) = match range {
+                    LineRange::Single(l) => (*l, *l),
+                    LineRange::Range(s, e) => (*s, *e),
+                };
+                for old_line in start..=end {
+                    if let Some(&new_line) = mapping.get(&old_line) {
+                        // Only seed if not already attributed in INITIAL
+                        let already_covered = file_initial.iter().any(|a| {
+                            a.start_line <= new_line && new_line <= a.end_line
+                        });
+                        if !already_covered {
+                            file_initial.push(LineAttribution {
+                                start_line: new_line,
+                                end_line: new_line,
+                                author_id: entry.hash.clone(),
+                                overrode: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also carry forward human metadata
+        for (id, human) in &parent_log.metadata.humans {
+            initial.humans.entry(id.clone()).or_insert_with(|| {
+                working_log::HumanRecord {
+                    author: human.author.clone(),
+                }
+            });
+        }
+    }
+}
+
+/// Read a git note for a commit.
+fn read_note(git_dir: &Path, commit_sha: &str) -> Option<String> {
+    let git = find_git();
+    let repo_dir = git_dir.parent()?;
+    let output = Command::new(git)
+        .current_dir(repo_dir)
+        .args(["notes", "--ref=ai", "show", commit_sha])
+        .env("GIT_TRACE2_EVENT", "0")
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        None
+    }
+}
+
+/// Get file content at a specific commit.
+fn git_show(git_dir: &Path, commit_sha: &str, file_path: &str) -> Option<String> {
+    let git = find_git();
+    let repo_dir = git_dir.parent()?;
+    let output = Command::new(git)
+        .current_dir(repo_dir)
+        .args(["show", &format!("{}:{}", commit_sha, file_path)])
+        .env("GIT_TRACE2_EVENT", "0")
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        None
+    }
+}
+
+/// Find the git executable path.
+fn find_git() -> &'static str {
+    static GIT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    GIT.get_or_init(|| {
+        for candidate in &["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"] {
+            if Path::new(candidate).is_file() {
+                return candidate.to_string();
+            }
+        }
+        "git".to_string()
+    })
 }

@@ -10,6 +10,8 @@ use super::lifecycle::{
     self, DaemonPaths, Error, acquire_lock, install_signal_handlers, read_pid_file,
     redirect_stderr_to_log, write_pid_file,
 };
+use super::startup;
+use super::telemetry_worker;
 use super::trace2_events::Trace2Event;
 
 #[cfg(unix)]
@@ -26,6 +28,9 @@ pub fn shutdown_flag() -> &'static Arc<AtomicBool> {
 pub fn run_daemon(foreground: bool) -> Result<(), Error> {
     let paths = DaemonPaths::resolve();
     paths.ensure_dirs()?;
+
+    // Run startup recovery before daemonizing so errors are visible on stderr
+    startup::run_startup_recovery(&paths)?;
 
     if !foreground {
         #[cfg(unix)]
@@ -60,8 +65,11 @@ pub fn run_daemon(foreground: bool) -> Result<(), Error> {
     // Start the control socket listener thread
     let control_handle = start_control_socket(&paths, shutdown.clone())?;
 
+    // Start the telemetry worker (3-second flush loop)
+    let telemetry_handle = telemetry_worker::spawn_telemetry_worker(shutdown.clone());
+
     // Run the event loop on the main thread (blocks until shutdown)
-    event_loop::run_event_loop(event_rx, shutdown.clone());
+    event_loop::run_event_loop(event_rx, shutdown.clone(), telemetry_handle);
 
     // Wait for listener threads to finish
     if let Some(handle) = listener_handle {
@@ -228,19 +236,46 @@ pub fn print_status() {
     match read_pid_file(&paths.pid_file) {
         Some(info) => {
             if lifecycle::is_process_alive(info.pid) {
-                eprintln!(
-                    "[git-ai] daemon running (pid {}, started {}, version {})",
+                println!(
+                    "daemon running (pid {}, started {}, version {})",
                     info.pid, info.started_at, info.version
                 );
+                // Try to get live stats from the control socket
+                #[cfg(unix)]
+                {
+                    if let Some(stats) = query_live_stats(&paths.control_sock) {
+                        println!("{}", stats);
+                    }
+                }
             } else {
-                eprintln!(
-                    "[git-ai] daemon not running (stale pid file, last pid {})",
+                println!(
+                    "daemon not running (stale pid file, last pid {})",
                     info.pid
                 );
             }
         }
         None => {
-            eprintln!("[git-ai] daemon not running");
+            println!("daemon not running");
         }
     }
+}
+
+#[cfg(unix)]
+fn query_live_stats(control_sock: &std::path::Path) -> Option<String> {
+    use std::io::{BufRead, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(control_sock).ok()?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .ok()?;
+    writeln!(stream, r#"{{"type":"stats"}}"#).ok()?;
+    stream.flush().ok()?;
+
+    let reader = std::io::BufReader::new(&stream);
+    let line = reader.lines().next()?.ok()?;
+    let resp: serde_json::Value = serde_json::from_str(&line).ok()?;
+    resp.get("stats")
+        .and_then(|s| s.as_str())
+        .map(|s| s.to_string())
 }

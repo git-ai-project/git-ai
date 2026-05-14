@@ -4,6 +4,23 @@ use std::time::{Duration, Instant};
 
 use crate::daemon::trace2_events::{Trace2Event, is_root_sid, root_sid};
 
+/// A detected git operation ready for processing.
+#[derive(Debug, Clone)]
+pub enum DetectedOperation {
+    Commit { repo_path: PathBuf },
+    Rewrite { repo_path: PathBuf, kind: RewriteKind, argv: Vec<String> },
+    Stash { repo_path: PathBuf },
+    StashPop { repo_path: PathBuf },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RewriteKind {
+    Rebase,
+    CherryPick,
+    Amend,
+    Reset,
+}
+
 /// A detected commit ready for authorship processing.
 #[derive(Debug, Clone)]
 pub struct DetectedCommit {
@@ -103,6 +120,161 @@ impl CommitDetector {
                     None
                 };
                 // Clean up the session regardless of outcome
+                self.sessions.remove(&sid);
+                result
+            }
+            Trace2Event::Ignored => None,
+        }
+    }
+
+    /// Feed an event. Returns a detected operation (commit or rewrite) if applicable.
+    pub fn process_event_full(&mut self, event: Trace2Event) -> Option<DetectedOperation> {
+        match event {
+            Trace2Event::Start { sid, argv } => {
+                if !is_root_sid(&sid) {
+                    return None;
+                }
+                let inferred_cmd = argv.get(1).cloned();
+                let session = self.sessions.entry(sid).or_insert_with(|| SessionState {
+                    cmd_name: None,
+                    repo_path: None,
+                    argv: Vec::new(),
+                    created_at: Instant::now(),
+                });
+                session.argv = argv;
+                if session.cmd_name.is_none() {
+                    session.cmd_name = inferred_cmd;
+                }
+                None
+            }
+            Trace2Event::CmdName { sid, cmd_name } => {
+                if !is_root_sid(&sid) {
+                    return None;
+                }
+                let session = self.sessions.entry(sid).or_insert_with(|| SessionState {
+                    cmd_name: None,
+                    repo_path: None,
+                    argv: Vec::new(),
+                    created_at: Instant::now(),
+                });
+                session.cmd_name = Some(cmd_name);
+                None
+            }
+            Trace2Event::DefRepo { sid, repo_path } => {
+                let root = root_sid(&sid).to_string();
+                let session = self.sessions.entry(root).or_insert_with(|| SessionState {
+                    cmd_name: None,
+                    repo_path: None,
+                    argv: Vec::new(),
+                    created_at: Instant::now(),
+                });
+                session.repo_path = Some(repo_path);
+                None
+            }
+            Trace2Event::CommandExit { sid, exit_code } => {
+                if !is_root_sid(&sid) {
+                    return None;
+                }
+                let result = if exit_code == 0 {
+                    if let Some(session) = self.sessions.get(&sid) {
+                        match session.cmd_name.as_deref() {
+                            Some("commit") => {
+                                // Check if this is an amend
+                                let is_amend = session.argv.iter().any(|a| a == "--amend");
+                                if is_amend {
+                                    session.repo_path.as_ref().map(|path| {
+                                        DetectedOperation::Rewrite {
+                                            repo_path: path.clone(),
+                                            kind: RewriteKind::Amend,
+                                            argv: session.argv.clone(),
+                                        }
+                                    })
+                                } else {
+                                    session.repo_path.as_ref().map(|path| {
+                                        DetectedOperation::Commit {
+                                            repo_path: path.clone(),
+                                        }
+                                    })
+                                }
+                            }
+                            Some("rebase") => {
+                                session.repo_path.as_ref().map(|path| {
+                                    DetectedOperation::Rewrite {
+                                        repo_path: path.clone(),
+                                        kind: RewriteKind::Rebase,
+                                        argv: session.argv.clone(),
+                                    }
+                                })
+                            }
+                            Some("cherry-pick") => {
+                                session.repo_path.as_ref().map(|path| {
+                                    DetectedOperation::Rewrite {
+                                        repo_path: path.clone(),
+                                        kind: RewriteKind::CherryPick,
+                                        argv: session.argv.clone(),
+                                    }
+                                })
+                            }
+                            Some("reset") => {
+                                session.repo_path.as_ref().map(|path| {
+                                    DetectedOperation::Rewrite {
+                                        repo_path: path.clone(),
+                                        kind: RewriteKind::Reset,
+                                        argv: session.argv.clone(),
+                                    }
+                                })
+                            }
+                            Some("stash") => {
+                                let has_pop_or_apply = session
+                                    .argv
+                                    .iter()
+                                    .any(|a| a == "pop" || a == "apply");
+                                let has_push_or_save = session
+                                    .argv
+                                    .iter()
+                                    .any(|a| a == "push" || a == "save");
+                                if has_pop_or_apply {
+                                    session.repo_path.as_ref().map(|path| {
+                                        DetectedOperation::StashPop {
+                                            repo_path: path.clone(),
+                                        }
+                                    })
+                                } else if has_push_or_save {
+                                    session.repo_path.as_ref().map(|path| {
+                                        DetectedOperation::Stash {
+                                            repo_path: path.clone(),
+                                        }
+                                    })
+                                } else {
+                                    // Bare `git stash` (no subcommand) is equivalent to push
+                                    let is_bare_stash = !session.argv.iter().any(|a| {
+                                        a == "list"
+                                            || a == "show"
+                                            || a == "drop"
+                                            || a == "clear"
+                                            || a == "branch"
+                                            || a == "create"
+                                            || a == "store"
+                                    });
+                                    if is_bare_stash {
+                                        session.repo_path.as_ref().map(|path| {
+                                            DetectedOperation::Stash {
+                                                repo_path: path.clone(),
+                                            }
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                }
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 self.sessions.remove(&sid);
                 result
             }

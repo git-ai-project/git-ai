@@ -8,6 +8,7 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
 
+use crate::daemon::stats;
 use crate::daemon::trace2_events::{Trace2Event, parse_trace2_line};
 
 /// Listens on a Unix domain socket for git trace2 events.
@@ -49,6 +50,9 @@ impl Trace2Listener {
         while !self.shutdown.load(Ordering::Relaxed) {
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
+                    stats::get()
+                        .trace2_connections
+                        .fetch_add(1, Ordering::Relaxed);
                     let tx = event_tx.clone();
                     let shutdown = Arc::clone(&self.shutdown);
                     thread::spawn(move || {

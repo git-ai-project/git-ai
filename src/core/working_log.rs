@@ -7,6 +7,9 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -52,6 +55,10 @@ pub struct Checkpoint {
     pub agent_id: Option<AgentId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
+    /// Monotonically increasing sequence number within a base commit's working log.
+    /// Used to establish ordering even if checkpoints arrive out of order.
+    #[serde(default)]
+    pub seq: u64,
 }
 
 impl Checkpoint {
@@ -67,6 +74,7 @@ impl Checkpoint {
             timestamp,
             agent_id: None,
             trace_id: None,
+            seq: 0,
         }
     }
 }
@@ -148,14 +156,59 @@ pub fn read_checkpoints(repo_git_dir: &Path, base_commit: &str) -> Vec<Checkpoin
     checkpoints
 }
 
+/// Acquire an advisory file lock for the given base commit's working log.
+/// Returns the lock file handle (lock is held for the lifetime of the handle).
+/// On non-Unix platforms or on failure, returns `None` (best-effort).
+#[cfg(unix)]
+fn lock_working_log(repo_git_dir: &Path, base_commit: &str) -> Option<fs::File> {
+    let dir = working_log_dir(repo_git_dir, base_commit);
+    let _ = fs::create_dir_all(&dir);
+    let lock_path = dir.join(".lock");
+    let file = fs::File::create(&lock_path).ok()?;
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if ret == 0 { Some(file) } else { None }
+}
+
+#[cfg(not(unix))]
+fn lock_working_log(_repo_git_dir: &Path, _base_commit: &str) -> Option<fs::File> {
+    None
+}
+
+/// Read and increment the sequence counter for the given base commit.
+/// The counter is stored in `.git/ai/working_logs/<base_commit>/.seq`.
+/// Caller should hold the working log lock before calling this.
+fn next_seq(repo_git_dir: &Path, base_commit: &str) -> u64 {
+    let dir = working_log_dir(repo_git_dir, base_commit);
+    let seq_path = dir.join(".seq");
+
+    let current: u64 = fs::read_to_string(&seq_path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+
+    let next = current + 1;
+    let _ = fs::write(&seq_path, next.to_string());
+    next
+}
+
 /// Append a single checkpoint to the JSONL file.
 /// Creates the directory structure if it does not exist.
+/// Acquires an advisory file lock to serialize concurrent writes
+/// and assigns a monotonically increasing sequence number.
 pub fn append_checkpoint(repo_git_dir: &Path, base_commit: &str, checkpoint: &Checkpoint) {
     let dir = working_log_dir(repo_git_dir, base_commit);
     let _ = fs::create_dir_all(&dir);
 
+    // Acquire advisory lock (held until _lock_guard is dropped)
+    let _lock_guard = lock_working_log(repo_git_dir, base_commit);
+
+    // Assign sequence number
+    let seq = next_seq(repo_git_dir, base_commit);
+    let mut checkpoint = checkpoint.clone();
+    checkpoint.seq = seq;
+
     let path = checkpoints_path(repo_git_dir, base_commit);
-    let json_line = match serde_json::to_string(checkpoint) {
+    let json_line = match serde_json::to_string(&checkpoint) {
         Ok(s) => s,
         Err(_) => return,
     };
@@ -331,5 +384,122 @@ mod tests {
     fn read_blob_returns_none_when_missing() {
         let (_tmp, git_dir) = setup();
         assert!(read_blob(&git_dir, "x", "nosuchsha").is_none());
+    }
+
+    #[test]
+    fn seq_numbers_are_monotonically_increasing() {
+        let (_tmp, git_dir) = setup();
+        let base = "seq_test";
+
+        let entry = WorkingLogEntry {
+            file: "test.rs".into(),
+            blob_sha: "aaa".into(),
+            attributions: vec![],
+            line_attributions: vec![],
+        };
+
+        for _ in 0..5 {
+            let cp = Checkpoint::new(CheckpointKind::AiAgent, "agent".into(), vec![entry.clone()]);
+            append_checkpoint(&git_dir, base, &cp);
+        }
+
+        let loaded = read_checkpoints(&git_dir, base);
+        assert_eq!(loaded.len(), 5);
+
+        // Verify sequence numbers are 1, 2, 3, 4, 5
+        for (i, cp) in loaded.iter().enumerate() {
+            assert_eq!(cp.seq, (i + 1) as u64, "checkpoint {} should have seq {}", i, i + 1);
+        }
+    }
+
+    #[test]
+    fn concurrent_writes_do_not_corrupt_data() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let (_tmp, git_dir) = setup();
+        let base = "concurrent_test";
+        let git_dir = Arc::new(git_dir);
+
+        let num_threads = 8;
+        let writes_per_thread = 10;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let git_dir = Arc::clone(&git_dir);
+                let base = base.to_string();
+                thread::spawn(move || {
+                    for i in 0..writes_per_thread {
+                        let entry = WorkingLogEntry {
+                            file: format!("file_t{}_i{}.rs", t, i),
+                            blob_sha: format!("sha_{}_{}", t, i),
+                            attributions: vec![],
+                            line_attributions: vec![],
+                        };
+                        let cp = Checkpoint::new(
+                            CheckpointKind::AiAgent,
+                            format!("agent-{}", t),
+                            vec![entry],
+                        );
+                        append_checkpoint(&git_dir, &base, &cp);
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let loaded = read_checkpoints(&git_dir, base);
+        let expected_count = num_threads * writes_per_thread;
+        assert_eq!(
+            loaded.len(),
+            expected_count,
+            "expected {} checkpoints, got {}",
+            expected_count,
+            loaded.len()
+        );
+
+        // Verify all sequence numbers are unique and form the set 1..=expected_count
+        let mut seqs: Vec<u64> = loaded.iter().map(|cp| cp.seq).collect();
+        seqs.sort();
+        let expected_seqs: Vec<u64> = (1..=expected_count as u64).collect();
+        assert_eq!(seqs, expected_seqs, "sequence numbers should be 1..={}", expected_count);
+    }
+
+    #[test]
+    fn seq_counter_persists_across_calls() {
+        let (_tmp, git_dir) = setup();
+        let base = "persist_seq";
+
+        let entry = WorkingLogEntry {
+            file: "a.rs".into(),
+            blob_sha: "x".into(),
+            attributions: vec![],
+            line_attributions: vec![],
+        };
+
+        // Write 3 checkpoints
+        for _ in 0..3 {
+            let cp = Checkpoint::new(CheckpointKind::Human, "user".into(), vec![entry.clone()]);
+            append_checkpoint(&git_dir, base, &cp);
+        }
+
+        // Read the sequence file directly to verify it persisted
+        let seq_path = working_log_dir(&git_dir, base).join(".seq");
+        let stored_seq: u64 = fs::read_to_string(&seq_path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(stored_seq, 3);
+
+        // Write one more and verify it gets seq=4
+        let cp = Checkpoint::new(CheckpointKind::Human, "user".into(), vec![entry.clone()]);
+        append_checkpoint(&git_dir, base, &cp);
+
+        let loaded = read_checkpoints(&git_dir, base);
+        assert_eq!(loaded.last().unwrap().seq, 4);
     }
 }

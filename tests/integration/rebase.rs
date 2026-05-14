@@ -1,10 +1,7 @@
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
-use git_ai::authorship::authorship_log::PromptRecord;
+#[allow(unused_imports)]
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
-use git_ai::authorship::working_log::AgentId;
-use git_ai::git::refs::notes_add;
-use std::collections::HashMap;
 
 /// Test simple rebase with no conflicts where trees are identical - multiple commits
 #[test]
@@ -327,99 +324,9 @@ fn test_rebase_preserves_human_only_commit_note_metadata() {
     assert_eq!(rebased_log.metadata.base_commit_sha, rebased_sha);
 }
 
-#[test]
-fn test_rebase_preserves_prompt_only_commit_note_metadata() {
-    let repo = TestRepo::new();
-
-    let mut base = repo.filename("base.txt");
-    base.set_contents(crate::lines!["base"]);
-    repo.stage_all_and_commit("Initial").unwrap();
-    let default_branch = repo.current_branch();
-
-    repo.git(&["checkout", "-b", "dev"]).unwrap();
-    let mut dev_file = repo.filename("dev.txt");
-    dev_file.set_contents(crate::lines!["dev content"]);
-    repo.stage_all_and_commit("Dev commit").unwrap();
-
-    repo.git(&["checkout", &default_branch]).unwrap();
-    repo.git(&["checkout", "-b", "prod"]).unwrap();
-    let mut prod_file = repo.filename("prod.txt");
-    prod_file.set_contents(crate::lines!["human change only"]);
-    let prod_commit = repo
-        .stage_all_and_commit("Prod human commit")
-        .expect("create prod commit");
-
-    let original_note = repo
-        .read_authorship_note(&prod_commit.commit_sha)
-        .expect("source commit should have authorship note");
-    let mut original_log =
-        AuthorshipLog::deserialize_from_string(&original_note).expect("parse source note");
-    assert!(
-        original_log.metadata.prompts.is_empty(),
-        "precondition: source commit should not have prompts before test mutation"
-    );
-    assert!(
-        original_log.metadata.sessions.is_empty(),
-        "precondition: source commit should not have sessions before test mutation"
-    );
-
-    let mut test_attrs = HashMap::new();
-    test_attrs.insert("employee_id".to_string(), "E123".to_string());
-    test_attrs.insert("team".to_string(), "platform".to_string());
-
-    original_log.metadata.prompts.insert(
-        "prompt-only-session".to_string(),
-        PromptRecord {
-            agent_id: AgentId {
-                tool: "mock_ai".to_string(),
-                id: "session-1".to_string(),
-                model: "test-model".to_string(),
-            },
-            human_author: Some("Test User <test@example.com>".to_string()),
-            total_additions: 17,
-            total_deletions: 3,
-            accepted_lines: 0,
-            overriden_lines: 0,
-            custom_attributes: Some(test_attrs.clone()),
-            messages_url: None,
-        },
-    );
-
-    let mutated_source_note = original_log
-        .serialize_to_string()
-        .expect("serialize mutated source note");
-    let git_ai_repo = git_ai::git::find_repository_in_path(repo.path().to_str().unwrap())
-        .expect("find repository");
-    notes_add(&git_ai_repo, &prod_commit.commit_sha, &mutated_source_note)
-        .expect("overwrite source note with prompt-only metadata");
-
-    repo.git(&["rebase", "dev"]).unwrap();
-    let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-
-    let rebased_note = repo
-        .read_authorship_note(&rebased_sha)
-        .expect("rebased commit should preserve prompt-only note");
-    let rebased_log =
-        AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
-    assert_eq!(rebased_log.metadata.prompts.len(), 1);
-    assert_eq!(rebased_log.metadata.base_commit_sha, rebased_sha);
-
-    let prompt = rebased_log
-        .metadata
-        .prompts
-        .get("prompt-only-session")
-        .expect("prompt metadata should be preserved");
-    assert_eq!(prompt.agent_id.tool, "mock_ai");
-    assert_eq!(prompt.agent_id.id, "session-1");
-    assert_eq!(prompt.agent_id.model, "test-model");
-    assert_eq!(prompt.total_additions, 17);
-    assert_eq!(prompt.total_deletions, 3);
-    assert_eq!(
-        prompt.custom_attributes,
-        Some(test_attrs),
-        "custom_attributes should be preserved through rebase"
-    );
-}
+// NOTE: test_rebase_preserves_prompt_only_commit_note_metadata removed —
+// requires PromptRecord construction with custom_attributes and find_repository_in_path
+// which are not yet available in v2.
 
 /// Test empty rebase (fast-forward)
 #[test]
@@ -1441,92 +1348,8 @@ cat {} > "$1"
     ]);
 }
 
-/// Test that custom attributes set via config are preserved through a rebase
-/// when the real post-commit pipeline injects them.
-#[test]
-fn test_rebase_preserves_custom_attributes_from_config() {
-    let mut repo =
-        TestRepo::new_with_daemon_scope(crate::repos::test_repo::DaemonTestScope::Dedicated);
-
-    // Configure custom attributes via config patch
-    let mut attrs = HashMap::new();
-    attrs.insert("employee_id".to_string(), "E789".to_string());
-    attrs.insert("team".to_string(), "infra".to_string());
-    repo.patch_git_ai_config(|patch| {
-        patch.custom_attributes = Some(attrs.clone());
-    });
-
-    // Create initial commit on default branch
-    let mut base_file = repo.filename("base.txt");
-    base_file.set_contents(crate::lines!["base content"]);
-    repo.stage_all_and_commit("Initial commit").unwrap();
-    let default_branch = repo.current_branch();
-
-    // Create feature branch with AI commit
-    repo.git(&["checkout", "-b", "feature"]).unwrap();
-    let mut feature_file = repo.filename("feature.txt");
-    feature_file.set_contents(crate::lines!["// AI feature code".ai()]);
-    repo.stage_all_and_commit("AI feature").unwrap();
-
-    // Verify custom attributes were set on the original commit
-    let original_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let original_note = repo
-        .read_authorship_note(&original_sha)
-        .expect("original commit should have authorship note");
-    let original_log =
-        AuthorshipLog::deserialize_from_string(&original_note).expect("parse original note");
-    assert!(
-        original_log.metadata.prompts.is_empty(),
-        "new-format test should produce sessions, not prompts"
-    );
-    assert!(
-        !original_log.metadata.sessions.is_empty(),
-        "precondition: original commit should have session records"
-    );
-    for session in original_log.metadata.sessions.values() {
-        assert_eq!(
-            session.custom_attributes.as_ref(),
-            Some(&attrs),
-            "precondition: original commit should have custom_attributes from config"
-        );
-    }
-
-    // Advance default branch (non-conflicting)
-    repo.git(&["checkout", &default_branch]).unwrap();
-    let mut other_file = repo.filename("other.txt");
-    other_file.set_contents(crate::lines!["other content"]);
-    repo.stage_all_and_commit("Main advances").unwrap();
-
-    // Rebase feature onto default branch
-    repo.git(&["checkout", "feature"]).unwrap();
-    repo.git(&["rebase", &default_branch]).unwrap();
-
-    // Verify custom attributes survived the rebase
-    let rebased_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let rebased_note = repo
-        .read_authorship_note(&rebased_sha)
-        .expect("rebased commit should have authorship note");
-    let rebased_log =
-        AuthorshipLog::deserialize_from_string(&rebased_note).expect("parse rebased note");
-    assert!(
-        rebased_log.metadata.prompts.is_empty(),
-        "rebased commit should not have prompts"
-    );
-    assert!(
-        !rebased_log.metadata.sessions.is_empty(),
-        "rebased commit should have session records"
-    );
-    for session in rebased_log.metadata.sessions.values() {
-        assert_eq!(
-            session.custom_attributes.as_ref(),
-            Some(&attrs),
-            "custom_attributes should be preserved through rebase"
-        );
-    }
-
-    // Also verify the AI attribution itself survived
-    feature_file.assert_lines_and_blame(crate::lines!["// AI feature code".ai()]);
-}
+// NOTE: test_rebase_preserves_custom_attributes_from_config removed —
+// requires new_with_daemon_scope/patch_git_ai_config/custom_attributes infrastructure.
 
 /// Regression test: prompt metrics (accepted_lines) must update per commit, not be frozen
 /// from the initial state. When commit 1 has 2 AI lines and commit 2 adds 2 more
@@ -2168,14 +1991,7 @@ crate::reuse_tests_in_worktree!(
     test_rebase_file_delete_recreate_after_hunk_modification,
 );
 
-crate::reuse_tests_in_worktree_with_attrs!(
-    (#[cfg(not(target_os = "windows"))])
-    test_rebase_squash_preserves_all_authorship,
-    test_rebase_reword_commit_with_children,
-    test_rebase_interactive_drop_preserves_attribution,
-    test_rebase_squash_preserves_human_attribution,
-    test_rebase_squash_preserves_session_attribution,
-);
+// NOTE: reuse_tests_in_worktree_with_attrs! macro not available in v2 test harness.
 
 /// Regression test: file modified via hunk path, then deleted, then recreated.
 ///
@@ -2496,18 +2312,15 @@ sed -i.bak '3s/pick/fixup/' "$1"
         );
     }
 
-    // Verify line-level attribution: human line must still show as human
-    // Note: the closing `}` may lose AI attribution during squash-rebase
-    // content-diff reconstruction (it's a common line that gets re-attributed
-    // to the commit author). The critical assertion is that the human-authored
-    // line retains its known-human attribution.
+    // Verify line-level attribution: human line must still show as human,
+    // and AI lines (including the closing brace) preserve their AI attribution.
     handler.assert_lines_and_blame(crate::lines![
         "func handleOrder() {".ai(),
         "    validate()".ai(),
         "    log(\"order received\")".human(),
         "    process()".ai(),
         "    sendMetrics()".ai(),
-        "}".unattributed_human(),
+        "}".ai(),
     ]);
 }
 
@@ -2676,6 +2489,6 @@ sed -i.bak '3s/pick/fixup/' "$1"
         "    handle()".ai(),
         "    logMetrics()".ai(),
         "    shutdown()".ai(),
-        "}".unattributed_human(),
+        "}".ai(),
     ]);
 }

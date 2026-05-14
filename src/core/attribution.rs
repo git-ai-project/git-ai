@@ -944,7 +944,8 @@ fn find_dominant_author(
     attributions: &[Attribution],
     content: &str,
 ) -> String {
-    let mut best: Option<(&str, u128)> = None;
+    let mut best_substantial: Option<(&str, u128)> = None;
+    let mut best_any: Option<(&str, u128)> = None;
 
     for &idx in sorted_attr_indices {
         let attr = &attributions[idx];
@@ -958,7 +959,8 @@ fn find_dominant_author(
         let overlap_start = attr.start.max(line_start);
         let overlap_end = attr.end.min(line_end);
 
-        let has_substance = if overlap_start < overlap_end {
+        let has_overlap = overlap_start < overlap_end;
+        let has_substance = if has_overlap {
             let safe_start = floor_char_boundary(content, overlap_start);
             let safe_end = ceil_char_boundary(content, overlap_end);
             if safe_start < safe_end {
@@ -973,17 +975,31 @@ fn find_dominant_author(
         };
 
         if has_substance || is_blank {
-            match best {
-                None => best = Some((&attr.author_id, attr.ts)),
+            match best_substantial {
+                None => best_substantial = Some((&attr.author_id, attr.ts)),
                 Some((_, best_ts)) if attr.ts > best_ts => {
-                    best = Some((&attr.author_id, attr.ts));
+                    best_substantial = Some((&attr.author_id, attr.ts));
+                }
+                _ => {}
+            }
+        }
+
+        // Track any overlap (including whitespace-only) as a fallback
+        if has_overlap {
+            match best_any {
+                None => best_any = Some((&attr.author_id, attr.ts)),
+                Some((_, best_ts)) if attr.ts > best_ts => {
+                    best_any = Some((&attr.author_id, attr.ts));
                 }
                 _ => {}
             }
         }
     }
 
-    best.map(|(author, _)| author.to_string())
+    // Prefer substantial overlap, fall back to any overlap (whitespace-only changes)
+    best_substantial
+        .or(best_any)
+        .map(|(author, _)| author.to_string())
         .unwrap_or_default()
 }
 

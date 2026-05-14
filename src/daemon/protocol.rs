@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum ControlRequest {
     Checkpoint(CheckpointRequest),
     Status(StatusRequest),
+    Stats,
     Shutdown,
     Ping,
 }
@@ -52,6 +53,8 @@ pub struct ControlResponse {
     pub pid: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<StatusResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stats: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,6 +73,7 @@ impl ControlResponse {
             version: None,
             pid: None,
             status: None,
+            stats: None,
         }
     }
 
@@ -81,6 +85,7 @@ impl ControlResponse {
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             pid: Some(std::process::id()),
             status: None,
+            stats: None,
         }
     }
 
@@ -92,6 +97,19 @@ impl ControlResponse {
             version: None,
             pid: None,
             status: Some(status),
+            stats: None,
+        }
+    }
+
+    pub fn ok_stats(report: String) -> Self {
+        Self {
+            ok: true,
+            processed: None,
+            error: None,
+            version: None,
+            pid: None,
+            status: None,
+            stats: Some(report),
         }
     }
 
@@ -103,6 +121,7 @@ impl ControlResponse {
             version: None,
             pid: None,
             status: None,
+            stats: None,
         }
     }
 
@@ -114,6 +133,7 @@ impl ControlResponse {
             version: None,
             pid: None,
             status: None,
+            stats: None,
         }
     }
 }
