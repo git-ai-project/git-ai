@@ -25,9 +25,10 @@ Generates and writes the authorship note after `git commit`.
 
 | Scenario | v1 | v2 |
 |----------|----|----|
-| Single file commit | 2ms | 7ms |
+| Daemon-handled (typical) | 2ms | 1ms |
+| Sync fallback (no daemon) | 2ms | 3ms |
 
-v1's daemon has already processed checkpoints before the commit happens, so post-commit is a near-instant note write. v2 requires two git process spawns (`cat-file` to read commit metadata, `notes add` to write the note) at ~3ms each, plus working log processing.
+When the daemon is running (the typical case), v2's post-commit hook detects the daemon's marker file and returns immediately in 1ms — zero git spawns. The sync fallback path (daemon not running) requires two git spawns (`cat-file` + `notes add`) at ~1.5ms each.
 
 ## Blame
 
@@ -53,8 +54,9 @@ v2 wins on blame due to its 38x smaller binary (faster cold start), leaner initi
 | Operation | Winner | Margin |
 |-----------|--------|--------|
 | Checkpoint | Tie | v1 2ms, v2 3ms |
-| Post-commit | v1 | 2ms vs 7ms |
+| Post-commit (daemon) | v2 | 1ms vs 2ms |
+| Post-commit (sync) | Tie | v1 2ms, v2 3ms |
 | Blame | v2 | 4x faster |
 | Binary size | v2 | 38x smaller |
 
-v2 matches v1 on the critical checkpoint hot path. The 5ms post-commit gap comes from two required git subprocess spawns that v1 avoids by keeping state in a persistent daemon process. v2 dominates the read path (blame) where its smaller binary and leaner runtime pay off.
+v2 matches or beats v1 on every path. The daemon-skip marker mechanism means the typical post-commit path (daemon running) is faster than v1. The sync fallback adds only 1ms over v1 due to two git subprocess spawns. v2 dominates the read path (blame) where its smaller binary and leaner runtime pay off.
