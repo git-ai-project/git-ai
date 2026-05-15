@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use git_ai::core::authorship_log::AuthorshipLog;
@@ -83,7 +83,13 @@ pub fn handle_stats(args: &[String]) {
     let is_range = commit_ref.contains("..");
 
     if is_range {
-        handle_range_stats(commit_ref, is_json, &file_filter, &author_filter, &since_filter);
+        handle_range_stats(
+            commit_ref,
+            is_json,
+            &file_filter,
+            &author_filter,
+            &since_filter,
+        );
     } else {
         handle_single_commit_stats(commit_ref, is_json);
     }
@@ -170,7 +176,11 @@ fn handle_single_commit_stats(commit_ref: &str, is_json: bool) {
         let mut file_ai: u64 = 0;
         let mut file_human: u64 = 0;
         for entry in &file_att.entries {
-            let count: u64 = entry.line_ranges.iter().map(|r| r.line_count() as u64).sum();
+            let count: u64 = entry
+                .line_ranges
+                .iter()
+                .map(|r| r.line_count() as u64)
+                .sum();
             if entry.hash.starts_with("h_") {
                 file_human += count;
             } else {
@@ -204,7 +214,11 @@ fn handle_range_stats(
     author_filter: &Option<String>,
     since_filter: &Option<String>,
 ) {
-    let mut log_args: Vec<String> = vec!["log".to_string(), "--format=%H".to_string(), range.to_string()];
+    let mut log_args: Vec<String> = vec![
+        "log".to_string(),
+        "--format=%H".to_string(),
+        range.to_string(),
+    ];
 
     if let Some(author) = author_filter {
         log_args.push(format!("--author={}", author));
@@ -280,7 +294,7 @@ fn handle_range_stats(
     }
 }
 
-fn get_attribution_for_commit(git_dir: &PathBuf, sha: &str) -> (u64, u64) {
+fn get_attribution_for_commit(git_dir: &Path, sha: &str) -> (u64, u64) {
     if let Some(cached) = StatsCache::get(git_dir, sha) {
         return (cached.ai_lines, cached.human_lines);
     }
@@ -300,7 +314,11 @@ fn get_attribution_for_commit(git_dir: &PathBuf, sha: &str) -> (u64, u64) {
 
     for file_att in &log.attestations {
         for entry in &file_att.entries {
-            let count: u64 = entry.line_ranges.iter().map(|r| r.line_count() as u64).sum();
+            let count: u64 = entry
+                .line_ranges
+                .iter()
+                .map(|r| r.line_count() as u64)
+                .sum();
             if entry.hash.starts_with("h_") {
                 human += count;
             } else {
@@ -390,9 +408,7 @@ fn resolve_git_dir() -> PathBuf {
         Ok(dir) => {
             let p = PathBuf::from(dir.trim());
             if p.is_relative() {
-                std::env::current_dir()
-                    .map(|cwd| cwd.join(&p))
-                    .unwrap_or(p)
+                std::env::current_dir().map(|cwd| cwd.join(&p)).unwrap_or(p)
             } else {
                 p
             }
@@ -445,6 +461,7 @@ mod tests {
     #[test]
     fn test_output_file_stats_missing_file() {
         // Doesn't panic
-        let _stats: std::collections::HashMap<String, (u64, u64, u64)> = std::collections::HashMap::new();
+        let _stats: std::collections::HashMap<String, (u64, u64, u64)> =
+            std::collections::HashMap::new();
     }
 }

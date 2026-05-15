@@ -247,22 +247,17 @@ mod tests {
     #[test]
     fn test_incremental_update_with_no_repo() {
         // Using a path that won't have any git repo - should return empty
-        let git_dir = std::env::temp_dir().join(format!(
-            "git-ai-incr-test-{}",
-            std::process::id()
-        ));
+        let git_dir = std::env::temp_dir().join(format!("git-ai-incr-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&git_dir);
         let fake_repo = std::env::temp_dir().join("nonexistent-repo-for-test");
 
         let result = update_cache(&git_dir, &fake_repo);
         // Either an error (git not finding repo) or Ok with 0 entries
-        match result {
-            Ok(r) => {
-                assert_eq!(r.new_entries, 0);
-                assert_eq!(r.total_cached, 0);
-            }
-            Err(_) => {} // acceptable - no repo there
+        if let Ok(r) = result {
+            assert_eq!(r.new_entries, 0);
+            assert_eq!(r.total_cached, 0);
         }
+        // Err is acceptable - no repo there
 
         let _ = std::fs::remove_dir_all(&git_dir);
     }

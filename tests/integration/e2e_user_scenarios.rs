@@ -318,8 +318,13 @@ fn generated_function() -> u32 {
     assert!(pre_note.is_some(), "should have note before amend");
 
     // Amend only the commit message (no file changes)
-    repo.git(&["commit", "--amend", "-m", "feat: properly named AI function"])
-        .expect("amend should succeed");
+    repo.git(&[
+        "commit",
+        "--amend",
+        "-m",
+        "feat: properly named AI function",
+    ])
+    .expect("amend should succeed");
 
     // Verify attribution preserved after amend
     let post_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();

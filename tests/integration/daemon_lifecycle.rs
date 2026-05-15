@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::repos::test_repo::{get_binary_path, real_git_executable};
 
 /// Wait for a file to exist, with timeout.
-fn wait_for_file(path: &PathBuf, timeout: Duration) -> bool {
+fn wait_for_file(path: &Path, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
         if path.exists() {
@@ -44,7 +44,7 @@ fn wait_for_note(repo_path: &PathBuf, commit_sha: &str, timeout: Duration) -> Op
 }
 
 /// Create a HOME directory with a .gitconfig that routes trace2 events to the socket.
-fn create_trace2_home(base_dir: &std::path::Path, socket_path: &PathBuf) -> PathBuf {
+fn create_trace2_home(base_dir: &std::path::Path, socket_path: &Path) -> PathBuf {
     let home = base_dir.join("trace2home");
     fs::create_dir_all(&home).unwrap();
     let gitconfig = home.join(".gitconfig");
@@ -91,7 +91,8 @@ fn test_stale_socket_cleanup() {
     fs::write(&control_path, "stale").unwrap();
 
     // Also create a stale PID file referencing a dead process
-    let stale_pid_content = r#"{"pid":999999999,"started_at":"2024-01-01T00:00:00Z","version":"0.0.0"}"#;
+    let stale_pid_content =
+        r#"{"pid":999999999,"started_at":"2024-01-01T00:00:00Z","version":"0.0.0"}"#;
     fs::write(daemon_base.join("daemon.pid.json"), stale_pid_content).unwrap();
 
     // Start the daemon — it should clean up the stale files and start successfully
@@ -214,8 +215,16 @@ fn test_concurrent_repos_isolation() {
     let repo_beta = create_repo("repo-beta");
 
     // Checkpoint different files with different content in each repo
-    fs::write(repo_alpha.join("alpha.txt"), "Alpha content line 1\nAlpha line 2\n").unwrap();
-    fs::write(repo_beta.join("beta.txt"), "Beta content line 1\nBeta line 2\n").unwrap();
+    fs::write(
+        repo_alpha.join("alpha.txt"),
+        "Alpha content line 1\nAlpha line 2\n",
+    )
+    .unwrap();
+    fs::write(
+        repo_beta.join("beta.txt"),
+        "Beta content line 1\nBeta line 2\n",
+    )
+    .unwrap();
 
     // Send checkpoints via control socket for both repos (interleaved)
     let send_checkpoint = |repo_path: &PathBuf, filename: &str| {
@@ -234,7 +243,7 @@ fn test_concurrent_repos_isolation() {
         let mut buf = [0u8; 4096];
         let n = read_retry(&mut client, &mut buf).unwrap();
         let resp: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
+            serde_json::from_str(String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
         assert_eq!(resp["ok"], true, "checkpoint failed: {:?}", resp);
     };
 
@@ -377,6 +386,9 @@ fn test_graceful_shutdown_on_sigterm() {
         let _ = daemon_proc.kill();
         let _ = daemon_proc.wait();
         panic!("daemon did not exit within 10s after SIGTERM");
+    } else {
+        // Ensure we wait on the exited process to avoid zombie
+        let _ = daemon_proc.wait();
     }
 
     // Verify the daemon logged a clean shutdown message
@@ -484,7 +496,11 @@ fn test_socket_path_too_long_uses_tmp() {
     // That's about 36 chars of suffix, so we need HOME to be > 64 chars
     let base_tmp = tempfile::tempdir().unwrap();
     let long_segment = "a".repeat(80);
-    let long_home = base_tmp.path().join(&long_segment).join("deep").join("nested");
+    let long_home = base_tmp
+        .path()
+        .join(&long_segment)
+        .join("deep")
+        .join("nested");
     fs::create_dir_all(&long_home).unwrap();
 
     // Verify our path is indeed > 100 chars for the socket
@@ -500,10 +516,7 @@ fn test_socket_path_too_long_uses_tmp() {
         would_be_socket.display()
     );
 
-    let daemon_base = long_home
-        .join(".git-ai")
-        .join("internal")
-        .join("daemon");
+    let daemon_base = long_home.join(".git-ai").join("internal").join("daemon");
     fs::create_dir_all(&daemon_base).unwrap();
 
     let pid_file = daemon_base.join("daemon.pid.json");
@@ -536,11 +549,7 @@ fn test_socket_path_too_long_uses_tmp() {
     let tmp_sockets: Vec<_> = fs::read_dir("/tmp")
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("git-ai-d-")
-        })
+        .filter(|e| e.file_name().to_string_lossy().starts_with("git-ai-d-"))
         .collect();
 
     // There should be at least one /tmp/git-ai-d-* directory
@@ -550,9 +559,9 @@ fn test_socket_path_too_long_uses_tmp() {
     );
 
     // Find the matching socket by checking which one has a trace2.sock
-    let found_socket = tmp_sockets.iter().any(|entry| {
-        entry.path().join("trace2.sock").exists()
-    });
+    let found_socket = tmp_sockets
+        .iter()
+        .any(|entry| entry.path().join("trace2.sock").exists());
     assert!(
         found_socket,
         "expected trace2.sock in one of the /tmp/git-ai-d-* directories"

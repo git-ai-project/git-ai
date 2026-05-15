@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+# Strip all GIT_* env vars that git sets during hook execution —
+# they leak into test subprocesses and break integration tests.
+for var in $(env | grep '^GIT_' | cut -d= -f1); do
+    unset "$var"
+done
+
+echo "[pre-commit] Running fmt check..."
+cargo fmt -- --check
+
+echo "[pre-commit] Running lint..."
+cargo clippy --all-targets -- -D warnings
+
+echo "[pre-commit] Running full test suite..."
+cargo test
+
+echo "[pre-commit] All checks passed."

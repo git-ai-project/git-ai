@@ -276,7 +276,10 @@ fn test_install_is_idempotent() {
         use std::os::unix::fs::PermissionsExt;
         let perms = fs::metadata(&hook_path).unwrap().permissions();
         let mode = perms.mode() & 0o777;
-        assert_eq!(mode, 0o755, "permissions should still be 755 after re-install");
+        assert_eq!(
+            mode, 0o755,
+            "permissions should still be 755 after re-install"
+        );
     }
 }
 
@@ -321,10 +324,7 @@ fn test_socket_path_follows_convention() {
     // The socket path should follow the convention:
     // ~/.git-ai/internal/daemon/trace2.sock
     // OR /tmp/git-ai-d-<hash>/trace2.sock (if path too long)
-    let expected_conventional = format!(
-        "{}/.git-ai/internal/daemon/trace2.sock",
-        home.display()
-    );
+    let expected_conventional = format!("{}/.git-ai/internal/daemon/trace2.sock", home.display());
 
     if expected_conventional.len() < 100 {
         // Should use the conventional path since it's short enough

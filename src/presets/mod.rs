@@ -201,7 +201,12 @@ static AGENT_CONFIGS: &[AgentConfig] = &[
         model_fields: &["model_name", "model"],
         file_path_fields: &["file_path"],
         pre_event_names: &["pre_write_code", "pre_run_command"],
-        post_event_names: &["post_write_code", "post_run_command", "post_cascade_response_with_transcript", "post_code_action"],
+        post_event_names: &[
+            "post_write_code",
+            "post_run_command",
+            "post_cascade_response_with_transcript",
+            "post_code_action",
+        ],
         legacy_event_names: &[],
         uses_workspace_roots: false,
         path_normalize: PathNormalize::None,
@@ -323,7 +328,10 @@ static AGENT_CONFIGS: &[AgentConfig] = &[
 
 /// Parse a hook payload from stdin for the given agent preset name.
 /// Returns the parsed event(s) or an error message.
-pub fn parse_hook_input(agent_name: &str, hook_input: &str) -> Result<Vec<ParsedHookEvent>, String> {
+pub fn parse_hook_input(
+    agent_name: &str,
+    hook_input: &str,
+) -> Result<Vec<ParsedHookEvent>, String> {
     // Strip UTF-8 BOM if present
     let input = hook_input.strip_prefix('\u{feff}').unwrap_or(hook_input);
 
@@ -341,17 +349,23 @@ pub fn parse_hook_input(agent_name: &str, hook_input: &str) -> Result<Vec<Parsed
     let config = get_agent_config(agent_name)
         .ok_or_else(|| format!("Unknown agent preset: {}", agent_name))?;
 
-    let data: serde_json::Value = serde_json::from_str(input)
-        .map_err(|e| format!("Invalid JSON in hook_input: {}", e))?;
+    let data: serde_json::Value =
+        serde_json::from_str(input).map_err(|e| format!("Invalid JSON in hook_input: {}", e))?;
 
     // Extract hook event name
-    let hook_event = extract_multi(&data, config.hook_event_fields)
-        .ok_or_else(|| format!("{}: hook_event_name not found in hook_input (tried: {:?})",
-            agent_name, config.hook_event_fields))?;
+    let hook_event = extract_multi(&data, config.hook_event_fields).ok_or_else(|| {
+        format!(
+            "{}: hook_event_name not found in hook_input (tried: {:?})",
+            agent_name, config.hook_event_fields
+        )
+    })?;
 
     // Reject legacy events
     if config.legacy_event_names.contains(&hook_event.as_str()) {
-        return Err(format!("Legacy {} hook event '{}' is no longer supported", agent_name, hook_event));
+        return Err(format!(
+            "Legacy {} hook event '{}' is no longer supported",
+            agent_name, hook_event
+        ));
     }
 
     // Determine pre vs post
@@ -361,21 +375,27 @@ pub fn parse_hook_input(agent_name: &str, hook_input: &str) -> Result<Vec<Parsed
         if config.unknown_event_is_post {
             // Agents like windsurf treat unknown events as post file edits
         } else {
-            return Err(format!("{}: invalid hook_event_name '{}'. Expected one of: {:?} or {:?}",
-                agent_name, hook_event, config.pre_event_names, config.post_event_names));
+            return Err(format!(
+                "{}: invalid hook_event_name '{}'. Expected one of: {:?} or {:?}",
+                agent_name, hook_event, config.pre_event_names, config.post_event_names
+            ));
         }
     }
 
     // Extract session ID
-    let session_id = extract_multi(&data, config.session_id_fields)
-        .unwrap_or_else(|| "unknown".to_string());
+    let session_id =
+        extract_multi(&data, config.session_id_fields).unwrap_or_else(|| "unknown".to_string());
 
     // Extract tool name and classify.
     // For agents like windsurf that encode tool type in the event name,
     // derive tool_name from the event when the field isn't present.
     let tool_name = extract_multi(&data, config.tool_name_fields).unwrap_or_default();
     let effective_tool_name = if tool_name.is_empty() && config.agent == Agent::Windsurf {
-        if hook_event.contains("run_command") { "run_command" } else { "code_action" }
+        if hook_event.contains("run_command") {
+            "run_command"
+        } else {
+            "code_action"
+        }
     } else {
         &tool_name
     };
@@ -385,10 +405,17 @@ pub fn parse_hook_input(agent_name: &str, hook_input: &str) -> Result<Vec<Parsed
     // may omit tool_name in hook payloads but provide file_path.
     if tool_class == ToolClass::Skip && tool_name.is_empty() {
         let has_file_path = extract_file_path(&data, config.file_path_fields).is_some();
-        tool_class = if has_file_path { ToolClass::FileEdit } else { ToolClass::Bash };
+        tool_class = if has_file_path {
+            ToolClass::FileEdit
+        } else {
+            ToolClass::Bash
+        };
     }
     if tool_class == ToolClass::Skip {
-        return Err(format!("Skipping {} hook for unsupported tool_name '{}'", agent_name, effective_tool_name));
+        return Err(format!(
+            "Skipping {} hook for unsupported tool_name '{}'",
+            agent_name, effective_tool_name
+        ));
     }
 
     // Extract model
@@ -403,7 +430,8 @@ pub fn parse_hook_input(agent_name: &str, hook_input: &str) -> Result<Vec<Parsed
         resolve_cwd_from_workspace_roots(&data, file_path.as_deref())
     } else {
         extract_multi(&data, config.cwd_fields)
-    }.ok_or_else(|| format!("{}: could not determine working directory", agent_name))?;
+    }
+    .ok_or_else(|| format!("{}: could not determine working directory", agent_name))?;
 
     // Resolve file paths to absolute
     let file_paths = if let Some(fp) = &file_path {
@@ -414,8 +442,8 @@ pub fn parse_hook_input(agent_name: &str, hook_input: &str) -> Result<Vec<Parsed
     };
 
     // Extract transcript path
-    let transcript_path = extract_multi(&data, &["transcript_path", "session_path"])
-        .map(PathBuf::from);
+    let transcript_path =
+        extract_multi(&data, &["transcript_path", "session_path"]).map(PathBuf::from);
 
     // Extract tool_use_id
     let tool_use_id = extract_multi(&data, &["tool_use_id", "toolUseId", "execution_id"])
@@ -424,7 +452,10 @@ pub fn parse_hook_input(agent_name: &str, hook_input: &str) -> Result<Vec<Parsed
     // Build metadata
     let mut metadata = HashMap::new();
     if let Some(ref tp) = transcript_path {
-        metadata.insert("transcript_path".to_string(), tp.to_string_lossy().to_string());
+        metadata.insert(
+            "transcript_path".to_string(),
+            tp.to_string_lossy().to_string(),
+        );
     }
 
     let context = PresetContext {
@@ -437,7 +468,10 @@ pub fn parse_hook_input(agent_name: &str, hook_input: &str) -> Result<Vec<Parsed
 
     // Validate that pre-file-edit events have at least one file path
     if tool_class == ToolClass::FileEdit && is_pre && file_paths.is_empty() {
-        return Err(format!("{}: will_edit_filepaths cannot be empty for before_edit events", agent_name));
+        return Err(format!(
+            "{}: will_edit_filepaths cannot be empty for before_edit events",
+            agent_name
+        ));
     }
 
     let event = match (tool_class, is_pre) {
@@ -504,8 +538,7 @@ fn is_file_creation_tool(tool_name: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 fn parse_simple_preset(name: &str, input: &str) -> Result<Vec<ParsedHookEvent>, String> {
-    let cwd = std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let file_paths = if !input.trim().is_empty() {
         if let Ok(data) = serde_json::from_str::<serde_json::Value>(input) {
@@ -546,10 +579,7 @@ fn parse_simple_preset(name: &str, input: &str) -> Result<Vec<ParsedHookEvent>, 
                 tool_use_id: None,
             })
         }
-        _ => ParsedHookEvent::UntrackedEdit(UntrackedEdit {
-            cwd,
-            file_paths,
-        }),
+        _ => ParsedHookEvent::UntrackedEdit(UntrackedEdit { cwd, file_paths }),
     };
 
     Ok(vec![event])
@@ -560,25 +590,26 @@ fn parse_simple_preset(name: &str, input: &str) -> Result<Vec<ParsedHookEvent>, 
 /// - `type: "human"` with `will_edit_filepaths` => PreFileEdit (pre-edit snapshot)
 /// - `type: "ai_agent"` with `edited_filepaths` => PostFileEdit (post-edit snapshot)
 fn parse_agent_v1_preset(input: &str) -> Result<Vec<ParsedHookEvent>, String> {
-    let data: serde_json::Value = serde_json::from_str(input)
-        .map_err(|e| format!("agent-v1: invalid JSON: {}", e))?;
+    let data: serde_json::Value =
+        serde_json::from_str(input).map_err(|e| format!("agent-v1: invalid JSON: {}", e))?;
 
     let event_type = data.get("type").and_then(|v| v.as_str()).unwrap_or("human");
-    let cwd = data.get("repo_working_dir")
+    let cwd = data
+        .get("repo_working_dir")
         .and_then(|v| v.as_str())
-        .map(|s| PathBuf::from(s))
+        .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let cwd_str = cwd.to_string_lossy().to_string();
 
     // Extract dirty_files if present
-    let dirty_files = data.get("dirty_files")
+    let dirty_files = data
+        .get("dirty_files")
         .and_then(|v| v.as_object())
         .map(|obj| {
             obj.iter()
                 .filter_map(|(k, v)| {
-                    v.as_str().map(|content| {
-                        (resolve_absolute(k, &cwd_str), content.to_string())
-                    })
+                    v.as_str()
+                        .map(|content| (resolve_absolute(k, &cwd_str), content.to_string()))
                 })
                 .collect::<HashMap<PathBuf, String>>()
         })
@@ -587,7 +618,8 @@ fn parse_agent_v1_preset(input: &str) -> Result<Vec<ParsedHookEvent>, String> {
     match event_type {
         "human" => {
             // Pre-edit: extract will_edit_filepaths
-            let file_paths = data.get("will_edit_filepaths")
+            let file_paths = data
+                .get("will_edit_filepaths")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
@@ -612,7 +644,8 @@ fn parse_agent_v1_preset(input: &str) -> Result<Vec<ParsedHookEvent>, String> {
         }
         "ai_agent" => {
             // Post-edit: extract edited_filepaths
-            let file_paths = data.get("edited_filepaths")
+            let file_paths = data
+                .get("edited_filepaths")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
@@ -622,13 +655,16 @@ fn parse_agent_v1_preset(input: &str) -> Result<Vec<ParsedHookEvent>, String> {
                 })
                 .unwrap_or_default();
 
-            let agent_name = data.get("agent_name")
+            let agent_name = data
+                .get("agent_name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("agent-v1");
-            let model = data.get("model")
+            let model = data
+                .get("model")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            let conversation_id = data.get("conversation_id")
+            let conversation_id = data
+                .get("conversation_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
 
@@ -646,29 +682,27 @@ fn parse_agent_v1_preset(input: &str) -> Result<Vec<ParsedHookEvent>, String> {
                 tool_use_id: None,
             })])
         }
-        _ => {
-            Err(format!("agent-v1: unknown type '{}'", event_type))
-        }
+        _ => Err(format!("agent-v1: unknown type '{}'", event_type)),
     }
 }
 
 fn extract_multi(data: &serde_json::Value, keys: &[&str]) -> Option<String> {
     // Check top-level fields first
     for key in keys {
-        if let Some(v) = data.get(*key).and_then(|v| v.as_str()) {
-            if !v.is_empty() {
-                return Some(v.to_string());
-            }
+        if let Some(v) = data.get(*key).and_then(|v| v.as_str())
+            && !v.is_empty()
+        {
+            return Some(v.to_string());
         }
     }
     // Fall back to checking inside tool_info / tool_input (windsurf, etc.)
     for nested in &["tool_info", "tool_input", "toolInput"] {
         if let Some(obj) = data.get(*nested) {
             for key in keys {
-                if let Some(v) = obj.get(*key).and_then(|v| v.as_str()) {
-                    if !v.is_empty() {
-                        return Some(v.to_string());
-                    }
+                if let Some(v) = obj.get(*key).and_then(|v| v.as_str())
+                    && !v.is_empty()
+                {
+                    return Some(v.to_string());
                 }
             }
         }
@@ -680,10 +714,10 @@ fn extract_file_path(data: &serde_json::Value, field_names: &[&str]) -> Option<S
     for container_key in &["tool_input", "toolInput", "tool_info"] {
         if let Some(container) = data.get(*container_key) {
             for field in field_names {
-                if let Some(v) = container.get(*field).and_then(|v| v.as_str()) {
-                    if !v.is_empty() {
-                        return Some(v.to_string());
-                    }
+                if let Some(v) = container.get(*field).and_then(|v| v.as_str())
+                    && !v.is_empty()
+                {
+                    return Some(v.to_string());
                 }
             }
         }
@@ -693,7 +727,12 @@ fn extract_file_path(data: &serde_json::Value, field_names: &[&str]) -> Option<S
 
 fn extract_file_path_array(data: &serde_json::Value, cwd: &str) -> Vec<PathBuf> {
     // Try will_edit_filepaths, edited_filepaths (used by copilot, ai_tab, firebender)
-    for key in &["will_edit_filepaths", "edited_filepaths", "file_paths", "filepaths"] {
+    for key in &[
+        "will_edit_filepaths",
+        "edited_filepaths",
+        "file_paths",
+        "filepaths",
+    ] {
         if let Some(arr) = data.get(*key).and_then(|v| v.as_array()) {
             let paths: Vec<PathBuf> = arr
                 .iter()
@@ -719,10 +758,17 @@ fn extract_dirty_files(data: &serde_json::Value, cwd: &str) -> Option<HashMap<Pa
             result.insert(path, content.to_string());
         }
     }
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
-fn resolve_cwd_from_workspace_roots(data: &serde_json::Value, file_path: Option<&str>) -> Option<String> {
+fn resolve_cwd_from_workspace_roots(
+    data: &serde_json::Value,
+    file_path: Option<&str>,
+) -> Option<String> {
     let roots = data.get("workspace_roots")?.as_array()?;
     let workspace_roots: Vec<String> = roots
         .iter()
@@ -734,12 +780,11 @@ fn resolve_cwd_from_workspace_roots(data: &serde_json::Value, file_path: Option<
         return None;
     }
 
-    if let Some(fp) = file_path {
-        if !fp.is_empty() {
-            if let Some(matched) = matching_workspace_root(fp, &workspace_roots) {
-                return Some(matched);
-            }
-        }
+    if let Some(fp) = file_path
+        && !fp.is_empty()
+        && let Some(matched) = matching_workspace_root(fp, &workspace_roots)
+    {
+        return Some(matched);
     }
 
     Some(workspace_roots[0].clone())
@@ -788,7 +833,13 @@ fn normalize_path(path: &str, _mode: PathNormalize) -> String {
 /// Returns all known agent preset names.
 pub fn known_presets() -> Vec<&'static str> {
     let mut names: Vec<&str> = AGENT_CONFIGS.iter().map(|c| c.tool_name).collect();
-    names.extend_from_slice(&["human", "mock_ai", "mock_known_human", "known_human", "agent-v1"]);
+    names.extend_from_slice(&[
+        "human",
+        "mock_ai",
+        "mock_known_human",
+        "known_human",
+        "agent-v1",
+    ]);
     names
 }
 
@@ -806,7 +857,8 @@ mod tests {
             "model": "claude-3-5-sonnet",
             "transcript_path": "/home/user/.cursor/transcripts/conv-123.jsonl",
             "tool_input": {"file_path": "src/main.rs"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("cursor", &input).unwrap();
         assert_eq!(events.len(), 1);
@@ -816,7 +868,10 @@ mod tests {
                 assert_eq!(e.context.agent_session_id, "conv-123");
                 assert_eq!(e.context.agent_model, "claude-3-5-sonnet");
                 assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
-                assert_eq!(e.file_paths, vec![PathBuf::from("/home/user/project/src/main.rs")]);
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/main.rs")]
+                );
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -832,15 +887,24 @@ mod tests {
             "model": "claude-3-5-sonnet",
             "transcript_path": "/home/user/.cursor/transcripts/conv-123.jsonl",
             "tool_input": {"file_path": "src/main.rs"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("cursor", &input).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
             ParsedHookEvent::PostFileEdit(e) => {
                 assert_eq!(e.context.agent_tool, "cursor");
-                assert_eq!(e.file_paths, vec![PathBuf::from("/home/user/project/src/main.rs")]);
-                assert_eq!(e.transcript_path, Some(PathBuf::from("/home/user/.cursor/transcripts/conv-123.jsonl")));
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/main.rs")]
+                );
+                assert_eq!(
+                    e.transcript_path,
+                    Some(PathBuf::from(
+                        "/home/user/.cursor/transcripts/conv-123.jsonl"
+                    ))
+                );
             }
             _ => panic!("Expected PostFileEdit"),
         }
@@ -854,7 +918,8 @@ mod tests {
             "hook_event_name": "preToolUse",
             "tool_name": "Read",
             "tool_input": {"file_path": "src/main.rs"}
-        }).to_string();
+        })
+        .to_string();
 
         let result = parse_hook_input("cursor", &input);
         assert!(result.is_err());
@@ -867,7 +932,8 @@ mod tests {
             "conversation_id": "conv-123",
             "workspace_roots": ["/home/user/project"],
             "hook_event_name": "beforeSubmitPrompt",
-        }).to_string();
+        })
+        .to_string();
 
         let result = parse_hook_input("cursor", &input);
         assert!(result.is_err());
@@ -881,7 +947,8 @@ mod tests {
             "hook_event_name": "preToolUse",
             "tool_name": "Write",
             "tool_input": {"file_path": "src/main.rs"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("cursor", &input).unwrap();
         match &events[0] {
@@ -900,11 +967,16 @@ mod tests {
             "hook_event_name": "preToolUse",
             "tool_name": "Write",
             "tool_input": {"file_path": "src/main.rs"}
-        }).to_string();
+        })
+        .to_string();
 
         let result = parse_hook_input("cursor", &input);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("could not determine working directory"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("could not determine working directory")
+        );
     }
 
     #[test]
@@ -915,12 +987,16 @@ mod tests {
             "hook_event_name": "preToolUse",
             "tool_name": "StrReplace",
             "tool_input": {"file_path": "/home/user/project/src/lib.rs"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("cursor", &input).unwrap();
         match &events[0] {
             ParsedHookEvent::PreFileEdit(e) => {
-                assert_eq!(e.file_paths, vec![PathBuf::from("/home/user/project/src/lib.rs")]);
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/lib.rs")]
+                );
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -934,7 +1010,8 @@ mod tests {
             "hook_event_name": "preToolUse",
             "tool_name": "Write",
             "tool_input": {"file_path": "/home/user/project-b/src/main.rs"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("cursor", &input).unwrap();
         match &events[0] {
@@ -955,7 +1032,8 @@ mod tests {
             "tool_use_id": "tu-shell-1",
             "model": "composer-2",
             "tool_input": {"command": "date > current_time.txt"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("cursor", &input).unwrap();
         assert_eq!(events.len(), 1);
@@ -964,7 +1042,10 @@ mod tests {
                 assert_eq!(e.context.agent_tool, "cursor");
                 assert_eq!(e.context.agent_session_id, "conv-shell");
                 assert_eq!(e.context.agent_model, "composer-2");
-                assert_eq!(e.context.cwd, PathBuf::from("/Users/aidan/Desktop/test-repo"));
+                assert_eq!(
+                    e.context.cwd,
+                    PathBuf::from("/Users/aidan/Desktop/test-repo")
+                );
                 assert_eq!(e.tool_use_id, "tu-shell-1");
             }
             _ => panic!("Expected PreBashCall"),
@@ -981,7 +1062,8 @@ mod tests {
             "tool_use_id": "tu-shell-2",
             "model": "composer-2",
             "tool_input": {"command": "date > current_time.txt"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("cursor", &input).unwrap();
         match &events[0] {
@@ -1001,7 +1083,8 @@ mod tests {
             "hook_event_name": "preToolUse",
             "tool_name": "Shell",
             "tool_input": {"command": "ls"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("cursor", &input).unwrap();
         match &events[0] {
@@ -1021,7 +1104,8 @@ mod tests {
             "tool_name": "Delete",
             "model": "claude-3-5-sonnet",
             "tool_input": {"file_path": "src/main.rs"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("cursor", &input).unwrap();
         assert!(matches!(events[0], ParsedHookEvent::PostFileEdit(_)));
@@ -1035,7 +1119,8 @@ mod tests {
             "hook_event_name": "postToolUse",
             "tool_name": "Write",
             "tool_input": {"file_path": "src/main.rs"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("cursor", &input).unwrap();
         match &events[0] {
@@ -1048,13 +1133,16 @@ mod tests {
 
     #[test]
     fn test_utf8_bom_stripped() {
-        let input = format!("\u{feff}{}", serde_json::json!({
-            "conversation_id": "conv-123",
-            "workspace_roots": ["/home/user/project"],
-            "hook_event_name": "preToolUse",
-            "tool_name": "Write",
-            "tool_input": {"file_path": "src/main.rs"}
-        }));
+        let input = format!(
+            "\u{feff}{}",
+            serde_json::json!({
+                "conversation_id": "conv-123",
+                "workspace_roots": ["/home/user/project"],
+                "hook_event_name": "preToolUse",
+                "tool_name": "Write",
+                "tool_input": {"file_path": "src/main.rs"}
+            })
+        );
 
         let events = parse_hook_input("cursor", &input).unwrap();
         assert_eq!(events.len(), 1);
@@ -1076,7 +1164,8 @@ mod tests {
             "tool_name": "Write",
             "model": "claude-sonnet-4-20250514",
             "tool_input": {"file_path": "src/lib.rs"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("claude", &input).unwrap();
         match &events[0] {
@@ -1084,7 +1173,10 @@ mod tests {
                 assert_eq!(e.context.agent_tool, "claude");
                 assert_eq!(e.context.agent_session_id, "session-abc");
                 assert_eq!(e.context.cwd, PathBuf::from("/home/user/project"));
-                assert_eq!(e.file_paths, vec![PathBuf::from("/home/user/project/src/lib.rs")]);
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/lib.rs")]
+                );
             }
             _ => panic!("Expected PreFileEdit"),
         }
@@ -1099,7 +1191,8 @@ mod tests {
             "tool_name": "write_file",
             "model": "gemini-2.5-pro",
             "tool_input": {"file_path": "main.py"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("gemini", &input).unwrap();
         match &events[0] {
@@ -1121,7 +1214,8 @@ mod tests {
             "tool_name": "Bash",
             "tool_use_id": "tu-1",
             "tool_input": {"command": "cargo build"}
-        }).to_string();
+        })
+        .to_string();
 
         let events = parse_hook_input("codex", &input).unwrap();
         match &events[0] {
@@ -1178,7 +1272,8 @@ mod tests {
                 "cwd": "/home/user/project",
                 "file_path": "src/lib.rs"
             }
-        }).to_string();
+        })
+        .to_string();
         let events = parse_hook_input("windsurf", &input).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -1186,7 +1281,10 @@ mod tests {
                 assert_eq!(e.context.agent_tool, "windsurf");
                 assert_eq!(e.context.agent_session_id, "traj-456");
                 assert_eq!(e.context.agent_model, "gpt-4");
-                assert_eq!(e.file_paths, vec![PathBuf::from("/home/user/project/src/lib.rs")]);
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/lib.rs")]
+                );
             }
             _ => panic!("Expected PostFileEdit"),
         }
@@ -1199,7 +1297,8 @@ mod tests {
             "agent_action_name": "pre_run_command",
             "cwd": "/home/user/project",
             "execution_id": "exec-1"
-        }).to_string();
+        })
+        .to_string();
         let events = parse_hook_input("windsurf", &input).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -1218,7 +1317,8 @@ mod tests {
             "agent_action_name": "post_run_command",
             "cwd": "/home/user/project",
             "execution_id": "exec-2"
-        }).to_string();
+        })
+        .to_string();
         let events = parse_hook_input("windsurf", &input).unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
@@ -1239,7 +1339,8 @@ mod tests {
                 "cwd": "/home/user/project",
                 "file_path": "file.txt"
             }
-        }).to_string();
+        })
+        .to_string();
         let events = parse_hook_input("windsurf", &input).unwrap();
         assert_eq!(events.len(), 1);
         assert!(matches!(&events[0], ParsedHookEvent::PostFileEdit(_)));

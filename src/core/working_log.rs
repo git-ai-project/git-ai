@@ -418,7 +418,13 @@ mod tests {
 
         // Verify sequence numbers are 1, 2, 3, 4, 5
         for (i, cp) in loaded.iter().enumerate() {
-            assert_eq!(cp.seq, (i + 1) as u64, "checkpoint {} should have seq {}", i, i + 1);
+            assert_eq!(
+                cp.seq,
+                (i + 1) as u64,
+                "checkpoint {} should have seq {}",
+                i,
+                i + 1
+            );
         }
     }
 
@@ -475,7 +481,11 @@ mod tests {
         let mut seqs: Vec<u64> = loaded.iter().map(|cp| cp.seq).collect();
         seqs.sort();
         let expected_seqs: Vec<u64> = (1..=expected_count as u64).collect();
-        assert_eq!(seqs, expected_seqs, "sequence numbers should be 1..={}", expected_count);
+        assert_eq!(
+            seqs, expected_seqs,
+            "sequence numbers should be 1..={}",
+            expected_count
+        );
     }
 
     #[test]

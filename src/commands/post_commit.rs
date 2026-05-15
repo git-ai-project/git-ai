@@ -74,10 +74,10 @@ pub fn handle_post_commit() {
             if parent_sha.is_none() {
                 parent_sha = Some(rest.trim().to_string());
             }
-        } else if let Some(rest) = line.strip_prefix("author ") {
-            if let Some(email_end) = rest.find("> ") {
-                human_author = rest[..email_end + 1].to_string();
-            }
+        } else if let Some(rest) = line.strip_prefix("author ")
+            && let Some(email_end) = rest.find("> ")
+        {
+            human_author = rest[..email_end + 1].to_string();
         }
     }
     let base_commit_owned = parent_sha.clone().unwrap_or_else(|| "initial".to_string());
@@ -104,8 +104,11 @@ pub fn handle_post_commit() {
             || git_dir.join("CHERRY_PICK_HEAD").exists();
 
         if !is_rewriting {
-            let committed_lines =
-                git_ai::core::post_commit::git_diff_committed_lines(&repo_dir, base_commit, &commit_sha);
+            let committed_lines = git_ai::core::post_commit::git_diff_committed_lines(
+                &repo_dir,
+                base_commit,
+                &commit_sha,
+            );
 
             // Build a synthetic session ID for the background agent
             let bg_session_id =
@@ -177,20 +180,22 @@ pub fn handle_post_commit() {
                         .find(|fa| fa.file_path == file_path);
 
                     if let Some(file_att) = existing {
-                        file_att.entries.push(git_ai::core::authorship_log::AttestationEntry {
-                            hash: bg_session_id.clone(),
-                            line_ranges: ranges,
-                        });
+                        file_att
+                            .entries
+                            .push(git_ai::core::authorship_log::AttestationEntry {
+                                hash: bg_session_id.clone(),
+                                line_ranges: ranges,
+                            });
                     } else {
-                        authorship_log
-                            .attestations
-                            .push(git_ai::core::authorship_log::FileAttestation {
+                        authorship_log.attestations.push(
+                            git_ai::core::authorship_log::FileAttestation {
                                 file_path,
                                 entries: vec![git_ai::core::authorship_log::AttestationEntry {
                                     hash: bg_session_id.clone(),
                                     line_ranges: ranges,
                                 }],
-                            });
+                            },
+                        );
                     }
                 }
             }

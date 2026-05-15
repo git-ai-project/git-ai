@@ -282,15 +282,9 @@ fn get_line_attributions(
         blame_args.push("--".to_string());
         blame_args.push(file.to_string());
         let args_refs: Vec<&str> = blame_args.iter().map(|s| s.as_str()).collect();
-        match git_cmd(&args_refs) {
-            Ok(output) => output,
-            Err(e) => return Err(e.into()),
-        }
+        git_cmd(&args_refs)?
     } else {
-        match git_cmd(&["blame", "--line-porcelain", "--", file]) {
-            Ok(output) => output,
-            Err(e) => return Err(e.into()),
-        }
+        git_cmd(&["blame", "--line-porcelain", "--", file])?
     };
 
     // Parse blame output to extract commit SHA and orig line for each line
@@ -301,8 +295,7 @@ fn get_line_attributions(
     let mut cur_author_email = String::new();
     let mut cur_headers: Vec<String> = Vec::new();
 
-    let target_lines: std::collections::HashSet<u32> =
-        matches.iter().map(|m| m.line).collect();
+    let target_lines: std::collections::HashSet<u32> = matches.iter().map(|m| m.line).collect();
 
     for line in blame_output.lines() {
         if line.is_empty() {
@@ -364,7 +357,8 @@ fn resolve_attribution(
 ) -> Attribution {
     if let Some(Some(authorship_log)) = commit_notes.get(commit_sha) {
         // Extract the original filename from blame porcelain headers
-        let orig_filename: Option<&str> = raw_headers.iter().find_map(|h| h.strip_prefix("filename "));
+        let orig_filename: Option<&str> =
+            raw_headers.iter().find_map(|h| h.strip_prefix("filename "));
 
         for file_attest in &authorship_log.attestations {
             let attest_path = file_attest

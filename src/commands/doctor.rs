@@ -59,10 +59,7 @@ fn check_binary_installed() -> bool {
 
     let bin_path = home.join(".git-ai/bin/git-ai");
     if !bin_path.exists() {
-        fail(&format!(
-            "Binary missing at {}",
-            bin_path.display()
-        ));
+        fail(&format!("Binary missing at {}", bin_path.display()));
         return false;
     }
 
@@ -72,10 +69,7 @@ fn check_binary_installed() -> bool {
         if let Ok(meta) = fs::metadata(&bin_path) {
             let mode = meta.permissions().mode();
             if mode & 0o111 == 0 {
-                fail(&format!(
-                    "Binary not executable at {}",
-                    bin_path.display()
-                ));
+                fail(&format!("Binary not executable at {}", bin_path.display()));
                 return false;
             }
         }
@@ -129,7 +123,7 @@ fn check_daemon_running() -> bool {
             return false;
         }
         pass(&format!("Daemon running (PID {})", pid));
-        return true;
+        true
     }
 
     #[cfg(not(unix))]
@@ -155,10 +149,7 @@ fn check_control_socket() -> bool {
             }
         };
 
-        let base_dir = home
-            .join(".git-ai")
-            .join("internal")
-            .join("daemon");
+        let base_dir = home.join(".git-ai").join("internal").join("daemon");
 
         let sock_path = resolve_socket_path(&base_dir, "control");
 
@@ -393,6 +384,7 @@ fn resolve_socket_path(base_dir: &std::path::Path, name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_extract_pid_from_json() {
@@ -400,15 +392,13 @@ mod tests {
             extract_pid_from_json(r#"{"pid":12345,"started_at":"2024-01-01"}"#),
             Some(12345)
         );
-        assert_eq!(
-            extract_pid_from_json(r#"{"pid": 999}"#),
-            Some(999)
-        );
+        assert_eq!(extract_pid_from_json(r#"{"pid": 999}"#), Some(999));
         assert_eq!(extract_pid_from_json(r#"{}"#), None);
         assert_eq!(extract_pid_from_json(r#"{"pid":"abc"}"#), None);
     }
 
     #[test]
+    #[serial]
     fn test_check_config_valid_with_valid_json() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config_dir = tmp.path().join(".git-ai");
@@ -422,6 +412,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_check_config_valid_with_invalid_json() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config_dir = tmp.path().join(".git-ai");
@@ -435,6 +426,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_check_config_missing_is_ok() {
         let tmp = tempfile::TempDir::new().unwrap();
         unsafe { env::set_var("HOME", tmp.path()) };
@@ -443,6 +435,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_check_binary_missing() {
         let tmp = tempfile::TempDir::new().unwrap();
         unsafe { env::set_var("HOME", tmp.path()) };
@@ -451,6 +444,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_check_binary_exists() {
         let tmp = tempfile::TempDir::new().unwrap();
         let bin_dir = tmp.path().join(".git-ai/bin");
@@ -470,6 +464,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_check_daemon_not_running() {
         let tmp = tempfile::TempDir::new().unwrap();
         unsafe { env::set_var("HOME", tmp.path()) };

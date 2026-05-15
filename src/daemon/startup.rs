@@ -54,10 +54,7 @@ fn remove_socket_if_stale(path: &Path) {
         if path.exists() {
             // Try connecting — if it fails, the socket is stale
             if UnixStream::connect(path).is_err() {
-                eprintln!(
-                    "[git-ai] removing stale socket: {}",
-                    path.display()
-                );
+                eprintln!("[git-ai] removing stale socket: {}", path.display());
                 let _ = fs::remove_file(path);
             }
         }

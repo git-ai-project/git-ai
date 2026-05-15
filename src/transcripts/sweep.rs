@@ -7,8 +7,8 @@ use std::path::Path;
 
 use super::watermark::{Watermark, WatermarkStore};
 use super::{
+    AGENT_TRANSCRIPT_CONFIGS, AgentTranscriptConfig, DiscoveryStrategy, TranscriptFormat,
     discover_sessions, read_json_array_incremental, read_jsonl_incremental,
-    AgentTranscriptConfig, DiscoveryStrategy, TranscriptFormat, AGENT_TRANSCRIPT_CONFIGS,
 };
 
 /// A batch of new events discovered during a sweep for a single session.
@@ -135,8 +135,7 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let z = days + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u64; // day of era [0, 146096]
-    let yoe =
-        (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
     let y = (yoe as i64) + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
     let mp = (5 * doy + 2) / 153; // [0, 11]
@@ -183,7 +182,11 @@ mod tests {
         let session_file = session_dir.join("test-session.jsonl");
         let mut f = fs::File::create(&session_file).unwrap();
         writeln!(f, r#"{{"role":"user","text":"hello"}}"#).unwrap();
-        writeln!(f, r#"{{"role":"assistant","text":"hi","model":"claude-4"}}"#).unwrap();
+        writeln!(
+            f,
+            r#"{{"role":"assistant","text":"hi","model":"claude-4"}}"#
+        )
+        .unwrap();
         f.flush().unwrap();
 
         // Override HOME for discover_sessions

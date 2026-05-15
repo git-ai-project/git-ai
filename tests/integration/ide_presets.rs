@@ -177,7 +177,11 @@ fn test_codex_preset_e2e_checkpoint_and_commit() {
     repo.git_ai(&["checkpoint", "codex", "--hook-input", &pre_hook])
         .unwrap();
 
-    fs::write(&file_path, "def main():\n    pass\n\ndef ai_func():\n    return 42\n").unwrap();
+    fs::write(
+        &file_path,
+        "def main():\n    pass\n\ndef ai_func():\n    return 42\n",
+    )
+    .unwrap();
 
     let post_hook = serde_json::json!({
         "hook_event_name": "PostToolUse",
@@ -773,16 +777,10 @@ fn test_cursor_multi_file_edit_e2e() {
     repo.stage_all_and_commit("Multi-file cursor edit").unwrap();
 
     let mut fa = repo.filename("src/a.rs");
-    fa.assert_lines_and_blame(crate::lines![
-        "fn a() {}".human(),
-        "fn a_helper() {}".ai(),
-    ]);
+    fa.assert_lines_and_blame(crate::lines!["fn a() {}".human(), "fn a_helper() {}".ai(),]);
 
     let mut fb = repo.filename("src/b.rs");
-    fb.assert_lines_and_blame(crate::lines![
-        "fn b() {}".human(),
-        "fn b_helper() {}".ai(),
-    ]);
+    fb.assert_lines_and_blame(crate::lines!["fn b() {}".human(), "fn b_helper() {}".ai(),]);
 }
 
 // =============================================================================
@@ -841,7 +839,8 @@ fn test_windsurf_multi_file_edit_e2e() {
     repo.git_ai(&["checkpoint", "windsurf", "--hook-input", &post_b])
         .unwrap();
 
-    repo.stage_all_and_commit("Multi-file windsurf edit").unwrap();
+    repo.stage_all_and_commit("Multi-file windsurf edit")
+        .unwrap();
 
     let mut fa = repo.filename("routes.ts");
     fa.assert_lines_and_blame(crate::lines![
@@ -866,11 +865,7 @@ fn test_claude_human_lines_preserved_after_ai_edit() {
     let file_path = repo.path().join("mixed.rs");
 
     // Initial file with multiple human lines
-    fs::write(
-        &file_path,
-        "fn first() {}\nfn second() {}\nfn third() {}\n",
-    )
-    .unwrap();
+    fs::write(&file_path, "fn first() {}\nfn second() {}\nfn third() {}\n").unwrap();
     repo.git_ai(&["checkpoint", "mock_known_human", "mixed.rs"])
         .unwrap();
     repo.stage_all_and_commit("initial").unwrap();
@@ -1020,10 +1015,7 @@ fn test_codex_camel_case_hook_event_names_e2e() {
     repo.stage_all_and_commit("Codex camelCase edit").unwrap();
 
     let mut file = repo.filename("camel.py");
-    file.assert_lines_and_blame(crate::lines![
-        "x = 1".human(),
-        "y = 2".ai(),
-    ]);
+    file.assert_lines_and_blame(crate::lines!["x = 1".human(), "y = 2".ai(),]);
 }
 
 // =============================================================================
@@ -1072,8 +1064,5 @@ fn test_windsurf_run_command_e2e() {
     repo.stage_all_and_commit("Windsurf bash edit").unwrap();
 
     let mut file = repo.filename("output.txt");
-    file.assert_lines_and_blame(crate::lines![
-        "line one".human(),
-        "appended".ai(),
-    ]);
+    file.assert_lines_and_blame(crate::lines!["line one".human(), "appended".ai(),]);
 }

@@ -11,21 +11,12 @@ const UPLOAD_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const METRICS_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Persisted rate limit state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct RateLimitState {
     /// ISO 8601 timestamp of the last upload.
     last_upload: Option<String>,
     /// ISO 8601 timestamp of the last metrics push.
     last_metrics: Option<String>,
-}
-
-impl Default for RateLimitState {
-    fn default() -> Self {
-        Self {
-            last_upload: None,
-            last_metrics: None,
-        }
-    }
 }
 
 /// Simple file-backed rate limiter.

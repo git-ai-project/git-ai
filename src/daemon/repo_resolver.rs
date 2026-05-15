@@ -43,10 +43,10 @@ impl RepoPathResolver {
     /// this is the worktree's own directory (not the main worktree), since each
     /// worktree has its own HEAD and working files.
     pub fn resolve(&mut self, raw_path: &Path) -> PathBuf {
-        if let Some(cached) = self.cache.get(raw_path) {
-            if cached.resolved_at.elapsed() < self.max_age {
-                return cached.working_dir.clone();
-            }
+        if let Some(cached) = self.cache.get(raw_path)
+            && cached.resolved_at.elapsed() < self.max_age
+        {
+            return cached.working_dir.clone();
         }
 
         let resolved = self.do_resolve(raw_path);
@@ -83,11 +83,7 @@ impl RepoPathResolver {
             .ok()
             .and_then(|o| {
                 if o.status.success() {
-                    Some(
-                        String::from_utf8_lossy(&o.stdout)
-                            .trim()
-                            .to_string(),
-                    )
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
                 } else {
                     None
                 }
@@ -171,6 +167,9 @@ mod tests {
         let from_real = resolver.resolve(&real_repo);
         let from_link = resolver.resolve(&link);
 
-        assert_eq!(from_real, from_link, "symlink and real path should resolve to same repo");
+        assert_eq!(
+            from_real, from_link,
+            "symlink and real path should resolve to same repo"
+        );
     }
 }

@@ -78,7 +78,11 @@ pub fn update_attributions(
     // When prev_content is NOT empty, Equal bytes represent content from HEAD which
     // should remain unattributed (resolved later via INITIAL from the parent commit's note).
     let is_human_author = current_author.starts_with("h_") || current_author == "human";
-    if is_human_author && prev_attributions.is_empty() && prev_content.is_empty() && !new_content.is_empty() {
+    if is_human_author
+        && prev_attributions.is_empty()
+        && prev_content.is_empty()
+        && !new_content.is_empty()
+    {
         return vec![Attribution {
             start: 0,
             end: new_content.len(),
@@ -146,11 +150,12 @@ pub fn attributions_to_line_attributions(
         );
 
         // Merge with previous LineAttribution if same author
-        if let Some(last) = result.last_mut() {
-            if last.author_id == author && last.end_line == line_num - 1 {
-                last.end_line = line_num;
-                continue;
-            }
+        if let Some(last) = result.last_mut()
+            && last.author_id == author
+            && last.end_line == line_num - 1
+        {
+            last.end_line = line_num;
+            continue;
         }
         result.push(LineAttribution {
             start_line: line_num,
@@ -593,10 +598,10 @@ fn collect_lines(content: &str) -> Vec<LineMeta> {
     lines
 }
 
-fn group_contiguous<'a>(
-    entries: &'a [(usize, usize, String)],
+fn group_contiguous(
+    entries: &[(usize, usize, String)],
     threshold: usize,
-) -> Vec<Vec<&'a (usize, usize, String)>> {
+) -> Vec<Vec<&(usize, usize, String)>> {
     let mut groups: Vec<Vec<&(usize, usize, String)>> = Vec::new();
     let mut current: Vec<&(usize, usize, String)> = Vec::new();
     let mut last_num: Option<usize> = None;
@@ -832,11 +837,13 @@ fn merge_attributions(mut attrs: Vec<Attribution>) -> Vec<Attribution> {
         if attr.start >= attr.end {
             continue;
         }
-        if let Some(last) = merged.last_mut() {
-            if last.author_id == attr.author_id && last.ts == attr.ts && attr.start <= last.end {
-                last.end = last.end.max(attr.end);
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && last.author_id == attr.author_id
+            && last.ts == attr.ts
+            && attr.start <= last.end
+        {
+            last.end = last.end.max(attr.end);
+            continue;
         }
         merged.push(attr);
     }

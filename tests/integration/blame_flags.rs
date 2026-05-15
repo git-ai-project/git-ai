@@ -11,10 +11,7 @@ fn test_blame_porcelain_output() {
     let repo = TestRepo::new();
     let mut file = repo.filename("test.rs");
 
-    file.set_contents(crate::lines![
-        "human line".human(),
-        "ai line".ai()
-    ]);
+    file.set_contents(crate::lines!["human line".human(), "ai line".ai()]);
 
     repo.stage_all_and_commit("Porcelain test").unwrap();
 
@@ -34,7 +31,10 @@ fn test_blame_porcelain_output() {
         output.contains("committer "),
         "Should contain 'committer' field"
     );
-    assert!(output.contains("summary "), "Should contain 'summary' field");
+    assert!(
+        output.contains("summary "),
+        "Should contain 'summary' field"
+    );
     assert!(
         output.contains("filename "),
         "Should contain 'filename' field"
@@ -59,7 +59,10 @@ fn test_blame_porcelain_output() {
             break;
         }
     }
-    assert!(found_ai_author, "Porcelain should show mock_ai in author field");
+    assert!(
+        found_ai_author,
+        "Porcelain should show mock_ai in author field"
+    );
 }
 
 // =============================================================================
@@ -112,9 +115,7 @@ fn test_blame_show_email_flag() {
     repo.stage_all_and_commit("Email test").unwrap();
 
     // Use porcelain format where email is shown in author-mail field
-    let output = repo
-        .git_ai(&["blame", "--porcelain", "test.rs"])
-        .unwrap();
+    let output = repo.git_ai(&["blame", "--porcelain", "test.rs"]).unwrap();
 
     // Porcelain always includes author-mail with email
     assert!(
@@ -269,8 +270,7 @@ fn test_blame_json_with_mixed_authorship() {
     repo.stage_all_and_commit("JSON mixed test").unwrap();
 
     let output = repo.git_ai(&["blame", "--json", "test.rs"]).unwrap();
-    let json: serde_json::Value =
-        serde_json::from_str(&output).expect("Should produce valid JSON");
+    let json: serde_json::Value = serde_json::from_str(&output).expect("Should produce valid JSON");
 
     // lines field should contain entries for AI lines
     let lines = json["lines"].as_object().expect("lines should be object");
@@ -301,14 +301,7 @@ fn test_blame_multiple_line_ranges() {
     let mut file = repo.filename("test.rs");
 
     file.set_contents(crate::lines![
-        "line 1",
-        "line 2",
-        "line 3",
-        "line 4",
-        "line 5",
-        "line 6",
-        "line 7",
-        "line 8"
+        "line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8"
     ]);
 
     repo.stage_all_and_commit("Multi range test").unwrap();

@@ -52,8 +52,8 @@ impl StatsCache {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create cache directory: {}", e))?;
         }
-        let json =
-            serde_json::to_string_pretty(stats).map_err(|e| format!("serialization error: {}", e))?;
+        let json = serde_json::to_string_pretty(stats)
+            .map_err(|e| format!("serialization error: {}", e))?;
         fs::write(&path, json).map_err(|e| format!("failed to write cache file: {}", e))
     }
 

@@ -14,9 +14,9 @@ pub mod authorship {
     }
     pub mod authorship_log {
         pub use crate::core::authorship_log::{
-            AgentId, AuthorshipLog, FileAttestation, AttestationEntry, HumanRecord, LineRange,
-            Metadata, PromptRecord, SessionRecord, generate_short_hash, generate_session_id,
-            generate_human_hash,
+            AgentId, AttestationEntry, AuthorshipLog, FileAttestation, HumanRecord, LineRange,
+            Metadata, PromptRecord, SessionRecord, generate_human_hash, generate_session_id,
+            generate_short_hash,
         };
     }
     pub mod working_log {
@@ -34,7 +34,15 @@ pub mod git {
             let result = Command::new("/usr/bin/git")
                 .arg("-C")
                 .arg(repo_path)
-                .args(["notes", "--ref=ai", "add", "-f", "-m", note_content, commit_sha])
+                .args([
+                    "notes",
+                    "--ref=ai",
+                    "add",
+                    "-f",
+                    "-m",
+                    note_content,
+                    commit_sha,
+                ])
                 .output();
             matches!(result, Ok(o) if o.status.success())
         }

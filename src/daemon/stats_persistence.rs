@@ -71,7 +71,9 @@ fn stats_file_path() -> PathBuf {
         .or_else(|_| std::env::var("APPDATA"))
         .unwrap_or_else(|_| "C:\\Temp".to_string());
 
-    PathBuf::from(home).join(".git-ai").join("daemon_stats.json")
+    PathBuf::from(home)
+        .join(".git-ai")
+        .join("daemon_stats.json")
 }
 
 #[cfg(test)]

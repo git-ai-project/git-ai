@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process;
 
-use crate::commands::helpers::{git_cmd};
+use crate::commands::helpers::git_cmd;
 
 pub fn handle_install() {
     // --- Step 1: Kill v1 daemon if running ---

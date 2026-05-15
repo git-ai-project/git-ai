@@ -103,7 +103,10 @@ pub fn run_event_loop(
                                 },
                             );
                         }
-                        DetectedOperation::Stash { ref repo_path, ref argv } => {
+                        DetectedOperation::Stash {
+                            ref repo_path,
+                            ref argv,
+                        } => {
                             let resolved = resolver.resolve(repo_path);
                             dispatch_stash(&resolved, argv, daemon_stats);
                         }
@@ -156,9 +159,7 @@ fn dispatch_commit(
             );
         }
         Ok(false) => {
-            daemon_stats
-                .commits_skipped
-                .fetch_add(1, Ordering::Relaxed);
+            daemon_stats.commits_skipped.fetch_add(1, Ordering::Relaxed);
             eprintln!(
                 "[git-ai daemon] skipped commit in {} (already noted or no data)",
                 resolved.display()
@@ -211,11 +212,17 @@ fn emit_commit_telemetry(repo_path: &std::path::Path, telemetry: &TelemetryHandl
     values.insert("0".to_string(), serde_json::json!(1)); // commit count
 
     let mut attrs = SparseArray::new();
-    attrs.insert("0".to_string(), serde_json::json!(env!("CARGO_PKG_VERSION")));
+    attrs.insert(
+        "0".to_string(),
+        serde_json::json!(env!("CARGO_PKG_VERSION")),
+    );
     if !remote_url.is_empty() {
         attrs.insert("1".to_string(), serde_json::json!(remote_url));
     }
-    attrs.insert("2".to_string(), serde_json::json!(&commit_sha[..7.min(commit_sha.len())]));
+    attrs.insert(
+        "2".to_string(),
+        serde_json::json!(&commit_sha[..7.min(commit_sha.len())]),
+    );
 
     telemetry.submit_metric(MetricEvent::new(MetricEventId::Committed, values, attrs));
 

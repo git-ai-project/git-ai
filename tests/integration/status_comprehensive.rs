@@ -221,7 +221,11 @@ fn test_stats_json_after_commit() {
     repo.stage_all_and_commit("initial").unwrap();
 
     // AI edits
-    write_file(&repo, "app.rs", "fn main() {}\nfn ai_code() {}\nfn more_ai() {}\n");
+    write_file(
+        &repo,
+        "app.rs",
+        "fn main() {}\nfn ai_code() {}\nfn more_ai() {}\n",
+    );
     repo.git_ai(&["checkpoint", "mock_ai", "app.rs"]).unwrap();
     repo.stage_all_and_commit("AI changes").unwrap();
 

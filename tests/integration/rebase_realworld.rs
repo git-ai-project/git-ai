@@ -43,7 +43,12 @@ fn test_rebase_disjoint_files_fast_path() {
     let default_branch = repo.current_branch();
 
     // Main advances with a different file
-    write_raw_commit(&repo, "main_only.rs", "fn main_stuff() {}", "Main: add main_only.rs");
+    write_raw_commit(
+        &repo,
+        "main_only.rs",
+        "fn main_stuff() {}",
+        "Main: add main_only.rs",
+    );
 
     // Feature branch from common ancestor
     let base_sha = repo
@@ -125,7 +130,11 @@ fn test_rebase_same_file_no_conflict() {
     // AI PREPENDS to the same file (line numbers stay same in the rebased commit)
     let file_path = repo.path().join("lib.rs");
     repo.git_ai(&["checkpoint", "human", "lib.rs"]).unwrap();
-    fs::write(&file_path, "fn ai_added() {}\nfn existing1() {}\nfn existing2() {}\nfn existing3() {}\n").unwrap();
+    fs::write(
+        &file_path,
+        "fn ai_added() {}\nfn existing1() {}\nfn existing2() {}\nfn existing3() {}\n",
+    )
+    .unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "lib.rs"]).unwrap();
     repo.stage_all_and_commit("feat: AI prepends to lib.rs")
         .unwrap();
@@ -298,7 +307,8 @@ fn test_rebase_interactive_squash_preserves_attribution() {
     fs::write(&file_path, "fn first() {}\nfn second() {}\n").unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "module.rs"])
         .unwrap();
-    repo.stage_all_and_commit("fixup! feat: add module").unwrap();
+    repo.stage_all_and_commit("fixup! feat: add module")
+        .unwrap();
 
     // Autosquash rebase: merges "fixup!" commit into its target
     let script_content = "#!/bin/sh\n\

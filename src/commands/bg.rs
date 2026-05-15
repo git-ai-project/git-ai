@@ -56,11 +56,17 @@ pub fn handle_bg(args: &[String]) {
             eprintln!("commands:");
             eprintln!("  run               run daemon in foreground (internal)");
             eprintln!("  start             start daemon in background");
-            eprintln!("  start --foreground  start daemon without daemonizing (for service managers)");
+            eprintln!(
+                "  start --foreground  start daemon without daemonizing (for service managers)"
+            );
             eprintln!("  stop              stop the running daemon");
-            eprintln!("  restart           stop and restart the daemon (preserves cumulative stats)");
+            eprintln!(
+                "  restart           stop and restart the daemon (preserves cumulative stats)"
+            );
             eprintln!("  status            show daemon status");
-            eprintln!("  health            check daemon health (exit 0=healthy, 1=degraded, 2=dead)");
+            eprintln!(
+                "  health            check daemon health (exit 0=healthy, 1=degraded, 2=dead)"
+            );
             eprintln!("  enable            enable auto-start via system service manager");
             eprintln!("  disable           disable auto-start via system service manager");
             process::exit(1);
@@ -69,7 +75,7 @@ pub fn handle_bg(args: &[String]) {
 }
 
 fn handle_enable() {
-    use git_ai::daemon::service::{detect_service_manager, enable_service, ServiceManager};
+    use git_ai::daemon::service::{ServiceManager, detect_service_manager, enable_service};
 
     let manager = detect_service_manager();
     match manager {
@@ -87,22 +93,20 @@ fn handle_enable() {
     }
 
     match enable_service() {
-        Ok(()) => {
-            match manager {
-                ServiceManager::Launchd => {
-                    eprintln!("[git-ai] launchd service enabled");
-                    eprintln!("[git-ai] the daemon will auto-start on login");
-                    eprintln!("[git-ai] to disable: git-ai bg disable");
-                }
-                ServiceManager::Systemd => {
-                    eprintln!("[git-ai] systemd user service enabled");
-                    eprintln!("[git-ai] the daemon will auto-start on login");
-                    eprintln!("[git-ai] to start now: systemctl --user start git-ai");
-                    eprintln!("[git-ai] to disable: git-ai bg disable");
-                }
-                ServiceManager::None => unreachable!(),
+        Ok(()) => match manager {
+            ServiceManager::Launchd => {
+                eprintln!("[git-ai] launchd service enabled");
+                eprintln!("[git-ai] the daemon will auto-start on login");
+                eprintln!("[git-ai] to disable: git-ai bg disable");
             }
-        }
+            ServiceManager::Systemd => {
+                eprintln!("[git-ai] systemd user service enabled");
+                eprintln!("[git-ai] the daemon will auto-start on login");
+                eprintln!("[git-ai] to start now: systemctl --user start git-ai");
+                eprintln!("[git-ai] to disable: git-ai bg disable");
+            }
+            ServiceManager::None => unreachable!(),
+        },
         Err(e) => {
             eprintln!("[git-ai] error: {}", e);
             process::exit(1);
@@ -111,7 +115,9 @@ fn handle_enable() {
 }
 
 fn handle_disable() {
-    use git_ai::daemon::service::{detect_service_manager, disable_service, is_service_enabled, ServiceManager};
+    use git_ai::daemon::service::{
+        ServiceManager, detect_service_manager, disable_service, is_service_enabled,
+    };
 
     let manager = detect_service_manager();
 

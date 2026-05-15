@@ -21,6 +21,12 @@ pub struct RepoLocks {
     locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
 }
 
+impl Default for RepoLocks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RepoLocks {
     pub fn new() -> Self {
         Self {
@@ -336,7 +342,7 @@ mod tests {
         let mut buf = [0u8; 4096];
         let n = client.read(&mut buf).unwrap();
         let response: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
+            serde_json::from_str(String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
 
         assert_eq!(response["ok"], true);
         assert_eq!(response["processed"], 1);
@@ -357,7 +363,7 @@ mod tests {
 
         let n = client2.read(&mut buf).unwrap();
         let status_resp: serde_json::Value =
-            serde_json::from_str(&String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
+            serde_json::from_str(String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
 
         assert_eq!(status_resp["ok"], true);
         assert_eq!(status_resp["status"]["checkpoint_count"], 1);

@@ -17,7 +17,9 @@ pub fn handle_gc(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "--help" | "-h" => {
                 println!("usage: git-ai gc [--dry-run] [--verbose]");
                 println!();
-                println!("Remove orphaned authorship notes (notes attached to unreachable commits).");
+                println!(
+                    "Remove orphaned authorship notes (notes attached to unreachable commits)."
+                );
                 println!();
                 println!("Options:");
                 println!("  --dry-run   Show what would be removed without removing");
@@ -152,7 +154,7 @@ mod tests {
     #[test]
     fn test_orphan_detection_logic() {
         // Simulate: 3 noted commits, only 2 are reachable
-        let noted = vec![
+        let noted = [
             "aaa1111111111111111111111111111111111111".to_string(),
             "bbb2222222222222222222222222222222222222".to_string(),
             "ccc3333333333333333333333333333333333333".to_string(),
@@ -175,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_all_reachable_means_no_orphans() {
-        let noted = vec![
+        let noted = [
             "aaa1111111111111111111111111111111111111".to_string(),
             "bbb2222222222222222222222222222222222222".to_string(),
         ];

@@ -4,7 +4,7 @@
 //! metrics + CAS upload to backend. Uses a Python mock HTTP server to capture requests.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,8 +17,7 @@ fn spawn_mock_server(base_dir: &std::path::Path) -> (Child, u16, PathBuf) {
     let requests_file = base_dir.join("requests.jsonl");
     let port_file = base_dir.join("port");
 
-    let script = format!(
-        r#"
+    let script = r#"
 import http.server
 import json
 import sys
@@ -31,21 +30,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length).decode('utf-8')
-        record = json.dumps({{
+        record = json.dumps({
             "path": self.path,
             "headers": dict(self.headers),
             "body": json.loads(body) if body else None
-        }})
+        })
         with open(requests_path, 'a') as f:
             f.write(record + '\n')
 
         # Return appropriate response based on endpoint
         if '/metrics/' in self.path:
-            response = '{{"errors":[]}}'
+            response = '{"errors":[]}'
         elif '/cas/' in self.path:
-            response = '{{"results":[],"success_count":1,"failure_count":0}}'
+            response = '{"results":[],"success_count":1,"failure_count":0}'
         else:
-            response = '{{}}'
+            response = '{}'
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -61,12 +60,12 @@ with open(port_path, 'w') as f:
     f.write(str(port))
 server.serve_forever()
 "#
-    );
+    .to_string();
 
     let script_path = base_dir.join("mock_server.py");
     fs::write(&script_path, script).unwrap();
 
-    let child = Command::new("python3")
+    let mut child = Command::new("python3")
         .arg(&script_path)
         .arg(&requests_file)
         .arg(&port_file)
@@ -86,11 +85,14 @@ server.serve_forever()
         thread::sleep(Duration::from_millis(50));
     }
 
+    // Child never started properly - kill and wait on it
+    let _ = child.kill();
+    let _ = child.wait();
     panic!("mock server did not start within 5s");
 }
 
 /// Create a HOME directory with trace2 config pointing to the daemon socket.
-fn create_trace2_home(base_dir: &std::path::Path, socket_path: &PathBuf) -> PathBuf {
+fn create_trace2_home(base_dir: &std::path::Path, socket_path: &Path) -> PathBuf {
     let home = base_dir.join("trace2home");
     fs::create_dir_all(&home).unwrap();
     let gitconfig = home.join(".gitconfig");
@@ -106,12 +108,12 @@ fn create_trace2_home(base_dir: &std::path::Path, socket_path: &PathBuf) -> Path
 fn wait_for_lines(path: &PathBuf, min_lines: usize, timeout: Duration) -> Vec<String> {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if path.exists() {
-            if let Ok(content) = fs::read_to_string(path) {
-                let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
-                if lines.len() >= min_lines {
-                    return lines;
-                }
+        if path.exists()
+            && let Ok(content) = fs::read_to_string(path)
+        {
+            let lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+            if lines.len() >= min_lines {
+                return lines;
             }
         }
         thread::sleep(Duration::from_millis(100));
@@ -182,7 +184,7 @@ fn test_daemon_telemetry_uploads_on_commit() {
     let socket_path = internal_dir.join("daemon").join("trace2.sock");
     fs::create_dir_all(socket_path.parent().unwrap()).unwrap();
 
-    let mut daemon = Command::new(&binary)
+    let mut daemon = Command::new(binary)
         .args(["bg", "run", "--foreground"])
         .env("HOME", &daemon_dir)
         .env("GIT_AI_API_BASE_URL", format!("http://127.0.0.1:{}", port))
@@ -245,7 +247,7 @@ fn test_daemon_telemetry_uploads_on_commit() {
     // Checkpoint + commit (with AI attribution)
     fs::write(repo_path.join("file.txt"), "line 1\nAI line\n").unwrap();
 
-    let checkpoint_output = Command::new(&binary)
+    let checkpoint_output = Command::new(binary)
         .current_dir(&repo_path)
         .args(["checkpoint", "mock_ai", "file.txt"])
         .env("HOME", &home)
@@ -374,18 +376,21 @@ fn test_daemon_telemetry_uploads_on_commit() {
             );
 
             // Metadata should contain commit SHA
-            if let Some(metadata) = obj.get("metadata") {
-                if let Some(commit) = metadata.get("commit") {
-                    assert_eq!(
-                        commit.as_str().unwrap_or(""),
-                        &commit_sha,
-                        "CAS metadata should reference the commit"
-                    );
-                }
+            if let Some(metadata) = obj.get("metadata")
+                && let Some(commit) = metadata.get("commit")
+            {
+                assert_eq!(
+                    commit.as_str().unwrap_or(""),
+                    &commit_sha,
+                    "CAS metadata should reference the commit"
+                );
             }
         }
     }
 
-    assert!(found_metrics, "should have received a metrics upload request");
+    assert!(
+        found_metrics,
+        "should have received a metrics upload request"
+    );
     assert!(found_cas, "should have received a CAS upload request");
 }

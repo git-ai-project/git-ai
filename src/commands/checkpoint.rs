@@ -10,7 +10,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::commands::helpers::{debug_log, discover_repo_and_gitdir, find_repo_root_for_path, git_cmd, git_cmd_in, read_head_sha, resolve_repo_info_in};
+use crate::commands::helpers::{
+    debug_log, discover_repo_and_gitdir, find_repo_root_for_path, git_cmd, git_cmd_in,
+    read_head_sha, resolve_repo_info_in,
+};
+
+type CheckpointEventData = (
+    CheckpointKind,
+    PathBuf,
+    Vec<PathBuf>,
+    Option<AgentId>,
+    Option<HashMap<PathBuf, String>>,
+);
 
 /// Try to route the checkpoint through the daemon's control socket.
 /// Returns true if the daemon handled it, false if we need to fall back to local processing.
@@ -312,11 +323,7 @@ pub fn handle_checkpoint(args: &[String]) {
                 .iter()
                 .map(|f| {
                     let p = PathBuf::from(f);
-                    if p.is_absolute() {
-                        p
-                    } else {
-                        cwd.join(f)
-                    }
+                    if p.is_absolute() { p } else { cwd.join(f) }
                 })
                 .filter(|p| p.exists())
                 .collect()
@@ -347,7 +354,9 @@ fn write_checkpoint_debug_log(preset_name: &str, event_count: usize) {
     // Check if the feature flag is enabled via GIT_AI_TEST_CONFIG_PATCH
     let enabled = if let Ok(patch_json) = env::var("GIT_AI_TEST_CONFIG_PATCH") {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&patch_json) {
-            parsed["feature_flags"]["checkpoint_debug_log"].as_bool().unwrap_or(false)
+            parsed["feature_flags"]["checkpoint_debug_log"]
+                .as_bool()
+                .unwrap_or(false)
         } else {
             false
         }
@@ -360,14 +369,19 @@ fn write_checkpoint_debug_log(preset_name: &str, event_count: usize) {
     }
 
     let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let log_dir = PathBuf::from(&home).join(".git-ai").join("internal").join("checkpoint-debug-logs");
+    let log_dir = PathBuf::from(&home)
+        .join(".git-ai")
+        .join("internal")
+        .join("checkpoint-debug-logs");
     if let Err(e) = fs::create_dir_all(&log_dir) {
         debug_log(&format!("failed to create checkpoint debug log dir: {}", e));
         return;
     }
 
     // Generate today's date for the filename
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = now.as_secs();
     // Simple date calculation (days since epoch)
     let days = secs / 86400;
@@ -386,14 +400,18 @@ fn write_checkpoint_debug_log(preset_name: &str, event_count: usize) {
     });
 
     use std::io::Write;
-    let mut file = match fs::OpenOptions::new().create(true).append(true).open(&log_file) {
+    let mut file = match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file)
+    {
         Ok(f) => f,
         Err(e) => {
             debug_log(&format!("failed to open checkpoint debug log: {}", e));
             return;
         }
     };
-    let _ = writeln!(file, "{}", entry.to_string());
+    let _ = writeln!(file, "{}", entry);
 }
 
 /// Process a single file for checkpoint, writing to the given repo's working log.
@@ -447,19 +465,13 @@ fn process_checkpoint_file(
         Err(_) => return 0,
     };
 
-    let blob_sha =
-        git_ai::core::working_log::save_blob(git_dir, base_commit, content.as_bytes());
+    let blob_sha = git_ai::core::working_log::save_blob(git_dir, base_commit, content.as_bytes());
 
-    let existing_checkpoints =
-        git_ai::core::working_log::read_checkpoints(git_dir, base_commit);
+    let existing_checkpoints = git_ai::core::working_log::read_checkpoints(git_dir, base_commit);
     let previous_attributions = find_latest_attributions(&existing_checkpoints, &relative_path);
 
-    let previous_content = find_latest_content(
-        &existing_checkpoints,
-        &relative_path,
-        git_dir,
-        base_commit,
-    );
+    let previous_content =
+        find_latest_content(&existing_checkpoints, &relative_path, git_dir, base_commit);
 
     let checkpoint_agent_id = if kind == CheckpointKind::AiAgent {
         let ts = SystemTime::now()
@@ -497,8 +509,7 @@ fn process_checkpoint_file(
         ),
         CheckpointKind::Human => "human".to_string(),
     };
-    let enable_move_detection =
-        kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
+    let enable_move_detection = kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
     let new_attributions = update_attributions(
         &previous_content,
         &content,
@@ -560,7 +571,7 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
             }
             i += 1;
         }
-        input.unwrap_or_else(|| git_ai::presets::read_stdin())
+        input.unwrap_or_else(git_ai::presets::read_stdin)
     };
 
     let events = match git_ai::presets::parse_hook_input(agent_name, &hook_input) {
@@ -578,17 +589,27 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
         let is_pre_file_edit = matches!(&event, ParsedHookEvent::PreFileEdit(_));
         let is_post_file_edit = matches!(&event, ParsedHookEvent::PostFileEdit(_));
 
-        let (kind, cwd, file_paths, agent_id, dirty_files): (CheckpointKind, PathBuf, Vec<PathBuf>, Option<AgentId>, Option<HashMap<PathBuf, String>>) = match event {
-            ParsedHookEvent::PreFileEdit(e) => {
-                (CheckpointKind::Human, e.context.cwd, e.file_paths, None, e.dirty_files)
-            }
+        let (kind, cwd, file_paths, agent_id, dirty_files): CheckpointEventData = match event {
+            ParsedHookEvent::PreFileEdit(e) => (
+                CheckpointKind::Human,
+                e.context.cwd,
+                e.file_paths,
+                None,
+                e.dirty_files,
+            ),
             ParsedHookEvent::PostFileEdit(e) => {
                 let aid = AgentId {
                     tool: e.context.agent_tool.clone(),
                     id: e.context.agent_session_id.clone(),
                     model: e.context.agent_model.clone(),
                 };
-                (CheckpointKind::AiAgent, e.context.cwd, e.file_paths, Some(aid), e.dirty_files)
+                (
+                    CheckpointKind::AiAgent,
+                    e.context.cwd,
+                    e.file_paths,
+                    Some(aid),
+                    e.dirty_files,
+                )
             }
             ParsedHookEvent::PreBashCall(e) => {
                 (CheckpointKind::Human, e.context.cwd, vec![], None, None)
@@ -599,11 +620,21 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                     id: e.context.agent_session_id.clone(),
                     model: e.context.agent_model.clone(),
                 };
-                (CheckpointKind::AiAgent, e.context.cwd, vec![], Some(aid), None)
+                (
+                    CheckpointKind::AiAgent,
+                    e.context.cwd,
+                    vec![],
+                    Some(aid),
+                    None,
+                )
             }
-            ParsedHookEvent::KnownHumanEdit(e) => {
-                (CheckpointKind::KnownHuman, e.cwd, e.file_paths, None, e.dirty_files)
-            }
+            ParsedHookEvent::KnownHumanEdit(e) => (
+                CheckpointKind::KnownHuman,
+                e.cwd,
+                e.file_paths,
+                None,
+                e.dirty_files,
+            ),
             ParsedHookEvent::UntrackedEdit(e) => {
                 (CheckpointKind::Human, e.cwd, e.file_paths, None, None)
             }
@@ -631,17 +662,22 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
         let raw_files: Vec<PathBuf> = if !file_paths.is_empty() {
             file_paths.clone()
         } else if !actual_file_args.is_empty() {
-            actual_file_args.iter().map(|f| {
-                let p = PathBuf::from(f);
-                if p.is_absolute() { p } else { cwd.join(f) }
-            }).collect()
+            actual_file_args
+                .iter()
+                .map(|f| {
+                    let p = PathBuf::from(f);
+                    if p.is_absolute() { p } else { cwd.join(f) }
+                })
+                .collect()
         } else {
             // For bash tools, scan for all modified files from CWD
-            let status_output = git_cmd_in(&cwd, &["status", "--porcelain", "-u"]).unwrap_or_default();
+            let status_output =
+                git_cmd_in(&cwd, &["status", "--porcelain", "-u"]).unwrap_or_default();
             let cwd_repo_root = git_cmd_in(&cwd, &["rev-parse", "--show-toplevel"])
                 .unwrap_or_else(|_| cwd.to_string_lossy().to_string());
             let cwd_root = PathBuf::from(&cwd_repo_root);
-            status_output.lines()
+            status_output
+                .lines()
                 .filter(|l| l.len() > 3)
                 .map(|l| cwd_root.join(l[3..].trim()))
                 .filter(|p| p.exists())
@@ -672,7 +708,11 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                 let git_dir = match git_cmd_in(repo_root_path, &["rev-parse", "--git-dir"]) {
                     Ok(d) => {
                         let p = PathBuf::from(&d);
-                        if p.is_relative() { repo_root_path.join(p) } else { p }
+                        if p.is_relative() {
+                            repo_root_path.join(p)
+                        } else {
+                            p
+                        }
                     }
                     Err(_) => continue,
                 };
@@ -682,7 +722,8 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                 // For PreFileEdit events, register pending AI edit markers
                 if is_pre_file_edit {
                     for fp in files {
-                        let rel = fp.strip_prefix(repo_root_path)
+                        let rel = fp
+                            .strip_prefix(repo_root_path)
                             .unwrap_or(fp)
                             .to_string_lossy()
                             .replace('\\', "/");
@@ -693,7 +734,8 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                 // For PostFileEdit (AI) events, clear pending AI edit markers
                 if is_post_file_edit {
                     for fp in files {
-                        let rel = fp.strip_prefix(repo_root_path)
+                        let rel = fp
+                            .strip_prefix(repo_root_path)
                             .unwrap_or(fp)
                             .to_string_lossy()
                             .replace('\\', "/");
@@ -716,7 +758,9 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                         .replace('\\', "/");
 
                     // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
-                    if kind == CheckpointKind::KnownHuman && has_pending_ai_edit(&git_dir, &relative_path) {
+                    if kind == CheckpointKind::KnownHuman
+                        && has_pending_ai_edit(&git_dir, &relative_path)
+                    {
                         debug_log(&format!(
                             "suppressing KnownHuman checkpoint for '{}' (pending AI edit)",
                             relative_path
@@ -734,8 +778,11 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                         }
                     };
 
-                    let blob_sha =
-                        git_ai::core::working_log::save_blob(&git_dir, &base_commit, content.as_bytes());
+                    let blob_sha = git_ai::core::working_log::save_blob(
+                        &git_dir,
+                        &base_commit,
+                        content.as_bytes(),
+                    );
 
                     let existing_checkpoints =
                         git_ai::core::working_log::read_checkpoints(&git_dir, &base_commit);
@@ -771,7 +818,8 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                         _ => "human".to_string(),
                     };
 
-                    let enable_move_detection = kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
+                    let enable_move_detection =
+                        kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
                     let new_attributions = update_attributions(
                         &previous_content,
                         &content,
@@ -779,7 +827,8 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                         &author_id,
                         enable_move_detection,
                     );
-                    let line_attributions = attributions_to_line_attributions(&content, &new_attributions);
+                    let line_attributions =
+                        attributions_to_line_attributions(&content, &new_attributions);
 
                     let entry = WorkingLogEntry {
                         file: relative_path,
@@ -808,7 +857,11 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                         ));
                     }
 
-                    git_ai::core::working_log::append_checkpoint(&git_dir, &base_commit, &checkpoint);
+                    git_ai::core::working_log::append_checkpoint(
+                        &git_dir,
+                        &base_commit,
+                        &checkpoint,
+                    );
                     processed += 1;
                 }
             }
@@ -818,7 +871,11 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
             let git_dir = match git_cmd_in(&repo_root_path, &["rev-parse", "--git-dir"]) {
                 Ok(d) => {
                     let p = PathBuf::from(&d);
-                    if p.is_relative() { repo_root_path.join(p) } else { p }
+                    if p.is_relative() {
+                        repo_root_path.join(p)
+                    } else {
+                        p
+                    }
                 }
                 Err(_) => continue,
             };
@@ -831,7 +888,8 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
             // For PreFileEdit events, register pending AI edit markers
             if is_pre_file_edit {
                 for fp in files_to_process {
-                    let rel = fp.strip_prefix(&repo_root_path)
+                    let rel = fp
+                        .strip_prefix(&repo_root_path)
                         .unwrap_or(fp)
                         .to_string_lossy()
                         .replace('\\', "/");
@@ -842,7 +900,8 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
             // For PostFileEdit (AI) events, clear pending AI edit markers
             if is_post_file_edit {
                 for fp in files_to_process {
-                    let rel = fp.strip_prefix(&repo_root_path)
+                    let rel = fp
+                        .strip_prefix(&repo_root_path)
                         .unwrap_or(fp)
                         .to_string_lossy()
                         .replace('\\', "/");
@@ -865,7 +924,9 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                     .replace('\\', "/");
 
                 // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
-                if kind == CheckpointKind::KnownHuman && has_pending_ai_edit(&git_dir, &relative_path) {
+                if kind == CheckpointKind::KnownHuman
+                    && has_pending_ai_edit(&git_dir, &relative_path)
+                {
                     debug_log(&format!(
                         "suppressing KnownHuman checkpoint for '{}' (pending AI edit)",
                         relative_path
@@ -883,8 +944,11 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                     }
                 };
 
-                let blob_sha =
-                    git_ai::core::working_log::save_blob(&git_dir, &base_commit, content.as_bytes());
+                let blob_sha = git_ai::core::working_log::save_blob(
+                    &git_dir,
+                    &base_commit,
+                    content.as_bytes(),
+                );
 
                 let existing_checkpoints =
                     git_ai::core::working_log::read_checkpoints(&git_dir, &base_commit);
@@ -920,7 +984,8 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                     _ => "human".to_string(),
                 };
 
-                let enable_move_detection = kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
+                let enable_move_detection =
+                    kind == CheckpointKind::Human || kind == CheckpointKind::KnownHuman;
                 let new_attributions = update_attributions(
                     &previous_content,
                     &content,
@@ -928,7 +993,8 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
                     &author_id,
                     enable_move_detection,
                 );
-                let line_attributions = attributions_to_line_attributions(&content, &new_attributions);
+                let line_attributions =
+                    attributions_to_line_attributions(&content, &new_attributions);
 
                 let entry = WorkingLogEntry {
                     file: relative_path,
@@ -1043,20 +1109,20 @@ fn find_latest_content(
 ) -> String {
     for cp in checkpoints.iter().rev() {
         for entry in &cp.entries {
-            if entry.file == relative_path && !entry.blob_sha.is_empty() {
-                if let Some(content) =
+            if entry.file == relative_path
+                && !entry.blob_sha.is_empty()
+                && let Some(content) =
                     git_ai::core::working_log::read_blob(git_dir, base_commit, &entry.blob_sha)
-                {
-                    return content;
-                }
+            {
+                return content;
             }
         }
     }
 
-    if base_commit != "initial" {
-        if let Ok(content) = git_cmd(&["show", &format!("{}:{}", base_commit, relative_path)]) {
-            return content;
-        }
+    if base_commit != "initial"
+        && let Ok(content) = git_cmd(&["show", &format!("{}:{}", base_commit, relative_path)])
+    {
+        return content;
     }
 
     String::new()

@@ -142,16 +142,16 @@ pub fn process_commit(repo_path: &Path) -> Result<bool, String> {
     // After processing regular commits, check if HEAD is a merge commit
     // that still lacks a note. This handles merges where both parents have
     // authorship notes but no working log data was accumulated (non-conflicting merges).
-    if let Some(&head_sha) = shas.first() {
-        if merge::is_merge_commit(repo_path, head_sha) {
-            // compute_merge_attribution is a no-op if a note already exists
-            if let Err(e) = merge::compute_merge_attribution(repo_path, head_sha) {
-                eprintln!(
-                    "[git-ai daemon] merge attribution failed for {}: {}",
-                    &head_sha[..7.min(head_sha.len())],
-                    e
-                );
-            }
+    if let Some(&head_sha) = shas.first()
+        && merge::is_merge_commit(repo_path, head_sha)
+    {
+        // compute_merge_attribution is a no-op if a note already exists
+        if let Err(e) = merge::compute_merge_attribution(repo_path, head_sha) {
+            eprintln!(
+                "[git-ai daemon] merge attribution failed for {}: {}",
+                &head_sha[..7.min(head_sha.len())],
+                e
+            );
         }
     }
 

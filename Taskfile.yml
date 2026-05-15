@@ -23,6 +23,11 @@ vars:
       [ "$n" -gt 12 ] && echo 12 || echo "$n"
 
 tasks:
+  setup:
+    desc: Configure local repo (hooks, etc). Run once after cloning.
+    cmds:
+      - git config core.hooksPath hooks
+
   dev:
     desc: |
       Install a git-ai debug build for local dev on the system so that all git commands will route through it.
@@ -30,6 +35,7 @@ tasks:
       and restarts the daemon to ensure all latest code changes are fully installed and propagated system-wide.
       Use this for trying out changes locally -- do not use any other approaches for runing git-ai locally. They will
       not work, interfere, and break things.
+    deps: [setup]
     cmds:
       - cmd: powershell -NonInteractive -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1
         platforms: [windows]

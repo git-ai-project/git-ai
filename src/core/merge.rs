@@ -78,10 +78,7 @@ pub fn compute_merge_attribution(repo_path: &Path, merge_commit: &str) -> Result
     }
 
     // Get parent SHAs
-    let parents_str = git_in_repo(
-        repo_path,
-        &["log", "--format=%P", "-1", merge_commit],
-    )?;
+    let parents_str = git_in_repo(repo_path, &["log", "--format=%P", "-1", merge_commit])?;
     let parents: Vec<&str> = parents_str.split_whitespace().collect();
 
     if parents.len() < 2 {
@@ -91,9 +88,7 @@ pub fn compute_merge_attribution(repo_path: &Path, merge_commit: &str) -> Result
     // Read authorship notes from all parents
     let parent_notes: Vec<(String, AuthorshipLog)> = parents
         .iter()
-        .filter_map(|&sha| {
-            read_authorship_note(repo_path, sha).map(|log| (sha.to_string(), log))
-        })
+        .filter_map(|&sha| read_authorship_note(repo_path, sha).map(|log| (sha.to_string(), log)))
         .collect();
 
     if parent_notes.is_empty() {
@@ -105,8 +100,13 @@ pub fn compute_merge_attribution(repo_path: &Path, merge_commit: &str) -> Result
     let changed_files = get_merge_changed_files(repo_path, merge_commit, &parents)?;
 
     // Build combined attributions
-    let combined_attestations =
-        build_merge_attestations(repo_path, merge_commit, &parents, &parent_notes, &changed_files);
+    let combined_attestations = build_merge_attestations(
+        repo_path,
+        merge_commit,
+        &parents,
+        &parent_notes,
+        &changed_files,
+    );
 
     if combined_attestations.is_empty() {
         return Ok(());
@@ -126,7 +126,13 @@ pub fn compute_merge_attribution(repo_path: &Path, merge_commit: &str) -> Result
         .arg("-C")
         .arg(repo_path)
         .args([
-            "notes", "--ref=ai", "add", "-f", "-m", &note_text, merge_commit,
+            "notes",
+            "--ref=ai",
+            "add",
+            "-f",
+            "-m",
+            &note_text,
+            merge_commit,
         ])
         .env("GIT_TRACE2_EVENT", "0")
         .stdout(Stdio::null())
@@ -171,10 +177,7 @@ fn get_merge_changed_files(
     let mut changed = Vec::new();
 
     for parent in parents {
-        let output = git_in_repo(
-            repo_path,
-            &["diff", "--name-only", parent, merge_commit],
-        )?;
+        let output = git_in_repo(repo_path, &["diff", "--name-only", parent, merge_commit])?;
         for line in output.lines() {
             let file = line.trim().to_string();
             if !file.is_empty() && !changed.contains(&file) {
@@ -238,7 +241,8 @@ fn build_merge_attestations(
                 let parent_lines: Vec<&str> = content.lines().collect();
                 let mapping = compute_line_mapping_forward(&parent_lines, &merge_lines);
                 for (_, &merge_line_idx) in mapping.iter() {
-                    if merge_line_idx < line_sources.len() && line_sources[merge_line_idx].is_none() {
+                    if merge_line_idx < line_sources.len() && line_sources[merge_line_idx].is_none()
+                    {
                         line_sources[merge_line_idx] = Some(parent_idx);
                     }
                 }
@@ -255,13 +259,19 @@ fn build_merge_attestations(
 
             if let Some(parent_idx) = source {
                 // Line came from this parent — look up its attribution
-                if let Some((_, attestation)) = parent_data.get(*parent_idx) {
-                    if let Some(file_att) = attestation {
-                        // Find which author owns this line in the parent
-                        if let Some(author) = find_line_author(file_att, line_num, &parent_data, *parent_idx, &merge_lines) {
-                            entries_map.entry(author).or_default().push(line_num);
-                            continue;
-                        }
+                if let Some((_, attestation)) = parent_data.get(*parent_idx)
+                    && let Some(file_att) = attestation
+                {
+                    // Find which author owns this line in the parent
+                    if let Some(author) = find_line_author(
+                        file_att,
+                        line_num,
+                        &parent_data,
+                        *parent_idx,
+                        &merge_lines,
+                    ) {
+                        entries_map.entry(author).or_default().push(line_num);
+                        continue;
                     }
                 }
                 // Parent exists but has no attribution for this line — skip (untracked)
@@ -333,7 +343,10 @@ fn find_line_author(
 /// Compute a forward mapping from parent line indices to merge line indices.
 /// Uses LCS (longest common subsequence) to find matching lines.
 /// Returns a HashMap where key=parent_line_index, value=merge_line_index (0-based).
-fn compute_line_mapping_forward(parent_lines: &[&str], merge_lines: &[&str]) -> HashMap<usize, usize> {
+fn compute_line_mapping_forward(
+    parent_lines: &[&str],
+    merge_lines: &[&str],
+) -> HashMap<usize, usize> {
     let m = parent_lines.len();
     let n = merge_lines.len();
 
@@ -512,8 +525,7 @@ mod tests {
     #[test]
     fn test_combine_metadata_merges_records() {
         use crate::core::authorship_log::{
-            AgentId, HumanRecord, PromptRecord,
-            AUTHORSHIP_LOG_VERSION, GIT_AI_VERSION,
+            AUTHORSHIP_LOG_VERSION, AgentId, GIT_AI_VERSION, HumanRecord, PromptRecord,
         };
         use std::collections::BTreeMap;
 
@@ -568,10 +580,7 @@ mod tests {
             },
         };
 
-        let parent_notes = vec![
-            ("parent1".to_string(), log1),
-            ("parent2".to_string(), log2),
-        ];
+        let parent_notes = vec![("parent1".to_string(), log1), ("parent2".to_string(), log2)];
 
         let result = combine_metadata("merge_abc", &parent_notes);
 

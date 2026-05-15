@@ -52,7 +52,8 @@ fn test_non_utf8_content_alongside_utf8() {
     ]);
 
     // Commit both files together
-    repo.stage_all_and_commit("Add non-utf8 and AI file").unwrap();
+    repo.stage_all_and_commit("Add non-utf8 and AI file")
+        .unwrap();
 
     // Attribution should work correctly for the UTF-8 file
     ai_file.assert_lines_and_blame(crate::lines![
@@ -132,12 +133,8 @@ fn test_blame_on_non_utf8_file() {
     let result = repo.git_ai(&["blame", "legacy.dat"]);
     // We accept either success or a graceful error -- the key is no panic/crash
     match result {
-        Ok(output) => {
-            // If it succeeds, it should produce some output
-            assert!(
-                !output.is_empty() || true,
-                "Blame output can be empty for non-UTF8 files"
-            );
+        Ok(_output) => {
+            // If it succeeds, blame output can be empty for non-UTF8 files (that's OK)
         }
         Err(err) => {
             // A graceful error is acceptable, just not a crash/panic
@@ -177,7 +174,8 @@ fn test_stats_with_binary_files() {
         "    return 'world'".ai(),
     ]);
 
-    repo.stage_all_and_commit("Add binary and AI files").unwrap();
+    repo.stage_all_and_commit("Add binary and AI files")
+        .unwrap();
 
     // Stats should report AI lines from the text file; binary should be excluded
     let raw = repo.git_ai(&["stats", "--json"]).unwrap();

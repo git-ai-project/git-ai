@@ -53,7 +53,10 @@ impl HttpClient {
         body: Option<(&str, &str)>,
     ) -> Result<HttpResponse, String> {
         let url = format!("{}{}", self.base_url, path);
-        let auth_header = self.auth_token.as_ref().map(|t| format!("Authorization: Bearer {t}"));
+        let auth_header = self
+            .auth_token
+            .as_ref()
+            .map(|t| format!("Authorization: Bearer {t}"));
 
         self.execute_with_retry(|| {
             let mut cmd = Command::new("curl");
@@ -89,7 +92,7 @@ impl HttpClient {
         let max_attempts = 3;
         let mut last_error = String::new();
 
-        for attempt in 0..max_attempts {
+        for (attempt, delay) in backoff_durations.iter().enumerate().take(max_attempts) {
             let mut cmd = build_cmd();
             match cmd.output() {
                 Ok(output) => {
@@ -108,7 +111,7 @@ impl HttpClient {
 
             // Sleep before retry (but not after the last attempt)
             if attempt < max_attempts - 1 {
-                thread::sleep(backoff_durations[attempt]);
+                thread::sleep(*delay);
             }
         }
 

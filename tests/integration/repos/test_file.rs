@@ -481,7 +481,7 @@ impl<'a> TestFile<'a> {
         let actual_lines: Vec<(String, String)> = blame_output
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .map(|line| parse_blame_line(line))
+            .map(parse_blame_line)
             .collect();
 
         assert_eq!(
@@ -554,11 +554,7 @@ impl<'a> TestFile<'a> {
                     AuthorType::Ai => is_ai,
                     AuthorType::Human | AuthorType::UnattributedHuman => !is_ai,
                 };
-                if matches {
-                    Some(content)
-                } else {
-                    None
-                }
+                if matches { Some(content) } else { None }
             })
             .collect()
     }
@@ -576,7 +572,7 @@ impl<'a> TestFile<'a> {
         let committed_lines: Vec<(String, String)> = blame_output
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .map(|line| parse_blame_line(line))
+            .map(parse_blame_line)
             .filter(|(author, _)| author != "Not Committed Yet")
             .collect();
 

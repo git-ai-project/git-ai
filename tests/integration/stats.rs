@@ -47,10 +47,7 @@ fn test_stats_basic_mixed_commit() {
 
     // Total added lines in the diff should be 5
     let git_diff_added = json["git_diff_added_lines"].as_u64().unwrap_or(0);
-    assert_eq!(
-        git_diff_added, 5,
-        "Should have 5 total added lines in diff"
-    );
+    assert_eq!(git_diff_added, 5, "Should have 5 total added lines in diff");
 }
 
 // =============================================================================
@@ -165,7 +162,8 @@ fn test_stats_ignores_lockfiles() {
     repo.filename("Cargo.lock")
         .set_contents(vec!["lockfile-entry".to_string(); 500]);
 
-    repo.stage_all_and_commit("Add source and lockfile").unwrap();
+    repo.stage_all_and_commit("Add source and lockfile")
+        .unwrap();
 
     let output = repo.git_ai(&["stats", "--json", "HEAD"]).unwrap();
     let json_str = extract_json_object(&output);

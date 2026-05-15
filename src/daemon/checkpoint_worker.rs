@@ -244,22 +244,22 @@ fn find_latest_content(
 ) -> String {
     for cp in checkpoints.iter().rev() {
         for entry in &cp.entries {
-            if entry.file == relative_path && !entry.blob_sha.is_empty() {
-                if let Some(content) = working_log::read_blob(git_dir, base_commit, &entry.blob_sha)
-                {
-                    return content;
-                }
+            if entry.file == relative_path
+                && !entry.blob_sha.is_empty()
+                && let Some(content) = working_log::read_blob(git_dir, base_commit, &entry.blob_sha)
+            {
+                return content;
             }
         }
     }
 
-    if base_commit != "initial" {
-        if let Ok(content) = git_in_repo(
+    if base_commit != "initial"
+        && let Ok(content) = git_in_repo(
             repo_path,
             &["show", &format!("{}:{}", base_commit, relative_path)],
-        ) {
-            return content;
-        }
+        )
+    {
+        return content;
     }
 
     String::new()

@@ -12,11 +12,11 @@ mod reader;
 pub mod sweep;
 pub mod watermark;
 
-pub use metadata::{extract_metadata, extract_model, extract_session_id, TranscriptMetadata};
+pub use metadata::{TranscriptMetadata, extract_metadata, extract_model, extract_session_id};
 pub use reader::{
-    read_json_array_incremental, read_jsonl_incremental, TranscriptBatch, TranscriptError,
+    TranscriptBatch, TranscriptError, read_json_array_incremental, read_jsonl_incremental,
 };
-pub use sweep::{sweep_transcripts, TranscriptUpdate};
+pub use sweep::{TranscriptUpdate, sweep_transcripts};
 pub use watermark::{Watermark, WatermarkStore};
 
 use std::path::{Path, PathBuf};
@@ -129,7 +129,12 @@ pub fn discover_sessions(tool: &str) -> Vec<PathBuf> {
         None => return vec![],
     };
 
-    let DiscoveryStrategy::ScanDirs { dirs, extension, recursive } = &config.discovery else {
+    let DiscoveryStrategy::ScanDirs {
+        dirs,
+        extension,
+        recursive,
+    } = &config.discovery
+    else {
         return vec![];
     };
 
@@ -149,7 +154,9 @@ pub fn discover_sessions(tool: &str) -> Vec<PathBuf> {
 }
 
 fn scan_dir(dir: &Path, extension: &str, recursive: bool, results: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some(extension) {

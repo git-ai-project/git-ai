@@ -78,10 +78,9 @@ fn glob_matches_recursive(pattern: &[u8], text: &[u8]) -> bool {
             star_p = Some(p + 1);
             star_t = t;
             p += 1;
-        } else if p < pattern.len() && (pattern[p] == b'?' && text[t] != b'/') {
-            p += 1;
-            t += 1;
-        } else if p < pattern.len() && pattern[p] == text[t] {
+        } else if p < pattern.len()
+            && ((pattern[p] == b'?' && text[t] != b'/') || pattern[p] == text[t])
+        {
             p += 1;
             t += 1;
         } else if let Some(sp) = star_p {
@@ -197,9 +196,7 @@ fn parse_hunk_header_start(line: &str) -> Option<u32> {
     let rest = line.strip_prefix("@@ ")?;
     let plus_pos = rest.find('+')?;
     let after_plus = &rest[plus_pos + 1..];
-    let end = after_plus
-        .find(|c: char| c == ',' || c == ' ')
-        .unwrap_or(after_plus.len());
+    let end = after_plus.find([',', ' ']).unwrap_or(after_plus.len());
     after_plus[..end].parse::<u32>().ok()
 }
 
@@ -229,12 +226,12 @@ fn split_diff_into_sections(diff_text: &str) -> Vec<(String, String)> {
             continue;
         } else {
             // Check for +++ line to get actual file path (handles renames, new files)
-            if line.starts_with("+++ ") {
-                if let Some(path) = line.strip_prefix("+++ b/") {
-                    current_file = path.to_string();
-                }
-                // "+++ /dev/null" means file deletion - keep old file path
+            if line.starts_with("+++ ")
+                && let Some(path) = line.strip_prefix("+++ b/")
+            {
+                current_file = path.to_string();
             }
+            // "+++ /dev/null" means file deletion - keep old file path
             current_section.push_str(line);
             current_section.push('\n');
         }
@@ -441,20 +438,22 @@ pub fn handle_diff(args: &[String]) {
     commit_authorship.insert(to_commit.clone(), to_note.clone());
 
     // For range mode, also collect intermediate commits
-    if from_commit != to_commit {
-        if let Ok(log_output) =
-            git_cmd(&["log", "--format=%H", &format!("{}..{}", from_commit, to_commit)])
-        {
-            for sha in log_output.lines() {
-                let sha = sha.trim();
-                if sha.is_empty() || sha == to_commit {
-                    continue;
-                }
-                let note = git_cmd(&["notes", "--ref=ai", "show", sha])
-                    .ok()
-                    .and_then(|n| AuthorshipLog::deserialize_from_string(&n).ok());
-                commit_authorship.insert(sha.to_string(), note);
+    if from_commit != to_commit
+        && let Ok(log_output) = git_cmd(&[
+            "log",
+            "--format=%H",
+            &format!("{}..{}", from_commit, to_commit),
+        ])
+    {
+        for sha in log_output.lines() {
+            let sha = sha.trim();
+            if sha.is_empty() || sha == to_commit {
+                continue;
             }
+            let note = git_cmd(&["notes", "--ref=ai", "show", sha])
+                .ok()
+                .and_then(|n| AuthorshipLog::deserialize_from_string(&n).ok());
+            commit_authorship.insert(sha.to_string(), note);
         }
     }
 
@@ -517,10 +516,9 @@ pub fn handle_diff(args: &[String]) {
                         }
                         if !lines_for_hash.is_empty() {
                             // Build line range representation for annotations
-                            let ranges =
-                                git_ai::core::authorship_log::LineRange::compress_lines(
-                                    &lines_for_hash,
-                                );
+                            let ranges = git_ai::core::authorship_log::LineRange::compress_lines(
+                                &lines_for_hash,
+                            );
                             let range_values: Vec<serde_json::Value> = ranges
                                 .iter()
                                 .map(|r| match r {
@@ -533,10 +531,8 @@ pub fn handle_diff(args: &[String]) {
                                 })
                                 .collect();
 
-                            annotations.insert(
-                                entry.hash.clone(),
-                                serde_json::Value::Array(range_values),
-                            );
+                            annotations
+                                .insert(entry.hash.clone(), serde_json::Value::Array(range_values));
 
                             // Build hunk entries
                             use sha2::{Digest, Sha256};
@@ -548,11 +544,8 @@ pub fn handle_diff(args: &[String]) {
                             let content_hash = {
                                 let mut hasher = Sha256::new();
                                 hasher.update(
-                                    format!(
-                                        "{}:{}:{}",
-                                        file_path, entry.hash, content_for_hash
-                                    )
-                                    .as_bytes(),
+                                    format!("{}:{}:{}", file_path, entry.hash, content_for_hash)
+                                        .as_bytes(),
                                 );
                                 format!("{:x}", hasher.finalize())[..16].to_string()
                             };
@@ -571,11 +564,9 @@ pub fn handle_diff(args: &[String]) {
 
                             // Add prompt_id or human_id
                             if entry.hash.starts_with("h_") {
-                                hunk["human_id"] =
-                                    serde_json::Value::String(entry.hash.clone());
+                                hunk["human_id"] = serde_json::Value::String(entry.hash.clone());
                             } else {
-                                hunk["prompt_id"] =
-                                    serde_json::Value::String(entry.hash.clone());
+                                hunk["prompt_id"] = serde_json::Value::String(entry.hash.clone());
                                 // session_id is the session portion (before ::)
                                 let session_id =
                                     entry.hash.split("::").next().unwrap_or(&entry.hash);
@@ -591,15 +582,13 @@ pub fn handle_diff(args: &[String]) {
                             if let Some(prompt) = note.metadata.prompts.get(&entry.hash) {
                                 prompts_map.insert(
                                     entry.hash.clone(),
-                                    serde_json::to_value(prompt)
-                                        .unwrap_or(serde_json::json!({})),
+                                    serde_json::to_value(prompt).unwrap_or(serde_json::json!({})),
                                 );
                             }
                             if let Some(session) = note.metadata.sessions.get(&entry.hash) {
                                 sessions_map.insert(
                                     entry.hash.clone(),
-                                    serde_json::to_value(session)
-                                        .unwrap_or(serde_json::json!({})),
+                                    serde_json::to_value(session).unwrap_or(serde_json::json!({})),
                                 );
                             }
                         }
@@ -614,8 +603,7 @@ pub fn handle_diff(args: &[String]) {
                         if has_landed && !sessions_map.contains_key(session_id) {
                             sessions_map.insert(
                                 session_id.clone(),
-                                serde_json::to_value(session)
-                                    .unwrap_or(serde_json::json!({})),
+                                serde_json::to_value(session).unwrap_or(serde_json::json!({})),
                             );
                         }
                     }
@@ -624,10 +612,10 @@ pub fn handle_diff(args: &[String]) {
         }
 
         // Add commit metadata for to_commit
-        if !commits_map.contains_key(&to_commit) {
-            if let Some(metadata) = get_commit_metadata(&to_commit) {
-                commits_map.insert(to_commit.clone(), metadata);
-            }
+        if !commits_map.contains_key(&to_commit)
+            && let Some(metadata) = get_commit_metadata(&to_commit)
+        {
+            commits_map.insert(to_commit.clone(), metadata);
         }
 
         files_map.insert(
@@ -641,23 +629,21 @@ pub fn handle_diff(args: &[String]) {
     }
 
     // For --all-prompts, include all sessions from authorship note
-    if all_prompts {
-        if let Some(note) = &to_note {
-            for (session_id, session) in &note.metadata.sessions {
-                if !sessions_map.contains_key(session_id) {
-                    sessions_map.insert(
-                        session_id.clone(),
-                        serde_json::to_value(session).unwrap_or(serde_json::json!({})),
-                    );
-                }
+    if all_prompts && let Some(note) = &to_note {
+        for (session_id, session) in &note.metadata.sessions {
+            if !sessions_map.contains_key(session_id) {
+                sessions_map.insert(
+                    session_id.clone(),
+                    serde_json::to_value(session).unwrap_or(serde_json::json!({})),
+                );
             }
-            for (prompt_id, prompt) in &note.metadata.prompts {
-                if !prompts_map.contains_key(prompt_id) {
-                    prompts_map.insert(
-                        prompt_id.clone(),
-                        serde_json::to_value(prompt).unwrap_or(serde_json::json!({})),
-                    );
-                }
+        }
+        for (prompt_id, prompt) in &note.metadata.prompts {
+            if !prompts_map.contains_key(prompt_id) {
+                prompts_map.insert(
+                    prompt_id.clone(),
+                    serde_json::to_value(prompt).unwrap_or(serde_json::json!({})),
+                );
             }
         }
     }
@@ -675,12 +661,11 @@ pub fn handle_diff(args: &[String]) {
     }
 
     // Add commit_stats if --include-stats requested
-    if include_stats {
-        if let Some(stats) =
+    if include_stats
+        && let Some(stats) =
             compute_commit_stats(&commit_authorship, &to_commit, &filtered_sections)
-        {
-            result["commit_stats"] = stats;
-        }
+    {
+        result["commit_stats"] = stats;
     }
 
     println!("{}", serde_json::to_string(&result).unwrap());
@@ -689,8 +674,7 @@ pub fn handle_diff(args: &[String]) {
 /// Get metadata for a commit (author, time, message).
 fn get_commit_metadata(commit_sha: &str) -> Option<serde_json::Value> {
     let format_str = "%aI%n%an <%ae>%n%s%n%B";
-    let output =
-        git_cmd(&["log", "-1", &format!("--format={}", format_str), commit_sha]).ok()?;
+    let output = git_cmd(&["log", "-1", &format!("--format={}", format_str), commit_sha]).ok()?;
     let lines: Vec<&str> = output.lines().collect();
     if lines.len() < 3 {
         return None;
@@ -758,41 +742,30 @@ fn compute_commit_stats(
             {
                 ai_lines_added += count;
                 if let Some(session) = note.metadata.sessions.get(&entry.hash) {
-                    let key =
-                        format!("{}::{}", session.agent_id.tool, session.agent_id.model);
+                    let key = format!("{}::{}", session.agent_id.tool, session.agent_id.model);
                     let existing = tool_model_breakdown
                         .entry(key)
                         .or_insert_with(|| serde_json::json!({"ai_lines_added": 0}));
-                    if let Some(n) =
-                        existing.get("ai_lines_added").and_then(|v| v.as_u64())
-                    {
-                        existing["ai_lines_added"] =
-                            serde_json::json!(n + count as u64);
+                    if let Some(n) = existing.get("ai_lines_added").and_then(|v| v.as_u64()) {
+                        existing["ai_lines_added"] = serde_json::json!(n + count as u64);
                     }
                 } else if let Some(prompt) = note.metadata.prompts.get(&entry.hash) {
-                    let key =
-                        format!("{}::{}", prompt.agent_id.tool, prompt.agent_id.model);
+                    let key = format!("{}::{}", prompt.agent_id.tool, prompt.agent_id.model);
                     let existing = tool_model_breakdown
                         .entry(key)
                         .or_insert_with(|| serde_json::json!({"ai_lines_added": 0}));
-                    if let Some(n) =
-                        existing.get("ai_lines_added").and_then(|v| v.as_u64())
-                    {
-                        existing["ai_lines_added"] =
-                            serde_json::json!(n + count as u64);
+                    if let Some(n) = existing.get("ai_lines_added").and_then(|v| v.as_u64()) {
+                        existing["ai_lines_added"] = serde_json::json!(n + count as u64);
                     }
                 }
             } else if note.metadata.prompts.contains_key(&entry.hash) {
                 ai_lines_added += count;
                 let prompt = &note.metadata.prompts[&entry.hash];
-                let key =
-                    format!("{}::{}", prompt.agent_id.tool, prompt.agent_id.model);
+                let key = format!("{}::{}", prompt.agent_id.tool, prompt.agent_id.model);
                 let existing = tool_model_breakdown
                     .entry(key)
                     .or_insert_with(|| serde_json::json!({"ai_lines_added": 0}));
-                if let Some(n) =
-                    existing.get("ai_lines_added").and_then(|v| v.as_u64())
-                {
+                if let Some(n) = existing.get("ai_lines_added").and_then(|v| v.as_u64()) {
                     existing["ai_lines_added"] = serde_json::json!(n + count as u64);
                 }
             } else {

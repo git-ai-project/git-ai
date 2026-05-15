@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use crate::commands::helpers::git_cmd;
-use git_ai::core::authorship_log::{AuthorshipLog, AUTHORSHIP_LOG_VERSION};
+use git_ai::core::authorship_log::{AUTHORSHIP_LOG_VERSION, AuthorshipLog};
 
 // ---------------------------------------------------------------------------
 // Migration framework
@@ -69,7 +69,10 @@ pub fn find_migration_chain<'a>(
 
     // Simple forward traversal (no cycles expected in version graph)
     for _ in 0..migrations.len() {
-        if let Some(m) = migrations.iter().find(|m| m.from_version == current && m.to_version != current) {
+        if let Some(m) = migrations
+            .iter()
+            .find(|m| m.from_version == current && m.to_version != current)
+        {
             chain.push(m);
             current = m.to_version;
             if current == target {
@@ -84,10 +87,7 @@ pub fn find_migration_chain<'a>(
 }
 
 /// Apply a migration chain to a JSON metadata value.
-pub fn apply_migration_chain(
-    chain: &[&Migration],
-    mut value: Value,
-) -> Result<Value, String> {
+pub fn apply_migration_chain(chain: &[&Migration], mut value: Value) -> Result<Value, String> {
     for migration in chain {
         value = (migration.migrate_fn)(value)?;
         // Update schema_version to reflect the migration target
@@ -243,11 +243,11 @@ pub fn handle_migrate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         };
 
         // Apply from-version filter if specified
-        if let Some(ref filter) = from_version_filter {
-            if &version != filter {
-                skipped += 1;
-                continue;
-            }
+        if let Some(ref filter) = from_version_filter
+            && &version != filter
+        {
+            skipped += 1;
+            continue;
         }
 
         // Already at current version — run validation only
@@ -276,7 +276,10 @@ pub fn handle_migrate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                         already_current += 1;
                     }
                     Err(e) => {
-                        eprintln!("warning: validation failed for {} ({}): {}", sha, version, e);
+                        eprintln!(
+                            "warning: validation failed for {} ({}): {}",
+                            sha, version, e
+                        );
                         errors += 1;
                     }
                 }
@@ -320,10 +323,7 @@ pub fn handle_migrate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         match apply_migration_chain(&chain, metadata_value) {
             Ok(migrated_value) => {
                 if dry_run {
-                    println!(
-                        "would migrate: {} ({} -> {})",
-                        sha, version, target_version
-                    );
+                    println!("would migrate: {} ({} -> {})", sha, version, target_version);
                     migrated += 1;
                 } else {
                     let new_json =
@@ -377,7 +377,10 @@ pub fn handle_migrate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         eprintln!("{} notes had errors (see warnings above)", errors);
     }
     if skipped > 0 && from_version_filter.is_some() {
-        println!("{} notes skipped (did not match --from-version filter)", skipped);
+        println!(
+            "{} notes skipped (did not match --from-version filter)",
+            skipped
+        );
     }
 
     Ok(())
@@ -393,9 +396,8 @@ pub fn handle_migrate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 #[allow(dead_code)]
 pub fn parse_note_with_compat(note_content: &str) -> Option<AuthorshipLog> {
     // First try normal deserialization
-    match AuthorshipLog::deserialize_from_string(note_content) {
-        Ok(log) => return Some(log),
-        Err(_) => {}
+    if let Ok(log) = AuthorshipLog::deserialize_from_string(note_content) {
+        return Some(log);
     }
 
     // If normal parsing failed, try to at least extract the version and warn
@@ -568,7 +570,8 @@ mod tests {
     #[test]
     fn test_reconstruct_note() {
         let attestation = "src/main.rs\n  abcdef1234567890 1-5";
-        let metadata = "{\"schema_version\":\"authorship/3.0.0\",\"base_commit_sha\":\"abc\",\"prompts\":{}}";
+        let metadata =
+            "{\"schema_version\":\"authorship/3.0.0\",\"base_commit_sha\":\"abc\",\"prompts\":{}}";
 
         let note = reconstruct_note(attestation, metadata);
         assert!(note.starts_with("src/main.rs\n"));

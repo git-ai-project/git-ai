@@ -35,10 +35,13 @@ fn handle_baseline() -> Result<(), Box<dyn std::error::Error>> {
             // Show what was captured
             if let Ok(baseline) = perf_regression::load_baseline() {
                 println!();
-                println!("{:<20} {:>8} {:>8} {:>8}", "OPERATION", "P50(ms)", "P95(ms)", "SAMPLES");
+                println!(
+                    "{:<20} {:>8} {:>8} {:>8}",
+                    "OPERATION", "P50(ms)", "P95(ms)", "SAMPLES"
+                );
                 println!("{}", "-".repeat(50));
                 let mut ops: Vec<_> = baseline.0.iter().collect();
-                ops.sort_by_key(|(name, _)| name.clone());
+                ops.sort_by_key(|(name, _)| *name);
                 for (op, stats) in ops {
                     println!(
                         "{:<20} {:>8.2} {:>8.2} {:>8}",
@@ -60,10 +63,13 @@ fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Performance Baseline ===");
     match perf_regression::load_baseline() {
         Ok(baseline) if !baseline.0.is_empty() => {
-            println!("{:<20} {:>8} {:>8} {:>8}", "OPERATION", "P50(ms)", "P95(ms)", "SAMPLES");
+            println!(
+                "{:<20} {:>8} {:>8} {:>8}",
+                "OPERATION", "P50(ms)", "P95(ms)", "SAMPLES"
+            );
             println!("{}", "-".repeat(50));
             let mut ops: Vec<_> = baseline.0.iter().collect();
-            ops.sort_by_key(|(name, _)| name.clone());
+            ops.sort_by_key(|(name, _)| *name);
             for (op, stats) in ops {
                 println!(
                     "{:<20} {:>8.2} {:>8.2} {:>8}",
@@ -83,10 +89,13 @@ fn handle_status() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Recent Samples ===");
     match perf_regression::load_samples() {
         Ok(samples) if !samples.0.is_empty() => {
-            println!("{:<20} {:>8} {:>8} {:>8} {:>8}", "OPERATION", "COUNT", "MIN(ms)", "MAX(ms)", "AVG(ms)");
+            println!(
+                "{:<20} {:>8} {:>8} {:>8} {:>8}",
+                "OPERATION", "COUNT", "MIN(ms)", "MAX(ms)", "AVG(ms)"
+            );
             println!("{}", "-".repeat(58));
             let mut ops: Vec<_> = samples.0.iter().collect();
-            ops.sort_by_key(|(name, _)| name.clone());
+            ops.sort_by_key(|(name, _)| *name);
             for (op, timings) in ops {
                 if timings.is_empty() {
                     continue;

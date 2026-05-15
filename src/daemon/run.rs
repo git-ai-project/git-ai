@@ -245,11 +245,9 @@ pub fn stop_daemon() -> Result<(), Error> {
     #[cfg(unix)]
     {
         // Try graceful shutdown via control socket first
-        let shutdown_sent = super::control_client::send_request(
-            &paths.control_sock,
-            r#"{"type":"shutdown"}"#,
-        )
-        .is_ok();
+        let shutdown_sent =
+            super::control_client::send_request(&paths.control_sock, r#"{"type":"shutdown"}"#)
+                .is_ok();
 
         if !shutdown_sent {
             // Fall back to SIGTERM
@@ -297,15 +295,15 @@ pub fn restart_daemon() -> Result<(), Error> {
     let paths = DaemonPaths::resolve();
 
     // Save stats from the running daemon before stopping
-    if let Some(daemon_pid) = read_pid_file(&paths.pid_file) {
-        if lifecycle::is_process_alive(daemon_pid.pid) {
-            eprintln!("[git-ai] saving stats before restart...");
-            // Query live stats and persist them via the control socket
-            #[cfg(unix)]
-            {
-                // The stats will be saved by the daemon during its shutdown sequence.
-                // We just need to trigger graceful shutdown.
-            }
+    if let Some(daemon_pid) = read_pid_file(&paths.pid_file)
+        && lifecycle::is_process_alive(daemon_pid.pid)
+    {
+        eprintln!("[git-ai] saving stats before restart...");
+        // Query live stats and persist them via the control socket
+        #[cfg(unix)]
+        {
+            // The stats will be saved by the daemon during its shutdown sequence.
+            // We just need to trigger graceful shutdown.
         }
     }
 
@@ -338,10 +336,7 @@ pub fn print_status() {
                     }
                 }
             } else {
-                println!(
-                    "daemon not running (stale pid file, last pid {})",
-                    info.pid
-                );
+                println!("daemon not running (stale pid file, last pid {})", info.pid);
             }
         }
         None => {
@@ -356,9 +351,7 @@ fn query_live_stats(control_sock: &std::path::Path) -> Option<String> {
     use std::os::unix::net::UnixStream;
 
     let mut stream = UnixStream::connect(control_sock).ok()?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
     writeln!(stream, r#"{{"type":"stats"}}"#).ok()?;
     stream.flush().ok()?;
 

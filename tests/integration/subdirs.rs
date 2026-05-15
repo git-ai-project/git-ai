@@ -4,7 +4,11 @@ use std::fs;
 use std::process::Command;
 
 /// Run git-ai from a specific working directory with proper HOME isolation.
-fn run_git_ai_in_with_home(cwd: &std::path::Path, home: &std::path::Path, args: &[&str]) -> Result<String, String> {
+fn run_git_ai_in_with_home(
+    cwd: &std::path::Path,
+    home: &std::path::Path,
+    args: &[&str],
+) -> Result<String, String> {
     let binary = get_binary_path();
     let output = Command::new(binary)
         .args(args)
@@ -168,7 +172,8 @@ fn test_commit_from_subdirectory() {
     run_git_in(&subdir, &["commit", "-m", "add widget"]).unwrap();
 
     // Run post-commit from subdirectory
-    run_git_ai_in_with_home(&subdir, &home, &["post-commit"]).expect("post-commit from subdir should succeed");
+    run_git_ai_in_with_home(&subdir, &home, &["post-commit"])
+        .expect("post-commit from subdir should succeed");
 
     // Verify attribution
     let blame_output = run_git_ai_in_with_home(&subdir, &home, &["blame", "widget.rs"])
@@ -217,11 +222,7 @@ fn test_nested_subdirectory_operations() {
 
     // Write file in deeply nested directory
     let file_path = deep_dir.join("oauth.rs");
-    fs::write(
-        &file_path,
-        "pub fn authenticate() -> bool {\n    true\n}\n",
-    )
-    .unwrap();
+    fs::write(&file_path, "pub fn authenticate() -> bool {\n    true\n}\n").unwrap();
 
     // Checkpoint from deeply nested directory
     let home = repo.test_home_path();
@@ -235,7 +236,8 @@ fn test_nested_subdirectory_operations() {
     run_git_in(&deep_dir, &["commit", "-m", "add oauth"]).unwrap();
 
     // Run post-commit from the deep directory
-    run_git_ai_in_with_home(&deep_dir, &home, &["post-commit"]).expect("post-commit from deep subdir should succeed");
+    run_git_ai_in_with_home(&deep_dir, &home, &["post-commit"])
+        .expect("post-commit from deep subdir should succeed");
 
     // Verify blame from deep directory (relative path)
     let blame_output = run_git_ai_in_with_home(&deep_dir, &home, &["blame", "oauth.rs"])
@@ -286,8 +288,9 @@ fn test_nested_subdirectory_operations() {
 
     // Verify blame from an intermediate directory (src/features/)
     let mid_dir = repo.path().join("src").join("features");
-    let blame_from_mid = run_git_ai_in_with_home(&mid_dir, &home, &["blame", "auth/providers/oauth.rs"])
-        .expect("blame from intermediate dir should succeed");
+    let blame_from_mid =
+        run_git_ai_in_with_home(&mid_dir, &home, &["blame", "auth/providers/oauth.rs"])
+            .expect("blame from intermediate dir should succeed");
 
     let mid_blame_lines: Vec<&str> = blame_from_mid
         .lines()

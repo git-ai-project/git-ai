@@ -31,10 +31,10 @@ pub fn extract_model(events: &[Value]) -> Option<String> {
 
         // Nested in known parent objects
         for parent in PARENTS {
-            if let Some(obj) = event.get(*parent) {
-                if let Some(m) = get_nonempty_str(obj, "model") {
-                    return Some(m.to_string());
-                }
+            if let Some(obj) = event.get(*parent)
+                && let Some(m) = get_nonempty_str(obj, "model")
+            {
+                return Some(m.to_string());
             }
         }
     }
@@ -131,10 +131,7 @@ mod tests {
 
     #[test]
     fn test_extract_model_skips_empty() {
-        let events = vec![
-            json!({"model": ""}),
-            json!({"model": "real-model"}),
-        ];
+        let events = vec![json!({"model": ""}), json!({"model": "real-model"})];
         assert_eq!(extract_model(&events), Some("real-model".to_string()));
     }
 
@@ -150,37 +147,25 @@ mod tests {
     #[test]
     fn test_extract_session_id_camel_case() {
         let events = vec![json!({"sessionId": "my-session", "data": 1})];
-        assert_eq!(
-            extract_session_id(&events),
-            Some("my-session".to_string())
-        );
+        assert_eq!(extract_session_id(&events), Some("my-session".to_string()));
     }
 
     #[test]
     fn test_extract_session_id_conversation() {
         let events = vec![json!({"conversation_id": "conv-999"})];
-        assert_eq!(
-            extract_session_id(&events),
-            Some("conv-999".to_string())
-        );
+        assert_eq!(extract_session_id(&events), Some("conv-999".to_string()));
     }
 
     #[test]
     fn test_extract_session_id_thread() {
         let events = vec![json!({"threadId": "thread-42"})];
-        assert_eq!(
-            extract_session_id(&events),
-            Some("thread-42".to_string())
-        );
+        assert_eq!(extract_session_id(&events), Some("thread-42".to_string()));
     }
 
     #[test]
     fn test_extract_session_id_in_metadata() {
         let events = vec![json!({"metadata": {"session_id": "meta-sess"}})];
-        assert_eq!(
-            extract_session_id(&events),
-            Some("meta-sess".to_string())
-        );
+        assert_eq!(extract_session_id(&events), Some("meta-sess".to_string()));
     }
 
     #[test]

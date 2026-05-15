@@ -10,13 +10,17 @@ fn main() {
         Some("checkpoint") => commands::checkpoint::handle_checkpoint(&args[1..]),
         Some("post-commit") => commands::post_commit::handle_post_commit(),
         Some("post-rewrite") => commands::post_rewrite::handle_post_rewrite(&args[1..]),
-        Some("post-rewrite-squash") => commands::post_rewrite::handle_post_rewrite_squash(&args[1..]),
+        Some("post-rewrite-squash") => {
+            commands::post_rewrite::handle_post_rewrite_squash(&args[1..])
+        }
         Some("stash-save") => commands::stash::handle_stash_save(),
         Some("stash-restore") => commands::stash::handle_stash_restore(),
         Some("stash-restore-ref") => commands::stash::handle_stash_restore_ref(&args[1..]),
         Some("blame") => commands::blame::handle_blame(&args[1..]),
         Some("diff") => commands::diff::handle_diff(&args[1..]),
-        Some("fetch-notes") | Some("fetch") => commands::fetch_notes::handle_fetch_notes(&args[1..]),
+        Some("fetch-notes") | Some("fetch") => {
+            commands::fetch_notes::handle_fetch_notes(&args[1..])
+        }
         Some("push-notes") | Some("push") => commands::push_notes::handle_push_notes(&args[1..]),
         Some("search") => commands::search::handle_search(&args[1..]),
         Some("install") => commands::install::handle_install(),
@@ -43,11 +47,21 @@ fn main() {
             }
         }
         Some("doctor") => commands::doctor::handle_doctor(&args[1..]),
-        Some("effective-ignore-patterns") => commands::internal::handle_internal_command("effective-ignore-patterns", &args[1..]),
-        Some("blame-analysis") => commands::internal::handle_internal_command("blame-analysis", &args[1..]),
-        Some("fetch-authorship-notes") => commands::internal::handle_internal_command("fetch-authorship-notes", &args[1..]),
-        Some("fetch_authorship_notes") => commands::internal::handle_internal_command("fetch_authorship_notes", &args[1..]),
-        Some("push-authorship-notes") => commands::internal::handle_internal_command("push-authorship-notes", &args[1..]),
+        Some("effective-ignore-patterns") => {
+            commands::internal::handle_internal_command("effective-ignore-patterns", &args[1..])
+        }
+        Some("blame-analysis") => {
+            commands::internal::handle_internal_command("blame-analysis", &args[1..])
+        }
+        Some("fetch-authorship-notes") => {
+            commands::internal::handle_internal_command("fetch-authorship-notes", &args[1..])
+        }
+        Some("fetch_authorship_notes") => {
+            commands::internal::handle_internal_command("fetch_authorship_notes", &args[1..])
+        }
+        Some("push-authorship-notes") => {
+            commands::internal::handle_internal_command("push-authorship-notes", &args[1..])
+        }
         Some("--version") | Some("-v") | Some("version") => {
             println!("git-ai {}", env!("CARGO_PKG_VERSION"));
         }

@@ -117,15 +117,15 @@ impl DaemonPaths {
     pub fn ensure_dirs(&self) -> Result<(), Error> {
         fs::create_dir_all(&self.base_dir)?;
 
-        if let Some(parent) = self.trace2_sock.parent() {
-            if parent != self.base_dir {
-                fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = self.trace2_sock.parent()
+            && parent != self.base_dir
+        {
+            fs::create_dir_all(parent)?;
         }
-        if let Some(parent) = self.control_sock.parent() {
-            if parent != self.base_dir {
-                fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = self.control_sock.parent()
+            && parent != self.base_dir
+        {
+            fs::create_dir_all(parent)?;
         }
 
         Ok(())
@@ -296,7 +296,7 @@ pub fn daemonize() -> Result<(), Error> {
     }
 
     unsafe {
-        let devnull = libc::open(b"/dev/null\0".as_ptr() as *const _, libc::O_RDWR);
+        let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
         if devnull >= 0 {
             libc::dup2(devnull, 0);
             libc::dup2(devnull, 1);

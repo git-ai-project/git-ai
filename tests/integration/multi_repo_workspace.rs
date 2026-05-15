@@ -14,7 +14,9 @@ fn test_cross_repo_checkpoint_attributes_correct_repo() {
     // Set up repo2 with an initial file
     let mut file = repo2.filename("target.txt");
     file.set_contents(crate::lines!["Line 1", "Line 2", "Line 3"]);
-    repo2.stage_all_and_commit("Initial commit in repo2").unwrap();
+    repo2
+        .stage_all_and_commit("Initial commit in repo2")
+        .unwrap();
 
     // Simulate AI editing a file in repo2
     fs::write(
@@ -63,10 +65,7 @@ fn test_files_in_separate_repos_independent() {
 
     // AI edits in repo1 only
     let mut ai_file1 = repo1.filename("ai_output.py");
-    ai_file1.set_contents(crate::lines![
-        "def func_a():".ai(),
-        "    return 'a'".ai(),
-    ]);
+    ai_file1.set_contents(crate::lines!["def func_a():".ai(), "    return 'a'".ai(),]);
     repo1.stage_all_and_commit("AI edit in repo1").unwrap();
 
     // Human edits in repo2 only
@@ -78,10 +77,7 @@ fn test_files_in_separate_repos_independent() {
     repo2.stage_all_and_commit("Human edit in repo2").unwrap();
 
     // Verify repo1 has AI attribution
-    ai_file1.assert_lines_and_blame(crate::lines![
-        "def func_a():".ai(),
-        "    return 'a'".ai(),
-    ]);
+    ai_file1.assert_lines_and_blame(crate::lines!["def func_a():".ai(), "    return 'a'".ai(),]);
 
     // Verify repo2 does NOT have AI attribution (human edit)
     let blame2 = repo2.git_ai(&["blame", "human_edit.py"]).unwrap();
@@ -120,7 +116,8 @@ fn test_checkpoint_with_absolute_path() {
     );
 
     // Commit and verify attribution
-    repo.stage_all_and_commit("Add main.rs via absolute path").unwrap();
+    repo.stage_all_and_commit("Add main.rs via absolute path")
+        .unwrap();
 
     let blame = repo.git_ai(&["blame", "src/main.rs"]).unwrap();
     assert!(

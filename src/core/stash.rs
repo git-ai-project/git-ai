@@ -155,7 +155,9 @@ pub fn save_stash_attributions(
         (checkpoints.clone(), initial.clone())
     } else {
         let filtered_cps = filter_checkpoints_by_pathspec(&checkpoints, pathspecs);
-        let filtered_init = initial.as_ref().map(|init| filter_initial_by_pathspec(init, pathspecs));
+        let filtered_init = initial
+            .as_ref()
+            .map(|init| filter_initial_by_pathspec(init, pathspecs));
         (filtered_cps, filtered_init)
     };
 
@@ -203,17 +205,19 @@ pub fn save_stash_attributions(
     } else {
         // Pathspec filter: only remove entries that matched, keep the rest
         let remaining_checkpoints = filter_checkpoints_excluding_pathspec(&checkpoints, pathspecs);
-        let remaining_initial = initial.as_ref().map(|init| filter_initial_excluding_pathspec(init, pathspecs));
+        let remaining_initial = initial
+            .as_ref()
+            .map(|init| filter_initial_excluding_pathspec(init, pathspecs));
 
         // Rewrite the working log with only the remaining entries
         working_log::delete_working_log(&git_dir, base_commit);
         for cp in &remaining_checkpoints {
             working_log::append_checkpoint(&git_dir, base_commit, cp);
         }
-        if let Some(ref init) = remaining_initial {
-            if !init.files.is_empty() {
-                working_log::write_initial_attributions(&git_dir, base_commit, init);
-            }
+        if let Some(ref init) = remaining_initial
+            && !init.files.is_empty()
+        {
+            working_log::write_initial_attributions(&git_dir, base_commit, init);
         }
     }
 
@@ -302,10 +306,10 @@ fn find_applied_stash_sha(repo_path: &Path) -> Result<String, String> {
         &["reflog", "show", "refs/stash", "--format=%H", "-1"],
     );
 
-    if let Ok(sha) = reflog {
-        if !sha.is_empty() {
-            return Ok(sha);
-        }
+    if let Ok(sha) = reflog
+        && !sha.is_empty()
+    {
+        return Ok(sha);
     }
 
     // Last resort: if stash reflog is gone (last stash was popped), try
@@ -386,7 +390,9 @@ fn filter_initial_by_pathspec(
     pathspecs: &[String],
 ) -> working_log::InitialAttributions {
     let mut filtered = initial.clone();
-    filtered.files.retain(|file_path, _| matches_pathspec(file_path, pathspecs));
+    filtered
+        .files
+        .retain(|file_path, _| matches_pathspec(file_path, pathspecs));
     filtered
 }
 
@@ -396,7 +402,9 @@ fn filter_initial_excluding_pathspec(
     pathspecs: &[String],
 ) -> working_log::InitialAttributions {
     let mut filtered = initial.clone();
-    filtered.files.retain(|file_path, _| !matches_pathspec(file_path, pathspecs));
+    filtered
+        .files
+        .retain(|file_path, _| !matches_pathspec(file_path, pathspecs));
     filtered
 }
 
@@ -547,8 +555,14 @@ mod tests {
 
     #[test]
     fn test_matches_pathspec_exact() {
-        assert!(matches_pathspec("src/main.rs", &["src/main.rs".to_string()]));
-        assert!(!matches_pathspec("src/lib.rs", &["src/main.rs".to_string()]));
+        assert!(matches_pathspec(
+            "src/main.rs",
+            &["src/main.rs".to_string()]
+        ));
+        assert!(!matches_pathspec(
+            "src/lib.rs",
+            &["src/main.rs".to_string()]
+        ));
     }
 
     #[test]
@@ -601,11 +615,7 @@ mod tests {
 
     #[test]
     fn test_extract_pathspecs_no_separator() {
-        let argv = vec![
-            "git".to_string(),
-            "stash".to_string(),
-            "push".to_string(),
-        ];
+        let argv = vec!["git".to_string(), "stash".to_string(), "push".to_string()];
         let specs = extract_pathspecs_from_argv(&argv);
         assert!(specs.is_empty());
     }

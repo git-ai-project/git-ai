@@ -116,7 +116,11 @@ pub fn handle_fetch_notes(args: &[String]) {
                     );
                     process::exit(1);
                 } else {
-                    eprintln!("error: failed to fetch notes from '{}': {}", remote_name, stderr.trim());
+                    eprintln!(
+                        "error: failed to fetch notes from '{}': {}",
+                        remote_name,
+                        stderr.trim()
+                    );
                     process::exit(1);
                 }
             }

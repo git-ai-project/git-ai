@@ -126,7 +126,8 @@ fn test_cherry_pick_abort_returns_to_original_state() {
 
     // Create initial commit on default branch
     fs::write(&file_path, "Line 1\nLine 2\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "file.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "file.txt"])
+        .unwrap();
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     let main_branch = repo.current_branch();
@@ -144,7 +145,8 @@ fn test_cherry_pick_abort_returns_to_original_state() {
     // Switch back to main and make conflicting change (also modify Line 2)
     repo.git(&["checkout", &main_branch]).unwrap();
     fs::write(&file_path, "Line 1\nHuman modification of line 2\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "file.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "file.txt"])
+        .unwrap();
     repo.stage_all_and_commit("Human change").unwrap();
 
     // Record state before the cherry-pick attempt
@@ -176,7 +178,11 @@ fn test_cherry_pick_abort_returns_to_original_state() {
     repo.git(&["checkout", "-b", "feature2"]).unwrap();
     // pre-edit checkpoint
     repo.git_ai(&["checkpoint", "human", "file.txt"]).unwrap();
-    fs::write(&file_path, "Line 1\nHuman modification of line 2\nNew AI line\n").unwrap();
+    fs::write(
+        &file_path,
+        "Line 1\nHuman modification of line 2\nNew AI line\n",
+    )
+    .unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "file.txt"]).unwrap();
     repo.stage_all_and_commit("Another AI commit").unwrap();
     let feature2_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
@@ -214,10 +220,7 @@ fn test_cherry_pick_human_only_commit() {
     repo.git(&["cherry-pick", &feature_commit]).unwrap();
 
     // Verify no AI authorship on any line
-    file.assert_lines_and_blame(crate::lines![
-        "Line 1".human(),
-        "Human line 2".human(),
-    ]);
+    file.assert_lines_and_blame(crate::lines!["Line 1".human(), "Human line 2".human(),]);
 
     // Verify that the authorship note exists (metadata-only note for human commit)
     let new_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
@@ -235,7 +238,8 @@ fn test_cherry_pick_skip_preserves_subsequent_attribution() {
     let file_path = repo.path().join("file.txt");
 
     fs::write(&file_path, "base line\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "file.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "file.txt"])
+        .unwrap();
     repo.stage_all_and_commit("initial").unwrap();
     let main_branch = repo.current_branch();
 
@@ -268,8 +272,10 @@ fn test_cherry_pick_skip_preserves_subsequent_attribution() {
     // Pre-apply sha1's change as a plain human commit so that cherry-picking sha1
     // results in an empty diff, forcing git to stop and require --skip.
     fs::write(&file_path, "base line\nAI line 1\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "file.txt"]).unwrap();
-    repo.stage_all_and_commit("pre-apply sha1 as human").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "file.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("pre-apply sha1 as human")
+        .unwrap();
 
     // Capture HEAD before the multi-cherry-pick
     let head_before = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
@@ -286,13 +292,16 @@ fn test_cherry_pick_skip_preserves_subsequent_attribution() {
 
     // Manually transfer notes for sha2 and sha3 (the daemon does this via sequencer
     // tracking, but the test harness needs explicit calls for --skip scenarios)
-    let new_commits_output = repo.git(&["rev-list", &format!("{}..HEAD", head_before)])
+    let new_commits_output = repo
+        .git(&["rev-list", &format!("{}..HEAD", head_before)])
         .unwrap();
     let new_commits: Vec<&str> = new_commits_output.trim().lines().rev().collect();
     // sha2 -> first new commit, sha3 -> second new commit
     if new_commits.len() >= 2 {
-        repo.git_ai(&["post-rewrite", &sha2, new_commits[0]]).unwrap();
-        repo.git_ai(&["post-rewrite", &sha3, new_commits[1]]).unwrap();
+        repo.git_ai(&["post-rewrite", &sha2, new_commits[0]])
+            .unwrap();
+        repo.git_ai(&["post-rewrite", &sha3, new_commits[1]])
+            .unwrap();
     }
 
     // After skip + continuation: sha2 and sha3's AI attribution should be preserved.

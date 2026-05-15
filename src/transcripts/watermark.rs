@@ -61,8 +61,7 @@ impl WatermarkStore {
         let dir = Self::watermark_dir(git_dir, agent);
         fs::create_dir_all(&dir)?;
         let path = Self::watermark_path(git_dir, agent, session_id);
-        let content = serde_json::to_string_pretty(watermark)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let content = serde_json::to_string_pretty(watermark).map_err(std::io::Error::other)?;
         fs::write(&path, content)
     }
 
@@ -158,7 +157,11 @@ mod tests {
 
         // Verify the directory was created
         assert!(git_dir.join("ai/transcripts/codex").is_dir());
-        assert!(git_dir.join("ai/transcripts/codex/session_x.json").is_file());
+        assert!(
+            git_dir
+                .join("ai/transcripts/codex/session_x.json")
+                .is_file()
+        );
     }
 
     #[test]

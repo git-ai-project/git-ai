@@ -82,7 +82,10 @@ mod tests {
 
         let mut attrs = SparseArray::new();
         attrs.insert("0".to_string(), serde_json::json!("2.0.0-alpha.1"));
-        attrs.insert("1".to_string(), serde_json::json!("https://github.com/user/repo"));
+        attrs.insert(
+            "1".to_string(),
+            serde_json::json!("https://github.com/user/repo"),
+        );
 
         let event = MetricEvent {
             timestamp: 1715644800,
@@ -183,7 +186,8 @@ mod tests {
 
     #[test]
     fn cas_upload_response_deserialization() {
-        let json = r#"{"results":[{"hash":"abc","status":"ok"}],"success_count":1,"failure_count":0}"#;
+        let json =
+            r#"{"results":[{"hash":"abc","status":"ok"}],"success_count":1,"failure_count":0}"#;
         let resp: CasUploadResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.success_count, 1);
         assert_eq!(resp.failure_count, 0);

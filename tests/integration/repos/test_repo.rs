@@ -272,7 +272,12 @@ impl TestRepo {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|| "initial".to_string());
 
-        let dir = self.path.join(".git").join("ai").join("working_logs").join(&head_sha);
+        let dir = self
+            .path
+            .join(".git")
+            .join("ai")
+            .join("working_logs")
+            .join(&head_sha);
         WorkingLogs { dir }
     }
 
@@ -287,10 +292,21 @@ impl TestRepo {
     }
 
     /// Read an authorship note from a specific git dir (e.g., a bare remote repo).
-    pub fn read_authorship_note_in_git_dir(&self, git_dir: &Path, commit_sha: &str) -> Option<String> {
+    pub fn read_authorship_note_in_git_dir(
+        &self,
+        git_dir: &Path,
+        commit_sha: &str,
+    ) -> Option<String> {
         let git = real_git_executable();
         let output = Command::new(git)
-            .args(["--git-dir", git_dir.to_str().unwrap(), "notes", "--ref=ai", "show", commit_sha])
+            .args([
+                "--git-dir",
+                git_dir.to_str().unwrap(),
+                "notes",
+                "--ref=ai",
+                "show",
+                commit_sha,
+            ])
             .env("GIT_TRACE2_EVENT", "/dev/null")
             .output()
             .ok()?;
@@ -368,7 +384,9 @@ impl TestRepo {
         let is_pull = args.first().map(|a| *a == "pull").unwrap_or(false);
         let is_fetch = args.first().map(|a| *a == "fetch").unwrap_or(false);
         let is_pull_rebase_flag = is_pull
-            && args.iter().any(|a| *a == "--rebase" || a.starts_with("--rebase="));
+            && args
+                .iter()
+                .any(|a| *a == "--rebase" || a.starts_with("--rebase="));
         // Also detect pull.rebase=true from git config (implicit rebase)
         let is_pull_rebase = if is_pull && !is_pull_rebase_flag {
             is_pull_rebase_flag || self.has_pull_rebase_config()
@@ -378,7 +396,8 @@ impl TestRepo {
 
         // Determine the remote name from args (for pull/fetch), defaulting to "origin"
         let pull_fetch_remote = if is_pull || is_fetch {
-            self.detect_remote_from_args(args).unwrap_or_else(|| "origin".to_string())
+            self.detect_remote_from_args(args)
+                .unwrap_or_else(|| "origin".to_string())
         } else {
             String::new()
         };
@@ -399,7 +418,7 @@ impl TestRepo {
 
         // Detect if autostash will be used (explicit flag or config)
         let is_autostash = is_pull
-            && (args.iter().any(|a| *a == "--autostash")
+            && (args.contains(&"--autostash")
                 || (is_pull_rebase && self.has_rebase_autostash_config()));
         // Check if there are dirty changes that will trigger autostash
         let has_dirty_changes = if is_autostash || (is_pull && !is_pull_rebase) {
@@ -425,8 +444,8 @@ impl TestRepo {
         // If the rebase has an explicit branch argument (e.g., `git rebase main feature`),
         // collect commits from that branch, not HEAD.
         let is_rebase = args.first().map(|a| *a == "rebase").unwrap_or(false);
-        let is_rebase_continuation = is_rebase
-            && args.iter().any(|a| *a == "--skip" || *a == "--continue");
+        let is_rebase_continuation =
+            is_rebase && args.iter().any(|a| *a == "--skip" || *a == "--continue");
         let pre_rebase_commits = if is_rebase || is_pull_rebase {
             if is_pull_rebase {
                 // For pull --rebase, capture current HEAD's commits before the pull rewrites them
@@ -448,7 +467,8 @@ impl TestRepo {
         };
 
         // Detect checkout/switch that might need working log migration
-        let is_checkout_with_merge = (args.first() == Some(&"checkout") || args.first() == Some(&"switch"))
+        let is_checkout_with_merge = (args.first() == Some(&"checkout")
+            || args.first() == Some(&"switch"))
             && args.iter().any(|a| *a == "--merge" || *a == "-m");
         let pre_checkout_head = if is_checkout_with_merge {
             Command::new(git)
@@ -464,8 +484,8 @@ impl TestRepo {
         };
 
         // Detect commit --amend so we can run post-commit hook after
-        let is_amend = args.first().map(|a| *a == "commit").unwrap_or(false)
-            && args.iter().any(|a| *a == "--amend");
+        let is_amend =
+            args.first().map(|a| *a == "commit").unwrap_or(false) && args.contains(&"--amend");
 
         // Before amend, capture current HEAD so we can migrate working logs
         let pre_amend_head = if is_amend {
@@ -483,8 +503,7 @@ impl TestRepo {
 
         // Detect cherry-pick commands
         let is_cherry_pick = args.first().map(|a| *a == "cherry-pick").unwrap_or(false);
-        let is_cherry_pick_continuation = is_cherry_pick
-            && args.iter().any(|a| *a == "--continue");
+        let is_cherry_pick_continuation = is_cherry_pick && args.contains(&"--continue");
         let pre_cherry_pick_sources: Vec<String> = if is_cherry_pick {
             if is_cherry_pick_continuation {
                 // For --continue, read the source from CHERRY_PICK_HEAD
@@ -507,7 +526,10 @@ impl TestRepo {
 
         // Before stash pop/apply/branch, capture the target stash SHA
         let is_stash_restore = args.first() == Some(&"stash")
-            && args.get(1).map(|s| *s == "pop" || *s == "apply" || *s == "branch").unwrap_or(false);
+            && args
+                .get(1)
+                .map(|s| *s == "pop" || *s == "apply" || *s == "branch")
+                .unwrap_or(false);
         let pre_stash_pop_sha = if is_stash_restore {
             // Find the explicit ref if provided (e.g., stash@{1})
             let explicit_ref = args.iter().skip(2).find(|a| a.contains("stash@{"));
@@ -527,11 +549,10 @@ impl TestRepo {
 
         // Detect merge --squash to reconstruct working logs from merged commits
         let is_merge = args.first() == Some(&"merge");
-        let is_squash_merge = is_merge && args.iter().any(|a| *a == "--squash");
+        let is_squash_merge = is_merge && args.contains(&"--squash");
         let squash_merge_branch = if is_squash_merge {
             args.iter()
-                .filter(|a| !a.starts_with('-') && **a != "merge")
-                .last()
+                .rfind(|a| !a.starts_with('-') && **a != "merge")
                 .map(|s| s.to_string())
         } else {
             None
@@ -594,15 +615,17 @@ impl TestRepo {
                     .ok()
                     .filter(|o| o.status.success())
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-                if let Some(new_head) = new_head {
-                    if new_head != *old_head {
-                        self.migrate_working_log(old_head, &new_head);
-                    }
+                if let Some(new_head) = new_head
+                    && new_head != *old_head
+                {
+                    self.migrate_working_log(old_head, &new_head);
                 }
             }
             // After a successful push, also push notes to the remote
             if args.first() == Some(&"push") {
-                let remote = self.detect_remote_from_args(args).unwrap_or_else(|| "origin".to_string());
+                let remote = self
+                    .detect_remote_from_args(args)
+                    .unwrap_or_else(|| "origin".to_string());
                 let _ = Command::new(git)
                     .current_dir(&self.path)
                     .args(["push", &remote, "refs/notes/ai"])
@@ -612,41 +635,52 @@ impl TestRepo {
             // After a successful reset, reconstruct working logs from reset commits' notes.
             // reset --soft/--mixed leave changes staged/unstaged; the next commit needs
             // the attributions from the undone commits to be available.
-            if is_reset && !args.iter().any(|a| *a == "--hard") {
-                if let Some(ref old_head) = pre_reset_head {
-                    let new_head = Command::new(git)
+            if is_reset
+                && !args.contains(&"--hard")
+                && let Some(ref old_head) = pre_reset_head
+            {
+                let new_head = Command::new(git)
+                    .current_dir(&self.path)
+                    .args(["rev-parse", "HEAD"])
+                    .env("GIT_TRACE2_EVENT", "/dev/null")
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+                if let Some(ref new_head) = new_head
+                    && new_head != old_head
+                {
+                    // Collect all commits between new HEAD and old HEAD
+                    let commits_output = Command::new(git)
                         .current_dir(&self.path)
-                        .args(["rev-parse", "HEAD"])
+                        .args(["rev-list", &format!("{}..{}", new_head, old_head)])
                         .env("GIT_TRACE2_EVENT", "/dev/null")
-                        .output()
-                        .ok()
-                        .filter(|o| o.status.success())
-                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-                    if let Some(ref new_head) = new_head {
-                        if new_head != old_head {
-                            // Collect all commits between new HEAD and old HEAD
-                            let commits_output = Command::new(git)
-                                .current_dir(&self.path)
-                                .args(["rev-list", &format!("{}..{}", new_head, old_head)])
-                                .env("GIT_TRACE2_EVENT", "/dev/null")
-                                .output();
-                            if let Ok(co) = commits_output {
-                                let reset_commits: Vec<String> = String::from_utf8_lossy(&co.stdout)
-                                    .lines()
-                                    .map(|s| s.trim().to_string())
-                                    .filter(|s| !s.is_empty())
-                                    .collect();
-                                // Build INITIAL attributions from all reset commits' notes
-                                self.reconstruct_working_log_from_notes(new_head, &reset_commits);
-                            }
-                        }
+                        .output();
+                    if let Ok(co) = commits_output {
+                        let reset_commits: Vec<String> = String::from_utf8_lossy(&co.stdout)
+                            .lines()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        // Build INITIAL attributions from all reset commits' notes
+                        self.reconstruct_working_log_from_notes(new_head, &reset_commits);
                     }
                 }
             }
             // After stash push/save, save attributions
             if args.first() == Some(&"stash") {
                 let sub = args.get(1).copied().unwrap_or("push");
-                if sub == "push" || sub == "save" || (!sub.starts_with('-') && sub != "pop" && sub != "apply" && sub != "branch" && sub != "list" && sub != "show" && sub != "drop" && sub != "clear") {
+                if sub == "push"
+                    || sub == "save"
+                    || (!sub.starts_with('-')
+                        && sub != "pop"
+                        && sub != "apply"
+                        && sub != "branch"
+                        && sub != "list"
+                        && sub != "show"
+                        && sub != "drop"
+                        && sub != "clear")
+                {
                     let _ = self.git_ai(&["stash-save"]);
                 } else if sub == "pop" || sub == "apply" || sub == "branch" {
                     if let Some(ref sha) = pre_stash_pop_sha {
@@ -667,10 +701,10 @@ impl TestRepo {
                         .ok()
                         .filter(|o| o.status.success())
                         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-                    if let Some(ref new_head) = new_head {
-                        if new_head != old_head {
-                            self.migrate_working_log(old_head, new_head);
-                        }
+                    if let Some(ref new_head) = new_head
+                        && new_head != old_head
+                    {
+                        self.migrate_working_log(old_head, new_head);
                     }
                 }
                 // After autostash pull completes, restore stash attributions
@@ -679,38 +713,36 @@ impl TestRepo {
                 }
             }
             // After a successful merge --squash, reconstruct working logs from squashed branch commits
-            if is_squash_merge {
-                if let Some(ref branch) = squash_merge_branch {
-                    let head_sha = Command::new(git)
-                        .current_dir(&self.path)
-                        .args(["rev-parse", "HEAD"])
-                        .env("GIT_TRACE2_EVENT", "/dev/null")
-                        .output()
-                        .ok()
-                        .filter(|o| o.status.success())
-                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                        .unwrap_or_else(|| "HEAD".to_string());
-                    // Find commits on the branch not reachable from current HEAD
-                    let commits_output = Command::new(git)
-                        .current_dir(&self.path)
-                        .args(["rev-list", &format!("HEAD..{}", branch)])
-                        .env("GIT_TRACE2_EVENT", "/dev/null")
-                        .output();
-                    if let Ok(co) = commits_output {
-                        if co.status.success() {
-                            let squashed_commits: Vec<String> = String::from_utf8_lossy(&co.stdout)
-                                .lines()
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                            if !squashed_commits.is_empty() {
-                                self.reconstruct_working_log_from_notes(&head_sha, &squashed_commits);
-                                eprintln!(
-                                    "[test] squash merge: reconstructed working log from {} branch commit(s)",
-                                    squashed_commits.len()
-                                );
-                            }
-                        }
+            if is_squash_merge && let Some(ref branch) = squash_merge_branch {
+                let head_sha = Command::new(git)
+                    .current_dir(&self.path)
+                    .args(["rev-parse", "HEAD"])
+                    .env("GIT_TRACE2_EVENT", "/dev/null")
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_else(|| "HEAD".to_string());
+                // Find commits on the branch not reachable from current HEAD
+                let commits_output = Command::new(git)
+                    .current_dir(&self.path)
+                    .args(["rev-list", &format!("HEAD..{}", branch)])
+                    .env("GIT_TRACE2_EVENT", "/dev/null")
+                    .output();
+                if let Ok(co) = commits_output
+                    && co.status.success()
+                {
+                    let squashed_commits: Vec<String> = String::from_utf8_lossy(&co.stdout)
+                        .lines()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !squashed_commits.is_empty() {
+                        self.reconstruct_working_log_from_notes(&head_sha, &squashed_commits);
+                        eprintln!(
+                            "[test] squash merge: reconstructed working log from {} branch commit(s)",
+                            squashed_commits.len()
+                        );
                     }
                 }
             }
@@ -753,16 +785,14 @@ impl TestRepo {
     fn reconstruct_working_log_from_notes(&self, base_commit: &str, reset_commits: &[String]) {
         // Merge all notes from reset commits into a single INITIAL attribution
         let initial = self.merge_notes_into_initial(reset_commits);
-        if !initial.files.is_empty() || !initial.sessions.is_empty() || !initial.humans.is_empty() || !initial.prompts.is_empty() {
+        if !initial.files.is_empty()
+            || !initial.sessions.is_empty()
+            || !initial.humans.is_empty()
+            || !initial.prompts.is_empty()
+        {
             let git_dir = self.path.join(".git");
-            std::fs::create_dir_all(
-                git_dir.join("ai").join("working_logs").join(base_commit),
-            ).ok();
-            git_ai::core::working_log::write_initial_attributions(
-                &git_dir,
-                base_commit,
-                &initial,
-            );
+            std::fs::create_dir_all(git_dir.join("ai").join("working_logs").join(base_commit)).ok();
+            git_ai::core::working_log::write_initial_attributions(&git_dir, base_commit, &initial);
             eprintln!(
                 "[test] reconstructed working log for {} from {} reset commit(s)",
                 &base_commit[..7.min(base_commit.len())],
@@ -850,13 +880,12 @@ impl TestRepo {
                                 line_num
                             };
 
-                            if let Some(last) = new_line_attrs.last_mut() {
-                                if last.author_id == entry.hash
-                                    && last.end_line + 1 == mapped_line
-                                {
-                                    last.end_line = mapped_line;
-                                    continue;
-                                }
+                            if let Some(last) = new_line_attrs.last_mut()
+                                && last.author_id == entry.hash
+                                && last.end_line + 1 == mapped_line
+                            {
+                                last.end_line = mapped_line;
+                                continue;
                             }
                             new_line_attrs.push(LineAttribution {
                                 start_line: mapped_line,
@@ -884,13 +913,12 @@ impl TestRepo {
                     for attr in existing.drain(..) {
                         for l in attr.start_line..=attr.end_line {
                             if !new_lines_covered.contains(&l) {
-                                if let Some(last) = split_existing.last_mut() {
-                                    if last.author_id == attr.author_id
-                                        && last.end_line + 1 == l
-                                    {
-                                        last.end_line = l;
-                                        continue;
-                                    }
+                                if let Some(last) = split_existing.last_mut()
+                                    && last.author_id == attr.author_id
+                                    && last.end_line + 1 == l
+                                {
+                                    last.end_line = l;
+                                    continue;
                                 }
                                 split_existing.push(LineAttribution {
                                     start_line: l,
@@ -964,10 +992,17 @@ impl TestRepo {
             }
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
-                eprintln!("[test] fetch notes from '{}' (non-fatal): {}", remote, stderr.trim());
+                eprintln!(
+                    "[test] fetch notes from '{}' (non-fatal): {}",
+                    remote,
+                    stderr.trim()
+                );
             }
             Err(e) => {
-                eprintln!("[test] fetch notes from '{}' failed (non-fatal): {}", remote, e);
+                eprintln!(
+                    "[test] fetch notes from '{}' failed (non-fatal): {}",
+                    remote, e
+                );
             }
         }
     }
@@ -979,10 +1014,20 @@ impl TestRepo {
         // that isn't a flag. For `git pull origin main` or `git fetch origin`,
         // the remote is the first non-flag argument after the subcommand.
         const VALUE_FLAGS: &[&str] = &[
-            "--upload-pack", "--refmap", "--depth", "--deepen",
-            "--shallow-since", "--shallow-exclude", "-o", "--server-option",
-            "--negotiation-tip", "--filter", "-j", "--jobs",
-            "--recurse-submodules-default", "--set-upstream",
+            "--upload-pack",
+            "--refmap",
+            "--depth",
+            "--deepen",
+            "--shallow-since",
+            "--shallow-exclude",
+            "-o",
+            "--server-option",
+            "--negotiation-tip",
+            "--filter",
+            "-j",
+            "--jobs",
+            "--recurse-submodules-default",
+            "--set-upstream",
         ];
         let mut skip_next = false;
         for arg in &args[1..] {
@@ -1076,7 +1121,9 @@ impl TestRepo {
         } else {
             return None;
         };
-        std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+        std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
     }
 
     /// Detect if a rebase command has an explicit branch argument.
@@ -1084,7 +1131,15 @@ impl TestRepo {
     /// Returns the branch name if present.
     fn detect_rebase_branch(&self, args: &[&str]) -> Option<String> {
         // Flags that consume the next argument as their value
-        const VALUE_FLAGS: &[&str] = &["--onto", "--exec", "-x", "--strategy", "-s", "--strategy-option", "-X"];
+        const VALUE_FLAGS: &[&str] = &[
+            "--onto",
+            "--exec",
+            "-x",
+            "--strategy",
+            "-s",
+            "--strategy-option",
+            "-X",
+        ];
         // Skip "rebase" itself, parse positional args (skipping flag values)
         let mut positional: Vec<&str> = Vec::new();
         let mut skip_next = false;
@@ -1104,7 +1159,7 @@ impl TestRepo {
         }
         // Format: [upstream [branch]]
         // With --root: [branch] (no upstream needed)
-        let has_root = args[1..].iter().any(|a| *a == "--root");
+        let has_root = args[1..].contains(&"--root");
         if has_root && !positional.is_empty() {
             // With --root, the only positional is the branch
             Some(positional[0].to_string())
@@ -1147,13 +1202,8 @@ impl TestRepo {
                 || !initial.sessions.is_empty()
                 || !initial.humans.is_empty()
             {
-                std::fs::create_dir_all(
-                    git_dir
-                        .join("ai")
-                        .join("working_logs")
-                        .join(target_base),
-                )
-                .ok();
+                std::fs::create_dir_all(git_dir.join("ai").join("working_logs").join(target_base))
+                    .ok();
                 git_ai::core::working_log::write_initial_attributions(
                     &git_dir,
                     target_base,
@@ -1166,8 +1216,7 @@ impl TestRepo {
             // gap-fill doesn't incorrectly attribute pre-existing lines to AI.
             if old_head != target_base {
                 let old_log_dir = git_dir.join("ai").join("working_logs").join(old_head);
-                let target_log_dir =
-                    git_dir.join("ai").join("working_logs").join(target_base);
+                let target_log_dir = git_dir.join("ai").join("working_logs").join(target_base);
 
                 if old_log_dir.exists() {
                     let old_checkpoints = old_log_dir.join("checkpoints.jsonl");
@@ -1266,8 +1315,7 @@ impl TestRepo {
 
             let old_lines: Vec<&str> = old_content.lines().collect();
             let new_lines: Vec<&str> = new_content.lines().collect();
-            let mapping =
-                git_ai::core::post_commit::build_line_mapping(&old_lines, &new_lines);
+            let mapping = git_ai::core::post_commit::build_line_mapping(&old_lines, &new_lines);
 
             let mut line_attrs: Vec<LineAttribution> = Vec::new();
             for entry in &file_att.entries {
@@ -1278,13 +1326,12 @@ impl TestRepo {
                     };
                     for old_line in start..=end {
                         if let Some(&new_line) = mapping.get(&old_line) {
-                            if let Some(last) = line_attrs.last_mut() {
-                                if last.author_id == entry.hash
-                                    && last.end_line + 1 == new_line
-                                {
-                                    last.end_line = new_line;
-                                    continue;
-                                }
+                            if let Some(last) = line_attrs.last_mut()
+                                && last.author_id == entry.hash
+                                && last.end_line + 1 == new_line
+                            {
+                                last.end_line = new_line;
+                                continue;
                             }
                             line_attrs.push(LineAttribution {
                                 start_line: new_line,
@@ -1349,11 +1396,7 @@ impl TestRepo {
     /// Uses the old commit's authorship note to determine correct attribution:
     /// - Lines that were AI in the old note keep their AI session ID
     /// - Lines that were human/unattributed get "human"
-    fn patch_empty_authors_in_checkpoints(
-        &self,
-        path: &std::path::Path,
-        old_head: &str,
-    ) -> String {
+    fn patch_empty_authors_in_checkpoints(&self, path: &std::path::Path, old_head: &str) -> String {
         let git = real_git_executable();
 
         // Build mapping: file -> Vec<(old_start, old_end, session_id)> from old note
@@ -1376,14 +1419,14 @@ impl TestRepo {
                             .to_string();
 
                         // Build new→old line mapping for this file
-                        let line_mapping = self.build_line_mapping_for_file(
-                            git, old_head, &file_path,
-                        );
+                        let line_mapping =
+                            self.build_line_mapping_for_file(git, old_head, &file_path);
 
                         let file_ai_info = old_ai_lines.get(&file_path);
 
-                        if let Some(line_attrs) =
-                            entry.get_mut("line_attributions").and_then(|a| a.as_array_mut())
+                        if let Some(line_attrs) = entry
+                            .get_mut("line_attributions")
+                            .and_then(|a| a.as_array_mut())
                         {
                             for attr in line_attrs.iter_mut() {
                                 let is_empty = attr
@@ -1397,11 +1440,9 @@ impl TestRepo {
                                         .and_then(|v| v.as_u64())
                                         .unwrap_or(0)
                                         as u32;
-                                    let end = attr
-                                        .get("end_line")
-                                        .and_then(|v| v.as_u64())
-                                        .unwrap_or(0)
-                                        as u32;
+                                    let end =
+                                        attr.get("end_line").and_then(|v| v.as_u64()).unwrap_or(0)
+                                            as u32;
                                     let new_author = self.find_old_author_for_lines(
                                         start,
                                         end,
@@ -1416,9 +1457,8 @@ impl TestRepo {
                         }
                     }
                 }
-                result.push_str(
-                    &serde_json::to_string(&value).unwrap_or_else(|_| line.to_string()),
-                );
+                result
+                    .push_str(&serde_json::to_string(&value).unwrap_or_else(|_| line.to_string()));
             } else {
                 result.push_str(line);
             }
@@ -1433,26 +1473,22 @@ impl TestRepo {
         commit_sha: &str,
     ) -> std::collections::HashMap<String, Vec<(u32, u32, String)>> {
         let mut result = std::collections::HashMap::new();
-        if let Some(note_content) = self.read_authorship_note(commit_sha) {
-            if let Ok(log) = AuthorshipLog::deserialize_from_string(&note_content) {
-                for file_att in &log.attestations {
-                    let mut ranges = Vec::new();
-                    for entry in &file_att.entries {
-                        for range in &entry.line_ranges {
-                            let (start, end) = match range {
-                                git_ai::authorship::authorship_log::LineRange::Single(l) => {
-                                    (*l, *l)
-                                }
-                                git_ai::authorship::authorship_log::LineRange::Range(s, e) => {
-                                    (*s, *e)
-                                }
-                            };
-                            ranges.push((start, end, entry.hash.clone()));
-                        }
+        if let Some(note_content) = self.read_authorship_note(commit_sha)
+            && let Ok(log) = AuthorshipLog::deserialize_from_string(&note_content)
+        {
+            for file_att in &log.attestations {
+                let mut ranges = Vec::new();
+                for entry in &file_att.entries {
+                    for range in &entry.line_ranges {
+                        let (start, end) = match range {
+                            git_ai::authorship::authorship_log::LineRange::Single(l) => (*l, *l),
+                            git_ai::authorship::authorship_log::LineRange::Range(s, e) => (*s, *e),
+                        };
+                        ranges.push((start, end, entry.hash.clone()));
                     }
-                    if !ranges.is_empty() {
-                        result.insert(file_att.file_path.clone(), ranges);
-                    }
+                }
+                if !ranges.is_empty() {
+                    result.insert(file_att.file_path.clone(), ranges);
                 }
             }
         }
@@ -1602,18 +1638,28 @@ impl TestRepo {
 
         // Find old commits that had notes and were on the branch before rebase
         // but are no longer on the branch after rebase (they were rewritten)
-        let post_set: std::collections::HashSet<&String> =
-            post_rebase_commits.iter().collect();
-        let noted_set: std::collections::HashSet<&String> =
-            noted_commits.iter().collect();
+        let post_set: std::collections::HashSet<&String> = post_rebase_commits.iter().collect();
+        let noted_set: std::collections::HashSet<&String> = noted_commits.iter().collect();
         let old_with_notes: Vec<&String> = pre_rebase_commits
             .iter()
             .filter(|c| noted_set.contains(c) && !post_set.contains(c))
             .collect();
 
-        eprintln!("[test] post-rewrite: noted_commits={:?}", noted_commits.iter().map(|s| &s[..7]).collect::<Vec<_>>());
-        eprintln!("[test] post-rewrite: post_rebase_commits={:?}", post_rebase_commits.iter().map(|s| &s[..7]).collect::<Vec<_>>());
-        eprintln!("[test] post-rewrite: old_with_notes={:?}", old_with_notes.iter().map(|s| &s[..7]).collect::<Vec<_>>());
+        eprintln!(
+            "[test] post-rewrite: noted_commits={:?}",
+            noted_commits.iter().map(|s| &s[..7]).collect::<Vec<_>>()
+        );
+        eprintln!(
+            "[test] post-rewrite: post_rebase_commits={:?}",
+            post_rebase_commits
+                .iter()
+                .map(|s| &s[..7])
+                .collect::<Vec<_>>()
+        );
+        eprintln!(
+            "[test] post-rewrite: old_with_notes={:?}",
+            old_with_notes.iter().map(|s| &s[..7]).collect::<Vec<_>>()
+        );
 
         if old_with_notes.is_empty() {
             eprintln!("[test] post-rewrite: no old commits with notes found");
@@ -1662,12 +1708,19 @@ impl TestRepo {
 
         // Filter out old commits that already have a matching new commit with a note
         // (these were handled by a previous rebase in the same stack)
-        let old_msgs: Vec<(String, String)> = old_msgs.into_iter().filter(|(_, old_msg)| {
-            !already_noted_new_msgs.iter().any(|(_, new_msg)| new_msg == old_msg)
-        }).collect();
+        let old_msgs: Vec<(String, String)> = old_msgs
+            .into_iter()
+            .filter(|(_, old_msg)| {
+                !already_noted_new_msgs
+                    .iter()
+                    .any(|(_, new_msg)| new_msg == old_msg)
+            })
+            .collect();
 
         if old_msgs.is_empty() {
-            eprintln!("[test] post-rewrite: all old commits already have matching noted new commits");
+            eprintln!(
+                "[test] post-rewrite: all old commits already have matching noted new commits"
+            );
             return;
         }
 
@@ -1677,9 +1730,10 @@ impl TestRepo {
         let mut one_to_one: Vec<(String, String)> = Vec::new(); // (old, new)
 
         for (old_sha, old_msg) in &old_msgs {
-            if let Some((new_sha, _)) = new_msgs.iter().find(|(ns, nm)| {
-                nm == old_msg && !matched_new.contains(ns)
-            }) {
+            if let Some((new_sha, _)) = new_msgs
+                .iter()
+                .find(|(ns, nm)| nm == old_msg && !matched_new.contains(ns))
+            {
                 matched_old.insert(old_sha.clone());
                 matched_new.insert(new_sha.clone());
                 one_to_one.push((old_sha.clone(), new_sha.clone()));
@@ -1764,7 +1818,8 @@ impl TestRepo {
 
             if let Some(target) = squash_target {
                 // Reverse to chronological order (oldest first) since pre_rebase_commits is newest-first
-                let all_originals: Vec<String> = old_msgs.iter().rev().map(|(sha, _)| sha.clone()).collect();
+                let all_originals: Vec<String> =
+                    old_msgs.iter().rev().map(|(sha, _)| sha.clone()).collect();
                 eprintln!(
                     "[test] post-rewrite: squash transfer {:?} -> {}",
                     all_originals.iter().map(|s| &s[..7]).collect::<Vec<_>>(),
@@ -1782,7 +1837,11 @@ impl TestRepo {
                     let stdout = String::from_utf8_lossy(&o.stdout);
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     if !stdout.is_empty() || !stderr.is_empty() {
-                        eprintln!("[test] post-rewrite-squash result: {} {}", stdout.trim(), stderr.trim());
+                        eprintln!(
+                            "[test] post-rewrite-squash result: {} {}",
+                            stdout.trim(),
+                            stderr.trim()
+                        );
                     }
                 }
 
@@ -1791,7 +1850,11 @@ impl TestRepo {
                     if *new_sha == target {
                         continue;
                     }
-                    eprintln!("[test] post-rewrite: transferring {} -> {}", &old_sha[..7], &new_sha[..7]);
+                    eprintln!(
+                        "[test] post-rewrite: transferring {} -> {}",
+                        &old_sha[..7],
+                        &new_sha[..7]
+                    );
                     let binary_path = get_binary_path();
                     let output = Command::new(binary_path)
                         .current_dir(&self.path)
@@ -1802,14 +1865,22 @@ impl TestRepo {
                         let stdout = String::from_utf8_lossy(&o.stdout);
                         let stderr = String::from_utf8_lossy(&o.stderr);
                         if !stdout.is_empty() || !stderr.is_empty() {
-                            eprintln!("[test] post-rewrite result: {} {}", stdout.trim(), stderr.trim());
+                            eprintln!(
+                                "[test] post-rewrite result: {} {}",
+                                stdout.trim(),
+                                stderr.trim()
+                            );
                         }
                     }
                 }
             } else {
                 // No squash target found, fall back to 1:1 transfers only
                 for (old_sha, new_sha) in &one_to_one {
-                    eprintln!("[test] post-rewrite: transferring {} -> {}", &old_sha[..7], &new_sha[..7]);
+                    eprintln!(
+                        "[test] post-rewrite: transferring {} -> {}",
+                        &old_sha[..7],
+                        &new_sha[..7]
+                    );
                     let binary_path = get_binary_path();
                     let output = Command::new(binary_path)
                         .current_dir(&self.path)
@@ -1820,7 +1891,11 @@ impl TestRepo {
                         let stdout = String::from_utf8_lossy(&o.stdout);
                         let stderr = String::from_utf8_lossy(&o.stderr);
                         if !stdout.is_empty() || !stderr.is_empty() {
-                            eprintln!("[test] post-rewrite result: {} {}", stdout.trim(), stderr.trim());
+                            eprintln!(
+                                "[test] post-rewrite result: {} {}",
+                                stdout.trim(),
+                                stderr.trim()
+                            );
                         }
                     }
                 }
@@ -1884,7 +1959,11 @@ impl TestRepo {
 
                 if let Some(idx) = matched_new_sha {
                     let new_sha = remaining_new.remove(idx);
-                    eprintln!("[test] post-rewrite: transferring {} -> {} (patch-id match)", &old_sha[..7], &new_sha[..7]);
+                    eprintln!(
+                        "[test] post-rewrite: transferring {} -> {} (patch-id match)",
+                        &old_sha[..7],
+                        &new_sha[..7]
+                    );
                     let binary_path = get_binary_path();
                     let output = Command::new(binary_path)
                         .current_dir(&self.path)
@@ -1895,17 +1974,28 @@ impl TestRepo {
                         let stdout = String::from_utf8_lossy(&o.stdout);
                         let stderr = String::from_utf8_lossy(&o.stderr);
                         if !stdout.is_empty() || !stderr.is_empty() {
-                            eprintln!("[test] post-rewrite result: {} {}", stdout.trim(), stderr.trim());
+                            eprintln!(
+                                "[test] post-rewrite result: {} {}",
+                                stdout.trim(),
+                                stderr.trim()
+                            );
                         }
                     }
                 } else {
-                    eprintln!("[test] post-rewrite: no patch-id match for old {}", &old_sha[..7]);
+                    eprintln!(
+                        "[test] post-rewrite: no patch-id match for old {}",
+                        &old_sha[..7]
+                    );
                 }
             }
 
             // Transfer all subject-matched pairs
             for (old_sha, new_sha) in &one_to_one {
-                eprintln!("[test] post-rewrite: transferring {} -> {}", &old_sha[..7], &new_sha[..7]);
+                eprintln!(
+                    "[test] post-rewrite: transferring {} -> {}",
+                    &old_sha[..7],
+                    &new_sha[..7]
+                );
                 let binary_path = get_binary_path();
                 let output = Command::new(binary_path)
                     .current_dir(&self.path)
@@ -1916,14 +2006,22 @@ impl TestRepo {
                     let stdout = String::from_utf8_lossy(&o.stdout);
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     if !stdout.is_empty() || !stderr.is_empty() {
-                        eprintln!("[test] post-rewrite result: {} {}", stdout.trim(), stderr.trim());
+                        eprintln!(
+                            "[test] post-rewrite result: {} {}",
+                            stdout.trim(),
+                            stderr.trim()
+                        );
                     }
                 }
             }
         } else {
             // No unmatched old commits — pure 1:1 rebase scenario
             for (old_sha, new_sha) in &one_to_one {
-                eprintln!("[test] post-rewrite: transferring {} -> {}", &old_sha[..7], &new_sha[..7]);
+                eprintln!(
+                    "[test] post-rewrite: transferring {} -> {}",
+                    &old_sha[..7],
+                    &new_sha[..7]
+                );
                 let binary_path = get_binary_path();
                 let output = Command::new(binary_path)
                     .current_dir(&self.path)
@@ -1934,7 +2032,11 @@ impl TestRepo {
                     let stdout = String::from_utf8_lossy(&o.stdout);
                     let stderr = String::from_utf8_lossy(&o.stderr);
                     if !stdout.is_empty() || !stderr.is_empty() {
-                        eprintln!("[test] post-rewrite result: {} {}", stdout.trim(), stderr.trim());
+                        eprintln!(
+                            "[test] post-rewrite result: {} {}",
+                            stdout.trim(),
+                            stderr.trim()
+                        );
                     }
                 }
             }
@@ -1947,8 +2049,13 @@ impl TestRepo {
         let git = real_git_executable();
         // Flags that consume the next argument as their value
         const VALUE_FLAGS: &[&str] = &[
-            "--strategy", "-s", "--strategy-option", "-X", "--cleanup",
-            "--mainline", "-m",
+            "--strategy",
+            "-s",
+            "--strategy-option",
+            "-X",
+            "--cleanup",
+            "--mainline",
+            "-m",
         ];
         let mut sources: Vec<String> = Vec::new();
         let mut skip_next = false;
@@ -1974,13 +2081,13 @@ impl TestRepo {
                     .args(["rev-list", "--reverse", arg_str])
                     .env("GIT_TRACE2_EVENT", "/dev/null")
                     .output();
-                if let Ok(o) = output {
-                    if o.status.success() {
-                        for line in String::from_utf8_lossy(&o.stdout).lines() {
-                            let sha = line.trim().to_string();
-                            if !sha.is_empty() {
-                                sources.push(sha);
-                            }
+                if let Ok(o) = output
+                    && o.status.success()
+                {
+                    for line in String::from_utf8_lossy(&o.stdout).lines() {
+                        let sha = line.trim().to_string();
+                        if !sha.is_empty() {
+                            sources.push(sha);
                         }
                     }
                 }
@@ -1991,12 +2098,12 @@ impl TestRepo {
                     .args(["rev-parse", arg_str])
                     .env("GIT_TRACE2_EVENT", "/dev/null")
                     .output();
-                if let Ok(o) = output {
-                    if o.status.success() {
-                        let sha = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        if !sha.is_empty() {
-                            sources.push(sha);
-                        }
+                if let Ok(o) = output
+                    && o.status.success()
+                {
+                    let sha = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if !sha.is_empty() {
+                        sources.push(sha);
                     }
                 }
             }
@@ -2082,10 +2189,10 @@ impl TestRepo {
         }
 
         // Pass config patch as env var.
-        if let Some(ref patch) = self.config_patch {
-            if let Ok(json) = serde_json::to_string(patch) {
-                command.env("GIT_AI_TEST_CONFIG_PATCH", json);
-            }
+        if let Some(ref patch) = self.config_patch
+            && let Ok(json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", json);
         }
 
         // Set HOME to test_home_path for isolation.
@@ -2205,8 +2312,8 @@ impl TestRepo {
         let git = real_git_executable();
 
         let is_rebase = args.first().map(|a| *a == "rebase").unwrap_or(false);
-        let is_rebase_continuation = is_rebase
-            && args.iter().any(|a| *a == "--skip" || *a == "--continue");
+        let is_rebase_continuation =
+            is_rebase && args.iter().any(|a| *a == "--skip" || *a == "--continue");
         let pre_rebase_commits = if is_rebase {
             if is_rebase_continuation {
                 // For --skip/--continue, read the original HEAD from rebase state
@@ -2304,7 +2411,13 @@ impl TestRepo {
 
         // Set default branch to main
         Command::new(git)
-            .args(["-C", upstream_path.to_str().unwrap(), "symbolic-ref", "HEAD", "refs/heads/main"])
+            .args([
+                "-C",
+                upstream_path.to_str().unwrap(),
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/main",
+            ])
             .env("GIT_TRACE2_EVENT", "/dev/null")
             .output()
             .ok();
@@ -2320,16 +2433,36 @@ impl TestRepo {
         let local_dir = tempfile::tempdir().expect("failed to create local temp dir");
         let local_path = local_dir.path().to_path_buf();
         let output = Command::new(git)
-            .args(["clone", upstream_path.to_str().unwrap(), local_path.to_str().unwrap()])
+            .args([
+                "clone",
+                upstream_path.to_str().unwrap(),
+                local_path.to_str().unwrap(),
+            ])
             .env("GIT_TRACE2_EVENT", "/dev/null")
             .output()
             .expect("failed to clone");
-        assert!(output.status.success(), "git clone failed: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(
+            output.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
 
         // Configure local
         for args in [
-            vec!["-C", local_path.to_str().unwrap(), "config", "user.name", "Test User"],
-            vec!["-C", local_path.to_str().unwrap(), "config", "user.email", "test@example.com"],
+            vec![
+                "-C",
+                local_path.to_str().unwrap(),
+                "config",
+                "user.name",
+                "Test User",
+            ],
+            vec![
+                "-C",
+                local_path.to_str().unwrap(),
+                "config",
+                "user.email",
+                "test@example.com",
+            ],
         ] {
             Command::new(git)
                 .args(&args)
@@ -2425,10 +2558,22 @@ impl TestRepo {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if output.status.success() {
-            let combined = if stdout.is_empty() { stderr } else if stderr.is_empty() { stdout } else { format!("{}{}", stdout, stderr) };
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stdout, stderr)
+            };
             Ok(combined)
         } else {
-            let combined = if stdout.is_empty() { stderr } else if stderr.is_empty() { stdout } else { format!("{}{}", stderr, stdout) };
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stderr, stdout)
+            };
             Err(combined)
         }
     }
@@ -2450,10 +2595,22 @@ impl TestRepo {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if output.status.success() {
-            let combined = if stdout.is_empty() { stderr } else if stderr.is_empty() { stdout } else { format!("{}{}", stdout, stderr) };
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stdout, stderr)
+            };
             Ok(combined)
         } else {
-            let combined = if stdout.is_empty() { stderr } else if stderr.is_empty() { stdout } else { format!("{}{}", stderr, stdout) };
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stderr, stdout)
+            };
             Err(combined)
         }
     }
@@ -2478,10 +2635,22 @@ impl TestRepo {
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if output.status.success() {
-            let combined = if stdout.is_empty() { stderr } else if stderr.is_empty() { stdout } else { format!("{}{}", stdout, stderr) };
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stdout, stderr)
+            };
             Ok(combined)
         } else {
-            let combined = if stdout.is_empty() { stderr } else if stderr.is_empty() { stdout } else { format!("{}{}", stderr, stdout) };
+            let combined = if stdout.is_empty() {
+                stderr
+            } else if stderr.is_empty() {
+                stdout
+            } else {
+                format!("{}{}", stderr, stdout)
+            };
             Err(combined)
         }
     }
@@ -2497,11 +2666,7 @@ impl TestRepo {
         let wall_start = Instant::now();
 
         // Run with performance instrumentation
-        let result = self.git_with_env(
-            args,
-            &[("GIT_AI_DEBUG_PERFORMANCE", "2")],
-            None,
-        );
+        let result = self.git_with_env(args, &[("GIT_AI_DEBUG_PERFORMANCE", "2")], None);
         let wall_duration = wall_start.elapsed();
 
         // If the command failed, return the error
@@ -2526,59 +2691,52 @@ impl TestRepo {
         for line in output_text.lines() {
             let trimmed = line.trim();
             // Look for performance JSON in various formats
-            if let Some(json_str) = trimmed.strip_prefix("[git-ai:perf]") {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str.trim()) {
-                    if let Some(phase) = val.get("phase").and_then(|p| p.as_str()) {
-                        let ms = val
-                            .get("duration_ms")
-                            .and_then(|d| d.as_u64())
-                            .unwrap_or(0);
-                        match phase {
-                            "pre_command" | "pre" => {
-                                pre_ms += ms;
-                                found_perf = true;
-                            }
-                            "git" | "git_command" | "child" => {
-                                git_ms += ms;
-                                found_perf = true;
-                            }
-                            "post_command" | "post" => {
-                                post_ms += ms;
-                                found_perf = true;
-                            }
-                            "total" => {
-                                // If we get a total, use it to cross-check
-                                found_perf = true;
-                            }
-                            _ => {}
-                        }
+            if let Some(json_str) = trimmed.strip_prefix("[git-ai:perf]")
+                && let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str.trim())
+                && let Some(phase) = val.get("phase").and_then(|p| p.as_str())
+            {
+                let ms = val.get("duration_ms").and_then(|d| d.as_u64()).unwrap_or(0);
+                match phase {
+                    "pre_command" | "pre" => {
+                        pre_ms += ms;
+                        found_perf = true;
                     }
+                    "git" | "git_command" | "child" => {
+                        git_ms += ms;
+                        found_perf = true;
+                    }
+                    "post_command" | "post" => {
+                        post_ms += ms;
+                        found_perf = true;
+                    }
+                    "total" => {
+                        // If we get a total, use it to cross-check
+                        found_perf = true;
+                    }
+                    _ => {}
                 }
             }
             // Also try plain key=value format: "PRE_COMMAND=123ms"
-            if trimmed.starts_with("PRE_COMMAND=") || trimmed.starts_with("pre_command=") {
-                if let Some(val) = trimmed.split('=').nth(1) {
-                    if let Ok(ms) = val.trim_end_matches("ms").parse::<u64>() {
-                        pre_ms = ms;
-                        found_perf = true;
-                    }
-                }
+            if (trimmed.starts_with("PRE_COMMAND=") || trimmed.starts_with("pre_command="))
+                && let Some(val) = trimmed.split('=').nth(1)
+                && let Ok(ms) = val.trim_end_matches("ms").parse::<u64>()
+            {
+                pre_ms = ms;
+                found_perf = true;
             }
-            if trimmed.starts_with("GIT_COMMAND=") || trimmed.starts_with("git_command=") {
-                if let Some(val) = trimmed.split('=').nth(1) {
-                    if let Ok(ms) = val.trim_end_matches("ms").parse::<u64>() {
-                        git_ms = ms;
-                        found_perf = true;
-                    }
-                }
+            if (trimmed.starts_with("GIT_COMMAND=") || trimmed.starts_with("git_command="))
+                && let Some(val) = trimmed.split('=').nth(1)
+                && let Ok(ms) = val.trim_end_matches("ms").parse::<u64>()
+            {
+                git_ms = ms;
+                found_perf = true;
             }
-            if trimmed.starts_with("POST_COMMAND=") || trimmed.starts_with("post_command=") {
-                if let Some(val) = trimmed.split('=').nth(1) {
-                    if let Ok(ms) = val.trim_end_matches("ms").parse::<u64>() {
-                        post_ms = ms;
-                        found_perf = true;
-                    }
-                }
+            if (trimmed.starts_with("POST_COMMAND=") || trimmed.starts_with("post_command="))
+                && let Some(val) = trimmed.split('=').nth(1)
+                && let Ok(ms) = val.trim_end_matches("ms").parse::<u64>()
+            {
+                post_ms = ms;
+                found_perf = true;
             }
         }
 

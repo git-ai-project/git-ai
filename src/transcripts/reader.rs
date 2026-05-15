@@ -54,9 +54,9 @@ pub fn read_jsonl_incremental(
     })?;
 
     let mut reader = BufReader::new(file);
-    reader.seek(SeekFrom::Start(byte_offset)).map_err(|e| {
-        TranscriptError::Io(format!("seek to {}: {}", byte_offset, e))
-    })?;
+    reader
+        .seek(SeekFrom::Start(byte_offset))
+        .map_err(|e| TranscriptError::Io(format!("seek to {}: {}", byte_offset, e)))?;
 
     let mut events = Vec::with_capacity(batch_size.min(256));
     let mut current_offset = byte_offset;
@@ -64,9 +64,9 @@ pub fn read_jsonl_incremental(
 
     loop {
         line.clear();
-        let bytes_read = reader.read_line(&mut line).map_err(|e| {
-            TranscriptError::Io(format!("read line: {}", e))
-        })?;
+        let bytes_read = reader
+            .read_line(&mut line)
+            .map_err(|e| TranscriptError::Io(format!("read line: {}", e)))?;
 
         if bytes_read == 0 {
             break;
@@ -113,16 +113,14 @@ pub fn read_json_array_incremental(
     })?;
 
     let mut content = String::new();
-    file.read_to_string(&mut content).map_err(|e| {
-        TranscriptError::Io(format!("read {}: {}", path.display(), e))
-    })?;
+    file.read_to_string(&mut content)
+        .map_err(|e| TranscriptError::Io(format!("read {}: {}", path.display(), e)))?;
 
-    let parsed: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
-        TranscriptError::Parse {
+    let parsed: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| TranscriptError::Parse {
             line: 0,
             message: format!("invalid JSON: {}", e),
-        }
-    })?;
+        })?;
 
     let array = match parsed.as_array() {
         Some(arr) => arr,
@@ -136,18 +134,16 @@ pub fn read_json_array_incremental(
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| TranscriptError::Parse {
                     line: 0,
-                    message: "expected JSON array or object with messages/events/thread/history key".into(),
+                    message:
+                        "expected JSON array or object with messages/events/thread/history key"
+                            .into(),
                 })?
         }
     };
 
     let skip = record_index as usize;
-    let events: Vec<serde_json::Value> = array
-        .iter()
-        .skip(skip)
-        .take(batch_size)
-        .cloned()
-        .collect();
+    let events: Vec<serde_json::Value> =
+        array.iter().skip(skip).take(batch_size).cloned().collect();
 
     let new_index = skip as u64 + events.len() as u64;
 

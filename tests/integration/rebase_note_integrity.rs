@@ -91,10 +91,7 @@ fn test_rebase_intermediate_commits_have_correct_attribution() {
 
     // Commit A: modifies shared.rs + creates module_a.rs
     let mut shared = repo.filename("shared.rs");
-    shared.set_contents(crate::lines![
-        "fn original() {}",
-        "fn feature_a() {}".ai()
-    ]);
+    shared.set_contents(crate::lines!["fn original() {}", "fn feature_a() {}".ai()]);
     let mut module_a = repo.filename("module_a.rs");
     module_a.set_contents(crate::lines!["fn ma() {}".ai()]);
     repo.stage_all_and_commit("Commit A: shared + module_a")
@@ -280,20 +277,17 @@ fn test_rebase_three_commit_chain_no_leakage() {
     // Three commits each adding a unique file
     let file_path_1 = repo.path().join("feat1.rs");
     fs::write(&file_path_1, "fn feat1() {}\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "feat1.rs"])
-        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feat1.rs"]).unwrap();
     repo.stage_all_and_commit("feat: add feat1.rs").unwrap();
 
     let file_path_2 = repo.path().join("feat2.rs");
     fs::write(&file_path_2, "fn feat2() {}\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "feat2.rs"])
-        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feat2.rs"]).unwrap();
     repo.stage_all_and_commit("feat: add feat2.rs").unwrap();
 
     let file_path_3 = repo.path().join("feat3.rs");
     fs::write(&file_path_3, "fn feat3() {}\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "feat3.rs"])
-        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feat3.rs"]).unwrap();
     repo.stage_all_and_commit("feat: add feat3.rs").unwrap();
 
     // Rebase onto updated main

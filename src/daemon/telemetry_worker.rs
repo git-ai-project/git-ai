@@ -62,7 +62,11 @@ impl TelemetryHandle {
 
     /// Submit a CAS object for upload.
     /// The hash is computed as SHA256 of the JSON-serialized content.
-    pub fn submit_cas(&self, content: serde_json::Value, metadata: std::collections::HashMap<String, String>) {
+    pub fn submit_cas(
+        &self,
+        content: serde_json::Value,
+        metadata: std::collections::HashMap<String, String>,
+    ) {
         let content_json = serde_json::to_string(&content).unwrap_or_default();
         let hash = {
             let mut hasher = Sha256::new();
@@ -110,12 +114,12 @@ fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, shutdown: Arc<Atomi
 
         if shutdown.load(Ordering::Relaxed) {
             // Final flush before exit
-            if let Ok(mut buf) = buffer.lock() {
-                if !buf.is_empty() {
-                    let snapshot = buf.take();
-                    drop(buf);
-                    flush_batch(snapshot);
-                }
+            if let Ok(mut buf) = buffer.lock()
+                && !buf.is_empty()
+            {
+                let snapshot = buf.take();
+                drop(buf);
+                flush_batch(snapshot);
             }
             break;
         }
@@ -199,7 +203,11 @@ mod tests {
             buffer: buffer.clone(),
         };
 
-        let event = MetricEvent::new(MetricEventId::Committed, SparseArray::new(), SparseArray::new());
+        let event = MetricEvent::new(
+            MetricEventId::Committed,
+            SparseArray::new(),
+            SparseArray::new(),
+        );
         handle.submit_metric(event);
 
         let buf = buffer.lock().unwrap();

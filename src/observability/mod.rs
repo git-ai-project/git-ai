@@ -18,13 +18,13 @@ enum PerfMode {
 /// Returns the cached performance mode (reads env once).
 fn perf_mode() -> PerfMode {
     static MODE: OnceLock<PerfMode> = OnceLock::new();
-    *MODE.get_or_init(|| {
-        match std::env::var("GIT_AI_DEBUG_PERFORMANCE").as_deref() {
+    *MODE.get_or_init(
+        || match std::env::var("GIT_AI_DEBUG_PERFORMANCE").as_deref() {
             Ok("1") => PerfMode::Human,
             Ok("2") => PerfMode::Json,
             _ => PerfMode::Off,
-        }
-    })
+        },
+    )
 }
 
 /// A lightweight performance timer that measures wall-clock elapsed time.
@@ -134,18 +134,42 @@ pub struct PerfBudget {
 
 /// Performance budgets for critical operations (in milliseconds).
 pub static BUDGETS: &[PerfBudget] = &[
-    PerfBudget { operation: "checkpoint", budget_ms: 3 },
-    PerfBudget { operation: "post_commit_daemon", budget_ms: 1 },
-    PerfBudget { operation: "post_commit_sync", budget_ms: 3 },
-    PerfBudget { operation: "blame_100", budget_ms: 6 },
-    PerfBudget { operation: "blame_500", budget_ms: 11 },
-    PerfBudget { operation: "blame_1000", budget_ms: 16 },
-    PerfBudget { operation: "startup", budget_ms: 1 },
+    PerfBudget {
+        operation: "checkpoint",
+        budget_ms: 3,
+    },
+    PerfBudget {
+        operation: "post_commit_daemon",
+        budget_ms: 1,
+    },
+    PerfBudget {
+        operation: "post_commit_sync",
+        budget_ms: 3,
+    },
+    PerfBudget {
+        operation: "blame_100",
+        budget_ms: 6,
+    },
+    PerfBudget {
+        operation: "blame_500",
+        budget_ms: 11,
+    },
+    PerfBudget {
+        operation: "blame_1000",
+        budget_ms: 16,
+    },
+    PerfBudget {
+        operation: "startup",
+        budget_ms: 1,
+    },
 ];
 
 /// Look up the budget for a given operation name.
 pub fn get_budget(operation: &str) -> Option<u64> {
-    BUDGETS.iter().find(|b| b.operation == operation).map(|b| b.budget_ms)
+    BUDGETS
+        .iter()
+        .find(|b| b.operation == operation)
+        .map(|b| b.budget_ms)
 }
 
 /// Times a block and reports on drop. Zero-cost when perf debugging is off
@@ -214,12 +238,19 @@ mod tests {
         let label = "checkpoint";
         let elapsed: u64 = 2;
         let budget: u64 = 3;
-        let status = if elapsed > budget { "\u{26a0} OVER BUDGET" } else { "\u{2713}" };
+        let status = if elapsed > budget {
+            "\u{26a0} OVER BUDGET"
+        } else {
+            "\u{2713}"
+        };
         let output = format!(
             "[git-ai perf] {}: {}ms (budget: {}ms) {}",
             label, elapsed, budget, status
         );
-        assert_eq!(output, "[git-ai perf] checkpoint: 2ms (budget: 3ms) \u{2713}");
+        assert_eq!(
+            output,
+            "[git-ai perf] checkpoint: 2ms (budget: 3ms) \u{2713}"
+        );
     }
 
     #[test]
@@ -227,7 +258,11 @@ mod tests {
         let label = "post_commit_sync";
         let elapsed: u64 = 5;
         let budget: u64 = 3;
-        let status = if elapsed > budget { "\u{26a0} OVER BUDGET" } else { "\u{2713}" };
+        let status = if elapsed > budget {
+            "\u{26a0} OVER BUDGET"
+        } else {
+            "\u{2713}"
+        };
         let output = format!(
             "[git-ai perf] {}: {}ms (budget: {}ms) {}",
             label, elapsed, budget, status
@@ -274,10 +309,7 @@ mod tests {
     fn test_json_format_no_budget() {
         let label = "custom_op";
         let elapsed: u64 = 7;
-        let output = format!(
-            r#"{{"operation":"{}","elapsed_ms":{}}}"#,
-            label, elapsed,
-        );
+        let output = format!(r#"{{"operation":"{}","elapsed_ms":{}}}"#, label, elapsed,);
         assert_eq!(output, r#"{"operation":"custom_op","elapsed_ms":7}"#);
     }
 

@@ -394,16 +394,16 @@ fn detect_squash_groups(mappings: &[CommitMapping]) -> HashMap<String, SquashGro
                 }
             }
             MappingKind::Modified | MappingKind::Added => {
-                if !pending_deleted.is_empty() {
-                    if let Some(new) = &mapping.new {
-                        groups.insert(
-                            new.clone(),
-                            SquashGroup {
-                                matched_original: mapping.original.clone(),
-                                deleted_originals: std::mem::take(&mut pending_deleted),
-                            },
-                        );
-                    }
+                if !pending_deleted.is_empty()
+                    && let Some(new) = &mapping.new
+                {
+                    groups.insert(
+                        new.clone(),
+                        SquashGroup {
+                            matched_original: mapping.original.clone(),
+                            deleted_originals: std::mem::take(&mut pending_deleted),
+                        },
+                    );
                 }
                 pending_deleted.clear();
             }
@@ -530,7 +530,10 @@ fn attestation_entries_to_line_attributions(entries: &[AttestationEntry]) -> Vec
 
 /// Build a FileAttestation from a flat list of line attributions.
 /// Merges adjacent ranges and groups by author. Returns None if empty.
-fn build_file_attestation(file_path: &str, line_attrs: &[LineAttribution]) -> Option<FileAttestation> {
+fn build_file_attestation(
+    file_path: &str,
+    line_attrs: &[LineAttribution],
+) -> Option<FileAttestation> {
     let mut by_author: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
     for attr in line_attrs {
         // Skip "human" placeholder attributions (untracked changes)
@@ -735,7 +738,11 @@ fn process_rebase(repo_path: &Path) -> Result<u32, String> {
     // After rebase, the rebased commits are the last N on new_head, so onto = new_head~N.
     let orig_count_str = git_in_repo(
         repo_path,
-        &["rev-list", "--count", &format!("{}..{}", merge_base, orig_head)],
+        &[
+            "rev-list",
+            "--count",
+            &format!("{}..{}", merge_base, orig_head),
+        ],
     )
     .unwrap_or_else(|_| "0".to_string());
     let orig_count: usize = orig_count_str.trim().parse().unwrap_or(0);
@@ -776,10 +783,10 @@ fn process_rebase(repo_path: &Path) -> Result<u32, String> {
 
         match mapping.kind {
             MappingKind::Identical => {
-                if let (Some(original), Some(new)) = (&mapping.original, &mapping.new) {
-                    if copy_note_with_remap(repo_path, original, new)? {
-                        processed += 1;
-                    }
+                if let (Some(original), Some(new)) = (&mapping.original, &mapping.new)
+                    && copy_note_with_remap(repo_path, original, new)?
+                {
+                    processed += 1;
                 }
             }
             MappingKind::Modified => {
@@ -794,12 +801,11 @@ fn process_rebase(repo_path: &Path) -> Result<u32, String> {
                 }
             }
             MappingKind::Added => {
-                if let Some(new) = &mapping.new {
-                    if let Some(group) = squash_groups.get(new.as_str()) {
-                        if transfer_attribution_squash(repo_path, &group.all_originals(), new)? {
-                            processed += 1;
-                        }
-                    }
+                if let Some(new) = &mapping.new
+                    && let Some(group) = squash_groups.get(new.as_str())
+                    && transfer_attribution_squash(repo_path, &group.all_originals(), new)?
+                {
+                    processed += 1;
                 }
             }
             MappingKind::Deleted => unreachable!(),
@@ -867,10 +873,8 @@ fn process_rebase_positional(
             .iter()
             .map(|s| s.to_string())
             .collect();
-        if !remaining.is_empty() {
-            if transfer_attribution_squash(repo_path, &remaining, last_new)? {
-                processed += 1;
-            }
+        if !remaining.is_empty() && transfer_attribution_squash(repo_path, &remaining, last_new)? {
+            processed += 1;
         }
     }
 
@@ -920,10 +924,10 @@ fn process_cherry_pick(repo_path: &Path) -> Result<u32, String> {
 
     let mut processed = 0u32;
     for new_sha in &new_commits {
-        if let Some(source_sha) = find_cherry_pick_source(repo_path, new_sha) {
-            if transfer_attribution_via_diff(repo_path, &source_sha, new_sha)? {
-                processed += 1;
-            }
+        if let Some(source_sha) = find_cherry_pick_source(repo_path, new_sha)
+            && transfer_attribution_via_diff(repo_path, &source_sha, new_sha)?
+        {
+            processed += 1;
         }
     }
 
@@ -1195,16 +1199,15 @@ pub fn transfer_attribution_squash(
                 let prev_content = prev_contents.get(file_path).map(String::as_str);
                 let curr_content = current_contents.get(file_path).map(String::as_str);
 
-                if let (Some(prev_c), Some(curr_c)) = (prev_content, curr_content) {
-                    if !prev_c.is_empty() && !curr_c.is_empty() && prev_c != curr_c {
-                        if let Some(attrs) = accumulated_attrs.get(file_path) {
-                            if !attrs.is_empty() {
-                                let transferred =
-                                    diff_based_line_attribution_transfer(prev_c, curr_c, attrs);
-                                accumulated_attrs.insert(file_path.clone(), transferred);
-                            }
-                        }
-                    }
+                if let (Some(prev_c), Some(curr_c)) = (prev_content, curr_content)
+                    && !prev_c.is_empty()
+                    && !curr_c.is_empty()
+                    && prev_c != curr_c
+                    && let Some(attrs) = accumulated_attrs.get(file_path)
+                    && !attrs.is_empty()
+                {
+                    let transferred = diff_based_line_attribution_transfer(prev_c, curr_c, attrs);
+                    accumulated_attrs.insert(file_path.clone(), transferred);
                 }
             }
         }
@@ -1231,16 +1234,15 @@ pub fn transfer_attribution_squash(
         let prev_content = prev_contents.get(file_path).map(String::as_str);
         let final_content = final_contents.get(file_path).map(String::as_str);
 
-        if let (Some(prev_c), Some(final_c)) = (prev_content, final_content) {
-            if !prev_c.is_empty() && !final_c.is_empty() && prev_c != final_c {
-                if let Some(attrs) = accumulated_attrs.get(file_path) {
-                    if !attrs.is_empty() {
-                        let transferred =
-                            diff_based_line_attribution_transfer(prev_c, final_c, attrs);
-                        accumulated_attrs.insert(file_path.clone(), transferred);
-                    }
-                }
-            }
+        if let (Some(prev_c), Some(final_c)) = (prev_content, final_content)
+            && !prev_c.is_empty()
+            && !final_c.is_empty()
+            && prev_c != final_c
+            && let Some(attrs) = accumulated_attrs.get(file_path)
+            && !attrs.is_empty()
+        {
+            let transferred = diff_based_line_attribution_transfer(prev_c, final_c, attrs);
+            accumulated_attrs.insert(file_path.clone(), transferred);
         }
     }
 
@@ -1293,15 +1295,16 @@ fn migrate_working_log(repo_path: &Path, old_head: &str, new_head: &str) -> Resu
     let old_log_dir = git_dir.join("ai").join("working_logs").join(old_head);
     let new_log_dir = git_dir.join("ai").join("working_logs").join(new_head);
 
-    if old_log_dir.exists() && !new_log_dir.exists() {
-        if let Err(e) = std::fs::rename(&old_log_dir, &new_log_dir) {
-            eprintln!(
-                "[git-ai daemon] working log rename failed ({}), attempting copy",
-                e
-            );
-            copy_dir_recursive(&old_log_dir, &new_log_dir)?;
-            let _ = std::fs::remove_dir_all(&old_log_dir);
-        }
+    if old_log_dir.exists()
+        && !new_log_dir.exists()
+        && let Err(e) = std::fs::rename(&old_log_dir, &new_log_dir)
+    {
+        eprintln!(
+            "[git-ai daemon] working log rename failed ({}), attempting copy",
+            e
+        );
+        copy_dir_recursive(&old_log_dir, &new_log_dir)?;
+        let _ = std::fs::remove_dir_all(&old_log_dir);
     }
 
     Ok(())
@@ -1748,17 +1751,16 @@ mod tests {
         commit_file(&repo_path, "init.txt", "init\n", "initial");
 
         // Commit with AI attribution
-        let old_sha = commit_file(
-            &repo_path,
-            "file.txt",
-            "line1\nline2\nline3\n",
-            "original",
-        );
+        let old_sha = commit_file(&repo_path, "file.txt", "line1\nline2\nline3\n", "original");
         let note = create_test_authorship_note(&old_sha, "file.txt", (1, 3));
         make_note(&repo_path, &old_sha, &note);
 
         // Amend: add a line but keep existing lines
-        std::fs::write(repo_path.join("file.txt"), "line1\nline2\nline3\nnew_line\n").unwrap();
+        std::fs::write(
+            repo_path.join("file.txt"),
+            "line1\nline2\nline3\nnew_line\n",
+        )
+        .unwrap();
         Command::new("git")
             .current_dir(&repo_path)
             .args(["add", "file.txt"])
@@ -1886,12 +1888,7 @@ mod tests {
         let (_dir, repo_path) = setup_repo();
 
         // Create base with a shared file
-        commit_file(
-            &repo_path,
-            "shared.txt",
-            "base_line\n",
-            "base",
-        );
+        commit_file(&repo_path, "shared.txt", "base_line\n", "base");
 
         // Feature branch: add lines after base_line
         Command::new("git")

@@ -3,8 +3,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use super::telemetry_types::{
-    CasUploadRequest, CasUploadResponse, DEFAULT_API_BASE_URL, MetricsBatch,
-    MetricsUploadResponse,
+    CasUploadRequest, CasUploadResponse, DEFAULT_API_BASE_URL, MetricsBatch, MetricsUploadResponse,
 };
 
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -19,13 +18,17 @@ pub struct ApiClient {
     version: String,
 }
 
+impl Default for ApiClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ApiClient {
     pub fn new() -> Self {
-        let base_url = std::env::var("GIT_AI_API_BASE_URL")
-            .unwrap_or_else(|_| {
-                read_config_field("api_base_url")
-                    .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string())
-            });
+        let base_url = std::env::var("GIT_AI_API_BASE_URL").unwrap_or_else(|_| {
+            read_config_field("api_base_url").unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string())
+        });
 
         let api_key = std::env::var("GIT_AI_API_KEY")
             .ok()
@@ -55,8 +58,7 @@ impl ApiClient {
     /// Upload metrics batch. Returns Ok on 200 response.
     pub fn upload_metrics(&self, batch: &MetricsBatch) -> Result<MetricsUploadResponse, String> {
         let url = format!("{}/worker/metrics/upload", self.base_url);
-        let body = serde_json::to_string(batch)
-            .map_err(|e| format!("serialize metrics: {}", e))?;
+        let body = serde_json::to_string(batch).map_err(|e| format!("serialize metrics: {}", e))?;
 
         let response = self.post(&url, &body)?;
         serde_json::from_str(&response).map_err(|e| format!("parse metrics response: {}", e))
@@ -80,8 +82,7 @@ impl ApiClient {
     /// Upload CAS objects.
     pub fn upload_cas(&self, request: &CasUploadRequest) -> Result<CasUploadResponse, String> {
         let url = format!("{}/worker/cas/upload", self.base_url);
-        let body = serde_json::to_string(request)
-            .map_err(|e| format!("serialize cas: {}", e))?;
+        let body = serde_json::to_string(request).map_err(|e| format!("serialize cas: {}", e))?;
 
         let response = self.post(&url, &body)?;
         serde_json::from_str(&response).map_err(|e| format!("parse cas response: {}", e))
@@ -103,7 +104,8 @@ impl ApiClient {
             .arg(format!("X-Distinct-ID: {}", self.distinct_id));
 
         if let Some(ref token) = self.auth_token {
-            cmd.arg("-H").arg(format!("Authorization: Bearer {}", token));
+            cmd.arg("-H")
+                .arg(format!("Authorization: Bearer {}", token));
         }
         if let Some(ref key) = self.api_key {
             cmd.arg("-H").arg(format!("X-API-Key: {}", key));
@@ -121,7 +123,11 @@ impl ApiClient {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("curl failed (exit {}): {}", output.status.code().unwrap_or(-1), stderr.trim()));
+            return Err(format!(
+                "curl failed (exit {}): {}",
+                output.status.code().unwrap_or(-1),
+                stderr.trim()
+            ));
         }
 
         String::from_utf8(output.stdout)
@@ -216,7 +222,9 @@ fn generate_random_id() -> String {
         u16::from_be_bytes([bytes[4], bytes[5]]),
         u16::from_be_bytes([bytes[6], bytes[7]]),
         u16::from_be_bytes([bytes[8], bytes[9]]),
-        u64::from_be_bytes([0, 0, bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]]),
+        u64::from_be_bytes([
+            0, 0, bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+        ]),
     )
 }
 

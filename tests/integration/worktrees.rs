@@ -8,7 +8,11 @@ fn unique_worktree_path(repo: &TestRepo, suffix: &str) -> std::path::PathBuf {
 }
 
 /// Run git-ai from a specific working directory (worktree).
-fn run_git_ai_in(cwd: &std::path::Path, home: &std::path::Path, args: &[&str]) -> Result<String, String> {
+fn run_git_ai_in(
+    cwd: &std::path::Path,
+    home: &std::path::Path,
+    args: &[&str],
+) -> Result<String, String> {
     let binary = get_binary_path();
     let output = Command::new(binary)
         .args(args)
@@ -44,7 +48,9 @@ fn run_git_in(cwd: &std::path::Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn blame_line_is_ai(line: &str) -> bool {
-    let ai_names = ["mock_ai", "claude", "gpt", "copilot", "cursor", "codex", "gemini"];
+    let ai_names = [
+        "mock_ai", "claude", "gpt", "copilot", "cursor", "codex", "gemini",
+    ];
     let lower = line.to_lowercase();
     ai_names.iter().any(|name| lower.contains(name))
 }
@@ -59,13 +65,24 @@ fn test_worktree_checkpoint_and_blame() {
     repo.stage_all_and_commit("initial commit").unwrap();
 
     let worktree_path = unique_worktree_path(&repo, "blame");
-    repo.git(&["worktree", "add", worktree_path.to_str().unwrap(), "-b", "feature-blame"]).unwrap();
+    repo.git(&[
+        "worktree",
+        "add",
+        worktree_path.to_str().unwrap(),
+        "-b",
+        "feature-blame",
+    ])
+    .unwrap();
 
     let wt_file = worktree_path.join("feature.rs");
     fs::write(&wt_file, "fn hello() {}\nfn world() {}\n").unwrap();
 
-    run_git_ai_in(&worktree_path, &home, &["checkpoint", "mock_ai", "feature.rs"])
-        .expect("AI checkpoint in worktree should succeed");
+    run_git_ai_in(
+        &worktree_path,
+        &home,
+        &["checkpoint", "mock_ai", "feature.rs"],
+    )
+    .expect("AI checkpoint in worktree should succeed");
 
     run_git_in(&worktree_path, &["add", "feature.rs"]).unwrap();
     run_git_in(&worktree_path, &["commit", "-m", "add feature"]).unwrap();
@@ -75,10 +92,26 @@ fn test_worktree_checkpoint_and_blame() {
     let blame_output = run_git_ai_in(&worktree_path, &home, &["blame", "feature.rs"])
         .expect("blame should succeed");
 
-    let blame_lines: Vec<&str> = blame_output.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(blame_lines.len(), 2, "Expected 2 blame lines, got: {}", blame_output);
-    assert!(blame_line_is_ai(blame_lines[0]), "Line 1 should be AI: {}", blame_lines[0]);
-    assert!(blame_line_is_ai(blame_lines[1]), "Line 2 should be AI: {}", blame_lines[1]);
+    let blame_lines: Vec<&str> = blame_output
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    assert_eq!(
+        blame_lines.len(),
+        2,
+        "Expected 2 blame lines, got: {}",
+        blame_output
+    );
+    assert!(
+        blame_line_is_ai(blame_lines[0]),
+        "Line 1 should be AI: {}",
+        blame_lines[0]
+    );
+    assert!(
+        blame_line_is_ai(blame_lines[1]),
+        "Line 2 should be AI: {}",
+        blame_lines[1]
+    );
 }
 
 #[test]
@@ -93,8 +126,22 @@ fn test_worktree_isolation() {
     let wt1_path = unique_worktree_path(&repo, "iso-1");
     let wt2_path = unique_worktree_path(&repo, "iso-2");
 
-    repo.git(&["worktree", "add", wt1_path.to_str().unwrap(), "-b", "feature-1"]).unwrap();
-    repo.git(&["worktree", "add", wt2_path.to_str().unwrap(), "-b", "feature-2"]).unwrap();
+    repo.git(&[
+        "worktree",
+        "add",
+        wt1_path.to_str().unwrap(),
+        "-b",
+        "feature-1",
+    ])
+    .unwrap();
+    repo.git(&[
+        "worktree",
+        "add",
+        wt2_path.to_str().unwrap(),
+        "-b",
+        "feature-2",
+    ])
+    .unwrap();
 
     let wt1_file = wt1_path.join("wt1_only.rs");
     fs::write(&wt1_file, "fn wt1() {}\n").unwrap();
@@ -103,15 +150,23 @@ fn test_worktree_isolation() {
 
     // Verify worktree2's working log does NOT contain wt1's AI file
     let common_dir = run_git_in(&wt1_path, &["rev-parse", "--git-common-dir"])
-        .unwrap().trim().to_string();
+        .unwrap()
+        .trim()
+        .to_string();
     let common_dir_path = if std::path::Path::new(&common_dir).is_relative() {
         wt1_path.join(&common_dir)
     } else {
         std::path::PathBuf::from(&common_dir)
     };
 
-    let wt2_head = run_git_in(&wt2_path, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
-    let wt2_working_log_dir = common_dir_path.join("ai").join("working_logs").join(&wt2_head);
+    let wt2_head = run_git_in(&wt2_path, &["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let wt2_working_log_dir = common_dir_path
+        .join("ai")
+        .join("working_logs")
+        .join(&wt2_head);
 
     if wt2_working_log_dir.exists() {
         let checkpoints_file = wt2_working_log_dir.join("checkpoints.jsonl");
@@ -135,7 +190,14 @@ fn test_worktree_rebase_preserves_attribution() {
     repo.stage_all_and_commit("base commit").unwrap();
 
     let wt_path = unique_worktree_path(&repo, "rebase");
-    repo.git(&["worktree", "add", wt_path.to_str().unwrap(), "-b", "feature-rebase"]).unwrap();
+    repo.git(&[
+        "worktree",
+        "add",
+        wt_path.to_str().unwrap(),
+        "-b",
+        "feature-rebase",
+    ])
+    .unwrap();
 
     let wt_file = wt_path.join("feature.rs");
     fs::write(&wt_file, "fn feature() {}\n").unwrap();
@@ -144,7 +206,10 @@ fn test_worktree_rebase_preserves_attribution() {
     run_git_in(&wt_path, &["commit", "-m", "AI feature"]).unwrap();
     run_git_ai_in(&wt_path, &home, &["post-commit"]).unwrap();
 
-    let old_sha = run_git_in(&wt_path, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let old_sha = run_git_in(&wt_path, &["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
     // Advance main with non-conflicting commit
     let mut main_file = repo.filename("main_only.txt");
@@ -154,17 +219,27 @@ fn test_worktree_rebase_preserves_attribution() {
     // Rebase worktree branch onto main
     run_git_in(&wt_path, &["rebase", "main"]).unwrap();
 
-    let new_sha = run_git_in(&wt_path, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let new_sha = run_git_in(&wt_path, &["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
     assert_ne!(old_sha, new_sha, "Rebase should create a new commit");
 
     // Transfer authorship note
     run_git_ai_in(&wt_path, &home, &["post-rewrite", &old_sha, &new_sha]).unwrap();
 
-    let blame_output = run_git_ai_in(&wt_path, &home, &["blame", "feature.rs"])
-        .expect("blame should succeed");
-    let blame_lines: Vec<&str> = blame_output.lines().filter(|l| !l.trim().is_empty()).collect();
+    let blame_output =
+        run_git_ai_in(&wt_path, &home, &["blame", "feature.rs"]).expect("blame should succeed");
+    let blame_lines: Vec<&str> = blame_output
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
     assert_eq!(blame_lines.len(), 1, "Expected 1 blame line");
-    assert!(blame_line_is_ai(blame_lines[0]), "AI attribution should survive rebase: {}", blame_lines[0]);
+    assert!(
+        blame_line_is_ai(blame_lines[0]),
+        "AI attribution should survive rebase: {}",
+        blame_lines[0]
+    );
 }
 
 #[test]
@@ -177,7 +252,14 @@ fn test_worktree_stash_preserves_attribution() {
     repo.stage_all_and_commit("initial").unwrap();
 
     let wt_path = unique_worktree_path(&repo, "stash");
-    repo.git(&["worktree", "add", wt_path.to_str().unwrap(), "-b", "feature-stash"]).unwrap();
+    repo.git(&[
+        "worktree",
+        "add",
+        wt_path.to_str().unwrap(),
+        "-b",
+        "feature-stash",
+    ])
+    .unwrap();
 
     let wt_file = wt_path.join("stash_test.txt");
     fs::write(&wt_file, "base line\n").unwrap();
@@ -187,7 +269,12 @@ fn test_worktree_stash_preserves_attribution() {
 
     // AI edit (uncommitted)
     fs::write(&wt_file, "base line\nai stash line\n").unwrap();
-    run_git_ai_in(&wt_path, &home, &["checkpoint", "mock_ai", "stash_test.txt"]).unwrap();
+    run_git_ai_in(
+        &wt_path,
+        &home,
+        &["checkpoint", "mock_ai", "stash_test.txt"],
+    )
+    .unwrap();
 
     // Save stash attributions
     let _ = run_git_ai_in(&wt_path, &home, &["stash-save"]);
@@ -209,9 +296,21 @@ fn test_worktree_stash_preserves_attribution() {
     run_git_in(&wt_path, &["commit", "-m", "commit after stash pop"]).unwrap();
     run_git_ai_in(&wt_path, &home, &["post-commit"]).unwrap();
 
-    let blame_output = run_git_ai_in(&wt_path, &home, &["blame", "stash_test.txt"])
-        .expect("blame should succeed");
-    let blame_lines: Vec<&str> = blame_output.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(blame_lines.len(), 2, "Expected 2 blame lines, got:\n{}", blame_output);
-    assert!(blame_line_is_ai(blame_lines[1]), "AI attribution should survive stash/pop: {}", blame_lines[1]);
+    let blame_output =
+        run_git_ai_in(&wt_path, &home, &["blame", "stash_test.txt"]).expect("blame should succeed");
+    let blame_lines: Vec<&str> = blame_output
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    assert_eq!(
+        blame_lines.len(),
+        2,
+        "Expected 2 blame lines, got:\n{}",
+        blame_output
+    );
+    assert!(
+        blame_line_is_ai(blame_lines[1]),
+        "AI attribution should survive stash/pop: {}",
+        blame_lines[1]
+    );
 }

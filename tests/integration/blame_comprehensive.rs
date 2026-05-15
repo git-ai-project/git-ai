@@ -18,7 +18,8 @@ fn test_blame_basic_mixed_authorship() {
         "    let y = another_ai_line();".ai()
     ]);
 
-    repo.stage_all_and_commit("Mixed authorship commit").unwrap();
+    repo.stage_all_and_commit("Mixed authorship commit")
+        .unwrap();
 
     let blame_output = repo.git_ai(&["blame", "file.rs"]).unwrap();
 
@@ -115,10 +116,7 @@ fn test_blame_json_output_format() {
     let repo = TestRepo::new();
     let mut file = repo.filename("json_test.rs");
 
-    file.set_contents(crate::lines![
-        "human line".human(),
-        "ai line".ai()
-    ]);
+    file.set_contents(crate::lines!["human line".human(), "ai line".ai()]);
 
     repo.stage_all_and_commit("JSON test commit").unwrap();
 
@@ -139,20 +137,17 @@ fn test_blame_json_output_format() {
     );
 
     // Lines should be an object (AI lines are recorded)
-    assert!(
-        json["lines"].is_object(),
-        "lines should be an object"
-    );
+    assert!(json["lines"].is_object(), "lines should be an object");
 
     // Prompts should be an object
-    assert!(
-        json["prompts"].is_object(),
-        "prompts should be an object"
-    );
+    assert!(json["prompts"].is_object(), "prompts should be an object");
 
     // At least the lines object should be non-empty (we have an AI line)
     let lines = json["lines"].as_object().unwrap();
-    assert!(!lines.is_empty(), "lines object should not be empty since we have an AI line");
+    assert!(
+        !lines.is_empty(),
+        "lines object should not be empty since we have an AI line"
+    );
 }
 
 // =============================================================================
@@ -165,11 +160,7 @@ fn test_blame_line_range() {
     let mut file = repo.filename("range.rs");
 
     file.set_contents(crate::lines![
-        "line 1",
-        "line 2",
-        "line 3",
-        "line 4",
-        "line 5"
+        "line 1", "line 2", "line 3", "line 4", "line 5"
     ]);
 
     repo.stage_all_and_commit("Range test commit").unwrap();
@@ -183,7 +174,11 @@ fn test_blame_line_range() {
     assert!(!output.contains("line 5"), "Should NOT contain line 5");
 
     // Should have exactly 3 lines of output
-    assert_eq!(output.lines().count(), 3, "Should have exactly 3 blame lines");
+    assert_eq!(
+        output.lines().count(),
+        3,
+        "Should have exactly 3 blame lines"
+    );
 }
 
 // =============================================================================
@@ -201,7 +196,10 @@ fn test_blame_missing_file_errors() {
 
     let result = repo.git_ai(&["blame", "nonexistent.txt"]);
 
-    assert!(result.is_err(), "Blame on nonexistent file should return error");
+    assert!(
+        result.is_err(),
+        "Blame on nonexistent file should return error"
+    );
     let err = result.unwrap_err();
     assert!(
         err.contains("File not found")
@@ -263,9 +261,15 @@ fn test_blame_unicode_content() {
 
     let blame_output = repo.git_ai(&["blame", "unicode.rs"]).unwrap();
 
-    assert!(blame_output.contains("世界"), "Should contain Chinese characters");
+    assert!(
+        blame_output.contains("世界"),
+        "Should contain Chinese characters"
+    );
     assert!(blame_output.contains("🚀"), "Should contain emoji");
-    assert!(blame_output.contains("αβγδ"), "Should contain Greek characters");
+    assert!(
+        blame_output.contains("αβγδ"),
+        "Should contain Greek characters"
+    );
 
     // Verify authorship is correct for unicode lines
     for line in blame_output.lines() {
@@ -340,11 +344,16 @@ fn test_blame_multiple_commits() {
 
     // First commit: human-only lines (no checkpoint needed, they'll be untracked/human)
     fs::write(&file_path, "fn first() {}\nfn second() {}\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "multi.rs"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "multi.rs"])
+        .unwrap();
     repo.stage_all_and_commit("First commit").unwrap();
 
     // Second commit: append an AI line
-    fs::write(&file_path, "fn first() {}\nfn second() {}\nfn ai_added() {}\n").unwrap();
+    fs::write(
+        &file_path,
+        "fn first() {}\nfn second() {}\nfn ai_added() {}\n",
+    )
+    .unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "multi.rs"]).unwrap();
     repo.stage_all_and_commit("Second commit").unwrap();
 
@@ -354,7 +363,8 @@ fn test_blame_multiple_commits() {
         "fn first() {}\nfn second() {}\nfn ai_added() {}\nfn third_human() {}\n",
     )
     .unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "multi.rs"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "multi.rs"])
+        .unwrap();
     repo.stage_all_and_commit("Third commit").unwrap();
 
     let blame_output = repo.git_ai(&["blame", "multi.rs"]).unwrap();
@@ -374,7 +384,10 @@ fn test_blame_multiple_commits() {
                 line
             );
         }
-        if line.contains("fn first()") || line.contains("fn second()") || line.contains("fn third_human()") {
+        if line.contains("fn first()")
+            || line.contains("fn second()")
+            || line.contains("fn third_human()")
+        {
             assert!(
                 line.contains("Test User"),
                 "Human line should show Test User, got: {}",

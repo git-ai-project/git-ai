@@ -22,15 +22,40 @@ pub fn handle_ci(args: &[String]) {
     let mut i = 0;
     while i < ci_args.len() {
         match ci_args[i].as_str() {
-            "--merge-commit-sha" => { i += 1; merge_commit_sha = ci_args.get(i).cloned().unwrap_or_default(); }
-            "--base-ref" => { i += 1; base_ref = ci_args.get(i).cloned().unwrap_or_default(); }
-            "--head-ref" => { i += 1; _head_ref = ci_args.get(i).cloned().unwrap_or_default(); }
-            "--head-sha" => { i += 1; head_sha = ci_args.get(i).cloned().unwrap_or_default(); }
-            "--base-sha" => { i += 1; base_sha = ci_args.get(i).cloned().unwrap_or_default(); }
-            "--skip-fetch-base" => { skip_fetch_base = true; }
-            "--skip-fetch-notes" => { skip_fetch_notes = true; }
-            "--skip-fetch" => { skip_fetch = true; skip_fetch_notes = true; skip_fetch_base = true; }
-            "--skip-push" => { skip_push = true; }
+            "--merge-commit-sha" => {
+                i += 1;
+                merge_commit_sha = ci_args.get(i).cloned().unwrap_or_default();
+            }
+            "--base-ref" => {
+                i += 1;
+                base_ref = ci_args.get(i).cloned().unwrap_or_default();
+            }
+            "--head-ref" => {
+                i += 1;
+                _head_ref = ci_args.get(i).cloned().unwrap_or_default();
+            }
+            "--head-sha" => {
+                i += 1;
+                head_sha = ci_args.get(i).cloned().unwrap_or_default();
+            }
+            "--base-sha" => {
+                i += 1;
+                base_sha = ci_args.get(i).cloned().unwrap_or_default();
+            }
+            "--skip-fetch-base" => {
+                skip_fetch_base = true;
+            }
+            "--skip-fetch-notes" => {
+                skip_fetch_notes = true;
+            }
+            "--skip-fetch" => {
+                skip_fetch = true;
+                skip_fetch_notes = true;
+                skip_fetch_base = true;
+            }
+            "--skip-push" => {
+                skip_push = true;
+            }
             _ => {}
         }
         i += 1;
@@ -49,12 +74,18 @@ pub fn handle_ci(args: &[String]) {
             Ok(output) if !output.status.success() => {
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                 if !stderr.contains("couldn't find remote ref") {
-                    eprintln!("Error running local CI: failed to fetch authorship notes: {}", stderr.trim());
+                    eprintln!(
+                        "Error running local CI: failed to fetch authorship notes: {}",
+                        stderr.trim()
+                    );
                     process::exit(1);
                 }
             }
             Err(e) => {
-                eprintln!("Error running local CI: failed to fetch authorship notes: {}", e);
+                eprintln!(
+                    "Error running local CI: failed to fetch authorship notes: {}",
+                    e
+                );
                 process::exit(1);
             }
             _ => {}
@@ -83,11 +114,18 @@ pub fn handle_ci(args: &[String]) {
         match fetch_base_result {
             Ok(output) if !output.status.success() => {
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                eprintln!("Failed to fetch base branch '{}' from origin: {}", base_ref, stderr.trim());
+                eprintln!(
+                    "Failed to fetch base branch '{}' from origin: {}",
+                    base_ref,
+                    stderr.trim()
+                );
                 process::exit(1);
             }
             Err(e) => {
-                eprintln!("Failed to fetch base branch '{}' from origin: {}", base_ref, e);
+                eprintln!(
+                    "Failed to fetch base branch '{}' from origin: {}",
+                    base_ref, e
+                );
                 process::exit(1);
             }
             _ => {}
@@ -101,11 +139,11 @@ pub fn handle_ci(args: &[String]) {
 
     let mut has_ai_authorship = false;
     for commit in &head_commits {
-        if let Ok(note) = git_cmd(&["notes", "--ref=ai", "show", commit]) {
-            if !note.trim().is_empty() {
-                has_ai_authorship = true;
-                break;
-            }
+        if let Ok(note) = git_cmd(&["notes", "--ref=ai", "show", commit])
+            && !note.trim().is_empty()
+        {
+            has_ai_authorship = true;
+            break;
         }
     }
 
@@ -117,15 +155,23 @@ pub fn handle_ci(args: &[String]) {
         }
     } else {
         for commit in &head_commits {
-            if let Ok(note) = git_cmd(&["notes", "--ref=ai", "show", commit]) {
-                if !note.trim().is_empty() {
-                    let _ = Command::new("/usr/bin/git")
-                        .args(["notes", "--ref=ai", "add", "-f", "-m", &note, &merge_commit_sha])
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .status();
-                    break;
-                }
+            if let Ok(note) = git_cmd(&["notes", "--ref=ai", "show", commit])
+                && !note.trim().is_empty()
+            {
+                let _ = Command::new("/usr/bin/git")
+                    .args([
+                        "notes",
+                        "--ref=ai",
+                        "add",
+                        "-f",
+                        "-m",
+                        &note,
+                        &merge_commit_sha,
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                break;
             }
         }
         println!("Local CI (merge): transferred AI authorship to merge commit");

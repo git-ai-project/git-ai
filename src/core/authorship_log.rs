@@ -407,10 +407,10 @@ fn parse_attestations(lines: &[&str]) -> Result<Vec<FileAttestation>, Error> {
             });
         } else {
             // Not indented: file path
-            if let Some(file) = current.take() {
-                if !file.entries.is_empty() {
-                    result.push(file);
-                }
+            if let Some(file) = current.take()
+                && !file.entries.is_empty()
+            {
+                result.push(file);
             }
 
             let path = if line.starts_with('"') && line.ends_with('"') {
@@ -426,10 +426,10 @@ fn parse_attestations(lines: &[&str]) -> Result<Vec<FileAttestation>, Error> {
         }
     }
 
-    if let Some(file) = current {
-        if !file.entries.is_empty() {
-            result.push(file);
-        }
+    if let Some(file) = current
+        && !file.entries.is_empty()
+    {
+        result.push(file);
     }
 
     Ok(result)

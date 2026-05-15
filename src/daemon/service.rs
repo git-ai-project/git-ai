@@ -19,7 +19,7 @@ pub fn detect_service_manager() -> ServiceManager {
         if is_systemd_available() {
             return ServiceManager::Systemd;
         }
-        return ServiceManager::None;
+        ServiceManager::None
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -57,7 +57,10 @@ pub fn is_service_enabled() -> bool {
 fn get_git_ai_bin_path() -> String {
     // Prefer the installed location, fall back to current exe
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let installed_path = PathBuf::from(&home).join(".git-ai").join("bin").join("git-ai");
+    let installed_path = PathBuf::from(&home)
+        .join(".git-ai")
+        .join("bin")
+        .join("git-ai");
     if installed_path.exists() {
         return installed_path.to_string_lossy().to_string();
     }
@@ -130,8 +133,7 @@ fn enable_launchd() -> Result<(), String> {
             .map_err(|e| format!("failed to create LaunchAgents directory: {}", e))?;
     }
 
-    fs::write(&plist_path, &content)
-        .map_err(|e| format!("failed to write plist: {}", e))?;
+    fs::write(&plist_path, &content).map_err(|e| format!("failed to write plist: {}", e))?;
 
     let output = std::process::Command::new("launchctl")
         .args(["load", &plist_path.to_string_lossy()])
@@ -164,8 +166,7 @@ fn disable_launchd() -> Result<(), String> {
             }
         }
 
-        fs::remove_file(&plist_path)
-            .map_err(|e| format!("failed to remove plist: {}", e))?;
+        fs::remove_file(&plist_path).map_err(|e| format!("failed to remove plist: {}", e))?;
     }
 
     Ok(())
@@ -384,9 +385,7 @@ mod tests {
         assert!(unit.contains("After=default.target"));
         assert!(unit.contains("[Service]"));
         assert!(unit.contains("Type=simple"));
-        assert!(unit.contains(
-            "ExecStart=/home/testuser/.git-ai/bin/git-ai bg start --foreground"
-        ));
+        assert!(unit.contains("ExecStart=/home/testuser/.git-ai/bin/git-ai bg start --foreground"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("RestartSec=5"));
         assert!(unit.contains("[Install]"));

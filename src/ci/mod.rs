@@ -55,17 +55,21 @@ fn detect_github_actions() -> Option<CiContext> {
     let (owner, name) = split_owner_repo(&repository);
     let commit_sha = std::env::var("GITHUB_SHA").unwrap_or_default();
     let github_ref = std::env::var("GITHUB_REF").unwrap_or_default();
-    let base_ref = std::env::var("GITHUB_BASE_REF").ok().filter(|s| !s.is_empty());
-    let head_ref = std::env::var("GITHUB_HEAD_REF").ok().filter(|s| !s.is_empty());
+    let base_ref = std::env::var("GITHUB_BASE_REF")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let head_ref = std::env::var("GITHUB_HEAD_REF")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     // Try to extract PR number from GITHUB_REF (refs/pull/123/merge)
     let mut pr_number = parse_pr_number_from_ref(&github_ref);
 
     // Fallback: try to read the event payload JSON
-    if pr_number.is_none() {
-        if let Ok(event_path) = std::env::var("GITHUB_EVENT_PATH") {
-            pr_number = parse_pr_number_from_event_file(&event_path);
-        }
+    if pr_number.is_none()
+        && let Ok(event_path) = std::env::var("GITHUB_EVENT_PATH")
+    {
+        pr_number = parse_pr_number_from_event_file(&event_path);
     }
 
     Some(CiContext {
@@ -168,7 +172,11 @@ pub struct AttributionReport {
 ///
 /// `repo_path` must point to the root of a git repository. This function shells
 /// out to git to determine changed files, parse diffs, and read authorship notes.
-pub fn compute_report(repo_path: &Path, base: &str, head: &str) -> Result<AttributionReport, String> {
+pub fn compute_report(
+    repo_path: &Path,
+    base: &str,
+    head: &str,
+) -> Result<AttributionReport, String> {
     let range = format!("{}..{}", base, head);
 
     // 1. Get list of changed files
@@ -201,7 +209,11 @@ pub fn compute_report(repo_path: &Path, base: &str, head: &str) -> Result<Attrib
         for file_att in &log.attestations {
             let mut entries_expanded = Vec::new();
             for entry in &file_att.entries {
-                let lines: Vec<u32> = entry.line_ranges.iter().flat_map(LineRange::expand).collect();
+                let lines: Vec<u32> = entry
+                    .line_ranges
+                    .iter()
+                    .flat_map(LineRange::expand)
+                    .collect();
                 entries_expanded.push((entry.hash.as_str(), lines));
             }
             file_attestations.insert(&file_att.file_path, entries_expanded);
@@ -286,16 +298,16 @@ fn parse_diff_added_lines(diff: &str) -> HashMap<String, Vec<u32>> {
     let mut current_file: Option<String> = None;
 
     for line in diff.lines() {
-        if line.starts_with("+++ b/") {
-            current_file = Some(line[6..].to_string());
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            current_file = Some(path.to_string());
         } else if line.starts_with("@@ ") {
             // Parse hunk header like "@@ -a,b +c,d @@" -- we want +c,d (new file side)
-            if let Some(ref file) = current_file {
-                if let Some((start, count)) = parse_hunk_header_new_side(line) {
-                    let lines = result.entry(file.clone()).or_default();
-                    for i in 0..count {
-                        lines.push(start + i);
-                    }
+            if let Some(ref file) = current_file
+                && let Some((start, count)) = parse_hunk_header_new_side(line)
+            {
+                let lines = result.entry(file.clone()).or_default();
+                for i in 0..count {
+                    lines.push(start + i);
                 }
             }
         }
@@ -383,11 +395,9 @@ fn percentage_f64(part: usize, total: usize) -> f64 {
 }
 
 fn percentage(part: usize, total: usize) -> usize {
-    if total == 0 {
-        0
-    } else {
-        (part * 100 + total / 2) / total
-    }
+    (part * 100 + total / 2)
+        .checked_div(total)
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -433,9 +443,15 @@ pub fn post_github_comment(report: &AttributionReport, env: &CiContext) -> Resul
     let existing_comment_id = find_existing_github_comment(&repo_slug, pr_number)?;
 
     let (method, endpoint) = if let Some(comment_id) = existing_comment_id {
-        ("PATCH", format!("repos/{}/issues/comments/{}", repo_slug, comment_id))
+        (
+            "PATCH",
+            format!("repos/{}/issues/comments/{}", repo_slug, comment_id),
+        )
     } else {
-        ("POST", format!("repos/{}/issues/{}/comments", repo_slug, pr_number))
+        (
+            "POST",
+            format!("repos/{}/issues/{}/comments", repo_slug, pr_number),
+        )
     };
 
     let json_body = serde_json::json!({ "body": body }).to_string();
@@ -486,12 +502,11 @@ fn find_existing_github_comment(repo_slug: &str, pr_number: u64) -> Result<Optio
         .map_err(|e| format!("failed to parse comments JSON: {}", e))?;
 
     for comment in &comments {
-        if let Some(body) = comment.get("body").and_then(|b| b.as_str()) {
-            if body.contains(COMMENT_MARKER) {
-                if let Some(id) = comment.get("id").and_then(|i| i.as_u64()) {
-                    return Ok(Some(id));
-                }
-            }
+        if let Some(body) = comment.get("body").and_then(|b| b.as_str())
+            && body.contains(COMMENT_MARKER)
+            && let Some(id) = comment.get("id").and_then(|i| i.as_u64())
+        {
+            return Ok(Some(id));
         }
     }
 
@@ -534,31 +549,41 @@ pub fn post_gitlab_comment(report: &AttributionReport, env: &CiContext) -> Resul
     }
 
     // Try to find existing note with our marker
-    let existing_note_id = find_existing_gitlab_note(
-        &api_url, &project_id, mr_iid, &job_token,
-    )?;
+    let existing_note_id = find_existing_gitlab_note(&api_url, &project_id, mr_iid, &job_token)?;
 
     let (method, url) = if let Some(note_id) = existing_note_id {
-        ("PUT", format!(
-            "{}/projects/{}/merge_requests/{}/notes/{}",
-            api_url, project_id, mr_iid, note_id
-        ))
+        (
+            "PUT",
+            format!(
+                "{}/projects/{}/merge_requests/{}/notes/{}",
+                api_url, project_id, mr_iid, note_id
+            ),
+        )
     } else {
-        ("POST", format!(
-            "{}/projects/{}/merge_requests/{}/notes",
-            api_url, project_id, mr_iid
-        ))
+        (
+            "POST",
+            format!(
+                "{}/projects/{}/merge_requests/{}/notes",
+                api_url, project_id, mr_iid
+            ),
+        )
     };
 
     let token_header = format!("JOB-TOKEN: {}", job_token);
     let json_data = serde_json::json!({ "body": body }).to_string();
     let output = Command::new("curl")
         .args([
-            "--silent", "--show-error", "--fail",
-            "--request", method,
-            "--header", &token_header,
-            "--header", "Content-Type: application/json",
-            "--data", &json_data,
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--request",
+            method,
+            "--header",
+            &token_header,
+            "--header",
+            "Content-Type: application/json",
+            "--data",
+            &json_data,
             &url,
         ])
         .stdout(Stdio::piped())
@@ -587,8 +612,10 @@ fn find_existing_gitlab_note(
     );
     let output = Command::new("curl")
         .args([
-            "--silent", "--show-error",
-            "--header", &format!("JOB-TOKEN: {}", job_token),
+            "--silent",
+            "--show-error",
+            "--header",
+            &format!("JOB-TOKEN: {}", job_token),
             &url,
         ])
         .stdout(Stdio::piped())
@@ -604,12 +631,11 @@ fn find_existing_gitlab_note(
     let notes: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap_or_default();
 
     for note in &notes {
-        if let Some(body) = note.get("body").and_then(|b| b.as_str()) {
-            if body.contains(COMMENT_MARKER) {
-                if let Some(id) = note.get("id").and_then(|i| i.as_u64()) {
-                    return Ok(Some(id));
-                }
-            }
+        if let Some(body) = note.get("body").and_then(|b| b.as_str())
+            && body.contains(COMMENT_MARKER)
+            && let Some(id) = note.get("id").and_then(|i| i.as_u64())
+        {
+            return Ok(Some(id));
         }
     }
 
@@ -670,8 +696,9 @@ pub fn compute_batch_report(
 
         // Aggregate line counts per file
         for file_att in &authorship.attestations {
-            let (ai, human, untracked) =
-                file_stats.entry(file_att.file_path.clone()).or_insert((0, 0, 0));
+            let (ai, human, untracked) = file_stats
+                .entry(file_att.file_path.clone())
+                .or_insert((0, 0, 0));
 
             for entry in &file_att.entries {
                 let line_count: usize = entry
@@ -739,7 +766,12 @@ pub fn check_threshold(report: &AttributionReport, max_ai_percent: f64) -> bool 
 // ---------------------------------------------------------------------------
 
 /// Classify hashes from an AuthorshipLog into AI and human sets.
-fn classify_hashes(log: &AuthorshipLog) -> (std::collections::HashSet<&str>, std::collections::HashSet<&str>) {
+fn classify_hashes(
+    log: &AuthorshipLog,
+) -> (
+    std::collections::HashSet<&str>,
+    std::collections::HashSet<&str>,
+) {
     let mut ai = std::collections::HashSet::new();
     for key in log.metadata.prompts.keys() {
         ai.insert(key.as_str());
@@ -1106,8 +1138,8 @@ new file mode 100644
         // internally: parse multiple authorship logs and aggregate stats.
 
         use crate::core::authorship_log::{
-            AgentId, AttestationEntry, AuthorshipLog, FileAttestation, LineRange, Metadata,
-            PromptRecord, HumanRecord,
+            AgentId, AttestationEntry, AuthorshipLog, FileAttestation, HumanRecord, LineRange,
+            Metadata, PromptRecord,
         };
 
         // Simulate two commits with authorship notes
@@ -1131,7 +1163,9 @@ new file mode 100644
         );
         log1.metadata.humans.insert(
             "h_human_hash_1".to_string(),
-            HumanRecord { author: "dev@example.com".to_string() },
+            HumanRecord {
+                author: "dev@example.com".to_string(),
+            },
         );
         log1.attestations.push(FileAttestation {
             file_path: "src/main.rs".to_string(),
@@ -1204,8 +1238,9 @@ new file mode 100644
             };
 
             for file_att in &authorship.attestations {
-                let (ai, human, untracked) =
-                    file_stats.entry(file_att.file_path.clone()).or_insert((0, 0, 0));
+                let (ai, human, untracked) = file_stats
+                    .entry(file_att.file_path.clone())
+                    .or_insert((0, 0, 0));
                 for entry in &file_att.entries {
                     let line_count: usize = entry
                         .line_ranges

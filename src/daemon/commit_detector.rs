@@ -7,10 +7,21 @@ use crate::daemon::trace2_events::{Trace2Event, is_root_sid, root_sid};
 /// A detected git operation ready for processing.
 #[derive(Debug, Clone)]
 pub enum DetectedOperation {
-    Commit { repo_path: PathBuf },
-    Rewrite { repo_path: PathBuf, kind: RewriteKind, argv: Vec<String> },
-    Stash { repo_path: PathBuf, argv: Vec<String> },
-    StashPop { repo_path: PathBuf },
+    Commit {
+        repo_path: PathBuf,
+    },
+    Rewrite {
+        repo_path: PathBuf,
+        kind: RewriteKind,
+        argv: Vec<String>,
+    },
+    Stash {
+        repo_path: PathBuf,
+        argv: Vec<String>,
+    },
+    StashPop {
+        repo_path: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,89 +186,62 @@ impl CommitDetector {
                 if !is_root_sid(&sid) {
                     return None;
                 }
-                let result = if exit_code == 0 {
-                    if let Some(session) = self.sessions.get(&sid) {
-                        match session.cmd_name.as_deref() {
-                            Some("commit") => {
-                                // Check if this is an amend
-                                let is_amend = session.argv.iter().any(|a| a == "--amend");
-                                if is_amend {
-                                    session.repo_path.as_ref().map(|path| {
-                                        DetectedOperation::Rewrite {
-                                            repo_path: path.clone(),
-                                            kind: RewriteKind::Amend,
-                                            argv: session.argv.clone(),
-                                        }
-                                    })
-                                } else {
-                                    session.repo_path.as_ref().map(|path| {
-                                        DetectedOperation::Commit {
-                                            repo_path: path.clone(),
-                                        }
-                                    })
+                let result =
+                    if exit_code == 0 {
+                        if let Some(session) = self.sessions.get(&sid) {
+                            match session.cmd_name.as_deref() {
+                                Some("commit") => {
+                                    // Check if this is an amend
+                                    let is_amend = session.argv.iter().any(|a| a == "--amend");
+                                    if is_amend {
+                                        session.repo_path.as_ref().map(|path| {
+                                            DetectedOperation::Rewrite {
+                                                repo_path: path.clone(),
+                                                kind: RewriteKind::Amend,
+                                                argv: session.argv.clone(),
+                                            }
+                                        })
+                                    } else {
+                                        session.repo_path.as_ref().map(|path| {
+                                            DetectedOperation::Commit {
+                                                repo_path: path.clone(),
+                                            }
+                                        })
+                                    }
                                 }
-                            }
-                            Some("rebase") => {
-                                session.repo_path.as_ref().map(|path| {
+                                Some("rebase") => session.repo_path.as_ref().map(|path| {
                                     DetectedOperation::Rewrite {
                                         repo_path: path.clone(),
                                         kind: RewriteKind::Rebase,
                                         argv: session.argv.clone(),
                                     }
-                                })
-                            }
-                            Some("cherry-pick") => {
-                                session.repo_path.as_ref().map(|path| {
+                                }),
+                                Some("cherry-pick") => session.repo_path.as_ref().map(|path| {
                                     DetectedOperation::Rewrite {
                                         repo_path: path.clone(),
                                         kind: RewriteKind::CherryPick,
                                         argv: session.argv.clone(),
                                     }
-                                })
-                            }
-                            Some("reset") => {
-                                session.repo_path.as_ref().map(|path| {
+                                }),
+                                Some("reset") => session.repo_path.as_ref().map(|path| {
                                     DetectedOperation::Rewrite {
                                         repo_path: path.clone(),
                                         kind: RewriteKind::Reset,
                                         argv: session.argv.clone(),
                                     }
-                                })
-                            }
-                            Some("stash") => {
-                                let has_pop_or_apply = session
-                                    .argv
-                                    .iter()
-                                    .any(|a| a == "pop" || a == "apply");
-                                let has_push_or_save = session
-                                    .argv
-                                    .iter()
-                                    .any(|a| a == "push" || a == "save");
-                                if has_pop_or_apply {
-                                    session.repo_path.as_ref().map(|path| {
-                                        DetectedOperation::StashPop {
-                                            repo_path: path.clone(),
-                                        }
-                                    })
-                                } else if has_push_or_save {
-                                    session.repo_path.as_ref().map(|path| {
-                                        DetectedOperation::Stash {
-                                            repo_path: path.clone(),
-                                            argv: session.argv.clone(),
-                                        }
-                                    })
-                                } else {
-                                    // Bare `git stash` (no subcommand) is equivalent to push
-                                    let is_bare_stash = !session.argv.iter().any(|a| {
-                                        a == "list"
-                                            || a == "show"
-                                            || a == "drop"
-                                            || a == "clear"
-                                            || a == "branch"
-                                            || a == "create"
-                                            || a == "store"
-                                    });
-                                    if is_bare_stash {
+                                }),
+                                Some("stash") => {
+                                    let has_pop_or_apply =
+                                        session.argv.iter().any(|a| a == "pop" || a == "apply");
+                                    let has_push_or_save =
+                                        session.argv.iter().any(|a| a == "push" || a == "save");
+                                    if has_pop_or_apply {
+                                        session.repo_path.as_ref().map(|path| {
+                                            DetectedOperation::StashPop {
+                                                repo_path: path.clone(),
+                                            }
+                                        })
+                                    } else if has_push_or_save {
                                         session.repo_path.as_ref().map(|path| {
                                             DetectedOperation::Stash {
                                                 repo_path: path.clone(),
@@ -265,18 +249,36 @@ impl CommitDetector {
                                             }
                                         })
                                     } else {
-                                        None
+                                        // Bare `git stash` (no subcommand) is equivalent to push
+                                        let is_bare_stash = !session.argv.iter().any(|a| {
+                                            a == "list"
+                                                || a == "show"
+                                                || a == "drop"
+                                                || a == "clear"
+                                                || a == "branch"
+                                                || a == "create"
+                                                || a == "store"
+                                        });
+                                        if is_bare_stash {
+                                            session.repo_path.as_ref().map(|path| {
+                                                DetectedOperation::Stash {
+                                                    repo_path: path.clone(),
+                                                    argv: session.argv.clone(),
+                                                }
+                                            })
+                                        } else {
+                                            None
+                                        }
                                     }
                                 }
+                                _ => None,
                             }
-                            _ => None,
+                        } else {
+                            None
                         }
                     } else {
                         None
-                    }
-                } else {
-                    None
-                };
+                    };
                 self.sessions.remove(&sid);
                 result
             }

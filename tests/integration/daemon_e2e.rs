@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ fn read_retry(stream: &mut impl std::io::Read, buf: &mut [u8]) -> std::io::Resul
 }
 
 /// Wait for a file to exist, with timeout.
-fn wait_for_file(path: &PathBuf, timeout: Duration) -> bool {
+fn wait_for_file(path: &Path, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
         if path.exists() {
@@ -30,7 +30,7 @@ fn wait_for_file(path: &PathBuf, timeout: Duration) -> bool {
 
 /// Create a HOME directory with a .gitconfig that routes trace2 events to the socket.
 /// Returns the HOME path. Git commands run with this HOME will send trace2 events.
-fn create_trace2_home(base_dir: &std::path::Path, socket_path: &PathBuf) -> PathBuf {
+fn create_trace2_home(base_dir: &std::path::Path, socket_path: &Path) -> PathBuf {
     let home = base_dir.join("trace2home");
     fs::create_dir_all(&home).unwrap();
     let gitconfig = home.join(".gitconfig");
@@ -626,7 +626,7 @@ fn test_checkpoint_via_control_socket() {
     let mut buf = [0u8; 4096];
     let n = read_retry(&mut client, &mut buf).unwrap();
     let response: serde_json::Value =
-        serde_json::from_str(&String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
+        serde_json::from_str(String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
 
     assert_eq!(response["ok"], true, "checkpoint response: {:?}", response);
     assert_eq!(
@@ -763,7 +763,7 @@ fn test_control_socket_status() {
     let mut buf = [0u8; 4096];
     let n = read_retry(&mut client, &mut buf).unwrap();
     let resp: serde_json::Value =
-        serde_json::from_str(&String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
+        serde_json::from_str(String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
 
     assert_eq!(resp["ok"], true);
     assert_eq!(resp["status"]["checkpoint_count"], 0);
@@ -784,7 +784,7 @@ fn test_control_socket_status() {
     client2.flush().unwrap();
     let n = read_retry(&mut client2, &mut buf).unwrap();
     let cp_resp: serde_json::Value =
-        serde_json::from_str(&String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
+        serde_json::from_str(String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
     assert_eq!(cp_resp["ok"], true);
     assert_eq!(cp_resp["processed"], 1);
 
@@ -798,7 +798,7 @@ fn test_control_socket_status() {
     client3.flush().unwrap();
     let n = read_retry(&mut client3, &mut buf).unwrap();
     let resp2: serde_json::Value =
-        serde_json::from_str(&String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
+        serde_json::from_str(String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
 
     assert_eq!(resp2["status"]["checkpoint_count"], 1);
     assert_eq!(resp2["status"]["files"][0], "test.txt");
@@ -823,7 +823,7 @@ fn test_daemon_rewrite_amend_copies_note() {
     let socket_path = daemon_base.join("trace2.sock");
     let pid_file = daemon_base.join("daemon.pid.json");
 
-    let mut daemon_proc = Command::new(&binary)
+    let mut daemon_proc = Command::new(binary)
         .args(["bg", "run"])
         .env("HOME", daemon_home.path())
         .env("GIT_TRACE2_EVENT", "/dev/null")
@@ -875,7 +875,7 @@ fn test_daemon_rewrite_amend_copies_note() {
 
     // Create a commit with checkpoint + authorship note
     fs::write(repo_path.join("hello.txt"), "Hello AI\n").unwrap();
-    Command::new(&binary)
+    Command::new(binary)
         .current_dir(&repo_path)
         .args(["checkpoint", "mock_ai", "hello.txt"])
         .env("GIT_TRACE2_EVENT", "/dev/null")
@@ -975,7 +975,7 @@ fn test_daemon_rewrite_rebase_copies_notes() {
     let socket_path = daemon_base.join("trace2.sock");
     let pid_file = daemon_base.join("daemon.pid.json");
 
-    let mut daemon_proc = Command::new(&binary)
+    let mut daemon_proc = Command::new(binary)
         .args(["bg", "run"])
         .env("HOME", daemon_home.path())
         .env("GIT_TRACE2_EVENT", "/dev/null")
@@ -1034,7 +1034,7 @@ fn test_daemon_rewrite_rebase_copies_notes() {
         .unwrap();
 
     fs::write(repo_path.join("feat.txt"), "feature line\n").unwrap();
-    Command::new(&binary)
+    Command::new(binary)
         .current_dir(&repo_path)
         .args(["checkpoint", "mock_ai", "feat.txt"])
         .env("GIT_TRACE2_EVENT", "/dev/null")
@@ -1156,7 +1156,7 @@ fn test_daemon_handles_concurrent_multi_repo_commits() {
     let socket_path = daemon_base.join("trace2.sock");
     let pid_file = daemon_base.join("daemon.pid.json");
 
-    let mut daemon_proc = Command::new(&binary)
+    let mut daemon_proc = Command::new(binary)
         .args(["bg", "run"])
         .env("HOME", daemon_home.path())
         .env("GIT_TRACE2_EVENT", "/dev/null")
@@ -1216,9 +1216,13 @@ fn test_daemon_handles_concurrent_multi_repo_commits() {
     let mut commit_shas: Vec<(PathBuf, String)> = Vec::new();
     for (repo, label) in [(&repo_a, "a"), (&repo_b, "b"), (&repo_c, "c")] {
         let filename = format!("{}.txt", label);
-        fs::write(repo.join(&filename), format!("Content from repo {}\n", label)).unwrap();
+        fs::write(
+            repo.join(&filename),
+            format!("Content from repo {}\n", label),
+        )
+        .unwrap();
 
-        Command::new(&binary)
+        Command::new(binary)
             .current_dir(repo)
             .args(["checkpoint", "mock_ai", &filename])
             .env("GIT_TRACE2_EVENT", "/dev/null")
@@ -1293,7 +1297,7 @@ fn test_daemon_resolves_symlinked_repo() {
     let socket_path = daemon_base.join("trace2.sock");
     let pid_file = daemon_base.join("daemon.pid.json");
 
-    let mut daemon_proc = Command::new(&binary)
+    let mut daemon_proc = Command::new(binary)
         .args(["bg", "run"])
         .env("HOME", daemon_home.path())
         .env("GIT_TRACE2_EVENT", "/dev/null")
@@ -1347,7 +1351,7 @@ fn test_daemon_resolves_symlinked_repo() {
 
     // Checkpoint via the symlinked path
     fs::write(link_path.join("hello.txt"), "Hello via symlink\n").unwrap();
-    Command::new(&binary)
+    Command::new(binary)
         .current_dir(&link_path)
         .args(["checkpoint", "mock_ai", "hello.txt"])
         .env("GIT_TRACE2_EVENT", "/dev/null")
@@ -1414,7 +1418,7 @@ fn test_daemon_stats_via_control_socket() {
     let control_path = daemon_base.join("control.sock");
     let pid_file = daemon_base.join("daemon.pid.json");
 
-    let mut daemon_proc = Command::new(&binary)
+    let mut daemon_proc = Command::new(binary)
         .args(["bg", "run"])
         .env("HOME", daemon_home.path())
         .env("GIT_TRACE2_EVENT", "/dev/null")
@@ -1437,10 +1441,12 @@ fn test_daemon_stats_via_control_socket() {
     let mut buf = [0u8; 4096];
     let n = read_retry(&mut client, &mut buf).unwrap();
     let resp: serde_json::Value =
-        serde_json::from_str(&String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
+        serde_json::from_str(String::from_utf8_lossy(&buf[..n]).trim()).unwrap();
 
     assert_eq!(resp["ok"], true, "stats response should be ok: {:?}", resp);
-    let stats_str = resp["stats"].as_str().expect("stats field should be a string");
+    let stats_str = resp["stats"]
+        .as_str()
+        .expect("stats field should be a string");
     assert!(
         stats_str.contains("uptime:"),
         "stats should contain uptime: {}",

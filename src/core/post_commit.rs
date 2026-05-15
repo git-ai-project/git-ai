@@ -75,51 +75,49 @@ pub fn generate_authorship_for_commit(
     let mut file_attributions = file_attributions;
     for (file_path, attrs) in file_attributions.iter_mut() {
         let blob_content = find_last_blob_content(&checkpoints, file_path, git_dir, parent_sha);
-        if let Some(ref checkpoint_content) = blob_content {
-            if let Some(committed_content) = std::fs::read_to_string(repo_dir.join(file_path)).ok()
-            {
-                if *checkpoint_content != committed_content {
-                    let old_lines: Vec<&str> = checkpoint_content.lines().collect();
-                    let new_lines: Vec<&str> = committed_content.lines().collect();
-                    let mapping = build_line_mapping(&old_lines, &new_lines);
-                    let mut new_attrs: Vec<LineAttribution> = Vec::new();
-                    for attr in attrs.iter() {
-                        let mut mapped_lines: Vec<u32> = Vec::new();
-                        for line_num in attr.start_line..=attr.end_line {
-                            if let Some(&new_line) = mapping.get(&line_num) {
-                                mapped_lines.push(new_line);
-                            }
-                        }
-                        if mapped_lines.is_empty() {
-                            continue;
-                        }
-                        mapped_lines.sort_unstable();
-                        let mut start = mapped_lines[0];
-                        let mut end = mapped_lines[0];
-                        for &l in &mapped_lines[1..] {
-                            if l == end + 1 {
-                                end = l;
-                            } else {
-                                new_attrs.push(LineAttribution {
-                                    start_line: start,
-                                    end_line: end,
-                                    author_id: attr.author_id.clone(),
-                                    overrode: attr.overrode.clone(),
-                                });
-                                start = l;
-                                end = l;
-                            }
-                        }
+        if let Some(ref checkpoint_content) = blob_content
+            && let Ok(committed_content) = std::fs::read_to_string(repo_dir.join(file_path))
+            && *checkpoint_content != committed_content
+        {
+            let old_lines: Vec<&str> = checkpoint_content.lines().collect();
+            let new_lines: Vec<&str> = committed_content.lines().collect();
+            let mapping = build_line_mapping(&old_lines, &new_lines);
+            let mut new_attrs: Vec<LineAttribution> = Vec::new();
+            for attr in attrs.iter() {
+                let mut mapped_lines: Vec<u32> = Vec::new();
+                for line_num in attr.start_line..=attr.end_line {
+                    if let Some(&new_line) = mapping.get(&line_num) {
+                        mapped_lines.push(new_line);
+                    }
+                }
+                if mapped_lines.is_empty() {
+                    continue;
+                }
+                mapped_lines.sort_unstable();
+                let mut start = mapped_lines[0];
+                let mut end = mapped_lines[0];
+                for &l in &mapped_lines[1..] {
+                    if l == end + 1 {
+                        end = l;
+                    } else {
                         new_attrs.push(LineAttribution {
                             start_line: start,
                             end_line: end,
                             author_id: attr.author_id.clone(),
                             overrode: attr.overrode.clone(),
                         });
+                        start = l;
+                        end = l;
                     }
-                    *attrs = new_attrs;
                 }
+                new_attrs.push(LineAttribution {
+                    start_line: start,
+                    end_line: end,
+                    author_id: attr.author_id.clone(),
+                    overrode: attr.overrode.clone(),
+                });
             }
+            *attrs = new_attrs;
         }
     }
     file_attributions.retain(|_, attrs| !attrs.is_empty());
@@ -153,7 +151,6 @@ pub fn generate_authorship_for_commit(
 
     Ok((authorship_log, initial_result))
 }
-
 
 // ---------------------------------------------------------------------------
 // Helper: read file at a given revision
@@ -276,15 +273,11 @@ fn git_diff_uncommitted_lines(
 /// Handles both unquoted (`+++ b/file.txt`) and quoted (`+++ "b/file with spaces.txt"`) forms.
 fn parse_diff_dst_path(line: &str) -> Option<String> {
     if line.starts_with("+++ \"b/") && line.ends_with('"') {
-        // Quoted form: +++ "b/path with spaces/file.txt"
-        // Strip the leading `+++ "b/` and trailing `"`
         let inner = &line[7..line.len() - 1];
         Some(unescape_git_path(inner))
-    } else if line.starts_with("+++ b/") {
-        // Unquoted form: +++ b/file.txt
-        Some(line[6..].trim_end().to_string())
     } else {
-        None
+        line.strip_prefix("+++ b/")
+            .map(|path| path.trim_end().to_string())
     }
 }
 
@@ -314,7 +307,7 @@ fn unescape_git_path(s: &str) -> String {
                 }
                 d @ b'0'..=b'3' => {
                     // Octal escape: up to 3 digits total
-                    let mut val = (d - b'0') as u8;
+                    let mut val = d - b'0';
                     let mut consumed = 2; // backslash + first digit
                     if i + 2 < bytes.len() && bytes[i + 2] >= b'0' && bytes[i + 2] <= b'7' {
                         val = val * 8 + (bytes[i + 2] - b'0');
@@ -350,34 +343,34 @@ fn parse_diff_added_lines(diff_output: &str) -> Vec<(String, Vec<u32>)> {
     for line in diff_output.lines() {
         if let Some(file_path) = parse_diff_dst_path(line) {
             // Flush previous file
-            if let Some(file) = current_file.take() {
-                if !current_lines.is_empty() {
-                    results.push((file, std::mem::take(&mut current_lines)));
-                }
+            if let Some(file) = current_file.take()
+                && !current_lines.is_empty()
+            {
+                results.push((file, std::mem::take(&mut current_lines)));
             }
             current_file = Some(file_path);
             current_lines.clear();
         } else if line.starts_with("+++ /dev/null") {
             // File was deleted; flush and reset
-            if let Some(file) = current_file.take() {
-                if !current_lines.is_empty() {
-                    results.push((file, std::mem::take(&mut current_lines)));
-                }
+            if let Some(file) = current_file.take()
+                && !current_lines.is_empty()
+            {
+                results.push((file, std::mem::take(&mut current_lines)));
             }
             current_file = None;
             current_lines.clear();
-        } else if line.starts_with("@@ ") {
-            if let Some(added) = parse_hunk_header_added(line) {
-                current_lines.extend(added);
-            }
+        } else if line.starts_with("@@ ")
+            && let Some(added) = parse_hunk_header_added(line)
+        {
+            current_lines.extend(added);
         }
     }
 
     // Flush last file
-    if let Some(file) = current_file {
-        if !current_lines.is_empty() {
-            results.push((file, current_lines));
-        }
+    if let Some(file) = current_file
+        && !current_lines.is_empty()
+    {
+        results.push((file, current_lines));
     }
 
     results
@@ -578,13 +571,13 @@ fn merge_attributions(
             // Last checkpoint wins, but preserve initial attributions for
             // lines that have no author (empty author_id means "unchanged").
             let existing = file_attrs.get(&entry.file);
-            if existing.is_some()
+            if let Some(existing_val) = existing
                 && entry
                     .line_attributions
                     .iter()
                     .any(|a| a.author_id.is_empty())
             {
-                let initial_attrs = existing.unwrap().clone();
+                let initial_attrs = existing_val.clone();
                 let mut merged: Vec<LineAttribution> = Vec::new();
                 for attr in &entry.line_attributions {
                     if !attr.author_id.is_empty() {
@@ -613,13 +606,12 @@ fn merge_attributions(
                             });
                         } else {
                             // Try to extend the last entry if same author
-                            if let Some(last) = merged.last_mut() {
-                                if last.author_id == resolved_author
-                                    && last.end_line + 1 == line
-                                {
-                                    last.end_line = line;
-                                    continue;
-                                }
+                            if let Some(last) = merged.last_mut()
+                                && last.author_id == resolved_author
+                                && last.end_line + 1 == line
+                            {
+                                last.end_line = line;
+                                continue;
                             }
                             merged.push(LineAttribution {
                                 start_line: line,
@@ -752,8 +744,7 @@ fn split_attributions(
         // changes. This correctly handles modifications (same position, different
         // content) without erroneous position shifts.
         let wt_to_committed: Option<HashMap<u32, u32>> = if uncommitted_sorted_lines.is_some() {
-            if let Some(committed_content) = std::fs::read_to_string(repo_dir.join(file_path)).ok()
-            {
+            if let Ok(committed_content) = std::fs::read_to_string(repo_dir.join(file_path)) {
                 let wt_path = repo_dir.join(file_path);
                 if let Ok(wt_content) = std::fs::read_to_string(&wt_path) {
                     if wt_content != committed_content {
@@ -838,42 +829,42 @@ fn split_attributions(
         // added after it when new lines were appended). These should be treated as "soft h_"
         // that gap-fill CAN override.
         let mut h_lines_matching_parent: HashSet<u32> = HashSet::new();
-        if parent_sha != "initial" {
-            if let Some(parent_content) = git_show_file(repo_dir, parent_sha, file_path) {
-                let parent_lines: Vec<&str> = parent_content.lines().collect();
-                let parent_has_no_trailing_newline = !parent_content.ends_with('\n');
-                if let Some(commit_content) = git_show_file(repo_dir, commit_sha, file_path) {
-                    let commit_lines: Vec<&str> = commit_content.lines().collect();
-                    if parent_has_no_trailing_newline
-                        && !parent_lines.is_empty()
-                        && commit_lines.len() > parent_lines.len()
+        if parent_sha != "initial"
+            && let Some(parent_content) = git_show_file(repo_dir, parent_sha, file_path)
+        {
+            let parent_lines: Vec<&str> = parent_content.lines().collect();
+            let parent_has_no_trailing_newline = !parent_content.ends_with('\n');
+            if let Some(commit_content) = git_show_file(repo_dir, commit_sha, file_path) {
+                let commit_lines: Vec<&str> = commit_content.lines().collect();
+                if parent_has_no_trailing_newline
+                    && !parent_lines.is_empty()
+                    && commit_lines.len() > parent_lines.len()
+                {
+                    let last_parent_line_num = parent_lines.len() as u32;
+                    let last_parent_idx = parent_lines.len() - 1;
+                    // Check if the last parent line appears unchanged at the same position
+                    if last_parent_idx < commit_lines.len()
+                        && commit_lines[last_parent_idx] == parent_lines[last_parent_idx]
                     {
-                        let last_parent_line_num = parent_lines.len() as u32;
-                        let last_parent_idx = parent_lines.len() - 1;
-                        // Check if the last parent line appears unchanged at the same position
-                        if last_parent_idx < commit_lines.len()
-                            && commit_lines[last_parent_idx] == parent_lines[last_parent_idx]
-                        {
-                            // Check if this line has h_ attribution (make it soft/gap-fillable)
-                            let h_authors_present: Vec<&str> = committed_by_author
-                                .keys()
-                                .filter(|k| k.starts_with("h_"))
-                                .copied()
-                                .collect();
-                            for h_author in &h_authors_present {
-                                if let Some(lines) = committed_by_author.get(*h_author) {
-                                    if lines.contains(&last_parent_line_num) {
-                                        h_lines_matching_parent.insert(last_parent_line_num);
-                                    }
-                                }
+                        // Check if this line has h_ attribution (make it soft/gap-fillable)
+                        let h_authors_present: Vec<&str> = committed_by_author
+                            .keys()
+                            .filter(|k| k.starts_with("h_"))
+                            .copied()
+                            .collect();
+                        for h_author in &h_authors_present {
+                            if let Some(lines) = committed_by_author.get(*h_author)
+                                && lines.contains(&last_parent_line_num)
+                            {
+                                h_lines_matching_parent.insert(last_parent_line_num);
                             }
-
-                            // Note: We no longer insert into explicitly_human_committed here.
-                            // The h_between check in gap_fill_committed prevents gap-fill from
-                            // bridging over h_ lines, which handles the case where the last
-                            // parent line should stay human (when there's a human-attributed
-                            // line between it and the nearest AI neighbor).
                         }
+
+                        // Note: We no longer insert into explicitly_human_committed here.
+                        // The h_between check in gap_fill_committed prevents gap-fill from
+                        // bridging over h_ lines, which handles the case where the last
+                        // parent line should stay human (when there's a human-attributed
+                        // line between it and the nearest AI neighbor).
                     }
                 }
             }
@@ -881,7 +872,12 @@ fn split_attributions(
 
         // Gap-fill committed lines (but not lines explicitly attributed to human)
         if let Some(c_set) = committed_set {
-            gap_fill_committed(&mut committed_by_author, c_set, &explicitly_human_committed, &h_lines_matching_parent);
+            gap_fill_committed(
+                &mut committed_by_author,
+                c_set,
+                &explicitly_human_committed,
+                &h_lines_matching_parent,
+            );
         }
 
         // Build attestation entries for committed lines
@@ -1166,7 +1162,12 @@ mod tests {
         committed_by_author.insert("abc123", vec![1, 2, 4, 5]);
         let committed_set: HashSet<u32> = [1, 2, 3, 4, 5].into_iter().collect();
 
-        gap_fill_committed(&mut committed_by_author, &committed_set, &HashSet::new(), &HashSet::new());
+        gap_fill_committed(
+            &mut committed_by_author,
+            &committed_set,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
 
         let lines = committed_by_author.get("abc123").unwrap();
         assert!(lines.contains(&3));
@@ -1179,7 +1180,12 @@ mod tests {
         committed_by_author.insert("author_b", vec![4, 5]);
         let committed_set: HashSet<u32> = [1, 2, 3, 4, 5].into_iter().collect();
 
-        gap_fill_committed(&mut committed_by_author, &committed_set, &HashSet::new(), &HashSet::new());
+        gap_fill_committed(
+            &mut committed_by_author,
+            &committed_set,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
 
         let lines_a = committed_by_author.get("author_a").unwrap();
         let lines_b = committed_by_author.get("author_b").unwrap();
@@ -1193,7 +1199,12 @@ mod tests {
         committed_by_author.insert("h_abc123", vec![1, 2, 4, 5]);
         let committed_set: HashSet<u32> = [1, 2, 3, 4, 5].into_iter().collect();
 
-        gap_fill_committed(&mut committed_by_author, &committed_set, &HashSet::new(), &HashSet::new());
+        gap_fill_committed(
+            &mut committed_by_author,
+            &committed_set,
+            &HashSet::new(),
+            &HashSet::new(),
+        );
 
         let lines = committed_by_author.get("h_abc123").unwrap();
         assert!(!lines.contains(&3));
@@ -1364,130 +1375,4 @@ diff --git a/my file.txt b/my file.txt
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], ("my file.txt".to_string(), vec![1, 2]));
     }
-}
-
-/// Seed INITIAL attributions from the parent commit's authorship note.
-/// Only `h_`-prefixed (known-human) entries are seeded. This protects
-/// known-human lines from being incorrectly gap-filled to AI.
-fn seed_initial_from_parent_note(
-    git_dir: &Path,
-    parent_sha: &str,
-    commit_sha: &str,
-    repo_dir: &Path,
-    initial: &mut InitialAttributions,
-) {
-    use super::attribution::LineAttribution;
-
-    let parent_note = match read_note(git_dir, parent_sha) {
-        Some(n) => n,
-        None => return,
-    };
-    let parent_log = match AuthorshipLog::deserialize_from_string(&parent_note) {
-        Ok(l) => l,
-        Err(_) => return,
-    };
-
-    for file_att in &parent_log.attestations {
-        // Only process h_-prefixed entries (known-human)
-        for entry in &file_att.entries {
-            if !entry.hash.starts_with("h_") {
-                continue;
-            }
-
-            // Get old file content (from parent) and new file content (committed)
-            let old_content = git_show(git_dir, parent_sha, &file_att.file_path);
-            let new_content = git_show(git_dir, commit_sha, &file_att.file_path)
-                .or_else(|| std::fs::read_to_string(repo_dir.join(&file_att.file_path)).ok());
-
-            let (old_content, new_content) = match (old_content, new_content) {
-                (Some(o), Some(n)) => (o, n),
-                _ => continue,
-            };
-
-            let old_lines: Vec<&str> = old_content.lines().collect();
-            let new_lines: Vec<&str> = new_content.lines().collect();
-            let mapping = build_line_mapping(&old_lines, &new_lines);
-
-            let file_initial = initial.files.entry(file_att.file_path.clone()).or_default();
-
-            for range in &entry.line_ranges {
-                let (start, end) = match range {
-                    LineRange::Single(l) => (*l, *l),
-                    LineRange::Range(s, e) => (*s, *e),
-                };
-                for old_line in start..=end {
-                    if let Some(&new_line) = mapping.get(&old_line) {
-                        // Only seed if not already attributed in INITIAL
-                        let already_covered = file_initial.iter().any(|a| {
-                            a.start_line <= new_line && new_line <= a.end_line
-                        });
-                        if !already_covered {
-                            file_initial.push(LineAttribution {
-                                start_line: new_line,
-                                end_line: new_line,
-                                author_id: entry.hash.clone(),
-                                overrode: None,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        // Also carry forward human metadata
-        for (id, human) in &parent_log.metadata.humans {
-            initial.humans.entry(id.clone()).or_insert_with(|| {
-                working_log::HumanRecord {
-                    author: human.author.clone(),
-                }
-            });
-        }
-    }
-}
-
-/// Read a git note for a commit.
-fn read_note(git_dir: &Path, commit_sha: &str) -> Option<String> {
-    let git = find_git();
-    let repo_dir = git_dir.parent()?;
-    let output = Command::new(git)
-        .current_dir(repo_dir)
-        .args(["notes", "--ref=ai", "show", commit_sha])
-        .env("GIT_TRACE2_EVENT", "0")
-        .output()
-        .ok()?;
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        None
-    }
-}
-
-/// Get file content at a specific commit.
-fn git_show(git_dir: &Path, commit_sha: &str, file_path: &str) -> Option<String> {
-    let git = find_git();
-    let repo_dir = git_dir.parent()?;
-    let output = Command::new(git)
-        .current_dir(repo_dir)
-        .args(["show", &format!("{}:{}", commit_sha, file_path)])
-        .env("GIT_TRACE2_EVENT", "0")
-        .output()
-        .ok()?;
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        None
-    }
-}
-
-/// Find the git executable path.
-fn find_git() -> &'static str {
-    static GIT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    GIT.get_or_init(|| {
-        for candidate in &["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"] {
-            if Path::new(candidate).is_file() {
-                return candidate.to_string();
-            }
-        }
-        "git".to_string()
-    })
 }

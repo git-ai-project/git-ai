@@ -9,7 +9,8 @@ fn test_squash_merge_preserves_ai_attribution() {
 
     // Create initial content on default branch (human)
     std::fs::write(&file_path, "line 1\nline 2\nline 3\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
     repo.stage_all_and_commit("Initial commit").unwrap();
 
     let default_branch = repo.current_branch();
@@ -99,7 +100,8 @@ fn test_squash_merge_mixed_ai_and_human() {
 
     // Create initial content on default branch (human)
     std::fs::write(&file_path, "header\nbody\nfooter\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "file.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "file.txt"])
+        .unwrap();
     repo.stage_all_and_commit("Initial").unwrap();
 
     let default_branch = repo.current_branch();
@@ -114,13 +116,22 @@ fn test_squash_merge_mixed_ai_and_human() {
     repo.stage_all_and_commit("AI session 1").unwrap();
 
     // Human commit - inserts line after body
-    std::fs::write(&file_path, "header\n// AI session 1\nbody\n// Human addition\nfooter\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_known_human", "file.txt"]).unwrap();
+    std::fs::write(
+        &file_path,
+        "header\n// AI session 1\nbody\n// Human addition\nfooter\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "file.txt"])
+        .unwrap();
     repo.stage_all_and_commit("Human edit").unwrap();
 
     // Another AI commit - appends line after footer
     repo.git_ai(&["checkpoint", "human", "file.txt"]).unwrap();
-    std::fs::write(&file_path, "header\n// AI session 1\nbody\n// Human addition\nfooter\n// AI session 2\n").unwrap();
+    std::fs::write(
+        &file_path,
+        "header\n// AI session 1\nbody\n// Human addition\nfooter\n// AI session 2\n",
+    )
+    .unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "file.txt"]).unwrap();
     repo.stage_all_and_commit("AI session 2").unwrap();
 

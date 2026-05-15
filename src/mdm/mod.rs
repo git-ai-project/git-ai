@@ -333,12 +333,10 @@ pub fn uninstall_hooks(tool: &str) -> Result<(), String> {
             }
             Ok(())
         }
-        HookFormat::GitHookScript => {
-            Err(format!(
-                "{} uses standard git hooks — use `git-ai install --repo` in a git repository to manage hooks",
-                tool
-            ))
-        }
+        HookFormat::GitHookScript => Err(format!(
+            "{} uses standard git hooks — use `git-ai install --repo` in a git repository to manage hooks",
+            tool
+        )),
         _ => {
             let command_needle = format!("git-ai checkpoint {}", tool);
             uninstall_hook_from_file(&full_path, &command_needle, hook_format)
@@ -371,12 +369,10 @@ pub fn install_hooks_dry_run(tool: &str) -> Result<DryRunResult, String> {
                 proposed_content,
             })
         }
-        HookFormat::GitHookScript => {
-            Err(format!(
-                "{} uses standard git hooks — use `git-ai install --repo` in a git repository",
-                tool
-            ))
-        }
+        HookFormat::GitHookScript => Err(format!(
+            "{} uses standard git hooks — use `git-ai install --repo` in a git repository",
+            tool
+        )),
         _ => {
             let command = format!(
                 "$HOME/.git-ai/bin/git-ai checkpoint {} --hook-input stdin",
@@ -521,9 +517,9 @@ fn remove_hooks_from_value(
     }
 
     // If all hook arrays are now empty, remove the hooks key entirely.
-    let all_empty = hooks_obj.values().all(|v| {
-        v.as_array().is_some_and(|a| a.is_empty())
-    });
+    let all_empty = hooks_obj
+        .values()
+        .all(|v| v.as_array().is_some_and(|a| a.is_empty()));
     if all_empty {
         root_obj.remove("hooks");
     }
@@ -554,7 +550,9 @@ fn merge_hooks_into(root: &mut Value, command: &str, format: HookFormat) -> Resu
     }
     match format {
         HookFormat::CursorStyle => merge_cursor_style(root, command, "preToolUse", "postToolUse"),
-        HookFormat::PascalCursorStyle => merge_cursor_style(root, command, "PreToolUse", "PostToolUse"),
+        HookFormat::PascalCursorStyle => {
+            merge_cursor_style(root, command, "PreToolUse", "PostToolUse")
+        }
         HookFormat::ClaudeStyle => merge_claude_style(root, command),
         HookFormat::JetBrainsXml | HookFormat::GitHookScript => {
             // These formats don't use JSON merging — handled by dedicated install functions
@@ -629,9 +627,7 @@ fn merge_cursor_style(
     let entry = serde_json::json!({"command": command});
 
     for key in [pre_key, post_key] {
-        let arr = hooks_obj
-            .entry(key)
-            .or_insert_with(|| Value::Array(vec![]));
+        let arr = hooks_obj.entry(key).or_insert_with(|| Value::Array(vec![]));
         let arr_vec = arr
             .as_array_mut()
             .ok_or_else(|| format!("\"hooks.{}\" is not an array", key))?;
@@ -661,9 +657,7 @@ fn merge_claude_style(root: &mut Value, command: &str) -> Result<(), String> {
     });
 
     for key in ["PreToolUse", "PostToolUse"] {
-        let arr = hooks_obj
-            .entry(key)
-            .or_insert_with(|| Value::Array(vec![]));
+        let arr = hooks_obj.entry(key).or_insert_with(|| Value::Array(vec![]));
         let arr_vec = arr
             .as_array_mut()
             .ok_or_else(|| format!("\"hooks.{}\" is not an array", key))?;
@@ -798,8 +792,7 @@ pub fn install_git_hooks(repo_path: &Path) -> Result<(), String> {
     }
 
     let hooks_dir = git_dir.join("hooks");
-    fs::create_dir_all(&hooks_dir)
-        .map_err(|e| format!("failed to create hooks dir: {}", e))?;
+    fs::create_dir_all(&hooks_dir).map_err(|e| format!("failed to create hooks dir: {}", e))?;
 
     let hooks_to_install = ["post-commit", "pre-commit"];
 
@@ -913,7 +906,10 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_command(agent: &str) -> String {
-        format!("$HOME/.git-ai/bin/git-ai checkpoint {} --hook-input stdin", agent)
+        format!(
+            "$HOME/.git-ai/bin/git-ai checkpoint {} --hook-input stdin",
+            agent
+        )
     }
 
     // --- Cursor-style tests ---
@@ -1399,7 +1395,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         unsafe { std::env::set_var("HOME", tmp.path()) };
 
-        for cfg in AGENT_INSTALL_CONFIGS.iter().filter(|c| c.config_path.is_some()) {
+        for cfg in AGENT_INSTALL_CONFIGS
+            .iter()
+            .filter(|c| c.config_path.is_some())
+        {
             // Skip GitHookScript agents (they need --repo, not global install)
             if cfg.hook_format == Some(HookFormat::GitHookScript) {
                 continue;
@@ -1407,18 +1406,35 @@ mod tests {
 
             fs::create_dir_all(tmp.path().join(cfg.detect_dir)).unwrap();
             let result = install_hooks(cfg.name);
-            assert!(result.is_ok(), "install_hooks({}) failed: {:?}", cfg.name, result);
+            assert!(
+                result.is_ok(),
+                "install_hooks({}) failed: {:?}",
+                cfg.name,
+                result
+            );
 
             let full_path = tmp.path().join(cfg.config_path.unwrap());
             let content = fs::read_to_string(&full_path).unwrap();
 
             if cfg.hook_format == Some(HookFormat::JetBrainsXml) {
                 // JetBrains uses XML, not JSON
-                assert!(content.contains("<toolSet"), "{} should contain XML toolSet", cfg.name);
-                assert!(content.contains("git-ai checkpoint"), "{} should contain checkpoint command", cfg.name);
+                assert!(
+                    content.contains("<toolSet"),
+                    "{} should contain XML toolSet",
+                    cfg.name
+                );
+                assert!(
+                    content.contains("git-ai checkpoint"),
+                    "{} should contain checkpoint command",
+                    cfg.name
+                );
             } else {
                 let parsed: Value = serde_json::from_str(&content).unwrap();
-                assert!(parsed["hooks"].is_object(), "{} hooks not an object", cfg.name);
+                assert!(
+                    parsed["hooks"].is_object(),
+                    "{} hooks not an object",
+                    cfg.name
+                );
             }
         }
     }
@@ -1466,7 +1482,10 @@ mod tests {
 
         // Verify hook removed and hooks key removed (was empty).
         let content: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert!(content.get("hooks").is_none(), "empty hooks object should be removed");
+        assert!(
+            content.get("hooks").is_none(),
+            "empty hooks object should be removed"
+        );
     }
 
     #[test]
@@ -1574,7 +1593,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("does_not_exist.json");
 
-        let result = uninstall_hook_from_file(&path, "git-ai checkpoint cursor", HookFormat::CursorStyle);
+        let result =
+            uninstall_hook_from_file(&path, "git-ai checkpoint cursor", HookFormat::CursorStyle);
         assert!(result.is_ok());
     }
 
@@ -1617,7 +1637,8 @@ mod tests {
         // Uninstall.
         uninstall_hooks("cursor").unwrap();
 
-        let content: Value = serde_json::from_str(&fs::read_to_string(&hook_path).unwrap()).unwrap();
+        let content: Value =
+            serde_json::from_str(&fs::read_to_string(&hook_path).unwrap()).unwrap();
         assert!(content.get("hooks").is_none());
     }
 
@@ -1638,7 +1659,8 @@ mod tests {
 
         // Verify hooks removed.
         let hook_path = tmp.path().join(".cursor/hooks/hooks.json");
-        let content: Value = serde_json::from_str(&fs::read_to_string(&hook_path).unwrap()).unwrap();
+        let content: Value =
+            serde_json::from_str(&fs::read_to_string(&hook_path).unwrap()).unwrap();
         assert!(content.get("hooks").is_none());
     }
 
@@ -1700,7 +1722,10 @@ mod tests {
 
         // Dry-run should show no change.
         let result = compute_install_dry_run(&path, &cmd, HookFormat::CursorStyle).unwrap();
-        assert_eq!(result.current_content.as_deref(), Some(installed_content.as_str()));
+        assert_eq!(
+            result.current_content.as_deref(),
+            Some(installed_content.as_str())
+        );
         assert_eq!(result.proposed_content, installed_content);
     }
 
@@ -1741,7 +1766,9 @@ mod tests {
 
         // All results successful with proposed content.
         for (name, result) in &results {
-            let dr = result.as_ref().unwrap_or_else(|e| panic!("{name} failed: {e}"));
+            let dr = result
+                .as_ref()
+                .unwrap_or_else(|e| panic!("{name} failed: {e}"));
             assert!(dr.proposed_content.contains("git-ai checkpoint"));
         }
     }
@@ -1889,9 +1916,15 @@ mod tests {
         unsafe { std::env::set_var("HOME", tmp.path()) };
 
         let result = install_hooks("intellij");
-        assert!(result.is_ok(), "install_hooks(intellij) failed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "install_hooks(intellij) failed: {:?}",
+            result
+        );
 
-        let xml_path = tmp.path().join(".config/JetBrains/IntelliJIdea/tools/git-ai.xml");
+        let xml_path = tmp
+            .path()
+            .join(".config/JetBrains/IntelliJIdea/tools/git-ai.xml");
         assert!(xml_path.exists());
         let content = fs::read_to_string(&xml_path).unwrap();
         assert!(content.contains("checkpoint intellij"));

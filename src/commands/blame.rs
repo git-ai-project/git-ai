@@ -3,7 +3,7 @@ use git_ai::core::authorship_log::AuthorshipLog;
 use std::collections::HashMap;
 use std::process;
 
-use crate::commands::helpers::{git_cmd};
+use crate::commands::helpers::git_cmd;
 
 pub fn handle_blame(args: &[String]) {
     if args.is_empty() {
@@ -47,9 +47,6 @@ pub fn handle_blame(args: &[String]) {
                 eprintln!("git-ai blame: -L requires a range argument");
                 process::exit(1);
             }
-        } else if args[i].starts_with("-L") {
-            blame_flags.push(args[i].clone());
-            i += 1;
         } else if args[i].starts_with('-') {
             blame_flags.push(args[i].clone());
             i += 1;
@@ -81,9 +78,13 @@ pub fn handle_blame(args: &[String]) {
         let mut components: Vec<String> = Vec::new();
         for comp in p.components() {
             match comp {
-                std::path::Component::ParentDir => { components.pop(); }
+                std::path::Component::ParentDir => {
+                    components.pop();
+                }
                 std::path::Component::CurDir => {}
-                std::path::Component::Normal(s) => { components.push(s.to_string_lossy().to_string()); }
+                std::path::Component::Normal(s) => {
+                    components.push(s.to_string_lossy().to_string());
+                }
                 _ => {}
             }
         }
@@ -120,7 +121,7 @@ pub fn handle_blame(args: &[String]) {
         if line.is_empty() {
             continue;
         }
-        if line.starts_with('\t') {
+        if let Some(content) = line.strip_prefix('\t') {
             lines.push(BlameLineData {
                 commit_sha: cur_sha.clone(),
                 orig_line: cur_orig_line,
@@ -129,14 +130,17 @@ pub fn handle_blame(args: &[String]) {
                 author_email: cur_author_email.clone(),
                 author_time: cur_author_time,
                 author_tz: cur_author_tz.clone(),
-                content: line[1..].to_string(),
+                content: content.to_string(),
                 raw_headers: cur_headers.clone(),
             });
             cur_headers.clear();
             continue;
         }
         if let Some(rest) = line.strip_prefix("author-mail ") {
-            cur_author_email = rest.trim_start_matches('<').trim_end_matches('>').to_string();
+            cur_author_email = rest
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_string();
             cur_headers.push(line.to_string());
             continue;
         }
@@ -235,7 +239,13 @@ pub fn resolve_line_author(
     raw_headers: &[String],
 ) -> String {
     let (author, _) = resolve_line_author_with_prompt(
-        commit_sha, orig_line, git_author, author_email, file_path, commit_notes, raw_headers,
+        commit_sha,
+        orig_line,
+        git_author,
+        author_email,
+        file_path,
+        commit_notes,
+        raw_headers,
     );
     author
 }
@@ -251,9 +261,8 @@ pub fn resolve_line_author_with_prompt(
 ) -> (String, Option<String>) {
     if let Some(Some(authorship_log)) = commit_notes.get(commit_sha) {
         // Extract the original filename from blame porcelain headers (handles renames)
-        let orig_filename: Option<&str> = raw_headers.iter().find_map(|h| {
-            h.strip_prefix("filename ")
-        });
+        let orig_filename: Option<&str> =
+            raw_headers.iter().find_map(|h| h.strip_prefix("filename "));
 
         for file_attest in &authorship_log.attestations {
             let attest_path = file_attest
@@ -263,7 +272,7 @@ pub fn resolve_line_author_with_prompt(
             let query_path = file_path.strip_prefix("./").unwrap_or(file_path);
             // Match against the queried file path OR the original filename from blame
             let matches = attest_path == query_path
-                || orig_filename.map_or(false, |orig| {
+                || orig_filename.is_some_and(|orig| {
                     let orig_clean = orig.strip_prefix("./").unwrap_or(orig);
                     attest_path == orig_clean
                 });
@@ -281,10 +290,10 @@ pub fn resolve_line_author_with_prompt(
                 if entry.hash.starts_with("h_") {
                     return (git_author.to_string(), None);
                 }
-                if entry.hash.starts_with("s_") {
-                    if let Some(session) = authorship_log.metadata.sessions.get(&entry.hash) {
-                        return (session.agent_id.tool.clone(), Some(entry.hash.clone()));
-                    }
+                if entry.hash.starts_with("s_")
+                    && let Some(session) = authorship_log.metadata.sessions.get(&entry.hash)
+                {
+                    return (session.agent_id.tool.clone(), Some(entry.hash.clone()));
                 }
             }
         }
@@ -296,7 +305,10 @@ pub fn resolve_line_author_with_prompt(
         hasher.update(b"_agent_email_");
         hasher.update(author_email.as_bytes());
         let hash_bytes = hasher.finalize();
-        let prompt_hash = format!("{:x}", hash_bytes).chars().take(16).collect::<String>();
+        let prompt_hash = format!("{:x}", hash_bytes)
+            .chars()
+            .take(16)
+            .collect::<String>();
         return (agent_name.to_string(), Some(prompt_hash));
     }
     (git_author.to_string(), None)
@@ -310,14 +322,39 @@ fn blame_output_default(
     let line_num_width = lines.len().to_string().len();
     let mut max_author_width = 0;
     for bl in lines {
-        let a = resolve_line_author(&bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file_path, commit_notes, &bl.raw_headers);
+        let a = resolve_line_author(
+            &bl.commit_sha,
+            bl.orig_line,
+            &bl.author,
+            &bl.author_email,
+            file_path,
+            commit_notes,
+            &bl.raw_headers,
+        );
         max_author_width = max_author_width.max(a.len());
     }
     for bl in lines {
         let short_sha = &bl.commit_sha[..7.min(bl.commit_sha.len())];
-        let display_author = resolve_line_author(&bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file_path, commit_notes, &bl.raw_headers);
+        let display_author = resolve_line_author(
+            &bl.commit_sha,
+            bl.orig_line,
+            &bl.author,
+            &bl.author_email,
+            file_path,
+            commit_notes,
+            &bl.raw_headers,
+        );
         let date_str = format_blame_date(bl.author_time, &bl.author_tz);
-        println!("{} ({:<width$} {} {:>lwidth$}) {}", short_sha, display_author, date_str, bl.final_line, bl.content, width = max_author_width, lwidth = line_num_width);
+        println!(
+            "{} ({:<width$} {} {:>lwidth$}) {}",
+            short_sha,
+            display_author,
+            date_str,
+            bl.final_line,
+            bl.content,
+            width = max_author_width,
+            lwidth = line_num_width
+        );
     }
 }
 
@@ -327,7 +364,15 @@ fn blame_output_porcelain(
     commit_notes: &HashMap<String, Option<AuthorshipLog>>,
 ) {
     for bl in lines {
-        let display_author = resolve_line_author(&bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file_path, commit_notes, &bl.raw_headers);
+        let display_author = resolve_line_author(
+            &bl.commit_sha,
+            bl.orig_line,
+            &bl.author,
+            &bl.author_email,
+            file_path,
+            commit_notes,
+            &bl.raw_headers,
+        );
         for header in &bl.raw_headers {
             if header.starts_with("author ") && !header.starts_with("author-") {
                 println!("author {}", display_author);
@@ -350,34 +395,43 @@ fn blame_output_json(
 
     for bl in lines {
         let (author_display, prompt_hash) = resolve_line_author_with_prompt(
-            &bl.commit_sha, bl.orig_line, &bl.author, &bl.author_email, file_path, commit_notes, &bl.raw_headers,
+            &bl.commit_sha,
+            bl.orig_line,
+            &bl.author,
+            &bl.author_email,
+            file_path,
+            commit_notes,
+            &bl.raw_headers,
         );
         if let Some(hash) = &prompt_hash {
             line_authors.insert(bl.final_line, hash.clone());
             if !prompts.contains_key(hash) {
-                if let Some(Some(log)) = commit_notes.get(&bl.commit_sha) {
-                    if let Some(prompt) = log.metadata.prompts.get(hash) {
-                        prompts.insert(hash.clone(), serde_json::json!({
+                if let Some(Some(log)) = commit_notes.get(&bl.commit_sha)
+                    && let Some(prompt) = log.metadata.prompts.get(hash)
+                {
+                    prompts.insert(hash.clone(), serde_json::json!({
                             "agent_id": { "tool": prompt.agent_id.tool, "model": prompt.agent_id.model, "id": prompt.agent_id.id },
                             "accepted_lines": prompt.accepted_lines,
                             "total_additions": prompt.total_additions,
                             "overriden_lines": prompt.overriden_lines,
                             "total_deletions": prompt.total_deletions,
                         }));
-                    }
                 }
-                if !prompts.contains_key(hash) {
-                    if let Some(agent_name) = detect_agent_from_email(&bl.author_email) {
-                        let total_lines = lines.iter().filter(|l| l.commit_sha == bl.commit_sha).count() as u64;
-                        let tool_name = format!("{}-agent", agent_name.replace("github-", ""));
-                        prompts.insert(hash.clone(), serde_json::json!({
+                if !prompts.contains_key(hash)
+                    && let Some(agent_name) = detect_agent_from_email(&bl.author_email)
+                {
+                    let total_lines = lines
+                        .iter()
+                        .filter(|l| l.commit_sha == bl.commit_sha)
+                        .count() as u64;
+                    let tool_name = format!("{}-agent", agent_name.replace("github-", ""));
+                    prompts.insert(hash.clone(), serde_json::json!({
                             "agent_id": { "tool": tool_name, "model": "unknown", "id": bl.commit_sha },
                             "accepted_lines": total_lines,
                             "total_additions": total_lines,
                             "overriden_lines": 0u64,
                             "total_deletions": 0u64,
                         }));
-                    }
                 }
             }
         } else {
@@ -395,19 +449,30 @@ fn blame_output_json(
             if entry.1 == range_author && entry.0 == range_end + 1 {
                 range_end = entry.0;
             } else {
-                let key = if range_start == range_end { format!("{}", range_start) } else { format!("{}-{}", range_start, range_end) };
+                let key = if range_start == range_end {
+                    format!("{}", range_start)
+                } else {
+                    format!("{}-{}", range_start, range_end)
+                };
                 lines_map.insert(key, serde_json::Value::String(range_author.clone()));
                 range_start = entry.0;
                 range_end = entry.0;
                 range_author = entry.1;
             }
         }
-        let key = if range_start == range_end { format!("{}", range_start) } else { format!("{}-{}", range_start, range_end) };
+        let key = if range_start == range_end {
+            format!("{}", range_start)
+        } else {
+            format!("{}-{}", range_start, range_end)
+        };
         lines_map.insert(key, serde_json::Value::String(range_author.clone()));
     }
 
     let output = serde_json::json!({ "lines": lines_map, "prompts": prompts });
-    println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).unwrap_or_default()
+    );
 }
 
 pub fn load_authorship_note(commit_sha: &str) -> Option<AuthorshipLog> {

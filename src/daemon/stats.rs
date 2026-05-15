@@ -3,8 +3,8 @@
 //! Thread-safe counters tracking daemon activity, used by `git-ai bg status`
 //! and structured log output.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 static DAEMON_STATS: OnceLock<DaemonStats> = OnceLock::new();
@@ -92,7 +92,8 @@ mod tests {
     fn uptime_is_non_zero_after_creation() {
         let stats = DaemonStats::new();
         std::thread::sleep(std::time::Duration::from_millis(10));
-        assert!(stats.uptime_secs() == 0 || stats.uptime_secs() >= 0);
+        // uptime_secs() is u64, so it's always >= 0
+        let _ = stats.uptime_secs();
     }
 
     #[test]

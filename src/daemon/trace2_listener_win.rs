@@ -538,7 +538,9 @@ mod tests {
         let result = to_wide("hello");
         assert_eq!(
             result,
-            vec!['h' as u16, 'e' as u16, 'l' as u16, 'l' as u16, 'o' as u16, 0]
+            vec![
+                'h' as u16, 'e' as u16, 'l' as u16, 'l' as u16, 'o' as u16, 0
+            ]
         );
     }
 
@@ -589,7 +591,7 @@ mod tests {
     #[test]
     fn parse_trace2_multiline_stream() {
         // Simulates what a git client would send over the pipe
-        let lines = vec![
+        let lines = [
             r#"{"event":"start","sid":"win-session-1","thread":"main","time":"2024-01-01T00:00:00Z","argv":["git","push","origin","main"]}"#,
             r#"{"event":"def_repo","sid":"win-session-1","thread":"main","repo":1,"worktree":"C:\\Users\\dev\\project"}"#,
             r#"{"event":"cmd_name","sid":"win-session-1","thread":"main","name":"push"}"#,
@@ -603,11 +605,17 @@ mod tests {
             .collect();
 
         assert_eq!(events.len(), 5);
-        assert!(matches!(&events[0], Trace2Event::Start { sid, argv } if sid == "win-session-1" && argv[1] == "push"));
-        assert!(matches!(&events[1], Trace2Event::DefRepo { repo_path, .. } if repo_path.to_string_lossy().contains("project")));
+        assert!(
+            matches!(&events[0], Trace2Event::Start { sid, argv } if sid == "win-session-1" && argv[1] == "push")
+        );
+        assert!(
+            matches!(&events[1], Trace2Event::DefRepo { repo_path, .. } if repo_path.to_string_lossy().contains("project"))
+        );
         assert!(matches!(&events[2], Trace2Event::CmdName { cmd_name, .. } if cmd_name == "push"));
         assert!(matches!(&events[3], Trace2Event::Ignored));
-        assert!(matches!(&events[4], Trace2Event::CommandExit { exit_code, .. } if *exit_code == 0));
+        assert!(
+            matches!(&events[4], Trace2Event::CommandExit { exit_code, .. } if *exit_code == 0)
+        );
     }
 
     #[test]
@@ -687,8 +695,8 @@ mod tests {
 
     #[cfg(windows)]
     mod integration {
-        use super::*;
         use super::super::imp::Trace2ListenerWin;
+        use super::*;
         use std::io;
         use std::sync::mpsc;
         use std::thread;
@@ -778,7 +786,8 @@ mod tests {
             };
 
             assert_ne!(
-                client_handle as isize, INVALID_HANDLE_VALUE,
+                client_handle as isize,
+                INVALID_HANDLE_VALUE,
                 "failed to connect to pipe: {}",
                 io::Error::last_os_error()
             );
@@ -985,9 +994,10 @@ mod tests {
             };
 
             if handle2 as isize != INVALID_HANDLE_VALUE {
-                let line = r#"{"event":"cmd_name","sid":"after-disconnect","thread":"main","name":"log"}"#
-                    .to_string()
-                    + "\n";
+                let line =
+                    r#"{"event":"cmd_name","sid":"after-disconnect","thread":"main","name":"log"}"#
+                        .to_string()
+                        + "\n";
                 let mut written: u32 = 0;
                 unsafe {
                     WriteFile(

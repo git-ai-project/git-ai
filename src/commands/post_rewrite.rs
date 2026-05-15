@@ -121,16 +121,25 @@ pub fn handle_post_rewrite_squash(args: &[String]) {
     // Parse all source notes and collect metadata
     let mut parsed_notes: Vec<(String, AuthorshipLog)> = Vec::new();
     let mut all_files: HashSet<String> = HashSet::new();
-    let mut merged_sessions: BTreeMap<String, git_ai::core::authorship_log::SessionRecord> = BTreeMap::new();
-    let mut merged_humans: BTreeMap<String, git_ai::core::authorship_log::HumanRecord> = BTreeMap::new();
-    let mut merged_prompts: BTreeMap<String, git_ai::core::authorship_log::PromptRecord> = BTreeMap::new();
+    let mut merged_sessions: BTreeMap<String, git_ai::core::authorship_log::SessionRecord> =
+        BTreeMap::new();
+    let mut merged_humans: BTreeMap<String, git_ai::core::authorship_log::HumanRecord> =
+        BTreeMap::new();
+    let mut merged_prompts: BTreeMap<String, git_ai::core::authorship_log::PromptRecord> =
+        BTreeMap::new();
 
     for source_sha in source_shas {
-        debug_log(&format!("post-rewrite-squash: looking up note for source {}", source_sha));
+        debug_log(&format!(
+            "post-rewrite-squash: looking up note for source {}",
+            source_sha
+        ));
         let note = match git_cmd(&["notes", "--ref=ai", "show", source_sha]) {
             Ok(n) => n,
             Err(e) => {
-                debug_log(&format!("post-rewrite-squash: no note for {}: {}", source_sha, e));
+                debug_log(&format!(
+                    "post-rewrite-squash: no note for {}: {}",
+                    source_sha, e
+                ));
                 continue;
             }
         };
@@ -145,13 +154,19 @@ pub fn handle_post_rewrite_squash(args: &[String]) {
 
         // Merge metadata
         for (id, session) in &log.metadata.sessions {
-            merged_sessions.entry(id.clone()).or_insert_with(|| session.clone());
+            merged_sessions
+                .entry(id.clone())
+                .or_insert_with(|| session.clone());
         }
         for (id, human) in &log.metadata.humans {
-            merged_humans.entry(id.clone()).or_insert_with(|| human.clone());
+            merged_humans
+                .entry(id.clone())
+                .or_insert_with(|| human.clone());
         }
         for (id, prompt) in &log.metadata.prompts {
-            merged_prompts.entry(id.clone()).or_insert_with(|| prompt.clone());
+            merged_prompts
+                .entry(id.clone())
+                .or_insert_with(|| prompt.clone());
         }
 
         for att in &log.attestations {
@@ -168,14 +183,17 @@ pub fn handle_post_rewrite_squash(args: &[String]) {
     // Sequential replay: for each file, accumulate attributions by diffing
     // consecutive commit contents and transferring line numbers forward.
     // accumulated_attrs: file_path -> (line_number -> author_hash)
-    let mut accumulated_attrs: std::collections::HashMap<String, BTreeMap<u32, String>> = std::collections::HashMap::new();
-    let mut prev_contents: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut accumulated_attrs: std::collections::HashMap<String, BTreeMap<u32, String>> =
+        std::collections::HashMap::new();
+    let mut prev_contents: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     let all_files_vec: Vec<String> = all_files.iter().cloned().collect();
 
     for (i, (source_sha, authorship_log)) in parsed_notes.iter().enumerate() {
         // Get file contents at this commit
-        let mut current_contents: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut current_contents: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
         for file_path in &all_files_vec {
             let spec = format!("{}:{}", source_sha, file_path);
             if let Ok(content) = git_cmd(&["show", &spec]) {
@@ -204,7 +222,12 @@ pub fn handle_post_rewrite_squash(args: &[String]) {
 
                         let mut new_attrs: BTreeMap<u32, String> = BTreeMap::new();
                         for op in &ops {
-                            if let LineDiffOp::Equal { old_index, new_index, len } = op {
+                            if let LineDiffOp::Equal {
+                                old_index,
+                                new_index,
+                                len,
+                            } = op
+                            {
                                 for j in 0..*len {
                                     let old_line_num = (*old_index + j + 1) as u32;
                                     let new_line_num = (*new_index + j + 1) as u32;
@@ -238,32 +261,34 @@ pub fn handle_post_rewrite_squash(args: &[String]) {
     // (In fixup squash, these should be identical, but handle the general case)
     for file_path in &all_files_vec {
         let spec = format!("{}:{}", target_sha, file_path);
-        if let Ok(target_content) = git_cmd(&["show", &spec]) {
-            if let Some(prev_c) = prev_contents.get(file_path) {
-                if prev_c != &target_content {
-                    if let Some(attrs) = accumulated_attrs.get(file_path) {
-                        if !attrs.is_empty() {
-                            let old_lines: Vec<&str> = prev_c.lines().collect();
-                            let new_lines: Vec<&str> = target_content.lines().collect();
-                            let ops = diff_slices(&old_lines, &new_lines);
+        if let Ok(target_content) = git_cmd(&["show", &spec])
+            && let Some(prev_c) = prev_contents.get(file_path)
+            && prev_c != &target_content
+            && let Some(attrs) = accumulated_attrs.get(file_path)
+            && !attrs.is_empty()
+        {
+            let old_lines: Vec<&str> = prev_c.lines().collect();
+            let new_lines: Vec<&str> = target_content.lines().collect();
+            let ops = diff_slices(&old_lines, &new_lines);
 
-                            let mut new_attrs: BTreeMap<u32, String> = BTreeMap::new();
-                            for op in &ops {
-                                if let LineDiffOp::Equal { old_index, new_index, len } = op {
-                                    for j in 0..*len {
-                                        let old_line_num = (*old_index + j + 1) as u32;
-                                        let new_line_num = (*new_index + j + 1) as u32;
-                                        if let Some(hash) = attrs.get(&old_line_num) {
-                                            new_attrs.insert(new_line_num, hash.clone());
-                                        }
-                                    }
-                                }
-                            }
-                            accumulated_attrs.insert(file_path.clone(), new_attrs);
+            let mut new_attrs: BTreeMap<u32, String> = BTreeMap::new();
+            for op in &ops {
+                if let LineDiffOp::Equal {
+                    old_index,
+                    new_index,
+                    len,
+                } = op
+                {
+                    for j in 0..*len {
+                        let old_line_num = (*old_index + j + 1) as u32;
+                        let new_line_num = (*new_index + j + 1) as u32;
+                        if let Some(hash) = attrs.get(&old_line_num) {
+                            new_attrs.insert(new_line_num, hash.clone());
                         }
                     }
                 }
             }
+            accumulated_attrs.insert(file_path.clone(), new_attrs);
         }
     }
 
@@ -292,7 +317,11 @@ pub fn handle_post_rewrite_squash(args: &[String]) {
         });
     }
 
-    if merged_attestations.is_empty() && merged_sessions.is_empty() && merged_humans.is_empty() && merged_prompts.is_empty() {
+    if merged_attestations.is_empty()
+        && merged_sessions.is_empty()
+        && merged_humans.is_empty()
+        && merged_prompts.is_empty()
+    {
         debug_log("post-rewrite-squash: no notes found in source commits");
         return;
     }
@@ -314,7 +343,15 @@ pub fn handle_post_rewrite_squash(args: &[String]) {
 
     // Write the merged note to the target commit
     let result = Command::new("/usr/bin/git")
-        .args(["notes", "--ref=ai", "add", "-f", "-m", &merged_note, target_sha])
+        .args([
+            "notes",
+            "--ref=ai",
+            "add",
+            "-f",
+            "-m",
+            &merged_note,
+            target_sha,
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .status();

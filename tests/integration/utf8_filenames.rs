@@ -43,18 +43,12 @@ fn test_emoji_filename() {
 
     // AI creates a file with emoji in the name
     let mut emoji_file = repo.filename("🚀rocket.txt");
-    emoji_file.set_contents(crate::lines![
-        "Launch sequence".ai(),
-        "Liftoff!".ai(),
-    ]);
+    emoji_file.set_contents(crate::lines!["Launch sequence".ai(), "Liftoff!".ai(),]);
 
     repo.stage_all_and_commit("Add emoji file").unwrap();
 
     // Blame should work with emoji filename
-    emoji_file.assert_lines_and_blame(crate::lines![
-        "Launch sequence".ai(),
-        "Liftoff!".ai(),
-    ]);
+    emoji_file.assert_lines_and_blame(crate::lines!["Launch sequence".ai(), "Liftoff!".ai(),]);
 }
 
 // =============================================================================
@@ -160,18 +154,12 @@ fn test_korean_filename() {
 
     // AI creates a file with Korean characters
     let mut korean_file = repo.filename("한글파일.txt");
-    korean_file.set_contents(crate::lines![
-        "안녕하세요".ai(),
-        "감사합니다".ai(),
-    ]);
+    korean_file.set_contents(crate::lines!["안녕하세요".ai(), "감사합니다".ai(),]);
 
     repo.stage_all_and_commit("Add Korean file").unwrap();
 
     // Attribution should be preserved
-    korean_file.assert_lines_and_blame(crate::lines![
-        "안녕하세요".ai(),
-        "감사합니다".ai(),
-    ]);
+    korean_file.assert_lines_and_blame(crate::lines!["안녕하세요".ai(), "감사합니다".ai(),]);
 }
 
 crate::reuse_tests_in_worktree!(

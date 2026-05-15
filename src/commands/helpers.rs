@@ -111,18 +111,17 @@ pub fn discover_repo_and_gitdir(start: &Path) -> Option<(PathBuf, PathBuf)> {
         if git_path.is_dir() {
             return Some((current.to_path_buf(), git_path));
         }
-        if git_path.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&git_path) {
-                if let Some(dir) = content.strip_prefix("gitdir: ") {
-                    let dir = dir.trim();
-                    let resolved = if Path::new(dir).is_relative() {
-                        current.join(dir)
-                    } else {
-                        PathBuf::from(dir)
-                    };
-                    return Some((current.to_path_buf(), resolved));
-                }
-            }
+        if git_path.is_file()
+            && let Ok(content) = std::fs::read_to_string(&git_path)
+            && let Some(dir) = content.strip_prefix("gitdir: ")
+        {
+            let dir = dir.trim();
+            let resolved = if Path::new(dir).is_relative() {
+                current.join(dir)
+            } else {
+                PathBuf::from(dir)
+            };
+            return Some((current.to_path_buf(), resolved));
         }
         current = current.parent()?;
     }

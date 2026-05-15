@@ -149,8 +149,8 @@ pub fn flush_samples() -> Result<(), String> {
         let mut lock = samples_lock()
             .lock()
             .map_err(|e| format!("lock poisoned: {}", e))?;
-        let taken = std::mem::take(&mut *lock);
-        taken
+
+        std::mem::take(&mut *lock)
     };
 
     if in_memory.is_empty() {
@@ -237,6 +237,7 @@ pub fn percentile(sorted: &[f64], pct: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_percentile_basic() {
@@ -334,6 +335,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_record_timing_basic() {
         // Clear any existing state
         if let Ok(mut lock) = samples_lock().lock() {
@@ -350,6 +352,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_record_timing_rolling_limit() {
         if let Ok(mut lock) = samples_lock().lock() {
             lock.clear();
