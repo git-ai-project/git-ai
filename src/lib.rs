@@ -1,6 +1,7 @@
 pub mod core;
 pub mod daemon;
 pub mod presets;
+pub mod transcripts;
 
 pub mod authorship {
     pub mod authorship_log_serialization {
