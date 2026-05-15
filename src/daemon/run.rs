@@ -11,6 +11,8 @@ use super::lifecycle::{
     redirect_stderr_to_log, write_pid_file,
 };
 use super::startup;
+use super::stats;
+use super::stats_persistence;
 use super::telemetry_worker;
 use super::trace2_events::Trace2Event;
 
@@ -56,6 +58,10 @@ pub fn run_daemon(foreground: bool) -> Result<(), Error> {
 
     eprintln!("[git-ai] daemon started (pid {})", std::process::id());
 
+    // Record start time in persisted stats
+    let start_timestamp = chrono_iso_now();
+    stats_persistence::update_last_started(&start_timestamp);
+
     // Create channel for trace2 events
     let (event_tx, event_rx) = mpsc::channel::<Trace2Event>();
 
@@ -78,6 +84,10 @@ pub fn run_daemon(foreground: bool) -> Result<(), Error> {
     if let Some(handle) = control_handle {
         let _ = handle.join();
     }
+
+    // Save stats before final shutdown
+    eprintln!("[git-ai] saving stats before shutdown...");
+    stats_persistence::save_stats(stats::get());
 
     eprintln!("[git-ai] daemon shutting down");
     let _ = fs::remove_file(&paths.pid_file);
@@ -185,6 +195,36 @@ fn disable_trace2_for_self() {
     }
 }
 
+/// Simple ISO 8601 timestamp for stats persistence.
+fn chrono_iso_now() -> String {
+    use std::time::SystemTime;
+    let dur = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let mins = (time_of_day % 3600) / 60;
+    let s = time_of_day % 60;
+
+    // Simple days-to-YMD conversion (same algorithm as lifecycle.rs)
+    let z = days as i64 + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, hours, mins, s
+    )
+}
+
 pub fn stop_daemon() -> Result<(), Error> {
     let paths = DaemonPaths::resolve();
 
@@ -204,10 +244,21 @@ pub fn stop_daemon() -> Result<(), Error> {
 
     #[cfg(unix)]
     {
-        unsafe {
-            libc::kill(daemon_pid.pid as i32, libc::SIGTERM);
+        // Try graceful shutdown via control socket first
+        let shutdown_sent = super::control_client::send_request(
+            &paths.control_sock,
+            r#"{"type":"shutdown"}"#,
+        )
+        .is_ok();
+
+        if !shutdown_sent {
+            // Fall back to SIGTERM
+            unsafe {
+                libc::kill(daemon_pid.pid as i32, libc::SIGTERM);
+            }
         }
 
+        // Wait up to 5 seconds for graceful exit
         for _ in 0..50 {
             thread::sleep(Duration::from_millis(100));
             if !lifecycle::is_process_alive(daemon_pid.pid) {
@@ -216,10 +267,20 @@ pub fn stop_daemon() -> Result<(), Error> {
             }
         }
 
-        eprintln!(
-            "[git-ai] daemon (pid {}) did not exit within 5s",
-            daemon_pid.pid
-        );
+        // SIGKILL as last resort
+        unsafe {
+            libc::kill(daemon_pid.pid as i32, libc::SIGKILL);
+        }
+        thread::sleep(Duration::from_millis(100));
+
+        if !lifecycle::is_process_alive(daemon_pid.pid) {
+            eprintln!("[git-ai] daemon killed (did not exit gracefully within 5s)");
+        } else {
+            eprintln!(
+                "[git-ai] daemon (pid {}) did not exit even after SIGKILL",
+                daemon_pid.pid
+            );
+        }
     }
 
     #[cfg(not(unix))]
@@ -228,6 +289,35 @@ pub fn stop_daemon() -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+/// Restart the daemon: gracefully stop the current instance (saving stats),
+/// then start a new one.
+pub fn restart_daemon() -> Result<(), Error> {
+    let paths = DaemonPaths::resolve();
+
+    // Save stats from the running daemon before stopping
+    if let Some(daemon_pid) = read_pid_file(&paths.pid_file) {
+        if lifecycle::is_process_alive(daemon_pid.pid) {
+            eprintln!("[git-ai] saving stats before restart...");
+            // Query live stats and persist them via the control socket
+            #[cfg(unix)]
+            {
+                // The stats will be saved by the daemon during its shutdown sequence.
+                // We just need to trigger graceful shutdown.
+            }
+        }
+    }
+
+    // Stop the running daemon
+    stop_daemon()?;
+
+    // Small delay to ensure the old process has fully released resources
+    thread::sleep(Duration::from_millis(200));
+
+    // Start a new daemon instance
+    eprintln!("[git-ai] starting new daemon instance...");
+    run_daemon(false)
 }
 
 pub fn print_status() {

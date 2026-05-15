@@ -7,11 +7,17 @@
 //! - **ByteOffset**: seek to byte position, read lines (JSONL files — most agents)
 //! - **RecordIndex**: parse whole file, skip N records (JSON array files — amp, continue, copilot sessions)
 
+pub mod metadata;
 mod reader;
+pub mod sweep;
+pub mod watermark;
 
+pub use metadata::{extract_metadata, extract_model, extract_session_id, TranscriptMetadata};
 pub use reader::{
-    read_jsonl_incremental, read_json_array_incremental, TranscriptBatch, TranscriptError,
+    read_json_array_incremental, read_jsonl_incremental, TranscriptBatch, TranscriptError,
 };
+pub use sweep::{sweep_transcripts, TranscriptUpdate};
+pub use watermark::{Watermark, WatermarkStore};
 
 use std::path::{Path, PathBuf};
 
@@ -123,25 +129,23 @@ pub fn discover_sessions(tool: &str) -> Vec<PathBuf> {
         None => return vec![],
     };
 
-    let dirs = match &config.discovery {
-        DiscoveryStrategy::ScanDirs { dirs, extension, recursive } => {
-            let home = match std::env::var("HOME") {
-                Ok(h) => PathBuf::from(h),
-                Err(_) => return vec![],
-            };
-            let mut results = Vec::new();
-            for dir in *dirs {
-                let full = home.join(dir);
-                if full.is_dir() {
-                    scan_dir(&full, extension, *recursive, &mut results);
-                }
-            }
-            results
-        }
-        DiscoveryStrategy::FromHookPayload => vec![],
+    let DiscoveryStrategy::ScanDirs { dirs, extension, recursive } = &config.discovery else {
+        return vec![];
     };
 
-    dirs
+    let Ok(home_str) = std::env::var("HOME") else {
+        return vec![];
+    };
+    let home = PathBuf::from(home_str);
+
+    let mut results = Vec::new();
+    for dir in *dirs {
+        let full = home.join(dir);
+        if full.is_dir() {
+            scan_dir(&full, extension, *recursive, &mut results);
+        }
+    }
+    results
 }
 
 fn scan_dir(dir: &Path, extension: &str, recursive: bool, results: &mut Vec<PathBuf>) {

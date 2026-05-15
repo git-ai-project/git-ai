@@ -1,3 +1,6 @@
+pub mod logging;
+pub mod perf_regression;
+
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -61,12 +64,24 @@ impl PerfTimer {
 
 impl Drop for PerfTimer {
     fn drop(&mut self) {
+        let elapsed = self.elapsed_ms();
+        let elapsed_f64 = elapsed as f64;
+
+        // Always record timing for regression detection (very cheap: just a vec push).
+        perf_regression::record_timing(self.label, elapsed_f64);
+
+        // Check for regression and emit warning if detected.
+        if let Some(warning) = perf_regression::check_regression(self.label, elapsed_f64) {
+            eprintln!(
+                "[git-ai perf] WARNING: {} took {:.1}ms (baseline p95: {:.1}ms, {:.1}x regression)",
+                warning.operation, warning.elapsed_ms, warning.baseline_p95_ms, warning.ratio,
+            );
+        }
+
         let mode = perf_mode();
         if mode == PerfMode::Off {
             return;
         }
-
-        let elapsed = self.elapsed_ms();
 
         match mode {
             PerfMode::Human => {

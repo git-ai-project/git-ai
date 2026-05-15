@@ -9,7 +9,7 @@ use crate::daemon::trace2_events::{Trace2Event, is_root_sid, root_sid};
 pub enum DetectedOperation {
     Commit { repo_path: PathBuf },
     Rewrite { repo_path: PathBuf, kind: RewriteKind, argv: Vec<String> },
-    Stash { repo_path: PathBuf },
+    Stash { repo_path: PathBuf, argv: Vec<String> },
     StashPop { repo_path: PathBuf },
 }
 
@@ -243,6 +243,7 @@ impl CommitDetector {
                                     session.repo_path.as_ref().map(|path| {
                                         DetectedOperation::Stash {
                                             repo_path: path.clone(),
+                                            argv: session.argv.clone(),
                                         }
                                     })
                                 } else {
@@ -260,6 +261,7 @@ impl CommitDetector {
                                         session.repo_path.as_ref().map(|path| {
                                             DetectedOperation::Stash {
                                                 repo_path: path.clone(),
+                                                argv: session.argv.clone(),
                                             }
                                         })
                                     } else {

@@ -169,8 +169,10 @@ pub struct AttributionReport {
 /// `repo_path` must point to the root of a git repository. This function shells
 /// out to git to determine changed files, parse diffs, and read authorship notes.
 pub fn compute_report(repo_path: &Path, base: &str, head: &str) -> Result<AttributionReport, String> {
+    let range = format!("{}..{}", base, head);
+
     // 1. Get list of changed files
-    let changed_files = git_in(repo_path, &["diff", "--name-only", format!("{}..{}", base, head).as_str()])?;
+    let changed_files = git_in(repo_path, &["diff", "--name-only", &range])?;
     let file_paths: Vec<&str> = changed_files.lines().filter(|l| !l.is_empty()).collect();
 
     if file_paths.is_empty() {
@@ -184,10 +186,7 @@ pub fn compute_report(repo_path: &Path, base: &str, head: &str) -> Result<Attrib
     }
 
     // 2. Get the added/modified line numbers per file from the diff
-    let diff_output = git_in(
-        repo_path,
-        &["diff", "-U0", format!("{}..{}", base, head).as_str()],
-    )?;
+    let diff_output = git_in(repo_path, &["diff", "-U0", &range])?;
     let added_lines_by_file = parse_diff_added_lines(&diff_output);
 
     // 3. Read authorship note for the head commit
@@ -210,29 +209,9 @@ pub fn compute_report(repo_path: &Path, base: &str, head: &str) -> Result<Attrib
     }
 
     // Determine which hashes are AI (prompt/session) vs human
-    let ai_hashes: std::collections::HashSet<&str> = authorship
+    let (ai_hashes, human_hashes) = authorship
         .as_ref()
-        .map(|log| {
-            let mut set = std::collections::HashSet::new();
-            for key in log.metadata.prompts.keys() {
-                set.insert(key.as_str());
-            }
-            for key in log.metadata.sessions.keys() {
-                set.insert(key.as_str());
-            }
-            set
-        })
-        .unwrap_or_default();
-
-    let human_hashes: std::collections::HashSet<&str> = authorship
-        .as_ref()
-        .map(|log| {
-            let mut set = std::collections::HashSet::new();
-            for key in log.metadata.humans.keys() {
-                set.insert(key.as_str());
-            }
-            set
-        })
+        .map(|log| classify_hashes(log))
         .unwrap_or_default();
 
     // 4. For each file, classify the added lines
@@ -349,47 +328,58 @@ fn parse_hunk_header_new_side(line: &str) -> Option<(u32, u32)> {
 // ---------------------------------------------------------------------------
 
 /// Format an attribution report as a markdown table suitable for a PR comment.
-pub fn format_markdown(report: &AttributionReport) -> String {
+///
+/// The output includes a hidden HTML marker (`<!-- git-ai-attribution -->`) used
+/// to identify and update existing comments.
+pub fn format_markdown_report(report: &AttributionReport) -> String {
     let mut out = String::new();
 
-    out.push_str("## git-ai Attribution Report\n\n");
+    out.push_str("## AI Attribution Report\n");
+    out.push_str(COMMENT_MARKER);
+    out.push('\n');
+    out.push('\n');
 
     // Summary table
-    out.push_str("| Metric | Lines | % |\n");
-    out.push_str("|--------|-------|---|\n");
+    out.push_str("| Metric | Value |\n");
+    out.push_str("|--------|-------|\n");
 
     let total = report.total_lines;
-    out.push_str(&format!(
-        "| AI-authored | {} | {}% |\n",
-        report.ai_lines,
-        percentage(report.ai_lines, total)
-    ));
-    out.push_str(&format!(
-        "| Human-authored | {} | {}% |\n",
-        report.human_lines,
-        percentage(report.human_lines, total)
-    ));
-    out.push_str(&format!(
-        "| Untracked | {} | {}% |\n",
-        report.untracked_lines,
-        percentage(report.untracked_lines, total)
-    ));
+    let ai_pct = percentage_f64(report.ai_lines, total);
+
+    out.push_str(&format!("| AI Lines | {} |\n", report.ai_lines));
+    out.push_str(&format!("| Human Lines | {} |\n", report.human_lines));
+    out.push_str(&format!("| AI % | {:.1}% |\n", ai_pct));
 
     // Per-file breakdown (only if there are files)
     if !report.files.is_empty() {
         out.push_str("\n### Per-file breakdown\n\n");
-        out.push_str("| File | AI | Human | Untracked |\n");
-        out.push_str("|------|-----|-------|-----------|\n");
+        out.push_str("| File | AI % | AI Lines | Total Lines |\n");
+        out.push_str("|------|------|----------|-------------|\n");
 
         for file in &report.files {
+            let file_total = file.ai_lines + file.human_lines + file.untracked_lines;
+            let file_ai_pct = percentage(file.ai_lines, file_total);
             out.push_str(&format!(
-                "| {} | {} | {} | {} |\n",
-                file.path, file.ai_lines, file.human_lines, file.untracked_lines
+                "| {} | {}% | {} | {} |\n",
+                file.path, file_ai_pct, file.ai_lines, file_total
             ));
         }
     }
 
     out
+}
+
+/// Legacy format function (delegates to format_markdown_report).
+pub fn format_markdown(report: &AttributionReport) -> String {
+    format_markdown_report(report)
+}
+
+fn percentage_f64(part: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (part as f64 / total as f64) * 100.0
+    }
 }
 
 fn percentage(part: usize, total: usize) -> usize {
@@ -404,16 +394,28 @@ fn percentage(part: usize, total: usize) -> usize {
 // GitHub PR Comment
 // ---------------------------------------------------------------------------
 
-/// Post (or print) a report comment on a GitHub PR.
+/// Hidden HTML marker used to identify git-ai comments for upsert behavior.
+const COMMENT_MARKER: &str = "<!-- git-ai-attribution -->";
+
+/// Post (or update) a report comment on a GitHub PR using the `gh` CLI.
 ///
-/// If the `gh` CLI is available, posts the comment to the PR. Otherwise,
-/// prints the formatted body to stdout so it appears in CI logs.
-pub fn post_github_comment(context: &CiContext, body: &str) -> Result<(), String> {
-    let pr_number = context
+/// If a comment from git-ai already exists (identified by `COMMENT_MARKER`),
+/// it is updated in place. Otherwise a new comment is created.
+///
+/// Requires `GITHUB_TOKEN` env var (already available in GitHub Actions) and
+/// the `gh` CLI to be installed.
+pub fn post_github_comment(report: &AttributionReport, env: &CiContext) -> Result<(), String> {
+    let pr_number = env
         .pr_number
         .ok_or_else(|| "no PR number available in CI context".to_string())?;
 
-    let repo_slug = format!("{}/{}", context.repo_owner, context.repo_name);
+    let repo_slug = format!("{}/{}", env.repo_owner, env.repo_name);
+    let body = format_markdown_report(report);
+
+    // Check GITHUB_TOKEN
+    if std::env::var("GITHUB_TOKEN").is_err() {
+        return Err("GITHUB_TOKEN environment variable is not set".to_string());
+    }
 
     // Check if `gh` is available
     let gh_available = Command::new("gh")
@@ -424,37 +426,335 @@ pub fn post_github_comment(context: &CiContext, body: &str) -> Result<(), String
         .is_ok_and(|s| s.success());
 
     if !gh_available {
-        println!("{}", body);
-        return Ok(());
+        return Err("gh CLI is not installed or not in PATH".to_string());
     }
 
-    let status = Command::new("gh")
-        .args([
-            "pr",
-            "comment",
-            &pr_number.to_string(),
-            "--body",
-            body,
-            "--repo",
-            &repo_slug,
-        ])
+    // Try to find an existing comment with our marker
+    let existing_comment_id = find_existing_github_comment(&repo_slug, pr_number)?;
+
+    let (method, endpoint) = if let Some(comment_id) = existing_comment_id {
+        ("PATCH", format!("repos/{}/issues/comments/{}", repo_slug, comment_id))
+    } else {
+        ("POST", format!("repos/{}/issues/{}/comments", repo_slug, pr_number))
+    };
+
+    let json_body = serde_json::json!({ "body": body }).to_string();
+    let output = Command::new("gh")
+        .args(["api", "--method", method, &endpoint, "--input", "-"])
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .status()
-        .map_err(|e| format!("failed to run gh: {}", e))?;
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                stdin.write_all(json_body.as_bytes())?;
+            }
+            child.wait_with_output()
+        })
+        .map_err(|e| format!("failed to run gh api: {}", e))?;
 
-    if status.success() {
-        Ok(())
-    } else {
-        // Fallback: print to stdout
-        println!("{}", body);
-        Err("gh pr comment failed; report printed to stdout instead".to_string())
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh api {} failed: {}", method, stderr.trim()));
     }
+
+    Ok(())
+}
+
+/// Search for an existing PR comment containing our marker.
+/// Returns the comment ID if found, or None.
+fn find_existing_github_comment(repo_slug: &str, pr_number: u64) -> Result<Option<u64>, String> {
+    let endpoint = format!(
+        "repos/{}/issues/{}/comments?per_page=100",
+        repo_slug, pr_number
+    );
+    let output = Command::new("gh")
+        .args(["api", &endpoint])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run gh api: {}", e))?;
+
+    if !output.status.success() {
+        // If we can't list comments, just create a new one
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let comments: Vec<serde_json::Value> = serde_json::from_str(&stdout)
+        .map_err(|e| format!("failed to parse comments JSON: {}", e))?;
+
+    for comment in &comments {
+        if let Some(body) = comment.get("body").and_then(|b| b.as_str()) {
+            if body.contains(COMMENT_MARKER) {
+                if let Some(id) = comment.get("id").and_then(|i| i.as_u64()) {
+                    return Ok(Some(id));
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
-// Internal git helper
+// GitLab MR Comment
 // ---------------------------------------------------------------------------
+
+/// Post (or update) a report note on a GitLab merge request using `curl`.
+///
+/// Uses `CI_JOB_TOKEN` for authentication and the GitLab API v4 endpoint.
+/// If an existing note with our marker is found, it is updated. Otherwise a
+/// new note is created.
+pub fn post_gitlab_comment(report: &AttributionReport, env: &CiContext) -> Result<(), String> {
+    let mr_iid = env
+        .pr_number
+        .ok_or_else(|| "no merge request IID available in CI context".to_string())?;
+
+    let api_url = std::env::var("CI_API_V4_URL")
+        .map_err(|_| "CI_API_V4_URL environment variable is not set".to_string())?;
+    let project_id = std::env::var("CI_PROJECT_ID")
+        .map_err(|_| "CI_PROJECT_ID environment variable is not set".to_string())?;
+    let job_token = std::env::var("CI_JOB_TOKEN")
+        .map_err(|_| "CI_JOB_TOKEN environment variable is not set".to_string())?;
+
+    let body = format_markdown_report(report);
+
+    // Check if curl is available
+    let curl_available = Command::new("curl")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+
+    if !curl_available {
+        return Err("curl is not installed or not in PATH".to_string());
+    }
+
+    // Try to find existing note with our marker
+    let existing_note_id = find_existing_gitlab_note(
+        &api_url, &project_id, mr_iid, &job_token,
+    )?;
+
+    let (method, url) = if let Some(note_id) = existing_note_id {
+        ("PUT", format!(
+            "{}/projects/{}/merge_requests/{}/notes/{}",
+            api_url, project_id, mr_iid, note_id
+        ))
+    } else {
+        ("POST", format!(
+            "{}/projects/{}/merge_requests/{}/notes",
+            api_url, project_id, mr_iid
+        ))
+    };
+
+    let token_header = format!("JOB-TOKEN: {}", job_token);
+    let json_data = serde_json::json!({ "body": body }).to_string();
+    let output = Command::new("curl")
+        .args([
+            "--silent", "--show-error", "--fail",
+            "--request", method,
+            "--header", &token_header,
+            "--header", "Content-Type: application/json",
+            "--data", &json_data,
+            &url,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run curl: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("curl {} failed: {}", method, stderr.trim()));
+    }
+
+    Ok(())
+}
+
+/// Search for an existing MR note containing our marker.
+fn find_existing_gitlab_note(
+    api_url: &str,
+    project_id: &str,
+    mr_iid: u64,
+    job_token: &str,
+) -> Result<Option<u64>, String> {
+    let url = format!(
+        "{}/projects/{}/merge_requests/{}/notes?per_page=100",
+        api_url, project_id, mr_iid
+    );
+    let output = Command::new("curl")
+        .args([
+            "--silent", "--show-error",
+            "--header", &format!("JOB-TOKEN: {}", job_token),
+            &url,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run curl: {}", e))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let notes: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap_or_default();
+
+    for note in &notes {
+        if let Some(body) = note.get("body").and_then(|b| b.as_str()) {
+            if body.contains(COMMENT_MARKER) {
+                if let Some(id) = note.get("id").and_then(|i| i.as_u64()) {
+                    return Ok(Some(id));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// Batch Mode
+// ---------------------------------------------------------------------------
+
+/// Compute an attribution report across a range of commits by reading their
+/// authorship notes. This is designed for CI environments where there is no
+/// daemon -- it simply parses existing git notes.
+///
+/// `repo_path` must point to the root of a git repository.
+/// `base_ref` and `head_ref` define the commit range (base..head).
+pub fn compute_batch_report(
+    repo_path: &Path,
+    base_ref: &str,
+    head_ref: &str,
+) -> Result<AttributionReport, String> {
+    // Get all commit SHAs in the range
+    let range = format!("{}..{}", base_ref, head_ref);
+    let log_output = git_in(repo_path, &["log", "--format=%H", &range])?;
+    let commits: Vec<&str> = log_output.lines().filter(|l| !l.is_empty()).collect();
+
+    if commits.is_empty() {
+        return Ok(AttributionReport {
+            total_lines: 0,
+            ai_lines: 0,
+            human_lines: 0,
+            untracked_lines: 0,
+            files: Vec::new(),
+        });
+    }
+
+    // Aggregate per-file stats across all commits
+    let mut file_stats: HashMap<String, (usize, usize, usize)> = HashMap::new(); // (ai, human, untracked)
+
+    for commit in &commits {
+        let note_result = git_in(repo_path, &["notes", "--ref=ai", "show", commit]);
+        let note_content = match note_result {
+            Ok(content) => content,
+            Err(_) => continue, // No note for this commit, skip
+        };
+
+        if note_content.trim().is_empty() {
+            continue;
+        }
+
+        let authorship = match AuthorshipLog::deserialize_from_string(&note_content) {
+            Ok(log) => log,
+            Err(_) => continue, // Malformed note, skip
+        };
+
+        // Determine AI and human hashes from metadata
+        let (ai_hashes, human_hashes) = classify_hashes(&authorship);
+
+        // Aggregate line counts per file
+        for file_att in &authorship.attestations {
+            let (ai, human, untracked) =
+                file_stats.entry(file_att.file_path.clone()).or_insert((0, 0, 0));
+
+            for entry in &file_att.entries {
+                let line_count: usize = entry
+                    .line_ranges
+                    .iter()
+                    .map(|r| r.line_count() as usize)
+                    .sum();
+
+                if ai_hashes.contains(entry.hash.as_str()) {
+                    *ai += line_count;
+                } else if human_hashes.contains(entry.hash.as_str()) {
+                    *human += line_count;
+                } else {
+                    *untracked += line_count;
+                }
+            }
+        }
+    }
+
+    // Build the report
+    let mut files: Vec<FileAttribution> = file_stats
+        .into_iter()
+        .map(|(path, (ai, human, untracked))| FileAttribution {
+            path,
+            ai_lines: ai,
+            human_lines: human,
+            untracked_lines: untracked,
+        })
+        .collect();
+
+    // Sort by path for deterministic output
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let ai_lines: usize = files.iter().map(|f| f.ai_lines).sum();
+    let human_lines: usize = files.iter().map(|f| f.human_lines).sum();
+    let untracked_lines: usize = files.iter().map(|f| f.untracked_lines).sum();
+
+    Ok(AttributionReport {
+        total_lines: ai_lines + human_lines + untracked_lines,
+        ai_lines,
+        human_lines,
+        untracked_lines,
+        files,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Threshold Check
+// ---------------------------------------------------------------------------
+
+/// Check whether the report exceeds the given AI percentage threshold.
+///
+/// Returns `true` if the AI percentage exceeds `max_ai_percent`, meaning
+/// the CI step should fail (exit code 1).
+pub fn check_threshold(report: &AttributionReport, max_ai_percent: f64) -> bool {
+    if report.total_lines == 0 {
+        return false;
+    }
+    let ai_percent = (report.ai_lines as f64 / report.total_lines as f64) * 100.0;
+    ai_percent > max_ai_percent
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Classify hashes from an AuthorshipLog into AI and human sets.
+fn classify_hashes(log: &AuthorshipLog) -> (std::collections::HashSet<&str>, std::collections::HashSet<&str>) {
+    let mut ai = std::collections::HashSet::new();
+    for key in log.metadata.prompts.keys() {
+        ai.insert(key.as_str());
+    }
+    for key in log.metadata.sessions.keys() {
+        ai.insert(key.as_str());
+    }
+
+    let mut human = std::collections::HashSet::new();
+    for key in log.metadata.humans.keys() {
+        human.insert(key.as_str());
+    }
+
+    (ai, human)
+}
 
 fn git_in(repo_path: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("/usr/bin/git")
@@ -647,39 +947,41 @@ new file mode 100644
     // -- Markdown Formatting Tests --
 
     #[test]
-    fn test_format_markdown_basic() {
+    fn test_format_markdown_report_structure() {
         let report = AttributionReport {
-            total_lines: 120,
+            total_lines: 200,
             ai_lines: 42,
-            human_lines: 65,
-            untracked_lines: 13,
-            files: vec![
-                FileAttribution {
-                    path: "src/main.rs".to_string(),
-                    ai_lines: 20,
-                    human_lines: 30,
-                    untracked_lines: 5,
-                },
-                FileAttribution {
-                    path: "src/lib.rs".to_string(),
-                    ai_lines: 22,
-                    human_lines: 35,
-                    untracked_lines: 8,
-                },
-            ],
+            human_lines: 158,
+            untracked_lines: 0,
+            files: vec![FileAttribution {
+                path: "src/foo.rs".to_string(),
+                ai_lines: 12,
+                human_lines: 28,
+                untracked_lines: 0,
+            }],
         };
 
-        let md = format_markdown(&report);
-        assert!(md.contains("## git-ai Attribution Report"));
-        assert!(md.contains("| AI-authored | 42 | 35% |"));
-        assert!(md.contains("| Human-authored | 65 | 54% |"));
-        assert!(md.contains("| Untracked | 13 | 11% |"));
-        assert!(md.contains("| src/main.rs | 20 | 30 | 5 |"));
-        assert!(md.contains("| src/lib.rs | 22 | 35 | 8 |"));
+        let md = format_markdown_report(&report);
+
+        // Check header and marker
+        assert!(md.contains("## AI Attribution Report"));
+        assert!(md.contains(COMMENT_MARKER));
+
+        // Check summary table
+        assert!(md.contains("| Metric | Value |"));
+        assert!(md.contains("|--------|-------|"));
+        assert!(md.contains("| AI Lines | 42 |"));
+        assert!(md.contains("| Human Lines | 158 |"));
+        assert!(md.contains("| AI % | 21.0% |"));
+
+        // Check per-file breakdown
+        assert!(md.contains("### Per-file breakdown"));
+        assert!(md.contains("| File | AI % | AI Lines | Total Lines |"));
+        assert!(md.contains("| src/foo.rs | 30% | 12 | 40 |"));
     }
 
     #[test]
-    fn test_format_markdown_empty() {
+    fn test_format_markdown_report_empty() {
         let report = AttributionReport {
             total_lines: 0,
             ai_lines: 0,
@@ -688,12 +990,293 @@ new file mode 100644
             files: Vec::new(),
         };
 
-        let md = format_markdown(&report);
-        assert!(md.contains("## git-ai Attribution Report"));
-        assert!(md.contains("| AI-authored | 0 | 0% |"));
+        let md = format_markdown_report(&report);
+        assert!(md.contains("## AI Attribution Report"));
+        assert!(md.contains(COMMENT_MARKER));
+        assert!(md.contains("| AI Lines | 0 |"));
+        assert!(md.contains("| Human Lines | 0 |"));
+        assert!(md.contains("| AI % | 0.0% |"));
         // No per-file section for empty reports
         assert!(!md.contains("### Per-file breakdown"));
     }
+
+    #[test]
+    fn test_format_markdown_report_multiple_files() {
+        let report = AttributionReport {
+            total_lines: 100,
+            ai_lines: 60,
+            human_lines: 40,
+            untracked_lines: 0,
+            files: vec![
+                FileAttribution {
+                    path: "src/a.rs".to_string(),
+                    ai_lines: 40,
+                    human_lines: 10,
+                    untracked_lines: 0,
+                },
+                FileAttribution {
+                    path: "src/b.rs".to_string(),
+                    ai_lines: 20,
+                    human_lines: 30,
+                    untracked_lines: 0,
+                },
+            ],
+        };
+
+        let md = format_markdown_report(&report);
+        assert!(md.contains("| AI % | 60.0% |"));
+        assert!(md.contains("| src/a.rs | 80% | 40 | 50 |"));
+        assert!(md.contains("| src/b.rs | 40% | 20 | 50 |"));
+    }
+
+    // -- Threshold Tests --
+
+    #[test]
+    fn test_check_threshold_below() {
+        let report = AttributionReport {
+            total_lines: 200,
+            ai_lines: 40,
+            human_lines: 160,
+            untracked_lines: 0,
+            files: Vec::new(),
+        };
+        // 40/200 = 20%, threshold is 25%
+        assert!(!check_threshold(&report, 25.0));
+    }
+
+    #[test]
+    fn test_check_threshold_above() {
+        let report = AttributionReport {
+            total_lines: 200,
+            ai_lines: 60,
+            human_lines: 140,
+            untracked_lines: 0,
+            files: Vec::new(),
+        };
+        // 60/200 = 30%, threshold is 25%
+        assert!(check_threshold(&report, 25.0));
+    }
+
+    #[test]
+    fn test_check_threshold_exact_boundary() {
+        let report = AttributionReport {
+            total_lines: 100,
+            ai_lines: 50,
+            human_lines: 50,
+            untracked_lines: 0,
+            files: Vec::new(),
+        };
+        // 50/100 = 50.0%, threshold is exactly 50.0%
+        // Should NOT exceed (> not >=)
+        assert!(!check_threshold(&report, 50.0));
+    }
+
+    #[test]
+    fn test_check_threshold_empty_report() {
+        let report = AttributionReport {
+            total_lines: 0,
+            ai_lines: 0,
+            human_lines: 0,
+            untracked_lines: 0,
+            files: Vec::new(),
+        };
+        // Empty report should never exceed threshold
+        assert!(!check_threshold(&report, 0.0));
+        assert!(!check_threshold(&report, 50.0));
+    }
+
+    #[test]
+    fn test_check_threshold_hundred_percent_ai() {
+        let report = AttributionReport {
+            total_lines: 100,
+            ai_lines: 100,
+            human_lines: 0,
+            untracked_lines: 0,
+            files: Vec::new(),
+        };
+        // 100% AI, threshold is 99%
+        assert!(check_threshold(&report, 99.0));
+    }
+
+    // -- Batch Aggregation Logic Tests --
+
+    #[test]
+    fn test_batch_aggregation_from_multiple_notes() {
+        // Test the aggregation logic by simulating what compute_batch_report does
+        // internally: parse multiple authorship logs and aggregate stats.
+
+        use crate::core::authorship_log::{
+            AgentId, AttestationEntry, AuthorshipLog, FileAttestation, LineRange, Metadata,
+            PromptRecord, HumanRecord,
+        };
+
+        // Simulate two commits with authorship notes
+        let mut log1 = AuthorshipLog::new(Metadata::new("base1".to_string()));
+        log1.metadata.prompts.insert(
+            "ai_hash_1".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "cursor".to_string(),
+                    id: "sess1".to_string(),
+                    model: "claude-3".to_string(),
+                },
+                human_author: None,
+                messages_url: None,
+                total_additions: 5,
+                total_deletions: 0,
+                accepted_lines: 5,
+                overriden_lines: 0,
+                custom_attributes: None,
+            },
+        );
+        log1.metadata.humans.insert(
+            "h_human_hash_1".to_string(),
+            HumanRecord { author: "dev@example.com".to_string() },
+        );
+        log1.attestations.push(FileAttestation {
+            file_path: "src/main.rs".to_string(),
+            entries: vec![
+                AttestationEntry {
+                    hash: "ai_hash_1".to_string(),
+                    line_ranges: vec![LineRange::Range(1, 5)],
+                },
+                AttestationEntry {
+                    hash: "h_human_hash_1".to_string(),
+                    line_ranges: vec![LineRange::Range(6, 10)],
+                },
+            ],
+        });
+
+        let mut log2 = AuthorshipLog::new(Metadata::new("base2".to_string()));
+        log2.metadata.prompts.insert(
+            "ai_hash_2".to_string(),
+            PromptRecord {
+                agent_id: AgentId {
+                    tool: "copilot".to_string(),
+                    id: "sess2".to_string(),
+                    model: "gpt-4".to_string(),
+                },
+                human_author: None,
+                messages_url: None,
+                total_additions: 3,
+                total_deletions: 0,
+                accepted_lines: 3,
+                overriden_lines: 0,
+                custom_attributes: None,
+            },
+        );
+        log2.attestations.push(FileAttestation {
+            file_path: "src/main.rs".to_string(),
+            entries: vec![AttestationEntry {
+                hash: "ai_hash_2".to_string(),
+                line_ranges: vec![LineRange::Range(11, 13)],
+            }],
+        });
+        log2.attestations.push(FileAttestation {
+            file_path: "src/lib.rs".to_string(),
+            entries: vec![AttestationEntry {
+                hash: "ai_hash_2".to_string(),
+                line_ranges: vec![LineRange::Range(1, 7)],
+            }],
+        });
+
+        // Simulate the aggregation logic from compute_batch_report
+        let logs = vec![log1, log2];
+        let mut file_stats: HashMap<String, (usize, usize, usize)> = HashMap::new();
+
+        for authorship in &logs {
+            let ai_hashes: std::collections::HashSet<&str> = {
+                let mut set = std::collections::HashSet::new();
+                for key in authorship.metadata.prompts.keys() {
+                    set.insert(key.as_str());
+                }
+                for key in authorship.metadata.sessions.keys() {
+                    set.insert(key.as_str());
+                }
+                set
+            };
+            let human_hashes: std::collections::HashSet<&str> = {
+                let mut set = std::collections::HashSet::new();
+                for key in authorship.metadata.humans.keys() {
+                    set.insert(key.as_str());
+                }
+                set
+            };
+
+            for file_att in &authorship.attestations {
+                let (ai, human, untracked) =
+                    file_stats.entry(file_att.file_path.clone()).or_insert((0, 0, 0));
+                for entry in &file_att.entries {
+                    let line_count: usize = entry
+                        .line_ranges
+                        .iter()
+                        .map(|r| r.line_count() as usize)
+                        .sum();
+                    if ai_hashes.contains(entry.hash.as_str()) {
+                        *ai += line_count;
+                    } else if human_hashes.contains(entry.hash.as_str()) {
+                        *human += line_count;
+                    } else {
+                        *untracked += line_count;
+                    }
+                }
+            }
+        }
+
+        // Verify aggregated results
+        let main_stats = file_stats.get("src/main.rs").unwrap();
+        assert_eq!(main_stats.0, 8); // AI: 5 (log1) + 3 (log2)
+        assert_eq!(main_stats.1, 5); // Human: 5 (log1)
+        assert_eq!(main_stats.2, 0); // Untracked: 0
+
+        let lib_stats = file_stats.get("src/lib.rs").unwrap();
+        assert_eq!(lib_stats.0, 7); // AI: 7 (log2)
+        assert_eq!(lib_stats.1, 0); // Human: 0
+        assert_eq!(lib_stats.2, 0); // Untracked: 0
+    }
+
+    #[test]
+    fn test_batch_aggregation_untracked_entries() {
+        // Test that entries with hashes not in prompts/sessions/humans are counted
+        // as untracked.
+
+        use crate::core::authorship_log::{
+            AttestationEntry, AuthorshipLog, FileAttestation, LineRange, Metadata,
+        };
+
+        let mut log = AuthorshipLog::new(Metadata::new("base".to_string()));
+        // No prompts, sessions, or humans in metadata -- all entries are untracked
+        log.attestations.push(FileAttestation {
+            file_path: "unknown.rs".to_string(),
+            entries: vec![AttestationEntry {
+                hash: "mystery_hash".to_string(),
+                line_ranges: vec![LineRange::Range(1, 20)],
+            }],
+        });
+
+        let ai_hashes: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let human_hashes: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        let mut untracked_total = 0usize;
+        for file_att in &log.attestations {
+            for entry in &file_att.entries {
+                let line_count: usize = entry
+                    .line_ranges
+                    .iter()
+                    .map(|r| r.line_count() as usize)
+                    .sum();
+                if !ai_hashes.contains(entry.hash.as_str())
+                    && !human_hashes.contains(entry.hash.as_str())
+                {
+                    untracked_total += line_count;
+                }
+            }
+        }
+
+        assert_eq!(untracked_total, 20);
+    }
+
+    // -- Legacy format_markdown tests (kept for backward compat) --
 
     #[test]
     fn test_percentage() {
@@ -702,6 +1285,14 @@ new file mode 100644
         assert_eq!(percentage(1, 3), 33);
         assert_eq!(percentage(2, 3), 67);
         assert_eq!(percentage(100, 100), 100);
+    }
+
+    #[test]
+    fn test_percentage_f64() {
+        assert_eq!(percentage_f64(0, 0), 0.0);
+        assert!((percentage_f64(50, 100) - 50.0).abs() < f64::EPSILON);
+        assert!((percentage_f64(1, 3) - 33.333333333333336).abs() < 0.001);
+        assert!((percentage_f64(42, 200) - 21.0).abs() < f64::EPSILON);
     }
 
     // -- Report Struct Construction Test --
@@ -740,5 +1331,68 @@ new file mode 100644
         assert_eq!(report.ai_lines, 13);
         assert_eq!(report.human_lines, 12);
         assert_eq!(report.untracked_lines, 3);
+    }
+
+    // -- GitHub comment posting (unit-testable parts) --
+
+    #[test]
+    fn test_post_github_comment_requires_pr_number() {
+        let report = AttributionReport {
+            total_lines: 10,
+            ai_lines: 5,
+            human_lines: 5,
+            untracked_lines: 0,
+            files: Vec::new(),
+        };
+        let env = CiContext {
+            provider: CiProvider::GitHubActions,
+            repo_owner: "octocat".to_string(),
+            repo_name: "hello".to_string(),
+            pr_number: None, // No PR number
+            commit_sha: "abc".to_string(),
+            base_ref: None,
+            head_ref: None,
+        };
+
+        let result = post_github_comment(&report, &env);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no PR number"));
+    }
+
+    #[test]
+    fn test_post_gitlab_comment_requires_mr_iid() {
+        let report = AttributionReport {
+            total_lines: 10,
+            ai_lines: 5,
+            human_lines: 5,
+            untracked_lines: 0,
+            files: Vec::new(),
+        };
+        let env = CiContext {
+            provider: CiProvider::GitLabCi,
+            repo_owner: "group".to_string(),
+            repo_name: "project".to_string(),
+            pr_number: None, // No MR IID
+            commit_sha: "abc".to_string(),
+            base_ref: None,
+            head_ref: None,
+        };
+
+        let result = post_gitlab_comment(&report, &env);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no merge request IID"));
+    }
+
+    #[test]
+    fn test_format_markdown_report_contains_marker() {
+        let report = AttributionReport {
+            total_lines: 50,
+            ai_lines: 25,
+            human_lines: 25,
+            untracked_lines: 0,
+            files: Vec::new(),
+        };
+        let md = format_markdown_report(&report);
+        assert!(md.contains("<!-- git-ai-attribution -->"));
     }
 }

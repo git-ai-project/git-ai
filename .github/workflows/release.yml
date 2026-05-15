@@ -1,4 +1,4 @@
-name: Release Build
+name: Release
 
 permissions:
   contents: write
@@ -6,18 +6,8 @@ permissions:
   attestations: write
 
 on:
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Dry Run (uncheck to create a release)'
-        required: false
-        default: true
-        type: boolean
-      release_production:
-        description: 'Release to latest (production) channel. For stable production releases only!'
-        required: false
-        default: false
-        type: boolean
+  push:
+    tags: ["v*"]
 
 jobs:
   build:
@@ -28,70 +18,60 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-musl
-            artifact_name: git-ai-linux-x64
-            use_docker: true
-            docker_image: ubuntu:22.04
-          - os: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-musl
-            artifact_name: git-ai-linux-arm64
-            use_docker: true
-            docker_image: ubuntu:22.04
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: git-ai-windows-x64
-            use_docker: false
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            artifact_name: git-ai-windows-arm64
-            use_docker: false
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact_name: git-ai-macos-arm64
-            use_docker: false
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: git-ai-x86_64-unknown-linux-gnu
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: git-ai-aarch64-unknown-linux-gnu
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact_name: git-ai-x86_64-apple-darwin
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_name: git-ai-aarch64-apple-darwin
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: git-ai-x86_64-pc-windows-msvc
+            cross: false
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@v4
 
-      - name: Get version from Cargo.toml
+      - name: Get version from tag
         id: get-version
         shell: bash
         run: |
-          VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
-          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+          VERSION="${GITHUB_REF_NAME}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Build in Docker (Linux)
-        if: matrix.use_docker == true
-        run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            -e DEBIAN_FRONTEND=noninteractive \
-            -e SENTRY_OSS="${{ secrets.SENTRY_OSS }}" \
-            -e POSTHOG_API_KEY="${{ secrets.POSTHOG_API_KEY }}" \
-            -e OSS_BUILD="1" \
-            ${{ matrix.docker_image }} \
-            bash -c "
-              apt-get update && \
-              apt-get install -y curl build-essential pkg-config musl-tools && \
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --target ${{ matrix.target }} && \
-              . \$HOME/.cargo/env && \
-              cargo build --release --target ${{ matrix.target }} && \
-              strip target/${{ matrix.target }}/release/git-ai
-            "
-
-      - name: Install Rust toolchain (non-Docker)
-        if: matrix.use_docker == false
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+      - name: Install Rust toolchain
+        if: matrix.cross == false
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
           targets: ${{ matrix.target }}
 
-      - name: Cache dependencies (non-Docker)
-        if: matrix.use_docker == false
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+      - name: Install cross-compilation tools (aarch64-linux)
+        if: matrix.cross == true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          rustup target add ${{ matrix.target }}
+
+      - name: Configure cross-compilation environment
+        if: matrix.cross == true
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+
+      - name: Cache cargo registry and git
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
@@ -100,398 +80,248 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.target }}-
 
-      - name: Build release binary (non-Docker, non-Windows-ARM64)
-        if: matrix.use_docker == false && matrix.os != 'windows-11-arm'
-        run: |
-          cargo build --release --target ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
         env:
           CARGO_INCREMENTAL: 0
-          SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
-          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
-          OSS_BUILD: "1"
 
-      - name: Build release binary (Windows ARM64 with LLVM strip)
-        if: matrix.os == 'windows-11-arm'
-        run: |
-          cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_INCREMENTAL: 0
-          SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
-          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
-          OSS_BUILD: "1"
-          RUSTFLAGS: "-C strip=symbols"
+      - name: Strip binary (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: strip target/${{ matrix.target }}/release/git-ai
 
-      - name: Verify binary architecture (Linux)
-        if: contains(matrix.os, 'ubuntu')
-        run: |
-          file target/${{ matrix.target }}/release/git-ai
-          # Verify the binary is statically linked (musl)
-          if ldd target/${{ matrix.target }}/release/git-ai 2>&1 | grep -q 'not a dynamic executable\|statically linked'; then
-            echo "Binary is statically linked (musl) - no GLIBC dependency"
-          else
-            echo "::error::Binary is dynamically linked - expected static musl binary"
-            ldd target/${{ matrix.target }}/release/git-ai || true
-            exit 1
-          fi
-
-      - name: Verify binary architecture (Windows)
-        if: contains(matrix.os, 'windows')
-        shell: bash
-        run: |
-          file target/${{ matrix.target }}/release/git-ai.exe
-
-      - name: Strip binary (Windows x64)
-        if: matrix.os == 'windows-latest'
-        run: |
-          strip target/${{ matrix.target }}/release/git-ai.exe
+      - name: Strip binary (Linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: aarch64-linux-gnu-strip target/${{ matrix.target }}/release/git-ai
 
       - name: Strip binary (macOS)
-        if: matrix.os == 'macos-latest'
-        run: |
-          strip target/${{ matrix.target }}/release/git-ai
+        if: contains(matrix.target, 'apple-darwin')
+        run: strip target/${{ matrix.target }}/release/git-ai
 
-      - name: Create release directory
-        run: |
-          mkdir -p release
+      - name: Strip binary (Windows)
+        if: contains(matrix.target, 'windows')
+        run: strip target/${{ matrix.target }}/release/git-ai.exe
 
-      - name: Copy binary to release directory
-        if: contains(matrix.os, 'windows')
+      - name: Package tarball (Unix)
+        if: "!contains(matrix.target, 'windows')"
+        shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/git-ai.exe release/${{ matrix.artifact_name }}.exe
+          mkdir -p staging
+          cp target/${{ matrix.target }}/release/git-ai staging/
+          cd staging
+          tar czf ../${{ matrix.artifact_name }}.tar.gz git-ai
+          cd ..
+          rm -rf staging
 
-      - name: Copy binary to release directory (non-Windows)
-        if: ${{ !contains(matrix.os, 'windows') }}
+      - name: Package zip (Windows)
+        if: contains(matrix.target, 'windows')
+        shell: pwsh
         run: |
-          cp target/${{ matrix.target }}/release/git-ai release/${{ matrix.artifact_name }}
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/git-ai.exe" "staging/"
+          Compress-Archive -Path "staging/git-ai.exe" -DestinationPath "${{ matrix.artifact_name }}.zip"
+          Remove-Item -Recurse -Force staging
+
+      - name: Upload artifact (Unix)
+        if: "!contains(matrix.target, 'windows')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}.tar.gz
+          retention-days: 7
 
       - name: Upload artifact (Windows)
-        if: contains(matrix.os, 'windows')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: contains(matrix.target, 'windows')
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: release/${{ matrix.artifact_name }}.exe
-          retention-days: 30
+          path: ${{ matrix.artifact_name }}.zip
+          retention-days: 7
 
-      - name: Upload artifact (non-Windows)
-        if: ${{ !contains(matrix.os, 'windows') }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: release/${{ matrix.artifact_name }}
-          retention-days: 30
-
-  build-macos-intel:
-    name: Build for macOS Intel
-    runs-on: macos-15-intel
-    outputs:
-      version: ${{ steps.get-version.outputs.version }}
+  build-deb:
+    name: Build .deb packages
+    needs: build
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@v4
 
-      - name: Get version from Cargo.toml
+      - name: Download Linux x86_64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: git-ai-x86_64-unknown-linux-gnu
+          path: artifacts
+
+      - name: Download Linux aarch64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: git-ai-aarch64-unknown-linux-gnu
+          path: artifacts
+
+      - name: Get version from tag
         id: get-version
-        shell: bash
         run: |
-          VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
-          echo "version=v$VERSION" >> $GITHUB_OUTPUT
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+      - name: Build deb for amd64
+        run: |
+          VERSION="${{ steps.get-version.outputs.version }}"
+          PKG_DIR="deb-amd64"
+          mkdir -p "$PKG_DIR/DEBIAN"
+          mkdir -p "$PKG_DIR/usr/bin"
+
+          # Extract binary from tarball
+          tar xzf artifacts/git-ai-x86_64-unknown-linux-gnu.tar.gz -C "$PKG_DIR/usr/bin/"
+          chmod 755 "$PKG_DIR/usr/bin/git-ai"
+
+          cat > "$PKG_DIR/DEBIAN/control" <<EOF
+          Package: git-ai
+          Version: ${VERSION}
+          Architecture: amd64
+          Maintainer: git-ai-inc <support@git-ai.com>
+          Description: AI-powered git attribution tracking
+           git-ai transparently tracks AI vs human code authorship through git hooks.
+          Section: devel
+          Priority: optional
+          Depends: git
+          EOF
+          # Remove leading spaces from control file (heredoc indentation)
+          sed -i 's/^          //' "$PKG_DIR/DEBIAN/control"
+
+          cat > "$PKG_DIR/DEBIAN/postinst" <<'EOF'
+          #!/bin/sh
+          set -e
+          if command -v git-ai >/dev/null 2>&1; then
+            git-ai install || true
+          fi
+          EOF
+          sed -i 's/^          //' "$PKG_DIR/DEBIAN/postinst"
+          chmod 755 "$PKG_DIR/DEBIAN/postinst"
+
+          dpkg-deb --build "$PKG_DIR" "git-ai_${VERSION}_amd64.deb"
+
+      - name: Build deb for arm64
+        run: |
+          VERSION="${{ steps.get-version.outputs.version }}"
+          PKG_DIR="deb-arm64"
+          mkdir -p "$PKG_DIR/DEBIAN"
+          mkdir -p "$PKG_DIR/usr/bin"
+
+          # Extract binary from tarball
+          tar xzf artifacts/git-ai-aarch64-unknown-linux-gnu.tar.gz -C "$PKG_DIR/usr/bin/"
+          chmod 755 "$PKG_DIR/usr/bin/git-ai"
+
+          cat > "$PKG_DIR/DEBIAN/control" <<EOF
+          Package: git-ai
+          Version: ${VERSION}
+          Architecture: arm64
+          Maintainer: git-ai-inc <support@git-ai.com>
+          Description: AI-powered git attribution tracking
+           git-ai transparently tracks AI vs human code authorship through git hooks.
+          Section: devel
+          Priority: optional
+          Depends: git
+          EOF
+          sed -i 's/^          //' "$PKG_DIR/DEBIAN/control"
+
+          cat > "$PKG_DIR/DEBIAN/postinst" <<'EOF'
+          #!/bin/sh
+          set -e
+          if command -v git-ai >/dev/null 2>&1; then
+            git-ai install || true
+          fi
+          EOF
+          sed -i 's/^          //' "$PKG_DIR/DEBIAN/postinst"
+          chmod 755 "$PKG_DIR/DEBIAN/postinst"
+
+          dpkg-deb --build "$PKG_DIR" "git-ai_${VERSION}_arm64.deb"
+
+      - name: Upload deb amd64
+        uses: actions/upload-artifact@v4
         with:
-          toolchain: stable
-          targets: x86_64-apple-darwin
+          name: git-ai-deb-amd64
+          path: git-ai_*_amd64.deb
+          retention-days: 7
 
-      - name: Cache dependencies
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+      - name: Upload deb arm64
+        uses: actions/upload-artifact@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-x86_64-apple-darwin-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-x86_64-apple-darwin-
+          name: git-ai-deb-arm64
+          path: git-ai_*_arm64.deb
+          retention-days: 7
 
-      - name: Build release binary
-        run: |
-          cargo build --release --target x86_64-apple-darwin
-        env:
-          CARGO_INCREMENTAL: 0
-          SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
-          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
-          OSS_BUILD: "1"
-
-      - name: Verify binary architecture
-        run: |
-          file target/x86_64-apple-darwin/release/git-ai
-          lipo -info target/x86_64-apple-darwin/release/git-ai
-
-      - name: Strip binary
-        run: |
-          strip target/x86_64-apple-darwin/release/git-ai
-
-      - name: Create release directory
-        run: |
-          mkdir -p release
-
-      - name: Copy binary to release directory
-        run: |
-          cp target/x86_64-apple-darwin/release/git-ai release/git-ai-macos-x64
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: git-ai-macos-x64
-          path: release/git-ai-macos-x64
-          retention-days: 30
-
-  create-release:
-    name: Create Release
-    needs: [build, build-macos-intel]
+  release:
+    name: Create GitHub Release
+    needs: [build, build-deb]
     runs-on: ubuntu-latest
-    if: success() && inputs.dry_run != true
 
     steps:
-      - name: Determine release metadata
-        id: release-meta
-        shell: bash
-        run: |
-          set -euo pipefail
-          BASE_VERSION="${{ needs.build.outputs.version }}"
-          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          if [[ "${{ inputs.release_production }}" == 'true' ]]; then
-            RELEASE_TAG="$BASE_VERSION"
-            CHANNEL="latest"
-            PRERELEASE="false"
-            MAKE_LATEST="true"
-          else
-            RELEASE_TAG="${BASE_VERSION}-next-${SHORT_SHA}"
-            CHANNEL="next"
-            PRERELEASE="true"
-            MAKE_LATEST="false"
-          fi
-
-          echo "tag_name=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "release_name=Release $RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
-          echo "make_latest=$MAKE_LATEST" >> "$GITHUB_OUTPUT"
-          echo "channel_label=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Download all artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Create release directory
-        run: mkdir -p release
-
-      - name: Move artifacts to release directory
+      - name: Collect release assets
         run: |
-          find artifacts -name "git-ai-*" -exec cp {} release/ \;
+          mkdir -p release
+          # Tarballs and zips
+          find artifacts -name "*.tar.gz" -exec cp {} release/ \;
+          find artifacts -name "*.zip" -exec cp {} release/ \;
+          # Deb packages
+          find artifacts -name "*.deb" -exec cp {} release/ \;
 
-      - name: List available artifacts
-        run: |
-          echo "Available artifacts:"
-          ls -la release/ || echo "No artifacts found"
-
-      - name: Create checksums
+      - name: Generate SHA256 checksums
         run: |
           cd release
-          if ls git-ai-* 1> /dev/null 2>&1; then
-            sha256sum git-ai-* > SHA256SUMS
-          else
-            echo "No binaries found to create checksums for"
-            touch SHA256SUMS
-          fi
+          sha256sum * | sort > SHA256SUMS
+          echo "=== SHA256SUMS ==="
+          cat SHA256SUMS
 
-      - name: Checkout code for install script
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          path: repo
-
-      - name: Generate version-pinned install script
-        run: |
-          VERSION="${{ steps.release-meta.outputs.tag_name }}"
-          REPO="${{ github.repository }}"
-          # Convert checksums to pipe-separated format for embedding
-          CHECKSUMS=$(tr '\n' '|' < release/SHA256SUMS | sed 's/|$//')
-          if [ -z "$CHECKSUMS" ]; then
-            CHECKSUMS="__CHECKSUMS_PLACEHOLDER__"
-          fi
-          # Replace placeholder values with release-specific values (pattern-based to be resilient to line changes)
-          awk -v repo="$REPO" -v version="$VERSION" -v checksums="$CHECKSUMS" '
-            /^REPO="__REPO_PLACEHOLDER__"/ { sub(/__REPO_PLACEHOLDER__/, repo) }
-            /^PINNED_VERSION="__VERSION_PLACEHOLDER__"/ { sub(/__VERSION_PLACEHOLDER__/, version) }
-            /^EMBEDDED_CHECKSUMS="__CHECKSUMS_PLACEHOLDER__"/ { sub(/__CHECKSUMS_PLACEHOLDER__/, checksums) }
-            { print }
-          ' repo/install.sh > release/install.sh
-          chmod +x release/install.sh
-          echo "Generated version-pinned install.sh for $VERSION from $REPO"
-          echo "Embedded checksums: $CHECKSUMS"
-
-      - name: Generate version-pinned install.ps1 script
-        run: |
-          VERSION="${{ steps.release-meta.outputs.tag_name }}"
-          REPO="${{ github.repository }}"
-          # Reuse checksums from earlier step
-          CHECKSUMS=$(tr '\n' '|' < release/SHA256SUMS | sed 's/|$//')
-          if [ -z "$CHECKSUMS" ]; then
-            CHECKSUMS="__CHECKSUMS_PLACEHOLDER__"
-          fi
-          # Replace placeholder values with release-specific values (pattern-based to be resilient to line changes)
-          awk -v repo="$REPO" -v version="$VERSION" -v checksums="$CHECKSUMS" '
-            /^[$]Repo = .__REPO_PLACEHOLDER__/ { sub(/__REPO_PLACEHOLDER__/, repo) }
-            /^[$]PinnedVersion = .__VERSION_PLACEHOLDER__/ { sub(/__VERSION_PLACEHOLDER__/, version) }
-            /^[$]EmbeddedChecksums = .__CHECKSUMS_PLACEHOLDER__/ { sub(/__CHECKSUMS_PLACEHOLDER__/, checksums) }
-            { print }
-          ' repo/install.ps1 > release/install.ps1
-          echo "Generated version-pinned install.ps1 for $VERSION from $REPO"
-
-      - name: Add install scripts to SHA256SUMS
-        run: |
-          cd release
-          sha256sum install.sh install.ps1 >> SHA256SUMS
-
-      - name: Generate attestations for release artifacts
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
-        with:
-          subject-path: |
-            release/git-ai-*
-            release/install.sh
-            release/install.ps1
-            release/SHA256SUMS
-
-      - name: Create Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v2
-        with:
-          tag_name: ${{ steps.release-meta.outputs.tag_name }}
-          name: ${{ steps.release-meta.outputs.release_name }}
-          generate_release_notes: true
-          body: |
-            ## git-ai ${{ steps.release-meta.outputs.tag_name }}
-
-            ### Release Channel
-            `${{ steps.release-meta.outputs.channel_label }}`
-
-            ${{ steps.release-meta.outputs.prerelease != 'true' && '---' || '' }}
-
-            ${{ steps.release-meta.outputs.prerelease != 'true' && '> **Detailed AI-generated changelog is being generated and will appear here shortly...**' || '' }}
-
-            ${{ steps.release-meta.outputs.prerelease != 'true' && '---' || '' }}
-
-            ### Installation
-            Install this specific version with checksum verification:
-
-            **macOS/Linux:**
-            ```bash
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ steps.release-meta.outputs.tag_name }}/install.sh | bash
-            ```
-
-            **Windows (PowerShell):**
-            ```powershell
-            irm https://github.com/${{ github.repository }}/releases/download/${{ steps.release-meta.outputs.tag_name }}/install.ps1 | iex
-            ```
-
-            ### Downloads
-            - **Linux (x64)**: `git-ai-linux-x64`
-            - **Linux (ARM64)**: `git-ai-linux-arm64`
-            - **Windows (x64)**: `git-ai-windows-x64.exe`
-            - **Windows (ARM64)**: `git-ai-windows-arm64.exe`
-            - **macOS (Intel)**: `git-ai-macos-x64`
-            - **macOS (Apple Silicon)**: `git-ai-macos-arm64`
-
-            ### SHA256 Checksums
-            ```
-            $(cat release/SHA256SUMS)
-            ```
-
-            ### Attestation Verification
-            Verify build provenance with the GitHub CLI:
-            ```bash
-            gh attestation verify git-ai-<platform> --repo ${{ github.repository }}
-            ```
-          files: |
-            release/git-ai-*
-            release/SHA256SUMS
-            release/install.sh
-            release/install.ps1
-          draft: false
-          prerelease: ${{ steps.release-meta.outputs.prerelease == 'true' }}
-          make_latest: ${{ steps.release-meta.outputs.make_latest }}
+      - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate release bot token
-        if: inputs.release_production == true
-        id: release-bot-token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
-        with:
-          app-id: 3481373
-          private-key: ${{ secrets.GIT_AI_INTERNAL_RELEASE_BOT_PRIVATE_KEY }}
-
-      - name: Checkout code for version bump
-        if: inputs.release_production == true
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          token: ${{ steps.release-bot-token.outputs.token }}
-          fetch-depth: 0
-
-      - name: Install Rust toolchain
-        if: inputs.release_production == true
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
-        with:
-          toolchain: stable
-
-      - name: Bump version in Cargo.toml
-        if: inputs.release_production == true
-        id: bump-version
         run: |
-          # Extract current version
-          CURRENT_VERSION=$(grep '^version = ' Cargo.toml | cut -d'"' -f2)
-          echo "Current version: $CURRENT_VERSION"
-          
-          # Parse version components
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
-          
-          # Bump patch version
-          NEW_PATCH=$((PATCH + 1))
-          NEW_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
-          echo "New version: $NEW_VERSION"
-          
-          # Update Cargo.toml
-          sed -i.bak "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" Cargo.toml
-          rm Cargo.toml.bak
-          
-          # Update flake.nix version to match
-          sed -i.bak "s/version = \".*\"/version = \"${NEW_VERSION}\"/" flake.nix
-          rm flake.nix.bak
-          
-          # Update Cargo.lock
-          cargo check
-          
-          echo "new_version=${NEW_VERSION}" >> $GITHUB_OUTPUT
+          VERSION="${GITHUB_REF_NAME}"
+          CHECKSUMS=$(cat release/SHA256SUMS)
 
-      - name: Commit and push version bump
-        if: inputs.release_production == true
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock flake.nix
-          git commit -m "chore: bump version to ${{ steps.bump-version.outputs.new_version }} [skip ci]"
-          git pull --rebase origin main
-          git push origin main
+          BODY="## git-ai ${VERSION}
 
-      - name: Trigger release channel update
-        run: |
-          curl -X POST \
-            -H "Authorization: token ${{ secrets.RELEASE_CHANNEL_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/next-element-inc/monorepo/actions/workflows/update-release-version.yaml/dispatches \
-            -d '{
-              "ref": "dev",
-              "inputs": {
-                "channel": "${{ steps.release-meta.outputs.channel_label }}",
-                "tag": "${{ steps.release-meta.outputs.tag_name }}"
-              }
-            }'
+          ### Installation
+
+          **macOS/Linux:**
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.sh | sh
+          \`\`\`
+
+          **Windows (PowerShell):**
+          \`\`\`powershell
+          irm https://raw.githubusercontent.com/${{ github.repository }}/main/scripts/install.ps1 | iex
+          \`\`\`
+
+          ### Downloads
+
+          | Platform | File |
+          |----------|------|
+          | Linux x86_64 | \`git-ai-x86_64-unknown-linux-gnu.tar.gz\` |
+          | Linux ARM64 | \`git-ai-aarch64-unknown-linux-gnu.tar.gz\` |
+          | macOS Intel | \`git-ai-x86_64-apple-darwin.tar.gz\` |
+          | macOS Apple Silicon | \`git-ai-aarch64-apple-darwin.tar.gz\` |
+          | Windows x86_64 | \`git-ai-x86_64-pc-windows-msvc.zip\` |
+          | Linux x86_64 (deb) | \`git-ai_*_amd64.deb\` |
+          | Linux ARM64 (deb) | \`git-ai_*_arm64.deb\` |
+
+          ### SHA256 Checksums
+
+          \`\`\`
+          ${CHECKSUMS}
+          \`\`\`
+          "
+
+          gh release create "$VERSION" \
+            --title "Release $VERSION" \
+            --notes "$BODY" \
+            release/*

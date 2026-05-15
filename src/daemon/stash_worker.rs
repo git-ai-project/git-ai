@@ -41,11 +41,14 @@ fn git_in_repo(repo_path: &Path, args: &[&str]) -> Result<String, String> {
 ///
 /// Determines the current HEAD (base commit for working log) and saves
 /// accumulated attributions as a note on the stash commit.
-pub fn process_stash_push(repo_path: &Path) -> Result<(), String> {
+/// The `argv` parameter carries the original stash command arguments so we
+/// can extract pathspecs (everything after `--`) and filter working log entries.
+pub fn process_stash_push(repo_path: &Path, argv: &[String]) -> Result<(), String> {
     let base_commit = git_in_repo(repo_path, &["rev-parse", "HEAD"])
         .map_err(|e| format!("cannot determine HEAD: {}", e))?;
 
-    stash::save_stash_attributions(repo_path, &base_commit)
+    let pathspecs = stash::extract_pathspecs_from_argv(argv);
+    stash::save_stash_attributions(repo_path, &base_commit, &pathspecs)
 }
 
 /// Process a detected `git stash pop/apply`.

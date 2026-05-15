@@ -7,6 +7,7 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use crate::core::merge;
 use crate::core::post_commit::generate_authorship_for_commit;
 use crate::core::working_log;
 
@@ -136,6 +137,22 @@ pub fn process_commit(repo_path: &Path) -> Result<bool, String> {
 
         working_log::delete_working_log(&git_dir, &parent_sha);
         wrote_any = true;
+    }
+
+    // After processing regular commits, check if HEAD is a merge commit
+    // that still lacks a note. This handles merges where both parents have
+    // authorship notes but no working log data was accumulated (non-conflicting merges).
+    if let Some(&head_sha) = shas.first() {
+        if merge::is_merge_commit(repo_path, head_sha) {
+            // compute_merge_attribution is a no-op if a note already exists
+            if let Err(e) = merge::compute_merge_attribution(repo_path, head_sha) {
+                eprintln!(
+                    "[git-ai daemon] merge attribution failed for {}: {}",
+                    &head_sha[..7.min(head_sha.len())],
+                    e
+                );
+            }
+        }
     }
 
     Ok(wrote_any)

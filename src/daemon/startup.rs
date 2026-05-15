@@ -3,14 +3,13 @@
 //! On startup, performs:
 //! - Stale socket file cleanup
 //! - Stale lock file detection (PID dead → break lock)
-//! - Log rotation (truncate if > 10MB)
+//! - Log rotation (rotate if > 10MB, keeping up to 3 rotated files)
 
 use std::fs;
 use std::path::Path;
 
 use super::lifecycle::{DaemonPaths, Error, is_process_alive, read_pid_file};
-
-const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024; // 10MB
+use super::log_rotation;
 
 /// Run all startup recovery checks before the daemon begins its main loop.
 /// This should be called early in `run_daemon()`, after paths are resolved
@@ -18,7 +17,7 @@ const MAX_LOG_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 pub fn run_startup_recovery(paths: &DaemonPaths) -> Result<(), Error> {
     cleanup_stale_pid(paths)?;
     cleanup_stale_sockets(paths);
-    rotate_log_if_needed(&paths.log_file);
+    log_rotation::rotate_logs_if_needed(&paths.log_file);
     Ok(())
 }
 
@@ -69,21 +68,9 @@ fn remove_socket_if_stale(path: &Path) {
     }
 }
 
-/// Truncate the log file if it exceeds the size limit.
-fn rotate_log_if_needed(log_path: &Path) {
-    if let Ok(meta) = fs::metadata(log_path)
-        && meta.len() > MAX_LOG_SIZE
-        && let Ok(content) = fs::read(log_path)
-    {
-        let keep_from = content.len().saturating_sub(1024 * 1024);
-        let _ = fs::write(log_path, &content[keep_from..]);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn removes_stale_pid_file_when_process_dead() {
@@ -106,41 +93,5 @@ mod tests {
         let result = run_startup_recovery(&paths);
         assert!(result.is_ok());
         assert!(!pid_file.exists());
-    }
-
-    #[test]
-    fn rotates_large_log_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let log_path = dir.path().join("daemon.log");
-
-        // Create a log file > 10MB
-        let mut f = fs::File::create(&log_path).unwrap();
-        let line = "x".repeat(1024) + "\n";
-        for _ in 0..11_000 {
-            f.write_all(line.as_bytes()).unwrap();
-        }
-        drop(f);
-
-        let size_before = fs::metadata(&log_path).unwrap().len();
-        assert!(size_before > MAX_LOG_SIZE);
-
-        rotate_log_if_needed(&log_path);
-
-        let size_after = fs::metadata(&log_path).unwrap().len();
-        assert!(size_after <= 1024 * 1024 + 1024); // ~1MB + slack
-    }
-
-    #[test]
-    fn does_not_rotate_small_log() {
-        let dir = tempfile::tempdir().unwrap();
-        let log_path = dir.path().join("daemon.log");
-
-        fs::write(&log_path, "small log content\n").unwrap();
-        let size_before = fs::metadata(&log_path).unwrap().len();
-
-        rotate_log_if_needed(&log_path);
-
-        let size_after = fs::metadata(&log_path).unwrap().len();
-        assert_eq!(size_before, size_after);
     }
 }

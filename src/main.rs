@@ -16,12 +16,33 @@ fn main() {
         Some("stash-restore-ref") => commands::stash::handle_stash_restore_ref(&args[1..]),
         Some("blame") => commands::blame::handle_blame(&args[1..]),
         Some("diff") => commands::diff::handle_diff(&args[1..]),
-        Some("fetch-notes") => commands::fetch_notes::handle_fetch_notes(&args[1..]),
+        Some("fetch-notes") | Some("fetch") => commands::fetch_notes::handle_fetch_notes(&args[1..]),
+        Some("push-notes") | Some("push") => commands::push_notes::handle_push_notes(&args[1..]),
+        Some("search") => commands::search::handle_search(&args[1..]),
         Some("install") => commands::install::handle_install(),
         Some("status") => commands::status::handle_status(&args[1..]),
-        Some("stats") => commands::status::handle_stats(&args[1..]),
+        Some("stats") => commands::stats::handle_stats(&args[1..]),
         Some("bg") => commands::bg::handle_bg(&args[1..]),
         Some("ci") => commands::ci::handle_ci(&args[1..]),
+        Some("gc") => {
+            if let Err(e) = commands::gc::handle_gc(&args[1..]) {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        }
+        Some("migrate") => {
+            if let Err(e) = commands::migrate::handle_migrate(&args[1..]) {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        }
+        Some("perf") => {
+            if let Err(e) = commands::perf::handle_perf(&args[1..]) {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        }
+        Some("doctor") => commands::doctor::handle_doctor(&args[1..]),
         Some("effective-ignore-patterns") => commands::internal::handle_internal_command("effective-ignore-patterns", &args[1..]),
         Some("blame-analysis") => commands::internal::handle_internal_command("blame-analysis", &args[1..]),
         Some("fetch-authorship-notes") => commands::internal::handle_internal_command("fetch-authorship-notes", &args[1..]),
@@ -39,11 +60,17 @@ fn main() {
             println!("  post-rewrite  Copy authorship notes after rebase/amend");
             println!("  blame         Show blame with AI/human attribution");
             println!("  diff          Show diff with AI attribution");
+            println!("  search        Grep with attribution context");
             println!("  fetch-notes   Fetch authorship notes from remote");
+            println!("  push-notes    Push authorship notes to remote");
             println!("  install       Install git hooks for automatic attribution");
             println!("  status        Show uncommitted attribution status");
-            println!("  stats         Show commit attribution stats");
+            println!("  stats         Show attribution statistics");
             println!("  bg            Daemon lifecycle (run, start, stop, status)");
+            println!("  gc            Remove orphaned authorship notes");
+            println!("  migrate       Upgrade authorship note schemas in-place");
+            println!("  perf          Performance baseline and regression detection");
+            println!("  doctor        Health check — verify installation and hooks");
         }
         Some(cmd) => {
             eprintln!("git-ai: unknown command '{}'", cmd);

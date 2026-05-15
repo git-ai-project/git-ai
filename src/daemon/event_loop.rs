@@ -103,9 +103,9 @@ pub fn run_event_loop(
                                 },
                             );
                         }
-                        DetectedOperation::Stash { ref repo_path } => {
+                        DetectedOperation::Stash { ref repo_path, ref argv } => {
                             let resolved = resolver.resolve(repo_path);
-                            dispatch_stash(&resolved, daemon_stats);
+                            dispatch_stash(&resolved, argv, daemon_stats);
                         }
                         DetectedOperation::StashPop { ref repo_path } => {
                             let resolved = resolver.resolve(repo_path);
@@ -269,12 +269,12 @@ fn dispatch_rewrite(
     }
 }
 
-fn dispatch_stash(resolved: &std::path::Path, daemon_stats: &stats::DaemonStats) {
+fn dispatch_stash(resolved: &std::path::Path, argv: &[String], daemon_stats: &stats::DaemonStats) {
     eprintln!(
         "[git-ai daemon] stash push detected in {}",
         resolved.display()
     );
-    match stash_worker::process_stash_push(resolved) {
+    match stash_worker::process_stash_push(resolved, argv) {
         Ok(()) => {
             eprintln!(
                 "[git-ai daemon] stash: saved attributions in {}",

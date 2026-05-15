@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-ubuntu:
+    runs-on: ubuntu-latest
+    env:
+      GIT_AI_TEST_GIT_MODE: daemon
+      GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -- --test-threads $(nproc)
+
+  test-macos:
+    runs-on: macos-latest
+    env:
+      GIT_AI_TEST_GIT_MODE: daemon
+      GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: "3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -- --test-threads $(sysctl -n hw.ncpu)
+
+  test-windows:
+    runs-on: windows-latest
+    env:
+      GIT_AI_TEST_GIT_MODE: daemon
+      GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: "4"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -- --test-threads $env:NUMBER_OF_PROCESSORS
+        shell: pwsh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt -- --check
+      - run: cargo clippy --all-targets -- -D warnings

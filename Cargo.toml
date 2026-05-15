@@ -22,6 +22,7 @@ sha2 = "0.10"
 serde_json = "1.0"
 rand = "0.10"
 regex = "1"
+serial_test = "3"
 
 [profile.dev]
 debug = 1
@@ -38,3 +39,16 @@ opt-level = 2
 name = "integration"
 path = "tests/integration/main.rs"
 harness = true
+
+[package.metadata.deb]
+maintainer = "git-ai-inc <support@git-ai.com>"
+copyright = "2024-2026, git-ai-inc"
+license-file = ["LICENSE", "0"]
+depends = "git"
+section = "devel"
+priority = "optional"
+assets = [
+    ["target/release/git-ai", "usr/bin/", "755"],
+]
+extended-description = """git-ai transparently tracks AI vs human code authorship \
+through git hooks, providing per-line attribution data stored in git notes."""

@@ -1,18 +1,12 @@
 version: "3"
 
 vars:
-  TEST_FILTER: '{{default "" .TEST_FILTER}}'
-  CARGO_TEST_ARGS: '{{default "" .CARGO_TEST_ARGS}}'
-  EXTRA_TEST_BINARY_ARGS: '{{default "" .EXTRA_TEST_BINARY_ARGS}}'
   NO_CAPTURE: '{{default "false" .NO_CAPTURE}}'
   TEST_BINARY_ARGS:
     sh: |
       args=""
       if [ "{{.NO_CAPTURE}}" = "true" ]; then
         args="--nocapture"
-      fi
-      if [ -n "{{.EXTRA_TEST_BINARY_ARGS}}" ]; then
-        args="$args {{.EXTRA_TEST_BINARY_ARGS}}"
       fi
       printf '%s' "$args"
   TEST_THREADS:
@@ -52,30 +46,22 @@ tasks:
     cmds:
       - cargo build
 
-  test:base:
-    internal: true
-    cmds:
-      - cargo test {{.CARGO_TEST_ARGS}} {{.TEST_FILTER}} -- --test-threads {{.TEST_THREADS}} {{.TEST_BINARY_ARGS}}
-    env:
-      GIT_AI_TEST_GIT_MODE: "{{.GIT_AI_TEST_GIT_MODE}}"
-      GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: "{{.TEST_THREADS}}"
-
   test:
-    desc: Run unit tests (daemon mode by default)
+    desc: Run the full test suite (lib + bin + integration). No filtering allowed.
     cmds:
-      - task: test:base
-        vars:
-          GIT_AI_TEST_GIT_MODE: daemon
+      - cargo test -- --test-threads {{.TEST_THREADS}} {{.TEST_BINARY_ARGS}}
+    env:
+      GIT_AI_TEST_GIT_MODE: daemon
+      GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: "{{.TEST_THREADS}}"
 
   test:wrapper-daemon:
     desc: |
-      Run unit tests in wrapper-daemon mode. Wrapper-daemon mode is where we simulate `git` pointing to the git-ai-wrapped git, but
-      all git-ai processing is still done in the shared daemon with some extra context from the wrapper that is passed over the control
-      socket. Do not use this test mode unless explicitly requested, use `task test` for normal testing purposes.
+      Run the full test suite in wrapper-daemon mode. Do not use unless explicitly requested.
     cmds:
-      - task: test:base
-        vars:
-          GIT_AI_TEST_GIT_MODE: wrapper-daemon
+      - cargo test -- --test-threads {{.TEST_THREADS}} {{.TEST_BINARY_ARGS}}
+    env:
+      GIT_AI_TEST_GIT_MODE: wrapper-daemon
+      GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: "{{.TEST_THREADS}}"
 
   lint:
     desc: Run cargo check and clippy with warnings as errors
