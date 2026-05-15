@@ -1,6 +1,8 @@
+pub mod ci;
 pub mod core;
 pub mod daemon;
 pub mod mdm;
+pub mod observability;
 pub mod presets;
 pub mod transcripts;
 
