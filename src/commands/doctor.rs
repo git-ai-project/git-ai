@@ -1,7 +1,9 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{self, Command, Stdio};
+use std::process::{self, Stdio};
+
+use git_ai::core::git_binary::git_cmd as git_command;
 
 /// Entry point for `git-ai doctor`.
 pub fn handle_doctor(_args: &[String]) {
@@ -240,7 +242,7 @@ fn check_agent_hooks() -> bool {
 }
 
 fn check_git_notes() -> bool {
-    let result = Command::new("/usr/bin/git")
+    let result = git_command()
         .args(["notes", "--ref=ai", "list"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -254,7 +256,7 @@ fn check_git_notes() -> bool {
         Ok(_) => {
             // Non-zero exit can mean empty namespace (which is fine) or not in a repo
             // Try to distinguish: if we're not in a repo at all, that's a warning
-            let in_repo = Command::new("/usr/bin/git")
+            let in_repo = git_command()
                 .args(["rev-parse", "--git-dir"])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -319,7 +321,7 @@ fn check_config_valid() -> bool {
 fn check_working_log_dir() -> bool {
     // Working logs are stored in .git/ai/working_logs/ inside a repository.
     // If we're in a repo, check that the ai directory is accessible.
-    let git_dir = Command::new("/usr/bin/git")
+    let git_dir = git_command()
         .args(["rev-parse", "--git-dir"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

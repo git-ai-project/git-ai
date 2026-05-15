@@ -1,9 +1,10 @@
 use git_ai::core::authorship_log::AuthorshipLog;
+use git_ai::core::git_binary::git_cmd as git_command;
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{self, Command, Stdio};
+use std::process::{self, Stdio};
 
 use crate::commands::blame::{
     BlameLineData, load_authorship_note, resolve_line_author_with_prompt,
@@ -304,7 +305,7 @@ pub fn handle_internal_command(cmd: &str, args: &[String]) {
             };
 
             // Try to fetch; determine if notes exist on remote
-            let result = Command::new("/usr/bin/git")
+            let result = git_command()
                 .args(["fetch", &remote, "+refs/notes/ai:refs/notes/ai"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -352,7 +353,7 @@ pub fn handle_internal_command(cmd: &str, args: &[String]) {
             for attempt in 0..3 {
                 // On retry attempts (or after first non-fast-forward), fetch and merge
                 if attempt > 0 {
-                    let _ = Command::new("/usr/bin/git")
+                    let _ = git_command()
                         .args([
                             "fetch",
                             &remote,
@@ -362,7 +363,7 @@ pub fn handle_internal_command(cmd: &str, args: &[String]) {
                         .stderr(Stdio::null())
                         .status();
                     // Try to merge remote notes with cat_sort_uniq
-                    let merge_ok = Command::new("/usr/bin/git")
+                    let merge_ok = git_command()
                         .args([
                             "notes",
                             "--ref=ai",
@@ -377,13 +378,13 @@ pub fn handle_internal_command(cmd: &str, args: &[String]) {
                         .map(|s| s.success())
                         .unwrap_or(false);
                     if !merge_ok {
-                        let _ = Command::new("/usr/bin/git")
+                        let _ = git_command()
                             .args(["notes", "--ref=ai", "merge", "--abort"])
                             .stdout(Stdio::null())
                             .stderr(Stdio::null())
                             .status();
                         // Fallback: merge with ours strategy
-                        let ours_ok = Command::new("/usr/bin/git")
+                        let ours_ok = git_command()
                             .args([
                                 "notes",
                                 "--ref=ai",
@@ -398,14 +399,14 @@ pub fn handle_internal_command(cmd: &str, args: &[String]) {
                             .map(|s| s.success())
                             .unwrap_or(false);
                         if !ours_ok {
-                            let _ = Command::new("/usr/bin/git")
+                            let _ = git_command()
                                 .args(["notes", "--ref=ai", "merge", "--abort"])
                                 .stdout(Stdio::null())
                                 .stderr(Stdio::null())
                                 .status();
                             // All merge strategies failed (corrupted remote tree).
                             // Force push our local notes as last resort.
-                            let force_result = Command::new("/usr/bin/git")
+                            let force_result = git_command()
                                 .args(["push", "--force", &remote, "refs/notes/ai:refs/notes/ai"])
                                 .stdout(Stdio::piped())
                                 .stderr(Stdio::piped())
@@ -420,7 +421,7 @@ pub fn handle_internal_command(cmd: &str, args: &[String]) {
                     }
                 }
 
-                let result = Command::new("/usr/bin/git")
+                let result = git_command()
                     .args(["push", &remote, "refs/notes/ai:refs/notes/ai"])
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())

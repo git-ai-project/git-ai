@@ -27,11 +27,12 @@ pub mod authorship {
 pub mod git {
     pub mod refs {
         use std::path::Path;
-        use std::process::Command;
+
+        use crate::core::git_binary::git_cmd as git_command;
 
         /// Add or replace a git note in the `refs/notes/ai` namespace.
         pub fn notes_add(repo_path: &Path, commit_sha: &str, note_content: &str) -> bool {
-            let result = Command::new("/usr/bin/git")
+            let result = git_command()
                 .arg("-C")
                 .arg(repo_path)
                 .args([

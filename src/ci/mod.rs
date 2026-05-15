@@ -8,6 +8,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::core::authorship_log::{AuthorshipLog, LineRange};
+use crate::core::git_binary::git_cmd as git_command;
 
 // ---------------------------------------------------------------------------
 // CI Environment Detection
@@ -789,7 +790,7 @@ fn classify_hashes(
 }
 
 fn git_in(repo_path: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("/usr/bin/git")
+    let output = git_command()
         .arg("-C")
         .arg(repo_path)
         .args(args)

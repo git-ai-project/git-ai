@@ -10,6 +10,33 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
+#[cfg(windows)]
+#[repr(C)]
+struct WinapiOverlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    h_event: usize,
+}
+
+#[cfg(windows)]
+const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x00000002;
+#[cfg(windows)]
+const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x00000001;
+
+#[cfg(windows)]
+extern "system" {
+    fn LockFileEx(
+        hFile: *mut std::ffi::c_void,
+        dwFlags: u32,
+        dwReserved: u32,
+        nNumberOfBytesToLockLow: u32,
+        nNumberOfBytesToLockHigh: u32,
+        lpOverlapped: *mut WinapiOverlapped,
+    ) -> i32;
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -113,7 +140,18 @@ pub struct InitialAttributions {
 // Path helpers
 // ---------------------------------------------------------------------------
 
+/// Validates that a string looks like a valid git SHA to prevent path traversal.
+fn is_valid_base_commit(s: &str) -> bool {
+    if s == "initial" {
+        return true;
+    }
+    !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 fn working_log_dir(repo_git_dir: &Path, base_commit: &str) -> PathBuf {
+    if !is_valid_base_commit(base_commit) {
+        return repo_git_dir.join("ai").join("working_logs").join("invalid");
+    }
     repo_git_dir
         .join("ai")
         .join("working_logs")
@@ -167,7 +205,7 @@ pub fn read_checkpoints(repo_git_dir: &Path, base_commit: &str) -> Vec<Checkpoin
 
 /// Acquire an advisory file lock for the given base commit's working log.
 /// Returns the lock file handle (lock is held for the lifetime of the handle).
-/// On non-Unix platforms or on failure, returns `None` (best-effort).
+/// On failure, returns `None` (best-effort).
 #[cfg(unix)]
 fn lock_working_log(repo_git_dir: &Path, base_commit: &str) -> Option<fs::File> {
     let dir = working_log_dir(repo_git_dir, base_commit);
@@ -178,7 +216,37 @@ fn lock_working_log(repo_git_dir: &Path, base_commit: &str) -> Option<fs::File> 
     if ret == 0 { Some(file) } else { None }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn lock_working_log(repo_git_dir: &Path, base_commit: &str) -> Option<fs::File> {
+    use std::os::windows::io::AsRawHandle;
+
+    let dir = working_log_dir(repo_git_dir, base_commit);
+    let _ = fs::create_dir_all(&dir);
+    let lock_path = dir.join(".lock");
+
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .ok()?;
+
+    let handle = file.as_raw_handle();
+    let mut overlapped: WinapiOverlapped = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        LockFileEx(
+            handle as _,
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        )
+    };
+    if ret != 0 { Some(file) } else { None }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn lock_working_log(_repo_git_dir: &Path, _base_commit: &str) -> Option<fs::File> {
     None
 }
@@ -227,7 +295,11 @@ pub fn append_checkpoint(repo_git_dir: &Path, base_commit: &str, checkpoint: &Ch
         Ok(f) => f,
         Err(_) => return,
     };
-    let _ = writeln!(file, "{}", json_line);
+    if writeln!(file, "{}", json_line).is_ok() {
+        // Ensure data is flushed to disk for crash resilience
+        let _ = file.flush();
+        let _ = file.sync_data();
+    }
 }
 
 /// Save arbitrary content to the blobs directory, returning its SHA-256 hex digest.
@@ -521,5 +593,39 @@ mod tests {
 
         let loaded = read_checkpoints(&git_dir, base);
         assert_eq!(loaded.last().unwrap().seq, 4);
+    }
+
+    #[test]
+    fn sha_validation_prevents_path_traversal() {
+        // Valid SHAs
+        assert!(is_valid_base_commit("abc123"));
+        assert!(is_valid_base_commit("0123456789abcdef"));
+        assert!(is_valid_base_commit("a".repeat(40).as_str())); // SHA-1 length
+        assert!(is_valid_base_commit("a".repeat(64).as_str())); // SHA-256 length
+
+        // Invalid SHAs (should be rejected)
+        assert!(!is_valid_base_commit(""));
+        assert!(!is_valid_base_commit("../../../etc/passwd"));
+        assert!(!is_valid_base_commit("../../etc"));
+        assert!(!is_valid_base_commit("abc/def"));
+        assert!(!is_valid_base_commit("abc def"));
+        assert!(!is_valid_base_commit("abc\x00def"));
+        assert!(!is_valid_base_commit("a".repeat(65).as_str())); // Too long
+    }
+
+    #[test]
+    fn path_traversal_attempt_uses_safe_fallback() {
+        let (_tmp, git_dir) = setup();
+        let malicious_base = "../../etc/passwd";
+
+        // Attempting to use a path traversal as base_commit should not escape the working_logs dir
+        let path = working_log_dir(&git_dir, malicious_base);
+        let path_str = path.to_string_lossy();
+
+        // Should use the "invalid" fallback, not traverse outside
+        assert!(path_str.contains("working_logs"));
+        assert!(path_str.contains("invalid"));
+        assert!(!path_str.contains("etc"));
+        assert!(!path_str.contains("passwd"));
     }
 }

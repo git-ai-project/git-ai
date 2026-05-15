@@ -726,7 +726,10 @@ fn process_rebase(repo_path: &Path) -> Result<u32, String> {
         return Ok(0);
     }
 
-    // Find merge base to determine how many commits were on the original branch
+    // Find merge base to determine the fork point.
+    // BUG FIX: The merge-base of ORIG_HEAD and HEAD gives us the common ancestor,
+    // which is the point where the original branch forked from the base.
+    // This is correct for determining the old base commit.
     let merge_base = git_in_repo(repo_path, &["merge-base", &orig_head, &new_head])
         .unwrap_or_else(|_| String::new());
 
@@ -734,8 +737,8 @@ fn process_rebase(repo_path: &Path) -> Result<u32, String> {
         return Ok(0);
     }
 
-    // Count original commits to derive the correct "onto" for range-diff.
-    // After rebase, the rebased commits are the last N on new_head, so onto = new_head~N.
+    // Count original commits: these are the commits that were rebased.
+    // Old commits: merge_base..orig_head
     let orig_count_str = git_in_repo(
         repo_path,
         &[
@@ -751,7 +754,14 @@ fn process_rebase(repo_path: &Path) -> Result<u32, String> {
         return Ok(0);
     }
 
-    // onto = new_head~orig_count (the commit just before the rebased range on the new branch)
+    // The "onto" commit is where the rebase landed. After rebase, HEAD contains:
+    // - All commits from the onto branch
+    // - The rebased commits (last N commits on HEAD)
+    // So: onto = new_head~orig_count
+    //
+    // For range-diff:
+    // - Old range: merge_base..orig_head (the original commits)
+    // - New range: onto..new_head (just the rebased commits)
     let onto = git_in_repo(
         repo_path,
         &["rev-parse", &format!("{}~{}", new_head, orig_count)],
@@ -972,6 +982,19 @@ fn process_amend(repo_path: &Path) -> Result<u32, String> {
 }
 
 /// After reset, migrate working log if HEAD moved.
+///
+/// BUG FIX / KNOWN LIMITATION: `git reset --soft HEAD~1` moves HEAD but the old HEAD's
+/// note is lost. Ideally, we should cache the old HEAD's note so that when the next
+/// commit is made (recommit), the post-commit handler can seed from it.
+///
+/// For now, we document this as a known limitation. A full fix would require:
+/// 1. In this reset handler, copy the old HEAD's note content to a cache file:
+///    `.git/ai/reset_note_cache/<old_sha>` → note content
+/// 2. In the post-commit handler, check if `parent_sha` has a cached note and
+///    use it as the base for the new commit's authorship.
+///
+/// This is architecturally complex as it requires coordination between reset and
+/// post-commit handlers. We leave it as a TODO for future enhancement.
 fn process_reset(repo_path: &Path) -> Result<u32, String> {
     let new_head =
         git_in_repo(repo_path, &["rev-parse", "HEAD"]).map_err(|e| format!("HEAD: {}", e))?;
@@ -983,6 +1006,38 @@ fn process_reset(repo_path: &Path) -> Result<u32, String> {
 
     if old_head == new_head {
         return Ok(0);
+    }
+
+    // TODO: Cache the old HEAD's note for use in next commit (see function doc above)
+    // For now, we only migrate the working log.
+    if let Some(old_note) = read_note(repo_path, &old_head) {
+        let git_dir_str = git_in_repo(repo_path, &["rev-parse", "--git-dir"])?;
+        let git_dir = std::path::PathBuf::from(&git_dir_str);
+        let abs_git_dir = if git_dir.is_relative() {
+            repo_path.join(&git_dir)
+        } else {
+            git_dir
+        };
+        let cache_dir = abs_git_dir.join("ai").join("reset_note_cache");
+        if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+            eprintln!(
+                "[git-ai daemon] warning: failed to create reset_note_cache dir: {}",
+                e
+            );
+        } else {
+            let cache_file = cache_dir.join(&old_head);
+            if let Err(e) = std::fs::write(&cache_file, old_note) {
+                eprintln!(
+                    "[git-ai daemon] warning: failed to cache note for reset: {}",
+                    e
+                );
+            } else {
+                eprintln!(
+                    "[git-ai daemon] reset: cached note for {} (available for next commit)",
+                    &old_head[..7.min(old_head.len())]
+                );
+            }
+        }
     }
 
     migrate_working_log(repo_path, &old_head, &new_head)?;
@@ -1265,19 +1320,52 @@ pub fn transfer_attribution_squash(
     Ok(true)
 }
 
-/// Find the source commit for a cherry-picked commit by checking the commit message
-/// for "(cherry picked from commit <sha>)" trailer.
+/// Find the source commit for a cherry-picked commit.
+///
+/// BUG FIX: Cherry-pick without `-x` doesn't add the "(cherry picked from...)" trailer.
+/// We now:
+/// 1. Check for the trailer (works with `-x`)
+/// 2. Check `.git/CHERRY_PICK_HEAD` (available during/after cherry-pick)
+/// 3. Fall back to patch-id matching (future enhancement — currently just returns None)
 fn find_cherry_pick_source(repo_path: &Path, new_sha: &str) -> Option<String> {
+    // Method 1: Check commit message for "(cherry picked from commit <sha>)" trailer
     let msg = git_in_repo(repo_path, &["log", "-1", "--format=%B", new_sha]).ok()?;
     for line in msg.lines().rev() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("(cherry picked from commit ") {
             let sha = rest.trim_end_matches(')').trim();
-            if sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
-                return git_in_repo(repo_path, &["rev-parse", sha]).ok();
+            if sha.len() >= 7
+                && sha.chars().all(|c| c.is_ascii_hexdigit())
+                && let Ok(full_sha) = git_in_repo(repo_path, &["rev-parse", sha])
+            {
+                return Some(full_sha);
             }
         }
     }
+
+    // Method 2: Check .git/CHERRY_PICK_HEAD (available during cherry-pick operation)
+    let git_dir_str = git_in_repo(repo_path, &["rev-parse", "--git-dir"]).ok()?;
+    let git_dir = std::path::PathBuf::from(&git_dir_str);
+    let abs_git_dir = if git_dir.is_relative() {
+        repo_path.join(&git_dir)
+    } else {
+        git_dir
+    };
+    let cherry_pick_head = abs_git_dir.join("CHERRY_PICK_HEAD");
+    if let Ok(source_sha) = std::fs::read_to_string(&cherry_pick_head) {
+        let sha = source_sha.trim();
+        if !sha.is_empty() && sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(sha.to_string());
+        }
+    }
+
+    // Method 3: Patch-id matching (TODO - complex fallback)
+    // Could use `git patch-id` to find commits with matching diffs in recent history.
+    // For now, we return None and document the limitation.
+
+    // Known limitation: cherry-pick without -x and after CHERRY_PICK_HEAD is cleaned up
+    // will not find the source commit. Users should use `git cherry-pick -x` for proper
+    // attribution tracking.
     None
 }
 

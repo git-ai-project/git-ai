@@ -54,6 +54,7 @@ pub fn run_daemon(foreground: bool) -> Result<(), Error> {
 
     redirect_stderr_to_log(&paths.log_file)?;
 
+    // Disable trace2 for self BEFORE spawning any threads to avoid data races
     disable_trace2_for_self();
 
     eprintln!("[git-ai] daemon started (pid {})", std::process::id());
@@ -184,7 +185,9 @@ fn start_control_socket(
     #[cfg(not(unix))]
     {
         let _ = (paths, shutdown);
-        eprintln!("[git-ai] control socket not yet supported on this platform");
+        eprintln!(
+            "[git-ai] control socket not available on Windows; daemon management via CLI is limited"
+        );
         Ok(None)
     }
 }

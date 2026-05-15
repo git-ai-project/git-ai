@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::process::{self, Command, Stdio};
+use std::process::{self, Stdio};
 
 use git_ai::core::authorship_log::AuthorshipLog;
+use git_ai::core::git_binary::git_cmd as git_command;
 
 use crate::commands::blame::load_authorship_note;
 use crate::commands::helpers::git_cmd;
@@ -115,7 +116,7 @@ pub fn handle_search(args: &[String]) {
     }
     grep_args.push(&search_pattern);
 
-    let grep_output = Command::new("/usr/bin/git")
+    let grep_output = git_command()
         .args(&grep_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -1,13 +1,14 @@
 use git_ai::core::attribution::{
     Attribution, attributions_to_line_attributions, update_attributions,
 };
+use git_ai::core::git_binary::git_cmd as git_command;
 use git_ai::core::working_log::{AgentId, Checkpoint, CheckpointKind, WorkingLogEntry};
 
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::helpers::{
@@ -1041,9 +1042,9 @@ fn pending_ai_edits_dir(git_dir: &Path) -> PathBuf {
     git_dir.join("ai").join("pending_ai_edits")
 }
 
-/// Convert a relative file path to a safe marker filename (replace / with __)
+/// Convert a relative file path to a safe marker filename (replace / and \ with __)
 fn marker_filename(relative_path: &str) -> String {
-    relative_path.replace('/', "__")
+    relative_path.replace(['/', '\\'], "__")
 }
 
 /// Write a pending AI edit marker for the given file.
@@ -1056,7 +1057,7 @@ fn write_pending_ai_edit(git_dir: &Path, relative_path: &str) {
 
 /// Check if a file is in a conflicted state (e.g., UU during merge conflict).
 fn is_file_conflicted(repo_root: &Path, relative_path: &str) -> bool {
-    let output = Command::new("/usr/bin/git")
+    let output = git_command()
         .arg("-C")
         .arg(repo_root)
         .args(["status", "--porcelain", "--", relative_path])

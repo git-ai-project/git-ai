@@ -24,6 +24,7 @@ use super::trace2_events::Trace2Event;
 const REWRITE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// Pending rewrite that is being debounced.
+/// BUG FIX: Changed to store a Vec to handle multiple rapid operations on the same repo.
 struct PendingRewrite {
     kind: RewriteKind,
     argv: Vec<String>,
@@ -48,8 +49,9 @@ pub fn run_event_loop(
     let stale_threshold = Duration::from_secs(120);
     let recv_timeout = Duration::from_millis(50);
 
-    // Debounce buffer for rewrites: repo_path → pending rewrite
-    let mut pending_rewrites: HashMap<PathBuf, PendingRewrite> = HashMap::new();
+    // Debounce buffer for rewrites: repo_path → Vec<pending rewrites>
+    // BUG FIX: Changed to Vec to handle multiple rapid successive operations
+    let mut pending_rewrites: HashMap<PathBuf, Vec<PendingRewrite>> = HashMap::new();
 
     let daemon_stats = stats::get();
 
@@ -65,13 +67,22 @@ pub fn run_event_loop(
         let now = Instant::now();
         let ready_keys: Vec<PathBuf> = pending_rewrites
             .iter()
-            .filter(|(_, pending)| now.duration_since(pending.scheduled_at) >= REWRITE_DEBOUNCE)
+            .filter(|(_, pending_list)| {
+                // Check if the oldest pending operation has expired
+                pending_list
+                    .first()
+                    .map(|p| now.duration_since(p.scheduled_at) >= REWRITE_DEBOUNCE)
+                    .unwrap_or(false)
+            })
             .map(|(k, _)| k.clone())
             .collect();
 
         for repo_path in ready_keys {
-            if let Some(pending) = pending_rewrites.remove(&repo_path) {
-                dispatch_rewrite(&repo_path, &pending.kind, &pending.argv, daemon_stats);
+            if let Some(pending_list) = pending_rewrites.remove(&repo_path) {
+                // BUG FIX: Process ALL pending operations, not just the last one
+                for pending in pending_list {
+                    dispatch_rewrite(&repo_path, &pending.kind, &pending.argv, daemon_stats);
+                }
             }
         }
 
@@ -93,15 +104,16 @@ pub fn run_event_loop(
                             ref argv,
                         } => {
                             let resolved = resolver.resolve(repo_path);
+                            // BUG FIX: Append to the list instead of overwriting
                             // Debounce rewrites: rebase generates many rapid events
-                            pending_rewrites.insert(
-                                resolved,
-                                PendingRewrite {
+                            pending_rewrites
+                                .entry(resolved)
+                                .or_default()
+                                .push(PendingRewrite {
                                     kind: kind.clone(),
                                     argv: argv.clone(),
                                     scheduled_at: Instant::now(),
-                                },
-                            );
+                                });
                         }
                         DetectedOperation::Stash {
                             ref repo_path,
@@ -132,8 +144,11 @@ pub fn run_event_loop(
     }
 
     // Flush remaining pending rewrites on shutdown
-    for (repo_path, pending) in pending_rewrites.drain() {
-        dispatch_rewrite(&repo_path, &pending.kind, &pending.argv, daemon_stats);
+    // BUG FIX: Process all pending operations in each repo's list
+    for (repo_path, pending_list) in pending_rewrites.drain() {
+        for pending in pending_list {
+            dispatch_rewrite(&repo_path, &pending.kind, &pending.argv, daemon_stats);
+        }
     }
 
     eprintln!("[git-ai daemon] event loop exited");

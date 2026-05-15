@@ -1,4 +1,6 @@
-use std::process::{self, Command, Stdio};
+use std::process::{self, Stdio};
+
+use git_ai::core::git_binary::git_cmd as git_command;
 
 pub fn handle_fetch_notes(args: &[String]) {
     let mut remote: Option<String> = None;
@@ -67,7 +69,7 @@ pub fn handle_fetch_notes(args: &[String]) {
 
     let remote_name = remote.unwrap_or_else(|| "origin".to_string());
 
-    let result = Command::new("/usr/bin/git")
+    let result = git_command()
         .args(["fetch", &remote_name, "refs/notes/ai:refs/notes/ai"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

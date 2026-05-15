@@ -39,16 +39,26 @@ pub fn save_token(token: &str) -> Result<(), String> {
     let serialized =
         serde_json::to_string_pretty(&content).map_err(|e| format!("json error: {e}"))?;
 
-    fs::write(&path, &serialized)
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
-
-    // Restrict permissions on Unix
+    // Write with restricted permissions from the start to avoid TOCTOU race
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&path, perms)
-            .map_err(|e| format!("failed to set permissions on {}: {e}", path.display()))?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+        file.write_all(serialized.as_bytes())
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: write then restrict (no atomic mode creation available)
+        fs::write(&path, &serialized)
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
     }
 
     Ok(())

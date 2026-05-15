@@ -1,6 +1,7 @@
-use std::process::{self, Command, Stdio};
+use std::process::{self, Stdio};
 
 use crate::commands::helpers::git_cmd;
+use git_ai::core::git_binary::git_cmd as git_command;
 
 pub fn handle_ci(args: &[String]) {
     if args.len() < 2 || args[0] != "local" || args[1] != "merge" {
@@ -65,7 +66,7 @@ pub fn handle_ci(args: &[String]) {
     if skip_fetch || skip_fetch_notes {
         println!("Skipping authorship history fetch (--skip-fetch)");
     } else {
-        let fetch_result = Command::new("/usr/bin/git")
+        let fetch_result = git_command()
             .args(["fetch", "origin", "+refs/notes/ai:refs/notes/ai"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -106,7 +107,7 @@ pub fn handle_ci(args: &[String]) {
         }
     } else {
         // Try to fetch the base branch from origin
-        let fetch_base_result = Command::new("/usr/bin/git")
+        let fetch_base_result = git_command()
             .args(["fetch", "origin", &base_ref])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -158,7 +159,7 @@ pub fn handle_ci(args: &[String]) {
             if let Ok(note) = git_cmd(&["notes", "--ref=ai", "show", commit])
                 && !note.trim().is_empty()
             {
-                let _ = Command::new("/usr/bin/git")
+                let _ = git_command()
                     .args([
                         "notes",
                         "--ref=ai",
@@ -182,7 +183,7 @@ pub fn handle_ci(args: &[String]) {
         println!("Skipping authorship push (--skip-push)");
     } else {
         println!("Pushing authorship...");
-        let _ = Command::new("/usr/bin/git")
+        let _ = git_command()
             .args(["push", "origin", "refs/notes/ai:refs/notes/ai"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())

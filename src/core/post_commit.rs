@@ -5,12 +5,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::process::Command;
 
 use super::attribution::LineAttribution;
 use super::authorship_log::{
     self, AttestationEntry, AuthorshipLog, FileAttestation, LineRange, Metadata,
 };
+use super::git_binary::git_cmd as git_command;
 use super::working_log::{self, AgentId, Checkpoint, CheckpointKind, InitialAttributions};
 
 /// Error type for post-commit operations.
@@ -159,7 +159,7 @@ pub fn generate_authorship_for_commit(
 /// Retrieve file content at a specific git revision.
 /// Returns None if the file doesn't exist at that revision.
 pub fn git_show_file(repo_dir: &Path, revision: &str, file_path: &str) -> Option<String> {
-    let output = Command::new("/usr/bin/git")
+    let output = git_command()
         .arg("-C")
         .arg(repo_dir)
         .arg("show")
@@ -192,7 +192,7 @@ pub fn git_diff_committed_lines(
         parent.to_string()
     };
 
-    let output = Command::new("/usr/bin/git")
+    let output = git_command()
         .arg("-C")
         .arg(repo_dir)
         .arg("diff")
@@ -229,7 +229,7 @@ fn git_diff_uncommitted_lines(
         return result;
     }
 
-    let mut cmd = Command::new("/usr/bin/git");
+    let mut cmd = git_command();
     cmd.arg("-C")
         .arg(repo_dir)
         .arg("diff")

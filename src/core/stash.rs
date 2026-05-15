@@ -230,6 +230,27 @@ pub fn save_stash_attributions(
     Ok(())
 }
 
+/// Save the current stash@{0} SHA to a temp file for later restoration.
+///
+/// Called by the pre-hook before `git stash pop/apply` to record which stash
+/// is about to be popped. This solves the bug where after pop, stash@{0} points
+/// to the next stash, not the one that was just popped.
+pub fn save_stash_sha_before_pop(repo_path: &Path) -> Result<(), String> {
+    let stash_sha = git_in_repo(repo_path, &["rev-parse", "stash@{0}"])
+        .map_err(|_| "no stash entry found — stash@{0} not available".to_string())?;
+
+    let git_dir = resolve_git_dir(repo_path)?;
+    let ai_dir = git_dir.join("ai");
+    std::fs::create_dir_all(&ai_dir)
+        .map_err(|e| format!("failed to create .git/ai directory: {}", e))?;
+
+    let last_stash_file = ai_dir.join("last_stash_sha");
+    std::fs::write(&last_stash_file, &stash_sha)
+        .map_err(|e| format!("failed to write last_stash_sha: {}", e))?;
+
+    Ok(())
+}
+
 /// Restore working-log attributions from a stash note.
 ///
 /// Called after `git stash pop/apply` completes successfully.
@@ -289,7 +310,12 @@ pub fn restore_stash_attributions_for_sha(
 /// Find the SHA of the stash that was just applied/popped.
 ///
 /// For `apply`: stash@{0} still exists and has the note.
-/// For `pop`: the entry was dropped, so we check the stash reflog.
+/// For `pop`: the entry was dropped, so we check a pre-saved SHA file.
+///
+/// BUG FIX: After `git stash pop`, the reflog tip is the NEXT stash, not the popped one.
+/// The correct approach is for the pre-hook to save the SHA before popping.
+/// For now, we check a temp file `.git/ai/last_stash_sha` that should be written by
+/// the pre-hook, or fall back to heuristics.
 fn find_applied_stash_sha(repo_path: &Path) -> Result<String, String> {
     // First try stash@{0} — works for `apply` where the stash entry remains
     if let Ok(sha) = git_in_repo(repo_path, &["rev-parse", "stash@{0}"]) {
@@ -299,25 +325,50 @@ fn find_applied_stash_sha(repo_path: &Path) -> Result<String, String> {
         }
     }
 
-    // For `pop`, the stash entry was removed. Check the stash reflog for the
-    // most recently dropped entry.
-    let reflog = git_in_repo(
-        repo_path,
-        &["reflog", "show", "refs/stash", "--format=%H", "-1"],
-    );
+    // For `pop`, check if the pre-hook saved the stash SHA
+    let git_dir_str = git_in_repo(repo_path, &["rev-parse", "--git-dir"])?;
+    let git_dir = std::path::PathBuf::from(&git_dir_str);
+    let abs_git_dir = if git_dir.is_relative() {
+        repo_path.join(&git_dir)
+    } else {
+        git_dir
+    };
+    let last_stash_file = abs_git_dir.join("ai").join("last_stash_sha");
 
-    if let Ok(sha) = reflog
-        && !sha.is_empty()
-    {
-        return Ok(sha);
+    if let Ok(saved_sha) = std::fs::read_to_string(&last_stash_file) {
+        let sha = saved_sha.trim().to_string();
+        // Clean up the temp file
+        let _ = std::fs::remove_file(&last_stash_file);
+        if !sha.is_empty() {
+            return Ok(sha);
+        }
     }
 
-    // Last resort: if stash reflog is gone (last stash was popped), try
-    // looking at the reflog for HEAD to find which commit was the stash
-    // This handles the edge case where popping the only stash deletes refs/stash entirely.
-    // In that case, we can look for the stash commit in the dangling objects,
-    // but that's complex. For now, check if there are any notes in ai-stash
-    // and try to find the most recent one.
+    // Fallback heuristic: Check HEAD reflog for stash application
+    // When stash pop/apply happens, git writes an entry like "WIP on <branch>: <sha>"
+    // to HEAD's reflog. We look for that pattern.
+    let head_reflog = git_in_repo(
+        repo_path,
+        &["reflog", "show", "HEAD", "--format=%H %gs", "-5"],
+    );
+    if let Ok(reflog) = head_reflog {
+        for line in reflog.lines() {
+            // Look for entries that mention "WIP on" or "stash"
+            if line.contains("WIP on") || line.to_lowercase().contains("stash") {
+                // Extract the SHA from the first word
+                if let Some(sha) = line.split_whitespace().next() {
+                    // Verify this is a valid stash commit with an ai-stash note
+                    if git_in_repo(repo_path, &["notes", "--ref=ai-stash", "show", sha]).is_ok() {
+                        return Ok(sha.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Last resort: search all ai-stash notes and try to find the most recent one
+    // This is a known limitation — without pre-hook coordination, we can't reliably
+    // determine which stash was popped when multiple stashes exist.
     let notes_list = git_in_repo(repo_path, &["notes", "--ref=ai-stash", "list"]);
     if let Ok(list) = notes_list {
         // Format: "<note-blob-sha> <annotated-object-sha>"
@@ -325,12 +376,14 @@ fn find_applied_stash_sha(repo_path: &Path) -> Result<String, String> {
         if let Some(last_line) = list.lines().last() {
             let parts: Vec<&str> = last_line.split_whitespace().collect();
             if parts.len() >= 2 {
+                // TODO: This is unreliable when multiple stashes exist.
+                // Proper fix requires pre-hook to save the stash@{0} SHA before pop.
                 return Ok(parts[1].to_string());
             }
         }
     }
 
-    Err("could not determine stash SHA for restore".to_string())
+    Err("could not determine stash SHA for restore — consider using 'git stash apply' instead of 'pop', or ensure pre-hook is properly configured".to_string())
 }
 
 /// Filter checkpoints to only include entries whose file paths match the pathspecs.

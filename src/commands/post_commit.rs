@@ -1,8 +1,9 @@
+use git_ai::core::git_binary::git_cmd as git_command;
 use git_ai::core::post_commit::generate_authorship_for_commit;
 
 use std::env;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::commands::helpers::{debug_log, discover_repo_and_gitdir, read_head_sha};
 
@@ -53,7 +54,7 @@ pub fn handle_post_commit() {
     }
 
     // Read parent SHA and author from the commit object (single git spawn)
-    let output = match Command::new("/usr/bin/git")
+    let output = match git_command()
         .args(["cat-file", "commit", &commit_sha])
         .current_dir(&repo_dir)
         .stdout(Stdio::piped())
@@ -203,7 +204,7 @@ pub fn handle_post_commit() {
     }
 
     let note_text = authorship_log.serialize_to_string();
-    let result = Command::new("/usr/bin/git")
+    let result = git_command()
         .args([
             "notes",
             "--ref=ai",

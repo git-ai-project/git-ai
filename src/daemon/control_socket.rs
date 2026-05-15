@@ -5,13 +5,16 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use super::checkpoint_worker;
 use super::protocol::{ControlRequest, ControlResponse};
 use super::stats;
+
+const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
 /// Per-repository lock registry.
 ///
@@ -76,11 +79,22 @@ impl ControlSocket {
         while !self.shutdown.load(Ordering::Relaxed) {
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
-                    let shutdown = Arc::clone(&self.shutdown);
-                    let repo_locks = Arc::clone(&self.repo_locks);
-                    thread::spawn(move || {
+                    let current = ACTIVE_CONNECTIONS.load(Ordering::Relaxed);
+                    if current >= MAX_CONCURRENT_CONNECTIONS {
+                        // At limit: handle inline (blocking accept loop briefly is better than OOM)
+                        let shutdown = Arc::clone(&self.shutdown);
+                        let repo_locks = Arc::clone(&self.repo_locks);
                         handle_connection(stream, shutdown, repo_locks);
-                    });
+                    } else {
+                        // Below limit: spawn thread
+                        ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+                        let shutdown = Arc::clone(&self.shutdown);
+                        let repo_locks = Arc::clone(&self.repo_locks);
+                        thread::spawn(move || {
+                            handle_connection(stream, shutdown, repo_locks);
+                            ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+                        });
+                    }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(poll_interval);

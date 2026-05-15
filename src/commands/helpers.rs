@@ -1,6 +1,8 @@
 use std::env;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+use git_ai::core::git_binary::git_cmd as git_command;
 
 pub fn debug_log(msg: &str) {
     if cfg!(debug_assertions) || env::var("GIT_AI_DEBUG").as_deref() == Ok("1") {
@@ -9,7 +11,7 @@ pub fn debug_log(msg: &str) {
 }
 
 pub fn git_cmd(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("/usr/bin/git")
+    let output = git_command()
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -29,7 +31,7 @@ pub fn git_cmd(args: &[&str]) -> Result<String, String> {
 
 /// Run a git command from a specific working directory.
 pub fn git_cmd_in(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("/usr/bin/git")
+    let output = git_command()
         .args(args)
         .current_dir(dir)
         .stdout(Stdio::piped())
@@ -49,7 +51,7 @@ pub fn git_cmd_in(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 /// Like resolve_repo_info but from a specific working directory.
 pub fn resolve_repo_info_in(dir: &Path) -> Result<(String, PathBuf, String), String> {
-    let output = Command::new("/usr/bin/git")
+    let output = git_command()
         .args(["rev-parse", "--show-toplevel", "--git-dir", "HEAD"])
         .current_dir(dir)
         .stdout(Stdio::piped())

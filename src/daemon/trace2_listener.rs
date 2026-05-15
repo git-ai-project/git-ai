@@ -3,13 +3,16 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
 
 use crate::daemon::stats;
 use crate::daemon::trace2_events::{Trace2Event, parse_trace2_line};
+
+const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
 /// Listens on a Unix domain socket for git trace2 events.
 ///
@@ -53,11 +56,23 @@ impl Trace2Listener {
                     stats::get()
                         .trace2_connections
                         .fetch_add(1, Ordering::Relaxed);
-                    let tx = event_tx.clone();
-                    let shutdown = Arc::clone(&self.shutdown);
-                    thread::spawn(move || {
+
+                    let current = ACTIVE_CONNECTIONS.load(Ordering::Relaxed);
+                    if current >= MAX_CONCURRENT_CONNECTIONS {
+                        // At limit: handle inline (blocking accept loop briefly is better than OOM)
+                        let tx = event_tx.clone();
+                        let shutdown = Arc::clone(&self.shutdown);
                         handle_connection(stream, tx, shutdown);
-                    });
+                    } else {
+                        // Below limit: spawn thread
+                        ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed);
+                        let tx = event_tx.clone();
+                        let shutdown = Arc::clone(&self.shutdown);
+                        thread::spawn(move || {
+                            handle_connection(stream, tx, shutdown);
+                            ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed);
+                        });
+                    }
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(poll_interval);

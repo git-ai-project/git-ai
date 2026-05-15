@@ -1,9 +1,10 @@
 use git_ai::core::authorship_log::AuthorshipLog;
+use git_ai::core::git_binary::git_cmd as git_command;
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::process::{self, Command, Stdio};
+use std::process::{self, Stdio};
 
 use crate::commands::helpers::git_cmd;
 
@@ -251,7 +252,7 @@ fn split_diff_into_sections(diff_text: &str) -> Vec<(String, String)> {
 /// Run git diff and return the raw text output with standard a/b prefix,
 /// using lossy UTF-8 conversion.
 fn get_diff_text_with_prefix(from_commit: &str, to_commit: &str) -> Result<String, String> {
-    let output = Command::new("/usr/bin/git")
+    let output = git_command()
         .args([
             "diff",
             "--no-color",
@@ -274,7 +275,7 @@ fn get_diff_text_with_prefix(from_commit: &str, to_commit: &str) -> Result<Strin
 
 /// Get file content at a specific commit.
 fn get_file_at_commit(file_path: &str, commit: &str) -> String {
-    let output = Command::new("/usr/bin/git")
+    let output = git_command()
         .args(["show", &format!("{}:{}", commit, file_path)])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

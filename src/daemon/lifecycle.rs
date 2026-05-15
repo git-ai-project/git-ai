@@ -166,7 +166,7 @@ pub fn acquire_lock(path: &Path) -> Result<File, Error> {
         use std::os::windows::io::AsRawHandle;
         use std::ptr;
         let handle = file.as_raw_handle();
-        let mut overlapped: winapi_OVERLAPPED = unsafe { std::mem::zeroed() };
+        let mut overlapped: WinapiOverlapped = unsafe { std::mem::zeroed() };
         let ret = unsafe {
             LockFileEx(
                 handle as _,
@@ -186,7 +186,14 @@ pub fn acquire_lock(path: &Path) -> Result<File, Error> {
 }
 
 #[cfg(windows)]
-type winapi_OVERLAPPED = [u8; 32]; // opaque, sized to match OVERLAPPED
+#[repr(C)]
+struct WinapiOverlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    h_event: usize,
+}
 #[cfg(windows)]
 const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x00000002;
 #[cfg(windows)]
@@ -199,9 +206,13 @@ extern "system" {
         dwReserved: u32,
         nNumberOfBytesToLockLow: u32,
         nNumberOfBytesToLockHigh: u32,
-        lpOverlapped: *mut winapi_OVERLAPPED,
+        lpOverlapped: *mut WinapiOverlapped,
     ) -> i32;
+    fn GetStdHandle(nStdHandle: u32) -> *mut std::ffi::c_void;
+    fn SetStdHandle(nStdHandle: u32, hHandle: *mut std::ffi::c_void) -> i32;
 }
+#[cfg(windows)]
+const STD_ERROR_HANDLE: u32 = 0xFFFFFFF4u32; // -12 as u32
 
 pub fn write_pid_file(path: &Path) -> Result<(), Error> {
     let pid = std::process::id();
@@ -432,9 +443,30 @@ pub fn redirect_stderr_to_log(log_path: &Path) -> Result<(), Error> {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = log_path;
+        use std::os::windows::io::AsRawHandle;
+
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)?;
+
+        let handle = file.as_raw_handle();
+        unsafe {
+            let stderr_handle = GetStdHandle(STD_ERROR_HANDLE);
+            SetStdHandle(STD_ERROR_HANDLE, handle as _);
+            CloseHandle(stderr_handle);
+        }
+        std::mem::forget(file); // Keep file open for the lifetime of the process
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        eprintln!(
+            "[git-ai] warning: stderr redirect not supported on this platform, logs would be at {}",
+            log_path.display()
+        );
     }
 
     Ok(())
@@ -477,14 +509,12 @@ pub fn install_signal_handlers(shutdown: Arc<AtomicBool>) {
         SIGNAL_SHUTDOWN_FLAG.get_or_init(|| shutdown);
 
         unsafe {
-            libc::signal(
-                libc::SIGTERM,
-                signal_handler as *const () as libc::sighandler_t,
-            );
-            libc::signal(
-                libc::SIGINT,
-                signal_handler as *const () as libc::sighandler_t,
-            );
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = signal_handler as *const () as usize;
+            sa.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut sa.sa_mask);
+            libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+            libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
         }
 
         extern "C" fn signal_handler(_sig: libc::c_int) {

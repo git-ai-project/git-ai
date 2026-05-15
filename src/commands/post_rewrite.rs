@@ -1,8 +1,9 @@
 use git_ai::core::authorship_log::AuthorshipLog;
+use git_ai::core::git_binary::git_cmd as git_command;
 
 use std::collections::BTreeMap;
 use std::collections::HashSet;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::commands::helpers::{debug_log, git_cmd};
 
@@ -63,7 +64,7 @@ pub fn handle_post_rewrite(args: &[String]) {
         };
 
         // Write the note to the new commit
-        let result = Command::new("/usr/bin/git")
+        let result = git_command()
             .args([
                 "notes",
                 "--ref=ai",
@@ -342,7 +343,7 @@ pub fn handle_post_rewrite_squash(args: &[String]) {
     let merged_note = merged_log.serialize_to_string();
 
     // Write the merged note to the target commit
-    let result = Command::new("/usr/bin/git")
+    let result = git_command()
         .args([
             "notes",
             "--ref=ai",

@@ -1,4 +1,6 @@
-use std::process::{self, Command, Stdio};
+use std::process::{self, Stdio};
+
+use git_ai::core::git_binary::git_cmd as git_command;
 
 pub fn handle_push_notes(args: &[String]) {
     let mut remote: Option<String> = None;
@@ -74,7 +76,7 @@ pub fn handle_push_notes(args: &[String]) {
     git_args.push(&remote_name);
     git_args.push("refs/notes/ai:refs/notes/ai");
 
-    let result = Command::new("/usr/bin/git")
+    let result = git_command()
         .args(&git_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
