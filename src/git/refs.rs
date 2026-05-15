@@ -660,7 +660,24 @@ pub fn normalize_notes_history_for_push(
     }
 
     let base_commit = base_ref.map(|base| rev_parse(repo, base)).transpose()?;
-    let local_notes = list_all_notes(repo, local_ref)?;
+    let mut notes_by_object = HashMap::new();
+    if let Some(base) = base_ref {
+        // If we use the remote tracking ref as the parent, the replacement tree
+        // must also contain any remote-only notes. Otherwise a failed pre-push
+        // merge followed by normalization could fast-forward the remote while
+        // deleting notes that only existed on the remote.
+        for (blob, object) in list_all_notes(repo, base)? {
+            notes_by_object.insert(object, blob);
+        }
+    }
+    for (blob, object) in list_all_notes(repo, local_ref)? {
+        notes_by_object.insert(object, blob);
+    }
+    let mut combined_notes: Vec<(String, String)> = notes_by_object
+        .into_iter()
+        .map(|(object, blob)| (blob, object))
+        .collect();
+    combined_notes.sort_by(|a, b| a.1.cmp(&b.1));
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
@@ -681,7 +698,7 @@ pub fn normalize_notes_history_for_push(
         stream.extend_from_slice(format!("from {}\n", base_commit).as_bytes());
     }
     stream.extend_from_slice(b"deleteall\n");
-    for (blob, object) in local_notes {
+    for (blob, object) in combined_notes {
         let path = notes_path_for_object(&object);
         stream.extend_from_slice(format!("M 100644 {} {}\n", blob, path).as_bytes());
     }

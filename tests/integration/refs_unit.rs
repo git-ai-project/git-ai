@@ -223,6 +223,66 @@ fn test_normalize_notes_history_preserves_remote_base_parent() {
 }
 
 #[test]
+fn test_normalize_notes_history_keeps_remote_only_notes_when_using_base_parent() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("remote.txt"), "remote\n").unwrap();
+    repo.stage_all_and_commit("Remote commit")
+        .expect("remote commit");
+    let remote_commit = head_sha(&repo);
+    notes_add(&gitai_repo, &remote_commit, "remote-only note").expect("add remote note");
+
+    let base_ref = "refs/notes/ai-remote/origin";
+    repo.git_og(&["update-ref", base_ref, "refs/notes/ai"])
+        .expect("copy remote notes ref");
+    let base_commit = repo
+        .git_og(&["rev-parse", base_ref])
+        .expect("read base notes commit")
+        .trim()
+        .to_string();
+
+    fs::write(repo.path().join("local.txt"), "local\n").unwrap();
+    repo.stage_all_and_commit("Local commit")
+        .expect("local commit");
+    let local_commit = head_sha(&repo);
+
+    // Simulate the hazardous state from a failed pre-push notes merge:
+    // the fetched tracking ref has a remote-only note, while local refs/notes/ai
+    // has legacy metadata and only the local note. Normalization must not create
+    // a fast-forward commit on top of the tracking ref that drops the remote note.
+    notes_add(&gitai_repo, &local_commit, "local note").expect("add local note");
+    let notes_tree = repo
+        .git_og(&["rev-parse", "refs/notes/ai^{tree}"])
+        .expect("read local notes tree")
+        .trim()
+        .to_string();
+    let legacy_bad_commit = legacy_bad_notes_commit(&repo, &notes_tree, None);
+    repo.git_og(&["update-ref", "refs/notes/ai", &legacy_bad_commit])
+        .expect("install local-only legacy notes commit");
+
+    assert!(
+        normalize_notes_history_for_push(&gitai_repo, Some(base_ref))
+            .expect("normalize notes history")
+    );
+
+    let metadata = repo
+        .git_og(&["log", "--format=%s%n%P", "-1", "refs/notes/ai"])
+        .expect("read normalized notes metadata");
+    let lines: Vec<&str> = metadata.lines().collect();
+    assert_eq!(lines[0], "chore: update git-ai authorship notes");
+    assert_eq!(lines[1], base_commit);
+
+    assert_eq!(
+        show_authorship_note(&gitai_repo, &remote_commit).expect("remote note survives"),
+        "remote-only note"
+    );
+    assert_eq!(
+        show_authorship_note(&gitai_repo, &local_commit).expect("local note survives"),
+        "local note"
+    );
+}
+
+#[test]
 fn test_notes_add_batch_writes_multiple_notes() {
     let (repo, gitai_repo) = repo_with_handle();
 
