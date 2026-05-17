@@ -154,6 +154,7 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
         }
 
         println!("{}", total_processed);
+        write_checkpoint_debug_log(kind_str.unwrap_or("human"), total_processed as usize);
         return true;
     }
 
@@ -165,6 +166,7 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
         None => return false,
     };
 
+    let repo_root_path = PathBuf::from(&repo_root);
     let files: Vec<serde_json::Value> = if file_args.is_empty() {
         let status_output = git_cmd(&["status", "--porcelain", "-u"]).unwrap_or_default();
         status_output
@@ -175,7 +177,16 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
     } else {
         file_args
             .iter()
-            .map(|f| serde_json::json!({"path": f}))
+            .map(|f| {
+                let p = PathBuf::from(f);
+                let abs = if p.is_absolute() { p } else { cwd.join(f) };
+                let rel = abs
+                    .strip_prefix(&repo_root_path)
+                    .unwrap_or(&abs)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                serde_json::json!({"path": rel})
+            })
             .collect()
     };
 
@@ -207,7 +218,9 @@ fn try_checkpoint_via_daemon(args: &[String]) -> bool {
 
     match git_ai::daemon::control_client::send_request(&paths.control_sock, &request_str) {
         Ok(resp) if resp.ok => {
-            println!("{}", resp.processed.unwrap_or(0));
+            let processed = resp.processed.unwrap_or(0);
+            println!("{}", processed);
+            write_checkpoint_debug_log(kind_str.unwrap_or("human"), processed as usize);
             true
         }
         _ => false,
@@ -524,7 +537,8 @@ fn process_checkpoint_file(
         CheckpointKind::AiAgent => {
             let aid = checkpoint_agent_id.as_ref().unwrap();
             let session_id = git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id);
-            let trace_hash = git_ai::core::authorship_log::generate_trace_hash(trace_value.as_deref().unwrap());
+            let trace_hash =
+                git_ai::core::authorship_log::generate_trace_hash(trace_value.as_deref().unwrap());
             format!("{}::{}", session_id, trace_hash)
         }
         CheckpointKind::KnownHuman => git_ai::core::authorship_log::generate_human_hash(
@@ -835,8 +849,12 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
 
                     let author_id = match (&kind, &agent_id) {
                         (CheckpointKind::AiAgent, Some(aid)) => {
-                            let session_id = git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id);
-                            let trace_hash = git_ai::core::authorship_log::generate_trace_hash(trace_value.as_deref().unwrap());
+                            let session_id = git_ai::core::authorship_log::generate_session_id(
+                                &aid.tool, &aid.id,
+                            );
+                            let trace_hash = git_ai::core::authorship_log::generate_trace_hash(
+                                trace_value.as_deref().unwrap(),
+                            );
                             format!("{}::{}", session_id, trace_hash)
                         }
                         (CheckpointKind::KnownHuman, _) => {
@@ -1007,8 +1025,11 @@ fn handle_agent_checkpoint(agent_name: &str, file_args: &[&str]) {
 
                 let author_id = match (&kind, &agent_id) {
                     (CheckpointKind::AiAgent, Some(aid)) => {
-                        let session_id = git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id);
-                        let trace_hash = git_ai::core::authorship_log::generate_trace_hash(trace_value.as_deref().unwrap());
+                        let session_id =
+                            git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id);
+                        let trace_hash = git_ai::core::authorship_log::generate_trace_hash(
+                            trace_value.as_deref().unwrap(),
+                        );
                         format!("{}::{}", session_id, trace_hash)
                     }
                     (CheckpointKind::KnownHuman, _) => {

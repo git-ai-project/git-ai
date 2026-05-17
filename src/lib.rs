@@ -1,4 +1,5 @@
 pub mod api;
+pub mod auth;
 pub mod ci;
 pub mod core;
 pub mod daemon;
@@ -39,10 +40,10 @@ pub mod error {
 pub mod commands {
     pub mod checkpoint_agent {
         pub mod presets {
-            pub use crate::presets::{ParsedHookEvent, PresetContext};
             pub use crate::presets::{
                 KnownHumanEdit, PostBashCall, PostFileEdit, PreBashCall, PreFileEdit, UntrackedEdit,
             };
+            pub use crate::presets::{ParsedHookEvent, PresetContext};
 
             pub struct ResolvedPreset {
                 agent_name: String,

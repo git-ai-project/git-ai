@@ -67,6 +67,16 @@ pub fn process_checkpoint(req: &CheckpointRequest) -> Result<u32, String> {
             repo_root_path.join(&file_entry.path)
         };
 
+        let relative_path = file_path
+            .strip_prefix(&repo_root_path)
+            .unwrap_or(&file_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+
+        if is_file_conflicted(&repo_path, &relative_path) {
+            continue;
+        }
+
         let content = if let Some(ref c) = file_entry.content {
             c.clone()
         } else {
@@ -76,13 +86,25 @@ pub fn process_checkpoint(req: &CheckpointRequest) -> Result<u32, String> {
             }
         };
 
+        // Skip binary files (non-UTF8 content with null bytes in first 8KB)
+        if let Ok(bytes) = fs::read(&file_path) {
+            let check_len = bytes.len().min(8192);
+            if bytes[..check_len].contains(&0) {
+                continue;
+            }
+        }
+
         let blob_sha = working_log::save_blob(&git_dir, &base_commit, content.as_bytes());
 
-        let relative_path = file_path
-            .strip_prefix(&repo_root_path)
-            .unwrap_or(&file_path)
-            .to_string_lossy()
-            .replace('\\', "/");
+        // Suppression: skip KnownHuman checkpoints for files with a pending AI edit
+        if kind == CheckpointKind::KnownHuman && has_pending_ai_edit(&git_dir, &relative_path) {
+            continue;
+        }
+
+        // For AI checkpoints, clear the pending AI edit marker
+        if kind == CheckpointKind::AiAgent {
+            clear_pending_ai_edit(&git_dir, &relative_path);
+        }
 
         let existing_checkpoints = working_log::read_checkpoints(&git_dir, &base_commit);
         let previous_attributions = find_latest_attributions(&existing_checkpoints, &relative_path);
@@ -141,7 +163,8 @@ pub fn process_checkpoint(req: &CheckpointRequest) -> Result<u32, String> {
             CheckpointKind::AiAgent => {
                 let aid = checkpoint_agent_id.as_ref().unwrap();
                 let session_id = authorship_log::generate_session_id(&aid.tool, &aid.id);
-                let trace_hash = authorship_log::generate_trace_hash(trace_value.as_deref().unwrap());
+                let trace_hash =
+                    authorship_log::generate_trace_hash(trace_value.as_deref().unwrap());
                 format!("{}::{}", session_id, trace_hash)
             }
             CheckpointKind::KnownHuman => {
@@ -239,6 +262,47 @@ fn find_latest_attributions(
         }
     }
     Vec::new()
+}
+
+fn pending_ai_edits_dir(git_dir: &Path) -> PathBuf {
+    git_dir.join("ai").join("pending_ai_edits")
+}
+
+fn marker_filename(relative_path: &str) -> String {
+    relative_path.replace(['/', '\\'], "__")
+}
+
+fn has_pending_ai_edit(git_dir: &Path, relative_path: &str) -> bool {
+    pending_ai_edits_dir(git_dir)
+        .join(marker_filename(relative_path))
+        .exists()
+}
+
+fn is_file_conflicted(repo_path: &Path, relative_path: &str) -> bool {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(["status", "--porcelain", "--", relative_path])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output();
+    if let Ok(out) = output {
+        let status = String::from_utf8_lossy(&out.stdout);
+        for line in status.lines() {
+            if line.len() >= 2 {
+                let xy = &line[..2];
+                if xy == "UU" || xy == "AA" || xy == "DU" || xy == "UD" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn clear_pending_ai_edit(git_dir: &Path, relative_path: &str) {
+    let marker_path = pending_ai_edits_dir(git_dir).join(marker_filename(relative_path));
+    let _ = fs::remove_file(&marker_path);
 }
 
 fn find_latest_content(

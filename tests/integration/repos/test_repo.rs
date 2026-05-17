@@ -152,10 +152,7 @@ fn find_real_git() -> &'static str {
             }
         }
         if cfg!(windows) {
-            if let Ok(output) = std::process::Command::new("where")
-                .arg("git")
-                .output()
-            {
+            if let Ok(output) = std::process::Command::new("where").arg("git").output() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 for line in stdout.lines() {
                     let p = Path::new(line.trim());
@@ -260,6 +257,10 @@ impl TestRepo {
                 .expect("failed to configure test repo");
             assert!(output.status.success(), "git config failed: {:?}", args);
         }
+
+        // Exclude daemon/internal files from git tracking
+        std::fs::write(path.join(".gitignore"), ".git-ai/\n")
+            .expect("failed to write .gitignore");
 
         Self {
             path,

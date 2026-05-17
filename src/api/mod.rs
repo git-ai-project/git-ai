@@ -7,7 +7,7 @@ pub mod rate_limit;
 use std::path::PathBuf;
 
 /// Get the user's home directory (shared across api submodules).
-fn home_dir() -> Option<PathBuf> {
+pub fn home_dir() -> Option<PathBuf> {
     #[cfg(unix)]
     {
         std::env::var_os("HOME").map(PathBuf::from)

@@ -134,8 +134,13 @@ fn handle_single_commit_stats(commit_ref: &str, is_json: bool) {
 
     let mut ai_additions: u64 = 0;
     let mut human_additions: u64 = 0;
+    let mut untracked_additions: u64 = 0;
 
+    let mut files = Vec::new();
     for file_att in &log.attestations {
+        let mut file_ai: u64 = 0;
+        let mut file_human: u64 = 0;
+        let mut file_untracked: u64 = 0;
         for entry in &file_att.entries {
             let count: u64 = entry
                 .line_ranges
@@ -143,11 +148,22 @@ fn handle_single_commit_stats(commit_ref: &str, is_json: bool) {
                 .map(|r| r.line_count() as u64)
                 .sum();
             if entry.hash.starts_with("h_") {
-                human_additions += count;
+                file_human += count;
+            } else if entry.hash == "untracked" || entry.hash.is_empty() {
+                file_untracked += count;
             } else {
-                ai_additions += count;
+                file_ai += count;
             }
         }
+        ai_additions += file_ai;
+        human_additions += file_human;
+        untracked_additions += file_untracked;
+        files.push(FileStats {
+            path: file_att.file_path.clone(),
+            ai_lines: file_ai,
+            human_lines: file_human,
+            untracked_lines: file_untracked,
+        });
     }
 
     let (diff_added, diff_deleted) = get_diff_stats_for_commit(&commit_sha);
@@ -158,49 +174,25 @@ fn handle_single_commit_stats(commit_ref: &str, is_json: bool) {
             serde_json::json!({
                 "ai_additions": ai_additions,
                 "human_additions": human_additions,
+                "untracked_additions": untracked_additions,
                 "git_diff_added_lines": diff_added,
                 "git_diff_deleted_lines": diff_deleted,
                 "files": { "total": {} }
             })
         );
     } else {
-        println!("AI additions: {}", ai_additions);
-        println!("Human additions: {}", human_additions);
-        println!("Diff: +{} -{}", diff_added, diff_deleted);
+        render_stats_bar(human_additions, untracked_additions, ai_additions);
     }
 
     // Cache the result
     let git_dir = resolve_git_dir();
-    let mut files = Vec::new();
-    for file_att in &log.attestations {
-        let mut file_ai: u64 = 0;
-        let mut file_human: u64 = 0;
-        for entry in &file_att.entries {
-            let count: u64 = entry
-                .line_ranges
-                .iter()
-                .map(|r| r.line_count() as u64)
-                .sum();
-            if entry.hash.starts_with("h_") {
-                file_human += count;
-            } else {
-                file_ai += count;
-            }
-        }
-        files.push(FileStats {
-            path: file_att.file_path.clone(),
-            ai_lines: file_ai,
-            human_lines: file_human,
-            untracked_lines: 0,
-        });
-    }
     let _ = StatsCache::put(
         &git_dir,
         &CommitStats {
             commit_sha,
             ai_lines: ai_additions,
             human_lines: human_additions,
-            untracked_lines: 0,
+            untracked_lines: untracked_additions,
             files,
             cached_at: current_timestamp(),
         },
@@ -262,13 +254,15 @@ fn handle_range_stats(
     let git_dir = resolve_git_dir();
     let mut total_ai: u64 = 0;
     let mut total_human: u64 = 0;
+    let mut total_untracked: u64 = 0;
     let mut total_diff_added: u64 = 0;
     let mut total_diff_deleted: u64 = 0;
 
     for sha in &commits {
-        let (ai, human) = get_attribution_for_commit(&git_dir, sha);
+        let (ai, human, untracked) = get_attribution_for_commit(&git_dir, sha);
         total_ai += ai;
         total_human += human;
+        total_untracked += untracked;
         let (added, deleted) = get_diff_stats_for_commit(sha);
         total_diff_added += added;
         total_diff_deleted += deleted;
@@ -280,37 +274,35 @@ fn handle_range_stats(
             serde_json::json!({
                 "ai_additions": total_ai,
                 "human_additions": total_human,
+                "untracked_additions": total_untracked,
                 "git_diff_added_lines": total_diff_added,
                 "git_diff_deleted_lines": total_diff_deleted,
                 "commits_analyzed": commits.len(),
             })
         );
     } else {
-        println!("Range: {}", range);
-        println!("Commits: {}", commits.len());
-        println!("AI additions: {}", total_ai);
-        println!("Human additions: {}", total_human);
-        println!("Diff: +{} -{}", total_diff_added, total_diff_deleted);
+        render_stats_bar(total_human, total_untracked, total_ai);
     }
 }
 
-fn get_attribution_for_commit(git_dir: &Path, sha: &str) -> (u64, u64) {
+fn get_attribution_for_commit(git_dir: &Path, sha: &str) -> (u64, u64, u64) {
     if let Some(cached) = StatsCache::get(git_dir, sha) {
-        return (cached.ai_lines, cached.human_lines);
+        return (cached.ai_lines, cached.human_lines, cached.untracked_lines);
     }
 
     let note = match git_cmd(&["notes", "--ref=ai", "show", sha]) {
         Ok(n) => n,
-        Err(_) => return (0, 0),
+        Err(_) => return (0, 0, 0),
     };
 
     let log = match AuthorshipLog::deserialize_from_string(&note) {
         Ok(l) => l,
-        Err(_) => return (0, 0),
+        Err(_) => return (0, 0, 0),
     };
 
     let mut ai: u64 = 0;
     let mut human: u64 = 0;
+    let mut untracked: u64 = 0;
 
     for file_att in &log.attestations {
         for entry in &file_att.entries {
@@ -321,13 +313,74 @@ fn get_attribution_for_commit(git_dir: &Path, sha: &str) -> (u64, u64) {
                 .sum();
             if entry.hash.starts_with("h_") {
                 human += count;
+            } else if entry.hash == "untracked" || entry.hash.is_empty() {
+                untracked += count;
             } else {
                 ai += count;
             }
         }
     }
 
-    (ai, human)
+    (ai, human, untracked)
+}
+
+fn render_stats_bar(human: u64, untracked: u64, ai: u64) {
+    const BAR_WIDTH: usize = 40;
+
+    let total = human + untracked + ai;
+    if total == 0 {
+        let bar = format!("you  {:>bar_w$} ai", "", bar_w = BAR_WIDTH);
+        println!("{}", bar);
+        println!("     {:^bar_w$}", "(no data)", bar_w = BAR_WIDTH);
+        return;
+    }
+
+    let untracked_pct_raw = untracked as f64 / total as f64 * 100.0;
+    let show_untracked = untracked_pct_raw > 1.0;
+
+    let human_bars = ((human as f64 / total as f64) * BAR_WIDTH as f64) as usize;
+    let min_human_bars = if human > 1 { 2 } else { 0 };
+    let final_human_bars = human_bars.max(min_human_bars);
+
+    let remaining = BAR_WIDTH.saturating_sub(final_human_bars);
+    let (final_untracked_bars, final_ai_bars) = if show_untracked {
+        let other_total = untracked + ai;
+        let ub = if other_total > 0 {
+            ((untracked as f64 / other_total as f64) * remaining as f64) as usize
+        } else {
+            0
+        };
+        (ub, remaining.saturating_sub(ub))
+    } else {
+        (0, remaining)
+    };
+
+    let bar = format!(
+        "you  {}{}{} ai",
+        "█".repeat(final_human_bars),
+        "▒".repeat(final_untracked_bars),
+        "░".repeat(final_ai_bars),
+    );
+    println!("{}", bar);
+
+    let human_pct = (human as f64 / total as f64 * 100.0).round() as u32;
+    let ai_pct = (ai as f64 / total as f64 * 100.0).round() as u32;
+
+    if show_untracked {
+        let untracked_pct = untracked_pct_raw.round() as u32;
+        println!(
+            "     {:<3}%{:>10}untracked{:>4}%{:>10}{:>3}%",
+            human_pct, "", untracked_pct, "", ai_pct
+        );
+    } else {
+        println!(
+            "     {}%{:>width$}{}%",
+            human_pct,
+            "",
+            ai_pct,
+            width = BAR_WIDTH - 2
+        );
+    }
 }
 
 /// Get diff stats for a commit, filtering out lockfiles and generated files.

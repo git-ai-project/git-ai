@@ -587,11 +587,13 @@ pub fn handle_diff(args: &[String]) {
                                 );
                             }
                             {
-                                let session_key = entry.hash.split("::").next().unwrap_or(&entry.hash);
+                                let session_key =
+                                    entry.hash.split("::").next().unwrap_or(&entry.hash);
                                 if let Some(session) = note.metadata.sessions.get(session_key) {
                                     sessions_map.insert(
                                         session_key.to_string(),
-                                        serde_json::to_value(session).unwrap_or(serde_json::json!({})),
+                                        serde_json::to_value(session)
+                                            .unwrap_or(serde_json::json!({})),
                                     );
                                 }
                             }

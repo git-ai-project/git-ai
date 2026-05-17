@@ -65,6 +65,17 @@ mod subdirs;
 mod utf8_filenames;
 mod worktrees;
 
+// --- New feature e2e tests ---
+mod auth_commands;
+mod config_command;
+mod dashboard_upgrade_commands;
+mod debug_command;
+mod show_command;
+
+// --- Coverage gap tests ---
+mod merge_authorship;
+mod push_hooks_comprehensive;
+
 // --- Batch 1: tests with minimal/no v1-internal imports ---
 mod checkpoint_perf;
 mod pi;

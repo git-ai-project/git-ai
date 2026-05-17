@@ -399,8 +399,8 @@ pub fn ensure_daemon_running() {
 
     #[cfg(windows)]
     {
-        use std::process::Command;
         use std::os::windows::process::CommandExt;
+        use std::process::Command;
         const CREATE_NO_WINDOW_FLAG: u32 = 0x08000000;
         const DETACHED_PROCESS_FLAG: u32 = 0x00000008;
         let _ = Command::new(&exe)
