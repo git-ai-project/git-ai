@@ -94,3 +94,5 @@ mod daemon_lifecycle;
 mod install_e2e;
 #[cfg(unix)]
 mod telemetry_e2e;
+#[cfg(unix)]
+mod telemetry_queue_e2e;

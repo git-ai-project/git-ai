@@ -7,7 +7,15 @@ use super::telemetry_types::{
 };
 
 const REQUEST_TIMEOUT_SECS: u64 = 30;
-const RETRY_DELAY_SECS: u64 = 60;
+const DEFAULT_RETRY_DELAY_SECS: u64 = 60;
+
+fn retry_delay() -> Duration {
+    let secs = std::env::var("GIT_AI_RETRY_DELAY_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_RETRY_DELAY_SECS);
+    Duration::from_secs(secs)
+}
 
 /// HTTP API client for outbound telemetry uploads (uses curl subprocess).
 pub struct ApiClient {
@@ -64,16 +72,17 @@ impl ApiClient {
         serde_json::from_str(&response).map_err(|e| format!("parse metrics response: {}", e))
     }
 
-    /// Upload metrics with retry (1 retry after 60s).
+    /// Upload metrics with retry (1 retry after configurable delay, default 60s).
     pub fn upload_metrics_with_retry(&self, batch: &MetricsBatch) -> Result<(), String> {
         match self.upload_metrics(batch) {
             Ok(_) => Ok(()),
             Err(first_err) => {
+                let delay = retry_delay();
                 eprintln!(
-                    "[git-ai daemon] metrics upload failed: {}, retrying in {}s",
-                    first_err, RETRY_DELAY_SECS
+                    "[git-ai daemon] metrics upload failed: {}, retrying in {:?}",
+                    first_err, delay
                 );
-                std::thread::sleep(Duration::from_secs(RETRY_DELAY_SECS));
+                std::thread::sleep(delay);
                 self.upload_metrics(batch).map(|_| ())
             }
         }
@@ -92,6 +101,7 @@ impl ApiClient {
         let mut cmd = Command::new("curl");
         cmd.arg("-s")
             .arg("-S")
+            .arg("--fail")
             .arg("--max-time")
             .arg(REQUEST_TIMEOUT_SECS.to_string())
             .arg("-X")
@@ -247,8 +257,29 @@ fn get_or_create_distinct_id() -> String {
 
     let new_id = generate_random_id();
     let _ = std::fs::create_dir_all(&internal_dir);
-    let _ = std::fs::write(&id_path, &new_id);
+    let _ = write_private_file(&id_path, new_id.as_bytes());
     new_id
+}
+
+/// Write a file with owner-only permissions (0600 on unix).
+fn write_private_file(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(content)?;
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, content)
+    }
 }
 
 #[cfg(test)]

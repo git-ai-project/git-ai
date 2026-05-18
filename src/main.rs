@@ -86,6 +86,7 @@ fn main() {
         Some("dashboard") => commands::dashboard::handle_dashboard(&args[1..]),
         Some("exchange-nonce") => commands::exchange_nonce::handle_exchange_nonce(&args[1..]),
         Some("config") => commands::config::handle_config(&args[1..]),
+        Some("flush-metrics-db") => commands::flush_metrics_db::handle_flush_metrics_db(&args[1..]),
         Some("bg") => commands::bg::handle_bg(&args[1..]),
         Some("ci") => commands::ci::handle_ci(&args[1..]),
         Some("gc") => {
@@ -150,6 +151,7 @@ fn main() {
             println!("  migrate       Upgrade authorship note schemas in-place");
             println!("  perf          Performance baseline and regression detection");
             println!("  config        View and manage configuration");
+            println!("  flush-metrics-db  Flush offline telemetry queue");
             println!("  debug         Print diagnostic information");
             println!("  login         Log in via device authorization flow");
             println!("  logout        Log out and clear stored credentials");

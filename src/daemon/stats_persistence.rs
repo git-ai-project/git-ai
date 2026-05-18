@@ -37,7 +37,7 @@ pub fn save_stats(current: &stats::DaemonStats) {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let _ = fs::write(&path, json);
+        let _ = write_private(&path, json.as_bytes());
     }
 }
 
@@ -59,7 +59,27 @@ pub fn update_last_started(timestamp: &str) {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let _ = fs::write(&path, json);
+        let _ = write_private(&path, json.as_bytes());
+    }
+}
+
+fn write_private(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(content)?;
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, content)
     }
 }
 

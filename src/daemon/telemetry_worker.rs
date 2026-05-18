@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -6,12 +7,14 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use super::api_client::ApiClient;
+use super::telemetry_queue::TelemetryQueue;
 use super::telemetry_types::{
     CasObject, CasUploadRequest, MAX_CAS_OBJECTS_PER_UPLOAD, MetricEvent, MetricsBatch,
 };
 
 const FLUSH_INTERVAL: Duration = Duration::from_secs(3);
 const MAX_METRICS_PER_BATCH: usize = 1000;
+const QUEUE_DRAIN_BATCH: usize = 20;
 
 /// Thread-safe telemetry buffer.
 struct TelemetryBuffer {
@@ -62,12 +65,25 @@ impl TelemetryHandle {
 
     /// Submit a CAS object for upload.
     /// The hash is computed as SHA256 of the JSON-serialized content.
+    /// Objects larger than 512KB are dropped as a safety bound against
+    /// accidentally transmitting source code or large artifacts.
     pub fn submit_cas(
         &self,
         content: serde_json::Value,
         metadata: std::collections::HashMap<String, String>,
     ) {
         let content_json = serde_json::to_string(&content).unwrap_or_default();
+
+        const MAX_CAS_PAYLOAD_BYTES: usize = 512 * 1024;
+        if content_json.len() > MAX_CAS_PAYLOAD_BYTES {
+            eprintln!(
+                "[git-ai daemon] dropping oversized CAS object ({} bytes, limit {})",
+                content_json.len(),
+                MAX_CAS_PAYLOAD_BYTES
+            );
+            return;
+        }
+
         let hash = {
             let mut hasher = Sha256::new();
             hasher.update(content_json.as_bytes());
@@ -89,7 +105,8 @@ impl TelemetryHandle {
 /// Spawn the telemetry worker thread. Returns a handle for submitting events.
 ///
 /// The worker flushes accumulated events every 3 seconds, uploading metrics
-/// and CAS objects to the backend. Runs until `shutdown` is set.
+/// and CAS objects to the backend. Failed uploads are persisted to a SQLite
+/// queue for retry on subsequent flush cycles. Runs until `shutdown` is set.
 pub fn spawn_telemetry_worker(shutdown: Arc<AtomicBool>) -> TelemetryHandle {
     let buffer = Arc::new(Mutex::new(TelemetryBuffer::new()));
     let handle = TelemetryHandle {
@@ -104,6 +121,14 @@ pub fn spawn_telemetry_worker(shutdown: Arc<AtomicBool>) -> TelemetryHandle {
         .expect("failed to spawn telemetry worker thread");
 
     handle
+}
+
+fn queue_db_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home)
+        .join(".git-ai")
+        .join("internal")
+        .join("telemetry_queue.db")
 }
 
 fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, shutdown: Arc<AtomicBool>) {
@@ -143,31 +168,52 @@ fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, shutdown: Arc<Atomi
 
 fn flush_batch(batch: TelemetryBuffer) {
     let client = ApiClient::new();
+    let queue = TelemetryQueue::open(&queue_db_path()).ok();
 
     if !batch.metrics.is_empty() {
-        flush_metrics(&client, batch.metrics);
+        flush_metrics(&client, batch.metrics, queue.as_ref());
     }
 
     if !batch.cas_objects.is_empty() {
-        flush_cas(&client, batch.cas_objects);
+        flush_cas(&client, batch.cas_objects, queue.as_ref());
+    }
+
+    if let Some(ref q) = queue {
+        drain_queued_metrics(&client, q);
+        drain_queued_cas(&client, q);
     }
 }
 
-fn flush_metrics(client: &ApiClient, events: Vec<MetricEvent>) {
+fn flush_metrics(client: &ApiClient, events: Vec<MetricEvent>, queue: Option<&TelemetryQueue>) {
     if !client.should_upload() {
+        if let Some(q) = queue {
+            if let Err(e) = q.enqueue_metrics(&events) {
+                eprintln!("[git-ai daemon] failed to queue metrics offline: {}", e);
+            }
+        }
         return;
     }
 
     for chunk in events.chunks(MAX_METRICS_PER_BATCH) {
         let batch = MetricsBatch::new(chunk.to_vec());
         if let Err(e) = client.upload_metrics_with_retry(&batch) {
-            eprintln!("[git-ai daemon] metrics upload failed after retry: {}", e);
+            eprintln!("[git-ai daemon] metrics upload failed, queuing offline: {}", e);
+            if let Some(q) = queue {
+                if let Err(qe) = q.enqueue_metrics(chunk) {
+                    eprintln!("[git-ai daemon] failed to queue metrics offline: {}", qe);
+                }
+            }
         }
     }
 }
 
-fn flush_cas(client: &ApiClient, objects: Vec<CasObject>) {
+fn flush_cas(client: &ApiClient, objects: Vec<CasObject>, queue: Option<&TelemetryQueue>) {
     if !client.should_upload() {
+        if let Some(q) = queue {
+            if let Err(e) = q.enqueue_cas(&objects) {
+                eprintln!("[git-ai daemon] failed to queue CAS offline: {}", e);
+            }
+        }
         return;
     }
 
@@ -185,10 +231,138 @@ fn flush_cas(client: &ApiClient, objects: Vec<CasObject>) {
                 }
             }
             Err(e) => {
-                eprintln!("[git-ai daemon] CAS upload failed: {}", e);
+                eprintln!("[git-ai daemon] CAS upload failed, queuing offline: {}", e);
+                if let Some(q) = queue {
+                    if let Err(qe) = q.enqueue_cas(chunk) {
+                        eprintln!("[git-ai daemon] failed to queue CAS offline: {}", qe);
+                    }
+                }
             }
         }
     }
+}
+
+fn drain_queued_metrics(client: &ApiClient, queue: &TelemetryQueue) {
+    if !client.should_upload() {
+        return;
+    }
+
+    let batches = match queue.drain_metrics(QUEUE_DRAIN_BATCH) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    let mut uploaded_ids = Vec::new();
+    for (id, events) in &batches {
+        for chunk in events.chunks(MAX_METRICS_PER_BATCH) {
+            let batch = MetricsBatch::new(chunk.to_vec());
+            if client.upload_metrics(&batch).is_err() {
+                if !uploaded_ids.is_empty() {
+                    let _ = queue.delete_metrics(&uploaded_ids);
+                }
+                return;
+            }
+        }
+        uploaded_ids.push(*id);
+    }
+
+    if !uploaded_ids.is_empty() {
+        let _ = queue.delete_metrics(&uploaded_ids);
+    }
+}
+
+fn drain_queued_cas(client: &ApiClient, queue: &TelemetryQueue) {
+    if !client.should_upload() {
+        return;
+    }
+
+    let batches = match queue.drain_cas(QUEUE_DRAIN_BATCH) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    let mut uploaded_ids = Vec::new();
+    for (id, objects) in &batches {
+        for chunk in objects.chunks(MAX_CAS_OBJECTS_PER_UPLOAD) {
+            let request = CasUploadRequest {
+                objects: chunk.to_vec(),
+            };
+            if client.upload_cas(&request).is_err() {
+                if !uploaded_ids.is_empty() {
+                    let _ = queue.delete_cas(&uploaded_ids);
+                }
+                return;
+            }
+        }
+        uploaded_ids.push(*id);
+    }
+
+    if !uploaded_ids.is_empty() {
+        let _ = queue.delete_cas(&uploaded_ids);
+    }
+}
+
+/// Flush all pending items from the SQLite queue. Used by the `flush-metrics-db` command.
+pub fn flush_queue_now() -> Result<(usize, usize), String> {
+    let queue = TelemetryQueue::open(&queue_db_path())?;
+    let client = ApiClient::new();
+
+    if !client.should_upload() {
+        let mc = queue.pending_metrics_count()?;
+        let cc = queue.pending_cas_count()?;
+        return Err(format!(
+            "cannot upload: not authenticated. {} metrics and {} CAS objects remain queued.",
+            mc, cc
+        ));
+    }
+
+    let mut metrics_flushed = 0usize;
+    loop {
+        let batches = queue.drain_metrics(QUEUE_DRAIN_BATCH)?;
+        if batches.is_empty() {
+            break;
+        }
+        let mut ids = Vec::new();
+        for (id, events) in &batches {
+            for chunk in events.chunks(MAX_METRICS_PER_BATCH) {
+                let batch = MetricsBatch::new(chunk.to_vec());
+                client.upload_metrics_with_retry(&batch)?;
+            }
+            metrics_flushed += events.len();
+            ids.push(*id);
+        }
+        queue.delete_metrics(&ids)?;
+    }
+
+    let mut cas_flushed = 0usize;
+    loop {
+        let batches = queue.drain_cas(QUEUE_DRAIN_BATCH)?;
+        if batches.is_empty() {
+            break;
+        }
+        let mut ids = Vec::new();
+        for (id, objects) in &batches {
+            for chunk in objects.chunks(MAX_CAS_OBJECTS_PER_UPLOAD) {
+                let request = CasUploadRequest {
+                    objects: chunk.to_vec(),
+                };
+                client.upload_cas(&request).map_err(|e| format!("CAS upload: {}", e))?;
+            }
+            cas_flushed += objects.len();
+            ids.push(*id);
+        }
+        queue.delete_cas(&ids)?;
+    }
+
+    Ok((metrics_flushed, cas_flushed))
+}
+
+/// Return the number of pending items in the offline queue.
+pub fn queue_stats() -> Result<(usize, usize), String> {
+    let queue = TelemetryQueue::open(&queue_db_path())?;
+    let mc = queue.pending_metrics_count()?;
+    let cc = queue.pending_cas_count()?;
+    Ok((mc, cc))
 }
 
 #[cfg(test)]

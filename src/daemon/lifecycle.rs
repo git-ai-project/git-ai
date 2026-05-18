@@ -1,6 +1,5 @@
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -223,9 +222,26 @@ pub fn write_pid_file(path: &Path) -> Result<(), Error> {
         pid, started_at, version
     );
 
-    let mut file = File::create(path)?;
-    file.write_all(content.as_bytes())?;
-    file.sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+        let mut file = File::create(path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+    }
     Ok(())
 }
 

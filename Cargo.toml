@@ -22,6 +22,9 @@ package = "keyring"
 version = "3"
 optional = true
 
+[build-dependencies]
+cc = "1"
+
 [dev-dependencies]
 git-ai = { path = ".", features = ["test-support"] }
 tempfile = "3.27"

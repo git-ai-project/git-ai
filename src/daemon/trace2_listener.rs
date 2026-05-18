@@ -12,6 +12,7 @@ use crate::daemon::stats;
 use crate::daemon::trace2_events::{Trace2Event, parse_trace2_line};
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+const MAX_LINE_BYTES: usize = 256 * 1024; // 256 KB max per trace2 event line
 static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 
 /// Listens on a Unix domain socket for git trace2 events.
@@ -25,18 +26,33 @@ pub struct Trace2Listener {
 
 impl Trace2Listener {
     /// Bind the trace2 socket. Removes a stale socket file if it exists.
+    /// Socket directory is restricted to owner-only (0700) to prevent
+    /// local users from connecting and injecting events.
     pub fn bind(socket_path: &Path, shutdown: Arc<AtomicBool>) -> std::io::Result<Self> {
         // Remove stale socket file if present
         if socket_path.exists() {
             std::fs::remove_file(socket_path)?;
         }
 
-        // Ensure the parent directory exists
+        // Ensure the parent directory exists with restricted permissions
         if let Some(parent) = socket_path.parent() {
             std::fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            }
         }
 
         let listener = UnixListener::bind(socket_path)?;
+
+        // Restrict socket file to owner-only
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+
         // Set non-blocking so we can periodically check the shutdown flag
         listener.set_nonblocking(true)?;
 
@@ -98,16 +114,20 @@ fn handle_connection(
         return;
     }
 
-    let reader = std::io::BufReader::new(&stream);
+    let mut reader = std::io::BufReader::new(&stream);
+    let mut line_buf = String::new();
 
-    for line_result in reader.lines() {
+    loop {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
 
-        match line_result {
-            Ok(line) => {
-                if let Some(event) = parse_trace2_line(&line)
+        line_buf.clear();
+        match reader.read_line(&mut line_buf) {
+            Ok(0) => break, // EOF
+            Ok(n) if n > MAX_LINE_BYTES => continue, // discard oversized lines
+            Ok(_) => {
+                if let Some(event) = parse_trace2_line(&line_buf)
                     && event_tx.send(event).is_err()
                 {
                     break;
@@ -119,9 +139,12 @@ fn handle_connection(
             {
                 continue;
             }
-            Err(_) => {
-                break;
-            }
+            Err(_) => break,
+        }
+
+        if line_buf.len() > MAX_LINE_BYTES {
+            // read_line already read into the buffer; just discard and move on
+            continue;
         }
     }
 

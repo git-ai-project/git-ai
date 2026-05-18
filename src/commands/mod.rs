@@ -9,6 +9,7 @@ pub mod diff;
 pub mod doctor;
 pub mod exchange_nonce;
 pub mod fetch_notes;
+pub mod flush_metrics_db;
 pub mod gc;
 pub mod git_hooks;
 pub mod helpers;

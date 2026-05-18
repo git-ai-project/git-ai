@@ -61,9 +61,21 @@ impl ControlSocket {
 
         if let Some(parent) = socket_path.parent() {
             std::fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            }
         }
 
         let listener = UnixListener::bind(socket_path)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+
         listener.set_nonblocking(true)?;
 
         Ok(Self {
