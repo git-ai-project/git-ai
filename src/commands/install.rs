@@ -1,6 +1,6 @@
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use crate::commands::helpers::git_cmd;
@@ -37,7 +37,7 @@ pub fn handle_install() {
     configure_trace2_global();
 }
 
-fn install_hook(hooks_dir: &PathBuf, name: &str, content: &str) {
+fn install_hook(hooks_dir: &Path, name: &str, content: &str) {
     let hook_path = hooks_dir.join(name);
     fs::write(&hook_path, content).unwrap_or_else(|e| {
         eprintln!("git-ai install: failed to write {} hook: {}", name, e);

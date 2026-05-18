@@ -124,7 +124,7 @@ fn handle_connection(
 
         line_buf.clear();
         match reader.read_line(&mut line_buf) {
-            Ok(0) => break, // EOF
+            Ok(0) => break,                          // EOF
             Ok(n) if n > MAX_LINE_BYTES => continue, // discard oversized lines
             Ok(_) => {
                 if let Some(event) = parse_trace2_line(&line_buf)

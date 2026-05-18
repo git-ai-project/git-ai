@@ -198,7 +198,7 @@ fn add_agent_metadata(request: &mut serde_json::Value, kind: &str, kind_str: Opt
     }
 }
 
-fn parse_simple_args<'a>(args: &'a [String]) -> (Option<&'a str>, Vec<&'a str>) {
+fn parse_simple_args(args: &[String]) -> (Option<&str>, Vec<&str>) {
     let mut kind_str: Option<&str> = None;
     let mut file_args: Vec<&str> = Vec::new();
     let mut past_separator = false;
@@ -531,7 +531,11 @@ fn group_files_by_repo(
             if !fp.exists() {
                 continue;
             }
-            let target = if fp.is_absolute() { fp.clone() } else { cwd.join(fp) };
+            let target = if fp.is_absolute() {
+                fp.clone()
+            } else {
+                cwd.join(fp)
+            };
             if let Some(repo_root) = find_repo_root_for_path(&target) {
                 repo_groups.entry(repo_root).or_default().push(fp.clone());
             }
@@ -563,7 +567,11 @@ fn group_files_by_repo(
 fn resolve_git_dir(repo_root: &Path) -> Option<PathBuf> {
     let d = git_cmd_in(repo_root, &["rev-parse", "--git-dir"]).ok()?;
     let p = PathBuf::from(&d);
-    Some(if p.is_relative() { repo_root.join(p) } else { p })
+    Some(if p.is_relative() {
+        repo_root.join(p)
+    } else {
+        p
+    })
 }
 
 fn make_relative(file_path: &Path, repo_root: &Path) -> String {
@@ -608,11 +616,9 @@ fn process_single_file(
         }
     };
 
-    let blob_sha =
-        git_ai::core::working_log::save_blob(git_dir, base_commit, content.as_bytes());
+    let blob_sha = git_ai::core::working_log::save_blob(git_dir, base_commit, content.as_bytes());
 
-    let existing_checkpoints =
-        git_ai::core::working_log::read_checkpoints(git_dir, base_commit);
+    let existing_checkpoints = git_ai::core::working_log::read_checkpoints(git_dir, base_commit);
     let previous_attributions = find_latest_attributions(&existing_checkpoints, &relative_path);
     let previous_content =
         find_latest_content(&existing_checkpoints, &relative_path, git_dir, base_commit);
@@ -641,11 +647,9 @@ fn process_single_file(
 
     let author_id = match (&ev.kind, &ev.agent_id) {
         (CheckpointKind::AiAgent, Some(aid)) => {
-            let session_id =
-                git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id);
-            let trace_hash = git_ai::core::authorship_log::generate_trace_hash(
-                trace_value.as_deref().unwrap(),
-            );
+            let session_id = git_ai::core::authorship_log::generate_session_id(&aid.tool, &aid.id);
+            let trace_hash =
+                git_ai::core::authorship_log::generate_trace_hash(trace_value.as_deref().unwrap());
             format!("{}::{}", session_id, trace_hash)
         }
         (CheckpointKind::KnownHuman, _) => git_ai::core::authorship_log::generate_human_hash(
@@ -798,7 +802,11 @@ fn write_checkpoint_debug_log(preset_name: &str, event_count: usize) {
     });
 
     use std::io::Write;
-    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&log_file) {
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_file)
+    {
         let _ = writeln!(file, "{}", entry);
     }
 }

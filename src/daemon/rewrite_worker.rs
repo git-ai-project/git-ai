@@ -367,9 +367,12 @@ fn read_note(repo_path: &Path, sha: &str) -> Option<String> {
 }
 
 fn write_note(repo_path: &Path, sha: &str, content: &str) -> Result<(), String> {
-    git_in_repo(repo_path, &["notes", "--ref=ai", "add", "-f", "-m", content, sha])
-        .map(|_| ())
-        .map_err(|_| format!("git notes add failed for {}", sha))
+    git_in_repo(
+        repo_path,
+        &["notes", "--ref=ai", "add", "-f", "-m", content, sha],
+    )
+    .map(|_| ())
+    .map_err(|_| format!("git notes add failed for {}", sha))
 }
 
 /// Batch read file contents at a specific commit using `git cat-file --batch`.
@@ -1352,7 +1355,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     // -----------------------------------------------------------------------
     // Range-diff parser tests

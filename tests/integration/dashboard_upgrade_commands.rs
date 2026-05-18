@@ -34,8 +34,5 @@ fn test_upgrade_check_only() {
     let output = repo
         .git_ai(&["upgrade", "--check"])
         .expect("upgrade --check should succeed");
-    assert!(
-        output.contains("git-ai v"),
-        "should show current version"
-    );
+    assert!(output.contains("git-ai v"), "should show current version");
 }

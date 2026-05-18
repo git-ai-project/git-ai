@@ -195,16 +195,16 @@ fn dispatch_commit(
 fn emit_commit_telemetry(repo_path: &std::path::Path, telemetry: &TelemetryHandle) {
     use super::telemetry_types::{MetricEvent, MetricEventId, SparseArray};
 
-    let git = |args: &[&str]| -> Option<String> {
-        crate::git_cmd::git_in_repo(repo_path, args).ok()
-    };
+    let git =
+        |args: &[&str]| -> Option<String> { crate::git_cmd::git_in_repo(repo_path, args).ok() };
 
     let commit_sha = match git(&["rev-parse", "HEAD"]) {
         Some(sha) => sha,
         None => return,
     };
 
-    let remote_url = strip_url_credentials(&git(&["remote", "get-url", "origin"]).unwrap_or_default());
+    let remote_url =
+        strip_url_credentials(&git(&["remote", "get-url", "origin"]).unwrap_or_default());
 
     // Read the authorship note we just wrote
     let note_content = git(&["notes", "--ref=ai", "show", &commit_sha]);
@@ -328,14 +328,14 @@ fn sweep_and_upload_transcripts(repo_path: &std::path::Path, telemetry: &Telemet
 /// Strip credentials from a git remote URL.
 /// Handles both HTTPS URLs (https://user:token@host/...) and SSH URLs.
 fn strip_url_credentials(url: &str) -> String {
-    if let Some(rest) = url.strip_prefix("https://") {
-        if let Some(at_pos) = rest.find('@') {
-            return format!("https://{}", &rest[at_pos + 1..]);
-        }
-    } else if let Some(rest) = url.strip_prefix("http://") {
-        if let Some(at_pos) = rest.find('@') {
-            return format!("http://{}", &rest[at_pos + 1..]);
-        }
+    if let Some(rest) = url.strip_prefix("https://")
+        && let Some(at_pos) = rest.find('@')
+    {
+        return format!("https://{}", &rest[at_pos + 1..]);
+    } else if let Some(rest) = url.strip_prefix("http://")
+        && let Some(at_pos) = rest.find('@')
+    {
+        return format!("http://{}", &rest[at_pos + 1..]);
     }
     url.to_string()
 }

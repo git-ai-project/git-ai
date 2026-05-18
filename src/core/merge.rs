@@ -99,9 +99,22 @@ pub fn compute_merge_attribution(repo_path: &Path, merge_commit: &str) -> Result
     let note_text = log.serialize_to_string();
     git_in_repo(
         repo_path,
-        &["notes", "--ref=ai", "add", "-f", "-m", &note_text, merge_commit],
+        &[
+            "notes",
+            "--ref=ai",
+            "add",
+            "-f",
+            "-m",
+            &note_text,
+            merge_commit,
+        ],
     )
-    .map_err(|_| format!("git notes add failed for merge {}", &merge_commit[..7.min(merge_commit.len())]))?;
+    .map_err(|_| {
+        format!(
+            "git notes add failed for merge {}",
+            &merge_commit[..7.min(merge_commit.len())]
+        )
+    })?;
 
     eprintln!(
         "[git-ai] merge: wrote combined authorship note for {}",

@@ -151,14 +151,14 @@ fn find_real_git() -> &'static str {
                 return c.to_string();
             }
         }
-        if cfg!(windows) {
-            if let Ok(output) = std::process::Command::new("where").arg("git").output() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    let p = Path::new(line.trim());
-                    if p.is_file() && !p.to_string_lossy().contains(".git-ai") {
-                        return line.trim().to_string();
-                    }
+        if cfg!(windows)
+            && let Ok(output) = std::process::Command::new("where").arg("git").output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let p = Path::new(line.trim());
+                if p.is_file() && !p.to_string_lossy().contains(".git-ai") {
+                    return line.trim().to_string();
                 }
             }
         }
@@ -259,8 +259,7 @@ impl TestRepo {
         }
 
         // Exclude daemon/internal files from git tracking
-        std::fs::write(path.join(".gitignore"), ".git-ai/\n")
-            .expect("failed to write .gitignore");
+        std::fs::write(path.join(".gitignore"), ".git-ai/\n").expect("failed to write .gitignore");
 
         Self {
             path,
@@ -2236,7 +2235,9 @@ impl TestRepo {
             .args(args)
             .current_dir(&self.path)
             // Suppress git trace2 events so the system daemon doesn't interfere.
-            .env("GIT_TRACE2_EVENT", "/dev/null");
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            // Disable cloud-agent fallback in tests — checkpoints are always explicit.
+            .env("GIT_AI_NO_CLOUD_AGENT", "1");
 
         // Pass additional daemon env vars (from new_with_daemon_env).
         for (key, value) in &self.daemon_env {
@@ -2621,6 +2622,7 @@ impl TestRepo {
             .args(args)
             .current_dir(working_dir)
             .env("GIT_TRACE2_EVENT", "/dev/null")
+            .env("GIT_AI_NO_CLOUD_AGENT", "1")
             .env("HOME", self._tempdir.path());
         for (key, value) in &self.daemon_env {
             command.env(key, value);
@@ -2663,7 +2665,8 @@ impl TestRepo {
         command
             .args(args)
             .current_dir(&self.path)
-            .env("GIT_TRACE2_EVENT", "/dev/null");
+            .env("GIT_TRACE2_EVENT", "/dev/null")
+            .env("GIT_AI_NO_CLOUD_AGENT", "1");
         for (key, value) in envs {
             command.env(key, value);
         }
@@ -2701,6 +2704,7 @@ impl TestRepo {
             .args(args)
             .current_dir(&self.path)
             .env("GIT_TRACE2_EVENT", "/dev/null")
+            .env("GIT_AI_NO_CLOUD_AGENT", "1")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

@@ -119,7 +119,9 @@ fn test_config_persists_across_invocations() {
     repo.git_ai(&["config", "set", "quiet", "true"])
         .expect("config set second key should succeed");
 
-    let output = repo.git_ai(&["config"]).expect("config show all should succeed");
+    let output = repo
+        .git_ai(&["config"])
+        .expect("config show all should succeed");
     let parsed: serde_json::Value =
         serde_json::from_str(output.trim()).expect("output should be valid JSON");
     assert_eq!(parsed["update_channel"], "next");
@@ -133,7 +135,10 @@ fn test_config_file_location() {
         .expect("config set should succeed");
 
     let config_path = repo.test_home_path().join(".git-ai").join("config.json");
-    assert!(config_path.exists(), "config.json should exist in HOME/.git-ai/");
+    assert!(
+        config_path.exists(),
+        "config.json should exist in HOME/.git-ai/"
+    );
 
     let content = fs::read_to_string(&config_path).expect("should be able to read config file");
     let parsed: serde_json::Value =
@@ -147,9 +152,15 @@ fn test_config_help() {
     let output = repo
         .git_ai(&["config", "--help"])
         .expect("config --help should succeed");
-    assert!(output.contains("git-ai config"), "help should mention git-ai config");
+    assert!(
+        output.contains("git-ai config"),
+        "help should mention git-ai config"
+    );
     assert!(output.contains("set"), "help should mention set subcommand");
-    assert!(output.contains("unset"), "help should mention unset subcommand");
+    assert!(
+        output.contains("unset"),
+        "help should mention unset subcommand"
+    );
 }
 
 #[test]
@@ -166,8 +177,5 @@ fn test_config_add_to_existing_non_array_fails() {
         .expect("config set should succeed");
 
     let result = repo.git_ai(&["config", "--add", "quiet", "false"]);
-    assert!(
-        result.is_err(),
-        "--add on non-array key should fail"
-    );
+    assert!(result.is_err(), "--add on non-array key should fail");
 }

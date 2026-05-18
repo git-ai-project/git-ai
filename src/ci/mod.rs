@@ -387,6 +387,83 @@ pub fn format_markdown(report: &AttributionReport) -> String {
     format_markdown_report(report)
 }
 
+// ---------------------------------------------------------------------------
+// Bar Chart Rendering
+// ---------------------------------------------------------------------------
+
+const BAR_WIDTH: usize = 20;
+
+/// Render a compact attribution bar chart for terminal or markdown code blocks.
+///
+/// Format:
+/// ```text
+/// 🧠 you    ████████░░░░░░░░░░░░  40%
+/// 🤖 ai     ░░░░░░░░████████████  60%
+/// ```
+///
+/// The "you" bar fills from the left with `█`, remaining with `░`.
+/// The "ai" bar fills from the right with `█`, leading with `░`.
+/// Returns `(no additions)\n` when total is zero.
+pub fn render_attribution_bar(human_lines: usize, ai_lines: usize, total_lines: usize) -> String {
+    if total_lines == 0 {
+        return "(no additions)\n".to_string();
+    }
+
+    let human_pct = percentage(human_lines, total_lines);
+    let ai_pct = percentage(ai_lines, total_lines);
+
+    let human_filled = (human_pct * BAR_WIDTH + 50) / 100;
+    let ai_filled = (ai_pct * BAR_WIDTH + 50) / 100;
+
+    let human_bar = format!(
+        "{}{}",
+        "\u{2588}".repeat(human_filled),
+        "\u{2591}".repeat(BAR_WIDTH - human_filled)
+    );
+
+    let ai_bar = format!(
+        "{}{}",
+        "\u{2591}".repeat(BAR_WIDTH - ai_filled),
+        "\u{2588}".repeat(ai_filled)
+    );
+
+    format!(
+        "\u{1f9e0} you    {}  {}%\n\u{1f916} ai     {}  {}%\n",
+        human_bar, human_pct, ai_bar, ai_pct
+    )
+}
+
+/// Render the full markdown stats block with the bar chart.
+///
+/// Wraps the bar in a code block and adds the "Stats powered by" header
+/// and an expandable details section for additional stats.
+pub fn render_markdown_stats(
+    human_lines: usize,
+    ai_lines: usize,
+    total_lines: usize,
+    details: &str,
+) -> String {
+    if total_lines == 0 {
+        return "(no additions)\n".to_string();
+    }
+
+    let bar = render_attribution_bar(human_lines, ai_lines, total_lines);
+
+    let mut out = String::new();
+    out.push_str("Stats powered by [Git AI](https://github.com/git-ai-project/git-ai)\n\n");
+    out.push_str("```text\n");
+    out.push_str(&bar);
+    out.push_str("```\n\n");
+    out.push_str("<details>\n<summary>More stats</summary>\n\n");
+    if !details.is_empty() {
+        out.push_str(details);
+        out.push('\n');
+    }
+    out.push_str("\n</details>");
+
+    out
+}
+
 fn percentage_f64(part: usize, total: usize) -> f64 {
     if total == 0 {
         0.0
@@ -1430,5 +1507,206 @@ new file mode 100644
         };
         let md = format_markdown_report(&report);
         assert!(md.contains("<!-- git-ai-attribution -->"));
+    }
+
+    // -- Attribution Bar Chart Tests --
+
+    #[test]
+    fn test_bar_zero_total_returns_no_additions() {
+        let result = render_attribution_bar(0, 0, 0);
+        assert_eq!(result, "(no additions)\n");
+    }
+
+    #[test]
+    fn test_bar_all_human() {
+        let result = render_attribution_bar(100, 0, 100);
+        assert!(result.contains("\u{2588}".repeat(BAR_WIDTH).as_str()));
+        assert!(result.contains("100%"));
+        // AI line should be all empty
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("\u{2591}".repeat(BAR_WIDTH).as_str()));
+        assert!(lines[1].contains("0%"));
+    }
+
+    #[test]
+    fn test_bar_all_ai() {
+        let result = render_attribution_bar(0, 100, 100);
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // Human line should be all empty
+        assert!(lines[0].contains("\u{2591}".repeat(BAR_WIDTH).as_str()));
+        assert!(lines[0].contains("0%"));
+        // AI line should be all filled
+        assert!(lines[1].contains("\u{2588}".repeat(BAR_WIDTH).as_str()));
+        assert!(lines[1].contains("100%"));
+    }
+
+    #[test]
+    fn test_bar_50_50() {
+        let result = render_attribution_bar(50, 50, 100);
+        let lines: Vec<&str> = result.lines().collect();
+        // Human: 10 filled + 10 empty
+        assert!(lines[0].contains(&format!(
+            "{}{}",
+            "\u{2588}".repeat(10),
+            "\u{2591}".repeat(10)
+        )));
+        assert!(lines[0].contains("50%"));
+        // AI: 10 empty + 10 filled
+        assert!(lines[1].contains(&format!(
+            "{}{}",
+            "\u{2591}".repeat(10),
+            "\u{2588}".repeat(10)
+        )));
+        assert!(lines[1].contains("50%"));
+    }
+
+    #[test]
+    fn test_bar_with_untracked_gap() {
+        // 40% human, 60% AI (adds to 100% but with rounding)
+        let result = render_attribution_bar(4, 6, 10);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines[0].contains("40%"));
+        assert!(lines[1].contains("60%"));
+        // Human: 8 filled, 12 empty (40% of 20 = 8)
+        assert!(lines[0].contains(&format!(
+            "{}{}",
+            "\u{2588}".repeat(8),
+            "\u{2591}".repeat(12)
+        )));
+        // AI: 8 empty, 12 filled (60% of 20 = 12)
+        assert!(lines[1].contains(&format!(
+            "{}{}",
+            "\u{2591}".repeat(8),
+            "\u{2588}".repeat(12)
+        )));
+    }
+
+    #[test]
+    fn test_bar_mixed_with_untracked() {
+        // 33% human, 50% AI, 17% untracked — matches the "mixed" snapshot
+        let result = render_attribution_bar(33, 50, 100);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines[0].contains("33%"));
+        assert!(lines[1].contains("50%"));
+    }
+
+    #[test]
+    fn test_bar_minimal_human() {
+        // 2% human, 98% AI — should still show at least 1 filled block for human
+        let result = render_attribution_bar(2, 98, 100);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines[0].contains("2%"));
+        assert!(lines[1].contains("98%"));
+        // 2% of 20 = 0.4, rounded = 0 blocks... unless we ensure at least 1
+        // The current rounding: (2 * 20 + 50) / 100 = 90/100 = 0
+        // So 0 filled blocks for 2% is correct per the rounding
+    }
+
+    #[test]
+    fn test_bar_1_percent_rounds_to_zero_blocks() {
+        let result = render_attribution_bar(1, 99, 100);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines[0].contains("1%"));
+        // (1 * 20 + 50) / 100 = 70/100 = 0 blocks (integer division)
+        assert!(lines[0].contains("\u{2591}".repeat(BAR_WIDTH).as_str()));
+    }
+
+    #[test]
+    fn test_bar_3_percent_rounds_to_one_block() {
+        let result = render_attribution_bar(3, 97, 100);
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines[0].contains("3%"));
+        // (3 * 20 + 50) / 100 = 110/100 = 1 block
+        assert!(lines[0].contains(&format!("\u{2588}{}", "\u{2591}".repeat(19))));
+    }
+
+    #[test]
+    fn test_bar_width_always_20() {
+        for human in [0, 1, 10, 25, 50, 75, 99, 100] {
+            let ai = 100 - human;
+            let result = render_attribution_bar(human, ai, 100);
+            for line in result.lines() {
+                let bar_chars: usize = line
+                    .chars()
+                    .filter(|c| *c == '\u{2588}' || *c == '\u{2591}')
+                    .count();
+                assert_eq!(
+                    bar_chars, BAR_WIDTH,
+                    "Bar width should always be {} for human={}%, ai={}%",
+                    BAR_WIDTH, human, ai
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_bar_human_fills_from_left() {
+        let result = render_attribution_bar(60, 40, 100);
+        let lines: Vec<&str> = result.lines().collect();
+        let human_line = lines[0];
+        // Extract just the bar portion (between the label and the percentage)
+        let bar_start = human_line.find('\u{2588}').or(human_line.find('\u{2591}'));
+        if let Some(start) = bar_start {
+            let bar_section: String = human_line[start..]
+                .chars()
+                .take_while(|c| *c == '\u{2588}' || *c == '\u{2591}')
+                .collect();
+            // Filled blocks must come before empty blocks (left-aligned)
+            let first_empty = bar_section.find('\u{2591}').unwrap_or(BAR_WIDTH);
+            let last_filled = bar_section.rfind('\u{2588}').map(|i| i + 1).unwrap_or(0);
+            assert!(
+                last_filled <= first_empty || first_empty == BAR_WIDTH,
+                "Human bar should fill from the left"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bar_ai_fills_from_right() {
+        let result = render_attribution_bar(40, 60, 100);
+        let lines: Vec<&str> = result.lines().collect();
+        let ai_line = lines[1];
+        let bar_start = ai_line.find('\u{2591}').or(ai_line.find('\u{2588}'));
+        if let Some(start) = bar_start {
+            let bar_section: String = ai_line[start..]
+                .chars()
+                .take_while(|c| *c == '\u{2588}' || *c == '\u{2591}')
+                .collect();
+            // Empty blocks must come before filled blocks (right-aligned fill)
+            let first_filled = bar_section.find('\u{2588}').unwrap_or(BAR_WIDTH);
+            let last_empty = bar_section.rfind('\u{2591}').map(|i| i + 1).unwrap_or(0);
+            assert!(
+                last_empty <= first_filled || first_filled == BAR_WIDTH,
+                "AI bar should fill from the right"
+            );
+        }
+    }
+
+    #[test]
+    fn test_render_markdown_stats_zero_total() {
+        let result = render_markdown_stats(0, 0, 0, "");
+        assert_eq!(result, "(no additions)\n");
+    }
+
+    #[test]
+    fn test_render_markdown_stats_structure() {
+        let result = render_markdown_stats(50, 50, 100, "- Top model: gpt-4 (50 lines)\n");
+        assert!(result.starts_with("Stats powered by [Git AI]"));
+        assert!(result.contains("```text\n"));
+        assert!(result.contains("```\n"));
+        assert!(result.contains("<details>"));
+        assert!(result.contains("</details>"));
+        assert!(result.contains("Top model: gpt-4"));
+    }
+
+    #[test]
+    fn test_render_markdown_stats_empty_details() {
+        let result = render_markdown_stats(100, 0, 100, "");
+        assert!(result.contains("<details>"));
+        assert!(result.contains("</details>"));
+        // Should not have stray content in the details section
+        assert!(!result.contains("- "));
     }
 }

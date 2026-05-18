@@ -20,17 +20,17 @@ fn test_debug_contains_version_info() {
         output.contains("Git AI version:"),
         "should show git-ai version"
     );
-    assert!(
-        output.contains("Git version:"),
-        "should show git version"
-    );
+    assert!(output.contains("Git version:"), "should show git version");
 }
 
 #[test]
 fn test_debug_contains_platform_info() {
     let repo = TestRepo::new();
     let output = repo.git_ai(&["debug"]).expect("debug should succeed");
-    assert!(output.contains("Platform"), "should contain Platform section");
+    assert!(
+        output.contains("Platform"),
+        "should contain Platform section"
+    );
     assert!(output.contains("OS:"), "should show OS info");
     assert!(output.contains("Arch:"), "should show architecture");
 }
@@ -39,10 +39,7 @@ fn test_debug_contains_platform_info() {
 fn test_debug_contains_auth_section() {
     let repo = TestRepo::new();
     let output = repo.git_ai(&["debug"]).expect("debug should succeed");
-    assert!(
-        output.contains("Auth"),
-        "should contain Auth section"
-    );
+    assert!(output.contains("Auth"), "should contain Auth section");
 }
 
 #[test]

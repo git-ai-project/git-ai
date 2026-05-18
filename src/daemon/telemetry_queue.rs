@@ -99,8 +99,8 @@ impl TelemetryQueue {
         while stmt.step()? {
             let id = stmt.column_i64(0);
             let payload = stmt.column_text(1);
-            let objects: Vec<CasObject> = serde_json::from_str(&payload)
-                .map_err(|e| format!("deserialize cas: {}", e))?;
+            let objects: Vec<CasObject> =
+                serde_json::from_str(&payload).map_err(|e| format!("deserialize cas: {}", e))?;
             result.push((id, objects));
         }
         Ok(result)
@@ -119,9 +119,7 @@ impl TelemetryQueue {
 
     pub fn delete_cas(&self, ids: &[i64]) -> Result<(), String> {
         for id in ids {
-            let stmt = self
-                .db
-                .prepare("DELETE FROM pending_cas WHERE id = ?1")?;
+            let stmt = self.db.prepare("DELETE FROM pending_cas WHERE id = ?1")?;
             stmt.bind_i64(1, *id)?;
             stmt.step()?;
         }
@@ -152,10 +150,10 @@ impl TelemetryQueue {
             self.evict_oldest(table)?;
         }
 
-        if let Ok(meta) = std::fs::metadata(&self.db_path) {
-            if meta.len() >= MAX_DB_SIZE_BYTES {
-                self.evict_oldest(table)?;
-            }
+        if let Ok(meta) = std::fs::metadata(&self.db_path)
+            && meta.len() >= MAX_DB_SIZE_BYTES
+        {
+            self.evict_oldest(table)?;
         }
         Ok(())
     }
@@ -175,7 +173,11 @@ mod tests {
     use crate::daemon::telemetry_types::{MetricEventId, SparseArray};
 
     fn make_event() -> MetricEvent {
-        MetricEvent::new(MetricEventId::Committed, SparseArray::new(), SparseArray::new())
+        MetricEvent::new(
+            MetricEventId::Committed,
+            SparseArray::new(),
+            SparseArray::new(),
+        )
     }
 
     fn make_cas() -> CasObject {

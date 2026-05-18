@@ -102,7 +102,9 @@ fn test_change_across_commits_standard_human() {
     let commit = repo.stage_all_and_commit("add more AI").unwrap();
 
     let file_attestation = commit.authorship_log.attestations.first().unwrap();
-    assert_eq!(file_attestation.entries.len(), 1);
+    // With the "human sentinel → h_ attestation" change, we now get 2 entries:
+    // one for the AI line and one for the explicitly-human line.
+    assert_eq!(file_attestation.entries.len(), 2);
 
     let second_ai_session_hash = commit
         .authorship_log
@@ -113,7 +115,12 @@ fn test_change_across_commits_standard_human() {
         .unwrap();
     assert_ne!(*second_ai_session_hash, initial_ai_entry.hash);
 
-    let second_ai_entry = file_attestation.entries.first().unwrap();
+    // Find the AI entry (session-based hash, not h_ prefix)
+    let second_ai_entry = file_attestation
+        .entries
+        .iter()
+        .find(|e| !e.hash.starts_with("h_"))
+        .unwrap();
     assert_eq!(second_ai_entry.line_ranges, vec![LineRange::Single(6)]);
     assert_ne!(second_ai_entry.hash, initial_ai_entry.hash);
 }

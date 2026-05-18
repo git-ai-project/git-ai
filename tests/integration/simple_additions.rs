@@ -224,8 +224,24 @@ fn test_simple_ai_then_human_deletion() {
 
     let commit = repo.stage_all_and_commit("Human deletes AI line").unwrap();
 
-    // The authorship log should have no attestations since we only deleted lines
-    assert_eq!(commit.authorship_log.attestations.len(), 0);
+    // Deletion-only commit, but the trailing-newline change on the last remaining
+    // line makes it appear as a committed line in the diff. With the "human sentinel
+    // → h_ attestation" change, this line gets a proper human attestation entry.
+    // The key invariant: no AI sessions should be present.
+    assert!(
+        commit.authorship_log.metadata.sessions.is_empty(),
+        "Should have no AI sessions for human-only deletion"
+    );
+    // Any attestation entries should only be human (h_ prefix)
+    for att in &commit.authorship_log.attestations {
+        for entry in &att.entries {
+            assert!(
+                entry.hash.starts_with("h_"),
+                "Expected only human attestation entries, got: {}",
+                entry.hash
+            );
+        }
+    }
 
     file.assert_lines_and_blame(crate::lines![
         "Line 1".human(),

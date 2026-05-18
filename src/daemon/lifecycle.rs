@@ -310,6 +310,7 @@ const DETACHED_PROCESS: u32 = 0x00000008;
 
 #[cfg(windows)]
 #[repr(C)]
+#[allow(clippy::upper_case_acronyms)]
 struct STARTUPINFOW {
     cb: u32,
     _reserved: *mut u16,

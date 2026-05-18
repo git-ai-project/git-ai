@@ -23,6 +23,7 @@ struct WinapiOverlapped {
 #[cfg(windows)]
 const LOCKFILE_EXCLUSIVE_LOCK: u32 = 0x00000002;
 #[cfg(windows)]
+#[allow(dead_code)]
 const LOCKFILE_FAIL_IMMEDIATELY: u32 = 0x00000001;
 
 #[cfg(windows)]

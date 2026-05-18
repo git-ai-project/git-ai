@@ -95,10 +95,30 @@ pub fn handle_post_commit() {
         Err(_) => return,
     };
 
-    // Background cloud agent: when GIT_AI_CLOUD_AGENT=1 is set, attribute all
-    // unattributed committed lines to AI. This covers no-hooks agents that don't
-    // fire their own checkpoints.
-    if env::var("GIT_AI_CLOUD_AGENT").as_deref() == Ok("1") {
+    // Attribute all unattributed committed lines to AI. This covers no-hooks
+    // agents that don't fire their own checkpoints. Can be disabled with
+    // GIT_AI_NO_CLOUD_AGENT=1.
+    let cloud_agent_active = env::var("GIT_AI_NO_CLOUD_AGENT").as_deref() != Ok("1");
+
+    // When cloud-agent is active and no checkpoints were fired at all, the
+    // generate_authorship_for_commit function attributed everything to human as
+    // a fallback. We must clear those fallback attestations so cloud-agent can
+    // re-attribute to AI. We detect this by checking that there are no sessions
+    // AND no KnownHuman attestations (humans map empty or only contains the
+    // commit author from the fallback path).
+    if cloud_agent_active {
+        let has_real_checkpoints =
+            git_ai::core::working_log::read_checkpoints(&git_dir, base_commit)
+                .iter()
+                .any(|cp| !cp.entries.is_empty());
+
+        if !has_real_checkpoints {
+            authorship_log.attestations.clear();
+            authorship_log.metadata.humans.clear();
+        }
+    }
+
+    if cloud_agent_active {
         // Only apply on normal commits, not during rebase/cherry-pick
         let is_rewriting = git_dir.join("rebase-merge").exists()
             || git_dir.join("rebase-apply").exists()

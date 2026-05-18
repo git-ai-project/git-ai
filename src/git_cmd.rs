@@ -9,9 +9,7 @@ use crate::core::git_binary::git_path;
 /// stdout/stderr/stdin before spawning.
 pub fn git_command(repo_path: &Path) -> Command {
     let mut cmd = Command::new(git_path());
-    cmd.arg("-C")
-        .arg(repo_path)
-        .env("GIT_TRACE2_EVENT", "0");
+    cmd.arg("-C").arg(repo_path).env("GIT_TRACE2_EVENT", "0");
     cmd
 }
 
@@ -35,7 +33,11 @@ pub fn git_in_repo(repo_path: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// Run a git command with data piped to stdin, returning raw stdout bytes.
-pub fn git_in_repo_stdin(repo_path: &Path, args: &[&str], stdin_data: &[u8]) -> Result<Vec<u8>, String> {
+pub fn git_in_repo_stdin(
+    repo_path: &Path,
+    args: &[&str],
+    stdin_data: &[u8],
+) -> Result<Vec<u8>, String> {
     let mut child = git_command(repo_path)
         .args(args)
         .stdin(Stdio::piped())

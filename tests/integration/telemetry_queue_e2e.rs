@@ -160,10 +160,10 @@ fn wait_for_note(repo_path: &Path, commit_sha: &str, timeout: Duration) -> bool 
             .env("GIT_TRACE2_EVENT", "/dev/null")
             .output()
             .ok();
-        if let Some(o) = output {
-            if o.status.success() {
-                return true;
-            }
+        if let Some(o) = output
+            && o.status.success()
+        {
+            return true;
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -209,7 +209,7 @@ fn test_telemetry_queue_persists_on_failure_and_drains_on_reconnect() {
     let binary = get_binary_path();
 
     // Start daemon with server DOWN (503 responses cause curl to succeed but JSON parse fails)
-    let mut daemon = Command::new(&binary)
+    let mut daemon = Command::new(binary)
         .args(["bg", "run", "--foreground"])
         .env("HOME", &daemon_home)
         .env("GIT_AI_API_BASE_URL", format!("http://127.0.0.1:{}", port))
@@ -257,7 +257,7 @@ fn test_telemetry_queue_persists_on_failure_and_drains_on_reconnect() {
 
     // AI edit + checkpoint + commit
     fs::write(repo_path.join("f.txt"), "base\nai line\n").unwrap();
-    let cp = Command::new(&binary)
+    let cp = Command::new(binary)
         .current_dir(&repo_path)
         .args(["checkpoint", "mock_ai", "f.txt"])
         .env("HOME", &home)
@@ -309,7 +309,7 @@ fn test_telemetry_queue_persists_on_failure_and_drains_on_reconnect() {
     );
 
     // Verify flush-metrics-db --stats shows pending items
-    let stats_out = Command::new(&binary)
+    let stats_out = Command::new(binary)
         .args(["flush-metrics-db", "--stats"])
         .env("HOME", &daemon_home)
         .env("GIT_AI_API_BASE_URL", format!("http://127.0.0.1:{}", port))
@@ -325,7 +325,7 @@ fn test_telemetry_queue_persists_on_failure_and_drains_on_reconnect() {
     // Bring server back UP and flush via CLI
     fs::write(&control_file, "up").unwrap();
 
-    let flush_out = Command::new(&binary)
+    let flush_out = Command::new(binary)
         .args(["flush-metrics-db"])
         .env("HOME", &daemon_home)
         .env("GIT_AI_API_BASE_URL", format!("http://127.0.0.1:{}", port))
@@ -374,7 +374,7 @@ fn test_flush_metrics_db_empty_queue() {
     .unwrap();
 
     let binary = get_binary_path();
-    let out = Command::new(&binary)
+    let out = Command::new(binary)
         .args(["flush-metrics-db"])
         .env("HOME", &daemon_home)
         .env("GIT_AI_API_BASE_URL", "http://127.0.0.1:1")
@@ -397,9 +397,13 @@ fn test_telemetry_queue_bounded_growth() {
     let db_path = dir.path().join("bounded.db");
     let queue = TelemetryQueue::open(&db_path).unwrap();
 
-    let event = MetricEvent::new(MetricEventId::Committed, SparseArray::new(), SparseArray::new());
+    let event = MetricEvent::new(
+        MetricEventId::Committed,
+        SparseArray::new(),
+        SparseArray::new(),
+    );
     for _ in 0..100 {
-        queue.enqueue_metrics(&[event.clone()]).unwrap();
+        queue.enqueue_metrics(std::slice::from_ref(&event)).unwrap();
     }
 
     let count = queue.pending_metrics_count().unwrap();

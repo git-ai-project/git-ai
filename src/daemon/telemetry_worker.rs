@@ -182,10 +182,10 @@ fn flush_batch(batch: TelemetryBuffer) {
 
 fn flush_metrics(client: &ApiClient, events: Vec<MetricEvent>, queue: Option<&TelemetryQueue>) {
     if !client.should_upload() {
-        if let Some(q) = queue {
-            if let Err(e) = q.enqueue_metrics(&events) {
-                eprintln!("[git-ai daemon] failed to queue metrics offline: {}", e);
-            }
+        if let Some(q) = queue
+            && let Err(e) = q.enqueue_metrics(&events)
+        {
+            eprintln!("[git-ai daemon] failed to queue metrics offline: {}", e);
         }
         return;
     }
@@ -193,11 +193,14 @@ fn flush_metrics(client: &ApiClient, events: Vec<MetricEvent>, queue: Option<&Te
     for chunk in events.chunks(MAX_METRICS_PER_BATCH) {
         let batch = MetricsBatch::new(chunk.to_vec());
         if let Err(e) = client.upload_metrics_with_retry(&batch) {
-            eprintln!("[git-ai daemon] metrics upload failed, queuing offline: {}", e);
-            if let Some(q) = queue {
-                if let Err(qe) = q.enqueue_metrics(chunk) {
-                    eprintln!("[git-ai daemon] failed to queue metrics offline: {}", qe);
-                }
+            eprintln!(
+                "[git-ai daemon] metrics upload failed, queuing offline: {}",
+                e
+            );
+            if let Some(q) = queue
+                && let Err(qe) = q.enqueue_metrics(chunk)
+            {
+                eprintln!("[git-ai daemon] failed to queue metrics offline: {}", qe);
             }
         }
     }
@@ -205,10 +208,10 @@ fn flush_metrics(client: &ApiClient, events: Vec<MetricEvent>, queue: Option<&Te
 
 fn flush_cas(client: &ApiClient, objects: Vec<CasObject>, queue: Option<&TelemetryQueue>) {
     if !client.should_upload() {
-        if let Some(q) = queue {
-            if let Err(e) = q.enqueue_cas(&objects) {
-                eprintln!("[git-ai daemon] failed to queue CAS offline: {}", e);
-            }
+        if let Some(q) = queue
+            && let Err(e) = q.enqueue_cas(&objects)
+        {
+            eprintln!("[git-ai daemon] failed to queue CAS offline: {}", e);
         }
         return;
     }
@@ -228,10 +231,10 @@ fn flush_cas(client: &ApiClient, objects: Vec<CasObject>, queue: Option<&Telemet
             }
             Err(e) => {
                 eprintln!("[git-ai daemon] CAS upload failed, queuing offline: {}", e);
-                if let Some(q) = queue {
-                    if let Err(qe) = q.enqueue_cas(chunk) {
-                        eprintln!("[git-ai daemon] failed to queue CAS offline: {}", qe);
-                    }
+                if let Some(q) = queue
+                    && let Err(qe) = q.enqueue_cas(chunk)
+                {
+                    eprintln!("[git-ai daemon] failed to queue CAS offline: {}", qe);
                 }
             }
         }
@@ -342,7 +345,9 @@ pub fn flush_queue_now() -> Result<(usize, usize), String> {
                 let request = CasUploadRequest {
                     objects: chunk.to_vec(),
                 };
-                client.upload_cas(&request).map_err(|e| format!("CAS upload: {}", e))?;
+                client
+                    .upload_cas(&request)
+                    .map_err(|e| format!("CAS upload: {}", e))?;
             }
             cas_flushed += objects.len();
             ids.push(*id);

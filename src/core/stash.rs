@@ -153,9 +153,22 @@ pub fn save_stash_attributions(
     // Store as a git note on the stash commit
     git_in_repo(
         repo_path,
-        &["notes", "--ref=ai-stash", "add", "-f", "-m", &json, &stash_sha],
+        &[
+            "notes",
+            "--ref=ai-stash",
+            "add",
+            "-f",
+            "-m",
+            &json,
+            &stash_sha,
+        ],
     )
     .map_err(|_| "git notes --ref=ai-stash add failed".to_string())?;
+
+    // Redundant filesystem storage as fallback if git notes are lost/pruned
+    let stash_backup_dir = git_dir.join("ai").join("stash");
+    let _ = std::fs::create_dir_all(&stash_backup_dir);
+    let _ = std::fs::write(stash_backup_dir.join(&stash_sha), &json);
 
     // Clear or update the working log for this base commit
     if pathspecs.is_empty() {
@@ -230,13 +243,16 @@ pub fn restore_stash_attributions_for_sha(
 ) -> Result<(), String> {
     let git_dir = resolve_git_dir(repo_path)?;
 
-    // Read the note
+    // Read the note, falling back to filesystem backup if git notes are unavailable
     let note_content = git_in_repo(repo_path, &["notes", "--ref=ai-stash", "show", stash_sha])
-        .map_err(|_| {
-            format!(
-                "no ai-stash note found for stash {}",
-                &stash_sha[..7.min(stash_sha.len())]
-            )
+        .or_else(|_| {
+            let backup_path = git_dir.join("ai").join("stash").join(stash_sha);
+            std::fs::read_to_string(&backup_path).map_err(|_| {
+                format!(
+                    "no ai-stash note found for stash {}",
+                    &stash_sha[..7.min(stash_sha.len())]
+                )
+            })
         })?;
 
     // Parse the payload
@@ -252,6 +268,9 @@ pub fn restore_stash_attributions_for_sha(
     if let Some(ref initial) = payload.initial {
         working_log::write_initial_attributions(&git_dir, base_commit, initial);
     }
+
+    // Clean up filesystem backup after successful restore
+    let _ = std::fs::remove_file(git_dir.join("ai").join("stash").join(stash_sha));
 
     eprintln!(
         "[git-ai daemon] stash: restored attributions from stash {} to {}",
@@ -440,7 +459,7 @@ mod tests {
     use super::*;
     use crate::core::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
     use std::path::PathBuf;
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     fn setup_repo() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();

@@ -65,8 +65,8 @@ unsafe impl Send for Database {}
 
 impl Database {
     pub fn open(path: &Path) -> Result<Self, String> {
-        let path_str =
-            CString::new(path.to_str().ok_or("invalid path")?.as_bytes()).map_err(|e| e.to_string())?;
+        let path_str = CString::new(path.to_str().ok_or("invalid path")?.as_bytes())
+            .map_err(|e| e.to_string())?;
         let mut db: *mut sqlite3 = ptr::null_mut();
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
         let rc = unsafe { sqlite3_open_v2(path_str.as_ptr(), &mut db, flags, ptr::null()) };
@@ -113,15 +113,8 @@ impl Database {
     pub fn prepare(&self, sql: &str) -> Result<Statement, String> {
         let sql_c = CString::new(sql).map_err(|e| e.to_string())?;
         let mut stmt: *mut sqlite3_stmt = ptr::null_mut();
-        let rc = unsafe {
-            sqlite3_prepare_v2(
-                self.db,
-                sql_c.as_ptr(),
-                -1,
-                &mut stmt,
-                ptr::null_mut(),
-            )
-        };
+        let rc =
+            unsafe { sqlite3_prepare_v2(self.db, sql_c.as_ptr(), -1, &mut stmt, ptr::null_mut()) };
         if rc != SQLITE_OK {
             return Err(unsafe { errmsg(self.db) });
         }
@@ -149,9 +142,8 @@ pub struct Statement {
 impl Statement {
     pub fn bind_text(&self, idx: i32, text: &str) -> Result<(), String> {
         let c = CString::new(text).map_err(|e| e.to_string())?;
-        let rc = unsafe {
-            sqlite3_bind_text(self.stmt, idx as c_int, c.as_ptr(), -1, SQLITE_TRANSIENT)
-        };
+        let rc =
+            unsafe { sqlite3_bind_text(self.stmt, idx as c_int, c.as_ptr(), -1, SQLITE_TRANSIENT) };
         if rc != SQLITE_OK {
             return Err(unsafe { errmsg(self.db) });
         }
@@ -192,9 +184,7 @@ impl Statement {
         if ptr.is_null() {
             String::new()
         } else {
-            unsafe { CStr::from_ptr(ptr) }
-                .to_string_lossy()
-                .to_string()
+            unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string()
         }
     }
 }
@@ -239,7 +229,9 @@ mod tests {
         let db = Database::open(Path::new(":memory:")).unwrap();
         db.execute_batch("CREATE TABLE kv (k TEXT, v INTEGER);")
             .unwrap();
-        let ins = db.prepare("INSERT INTO kv (k, v) VALUES (?1, ?2);").unwrap();
+        let ins = db
+            .prepare("INSERT INTO kv (k, v) VALUES (?1, ?2);")
+            .unwrap();
         ins.bind_text(1, "key1").unwrap();
         ins.bind_i64(2, 42).unwrap();
         ins.step().unwrap();

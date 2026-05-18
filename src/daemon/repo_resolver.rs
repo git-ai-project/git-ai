@@ -71,7 +71,8 @@ impl RepoPathResolver {
 
         // Ask git for the actual toplevel working directory. This handles cases where
         // the trace2 event reports a subdirectory or a worktree path.
-        let toplevel = crate::git_cmd::git_in_repo(&canonical, &["rev-parse", "--show-toplevel"]).ok();
+        let toplevel =
+            crate::git_cmd::git_in_repo(&canonical, &["rev-parse", "--show-toplevel"]).ok();
 
         match toplevel {
             Some(tl) => {
@@ -183,6 +184,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn resolve_symlinked_path_returns_canonical() {
         let dir = tempfile::tempdir().unwrap();
         let real_repo = dir.path().join("actual");

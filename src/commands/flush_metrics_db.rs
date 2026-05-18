@@ -1,7 +1,10 @@
 use git_ai::daemon::telemetry_worker;
 
 pub fn handle_flush_metrics_db(args: &[String]) {
-    let show_stats = args.first().map(|a| a == "--stats" || a == "-s").unwrap_or(false);
+    let show_stats = args
+        .first()
+        .map(|a| a == "--stats" || a == "-s")
+        .unwrap_or(false);
 
     if show_stats {
         match telemetry_worker::queue_stats() {

@@ -60,7 +60,7 @@ pub fn write_private(path: &std::path::Path, content: &[u8]) -> std::io::Result<
             .mode(0o600)
             .open(path)?;
         f.write_all(content)?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(unix))]
     {

@@ -75,20 +75,20 @@ fn remove_hooks() {
     }
 
     // Reset core.hooksPath if it points to a git-ai managed directory
-    if let Ok(hooks_path_config) = get_git_config("core.hooksPath") {
-        if hooks_path_config.contains("git-ai") || hooks_path_config.contains(".git-ai") {
-            let _ = unset_git_config("core.hooksPath");
-            println!("Reset core.hooksPath");
-        }
+    if let Ok(hooks_path_config) = get_git_config("core.hooksPath")
+        && (hooks_path_config.contains("git-ai") || hooks_path_config.contains(".git-ai"))
+    {
+        let _ = unset_git_config("core.hooksPath");
+        println!("Reset core.hooksPath");
     }
 }
 
 fn is_git_ai_hook(path: &Path) -> bool {
-    if path.is_symlink() {
-        if let Ok(target) = fs::read_link(path) {
-            let target_str = target.to_string_lossy();
-            return target_str.contains("git-ai");
-        }
+    if path.is_symlink()
+        && let Ok(target) = fs::read_link(path)
+    {
+        let target_str = target.to_string_lossy();
+        return target_str.contains("git-ai");
     }
     if let Ok(content) = fs::read_to_string(path) {
         return content.contains("git-ai");
@@ -131,5 +131,9 @@ fn unset_git_config(key: &str) -> Result<(), ()> {
         .stderr(Stdio::piped())
         .output()
         .map_err(|_| ())?;
-    if output.status.success() { Ok(()) } else { Err(()) }
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(())
+    }
 }

@@ -7,7 +7,10 @@ use std::fs;
 /// to the detected AI tool even though no checkpoints were fired.
 #[test]
 fn test_no_hooks_agent_all_lines_attributed() {
-    let repo = TestRepo::new_with_daemon_env(&[("GIT_AI_CLOUD_AGENT", "1")]);
+    let repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_CLOUD_AGENT", "1"),
+        ("GIT_AI_NO_CLOUD_AGENT", "0"),
+    ]);
 
     fs::write(repo.path().join("file.txt"), "alpha\nbeta\ngamma\n").unwrap();
     repo.stage_all_and_commit("first commit").unwrap();
@@ -19,7 +22,10 @@ fn test_no_hooks_agent_all_lines_attributed() {
 /// Multiple files in a single commit are all attributed.
 #[test]
 fn test_no_hooks_agent_multiple_files() {
-    let repo = TestRepo::new_with_daemon_env(&[("GIT_AI_CLOUD_AGENT", "1")]);
+    let repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_CLOUD_AGENT", "1"),
+        ("GIT_AI_NO_CLOUD_AGENT", "0"),
+    ]);
 
     fs::write(repo.path().join("a.txt"), "line a\n").unwrap();
     fs::write(repo.path().join("b.txt"), "line b\n").unwrap();
@@ -36,7 +42,10 @@ fn test_no_hooks_agent_multiple_files() {
 /// get the background agent attribution.
 #[test]
 fn test_no_hooks_agent_preserves_existing_attribution() {
-    let repo = TestRepo::new_with_daemon_env(&[("GIT_AI_CLOUD_AGENT", "1")]);
+    let repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_CLOUD_AGENT", "1"),
+        ("GIT_AI_NO_CLOUD_AGENT", "0"),
+    ]);
 
     // Seed commit so we have a base
     fs::write(repo.path().join("seed.txt"), "seed\n").unwrap();
@@ -72,7 +81,10 @@ fn test_no_hooks_agent_preserves_existing_attribution() {
 /// only the new lines get attributed.
 #[test]
 fn test_no_hooks_agent_append_to_existing_file() {
-    let repo = TestRepo::new_with_daemon_env(&[("GIT_AI_CLOUD_AGENT", "1")]);
+    let repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_CLOUD_AGENT", "1"),
+        ("GIT_AI_NO_CLOUD_AGENT", "0"),
+    ]);
 
     fs::write(repo.path().join("file.txt"), "original\n").unwrap();
     repo.stage_all_and_commit("initial").unwrap();
@@ -120,7 +132,10 @@ fn test_with_hooks_agent_does_not_blanket_attribute() {
 /// the rebase operation.
 #[test]
 fn test_rebase_does_not_reattribute_to_bg_agent() {
-    let repo = TestRepo::new_with_daemon_env(&[("GIT_AI_CLOUD_AGENT", "1")]);
+    let repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_CLOUD_AGENT", "1"),
+        ("GIT_AI_NO_CLOUD_AGENT", "0"),
+    ]);
 
     // Commit 1: base
     fs::write(repo.path().join("file.txt"), "base line\n").unwrap();
@@ -150,7 +165,10 @@ fn test_rebase_does_not_reattribute_to_bg_agent() {
 /// Amend preserves existing attribution and fills holes for new lines.
 #[test]
 fn test_amend_preserves_existing_and_attributes_new_lines() {
-    let repo = TestRepo::new_with_daemon_env(&[("GIT_AI_CLOUD_AGENT", "1")]);
+    let repo = TestRepo::new_with_daemon_env(&[
+        ("GIT_AI_CLOUD_AGENT", "1"),
+        ("GIT_AI_NO_CLOUD_AGENT", "0"),
+    ]);
 
     // Commit with explicit AI checkpoint
     fs::write(repo.path().join("file.txt"), "original\n").unwrap();

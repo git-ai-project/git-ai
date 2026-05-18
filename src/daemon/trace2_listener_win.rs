@@ -58,6 +58,7 @@ pub(crate) fn validate_pipe_path(path: &str) -> Result<(), String> {
 // =============================================================================
 
 #[cfg(windows)]
+#[allow(clippy::upper_case_acronyms, clippy::io_other_error)]
 mod imp {
     use super::*;
     use std::io::{self, BufRead, BufReader, Read};
@@ -700,6 +701,7 @@ mod tests {
     // -------------------------------------------------------
 
     #[cfg(windows)]
+    #[allow(clippy::upper_case_acronyms, clippy::len_zero)]
     mod integration {
         use super::super::imp::Trace2ListenerWin;
         use super::*;

@@ -9,6 +9,7 @@ const SERVICE_NAME: &str = "git-ai";
 #[cfg(all(not(test), feature = "keyring"))]
 const USERNAME: &str = "oauth-tokens";
 
+#[allow(dead_code)]
 fn home_dir() -> Option<PathBuf> {
     crate::paths::home_dir()
 }

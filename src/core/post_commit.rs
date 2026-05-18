@@ -65,7 +65,43 @@ pub fn generate_authorship_for_commit(
     let (file_attributions, metadata) = merge_attributions(&checkpoints, &initial, human_author);
 
     if file_attributions.is_empty() {
-        let log = AuthorshipLog::new(Metadata::new(commit_sha.to_string()));
+        // No checkpoints or INITIAL data — attribute all committed lines to human.
+        // This covers initial commits and commits made without any AI tool active.
+        let committed_lines = git_diff_committed_lines(repo_dir, parent_sha, commit_sha);
+        if committed_lines.is_empty() {
+            let log = AuthorshipLog::new(Metadata::new(commit_sha.to_string()));
+            return Ok((log, None));
+        }
+
+        let human_hash = authorship_log::generate_human_hash(human_author);
+        let mut log = AuthorshipLog::new(Metadata {
+            schema_version: authorship_log::AUTHORSHIP_LOG_VERSION.to_string(),
+            git_ai_version: Some(authorship_log::GIT_AI_VERSION.to_string()),
+            base_commit_sha: commit_sha.to_string(),
+            prompts: BTreeMap::new(),
+            humans: BTreeMap::from([(
+                human_hash.clone(),
+                authorship_log::HumanRecord {
+                    author: human_author.to_string(),
+                },
+            )]),
+            sessions: BTreeMap::new(),
+        });
+
+        for (file_path, lines) in &committed_lines {
+            if lines.is_empty() {
+                continue;
+            }
+            let ranges = LineRange::compress_lines(lines);
+            log.attestations.push(FileAttestation {
+                file_path: file_path.clone(),
+                entries: vec![AttestationEntry {
+                    hash: human_hash.clone(),
+                    line_ranges: ranges,
+                }],
+            });
+        }
+
         return Ok((log, None));
     }
 
@@ -129,6 +165,19 @@ pub fn generate_authorship_for_commit(
     // 4. Determine which lines were added in this commit (diff parent vs commit)
     let committed_lines = git_diff_committed_lines(repo_dir, parent_sha, commit_sha);
 
+    // 4b. Detect renames: if file_attributions has an old path that doesn't appear
+    // in committed_lines but committed_lines has a new path from a rename, remap
+    // the attribution key to the new path.
+    let rename_map = detect_renames(repo_dir, parent_sha, commit_sha);
+    for (old_path, new_path) in &rename_map {
+        if file_attributions.contains_key(old_path)
+            && !file_attributions.contains_key(new_path)
+            && let Some(attrs) = file_attributions.remove(old_path)
+        {
+            file_attributions.insert(new_path.clone(), attrs);
+        }
+    }
+
     // 5. Determine which lines are uncommitted (working dir vs commit)
     let uncommitted_lines = git_diff_uncommitted_lines(repo_dir, commit_sha, &file_attributions);
 
@@ -141,6 +190,7 @@ pub fn generate_authorship_for_commit(
         commit_sha,
         parent_sha,
         repo_dir,
+        human_author,
     );
 
     let initial_result = if initial_out.files.is_empty() {
@@ -415,6 +465,45 @@ fn find_last_blob_content(
         }
     }
     None
+}
+
+/// Detect file renames between parent and commit.
+/// Returns a list of (old_path, new_path) pairs.
+fn detect_renames(repo_dir: &Path, parent: &str, commit: &str) -> Vec<(String, String)> {
+    let base = if parent == "initial" {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()
+    } else {
+        parent.to_string()
+    };
+
+    let output = git_command()
+        .arg("-C")
+        .arg(repo_dir)
+        .args([
+            "diff",
+            "--diff-filter=R",
+            "--name-status",
+            "--find-renames=1%",
+            &base,
+            commit,
+        ])
+        .output();
+
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut renames = Vec::new();
+    for line in text.lines() {
+        // Format: R<percentage>\t<old_path>\t<new_path>
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 3 && parts[0].starts_with('R') {
+            renames.push((parts[1].to_string(), parts[2].to_string()));
+        }
+    }
+    renames
 }
 
 /// Build a mapping from old line numbers to new line numbers using LCS-based diff.
@@ -693,6 +782,7 @@ fn register_agent_metadata(
 // ---------------------------------------------------------------------------
 
 /// Split per-file attributions into committed (AuthorshipLog) and uncommitted (InitialAttributions).
+#[allow(clippy::too_many_arguments)]
 fn split_attributions(
     file_attributions: &HashMap<String, Vec<LineAttribution>>,
     committed_lines: &[(String, Vec<u32>)],
@@ -701,6 +791,7 @@ fn split_attributions(
     commit_sha: &str,
     parent_sha: &str,
     repo_dir: &Path,
+    human_author: &str,
 ) -> (AuthorshipLog, InitialAttributions) {
     let mut log = AuthorshipLog::new(Metadata {
         schema_version: authorship_log::AUTHORSHIP_LOG_VERSION.to_string(),
@@ -710,6 +801,16 @@ fn split_attributions(
         humans: metadata.humans.clone(),
         sessions: metadata.sessions.clone(),
     });
+
+    // Ensure the human author hash is registered in metadata so that "human"
+    // sentinel lines can be written as proper h_ attestation entries.
+    let sentinel_human_hash = authorship_log::generate_human_hash(human_author);
+    log.metadata
+        .humans
+        .entry(sentinel_human_hash)
+        .or_insert_with(|| authorship_log::HumanRecord {
+            author: human_author.to_string(),
+        });
 
     let mut initial_out = InitialAttributions::default();
 
@@ -769,13 +870,18 @@ fn split_attributions(
         let mut uncommitted_by_author: HashMap<&str, Vec<u32>> = HashMap::new();
         let mut explicitly_human_committed: HashSet<u32> = HashSet::new();
 
+        // Resolve the h_ hash for the "human" sentinel so explicitly-human lines
+        // get proper known-human attestation entries instead of being untracked.
+        let human_hash = authorship_log::generate_human_hash(human_author);
+        let human_hash_ref = human_hash.as_str();
+
         for attr in line_attrs {
             let is_explicitly_human = attr.author_id == "human";
-            let is_skipped = is_explicitly_human || attr.author_id.is_empty();
+            let is_empty = attr.author_id.is_empty();
 
             for line_num in attr.start_line..=attr.end_line {
                 if file_not_in_commit {
-                    if !is_skipped {
+                    if !is_empty && !is_explicitly_human {
                         uncommitted_by_author
                             .entry(attr.author_id.as_str())
                             .or_default()
@@ -789,7 +895,7 @@ fn split_attributions(
                     .unwrap_or(false);
 
                 if is_uncommitted {
-                    if !is_skipped {
+                    if !is_empty && !is_explicitly_human {
                         uncommitted_by_author
                             .entry(attr.author_id.as_str())
                             .or_default()
@@ -813,7 +919,12 @@ fn split_attributions(
                     if is_committed {
                         if is_explicitly_human {
                             explicitly_human_committed.insert(commit_line);
-                        } else if !is_skipped {
+                            // Write as a known-human attestation entry (h_ hash)
+                            committed_by_author
+                                .entry(human_hash_ref)
+                                .or_default()
+                                .push(commit_line);
+                        } else if !is_empty {
                             committed_by_author
                                 .entry(attr.author_id.as_str())
                                 .or_default()
@@ -1285,7 +1396,7 @@ diff --git a/bar.rs b/bar.rs
     }
 
     #[test]
-    fn test_human_sentinel_skipped_in_split() {
+    fn test_human_sentinel_becomes_h_attestation() {
         let mut file_attrs: HashMap<String, Vec<LineAttribution>> = HashMap::new();
         file_attrs.insert(
             "test.rs".to_string(),
@@ -1322,12 +1433,25 @@ diff --git a/bar.rs b/bar.rs
             "abc",
             "initial",
             Path::new("."),
+            "Test User <test@example.com>",
         );
 
-        // "human" lines should NOT appear in attestations
+        // "human" sentinel lines should now appear as h_ attestation entries
         let file_att = &log.attestations[0];
-        assert_eq!(file_att.entries.len(), 1);
-        assert_eq!(file_att.entries[0].hash, "ai_hash");
+        assert_eq!(file_att.entries.len(), 2);
+        let has_ai = file_att.entries.iter().any(|e| e.hash == "ai_hash");
+        let has_human = file_att.entries.iter().any(|e| e.hash.starts_with("h_"));
+        assert!(has_ai, "should have AI attestation entry");
+        assert!(has_human, "should have human (h_) attestation entry");
+
+        // The h_ entry should cover lines 1-3
+        let human_entry = file_att
+            .entries
+            .iter()
+            .find(|e| e.hash.starts_with("h_"))
+            .unwrap();
+        let human_lines: u32 = human_entry.line_ranges.iter().map(|r| r.line_count()).sum();
+        assert_eq!(human_lines, 3);
     }
 
     #[test]

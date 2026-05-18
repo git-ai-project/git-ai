@@ -77,9 +77,17 @@ pub fn process_commit(repo_path: &Path) -> Result<bool, String> {
         let note_text = authorship_log.serialize_to_string();
         git_in_repo(
             repo_path,
-            &["notes", "--ref=ai", "add", "-f", "-m", &note_text, commit_sha],
+            &[
+                "notes", "--ref=ai", "add", "-f", "-m", &note_text, commit_sha,
+            ],
         )
-        .map_err(|e| format!("git notes add failed for {}: {}", &commit_sha[..7.min(commit_sha.len())], e))?;
+        .map_err(|e| {
+            format!(
+                "git notes add failed for {}: {}",
+                &commit_sha[..7.min(commit_sha.len())],
+                e
+            )
+        })?;
 
         eprintln!(
             "[git-ai daemon] wrote authorship note for {}",
@@ -111,10 +119,7 @@ pub fn process_commit(repo_path: &Path) -> Result<bool, String> {
         // generate a proper one from parent notes. The working log during
         // conflict resolution captures ephemeral edits (marker removal) that
         // don't reflect the true authorship of the final content.
-        let _ = git_in_repo(
-            repo_path,
-            &["notes", "--ref=ai", "remove", head_sha],
-        );
+        let _ = git_in_repo(repo_path, &["notes", "--ref=ai", "remove", head_sha]);
         if let Err(e) = merge::compute_merge_attribution(repo_path, head_sha) {
             eprintln!(
                 "[git-ai daemon] merge attribution failed for {}: {}",

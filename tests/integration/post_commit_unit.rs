@@ -60,11 +60,15 @@ fn test_post_commit_empty_repo_no_checkpoint() {
     let note = repo.read_authorship_note(&head_sha);
     assert!(note.is_some(), "Should have authorship note");
 
-    // No checkpoints = no AI attribution, so note should have empty attestations
+    // No checkpoints + cloud-agent disabled = human fallback attributes all lines to human
     let log = AuthorshipLog::deserialize_from_string(&note.unwrap()).unwrap();
     assert!(
-        log.attestations.is_empty(),
-        "Should have empty attestations when no checkpoints exist"
+        !log.attestations.is_empty(),
+        "Should have human attestations when no checkpoints exist and cloud-agent is disabled"
+    );
+    assert!(
+        log.metadata.sessions.is_empty(),
+        "Should have no AI sessions when no checkpoints exist"
     );
 }
 

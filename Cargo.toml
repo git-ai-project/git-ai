@@ -34,6 +34,9 @@ rand = "0.10"
 regex = "1"
 serial_test = "3"
 
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("__v1_internals"))'] }
+
 [profile.dev]
 debug = 1
 split-debuginfo = "unpacked"

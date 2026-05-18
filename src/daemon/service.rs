@@ -55,6 +55,7 @@ pub fn is_service_enabled() -> bool {
 
 // --- Binary path resolution ---
 
+#[allow(dead_code)]
 fn get_git_ai_bin_path() -> String {
     // Prefer the installed location, fall back to current exe
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
@@ -316,6 +317,7 @@ fn is_systemd_enabled() -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 fn is_systemd_available() -> bool {
     false
 }
