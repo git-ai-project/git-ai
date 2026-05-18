@@ -99,7 +99,7 @@ mod tests {
         CommandScope, Confidence, FamilyKey, NormalizedCommand, RepoContext,
     };
     use crate::daemon::git_backend::{GitBackend, ReflogCut};
-    use crate::git::cli_parser::parse_git_cli_args;
+    use crate::git::cli_parser::{ParsedGitInvocation, parse_git_cli_args};
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
 
@@ -150,6 +150,16 @@ mod tests {
             _worktree: &Path,
             argv: &[String],
         ) -> Result<Option<String>, GitAiError> {
+            Ok(self
+                .resolve_invocation(_worktree, argv)?
+                .and_then(|invocation| invocation.command))
+        }
+
+        fn resolve_invocation(
+            &self,
+            _worktree: &Path,
+            argv: &[String],
+        ) -> Result<Option<ParsedGitInvocation>, GitAiError> {
             let tokens: &[String] = if argv
                 .first()
                 .is_some_and(|value| value == "git" || value == "git.exe")
@@ -158,7 +168,7 @@ mod tests {
             } else {
                 argv
             };
-            Ok(parse_git_cli_args(tokens).command)
+            Ok(Some(parse_git_cli_args(tokens)))
         }
 
         fn clone_target(&self, _argv: &[String], _cwd_hint: Option<&Path>) -> Option<PathBuf> {
