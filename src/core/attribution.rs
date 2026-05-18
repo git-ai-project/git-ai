@@ -2202,4 +2202,22 @@ mod tests {
         let uni_pos = new.find("universe").unwrap();
         assert_owned(&result, uni_pos, uni_pos + 8, "bob");
     }
+
+    #[test]
+    fn ai_modified_line_gets_ai_attribution_at_line_level() {
+        let old = "fn old_function() {\n    do_stuff();\n}\n";
+        let new = "fn new_function() {\n    do_stuff();\n}\n";
+        let prev = vec![attr(0, old.len(), "h_alice", 1)];
+
+        let byte_attrs = update_attributions(old, new, &prev, "s_ai::t_1", false);
+        let line_attrs = attributions_to_line_attributions(new, &byte_attrs);
+
+        // Line 1 was modified by AI — AI wins via higher ts
+        assert_eq!(line_attrs[0].start_line, 1);
+        assert_eq!(line_attrs[0].author_id, "s_ai::t_1");
+
+        // Line 2 untouched — stays with human
+        assert_eq!(line_attrs[1].start_line, 2);
+        assert_eq!(line_attrs[1].author_id, "h_alice");
+    }
 }
