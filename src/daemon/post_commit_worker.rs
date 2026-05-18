@@ -99,13 +99,22 @@ pub fn process_commit(repo_path: &Path) -> Result<bool, String> {
         wrote_any = true;
     }
 
-    // After processing regular commits, check if HEAD is a merge commit
-    // that still lacks a note. This handles merges where both parents have
-    // authorship notes but no working log data was accumulated (non-conflicting merges).
+    // For merge commits, compute attribution from parent notes.
+    // This handles both:
+    // - Clean merges (no working log data, no note yet)
+    // - Conflict merges (working log generated a human-only note that needs
+    //   parent attribution data overlaid — fixes #910)
     if let Some(&head_sha) = shas.first()
         && merge::is_merge_commit(repo_path, head_sha)
     {
-        // compute_merge_attribution is a no-op if a note already exists
+        // Remove any working-log-based note so compute_merge_attribution can
+        // generate a proper one from parent notes. The working log during
+        // conflict resolution captures ephemeral edits (marker removal) that
+        // don't reflect the true authorship of the final content.
+        let _ = git_in_repo(
+            repo_path,
+            &["notes", "--ref=ai", "remove", head_sha],
+        );
         if let Err(e) = merge::compute_merge_attribution(repo_path, head_sha) {
             eprintln!(
                 "[git-ai daemon] merge attribution failed for {}: {}",
