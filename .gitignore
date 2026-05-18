@@ -43,3 +43,4 @@ fuzz/corpus/
 
 libattribution.rlib
 vendor/
+!vendor/sqlite/
