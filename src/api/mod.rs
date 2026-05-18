@@ -8,12 +8,5 @@ use std::path::PathBuf;
 
 /// Get the user's home directory (shared across api submodules).
 pub fn home_dir() -> Option<PathBuf> {
-    #[cfg(unix)]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
+    crate::paths::home_dir()
 }

@@ -13,36 +13,11 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use super::authorship_log::{
     AttestationEntry, AuthorshipLog, FileAttestation, LineRange, Metadata,
 };
-
-// ---------------------------------------------------------------------------
-// Git helpers
-// ---------------------------------------------------------------------------
-
-fn git_in_repo(repo_path: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(args)
-        .env("GIT_TRACE2_EVENT", "0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("git failed to execute: {}", e))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(format!("git {} failed: {}", args.join(" "), stderr))
-    }
-}
+use crate::git_cmd::git_in_repo;
 
 /// Read a git note for a commit from the ai namespace.
 fn read_authorship_note(repo_path: &Path, commit_sha: &str) -> Option<AuthorshipLog> {
@@ -122,30 +97,11 @@ pub fn compute_merge_attribution(repo_path: &Path, merge_commit: &str) -> Result
 
     // Write the note
     let note_text = log.serialize_to_string();
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args([
-            "notes",
-            "--ref=ai",
-            "add",
-            "-f",
-            "-m",
-            &note_text,
-            merge_commit,
-        ])
-        .env("GIT_TRACE2_EVENT", "0")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
-        .map_err(|e| format!("failed to run git notes: {}", e))?;
-
-    if !status.success() {
-        return Err(format!(
-            "git notes add failed for merge {}",
-            &merge_commit[..7.min(merge_commit.len())]
-        ));
-    }
+    git_in_repo(
+        repo_path,
+        &["notes", "--ref=ai", "add", "-f", "-m", &note_text, merge_commit],
+    )
+    .map_err(|_| format!("git notes add failed for merge {}", &merge_commit[..7.min(merge_commit.len())]))?;
 
     eprintln!(
         "[git-ai] merge: wrote combined authorship note for {}",

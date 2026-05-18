@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Resolves and caches repository working directory paths.
@@ -72,22 +71,7 @@ impl RepoPathResolver {
 
         // Ask git for the actual toplevel working directory. This handles cases where
         // the trace2 event reports a subdirectory or a worktree path.
-        let toplevel = Command::new("git")
-            .arg("-C")
-            .arg(&canonical)
-            .args(["rev-parse", "--show-toplevel"])
-            .env("GIT_TRACE2_EVENT", "0")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .ok()
-            .and_then(|o| {
-                if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else {
-                    None
-                }
-            });
+        let toplevel = crate::git_cmd::git_in_repo(&canonical, &["rev-parse", "--show-toplevel"]).ok();
 
         match toplevel {
             Some(tl) => {
@@ -103,6 +87,7 @@ impl RepoPathResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn resolve_real_repo() {

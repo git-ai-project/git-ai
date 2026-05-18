@@ -70,8 +70,8 @@ fn get_git_ai_bin_path() -> String {
         .unwrap_or_else(|_| "git-ai".to_string())
 }
 
-fn get_home_dir() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+fn get_home_dir() -> PathBuf {
+    crate::paths::home_dir_or_tmp()
 }
 
 // --- macOS launchd ---
@@ -81,8 +81,7 @@ const LAUNCHD_LABEL: &str = "com.git-ai.daemon";
 
 #[cfg(target_os = "macos")]
 fn launchd_plist_path() -> PathBuf {
-    let home = get_home_dir();
-    PathBuf::from(&home)
+    get_home_dir()
         .join("Library")
         .join("LaunchAgents")
         .join(format!("{}.plist", LAUNCHD_LABEL))
@@ -126,7 +125,7 @@ fn enable_launchd() -> Result<(), String> {
     let bin_path = get_git_ai_bin_path();
     let home = get_home_dir();
 
-    let content = generate_launchd_plist(&bin_path, &home);
+    let content = generate_launchd_plist(&bin_path, &home.to_string_lossy());
 
     // Ensure LaunchAgents directory exists
     if let Some(parent) = plist_path.parent() {
@@ -200,8 +199,7 @@ const SYSTEMD_SERVICE_NAME: &str = "git-ai";
 
 #[cfg(target_os = "linux")]
 fn systemd_unit_path() -> PathBuf {
-    let home = get_home_dir();
-    PathBuf::from(&home)
+    get_home_dir()
         .join(".config")
         .join("systemd")
         .join("user")

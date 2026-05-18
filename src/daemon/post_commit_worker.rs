@@ -5,38 +5,11 @@
 //! explicit repo_path instead of discovering it from CWD.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use crate::core::merge;
 use crate::core::post_commit::generate_authorship_for_commit;
 use crate::core::working_log;
-
-// ---------------------------------------------------------------------------
-// Git helper
-// ---------------------------------------------------------------------------
-
-/// Run a git command in the given repo with GIT_TRACE2_EVENT=0 to prevent
-/// recursive daemon events.
-fn git_in_repo(repo_path: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(args)
-        .env("GIT_TRACE2_EVENT", "0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("git failed to execute: {}", e))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(format!("git {} failed: {}", args.join(" "), stderr))
-    }
-}
+use crate::git_cmd::git_in_repo;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -102,24 +75,11 @@ pub fn process_commit(repo_path: &Path) -> Result<bool, String> {
         .map_err(|e| format!("generate_authorship_for_commit failed: {}", e))?;
 
         let note_text = authorship_log.serialize_to_string();
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args([
-                "notes", "--ref=ai", "add", "-f", "-m", &note_text, commit_sha,
-            ])
-            .env("GIT_TRACE2_EVENT", "0")
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .status()
-            .map_err(|e| format!("failed to run git notes: {}", e))?;
-
-        if !status.success() {
-            return Err(format!(
-                "git notes add failed for {}",
-                &commit_sha[..7.min(commit_sha.len())]
-            ));
-        }
+        git_in_repo(
+            repo_path,
+            &["notes", "--ref=ai", "add", "-f", "-m", &note_text, commit_sha],
+        )
+        .map_err(|e| format!("git notes add failed for {}: {}", &commit_sha[..7.min(commit_sha.len())], e))?;
 
         eprintln!(
             "[git-ai daemon] wrote authorship note for {}",
@@ -166,6 +126,7 @@ pub fn process_commit(repo_path: &Path) -> Result<bool, String> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::process::Command;
 
     #[test]
     fn test_git_in_repo_returns_error_for_bad_dir() {

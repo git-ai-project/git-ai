@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -188,8 +187,7 @@ pub fn curl_post(url: &str, body: &str, timeout_secs: u64) -> Result<(u16, Strin
 
 /// Read a field from ~/.git-ai/config.json
 fn read_config_field(field: &str) -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let config_path = PathBuf::from(&home).join(".git-ai").join("config.json");
+    let config_path = crate::paths::git_ai_dir().join("config.json");
     let content = std::fs::read_to_string(&config_path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
     json.get(field)?.as_str().map(|s| s.to_string())
@@ -197,11 +195,7 @@ fn read_config_field(field: &str) -> Option<String> {
 
 /// Load OAuth auth token from credential store.
 fn load_auth_token() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let cred_path = PathBuf::from(&home)
-        .join(".git-ai")
-        .join("internal")
-        .join("credentials.json");
+    let cred_path = crate::paths::git_ai_internal_dir().join("credentials.json");
     let content = std::fs::read_to_string(&cred_path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
     json.get("access_token")?.as_str().map(|s| s.to_string())
@@ -240,13 +234,7 @@ fn generate_random_id() -> String {
 
 /// Get or create a persistent distinct_id at ~/.git-ai/internal/distinct_id
 fn get_or_create_distinct_id() -> String {
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => return generate_random_id(),
-    };
-
-    let internal_dir = PathBuf::from(&home).join(".git-ai").join("internal");
-    let id_path = internal_dir.join("distinct_id");
+    let id_path = crate::paths::git_ai_internal_dir().join("distinct_id");
 
     if let Ok(id) = std::fs::read_to_string(&id_path) {
         let trimmed = id.trim().to_string();
@@ -256,30 +244,8 @@ fn get_or_create_distinct_id() -> String {
     }
 
     let new_id = generate_random_id();
-    let _ = std::fs::create_dir_all(&internal_dir);
-    let _ = write_private_file(&id_path, new_id.as_bytes());
+    let _ = crate::paths::write_private(&id_path, new_id.as_bytes());
     new_id
-}
-
-/// Write a file with owner-only permissions (0600 on unix).
-fn write_private_file(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(content)?;
-        return Ok(());
-    }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(path, content)
-    }
 }
 
 #[cfg(test)]

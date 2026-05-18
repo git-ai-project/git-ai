@@ -49,39 +49,6 @@ pub fn git_cmd_in(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
-/// Like resolve_repo_info but from a specific working directory.
-pub fn resolve_repo_info_in(dir: &Path) -> Result<(String, PathBuf, String), String> {
-    let output = git_command()
-        .args(["rev-parse", "--show-toplevel", "--git-dir", "HEAD"])
-        .current_dir(dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("failed to run git rev-parse: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("git rev-parse failed: {}", stderr));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let lines: Vec<&str> = stdout.trim_end().lines().collect();
-    if lines.len() < 3 {
-        return Err("git rev-parse returned fewer than 3 lines".to_string());
-    }
-
-    let toplevel = lines[0].to_string();
-    let git_dir_raw = lines[1];
-    let git_dir = if Path::new(git_dir_raw).is_relative() {
-        PathBuf::from(&toplevel).join(git_dir_raw)
-    } else {
-        PathBuf::from(git_dir_raw)
-    };
-    let head_sha = lines[2].to_string();
-
-    Ok((toplevel, git_dir, head_sha))
-}
-
 /// Given an absolute file path, find the git repository root that contains it.
 /// Walks up from the file's parent directory looking for `.git/` (directory or file for worktrees).
 pub fn find_repo_root_for_path(file_path: &Path) -> Option<PathBuf> {

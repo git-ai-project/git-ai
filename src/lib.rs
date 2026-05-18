@@ -3,9 +3,11 @@ pub mod auth;
 pub mod ci;
 pub mod core;
 pub mod daemon;
+pub mod git_cmd;
 pub mod mdm;
 pub mod metrics;
 pub mod observability;
+pub mod paths;
 pub mod presets;
 pub mod transcripts;
 

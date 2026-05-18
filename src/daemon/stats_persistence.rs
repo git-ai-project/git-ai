@@ -34,10 +34,7 @@ pub fn save_stats(current: &stats::DaemonStats) {
     // (it will be updated on next start via update_last_started)
 
     if let Ok(json) = serde_json::to_string_pretty(&persisted) {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = write_private(&path, json.as_bytes());
+        let _ = crate::paths::write_private(&path, json.as_bytes());
     }
 }
 
@@ -56,44 +53,12 @@ pub fn update_last_started(timestamp: &str) {
     persisted.last_started = timestamp.to_string();
 
     if let Ok(json) = serde_json::to_string_pretty(&persisted) {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = write_private(&path, json.as_bytes());
-    }
-}
-
-fn write_private(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(content)?;
-        return Ok(());
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(path, content)
+        let _ = crate::paths::write_private(&path, json.as_bytes());
     }
 }
 
 fn stats_file_path() -> PathBuf {
-    #[cfg(unix)]
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    #[cfg(windows)]
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("APPDATA"))
-        .unwrap_or_else(|_| "C:\\Temp".to_string());
-
-    PathBuf::from(home)
-        .join(".git-ai")
-        .join("daemon_stats.json")
+    crate::paths::git_ai_dir().join("daemon_stats.json")
 }
 
 #[cfg(test)]

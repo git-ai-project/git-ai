@@ -420,10 +420,7 @@ pub fn install_vscode_extension() -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))
+    crate::paths::home_dir()
 }
 
 /// Resolve the config for a given tool, returning (full_path, hook_format).

@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use imara_diff::{Algorithm, Diff, InternedInput, TokenSource};
 
@@ -8,65 +7,9 @@ use crate::core::attribution::LineAttribution;
 use crate::core::authorship_log::{
     AttestationEntry, AuthorshipLog, FileAttestation, LineRange, Metadata,
 };
+use crate::git_cmd::{git_in_repo, git_in_repo_stdin};
 
 use super::commit_detector::RewriteKind;
-
-// ---------------------------------------------------------------------------
-// Git helper
-// ---------------------------------------------------------------------------
-
-fn git_in_repo(repo_path: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(args)
-        .env("GIT_TRACE2_EVENT", "0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("git failed to execute: {}", e))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(format!("git {} failed: {}", args.join(" "), stderr))
-    }
-}
-
-fn git_in_repo_stdin(repo_path: &Path, args: &[&str], stdin: &[u8]) -> Result<Vec<u8>, String> {
-    use std::io::Write;
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(args)
-        .env("GIT_TRACE2_EVENT", "0")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("git failed to spawn: {}", e))?;
-
-    if let Some(ref mut stdin_pipe) = child.stdin {
-        stdin_pipe
-            .write_all(stdin)
-            .map_err(|e| format!("failed to write to git stdin: {}", e))?;
-    }
-    drop(child.stdin.take());
-
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("git failed to complete: {}", e))?;
-
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(format!("git {} failed: {}", args.join(" "), stderr))
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Range-diff parsing
@@ -424,21 +367,9 @@ fn read_note(repo_path: &Path, sha: &str) -> Option<String> {
 }
 
 fn write_note(repo_path: &Path, sha: &str, content: &str) -> Result<(), String> {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(["notes", "--ref=ai", "add", "-f", "-m", content, sha])
-        .env("GIT_TRACE2_EVENT", "0")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
-        .map_err(|e| format!("failed to run git notes: {}", e))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("git notes add failed for {}", sha))
-    }
+    git_in_repo(repo_path, &["notes", "--ref=ai", "add", "-f", "-m", content, sha])
+        .map(|_| ())
+        .map_err(|_| format!("git notes add failed for {}", sha))
 }
 
 /// Batch read file contents at a specific commit using `git cat-file --batch`.
@@ -1421,6 +1352,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
 
     // -----------------------------------------------------------------------
     // Range-diff parser tests

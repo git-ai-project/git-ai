@@ -7,34 +7,9 @@
 //! current HEAD.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use super::working_log;
-
-// ---------------------------------------------------------------------------
-// Git helper
-// ---------------------------------------------------------------------------
-
-fn git_in_repo(repo_path: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(args)
-        .env("GIT_TRACE2_EVENT", "0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("git failed to execute: {}", e))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(format!("git {} failed: {}", args.join(" "), stderr))
-    }
-}
+use crate::git_cmd::git_in_repo;
 
 // ---------------------------------------------------------------------------
 // Resolve git dir from repo path
@@ -176,27 +151,11 @@ pub fn save_stash_attributions(
         .map_err(|e| format!("failed to serialize stash payload: {}", e))?;
 
     // Store as a git note on the stash commit
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args([
-            "notes",
-            "--ref=ai-stash",
-            "add",
-            "-f",
-            "-m",
-            &json,
-            &stash_sha,
-        ])
-        .env("GIT_TRACE2_EVENT", "0")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .status()
-        .map_err(|e| format!("failed to run git notes: {}", e))?;
-
-    if !status.success() {
-        return Err("git notes --ref=ai-stash add failed".to_string());
-    }
+    git_in_repo(
+        repo_path,
+        &["notes", "--ref=ai-stash", "add", "-f", "-m", &json, &stash_sha],
+    )
+    .map_err(|_| "git notes --ref=ai-stash add failed".to_string())?;
 
     // Clear or update the working log for this base commit
     if pathspecs.is_empty() {
@@ -481,6 +440,7 @@ mod tests {
     use super::*;
     use crate::core::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry};
     use std::path::PathBuf;
+    use std::process::{Command, Stdio};
 
     fn setup_repo() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();

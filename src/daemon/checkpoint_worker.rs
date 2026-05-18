@@ -1,34 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::attribution::{attributions_to_line_attributions, update_attributions};
 use crate::core::authorship_log;
 use crate::core::working_log::{self, AgentId, Checkpoint, CheckpointKind, WorkingLogEntry};
+use crate::git_cmd::git_in_repo;
 
 use super::protocol::{CheckpointRequest, StatusRequest, StatusResponse};
-
-fn git_in_repo(repo_path: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(args)
-        .env("GIT_TRACE2_EVENT", "0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("git failed to execute: {}", e))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(format!("git {} failed: {}", args.join(" "), stderr))
-    }
-}
 
 pub fn process_checkpoint(req: &CheckpointRequest) -> Result<u32, String> {
     let repo_path = PathBuf::from(&req.repo_dir);
@@ -279,9 +258,8 @@ fn has_pending_ai_edit(git_dir: &Path, relative_path: &str) -> bool {
 }
 
 fn is_file_conflicted(repo_path: &Path, relative_path: &str) -> bool {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
+    use std::process::Stdio;
+    let output = crate::git_cmd::git_command(repo_path)
         .args(["status", "--porcelain", "--", relative_path])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

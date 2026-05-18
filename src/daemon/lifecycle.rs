@@ -72,17 +72,7 @@ impl DaemonPaths {
     }
 
     pub fn base_dir() -> PathBuf {
-        #[cfg(unix)]
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        #[cfg(windows)]
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("APPDATA"))
-            .unwrap_or_else(|_| "C:\\Temp".to_string());
-
-        PathBuf::from(&home)
-            .join(".git-ai")
-            .join("internal")
-            .join("daemon")
+        crate::paths::daemon_dir()
     }
 
     fn resolve_socket_path(base_dir: &Path, name: &str) -> PathBuf {
@@ -132,11 +122,7 @@ impl DaemonPaths {
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
+    crate::paths::hex_encode(bytes)
 }
 
 pub fn acquire_lock(path: &Path) -> Result<File, Error> {
@@ -222,26 +208,7 @@ pub fn write_pid_file(path: &Path) -> Result<(), Error> {
         pid, started_at, version
     );
 
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    {
-        use std::io::Write;
-        let mut file = File::create(path)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-    }
+    crate::paths::write_private(path, content.as_bytes())?;
     Ok(())
 }
 

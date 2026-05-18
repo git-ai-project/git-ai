@@ -124,11 +124,7 @@ pub fn spawn_telemetry_worker(shutdown: Arc<AtomicBool>) -> TelemetryHandle {
 }
 
 fn queue_db_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home)
-        .join(".git-ai")
-        .join("internal")
-        .join("telemetry_queue.db")
+    crate::paths::git_ai_internal_dir().join("telemetry_queue.db")
 }
 
 fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>, shutdown: Arc<AtomicBool>) {

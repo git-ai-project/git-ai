@@ -30,36 +30,12 @@ pub fn load_token() -> Option<String> {
 pub fn save_token(token: &str) -> Result<(), String> {
     let path = credentials_path().ok_or("unable to determine home directory")?;
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create directory {}: {e}", parent.display()))?;
-    }
-
     let content = serde_json::json!({ "token": token });
     let serialized =
         serde_json::to_string_pretty(&content).map_err(|e| format!("json error: {e}"))?;
 
-    // Write with restricted permissions from the start to avoid TOCTOU race
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
-        file.write_all(serialized.as_bytes())
-            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows: write then restrict (no atomic mode creation available)
-        fs::write(&path, &serialized)
-            .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
-    }
+    crate::paths::write_private(&path, serialized.as_bytes())
+        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
 
     Ok(())
 }

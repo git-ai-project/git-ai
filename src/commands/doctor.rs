@@ -1,4 +1,3 @@
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{self, Stdio};
@@ -44,10 +43,7 @@ fn fail(msg: &str) {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    env::var("HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| env::var("USERPROFILE").ok().map(PathBuf::from))
+    git_ai::paths::home_dir()
 }
 
 fn check_binary_installed() -> bool {
@@ -387,6 +383,7 @@ fn resolve_socket_path(base_dir: &std::path::Path, name: &str) -> PathBuf {
 mod tests {
     use super::*;
     use serial_test::serial;
+    use std::env;
 
     #[test]
     fn test_extract_pid_from_json() {

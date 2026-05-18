@@ -12,16 +12,8 @@ pub struct OAuthClient {
     base_url: String,
 }
 
-/// Get the user's home directory.
 fn home_dir() -> Option<PathBuf> {
-    #[cfg(unix)]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
+    crate::paths::home_dir()
 }
 
 /// Read the API base URL from `~/.git-ai/config.json`.

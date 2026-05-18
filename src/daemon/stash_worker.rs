@@ -4,34 +4,9 @@
 //! `core::stash` to save/restore working-log attributions.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use crate::core::stash;
-
-// ---------------------------------------------------------------------------
-// Git helper
-// ---------------------------------------------------------------------------
-
-fn git_in_repo(repo_path: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .args(args)
-        .env("GIT_TRACE2_EVENT", "0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("git failed to execute: {}", e))?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(format!("git {} failed: {}", args.join(" "), stderr))
-    }
-}
+use crate::git_cmd::git_in_repo;
 
 // ---------------------------------------------------------------------------
 // Public API

@@ -48,10 +48,7 @@ fn perf_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("GIT_AI_PERF_DATA_DIR") {
         return PathBuf::from(dir);
     }
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".git-ai")
+    crate::paths::git_ai_dir()
 }
 
 fn baseline_path() -> PathBuf {

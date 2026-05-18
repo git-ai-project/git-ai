@@ -9,16 +9,8 @@ const SERVICE_NAME: &str = "git-ai";
 #[cfg(all(not(test), feature = "keyring"))]
 const USERNAME: &str = "oauth-tokens";
 
-/// Get the user's home directory.
 fn home_dir() -> Option<PathBuf> {
-    #[cfg(unix)]
-    {
-        std::env::var_os("HOME").map(PathBuf::from)
-    }
-    #[cfg(windows)]
-    {
-        std::env::var_os("USERPROFILE").map(PathBuf::from)
-    }
+    crate::paths::home_dir()
 }
 
 /// Read the `auth_keyring` feature flag from `~/.git-ai/config.json`.

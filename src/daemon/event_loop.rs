@@ -194,23 +194,9 @@ fn dispatch_commit(
 
 fn emit_commit_telemetry(repo_path: &std::path::Path, telemetry: &TelemetryHandle) {
     use super::telemetry_types::{MetricEvent, MetricEventId, SparseArray};
-    use std::process::{Command, Stdio};
 
     let git = |args: &[&str]| -> Option<String> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .args(args)
-            .env("GIT_TRACE2_EVENT", "0")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .ok()?;
-        if output.status.success() {
-            Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            None
-        }
+        crate::git_cmd::git_in_repo(repo_path, args).ok()
     };
 
     let commit_sha = match git(&["rev-parse", "HEAD"]) {
