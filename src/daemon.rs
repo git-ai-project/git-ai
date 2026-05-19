@@ -6994,6 +6994,68 @@ impl ActorDaemonCoordinator {
         Ok(out)
     }
 
+    /// Detects non-fast-forward ref moves and fires handle_rewrite_event.
+    fn detect_and_handle_non_ff_rewrites(
+        &self,
+        cmd: &crate::daemon::domain::NormalizedCommand,
+    ) -> Result<(), GitAiError> {
+        let worktree = match cmd.worktree.as_ref() {
+            Some(w) => w,
+            None => return Ok(()),
+        };
+
+        let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+
+        // Collect branch ref changes (skip notes, tags, etc.)
+        let branch_changes: Vec<_> = cmd
+            .ref_changes
+            .iter()
+            .filter(|rc| rc.reference.starts_with("refs/heads/"))
+            .filter(|rc| is_valid_oid(&rc.old) && !is_zero_oid(&rc.old))
+            .filter(|rc| is_valid_oid(&rc.new) && !is_zero_oid(&rc.new))
+            .collect();
+
+        if branch_changes.is_empty() {
+            return Ok(());
+        }
+
+        // Collapse multiple changes to same branch: use (first old, last new)
+        let mut collapsed: std::collections::HashMap<&str, (&str, &str)> =
+            std::collections::HashMap::new();
+        for rc in &branch_changes {
+            collapsed
+                .entry(rc.reference.as_str())
+                .and_modify(|(_old, new)| *new = &rc.new)
+                .or_insert((&rc.old, &rc.new));
+        }
+
+        for (_ref_name, (old_tip, new_tip)) in &collapsed {
+            if *old_tip == *new_tip {
+                continue;
+            }
+
+            // Fast-forward — not a rewrite
+            if is_ancestor_commit(&repo, old_tip, new_tip) {
+                continue;
+            }
+
+            // Backward reset (new_tip is ancestor of old_tip) — handled by old pipeline
+            if is_ancestor_commit(&repo, new_tip, old_tip) {
+                continue;
+            }
+
+            crate::authorship::rewrite::handle_rewrite_event(
+                &repo,
+                crate::authorship::rewrite::RewriteEvent::NonFastForward {
+                    old_tip: old_tip.to_string(),
+                    new_tip: new_tip.to_string(),
+                },
+            )?;
+        }
+
+        Ok(())
+    }
+
     async fn maybe_apply_side_effects_for_applied_command(
         &self,
         family: Option<&str>,
@@ -7164,6 +7226,16 @@ impl ActorDaemonCoordinator {
                 }
             }
         }
+
+        // New unified rewrite detection
+        if let Err(e) = self.detect_and_handle_non_ff_rewrites(cmd) {
+            tracing::debug!(
+                sid = %cmd.root_sid,
+                %e,
+                "non-ff rewrite detection failed (non-fatal)"
+            );
+        }
+
         if cmd.exit_code != 0 {
             if cmd.primary_command.as_deref() == Some("rebase") {
                 let worktree = cmd.worktree.as_ref().ok_or_else(|| {
@@ -7271,6 +7343,83 @@ impl ActorDaemonCoordinator {
                             cmd.invoked_command.as_deref(),
                             &cmd.invoked_args,
                         );
+                    }
+                    crate::daemon::domain::SemanticEvent::CherryPickComplete {
+                        original_head,
+                        new_head,
+                    } => {
+                        if !new_head.is_empty() {
+                            let repo = find_repository_in_path(&worktree)?;
+                            let sources =
+                                crate::authorship::rewrite_cherry_pick::expand_cherry_pick_sources(
+                                    &repo,
+                                    &cmd.invoked_args,
+                                );
+                            let new_commits =
+                                crate::authorship::rewrite_cherry_pick::new_commits_since(
+                                    &repo,
+                                    original_head,
+                                );
+                            let pairs =
+                                crate::authorship::rewrite_cherry_pick::match_cherry_pick_pairs(
+                                    &repo, &sources, &new_commits,
+                                );
+                            if !pairs.is_empty() {
+                                let (src, dst): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+                                let _ = crate::authorship::rewrite::handle_rewrite_event(
+                                    &repo,
+                                    crate::authorship::rewrite::RewriteEvent::CherryPickComplete {
+                                        sources: src,
+                                        new_commits: dst,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    crate::daemon::domain::SemanticEvent::StashOperation {
+                        kind,
+                        stash_ref,
+                        head,
+                    } => {
+                        let repo = find_repository_in_path(&worktree)?;
+                        match kind {
+                            crate::daemon::domain::StashOpKind::Push => {
+                                if let (Some(stash_sha), Some(head_sha)) =
+                                    (stash_ref.as_deref(), head.as_deref())
+                                {
+                                    let pathspecs = Self::stash_pathspecs_from_command(cmd);
+                                    let _ =
+                                        crate::authorship::rewrite_stash::handle_stash_create(
+                                            &repo, stash_sha, head_sha, pathspecs,
+                                        );
+                                }
+                            }
+                            crate::daemon::domain::StashOpKind::Pop => {
+                                if let Some(stash_sha) = stash_ref.as_deref() {
+                                    let _ =
+                                        crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
+                                            &repo, stash_sha, true,
+                                        );
+                                }
+                            }
+                            crate::daemon::domain::StashOpKind::Apply
+                            | crate::daemon::domain::StashOpKind::Branch => {
+                                if let Some(stash_sha) = stash_ref.as_deref() {
+                                    let _ =
+                                        crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
+                                            &repo, stash_sha, false,
+                                        );
+                                }
+                            }
+                            crate::daemon::domain::StashOpKind::Drop => {
+                                if let Some(stash_sha) = stash_ref.as_deref() {
+                                    let _ = crate::authorship::rewrite_stash::handle_stash_drop(
+                                        &repo, stash_sha,
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                     _ => {}
                 }
