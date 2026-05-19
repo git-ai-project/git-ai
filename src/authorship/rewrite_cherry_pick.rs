@@ -3,7 +3,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::config;
-use crate::git::repository::{exec_git_allow_nonzero, Repository};
+use crate::git::repository::{Repository, exec_git_allow_nonzero};
 
 pub struct PendingCherryPick {
     pub all_sources: Vec<String>,
@@ -139,19 +139,15 @@ pub fn expand_cherry_pick_sources(repo: &Repository, argv: &[String]) -> Vec<Str
         if arg.contains("..") {
             // Expand range via rev-list
             let mut args = repo.global_args_for_exec();
-            args.extend([
-                "rev-list".to_string(),
-                "--reverse".to_string(),
-                arg.clone(),
-            ]);
-            if let Ok(output) = exec_git_allow_nonzero(&args) {
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        let trimmed = line.trim();
-                        if is_full_sha(trimmed) {
-                            sources.push(trimmed.to_string());
-                        }
+            args.extend(["rev-list".to_string(), "--reverse".to_string(), arg.clone()]);
+            if let Ok(output) = exec_git_allow_nonzero(&args)
+                && output.status.success()
+            {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let trimmed = line.trim();
+                    if is_full_sha(trimmed) {
+                        sources.push(trimmed.to_string());
                     }
                 }
             }
@@ -159,12 +155,12 @@ pub fn expand_cherry_pick_sources(repo: &Repository, argv: &[String]) -> Vec<Str
             // Resolve single ref
             let mut args = repo.global_args_for_exec();
             args.extend(["rev-parse".to_string(), arg.clone()]);
-            if let Ok(output) = exec_git_allow_nonzero(&args) {
-                if output.status.success() {
-                    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if is_full_sha(&resolved) {
-                        sources.push(resolved);
-                    }
+            if let Ok(output) = exec_git_allow_nonzero(&args)
+                && output.status.success()
+            {
+                let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if is_full_sha(&resolved) {
+                    sources.push(resolved);
                 }
             }
         }
@@ -214,14 +210,20 @@ mod tests {
         let new_commits = vec!["abc".repeat(13) + "a"]; // 40 chars
         // With empty sources, result should be empty regardless
         assert!(sources.is_empty());
-        assert_eq!(positional_pair(&sources, &new_commits), Vec::<(String, String)>::new());
+        assert_eq!(
+            positional_pair(&sources, &new_commits),
+            Vec::<(String, String)>::new()
+        );
     }
 
     #[test]
     fn match_cherry_pick_pairs_empty_new_commits() {
         let sources = vec!["a".repeat(40)];
         let new_commits: Vec<String> = Vec::new();
-        assert_eq!(positional_pair(&sources, &new_commits), Vec::<(String, String)>::new());
+        assert_eq!(
+            positional_pair(&sources, &new_commits),
+            Vec::<(String, String)>::new()
+        );
     }
 
     #[test]
@@ -273,7 +275,7 @@ mod tests {
     #[test]
     fn expand_skips_flags() {
         // Verify the flag-skipping logic without needing a real repo
-        let argv = vec![
+        let argv = [
             "-n".to_string(),
             "--no-commit".to_string(),
             "abc123".to_string(),
@@ -286,7 +288,7 @@ mod tests {
 
     #[test]
     fn expand_detects_ranges() {
-        let argv = vec!["main..feature".to_string(), "abc123".to_string()];
+        let argv = ["main..feature".to_string(), "abc123".to_string()];
         let range_args: Vec<&String> = argv.iter().filter(|a| a.contains("..")).collect();
         let single_args: Vec<&String> = argv
             .iter()

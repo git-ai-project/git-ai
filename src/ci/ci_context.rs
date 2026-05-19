@@ -1,5 +1,5 @@
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
-use crate::authorship::rewrite::{handle_rewrite_event, RewriteEvent};
+use crate::authorship::rewrite::{RewriteEvent, handle_rewrite_event};
 use crate::error::GitAiError;
 use crate::git::notes_api::{
     read_authorship_v3 as get_reference_as_authorship_log_v3, read_note as show_authorship_note,

@@ -2943,26 +2943,19 @@ pub fn restore_virtual_attribution_carryover(
         return Ok(());
     }
 
-    let new_va = VirtualAttributions::from_persisted_working_log(
-        repo.clone(),
-        new_head.to_string(),
-        None,
-    )
-    .unwrap_or_else(|_| {
-        VirtualAttributions::new(
-            repo.clone(),
-            new_head.to_string(),
-            HashMap::new(),
-            HashMap::new(),
-            0,
-        )
-    });
+    let new_va =
+        VirtualAttributions::from_persisted_working_log(repo.clone(), new_head.to_string(), None)
+            .unwrap_or_else(|_| {
+                VirtualAttributions::new(
+                    repo.clone(),
+                    new_head.to_string(),
+                    HashMap::new(),
+                    HashMap::new(),
+                    0,
+                )
+            });
 
-    let merged_va = merge_attributions_favoring_first(
-        carried_va,
-        new_va,
-        final_state.clone(),
-    )?;
+    let merged_va = merge_attributions_favoring_first(carried_va, new_va, final_state.clone())?;
     let initial_attributions = merged_va.to_initial_working_log_only();
     if initial_attributions.files.is_empty()
         && initial_attributions.prompts.is_empty()

@@ -426,12 +426,14 @@ fn build_authorship_push_args(global_args: Vec<String>, remote_name: &str) -> Ve
     args
 }
 
+#[allow(dead_code)]
 pub(crate) fn should_skip_authorship_push(command_args: &[String]) -> bool {
     crate::git::cli_parser::is_dry_run(command_args)
         || command_args.iter().any(|a| a == "-d" || a == "--delete")
         || command_args.iter().any(|a| a == "--mirror")
 }
 
+#[allow(dead_code)]
 pub(crate) fn resolve_push_remote_for_daemon(
     repo: &Repository,
     _command: Option<&str>,
@@ -460,7 +462,11 @@ pub(crate) fn resolve_push_remote_for_daemon(
     specified_remote.or(upstream_remote).or(default_remote)
 }
 
-fn extract_remote_from_push_args_internal(args: &[String], known_remotes: &[String]) -> Option<String> {
+#[allow(dead_code)]
+fn extract_remote_from_push_args_internal(
+    args: &[String],
+    known_remotes: &[String],
+) -> Option<String> {
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -496,6 +502,7 @@ fn extract_remote_from_push_args_internal(args: &[String], known_remotes: &[Stri
         .cloned()
 }
 
+#[allow(dead_code)]
 fn push_option_with_inline_value(arg: &str) -> Option<(&str, &str)> {
     if let Some((flag, value)) = arg.split_once('=') {
         Some((flag, value))
@@ -508,6 +515,7 @@ fn push_option_with_inline_value(arg: &str) -> Option<(&str, &str)> {
     }
 }
 
+#[allow(dead_code)]
 fn push_option_consumes_separate_value(arg: &str) -> bool {
     matches!(
         arg,

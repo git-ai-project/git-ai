@@ -7029,7 +7029,7 @@ impl ActorDaemonCoordinator {
                 .or_insert((&rc.old, &rc.new));
         }
 
-        for (_ref_name, (old_tip, new_tip)) in &collapsed {
+        for (old_tip, new_tip) in collapsed.values() {
             if *old_tip == *new_tip {
                 continue;
             }
@@ -7362,7 +7362,9 @@ impl ActorDaemonCoordinator {
                                 );
                             let pairs =
                                 crate::authorship::rewrite_cherry_pick::match_cherry_pick_pairs(
-                                    &repo, &sources, &new_commits,
+                                    &repo,
+                                    &sources,
+                                    &new_commits,
                                 );
                             if !pairs.is_empty() {
                                 let (src, dst): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
@@ -7388,10 +7390,9 @@ impl ActorDaemonCoordinator {
                                     (stash_ref.as_deref(), head.as_deref())
                                 {
                                     let pathspecs = Self::stash_pathspecs_from_command(cmd);
-                                    let _ =
-                                        crate::authorship::rewrite_stash::handle_stash_create(
-                                            &repo, stash_sha, head_sha, pathspecs,
-                                        );
+                                    let _ = crate::authorship::rewrite_stash::handle_stash_create(
+                                        &repo, stash_sha, head_sha, pathspecs,
+                                    );
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Pop => {

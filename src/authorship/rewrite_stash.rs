@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::authorship::rewrite::migrate_working_log_if_needed;
 use crate::error::GitAiError;
-use crate::git::repository::{exec_git_allow_nonzero, Repository};
+use crate::git::repository::{Repository, exec_git_allow_nonzero};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StashMetadata {
@@ -44,8 +44,12 @@ fn clean_working_log_for_stash(
         initial.files.clear();
         initial.file_blobs.clear();
     } else {
-        initial.files.retain(|path, _| !path_matches_any(path, pathspecs));
-        initial.file_blobs.retain(|path, _| !path_matches_any(path, pathspecs));
+        initial
+            .files
+            .retain(|path, _| !path_matches_any(path, pathspecs));
+        initial
+            .file_blobs
+            .retain(|path, _| !path_matches_any(path, pathspecs));
     }
 
     persisted.write_initial(initial)?;
@@ -105,10 +109,8 @@ pub fn handle_stash_pop_or_apply(
     };
 
     if !current_head.is_empty() && metadata.base_commit != current_head {
-        let _ = migrate_working_log_if_needed(
-            repo,
-            &[(metadata.base_commit.clone(), current_head)],
-        );
+        let _ =
+            migrate_working_log_if_needed(repo, &[(metadata.base_commit.clone(), current_head)]);
     }
 
     if is_pop {
@@ -161,10 +163,10 @@ pub fn gc_stash_metadata(repo: &Repository) -> Result<(), GitAiError> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name_str = name.to_string_lossy().to_string();
-        if let Some(sha) = name_str.strip_suffix(".json") {
-            if !live_shas.contains(sha) {
-                let _ = fs::remove_file(entry.path());
-            }
+        if let Some(sha) = name_str.strip_suffix(".json")
+            && !live_shas.contains(sha)
+        {
+            let _ = fs::remove_file(entry.path());
         }
     }
 

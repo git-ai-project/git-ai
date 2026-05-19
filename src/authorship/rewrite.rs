@@ -1,13 +1,21 @@
 use std::collections::HashMap;
 
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
-use crate::authorship::hunk_shift::{apply_hunk_shifts_to_file_attestation, parse_hunk_header, DiffHunk};
+use crate::authorship::hunk_shift::{
+    DiffHunk, apply_hunk_shifts_to_file_attestation, parse_hunk_header,
+};
 use crate::error::GitAiError;
-use crate::git::repository::{exec_git, exec_git_allow_nonzero, Repository};
+use crate::git::repository::{Repository, exec_git, exec_git_allow_nonzero};
 
 pub enum RewriteEvent {
-    NonFastForward { old_tip: String, new_tip: String },
-    CherryPickComplete { sources: Vec<String>, new_commits: Vec<String> },
+    NonFastForward {
+        old_tip: String,
+        new_tip: String,
+    },
+    CherryPickComplete {
+        sources: Vec<String>,
+        new_commits: Vec<String>,
+    },
 }
 
 pub(crate) struct DiffTreeResult {
@@ -20,9 +28,10 @@ pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<()
         RewriteEvent::NonFastForward { old_tip, new_tip } => {
             derive_mappings_from_range_diff(repo, &old_tip, &new_tip)?
         }
-        RewriteEvent::CherryPickComplete { sources, new_commits } => {
-            sources.into_iter().zip(new_commits).collect()
-        }
+        RewriteEvent::CherryPickComplete {
+            sources,
+            new_commits,
+        } => sources.into_iter().zip(new_commits).collect(),
     };
     if mappings.is_empty() {
         return Ok(());
@@ -132,31 +141,20 @@ pub fn derive_mappings_from_range_diff(
 
 fn find_merge_base(repo: &Repository, a: &str, b: &str) -> Option<String> {
     let mut args = repo.global_args_for_exec();
-    args.extend([
-        "merge-base".to_string(),
-        a.to_string(),
-        b.to_string(),
-    ]);
+    args.extend(["merge-base".to_string(), a.to_string(), b.to_string()]);
 
     let output = exec_git_allow_nonzero(&args).ok()?;
     if !output.status.success() {
         return None;
     }
     let base = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if base.is_empty() {
-        None
-    } else {
-        Some(base)
-    }
+    if base.is_empty() { None } else { Some(base) }
 }
 
 fn is_full_squash(repo: &Repository, base: &str, old_tip: &str, new_tip: &str) -> bool {
     // Check new_tip^ == base (exactly one commit between base and new_tip)
     let mut args = repo.global_args_for_exec();
-    args.extend([
-        "rev-parse".to_string(),
-        format!("{}^", new_tip),
-    ]);
+    args.extend(["rev-parse".to_string(), format!("{}^", new_tip)]);
     let Ok(output) = exec_git_allow_nonzero(&args) else {
         return false;
     };
@@ -170,10 +168,7 @@ fn is_full_squash(repo: &Repository, base: &str, old_tip: &str, new_tip: &str) -
 
     // Check new_tip is not a merge commit (new_tip^2 should fail)
     let mut args = repo.global_args_for_exec();
-    args.extend([
-        "rev-parse".to_string(),
-        format!("{}^2", new_tip),
-    ]);
+    args.extend(["rev-parse".to_string(), format!("{}^2", new_tip)]);
     let Ok(output) = exec_git_allow_nonzero(&args) else {
         return false;
     };
@@ -355,15 +350,16 @@ fn list_merge_commits(repo: &Repository, base: &str, tip: &str) -> Result<Vec<St
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+    Ok(stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
 }
 
 fn get_commit_parents(repo: &Repository, sha: &str) -> Vec<String> {
     let mut args = repo.global_args_for_exec();
-    args.extend([
-        "rev-parse".to_string(),
-        format!("{}^@", sha),
-    ]);
+    args.extend(["rev-parse".to_string(), format!("{}^@", sha)]);
 
     let Ok(output) = exec_git_allow_nonzero(&args) else {
         return Vec::new();
@@ -373,7 +369,11 @@ fn get_commit_parents(repo: &Repository, sha: &str) -> Vec<String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()
+    stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 pub fn migrate_working_log_if_needed(
@@ -540,16 +540,18 @@ fn parse_diff_tree_output(output: &str) -> DiffTreeResult {
             if let Some(from_path) = current_rename_from.take() {
                 renames.push((from_path, to_path.to_string()));
             }
-        } else if line.starts_with("@@") {
-            if let Some(ref file) = current_file {
-                if let Some(hunk) = parse_hunk_header(line) {
-                    hunks_by_file.entry(file.clone()).or_default().push(hunk);
-                }
-            }
+        } else if line.starts_with("@@")
+            && let Some(ref file) = current_file
+            && let Some(hunk) = parse_hunk_header(line)
+        {
+            hunks_by_file.entry(file.clone()).or_default().push(hunk);
         }
     }
 
-    DiffTreeResult { hunks_by_file, renames }
+    DiffTreeResult {
+        hunks_by_file,
+        renames,
+    }
 }
 
 fn extract_b_path(diff_header: &str) -> Option<String> {
@@ -599,7 +601,10 @@ mod tests {
 
     #[test]
     fn test_extract_b_path_simple() {
-        assert_eq!(extract_b_path("a/src/main.rs b/src/main.rs"), Some("src/main.rs".to_string()));
+        assert_eq!(
+            extract_b_path("a/src/main.rs b/src/main.rs"),
+            Some("src/main.rs".to_string())
+        );
     }
 
     #[test]
@@ -655,7 +660,10 @@ index abc123..def456 100644
 ";
         let result = parse_diff_tree_output(output);
         assert_eq!(result.renames.len(), 1);
-        assert_eq!(result.renames[0], ("src/old.rs".to_string(), "src/new.rs".to_string()));
+        assert_eq!(
+            result.renames[0],
+            ("src/old.rs".to_string(), "src/new.rs".to_string())
+        );
         let hunks = &result.hunks_by_file["src/new.rs"];
         assert_eq!(hunks.len(), 1);
         assert_eq!(hunks[0].old_start, 5);
@@ -700,7 +708,10 @@ Binary files a/image.png and b/image.png differ
         let result = parse_diff_tree_output(output);
         // No hunks for binary files
         assert!(
-            result.hunks_by_file.get("image.png").map_or(true, |h| h.is_empty())
+            result
+                .hunks_by_file
+                .get("image.png")
+                .is_none_or(|h| h.is_empty())
         );
     }
 
@@ -713,7 +724,7 @@ Binary files a/image.png and b/image.png differ
 
     #[test]
     fn test_is_hex_sha_valid() {
-        assert!(is_hex_sha("a" .repeat(40).as_str()));
+        assert!(is_hex_sha("a".repeat(40).as_str()));
         assert!(is_hex_sha("0123456789abcdef0123456789abcdef01234567"));
         assert!(is_hex_sha("ABCDEF0123456789abcdef0123456789abcdef01"));
     }
@@ -722,7 +733,7 @@ Binary files a/image.png and b/image.png differ
     fn test_is_hex_sha_invalid() {
         assert!(!is_hex_sha("short"));
         assert!(!is_hex_sha("g123456789abcdef0123456789abcdef01234567"));
-        assert!(!is_hex_sha("0123456789abcdef0123456789abcdef0123456"));  // 39 chars
+        assert!(!is_hex_sha("0123456789abcdef0123456789abcdef0123456")); // 39 chars
         assert!(!is_hex_sha("0123456789abcdef0123456789abcdef012345678")); // 41 chars
         assert!(!is_hex_sha(""));
     }
@@ -771,9 +782,27 @@ Binary files a/image.png and b/image.png differ
 ";
         let mappings = parse_range_diff_output(output);
         assert_eq!(mappings.len(), 3);
-        assert_eq!(mappings[0], ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()));
-        assert_eq!(mappings[1], ("cccccccccccccccccccccccccccccccccccccccc".to_string(), "dddddddddddddddddddddddddddddddddddddddd".to_string()));
-        assert_eq!(mappings[2], ("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string(), "ffffffffffffffffffffffffffffffffffffffff".to_string()));
+        assert_eq!(
+            mappings[0],
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()
+            )
+        );
+        assert_eq!(
+            mappings[1],
+            (
+                "cccccccccccccccccccccccccccccccccccccccc".to_string(),
+                "dddddddddddddddddddddddddddddddddddddddd".to_string()
+            )
+        );
+        assert_eq!(
+            mappings[2],
+            (
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string(),
+                "ffffffffffffffffffffffffffffffffffffffff".to_string()
+            )
+        );
     }
 
     #[test]

@@ -299,9 +299,10 @@ mod tests {
             new_count: 3,
         }];
 
-        let entries = vec![
-            AttestationEntry::new("a".to_string(), vec![LineRange::Range(1, 5)]),
-        ];
+        let entries = vec![AttestationEntry::new(
+            "a".to_string(),
+            vec![LineRange::Range(1, 5)],
+        )];
 
         let result = apply_hunk_shifts_to_attestation_entries(&entries, &hunks);
         assert_eq!(result.len(), 1);
