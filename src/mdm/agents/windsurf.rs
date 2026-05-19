@@ -4,8 +4,8 @@ use crate::mdm::hook_installer::{
 };
 use crate::mdm::utils::{
     generate_diff, home_dir, install_vsc_editor_extension, is_git_ai_checkpoint_command,
-    is_github_codespaces, is_vsc_editor_extension_installed, resolve_editor_cli, to_git_bash_path,
-    write_atomic,
+    is_github_codespaces, is_vsc_editor_extension_installed, resolve_editor_cli,
+    to_agent_hook_command_path, write_atomic,
 };
 
 use serde_json::{Value, json};
@@ -272,7 +272,7 @@ impl HookInstaller for WindsurfInstaller {
     ) -> Result<Option<String>, GitAiError> {
         let desired_cmd = format!(
             "{} {}",
-            to_git_bash_path(&params.binary_path),
+            to_agent_hook_command_path(&params.binary_path),
             WINDSURF_CHECKPOINT_CMD
         );
 

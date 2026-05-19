@@ -704,6 +704,18 @@ pub fn to_git_bash_path(path: &Path) -> String {
     s.into_owned()
 }
 
+/// Convert a path for agent hook command execution.
+/// On Windows, use `C:/...` style paths so commands can run in cmd.exe,
+/// PowerShell, and shells that also accept forward slashes.
+/// On non-Windows platforms, return the existing hook command path style.
+pub fn to_agent_hook_command_path(path: &Path) -> String {
+    if cfg!(windows) {
+        to_windows_git_bash_style_path(path)
+    } else {
+        to_git_bash_path(path)
+    }
+}
+
 /// Get the absolute path to the currently running binary
 pub fn get_current_binary_path() -> Result<PathBuf, GitAiError> {
     let path = std::env::current_exe()?;

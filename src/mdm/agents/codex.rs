@@ -1,8 +1,8 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
 use crate::mdm::utils::{
-    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command, to_git_bash_path,
-    write_atomic,
+    binary_exists, generate_diff, home_dir, is_git_ai_checkpoint_command,
+    to_agent_hook_command_path, to_git_bash_path, write_atomic,
 };
 use serde_json::{Value as JsonValue, json};
 use sha2::{Digest, Sha256};
@@ -26,6 +26,14 @@ impl CodexInstaller {
     }
 
     fn desired_command(binary_path: &Path) -> String {
+        format!(
+            "{} {}",
+            to_agent_hook_command_path(binary_path),
+            CODEX_CHECKPOINT_CMD
+        )
+    }
+
+    fn legacy_msys_desired_command(binary_path: &Path) -> String {
         format!("{} {}", to_git_bash_path(binary_path), CODEX_CHECKPOINT_CMD)
     }
 
@@ -212,6 +220,13 @@ impl CodexInstaller {
         config: &TomlValue,
         binary_path: &Path,
     ) -> Result<TomlValue, GitAiError> {
+        Self::config_with_installed_hooks_for_command(config, Self::desired_command(binary_path))
+    }
+
+    fn config_with_installed_hooks_for_command(
+        config: &TomlValue,
+        desired_command: String,
+    ) -> Result<TomlValue, GitAiError> {
         let mut merged = Self::remove_notify_if_git_ai(config)?.unwrap_or(config.clone());
         let root = merged
             .as_table_mut()
@@ -232,7 +247,6 @@ impl CodexInstaller {
         }
 
         // Add inline hooks to config.toml under [hooks] table
-        let desired_command = Self::desired_command(binary_path);
         let hooks_table = root
             .entry("hooks")
             .or_insert_with(|| TomlValue::Table(Map::new()));
@@ -632,6 +646,14 @@ impl HookInstaller for CodexInstaller {
         };
 
         let desired_config = Self::config_with_installed_hooks(&config, &params.binary_path)?;
+        let legacy_msys_desired_config = if cfg!(windows) {
+            Some(Self::config_with_installed_hooks_for_command(
+                &config,
+                Self::legacy_msys_desired_command(&params.binary_path),
+            )?)
+        } else {
+            None
+        };
         let has_inline_hooks = Self::config_has_inline_hooks(&config);
         let has_legacy_hooks_json = Self::hooks_json_path().exists()
             && Self::parse_hooks_json(&fs::read_to_string(Self::hooks_json_path())?)
@@ -639,7 +661,12 @@ impl HookInstaller for CodexInstaller {
                 .unwrap_or(false);
         let hooks_installed = Self::config_hooks_feature_enabled(&config)
             && (has_inline_hooks || has_legacy_hooks_json);
-        let hooks_up_to_date = config == desired_config && !has_legacy_hooks_json;
+        let hooks_up_to_date = (config == desired_config
+            || legacy_msys_desired_config
+                .as_ref()
+                .map(|legacy| config == *legacy)
+                .unwrap_or(false))
+            && !has_legacy_hooks_json;
 
         Ok(HookCheckResult {
             tool_installed: true,

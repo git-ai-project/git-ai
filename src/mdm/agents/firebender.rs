@@ -1,6 +1,6 @@
 use crate::error::GitAiError;
 use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerParams};
-use crate::mdm::utils::{generate_diff, home_dir, to_git_bash_path, write_atomic};
+use crate::mdm::utils::{generate_diff, home_dir, to_agent_hook_command_path, write_atomic};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
@@ -112,7 +112,7 @@ impl HookInstaller for FirebenderInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        let binary_path_str = to_git_bash_path(&params.binary_path);
+        let binary_path_str = to_agent_hook_command_path(&params.binary_path);
         let pre_tool_use_cmd = format!("{} {}", binary_path_str, FIREBENDER_PRE_TOOL_USE_CMD);
         let post_tool_use_cmd = format!("{} {}", binary_path_str, FIREBENDER_POST_TOOL_USE_CMD);
 
