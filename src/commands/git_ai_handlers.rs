@@ -228,7 +228,7 @@ pub fn handle_git_ai(args: &[String]) {
 }
 
 /// Dispatch `git-ai notes <subcommand>` commands.
-fn handle_notes_subcommand(args: &[String]) {
+pub(crate) fn handle_notes_subcommand(args: &[String]) {
     let subcommand = args.first().map(|s| s.as_str()).unwrap_or("--help");
     match subcommand {
         "migrate" => {
@@ -676,7 +676,7 @@ fn notes_existence_label(existence: NotesExistence) -> &'static str {
     }
 }
 
-fn handle_effective_ignore_patterns_internal(args: &[String]) {
+pub(crate) fn handle_effective_ignore_patterns_internal(args: &[String]) {
     let payload = parse_machine_json_arg(args, "effective-ignore-patterns")
         .unwrap_or_else(|msg| emit_machine_json_error(msg));
 
@@ -696,7 +696,7 @@ fn handle_effective_ignore_patterns_internal(args: &[String]) {
     print_machine_json(&response_value);
 }
 
-fn handle_blame_analysis_internal(args: &[String]) {
+pub(crate) fn handle_blame_analysis_internal(args: &[String]) {
     let payload = parse_machine_json_arg(args, "blame-analysis")
         .unwrap_or_else(|msg| emit_machine_json_error(msg));
 
@@ -720,7 +720,7 @@ fn handle_blame_analysis_internal(args: &[String]) {
     print_machine_json(&response_value);
 }
 
-fn handle_fetch_authorship_notes_internal(args: &[String]) {
+pub(crate) fn handle_fetch_authorship_notes_internal(args: &[String]) {
     disable_debug_logs_for_machine_command();
     let (repo, request) = parse_authorship_remote_request(args, "fetch-authorship-notes");
 
@@ -737,7 +737,7 @@ fn handle_fetch_authorship_notes_internal(args: &[String]) {
     print_machine_json(&response_value);
 }
 
-fn handle_push_authorship_notes_internal(args: &[String]) {
+pub(crate) fn handle_push_authorship_notes_internal(args: &[String]) {
     disable_debug_logs_for_machine_command();
     let (repo, request) = parse_authorship_remote_request(args, "push-authorship-notes");
 
