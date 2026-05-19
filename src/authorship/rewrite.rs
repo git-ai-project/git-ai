@@ -105,6 +105,9 @@ pub fn derive_mappings_from_range_diff(
 
     // Rewind: branch moved backward
     if base == new_tip {
+        crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
+            repo, old_tip, new_tip,
+        )?;
         return Ok(Vec::new());
     }
 
@@ -374,10 +377,129 @@ fn get_commit_parents(repo: &Repository, sha: &str) -> Vec<String> {
 }
 
 pub fn migrate_working_log_if_needed(
-    _repo: &Repository,
-    _mappings: &[(String, String)],
+    repo: &Repository,
+    mappings: &[(String, String)],
 ) -> Result<(), GitAiError> {
-    Ok(()) // Task 5
+    let working_logs_dir = &repo.storage.working_logs;
+
+    // Get current HEAD to identify the tip mapping
+    let current_head = {
+        let mut args = repo.global_args_for_exec();
+        args.extend(["rev-parse".to_string(), "HEAD".to_string()]);
+        exec_git_allow_nonzero(&args)
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+
+    for (source, new_sha) in mappings {
+        let old_dir = working_logs_dir.join(source);
+        if !old_dir.exists() {
+            continue;
+        }
+
+        if *new_sha == current_head {
+            // Tip mapping — migrate
+            let new_dir = working_logs_dir.join(new_sha);
+            if old_dir == new_dir {
+                continue;
+            }
+
+            let diff_result = compute_diff_tree(repo, source, new_sha);
+            match diff_result {
+                Ok(ref dr) if dr.hunks_by_file.is_empty() && dr.renames.is_empty() => {
+                    // No content changes — simple rename
+                    let _ = std::fs::rename(&old_dir, &new_dir);
+                }
+                Ok(dr) => {
+                    let _ = migrate_working_log_with_shifts(&old_dir, &new_dir, &dr);
+                    let _ = std::fs::remove_dir_all(&old_dir);
+                }
+                Err(_) => {
+                    // diff-tree failed — simple rename as fallback
+                    let _ = std::fs::rename(&old_dir, &new_dir);
+                }
+            }
+        } else {
+            // Intermediate commit — remove stale working log
+            let _ = std::fs::remove_dir_all(&old_dir);
+        }
+    }
+
+    Ok(())
+}
+
+fn migrate_working_log_with_shifts(
+    old_dir: &std::path::Path,
+    new_dir: &std::path::Path,
+    diff_result: &DiffTreeResult,
+) -> Result<(), GitAiError> {
+    use crate::authorship::hunk_shift::apply_hunk_shifts_to_line_attributions;
+    use crate::git::repo_storage::InitialAttributions;
+
+    let initial_path = old_dir.join("INITIAL");
+    if !initial_path.exists() {
+        // No INITIAL — just rename the directory
+        std::fs::rename(old_dir, new_dir)?;
+        return Ok(());
+    }
+
+    let content = std::fs::read_to_string(&initial_path)?;
+    let mut initial: InitialAttributions = serde_json::from_str(&content)
+        .map_err(|e| GitAiError::Generic(format!("Failed to parse INITIAL: {}", e)))?;
+
+    // Apply renames to file keys
+    for (old_path, new_path) in &diff_result.renames {
+        if let Some(attrs) = initial.files.remove(old_path) {
+            initial.files.insert(new_path.clone(), attrs);
+        }
+        if let Some(blob) = initial.file_blobs.remove(old_path) {
+            initial.file_blobs.insert(new_path.clone(), blob);
+        }
+    }
+
+    // Shift line attributions for files with hunks
+    for (file_path, hunks) in &diff_result.hunks_by_file {
+        if let Some(attrs) = initial.files.get_mut(file_path) {
+            *attrs = apply_hunk_shifts_to_line_attributions(attrs, hunks);
+        }
+        // Clear stale blob SHA
+        initial.file_blobs.remove(file_path);
+    }
+
+    // Write to new directory
+    std::fs::create_dir_all(new_dir)?;
+    let serialized = serde_json::to_string(&initial)
+        .map_err(|e| GitAiError::Generic(format!("Failed to serialize INITIAL: {}", e)))?;
+    std::fs::write(new_dir.join("INITIAL"), serialized)?;
+
+    // Copy checkpoints.jsonl and blobs/ as-is
+    let checkpoints_src = old_dir.join("checkpoints.jsonl");
+    if checkpoints_src.exists() {
+        let _ = std::fs::copy(&checkpoints_src, new_dir.join("checkpoints.jsonl"));
+    }
+
+    let blobs_src = old_dir.join("blobs");
+    if blobs_src.exists() {
+        copy_dir_recursive(&blobs_src, &new_dir.join("blobs"))?;
+    }
+
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), GitAiError> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn compute_diff_tree(
