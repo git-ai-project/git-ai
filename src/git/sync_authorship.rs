@@ -426,6 +426,95 @@ fn build_authorship_push_args(global_args: Vec<String>, remote_name: &str) -> Ve
     args
 }
 
+pub(crate) fn should_skip_authorship_push(command_args: &[String]) -> bool {
+    crate::git::cli_parser::is_dry_run(command_args)
+        || command_args.iter().any(|a| a == "-d" || a == "--delete")
+        || command_args.iter().any(|a| a == "--mirror")
+}
+
+pub(crate) fn resolve_push_remote_for_daemon(
+    repo: &Repository,
+    _command: Option<&str>,
+    args: &[String],
+) -> Option<String> {
+    let remotes = repo.remotes().ok();
+    let remote_names: Vec<String> = remotes
+        .as_ref()
+        .map(|r| {
+            (0..r.len())
+                .filter_map(|i| r.get(i).map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let upstream_remote = repo.upstream_remote().ok().flatten();
+    let default_remote = repo.get_default_remote().ok().flatten();
+
+    let positional_remote = extract_remote_from_push_args_internal(args, &remote_names);
+
+    let specified_remote = positional_remote.or_else(|| {
+        args.iter()
+            .find(|arg| remote_names.iter().any(|remote| remote == *arg))
+            .cloned()
+    });
+
+    specified_remote.or(upstream_remote).or(default_remote)
+}
+
+fn extract_remote_from_push_args_internal(args: &[String], known_remotes: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            return args.get(i + 1).cloned();
+        }
+        if arg.starts_with('-') {
+            if let Some((flag, value)) = push_option_with_inline_value(arg) {
+                if flag == "--repo" {
+                    return Some(value.to_string());
+                }
+                i += 1;
+                continue;
+            }
+
+            if push_option_consumes_separate_value(arg.as_str()) {
+                if arg == "--repo" {
+                    return args.get(i + 1).cloned();
+                }
+                i += 2;
+                continue;
+            }
+
+            i += 1;
+            continue;
+        }
+        return Some(arg.clone());
+    }
+
+    known_remotes
+        .iter()
+        .find(|r| args.iter().any(|arg| arg == *r))
+        .cloned()
+}
+
+fn push_option_with_inline_value(arg: &str) -> Option<(&str, &str)> {
+    if let Some((flag, value)) = arg.split_once('=') {
+        Some((flag, value))
+    } else if (arg.starts_with("-C") || arg.starts_with("-c")) && arg.len() > 2 {
+        let flag = &arg[..2];
+        let value = &arg[2..];
+        Some((flag, value))
+    } else {
+        None
+    }
+}
+
+fn push_option_consumes_separate_value(arg: &str) -> bool {
+    matches!(
+        arg,
+        "--repo" | "--receive-pack" | "--exec" | "-o" | "--push-option" | "-c" | "-C"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
