@@ -95,11 +95,282 @@ pub fn shift_authorship_notes(
 }
 
 pub fn derive_mappings_from_range_diff(
-    _repo: &Repository,
-    _old_tip: &str,
-    _new_tip: &str,
+    repo: &Repository,
+    old_tip: &str,
+    new_tip: &str,
 ) -> Result<Vec<(String, String)>, GitAiError> {
-    Ok(Vec::new()) // Task 3
+    let Some(base) = find_merge_base(repo, old_tip, new_tip) else {
+        return Ok(Vec::new());
+    };
+
+    // Rewind: branch moved backward
+    if base == new_tip {
+        return Ok(Vec::new());
+    }
+
+    // Fast-forward: no rewrite happened
+    if base == old_tip {
+        return Ok(Vec::new());
+    }
+
+    // Full squash: all old commits collapsed into one new commit
+    if is_full_squash(repo, &base, old_tip, new_tip) {
+        return Ok(vec![(old_tip.to_string(), new_tip.to_string())]);
+    }
+
+    let range_diff_output = run_range_diff(repo, &base, old_tip, new_tip)?;
+    let mut mappings = parse_range_diff_output(&range_diff_output);
+
+    let merge_mappings = derive_merge_commit_mappings(repo, &base, old_tip, new_tip, &mappings)?;
+    mappings.extend(merge_mappings);
+
+    Ok(mappings)
+}
+
+fn find_merge_base(repo: &Repository, a: &str, b: &str) -> Option<String> {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "merge-base".to_string(),
+        a.to_string(),
+        b.to_string(),
+    ]);
+
+    let output = exec_git_allow_nonzero(&args).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let base = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if base.is_empty() {
+        None
+    } else {
+        Some(base)
+    }
+}
+
+fn is_full_squash(repo: &Repository, base: &str, old_tip: &str, new_tip: &str) -> bool {
+    // Check new_tip^ == base (exactly one commit between base and new_tip)
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "rev-parse".to_string(),
+        format!("{}^", new_tip),
+    ]);
+    let Ok(output) = exec_git_allow_nonzero(&args) else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let parent = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if parent != base {
+        return false;
+    }
+
+    // Check new_tip is not a merge commit (new_tip^2 should fail)
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "rev-parse".to_string(),
+        format!("{}^2", new_tip),
+    ]);
+    let Ok(output) = exec_git_allow_nonzero(&args) else {
+        return false;
+    };
+    if output.status.success() {
+        return false;
+    }
+
+    // Check multiple old commits existed
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "rev-list".to_string(),
+        "--count".to_string(),
+        format!("{}..{}", base, old_tip),
+    ]);
+    let Ok(output) = exec_git_allow_nonzero(&args) else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let count: usize = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    count > 1
+}
+
+fn run_range_diff(
+    repo: &Repository,
+    base: &str,
+    old_tip: &str,
+    new_tip: &str,
+) -> Result<String, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "range-diff".to_string(),
+        "--no-color".to_string(),
+        "--no-abbrev".to_string(),
+        "-s".to_string(),
+        "--creation-factor=100".to_string(),
+        format!("{}..{}", base, old_tip),
+        format!("{}..{}", base, new_tip),
+    ]);
+    let output = exec_git(&args)?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn parse_range_diff_output(output: &str) -> Vec<(String, String)> {
+    let mut mappings = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Find first 40-char hex SHA
+        let Some((old_sha, rest)) = find_next_sha(trimmed) else {
+            continue;
+        };
+
+        // Skip whitespace, read status character
+        let rest = rest.trim_start();
+        let Some(status_char) = rest.chars().next() else {
+            continue;
+        };
+
+        // Only matched pairs (= or !) are useful
+        if status_char != '=' && status_char != '!' {
+            continue;
+        }
+
+        // Find second 40-char hex SHA
+        let after_status = &rest[status_char.len_utf8()..];
+        let Some((new_sha, _)) = find_next_sha(after_status) else {
+            continue;
+        };
+
+        // Skip null SHAs
+        if old_sha.chars().all(|c| c == '0') || new_sha.chars().all(|c| c == '0') {
+            continue;
+        }
+
+        mappings.push((old_sha, new_sha));
+    }
+
+    mappings
+}
+
+fn find_next_sha(s: &str) -> Option<(String, &str)> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + 40 <= bytes.len() {
+        let candidate = &s[i..i + 40];
+        if is_hex_sha(candidate) {
+            return Some((candidate.to_string(), &s[i + 40..]));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_hex_sha(s: &str) -> bool {
+    s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn derive_merge_commit_mappings(
+    repo: &Repository,
+    base: &str,
+    old_tip: &str,
+    new_tip: &str,
+    existing_mappings: &[(String, String)],
+) -> Result<Vec<(String, String)>, GitAiError> {
+    let old_merges = list_merge_commits(repo, base, old_tip)?;
+    let new_merges = list_merge_commits(repo, base, new_tip)?;
+
+    let mut merge_mappings: Vec<(String, String)> = Vec::new();
+
+    for old_merge in &old_merges {
+        // Only map merges that have authorship notes
+        let has_note = read_authorship_note(repo, old_merge)?.is_some();
+        if !has_note {
+            continue;
+        }
+
+        let old_parents = get_commit_parents(repo, old_merge);
+        if old_parents.is_empty() {
+            continue;
+        }
+
+        // For each new merge, check if its parents are the mapped equivalents of old_merge's parents
+        for new_merge in &new_merges {
+            // Skip if already used in a mapping
+            if merge_mappings.iter().any(|(_, n)| n == new_merge) {
+                continue;
+            }
+
+            let new_parents = get_commit_parents(repo, new_merge);
+            if new_parents.len() != old_parents.len() {
+                continue;
+            }
+
+            let all_match = old_parents.iter().zip(new_parents.iter()).all(|(op, np)| {
+                // Check in existing_mappings
+                if existing_mappings.iter().any(|(o, n)| o == op && n == np) {
+                    return true;
+                }
+                // Check in already-matched merge_mappings
+                if merge_mappings.iter().any(|(o, n)| o == op && n == np) {
+                    return true;
+                }
+                // Unmapped parent that stayed the same (e.g., shared ancestor)
+                op == np
+            });
+
+            if all_match {
+                merge_mappings.push((old_merge.clone(), new_merge.clone()));
+                break;
+            }
+        }
+    }
+
+    Ok(merge_mappings)
+}
+
+fn list_merge_commits(repo: &Repository, base: &str, tip: &str) -> Result<Vec<String>, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "rev-list".to_string(),
+        "--merges".to_string(),
+        "--topo-order".to_string(),
+        "--reverse".to_string(),
+        format!("{}..{}", base, tip),
+    ]);
+
+    let output = exec_git_allow_nonzero(&args)?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+}
+
+fn get_commit_parents(repo: &Repository, sha: &str) -> Vec<String> {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "rev-parse".to_string(),
+        format!("{}^@", sha),
+    ]);
+
+    let Ok(output) = exec_git_allow_nonzero(&args) else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()
 }
 
 pub fn migrate_working_log_if_needed(
@@ -316,5 +587,76 @@ Binary files a/image.png and b/image.png differ
         let result = parse_diff_tree_output("");
         assert!(result.hunks_by_file.is_empty());
         assert!(result.renames.is_empty());
+    }
+
+    #[test]
+    fn test_is_hex_sha_valid() {
+        assert!(is_hex_sha("a" .repeat(40).as_str()));
+        assert!(is_hex_sha("0123456789abcdef0123456789abcdef01234567"));
+        assert!(is_hex_sha("ABCDEF0123456789abcdef0123456789abcdef01"));
+    }
+
+    #[test]
+    fn test_is_hex_sha_invalid() {
+        assert!(!is_hex_sha("short"));
+        assert!(!is_hex_sha("g123456789abcdef0123456789abcdef01234567"));
+        assert!(!is_hex_sha("0123456789abcdef0123456789abcdef0123456"));  // 39 chars
+        assert!(!is_hex_sha("0123456789abcdef0123456789abcdef012345678")); // 41 chars
+        assert!(!is_hex_sha(""));
+    }
+
+    #[test]
+    fn test_parse_range_diff_output_matched_equal() {
+        let output = " 1:  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = 1:  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb Some commit subject\n";
+        let mappings = parse_range_diff_output(output);
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].0, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(mappings[0].1, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    }
+
+    #[test]
+    fn test_parse_range_diff_output_matched_bang() {
+        let output = " 2:  1111111111111111111111111111111111111111 ! 3:  2222222222222222222222222222222222222222 Modified commit\n";
+        let mappings = parse_range_diff_output(output);
+        assert_eq!(mappings.len(), 1);
+        assert_eq!(mappings[0].0, "1111111111111111111111111111111111111111");
+        assert_eq!(mappings[0].1, "2222222222222222222222222222222222222222");
+    }
+
+    #[test]
+    fn test_parse_range_diff_output_dropped_and_new() {
+        let output = "\
+ 1:  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa < -:  0000000000000000000000000000000000000000 Dropped commit
+ -:  0000000000000000000000000000000000000000 > 1:  cccccccccccccccccccccccccccccccccccccccc New commit
+";
+        let mappings = parse_range_diff_output(output);
+        assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_range_diff_output_null_shas_skipped() {
+        let output = " 1:  0000000000000000000000000000000000000000 = 1:  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb Subject\n";
+        let mappings = parse_range_diff_output(output);
+        assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_range_diff_output_multiple_lines() {
+        let output = "\
+ 1:  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = 1:  bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb First commit
+ 2:  cccccccccccccccccccccccccccccccccccccccc ! 2:  dddddddddddddddddddddddddddddddddddddddd Second commit
+ 3:  eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee = 3:  ffffffffffffffffffffffffffffffffffffffff Third commit
+";
+        let mappings = parse_range_diff_output(output);
+        assert_eq!(mappings.len(), 3);
+        assert_eq!(mappings[0], ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string()));
+        assert_eq!(mappings[1], ("cccccccccccccccccccccccccccccccccccccccc".to_string(), "dddddddddddddddddddddddddddddddddddddddd".to_string()));
+        assert_eq!(mappings[2], ("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string(), "ffffffffffffffffffffffffffffffffffffffff".to_string()));
+    }
+
+    #[test]
+    fn test_parse_range_diff_output_empty() {
+        let mappings = parse_range_diff_output("");
+        assert!(mappings.is_empty());
     }
 }
