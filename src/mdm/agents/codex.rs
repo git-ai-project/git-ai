@@ -664,7 +664,7 @@ impl HookInstaller for CodexInstaller {
         let hooks_up_to_date = (config == desired_config
             || legacy_msys_desired_config
                 .as_ref()
-                .map(|legacy| config == *legacy)
+                .map(|legacy| &config == legacy)
                 .unwrap_or(false))
             && !has_legacy_hooks_json;
 
