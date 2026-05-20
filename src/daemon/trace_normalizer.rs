@@ -306,13 +306,13 @@ impl<B: GitBackend> TraceNormalizer<B> {
         stash_target_oid: Option<String>,
         stash_target_error: Option<String>,
     ) {
-        if let Some(pending) = self.state.pending.get_mut(root_sid) {
+        if let Some(pending) = self.state.pending.get_mut(root_sid)
+            && pending.stash_target_oid.is_none()
+        {
             if let Some(stash_target_oid) = stash_target_oid {
                 pending.stash_target_oid = Some(stash_target_oid);
                 pending.stash_target_error = None;
-            } else if pending.stash_target_oid.is_none()
-                && let Some(stash_target_error) = stash_target_error
-            {
+            } else if let Some(stash_target_error) = stash_target_error {
                 pending.stash_target_error = Some(stash_target_error);
             }
         }

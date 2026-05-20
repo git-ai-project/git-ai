@@ -275,6 +275,7 @@ impl CiContext {
                     RewriteEvent::NonFastForward {
                         old_tip: head_sha.to_string(),
                         new_tip: merge_commit_sha.to_string(),
+                        onto: None,
                     },
                 )?;
                 println!("Rewrote authorship.");

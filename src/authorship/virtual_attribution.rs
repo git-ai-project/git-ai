@@ -634,12 +634,11 @@ impl VirtualAttributions {
         }
 
         for (file_path, line_attrs) in &initial_attributions.files {
-            let file_content = final_state_snapshot
-                .get(file_path)
-                .cloned()
-                .or_else(|| {
-                    working_log.stored_initial_file_content_from(&initial_attributions, file_path)
-                })
+            // Use stored content for INITIAL since line_attrs reference that file version.
+            // Fall back to final_state_snapshot only if no stored content exists.
+            let file_content = working_log
+                .stored_initial_file_content_from(&initial_attributions, file_path)
+                .or_else(|| final_state_snapshot.get(file_path).cloned())
                 .unwrap_or_default();
             file_contents.insert(file_path.clone(), file_content.clone());
 

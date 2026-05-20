@@ -716,6 +716,99 @@ fn matches_any_pathspec(file: &str, pathspecs: &[String]) -> bool {
     })
 }
 
+fn sync_pre_commit_checkpoint(
+    repo: &Repository,
+    base_commit: &str,
+    carryover_snapshot: Option<&HashMap<String, String>>,
+) -> Result<(), GitAiError> {
+    if base_commit.trim().is_empty() {
+        return Ok(());
+    }
+    if !repo.storage.has_working_log(base_commit) {
+        return Ok(());
+    }
+
+    let working_log = repo.storage.working_log_for_base_commit(base_commit)?;
+    let initial = working_log.read_initial_attributions();
+
+    let dirty_files: HashMap<String, String> = if let Some(snapshot) = carryover_snapshot {
+        snapshot.clone()
+    } else {
+        return Ok(());
+    };
+
+    let mut files_to_replay: Vec<String> = Vec::new();
+    let mut replay_dirty: HashMap<String, String> = HashMap::new();
+
+    for (file_path, target_content) in &dirty_files {
+        let current_tracked = working_log.effective_tracked_file_content(&initial, file_path)?;
+        let needs_replay = match current_tracked {
+            None => true,
+            Some(ref tracked) => tracked != target_content,
+        };
+        if needs_replay {
+            files_to_replay.push(file_path.clone());
+            replay_dirty.insert(file_path.clone(), target_content.clone());
+        }
+    }
+
+    if files_to_replay.is_empty() {
+        return Ok(());
+    }
+    files_to_replay.sort();
+
+    let repo_workdir = repo
+        .workdir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let repo_work_dir_path = std::path::PathBuf::from(&repo_workdir);
+
+    let checkpoint_files: Vec<crate::commands::checkpoint_agent::orchestrator::CheckpointFile> =
+        files_to_replay
+            .iter()
+            .map(
+                |path| crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
+                    path: std::path::PathBuf::from(path),
+                    content: replay_dirty.get(path).cloned(),
+                    repo_work_dir: repo_work_dir_path.clone(),
+                    base_commit:
+                        crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
+                },
+            )
+            .collect();
+
+    let request = CheckpointRequest {
+        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
+        checkpoint_kind: CheckpointKind::Human,
+        agent_id: None,
+        files: checkpoint_files,
+        path_role: crate::daemon::checkpoint::PreparedPathRole::WillEdit,
+        transcript_source: None,
+        metadata: std::collections::HashMap::new(),
+    };
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    let resolved = crate::daemon::checkpoint::ResolvedCheckpointExecution {
+        base_commit: base_commit.to_string(),
+        ts,
+        files: files_to_replay,
+        dirty_files: replay_dirty,
+    };
+
+    let author = repo.git_author_identity().formatted_or_unknown();
+    crate::daemon::checkpoint::execute_resolved_checkpoint_from_daemon(
+        repo,
+        &author,
+        CheckpointKind::Human,
+        request,
+        resolved,
+    )
+}
+
 fn tracked_working_log_files(
     repo: &Repository,
     base_commit: &str,
@@ -729,6 +822,86 @@ fn tracked_working_log_files(
     let mut files: HashSet<String> = initial.files.keys().cloned().collect();
     files.extend(working_log.all_touched_files()?);
     Ok(files)
+}
+
+/// After a rebase completes, check if any newly-rebased commits were created
+/// from conflict resolution with AI checkpoints. If so, run post_commit on
+/// those commits to incorporate the AI attribution from the working log.
+fn process_conflict_resolution_working_logs(repo: &Repository, new_tip: &str, onto: Option<&str>) {
+    let onto_sha = match onto {
+        Some(s) if !s.is_empty() => s,
+        _ => return,
+    };
+
+    // Walk rebased commits between onto and new_tip
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "log".to_string(),
+        "--format=%H %P".to_string(),
+        format!("{}..{}", onto_sha, new_tip),
+    ]);
+    let output = match crate::git::repository::exec_git(&args) {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+    let log_output = String::from_utf8_lossy(&output.stdout);
+
+    for line in log_output.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let commit_sha = parts[0];
+        let parent_sha = parts[1]; // first parent
+
+        if !repo.storage.has_working_log(parent_sha) {
+            continue;
+        }
+
+        // There's a working log at this parent — conflict resolution happened here.
+        // Run post_commit to generate the authorship note from the working log.
+        let author = repo.git_author_identity().formatted_or_unknown();
+        let _ = crate::authorship::post_commit::post_commit_with_final_state(
+            repo,
+            Some(parent_sha.to_string()),
+            commit_sha.to_string(),
+            author,
+            true,
+            None,
+        );
+    }
+}
+
+fn committed_file_snapshot_for_amend(
+    repo: &Repository,
+    old_head: &str,
+    new_head: &str,
+) -> Option<HashMap<String, String>> {
+    let mut files = repo
+        .list_commit_files(new_head, None)
+        .ok()
+        .unwrap_or_default();
+    if old_head != "initial"
+        && let Ok(parent_files) = repo.list_commit_files(old_head, None)
+    {
+        files.extend(parent_files);
+    }
+    if files.is_empty() {
+        return None;
+    }
+    let mut snapshot = HashMap::new();
+    for file_path in &files {
+        if let Ok(content) = repo.get_file_content(file_path, new_head)
+            && let Ok(text) = String::from_utf8(content)
+        {
+            snapshot.insert(file_path.clone(), text);
+        }
+    }
+    if snapshot.is_empty() {
+        None
+    } else {
+        Some(snapshot)
+    }
 }
 
 fn system_time_to_unix_nanos(time: SystemTime) -> Option<u128> {
@@ -1046,6 +1219,27 @@ fn resolve_rebase_original_head_for_worktree(worktree: &Path) -> Option<String> 
 
     read_ref_oid_for_worktree(worktree, "ORIG_HEAD")
         .filter(|oid| is_valid_oid(oid) && !is_zero_oid(oid))
+}
+
+fn resolve_rebase_onto_for_worktree(worktree: &Path) -> Option<String> {
+    let git_dir = git_dir_for_worktree(worktree)?;
+    let onto_path = git_dir.join("rebase-merge").join("onto");
+    if let Ok(contents) = fs::read_to_string(onto_path)
+        && let Some(oid) = contents.lines().map(str::trim).find(|l| !l.is_empty())
+        && is_valid_oid(oid)
+        && !is_zero_oid(oid)
+    {
+        return Some(oid.to_string());
+    }
+    let onto_path = git_dir.join("rebase-apply").join("onto");
+    if let Ok(contents) = fs::read_to_string(onto_path)
+        && let Some(oid) = contents.lines().map(str::trim).find(|l| !l.is_empty())
+        && is_valid_oid(oid)
+        && !is_zero_oid(oid)
+    {
+        return Some(oid.to_string());
+    }
+    None
 }
 
 type MergeSquashSnapshot = String;
@@ -2308,7 +2502,7 @@ pub struct ActorDaemonCoordinator {
             crate::daemon::git_backend::SystemGitBackend,
         >,
     >,
-    pending_rebase_original_head_by_worktree: Mutex<HashMap<String, String>>,
+    pending_rebase_original_head_by_worktree: Mutex<HashMap<String, (String, Option<String>)>>,
     pending_cherry_pick_sources_by_worktree: Mutex<HashMap<String, Vec<String>>>,
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
     /// Files with an in-flight AI edit (PreFileEdit received, PostFileEdit not yet completed).
@@ -4484,6 +4678,7 @@ impl ActorDaemonCoordinator {
         &self,
         worktree: &Path,
         original_head: String,
+        onto: Option<String>,
     ) -> Result<(), GitAiError> {
         let mut map = self
             .pending_rebase_original_head_by_worktree
@@ -4491,7 +4686,7 @@ impl ActorDaemonCoordinator {
             .map_err(|_| {
                 GitAiError::Generic("pending rebase original-head map lock poisoned".to_string())
             })?;
-        map.insert(Self::rewrite_worktree_key(worktree), original_head);
+        map.insert(Self::rewrite_worktree_key(worktree), (original_head, onto));
         Ok(())
     }
 
@@ -4507,6 +4702,19 @@ impl ActorDaemonCoordinator {
             })?;
         map.remove(&Self::rewrite_worktree_key(worktree));
         Ok(())
+    }
+
+    fn take_pending_rebase_original_head_for_worktree(
+        &self,
+        worktree: &Path,
+    ) -> Result<Option<(String, Option<String>)>, GitAiError> {
+        let mut map = self
+            .pending_rebase_original_head_by_worktree
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("pending rebase original-head map lock poisoned".to_string())
+            })?;
+        Ok(map.remove(&Self::rewrite_worktree_key(worktree)))
     }
 
     fn set_pending_cherry_pick_sources_for_worktree(
@@ -4541,6 +4749,21 @@ impl ActorDaemonCoordinator {
             })?;
         map.remove(&Self::rewrite_worktree_key(worktree));
         Ok(())
+    }
+
+    fn take_pending_cherry_pick_sources_for_worktree(
+        &self,
+        worktree: &Path,
+    ) -> Result<Vec<String>, GitAiError> {
+        let mut map = self
+            .pending_cherry_pick_sources_by_worktree
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("pending cherry-pick sources map lock poisoned".to_string())
+            })?;
+        Ok(map
+            .remove(&Self::rewrite_worktree_key(worktree))
+            .unwrap_or_default())
     }
 
     fn resolve_heads_for_command(
@@ -4655,6 +4878,16 @@ impl ActorDaemonCoordinator {
 
         let repo = find_repository_in_path(&worktree.to_string_lossy())?;
 
+        // For rebase --skip/--continue that completes successfully, the trace2 data only shows
+        // HEAD moving from onto → new_tip (a fast-forward). The real old_tip (original branch tip
+        // before rebase started) was stored when the initial rebase failed. Use it here.
+        let is_rebase_cmd = cmd.primary_command.as_deref() == Some("rebase");
+        let pending_original_head = if is_rebase_cmd {
+            self.take_pending_rebase_original_head_for_worktree(worktree)?
+        } else {
+            None
+        };
+
         // Collect branch ref changes (skip notes, tags, etc.)
         let mut branch_changes: Vec<_> = cmd
             .ref_changes
@@ -4680,7 +4913,7 @@ impl ActorDaemonCoordinator {
             }
         }
 
-        if branch_changes.is_empty() {
+        if branch_changes.is_empty() && pending_original_head.is_none() {
             return Ok(());
         }
 
@@ -4692,6 +4925,45 @@ impl ActorDaemonCoordinator {
                 .entry(rc.reference.as_str())
                 .and_modify(|(_old, new)| *new = &rc.new)
                 .or_insert((&rc.old, &rc.new));
+        }
+
+        // Extract "onto" hint from HEAD ref changes for rebases.
+        // During a rebase, the first HEAD change target is the onto commit.
+        let onto_hint: Option<String> = cmd
+            .ref_changes
+            .iter()
+            .filter(|rc| rc.reference == "HEAD")
+            .filter(|rc| is_valid_oid(&rc.new) && !is_zero_oid(&rc.new))
+            .map(|rc| rc.new.clone())
+            .next();
+
+        // If we have a pending original head from a failed rebase, use it as old_tip
+        // with the last HEAD new value as new_tip. This handles rebase --skip/--continue
+        // where trace2 only shows the within-command HEAD movement (onto → new_tip).
+        if let Some((original_head, stored_onto)) = pending_original_head {
+            let new_tip = cmd
+                .ref_changes
+                .iter()
+                .filter(|rc| rc.reference == "HEAD" || rc.reference.starts_with("refs/heads/"))
+                .filter(|rc| is_valid_oid(&rc.new) && !is_zero_oid(&rc.new))
+                .map(|rc| rc.new.clone())
+                .next_back();
+            let rebase_onto = stored_onto;
+            if let Some(new_tip) = new_tip
+                && original_head != new_tip
+                && !is_ancestor_commit(&repo, &original_head, &new_tip)
+            {
+                crate::authorship::rewrite::handle_rewrite_event(
+                    &repo,
+                    crate::authorship::rewrite::RewriteEvent::NonFastForward {
+                        old_tip: original_head,
+                        new_tip: new_tip.clone(),
+                        onto: rebase_onto.clone(),
+                    },
+                )?;
+                process_conflict_resolution_working_logs(&repo, &new_tip, rebase_onto.as_deref());
+            }
+            return Ok(());
         }
 
         for (old_tip, new_tip) in collapsed.values() {
@@ -4709,6 +4981,7 @@ impl ActorDaemonCoordinator {
                 crate::authorship::rewrite::RewriteEvent::NonFastForward {
                     old_tip: old_tip.to_string(),
                     new_tip: new_tip.to_string(),
+                    onto: onto_hint.clone(),
                 },
             )?;
         }
@@ -4876,21 +5149,37 @@ impl ActorDaemonCoordinator {
             }
         }
 
-        // Non-FF rewrite detection: only for commands that actually rewrite history.
-        // Skip for: commits (handled by CommitAmended/CommitCreated), checkout/switch,
-        // branch moves, cherry-pick (handled separately via CherryPickComplete event).
-        let skip_non_ff = events.iter().any(|event| {
-            matches!(
-                event,
-                crate::daemon::domain::SemanticEvent::CommitAmended { .. }
-                    | crate::daemon::domain::SemanticEvent::CommitCreated { .. }
-                    | crate::daemon::domain::SemanticEvent::CherryPickComplete { .. }
+        // Non-FF rewrite detection: fires for commands that rewrite history via ref moves.
+        // Skip for: checkout/switch/branch (no rewriting), cherry-pick (handled separately),
+        // and plain commit/amend (CommitCreated/CommitAmended events handle those).
+        // Do NOT skip for rebase — the CommitCreated events during rebase are intermediate
+        // replayed commits; note transfer happens via non-FF detection on the final ref move.
+        // But DO skip for rebase --abort/--skip (those restore state, not rewrite).
+        let is_rebase = cmd.primary_command.as_deref() == Some("rebase");
+        let is_rebase_abort = is_rebase && cmd.invoked_args.iter().any(|a| a == "--abort");
+        let is_completing_rebase = is_rebase && !is_rebase_abort;
+        let is_pull_rebase = pull_uses_rebase && cmd.primary_command.as_deref() == Some("pull");
+        let skip_non_ff = if is_completing_rebase || is_pull_rebase {
+            false
+        } else if is_rebase_abort {
+            true
+        } else {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    crate::daemon::domain::SemanticEvent::CommitAmended { .. }
+                        | crate::daemon::domain::SemanticEvent::CommitCreated { .. }
+                        | crate::daemon::domain::SemanticEvent::CherryPickComplete { .. }
+                )
+            }) || matches!(
+                cmd.primary_command.as_deref(),
+                Some("checkout" | "switch" | "branch" | "stash")
             )
-        }) || matches!(
-            cmd.primary_command.as_deref(),
-            Some("checkout" | "switch" | "branch")
-        );
-        if !skip_non_ff && let Err(e) = self.detect_and_handle_non_ff_rewrites(cmd) {
+        };
+        if !skip_non_ff
+            && cmd.exit_code == 0
+            && let Err(e) = self.detect_and_handle_non_ff_rewrites(cmd)
+        {
             tracing::debug!(
                 sid = %cmd.root_sid,
                 %e,
@@ -4899,7 +5188,9 @@ impl ActorDaemonCoordinator {
         }
 
         if cmd.exit_code != 0 {
-            if cmd.primary_command.as_deref() == Some("rebase") {
+            let is_rebase_like = cmd.primary_command.as_deref() == Some("rebase")
+                || (cmd.primary_command.as_deref() == Some("pull") && pull_uses_rebase);
+            if is_rebase_like {
                 let worktree = cmd.worktree.as_ref().ok_or_else(|| {
                     GitAiError::Generic(format!(
                         "rebase side-effect state requires worktree sid={}",
@@ -4911,6 +5202,7 @@ impl ActorDaemonCoordinator {
                 } else if cmd.exit_code != 0 && !rebase_is_control_mode(cmd) {
                     let pending_old_head = strict_rebase_original_head_from_command(cmd, "");
                     if let Some(old_head) = pending_old_head {
+                        let rebase_onto = resolve_rebase_onto_for_worktree(worktree);
                         if std::env::var("GIT_AI_DEBUG_DAEMON_TRACE")
                             .ok()
                             .as_deref()
@@ -4919,10 +5211,15 @@ impl ActorDaemonCoordinator {
                             tracing::debug!(
                                 ?family,
                                 %old_head,
+                                ?rebase_onto,
                                 "pending rebase original head set"
                             );
                         }
-                        self.set_pending_rebase_original_head_for_worktree(worktree, old_head)?;
+                        self.set_pending_rebase_original_head_for_worktree(
+                            worktree,
+                            old_head,
+                            rebase_onto,
+                        )?;
                     }
                 }
             }
@@ -5012,11 +5309,21 @@ impl ActorDaemonCoordinator {
                     } => {
                         if !new_head.is_empty() {
                             let repo = find_repository_in_path(&worktree)?;
-                            let sources =
+                            let mut sources =
                                 crate::authorship::rewrite_cherry_pick::expand_cherry_pick_sources(
                                     &repo,
                                     &cmd.invoked_args,
                                 );
+                            // For --continue, args don't contain source refs — use stored state
+                            if sources.is_empty() {
+                                sources = self.take_pending_cherry_pick_sources_for_worktree(
+                                    worktree.as_ref(),
+                                )?;
+                            } else {
+                                self.clear_pending_cherry_pick_sources_for_worktree(
+                                    worktree.as_ref(),
+                                )?;
+                            }
                             let new_commits =
                                 crate::authorship::rewrite_cherry_pick::new_commits_since(
                                     &repo,
@@ -5048,8 +5355,27 @@ impl ActorDaemonCoordinator {
                         let repo = find_repository_in_path(&worktree)?;
                         match kind {
                             crate::daemon::domain::StashOpKind::Push => {
+                                // For push, stash_ref is usually None (no target spec).
+                                // Resolve from refs/stash after the push completes.
+                                let resolved_stash =
+                                    stash_ref.as_deref().map(String::from).or_else(|| {
+                                        let mut args = repo.global_args_for_exec();
+                                        args.extend([
+                                            "rev-parse".to_string(),
+                                            "refs/stash".to_string(),
+                                        ]);
+                                        crate::git::repository::exec_git_allow_nonzero(&args)
+                                            .ok()
+                                            .filter(|o| o.status.success())
+                                            .map(|o| {
+                                                String::from_utf8_lossy(&o.stdout)
+                                                    .trim()
+                                                    .to_string()
+                                            })
+                                            .filter(|s| !s.is_empty())
+                                    });
                                 if let (Some(stash_sha), Some(head_sha)) =
-                                    (stash_ref.as_deref(), head.as_deref())
+                                    (resolved_stash.as_deref(), head.as_deref())
                                 {
                                     let pathspecs = Self::stash_pathspecs_from_command(cmd);
                                     let _ = crate::authorship::rewrite_stash::handle_stash_create(
@@ -5058,7 +5384,9 @@ impl ActorDaemonCoordinator {
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Pop => {
-                                if let Some(stash_sha) = stash_ref.as_deref() {
+                                let resolved =
+                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref());
+                                if let Some(stash_sha) = resolved {
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
                                             &repo, stash_sha, true,
@@ -5067,7 +5395,9 @@ impl ActorDaemonCoordinator {
                             }
                             crate::daemon::domain::StashOpKind::Apply
                             | crate::daemon::domain::StashOpKind::Branch => {
-                                if let Some(stash_sha) = stash_ref.as_deref() {
+                                let resolved =
+                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref());
+                                if let Some(stash_sha) = resolved {
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
                                             &repo, stash_sha, false,
@@ -5075,7 +5405,9 @@ impl ActorDaemonCoordinator {
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Drop => {
-                                if let Some(stash_sha) = stash_ref.as_deref() {
+                                let resolved =
+                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref());
+                                if let Some(stash_sha) = resolved {
                                     let _ = crate::authorship::rewrite_stash::handle_stash_drop(
                                         &repo, stash_sha,
                                     );
@@ -5089,6 +5421,12 @@ impl ActorDaemonCoordinator {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.git_author_identity().formatted_or_unknown();
                             let base_opt = base.clone().filter(|b| !b.is_empty() && b != "initial");
+                            let parent_sha = base_opt.as_deref().unwrap_or("initial");
+                            let _ = sync_pre_commit_checkpoint(
+                                &repo,
+                                parent_sha,
+                                carryover_snapshot.as_ref(),
+                            );
                             if let Err(e) =
                                 crate::authorship::post_commit::post_commit_with_final_state(
                                     &repo,
@@ -5105,6 +5443,23 @@ impl ActorDaemonCoordinator {
                                     "commit post-commit side effect failed"
                                 );
                             }
+                            // Squash merge: if this commit was created after merge --squash,
+                            // transfer authorship notes from the source branch commits.
+                            if let Some(source_head) = cmd.merge_squash_source_head.as_deref()
+                                && !source_head.is_empty()
+                            {
+                                let onto = base.clone().unwrap_or_default();
+                                if !onto.is_empty() {
+                                    let _ = crate::authorship::rewrite::handle_rewrite_event(
+                                        &repo,
+                                        crate::authorship::rewrite::RewriteEvent::SquashMerge {
+                                            source_head: source_head.to_string(),
+                                            squash_commit: new_head.clone(),
+                                            onto,
+                                        },
+                                    );
+                                }
+                            }
                         }
                     }
                     crate::daemon::domain::SemanticEvent::CommitAmended { old_head, new_head } => {
@@ -5118,13 +5473,49 @@ impl ActorDaemonCoordinator {
                         {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.git_author_identity().formatted_or_unknown();
+                            let committed_snapshot =
+                                committed_file_snapshot_for_amend(&repo, old_head, new_head);
+                            // Build effective snapshot: start with carryover (captures
+                            // working directory state including unstaged content), but
+                            // override per-file with committed content when the working
+                            // log's latest checkpoint blob matches the committed content.
+                            // This corrects for stale carryover snapshots that may have
+                            // been read after subsequent filesystem writes raced with
+                            // async daemon processing.
+                            let effective_snapshot =
+                                match (&carryover_snapshot, &committed_snapshot) {
+                                    (Some(carryover), Some(committed)) => {
+                                        let working_log =
+                                            repo.storage.working_log_for_base_commit(old_head).ok();
+                                        let mut merged = carryover.clone();
+                                        for (file, committed_content) in committed {
+                                            let latest_matches_committed = working_log
+                                                .as_ref()
+                                                .and_then(|wl| {
+                                                    wl.latest_checkpoint_file_content(file)
+                                                })
+                                                .is_some_and(|latest| latest == *committed_content);
+                                            if latest_matches_committed {
+                                                merged.insert(
+                                                    file.clone(),
+                                                    committed_content.clone(),
+                                                );
+                                            }
+                                        }
+                                        Some(merged)
+                                    }
+                                    (Some(c), None) => Some(c.clone()),
+                                    (None, Some(c)) => Some(c.clone()),
+                                    (None, None) => None,
+                                };
+                            let effective_snapshot = effective_snapshot.as_ref();
                             if let Err(e) =
                                 crate::authorship::post_commit::post_commit_amend_with_final_state(
                                     &repo,
                                     old_head,
                                     new_head,
                                     author,
-                                    carryover_snapshot.as_ref(),
+                                    effective_snapshot,
                                 )
                             {
                                 tracing::debug!(
@@ -5222,6 +5613,7 @@ impl ActorDaemonCoordinator {
                                 crate::authorship::rewrite::RewriteEvent::NonFastForward {
                                     old_tip: old.to_string(),
                                     new_tip: new.to_string(),
+                                    onto: None,
                                 },
                             );
                         }

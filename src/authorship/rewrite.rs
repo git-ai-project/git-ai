@@ -1,20 +1,26 @@
 use std::collections::HashMap;
 
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
-use crate::authorship::hunk_shift::{
-    DiffHunk, apply_hunk_shifts_to_file_attestation, parse_hunk_header,
-};
+use crate::authorship::hunk_shift::{DiffHunk, parse_hunk_header};
+use crate::authorship::rewrite_reset::file_content_at_commit;
 use crate::error::GitAiError;
 use crate::git::repository::{Repository, exec_git, exec_git_allow_nonzero};
 
+#[derive(Debug)]
 pub enum RewriteEvent {
     NonFastForward {
         old_tip: String,
         new_tip: String,
+        onto: Option<String>,
     },
     CherryPickComplete {
         sources: Vec<String>,
         new_commits: Vec<String>,
+    },
+    SquashMerge {
+        source_head: String,
+        squash_commit: String,
+        onto: String,
     },
 }
 
@@ -24,20 +30,198 @@ pub(crate) struct DiffTreeResult {
 }
 
 pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<(), GitAiError> {
-    let mappings = match event {
-        RewriteEvent::NonFastForward { old_tip, new_tip } => {
-            derive_mappings_from_range_diff(repo, &old_tip, &new_tip)?
+    match event {
+        RewriteEvent::SquashMerge {
+            ref source_head,
+            ref squash_commit,
+            ref onto,
+        } => handle_squash_merge(repo, source_head, squash_commit, onto),
+        _ => {
+            let mappings = match event {
+                RewriteEvent::NonFastForward {
+                    ref old_tip,
+                    ref new_tip,
+                    ref onto,
+                } => derive_mappings_from_range_diff(repo, old_tip, new_tip, onto.as_deref())?,
+                RewriteEvent::CherryPickComplete {
+                    sources,
+                    new_commits,
+                } => sources.into_iter().zip(new_commits).collect(),
+                RewriteEvent::SquashMerge { .. } => unreachable!(),
+            };
+            if mappings.is_empty() {
+                return Ok(());
+            }
+            let source_shas: Vec<String> = mappings.iter().map(|(src, _)| src.clone()).collect();
+            crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &source_shas);
+            shift_authorship_notes(repo, &mappings)?;
+            migrate_working_log_if_needed(repo, &mappings)?;
+            Ok(())
         }
-        RewriteEvent::CherryPickComplete {
-            sources,
-            new_commits,
-        } => sources.into_iter().zip(new_commits).collect(),
-    };
-    if mappings.is_empty() {
-        return Ok(());
     }
-    shift_authorship_notes(repo, &mappings)?;
-    migrate_working_log_if_needed(repo, &mappings)?;
+}
+
+fn handle_squash_merge(
+    repo: &Repository,
+    source_head: &str,
+    squash_commit: &str,
+    onto: &str,
+) -> Result<(), GitAiError> {
+    use crate::authorship::authorship_log::LineRange;
+    use crate::authorship::authorship_log_serialization::{AttestationEntry, FileAttestation};
+    use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
+    use std::collections::HashSet;
+
+    let base = find_merge_base(repo, source_head, onto).unwrap_or_else(|| onto.to_string());
+    let source_commits = list_commits_in_range(repo, &base, source_head);
+    let sources = if source_commits.is_empty() {
+        vec![source_head.to_string()]
+    } else {
+        source_commits
+    };
+
+    crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &sources);
+
+    // For each source commit, shift its attributions to the squash commit's line numbering,
+    // then merge all shifted logs together. Each commit's note uses line numbers relative to
+    // that commit's file state, so we must shift individually.
+    let mut result_log: Option<AuthorshipLog> = None;
+
+    // Pre-compute which lines in the squash commit are new (not in onto).
+    // Cache per file path to avoid re-computing for each source commit.
+    let mut new_lines_cache: HashMap<String, HashSet<u32>> = HashMap::new();
+
+    for src_sha in &sources {
+        let Some(raw) = read_authorship_note(repo, src_sha)? else {
+            continue;
+        };
+        let Ok(log) = AuthorshipLog::deserialize_from_string(&raw) else {
+            continue;
+        };
+
+        let shifted: Vec<_> = log
+            .attestations
+            .iter()
+            .filter_map(|fa| {
+                let src_content = file_content_at_commit(repo, src_sha, &fa.file_path);
+                let dst_content = file_content_at_commit(repo, squash_commit, &fa.file_path);
+
+                if dst_content.is_empty() {
+                    return None;
+                }
+
+                // Get or compute new lines for this file
+                let new_lines_in_squash = new_lines_cache
+                    .entry(fa.file_path.clone())
+                    .or_insert_with(|| {
+                        let onto_content = file_content_at_commit(repo, onto, &fa.file_path);
+                        let onto_lines: Vec<&str> = onto_content.lines().collect();
+                        let dst_lines: Vec<&str> = dst_content.lines().collect();
+                        let diff_ops = capture_diff_slices(&onto_lines, &dst_lines);
+                        let mut new_lines: HashSet<u32> = HashSet::new();
+                        for op in &diff_ops {
+                            match op {
+                                DiffOp::Insert {
+                                    new_index, new_len, ..
+                                }
+                                | DiffOp::Replace {
+                                    new_index, new_len, ..
+                                } => {
+                                    for i in 0..*new_len {
+                                        new_lines.insert((*new_index + i + 1) as u32);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        new_lines
+                    });
+
+                // Build mapping from this source commit's line numbers to squash commit
+                let src_lines: Vec<&str> = src_content.lines().collect();
+                let dst_lines: Vec<&str> = dst_content.lines().collect();
+                let old_to_new = if src_content == dst_content {
+                    (1..=src_lines.len() as u32)
+                        .map(|i| (i, i))
+                        .collect::<HashMap<u32, u32>>()
+                } else if src_content.is_empty() {
+                    HashMap::new()
+                } else {
+                    let ops = capture_diff_slices(&src_lines, &dst_lines);
+                    let mut map = HashMap::new();
+                    for op in &ops {
+                        if let DiffOp::Equal {
+                            old_index,
+                            new_index,
+                            len,
+                        } = op
+                        {
+                            for i in 0..*len {
+                                map.insert(
+                                    (*old_index + i + 1) as u32,
+                                    (*new_index + i + 1) as u32,
+                                );
+                            }
+                        }
+                    }
+                    map
+                };
+
+                // Transfer entries, filtering to only new lines in squash
+                let mut new_entries: Vec<AttestationEntry> = Vec::new();
+                for entry in &fa.entries {
+                    let mut new_ranges: Vec<LineRange> = Vec::new();
+                    for range in &entry.line_ranges {
+                        let (start, end) = match range {
+                            LineRange::Single(l) => (*l, *l),
+                            LineRange::Range(s, e) => (*s, *e),
+                        };
+                        for line in start..=end {
+                            if let Some(&new_line) = old_to_new.get(&line)
+                                && new_lines_in_squash.contains(&new_line)
+                            {
+                                new_ranges.push(LineRange::Single(new_line));
+                            }
+                        }
+                    }
+                    if !new_ranges.is_empty() {
+                        let compacted = compact_line_ranges(new_ranges);
+                        new_entries.push(AttestationEntry {
+                            hash: entry.hash.clone(),
+                            line_ranges: compacted,
+                        });
+                    }
+                }
+
+                if new_entries.is_empty() {
+                    None
+                } else {
+                    Some(FileAttestation {
+                        file_path: fa.file_path.clone(),
+                        entries: new_entries,
+                    })
+                }
+            })
+            .collect();
+
+        let mut shifted_log = log.clone();
+        shifted_log.attestations = shifted;
+        shifted_log.metadata.base_commit_sha = squash_commit.to_string();
+
+        match result_log.as_mut() {
+            Some(existing) => merge_authorship_logs(existing, &shifted_log),
+            None => result_log = Some(shifted_log),
+        }
+    }
+
+    let Some(final_log) = result_log else {
+        return Ok(());
+    };
+
+    let serialized = final_log.serialize_to_string().map_err(|e| {
+        GitAiError::Generic(format!("failed to serialize squash authorship log: {}", e))
+    })?;
+    write_authorship_note(repo, squash_commit, &serialized)?;
     Ok(())
 }
 
@@ -45,48 +229,123 @@ pub fn shift_authorship_notes(
     repo: &Repository,
     mappings: &[(String, String)],
 ) -> Result<(), GitAiError> {
-    let mut notes_to_write: Vec<(String, String)> = Vec::new();
+    use crate::authorship::authorship_log::LineRange;
+    use crate::authorship::authorship_log_serialization::{AttestationEntry, FileAttestation};
+    use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
+
+    tracing::debug!("shift_authorship_notes: {} mappings", mappings.len());
+
+    let mut pending_logs: HashMap<String, AuthorshipLog> = HashMap::new();
+    let mut raw_fallbacks: HashMap<String, String> = HashMap::new();
 
     for (source_sha, new_sha) in mappings {
-        // Don't overwrite existing notes on the target commit
-        if read_authorship_note(repo, new_sha)?.is_some() {
-            continue;
+        // Don't overwrite existing notes on the target commit that have real attestations.
+        // Empty notes (no attestations) may come from post-commit on squash merges
+        // and should be overwritable by the transfer.
+        if let Some(existing_raw) = read_authorship_note(repo, new_sha)? {
+            if let Ok(existing_log) = AuthorshipLog::deserialize_from_string(&existing_raw) {
+                if !existing_log.attestations.is_empty() {
+                    continue;
+                }
+            } else {
+                continue;
+            }
         }
         let Some(raw_note) = read_authorship_note(repo, source_sha)? else {
             continue;
         };
 
         let Ok(mut log) = AuthorshipLog::deserialize_from_string(&raw_note) else {
-            notes_to_write.push((new_sha.clone(), raw_note));
+            raw_fallbacks.entry(new_sha.clone()).or_insert(raw_note);
             continue;
         };
 
-        let diff_result = match compute_diff_tree(repo, source_sha, new_sha) {
-            Ok(r) => r,
-            Err(_) => {
-                notes_to_write.push((new_sha.clone(), raw_note));
-                continue;
-            }
-        };
-
-        // Apply renames
-        for (old_path, new_path) in &diff_result.renames {
-            for attestation in &mut log.attestations {
-                if attestation.file_path == *old_path {
-                    attestation.file_path = new_path.clone();
+        // Detect renames via diff-tree
+        let diff_result = compute_diff_tree(repo, source_sha, new_sha).ok();
+        if let Some(ref dr) = diff_result {
+            for (old_path, new_path) in &dr.renames {
+                for attestation in &mut log.attestations {
+                    if attestation.file_path == *old_path {
+                        attestation.file_path = new_path.clone();
+                    }
                 }
             }
         }
 
-        // Shift attestations
+        // Content-based attribution transfer: for each file, read content at both
+        // commits and use line-level diff to carry attributions to matching lines.
         let shifted: Vec<_> = log
             .attestations
             .iter()
             .filter_map(|fa| {
-                let hunks = diff_result.hunks_by_file.get(&fa.file_path);
-                match hunks {
-                    Some(h) if !h.is_empty() => apply_hunk_shifts_to_file_attestation(fa, h),
-                    _ => Some(fa.clone()),
+                let old_content = file_content_at_commit(repo, source_sha, &fa.file_path);
+                let new_content = file_content_at_commit(repo, new_sha, &fa.file_path);
+
+                if old_content.is_empty() && new_content.is_empty() {
+                    return None;
+                }
+                // If file unchanged, keep attestation as-is
+                if old_content == new_content {
+                    return Some(fa.clone());
+                }
+                // If file was deleted in new commit, drop attestation
+                if new_content.is_empty() {
+                    return None;
+                }
+
+                let old_lines: Vec<&str> = old_content.lines().collect();
+                let new_lines: Vec<&str> = new_content.lines().collect();
+                let diff_ops = capture_diff_slices(&old_lines, &new_lines);
+
+                // Build mapping: old_line_number (1-based) → new_line_number (1-based)
+                let mut old_to_new: HashMap<u32, u32> = HashMap::new();
+                for op in &diff_ops {
+                    if let DiffOp::Equal {
+                        old_index,
+                        new_index,
+                        len,
+                    } = op
+                    {
+                        for i in 0..*len {
+                            let old_line = (*old_index + i + 1) as u32;
+                            let new_line = (*new_index + i + 1) as u32;
+                            old_to_new.insert(old_line, new_line);
+                        }
+                    }
+                }
+
+                // Transfer attestation entries using the mapping
+                let mut new_entries: Vec<AttestationEntry> = Vec::new();
+                for entry in &fa.entries {
+                    let mut new_ranges: Vec<LineRange> = Vec::new();
+                    for range in &entry.line_ranges {
+                        let (start, end) = match range {
+                            LineRange::Single(l) => (*l, *l),
+                            LineRange::Range(s, e) => (*s, *e),
+                        };
+                        for line in start..=end {
+                            if let Some(&new_line) = old_to_new.get(&line) {
+                                new_ranges.push(LineRange::Single(new_line));
+                            }
+                        }
+                    }
+                    if !new_ranges.is_empty() {
+                        // Compact consecutive singles into ranges
+                        let compacted = compact_line_ranges(new_ranges);
+                        new_entries.push(AttestationEntry {
+                            hash: entry.hash.clone(),
+                            line_ranges: compacted,
+                        });
+                    }
+                }
+
+                if new_entries.is_empty() {
+                    None
+                } else {
+                    Some(FileAttestation {
+                        file_path: fa.file_path.clone(),
+                        entries: new_entries,
+                    })
                 }
             })
             .collect();
@@ -94,23 +353,130 @@ pub fn shift_authorship_notes(
 
         log.metadata.base_commit_sha = new_sha.clone();
 
-        match log.serialize_to_string() {
-            Ok(serialized) => notes_to_write.push((new_sha.clone(), serialized)),
-            Err(_) => notes_to_write.push((new_sha.clone(), raw_note)),
+        if let Some(existing) = pending_logs.get_mut(new_sha) {
+            merge_authorship_logs(existing, &log);
+        } else {
+            pending_logs.insert(new_sha.clone(), log);
         }
     }
 
-    for (sha, content) in &notes_to_write {
-        write_authorship_note(repo, sha, content)?;
+    for (sha, log) in &pending_logs {
+        match log.serialize_to_string() {
+            Ok(serialized) => write_authorship_note(repo, sha, &serialized)?,
+            Err(_) => {
+                if let Some(raw) = raw_fallbacks.get(sha) {
+                    write_authorship_note(repo, sha, raw)?;
+                }
+            }
+        }
+    }
+
+    for (sha, raw) in &raw_fallbacks {
+        if !pending_logs.contains_key(sha) {
+            write_authorship_note(repo, sha, raw)?;
+        }
     }
 
     Ok(())
+}
+
+fn compact_line_ranges(
+    ranges: Vec<crate::authorship::authorship_log::LineRange>,
+) -> Vec<crate::authorship::authorship_log::LineRange> {
+    use crate::authorship::authorship_log::LineRange;
+    if ranges.is_empty() {
+        return ranges;
+    }
+    let mut lines: Vec<u32> = ranges
+        .iter()
+        .map(|r| match r {
+            LineRange::Single(l) => *l,
+            LineRange::Range(s, _) => *s,
+        })
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+
+    let mut result = Vec::new();
+    let mut start = lines[0];
+    let mut end = lines[0];
+    for &line in &lines[1..] {
+        if line == end + 1 {
+            end = line;
+        } else {
+            if start == end {
+                result.push(LineRange::Single(start));
+            } else {
+                result.push(LineRange::Range(start, end));
+            }
+            start = line;
+            end = line;
+        }
+    }
+    if start == end {
+        result.push(LineRange::Single(start));
+    } else {
+        result.push(LineRange::Range(start, end));
+    }
+    result
+}
+
+fn merge_authorship_logs(target: &mut AuthorshipLog, source: &AuthorshipLog) {
+    for src_fa in &source.attestations {
+        if let Some(existing_fa) = target
+            .attestations
+            .iter_mut()
+            .find(|a| a.file_path == src_fa.file_path)
+        {
+            // Merge entries into existing file attestation
+            for src_entry in &src_fa.entries {
+                if let Some(existing_entry) = existing_fa
+                    .entries
+                    .iter_mut()
+                    .find(|e| e.hash == src_entry.hash)
+                {
+                    for range in &src_entry.line_ranges {
+                        if !existing_entry.line_ranges.contains(range) {
+                            existing_entry.line_ranges.push(range.clone());
+                        }
+                    }
+                } else {
+                    existing_fa.entries.push(src_entry.clone());
+                }
+            }
+        } else {
+            target.attestations.push(src_fa.clone());
+        }
+    }
+    // Merge all metadata maps
+    for (key, record) in &source.metadata.prompts {
+        target
+            .metadata
+            .prompts
+            .entry(key.clone())
+            .or_insert_with(|| record.clone());
+    }
+    for (key, record) in &source.metadata.sessions {
+        target
+            .metadata
+            .sessions
+            .entry(key.clone())
+            .or_insert_with(|| record.clone());
+    }
+    for (key, record) in &source.metadata.humans {
+        target
+            .metadata
+            .humans
+            .entry(key.clone())
+            .or_insert_with(|| record.clone());
+    }
 }
 
 pub fn derive_mappings_from_range_diff(
     repo: &Repository,
     old_tip: &str,
     new_tip: &str,
+    onto_hint: Option<&str>,
 ) -> Result<Vec<(String, String)>, GitAiError> {
     let Some(base) = find_merge_base(repo, old_tip, new_tip) else {
         return Ok(Vec::new());
@@ -130,17 +496,47 @@ pub fn derive_mappings_from_range_diff(
     }
 
     // Full squash: all old commits collapsed into one new commit
-    if is_full_squash(repo, &base, old_tip, new_tip) {
-        return Ok(vec![(old_tip.to_string(), new_tip.to_string())]);
+    if is_full_squash(repo, &base, old_tip, new_tip, onto_hint) {
+        // Map ALL old commits to new_tip so their notes get merged
+        let old_commits = list_commits_in_range(repo, &base, old_tip);
+        if old_commits.is_empty() {
+            return Ok(vec![(old_tip.to_string(), new_tip.to_string())]);
+        }
+        return Ok(old_commits
+            .into_iter()
+            .map(|src| (src, new_tip.to_string()))
+            .collect());
     }
 
-    let range_diff_output = run_range_diff(repo, &base, old_tip, new_tip)?;
+    // Validate onto_hint: it must be an ancestor of new_tip and different from new_tip.
+    // If the hint is invalid (e.g., from a checkout-then-rebase where first HEAD change
+    // is the checkout, not the rebase), fall back to base.
+    let onto = match onto_hint {
+        Some(hint) if hint != new_tip && hint != old_tip && is_ancestor(repo, hint, new_tip) => {
+            hint
+        }
+        _ => &base,
+    };
+    let range_diff_output = run_range_diff(repo, &base, old_tip, onto, new_tip)?;
     let mut mappings = parse_range_diff_output(&range_diff_output);
 
     let merge_mappings = derive_merge_commit_mappings(repo, &base, old_tip, new_tip, &mappings)?;
     mappings.extend(merge_mappings);
 
     Ok(mappings)
+}
+
+fn is_ancestor(repo: &Repository, ancestor: &str, descendant: &str) -> bool {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "merge-base".to_string(),
+        "--is-ancestor".to_string(),
+        ancestor.to_string(),
+        descendant.to_string(),
+    ]);
+    exec_git_allow_nonzero(&args)
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn find_merge_base(repo: &Repository, a: &str, b: &str) -> Option<String> {
@@ -155,55 +551,91 @@ fn find_merge_base(repo: &Repository, a: &str, b: &str) -> Option<String> {
     if base.is_empty() { None } else { Some(base) }
 }
 
-fn is_full_squash(repo: &Repository, base: &str, old_tip: &str, new_tip: &str) -> bool {
-    // Check new_tip^ == base (exactly one commit between base and new_tip)
-    let mut args = repo.global_args_for_exec();
-    args.extend(["rev-parse".to_string(), format!("{}^", new_tip)]);
-    let Ok(output) = exec_git_allow_nonzero(&args) else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let parent = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if parent != base {
+fn is_full_squash(
+    repo: &Repository,
+    base: &str,
+    old_tip: &str,
+    new_tip: &str,
+    onto_hint: Option<&str>,
+) -> bool {
+    let old_count = count_commits_in_range(repo, base, old_tip);
+    if old_count <= 1 {
         return false;
     }
 
-    // Check new_tip is not a merge commit (new_tip^2 should fail)
-    let mut args = repo.global_args_for_exec();
-    args.extend(["rev-parse".to_string(), format!("{}^2", new_tip)]);
-    let Ok(output) = exec_git_allow_nonzero(&args) else {
-        return false;
+    // If we have a valid onto hint, count commits between onto and new_tip (the rebased commits)
+    let valid_onto = onto_hint
+        .filter(|hint| *hint != new_tip && *hint != old_tip && is_ancestor(repo, hint, new_tip));
+    let new_rebased_count = if let Some(onto) = valid_onto {
+        count_commits_in_range(repo, onto, new_tip)
+    } else {
+        // Fallback: count commits unique to new side using three-dot symmetric diff
+        let mut args = repo.global_args_for_exec();
+        args.extend([
+            "rev-list".to_string(),
+            "--count".to_string(),
+            "--right-only".to_string(),
+            format!("{}...{}", old_tip, new_tip),
+        ]);
+        exec_git_allow_nonzero(&args)
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+            })
+            .unwrap_or(0)
     };
-    if output.status.success() {
-        return false;
-    }
 
-    // Check multiple old commits existed
+    new_rebased_count == 1
+}
+
+pub(crate) fn list_commits_in_range(repo: &Repository, base: &str, tip: &str) -> Vec<String> {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "rev-list".to_string(),
+        "--reverse".to_string(),
+        format!("{}..{}", base, tip),
+    ]);
+    exec_git_allow_nonzero(&args)
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn count_commits_in_range(repo: &Repository, base: &str, tip: &str) -> usize {
     let mut args = repo.global_args_for_exec();
     args.extend([
         "rev-list".to_string(),
         "--count".to_string(),
-        format!("{}..{}", base, old_tip),
+        format!("{}..{}", base, tip),
     ]);
-    let Ok(output) = exec_git_allow_nonzero(&args) else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let count: usize = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .unwrap_or(0);
-    count > 1
+    exec_git_allow_nonzero(&args)
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<usize>()
+                .ok()
+        })
+        .unwrap_or(0)
 }
 
 fn run_range_diff(
     repo: &Repository,
-    base: &str,
+    old_base: &str,
     old_tip: &str,
+    new_base: &str,
     new_tip: &str,
 ) -> Result<String, GitAiError> {
     let mut args = repo.global_args_for_exec();
@@ -213,8 +645,8 @@ fn run_range_diff(
         "--no-abbrev".to_string(),
         "-s".to_string(),
         "--creation-factor=100".to_string(),
-        format!("{}..{}", base, old_tip),
-        format!("{}..{}", base, new_tip),
+        format!("{}..{}", old_base, old_tip),
+        format!("{}..{}", new_base, new_tip),
     ]);
     let output = exec_git(&args)?;
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -222,6 +654,7 @@ fn run_range_diff(
 
 fn parse_range_diff_output(output: &str) -> Vec<(String, String)> {
     let mut mappings = Vec::new();
+    let mut pending_dropped: Vec<String> = Vec::new();
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -240,23 +673,33 @@ fn parse_range_diff_output(output: &str) -> Vec<(String, String)> {
             continue;
         };
 
-        // Only matched pairs (= or !) are useful
-        if status_char != '=' && status_char != '!' {
-            continue;
+        match status_char {
+            '<' => {
+                // Dropped commit (squashed into a later commit)
+                if !old_sha.chars().all(|c| c == '0') {
+                    pending_dropped.push(old_sha);
+                }
+            }
+            '=' | '!' => {
+                // Matched pair
+                let after_status = &rest[status_char.len_utf8()..];
+                let Some((new_sha, _)) = find_next_sha(after_status) else {
+                    continue;
+                };
+                if old_sha.chars().all(|c| c == '0') || new_sha.chars().all(|c| c == '0') {
+                    continue;
+                }
+                // Map any preceding dropped commits to this new commit (squash)
+                for dropped in pending_dropped.drain(..) {
+                    mappings.push((dropped, new_sha.clone()));
+                }
+                mappings.push((old_sha, new_sha));
+            }
+            _ => {
+                // '>' (new commit) or other — skip
+                continue;
+            }
         }
-
-        // Find second 40-char hex SHA
-        let after_status = &rest[status_char.len_utf8()..];
-        let Some((new_sha, _)) = find_next_sha(after_status) else {
-            continue;
-        };
-
-        // Skip null SHAs
-        if old_sha.chars().all(|c| c == '0') || new_sha.chars().all(|c| c == '0') {
-            continue;
-        }
-
-        mappings.push((old_sha, new_sha));
     }
 
     mappings

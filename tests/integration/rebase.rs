@@ -2496,18 +2496,15 @@ sed -i.bak '3s/pick/fixup/' "$1"
         );
     }
 
-    // Verify line-level attribution: human line must still show as human
-    // Note: the closing `}` may lose AI attribution during squash-rebase
-    // content-diff reconstruction (it's a common line that gets re-attributed
-    // to the commit author). The critical assertion is that the human-authored
-    // line retains its known-human attribution.
+    // Verify line-level attribution: human line must still show as human,
+    // and AI lines (including closing `}`) retain their attribution through squash.
     handler.assert_lines_and_blame(crate::lines![
         "func handleOrder() {".ai(),
         "    validate()".ai(),
         "    log(\"order received\")".human(),
         "    process()".ai(),
         "    sendMetrics()".ai(),
-        "}".unattributed_human(),
+        "}".ai(),
     ]);
 }
 
@@ -2676,6 +2673,6 @@ sed -i.bak '3s/pick/fixup/' "$1"
         "    handle()".ai(),
         "    logMetrics()".ai(),
         "    shutdown()".ai(),
-        "}".unattributed_human(),
+        "}".ai(),
     ]);
 }
