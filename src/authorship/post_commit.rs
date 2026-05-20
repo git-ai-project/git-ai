@@ -325,6 +325,199 @@ pub fn post_commit_with_final_state(
     Ok((commit_sha.to_string(), authorship_log))
 }
 
+/// Amend-specific post-commit that uses blame-based attribution to carry forward
+/// existing line attributions from the original commit.  Unlike `post_commit_with_final_state`
+/// (which only reads the working log), this merges blame-sourced attributions with
+/// checkpoint data so unchanged lines retain their AI/human provenance.
+pub fn post_commit_amend_with_final_state(
+    repo: &Repository,
+    original_commit: &str,
+    amended_commit: &str,
+    human_author: String,
+    final_state_override: Option<&HashMap<String, String>>,
+) -> Result<(String, AuthorshipLog), GitAiError> {
+    let repo_storage = &repo.storage;
+    let working_log = repo_storage.working_log_for_base_commit(original_commit)?;
+
+    // Compute pathspecs: changed files in the amended commit + working log touched files
+    let changed_files = repo.list_commit_files(amended_commit, None)?;
+    let mut pathspecs: HashSet<String> = changed_files.into_iter().collect();
+    let touched_files = working_log.all_touched_files()?;
+    pathspecs.extend(touched_files);
+    let initial_attributions_for_pathspecs = working_log.read_initial_attributions();
+    for file_path in initial_attributions_for_pathspecs.files.keys() {
+        pathspecs.insert(file_path.clone());
+    }
+    let pathspecs_vec: Vec<String> = pathspecs.iter().cloned().collect();
+
+    // Check if original commit has existing authorship data
+    let has_existing_data =
+        crate::git::refs::get_reference_as_authorship_log_v3(repo, original_commit)
+            .map(|log| {
+                !log.metadata.prompts.is_empty()
+                    || !log.metadata.humans.is_empty()
+                    || !log.metadata.sessions.is_empty()
+            })
+            .unwrap_or(false);
+
+    // Use blame-based VA which merges existing note attributions with working log
+    let working_va = if let Some(snapshot) = final_state_override {
+        smol::block_on(async {
+            VirtualAttributions::from_working_log_for_commit_snapshot(
+                repo.clone(),
+                original_commit.to_string(),
+                &pathspecs_vec,
+                if has_existing_data {
+                    None
+                } else {
+                    Some(human_author.clone())
+                },
+                None,
+                snapshot,
+            )
+            .await
+        })?
+    } else {
+        smol::block_on(async {
+            VirtualAttributions::from_working_log_for_commit(
+                repo.clone(),
+                original_commit.to_string(),
+                &pathspecs_vec,
+                if has_existing_data {
+                    None
+                } else {
+                    Some(human_author.clone())
+                },
+                None,
+            )
+            .await
+        })?
+    };
+
+    // Resolve parent of the amended commit for diff base
+    let amended_commit_obj = repo.find_commit(amended_commit.to_string())?;
+    let parent_sha = if amended_commit_obj.parent_count()? > 0 {
+        amended_commit_obj
+            .parent(0)
+            .map(|p| p.id())
+            .unwrap_or_else(|_| "initial".to_string())
+    } else {
+        "initial".to_string()
+    };
+
+    let (mut authorship_log, initial_attributions) = working_va
+        .to_authorship_log_and_initial_working_log(
+            repo,
+            &parent_sha,
+            amended_commit,
+            Some(&pathspecs),
+            final_state_override,
+        )?;
+
+    authorship_log.metadata.base_commit_sha = amended_commit.to_string();
+
+    // Fill unattributed lines for background agents
+    if !matches!(
+        crate::authorship::background_agent::detect(),
+        crate::authorship::background_agent::BackgroundAgent::None
+            | crate::authorship::background_agent::BackgroundAgent::WithHooks { .. }
+    ) {
+        let diff_base = if parent_sha == "initial" {
+            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        } else {
+            &parent_sha
+        };
+        if let Ok(added_lines) = repo.diff_added_lines(diff_base, amended_commit, None) {
+            let committed_hunks: HashMap<
+                String,
+                Vec<crate::authorship::authorship_log::LineRange>,
+            > = added_lines
+                .into_iter()
+                .filter(|(_, lines)| !lines.is_empty())
+                .map(|(path, lines)| {
+                    (
+                        path,
+                        crate::authorship::authorship_log::LineRange::compress_lines(&lines),
+                    )
+                })
+                .collect();
+            crate::authorship::background_agent::fill_unattributed_lines(
+                &mut authorship_log,
+                &committed_hunks,
+                &human_author,
+            );
+        }
+    }
+
+    // Preserve human/session metadata from the original commit's note
+    if let Ok(original_log) =
+        crate::git::refs::get_reference_as_authorship_log_v3(repo, original_commit)
+    {
+        for (id, record) in original_log.metadata.humans {
+            authorship_log.metadata.humans.entry(id).or_insert(record);
+        }
+        let referenced_session_ids: HashSet<String> = authorship_log
+            .attestations
+            .iter()
+            .flat_map(|fa| fa.entries.iter())
+            .filter_map(|entry| {
+                if entry.hash.starts_with("s_") {
+                    Some(
+                        entry
+                            .hash
+                            .split("::")
+                            .next()
+                            .unwrap_or(&entry.hash)
+                            .to_string(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (id, record) in original_log.metadata.sessions {
+            if referenced_session_ids.contains(&id) {
+                authorship_log.metadata.sessions.entry(id).or_insert(record);
+            }
+        }
+    }
+
+    // Inject custom attributes
+    let custom_attrs = Config::fresh().custom_attributes().clone();
+    if !custom_attrs.is_empty() {
+        for pr in authorship_log.metadata.prompts.values_mut() {
+            pr.custom_attributes = Some(custom_attrs.clone());
+        }
+        for sr in authorship_log.metadata.sessions.values_mut() {
+            sr.custom_attributes = Some(custom_attrs.clone());
+        }
+    }
+
+    let authorship_note_str = authorship_log
+        .serialize_to_string()
+        .map_err(|_| GitAiError::Generic("Failed to serialize authorship log".to_string()))?;
+    notes_add(repo, amended_commit, &authorship_note_str)?;
+
+    // Write INITIAL file for uncommitted attributions
+    if !initial_attributions.files.is_empty() {
+        let new_working_log = repo_storage.working_log_for_base_commit(amended_commit)?;
+        let initial_file_contents =
+            working_va.snapshot_contents_for_files(initial_attributions.files.keys());
+        new_working_log.write_initial_attributions_with_contents(
+            initial_attributions.files,
+            initial_attributions.prompts,
+            initial_attributions.humans,
+            initial_file_contents,
+            initial_attributions.sessions,
+        )?;
+    }
+
+    // Clean up old working log
+    repo_storage.delete_working_log_for_base_commit(original_commit)?;
+
+    Ok((amended_commit.to_string(), authorship_log))
+}
+
 #[derive(Debug, Clone)]
 enum StatsSkipReason {
     MergeCommit,
