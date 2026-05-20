@@ -38,12 +38,20 @@ pub fn ensure_git_symlinks() -> Result<(), GitAiError> {
 
     // Remove existing symlink/junction if present
     if symlink_path.exists() || symlink_path.symlink_metadata().is_ok() {
-        // On Windows, junctions are directories, so use remove_dir
+        // On Windows, junctions are directories, so try remove_dir first,
+        // then fall back to remove_file (for regular symlinks). Both errors
+        // are surfaced rather than swallowed so callers get a clear diagnosis.
         #[cfg(windows)]
         {
-            // Try remove_dir first (for junctions), then remove_file (for symlinks)
-            if std::fs::remove_dir(&symlink_path).is_err() {
-                let _ = std::fs::remove_file(&symlink_path);
+            let dir_err = std::fs::remove_dir(&symlink_path);
+            if dir_err.is_err() {
+                std::fs::remove_file(&symlink_path).map_err(|e| {
+                    GitAiError::Generic(format!(
+                        "Failed to remove existing junction/symlink at {}: {}",
+                        symlink_path.display(),
+                        e
+                    ))
+                })?;
             }
         }
         #[cfg(unix)]

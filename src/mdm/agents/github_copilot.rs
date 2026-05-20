@@ -3,7 +3,7 @@ use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerPa
 use crate::mdm::utils::{
     MIN_CODE_VERSION, generate_diff, get_editor_version, home_dir, parse_version,
     resolve_editor_cli, settings_paths_for_products, should_process_settings_target,
-    version_meets_requirement, write_atomic,
+    to_agent_hook_command_path, to_git_bash_path, version_meets_requirement, write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
@@ -107,15 +107,17 @@ impl HookInstaller for GitHubCopilotInstaller {
         let content = fs::read_to_string(&hooks_path)?;
         let existing: Value = serde_json::from_str(&content).unwrap_or_else(|_| json!({}));
 
-        let pre_desired = format!(
+        let binary_path_str = to_agent_hook_command_path(&params.binary_path);
+        let pre_desired = format!("{} {}", binary_path_str, GITHUB_COPILOT_PRE_TOOL_CMD);
+        let post_desired = format!("{} {}", binary_path_str, GITHUB_COPILOT_POST_TOOL_CMD);
+        let legacy_msys_binary_path_str = to_git_bash_path(&params.binary_path);
+        let pre_legacy = format!(
             "{} {}",
-            params.binary_path.display(),
-            GITHUB_COPILOT_PRE_TOOL_CMD
+            legacy_msys_binary_path_str, GITHUB_COPILOT_PRE_TOOL_CMD
         );
-        let post_desired = format!(
+        let post_legacy = format!(
             "{} {}",
-            params.binary_path.display(),
-            GITHUB_COPILOT_POST_TOOL_CMD
+            legacy_msys_binary_path_str, GITHUB_COPILOT_POST_TOOL_CMD
         );
 
         let has_pre_installed = existing
@@ -154,7 +156,7 @@ impl HookInstaller for GitHubCopilotInstaller {
                 arr.iter().any(|hook| {
                     hook.get("command")
                         .and_then(|c| c.as_str())
-                        .map(|cmd| cmd == pre_desired)
+                        .map(|cmd| cmd == pre_desired || (cfg!(windows) && cmd == pre_legacy))
                         .unwrap_or(false)
                 })
             })
@@ -168,7 +170,7 @@ impl HookInstaller for GitHubCopilotInstaller {
                 arr.iter().any(|hook| {
                     hook.get("command")
                         .and_then(|c| c.as_str())
-                        .map(|cmd| cmd == post_desired)
+                        .map(|cmd| cmd == post_desired || (cfg!(windows) && cmd == post_legacy))
                         .unwrap_or(false)
                 })
             })
@@ -204,16 +206,9 @@ impl HookInstaller for GitHubCopilotInstaller {
             serde_json::from_str(&existing_content)?
         };
 
-        let pre_tool_cmd = format!(
-            "{} {}",
-            params.binary_path.display(),
-            GITHUB_COPILOT_PRE_TOOL_CMD
-        );
-        let post_tool_cmd = format!(
-            "{} {}",
-            params.binary_path.display(),
-            GITHUB_COPILOT_POST_TOOL_CMD
-        );
+        let binary_path_str = to_agent_hook_command_path(&params.binary_path);
+        let pre_tool_cmd = format!("{} {}", binary_path_str, GITHUB_COPILOT_PRE_TOOL_CMD);
+        let post_tool_cmd = format!("{} {}", binary_path_str, GITHUB_COPILOT_POST_TOOL_CMD);
 
         let desired: Value = json!({
             "hooks": {

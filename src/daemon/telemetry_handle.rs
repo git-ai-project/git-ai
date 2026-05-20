@@ -23,7 +23,17 @@ use std::time::Duration;
 const DAEMON_SOCKET_IO_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Maximum time to wait for the daemon socket on process start.
-#[cfg(not(any(test, feature = "test-support")))]
+///
+/// Windows Named Pipes require a listening server instance before `connect_ms`
+/// returns, and process startup on Windows is meaningfully slower than on Unix
+/// (AV scanning, loader lock, etc.). The daemon startup timeout in
+/// `daemon_startup_timeout()` already grants 5 s on Windows for this reason;
+/// we mirror that budget here so the git wrapper does not time-out connecting
+/// to the control socket before the daemon is ready.
+#[cfg(all(not(any(test, feature = "test-support")), windows))]
+const DAEMON_TELEMETRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(all(not(any(test, feature = "test-support")), not(windows)))]
 const DAEMON_TELEMETRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Global handle to the daemon control socket for telemetry submission.
