@@ -15,7 +15,6 @@ fn setup() {
 
     // Test that we can override feature flags
     let test_flags = FeatureFlags {
-        rewrite_stash: true,
         auth_keyring: false,
         git_hooks_enabled: false,
         git_hooks_externally_managed: false,

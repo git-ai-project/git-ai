@@ -23,7 +23,6 @@ use crate::{
     },
     authorship::working_log::CheckpointKind,
     commands::checkpoint_agent::orchestrator::CheckpointRequest,
-    commands::hooks::{push_hooks, stash_hooks},
     daemon::checkpoint::PreparedPathRole,
 };
 #[cfg(not(windows))]
@@ -1620,10 +1619,66 @@ fn apply_push_side_effect(
     command: Option<&str>,
     args: &[String],
 ) -> Result<(), GitAiError> {
+    use crate::config::NotesBackendKind;
+    use crate::git::cli_parser::is_dry_run;
+    use crate::git::sync_authorship::push_authorship_notes;
+
+    if crate::config::Config::get().notes_backend_kind() == NotesBackendKind::Http {
+        tracing::debug!("apply_push_side_effect: skipping authorship push (Http backend)");
+        return Ok(());
+    }
+
     let repo = find_repository_in_path(worktree)?;
     let parsed = parsed_invocation_for_side_effect(command, args);
-    push_hooks::run_pre_push_hook_managed(&parsed, &repo);
+
+    if is_dry_run(&parsed.command_args)
+        || parsed
+            .command_args
+            .iter()
+            .any(|a| a == "-d" || a == "--delete")
+        || parsed.command_args.iter().any(|a| a == "--mirror")
+    {
+        return Ok(());
+    }
+
+    let remote = resolve_push_remote_for_side_effect(&parsed, &repo);
+    let Some(remote) = remote else {
+        tracing::debug!("no remotes found for authorship push; skipping");
+        return Ok(());
+    };
+
+    crate::commands::upgrade::maybe_schedule_background_update_check();
+    tracing::debug!("started pushing authorship notes to remote: {}", remote);
+
+    if let Err(e) = push_authorship_notes(&repo, &remote) {
+        tracing::debug!("authorship push failed: {}", e);
+    }
     Ok(())
+}
+
+fn resolve_push_remote_for_side_effect(
+    parsed_args: &crate::git::cli_parser::ParsedGitInvocation,
+    repository: &Repository,
+) -> Option<String> {
+    let remotes = repository.remotes().ok();
+    let remote_names: Vec<String> = remotes
+        .as_ref()
+        .map(|r| {
+            (0..r.len())
+                .filter_map(|i| r.get(i).map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let upstream_remote = repository.upstream_remote().ok().flatten();
+    let default_remote = repository.get_default_remote().ok().flatten();
+
+    let positional_remote = parsed_args
+        .command_args
+        .iter()
+        .find(|arg| !arg.starts_with('-') && remote_names.contains(arg))
+        .cloned();
+
+    positional_remote.or(upstream_remote).or(default_remote)
 }
 
 fn apply_pull_notes_sync_side_effect(
@@ -4792,7 +4847,44 @@ impl ActorDaemonCoordinator {
         if parsed.command.as_deref() != Some("stash") {
             return Vec::new();
         }
-        stash_hooks::extract_stash_pathspecs(&parsed)
+
+        let mut pathspecs = Vec::new();
+        let mut found_separator = false;
+        let mut skip_next = false;
+
+        for (i, arg) in parsed.command_args.iter().enumerate() {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            if arg == "--" {
+                found_separator = true;
+                continue;
+            }
+            if found_separator {
+                pathspecs.push(arg.clone());
+                continue;
+            }
+            if arg.starts_with('-') {
+                if matches!(
+                    arg.as_str(),
+                    "-m" | "--message" | "--pathspec-from-file" | "--pathspec-file-nul"
+                ) {
+                    skip_next = true;
+                }
+                continue;
+            }
+            if i == 0 && matches!(arg.as_str(), "push" | "save" | "pop" | "apply") {
+                continue;
+            }
+            if i == 1 && arg.starts_with("stash@") {
+                continue;
+            }
+            pathspecs.push(arg.clone());
+        }
+
+        tracing::debug!("Extracted stash pathspecs: {:?}", pathspecs);
+        pathspecs
     }
 
     fn stable_rebase_heads_from_worktree(
