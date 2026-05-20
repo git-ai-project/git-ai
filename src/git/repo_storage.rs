@@ -3,7 +3,6 @@ use crate::authorship::authorship_log::{HumanRecord, PromptRecord, SessionRecord
 use crate::authorship::authorship_log_serialization::generate_short_hash;
 use crate::authorship::working_log::{CHECKPOINT_API_VERSION, Checkpoint, CheckpointKind};
 use crate::error::GitAiError;
-use crate::git::rewrite_log::{RewriteLogEvent, append_event_to_file};
 use crate::utils::normalize_to_posix;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -35,7 +34,6 @@ pub struct RepoStorage {
     pub ai_dir: PathBuf,
     pub repo_workdir: PathBuf,
     pub working_logs: PathBuf,
-    pub rewrite_log: PathBuf,
     pub logs: PathBuf,
 }
 
@@ -53,14 +51,12 @@ impl RepoStorage {
 
     fn for_ai_dir(ai_dir: &Path, repo_workdir: &Path) -> Result<RepoStorage, GitAiError> {
         let working_logs_dir = ai_dir.join("working_logs");
-        let rewrite_log_file = ai_dir.join("rewrite_log");
         let logs_dir = ai_dir.join("logs");
 
         let config = RepoStorage {
             ai_dir: ai_dir.to_path_buf(),
             repo_workdir: repo_workdir.to_path_buf(),
             working_logs: working_logs_dir,
-            rewrite_log: rewrite_log_file,
             logs: logs_dir,
         };
 
@@ -77,10 +73,6 @@ impl RepoStorage {
 
         // Create logs directory for Sentry events
         fs::create_dir_all(&self.logs)?;
-
-        if !&self.rewrite_log.exists() && !&self.rewrite_log.is_file() {
-            fs::write(&self.rewrite_log, "")?;
-        }
 
         Ok(())
     }
@@ -197,27 +189,6 @@ impl RepoStorage {
             tracing::debug!("Renamed working log from {} to {}", old_sha, new_sha);
         }
         Ok(())
-    }
-
-    /* Rewrite Log Persistance */
-
-    /// Append a rewrite event to the rewrite log file and return the full log
-    pub fn append_rewrite_event(
-        &self,
-        event: RewriteLogEvent,
-    ) -> Result<Vec<RewriteLogEvent>, GitAiError> {
-        append_event_to_file(&self.rewrite_log, event)?;
-        self.read_rewrite_events()
-    }
-
-    /// Read all rewrite events from the rewrite log file
-    pub fn read_rewrite_events(&self) -> Result<Vec<RewriteLogEvent>, GitAiError> {
-        if !self.rewrite_log.exists() {
-            return Ok(Vec::new());
-        }
-
-        let content = fs::read_to_string(&self.rewrite_log)?;
-        crate::git::rewrite_log::deserialize_events_from_jsonl(&content)
     }
 }
 

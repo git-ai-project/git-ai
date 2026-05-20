@@ -15,11 +15,10 @@ use crate::git::repo_state::{
     worktree_root_for_path,
 };
 use crate::git::repository::{Repository, discover_repository_in_path_no_git_exec, exec_git};
-use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
 use crate::utils::LockFile;
 use crate::{
-    authorship::rebase_authorship::{
+    authorship::virtual_attribution::{
         restore_virtual_attribution_carryover, restore_working_log_carryover,
     },
     authorship::working_log::CheckpointKind,
@@ -1721,14 +1720,9 @@ fn is_non_auxiliary_ref(reference: &str) -> bool {
         || reference.starts_with("refs/replace/"))
 }
 
-fn processed_rebase_new_heads(repository: &Repository) -> Result<HashSet<String>, GitAiError> {
-    let mut out = HashSet::new();
-    for event in repository.storage.read_rewrite_events()? {
-        if let RewriteLogEvent::RebaseComplete { rebase_complete } = event {
-            out.insert(rebase_complete.new_head);
-        }
-    }
-    Ok(out)
+fn processed_rebase_new_heads(_repository: &Repository) -> Result<HashSet<String>, GitAiError> {
+    // The rewrite log has been removed; no previously-processed heads to report.
+    Ok(HashSet::new())
 }
 
 /// Check whether `ancestor` is an ancestor of `descendant` using
@@ -5060,13 +5054,16 @@ impl ActorDaemonCoordinator {
                         {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.git_author_identity().formatted_or_unknown();
-                            if let Err(e) = crate::authorship::rebase_authorship::rewrite_authorship_after_commit_amend_with_snapshot(
-                                &repo,
-                                old_head,
-                                new_head,
-                                author,
-                                carryover_snapshot.as_ref(),
-                            ) {
+                            if let Err(e) =
+                                crate::authorship::post_commit::post_commit_with_final_state(
+                                    &repo,
+                                    Some(old_head.clone()),
+                                    new_head.clone(),
+                                    author,
+                                    true,
+                                    carryover_snapshot.as_ref(),
+                                )
+                            {
                                 tracing::debug!(
                                     %e,
                                     %worktree,

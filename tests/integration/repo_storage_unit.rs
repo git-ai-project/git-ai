@@ -38,12 +38,9 @@ fn test_ensure_config_directory_creates_structure() {
         "working_logs should be a directory"
     );
 
-    let rewrite_log_file = ai_dir.join("rewrite_log");
-    assert!(rewrite_log_file.exists(), "rewrite_log file should exist");
-    assert!(rewrite_log_file.is_file(), "rewrite_log should be a file");
-
-    let content = fs::read_to_string(&rewrite_log_file).expect("Failed to read rewrite_log");
-    assert_eq!(content, "", "rewrite_log should be empty by default");
+    let logs_dir = ai_dir.join("logs");
+    assert!(logs_dir.exists(), "logs directory should exist");
+    assert!(logs_dir.is_dir(), "logs should be a directory");
 }
 
 // ---------------------------------------------------------------------------
@@ -51,22 +48,14 @@ fn test_ensure_config_directory_creates_structure() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_ensure_config_directory_handles_existing_files() {
+fn test_ensure_config_directory_handles_existing_dirs() {
     let repo = TestRepo::new();
     let repo_storage = storage_for(&repo);
 
-    let rewrite_log_file = repo.path().join(".git").join("ai").join("rewrite_log");
-    fs::write(&rewrite_log_file, "existing content").expect("Failed to write to rewrite_log");
-
+    // Call ensure_config_directory again - should be idempotent
     repo_storage
         .ensure_config_directory()
         .expect("Failed to ensure config directory again");
-
-    let content = fs::read_to_string(&rewrite_log_file).expect("Failed to read rewrite_log");
-    assert_eq!(
-        content, "existing content",
-        "Existing rewrite_log content should be preserved"
-    );
 
     let ai_dir = repo.path().join(".git").join("ai");
     let working_logs_dir = ai_dir.join("working_logs");

@@ -14,7 +14,6 @@ pub mod post_commit;
 
 pub mod prompt_utils;
 pub mod range_authorship;
-pub mod rebase_authorship;
 pub mod rewrite;
 pub mod rewrite_cherry_pick;
 pub mod rewrite_reset;

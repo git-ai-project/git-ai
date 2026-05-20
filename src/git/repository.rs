@@ -1,11 +1,9 @@
-use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::repo_state::{
     common_dir_for_git_dir, git_dir_for_worktree, worktree_root_for_path,
 };
 use crate::git::repo_storage::RepoStorage;
-use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::push_authorship_notes;
 #[cfg(windows)]
@@ -1027,43 +1025,6 @@ impl Repository {
             let refname = head_ref.name().map(|n| n.to_string());
             self.pre_command_base_commit = Some(target_string);
             self.pre_command_refname = refname;
-        }
-    }
-
-    pub fn handle_rewrite_log_event(
-        &mut self,
-        rewrite_log_event: RewriteLogEvent,
-        commit_author: String,
-        supress_output: bool,
-        apply_side_effects: bool,
-    ) {
-        let log = self
-            .storage
-            .append_rewrite_event(rewrite_log_event.clone())
-            .expect("Error writing .git/ai/rewrite_log");
-
-        if apply_side_effects
-            && let Err(error) = rewrite_authorship_if_needed(
-                self,
-                &rewrite_log_event,
-                commit_author,
-                &log,
-                supress_output,
-            )
-        {
-            tracing::debug!(
-                "rewrite_authorship_if_needed failed for {:?}: {}",
-                rewrite_log_event,
-                error
-            );
-            crate::observability::log_error(
-                &error,
-                Some(serde_json::json!({
-                    "component": "repository",
-                    "operation": "handle_rewrite_log_event",
-                    "rewrite_event": rewrite_log_event,
-                })),
-            );
         }
     }
 

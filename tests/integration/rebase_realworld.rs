@@ -3,7 +3,7 @@
 //! These tests cover four rebase scenario categories with ≥5 commits per branch,
 //! verifying line-level attribution at EVERY rebased commit — not just HEAD.
 //! Tests are intentionally strict: they surface bugs in the slow-path attribution
-//! rewriting code (src/authorship/rebase_authorship.rs).
+//! rewriting code (src/authorship/rewrite.rs).
 //!
 //! IMPORTANT: All attribution reads MUST go through TestRepo helpers:
 //!   - `run_blame_api(repo, sha, file, ctx)` — blame at specific commit via Rust API (newest_commit)

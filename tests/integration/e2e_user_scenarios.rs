@@ -376,6 +376,7 @@ class DataProcessor:
 // Test 11: squash-authorship concatenates AI and human changes
 // ---------------------------------------------------------------------------
 #[test]
+#[ignore = "squash-authorship command has been removed"]
 fn test_squash_authorship_concatenates() {
     let repo = TestRepo::new();
     let file_path = repo.path().join("example.txt");

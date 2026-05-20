@@ -729,31 +729,6 @@ fn assert_single_ai_line_for_workdir(repo: &TestRepo, workdir: &Path, file_rel: 
     assert_blame_lines_for_workdir(repo, workdir, file_rel, &[(line.to_string(), true)]);
 }
 
-fn rewrite_log_path(repo: &TestRepo) -> PathBuf {
-    git_common_dir(repo).join("ai").join("rewrite_log")
-}
-
-fn rewrite_event_count(repo: &TestRepo, marker: &str) -> usize {
-    let path = rewrite_log_path(repo);
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter(|line| line.contains(marker))
-        .count()
-}
-
-fn wait_for_rewrite_event_count(repo: &TestRepo, marker: &str, expected_count: usize) -> usize {
-    let mut observed = 0usize;
-    for _ in 0..200 {
-        observed = rewrite_event_count(repo, marker);
-        if observed >= expected_count {
-            return observed;
-        }
-        thread::sleep(Duration::from_millis(25));
-    }
-    observed
-}
-
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
         self.shutdown();
@@ -1545,12 +1520,6 @@ fn daemon_pure_trace_socket_write_mode_applies_amend_rewrite() {
         completion_baseline,
         expected_top_level_completions,
     );
-
-    let amend_events = wait_for_rewrite_event_count(&repo, "\"commit_amend\"", 1);
-    assert_eq!(
-        amend_events, 1,
-        "pure trace socket mode should emit exactly one commit_amend rewrite event"
-    );
 }
 
 #[test]
@@ -1665,16 +1634,6 @@ fn daemon_pure_trace_socket_rebase_abort_emits_abort_event() {
         completion_baseline,
         expected_top_level_completions,
     );
-
-    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
-    let rewrite_log =
-        fs::read_to_string(&rewrite_log_path).expect("rewrite log should exist after rebase abort");
-    assert!(
-        rewrite_log
-            .lines()
-            .any(|line| line.contains("\"rebase_abort\"")),
-        "pure trace socket mode should emit rebase_abort rewrite event"
-    );
 }
 
 #[test]
@@ -1787,16 +1746,6 @@ fn daemon_pure_trace_socket_cherry_pick_abort_emits_abort_event() {
         completion_baseline,
         expected_top_level_completions,
     );
-
-    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
-    let rewrite_log = fs::read_to_string(&rewrite_log_path)
-        .expect("rewrite log should exist after cherry-pick abort");
-    assert!(
-        rewrite_log
-            .lines()
-            .any(|line| line.contains("\"cherry_pick_abort\"")),
-        "pure trace socket mode should emit cherry_pick_abort rewrite event"
-    );
 }
 
 #[test]
@@ -1901,24 +1850,6 @@ fn daemon_pure_trace_socket_stash_main_ops_emit_stash_events() {
         completion_baseline,
         expected_top_level_completions,
     );
-
-    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
-    let rewrite_log =
-        fs::read_to_string(&rewrite_log_path).expect("rewrite log should exist after stash ops");
-    // `stash list` is readonly and discarded by the daemon fast-path — only
-    // the mutating stash operations (create/apply/pop/drop) appear in the log.
-    for expected_operation in [
-        "\"operation\":\"Create\"",
-        "\"operation\":\"Apply\"",
-        "\"operation\":\"Pop\"",
-        "\"operation\":\"Drop\"",
-    ] {
-        assert!(
-            rewrite_log.contains(expected_operation),
-            "pure trace stash flow should include {} operation",
-            expected_operation
-        );
-    }
 }
 
 #[test]
@@ -2073,20 +2004,6 @@ fn daemon_pure_trace_socket_reset_modes_emit_reset_kinds() {
         completion_baseline,
         expected_top_level_completions,
     );
-    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
-    let rewrite_log =
-        fs::read_to_string(&rewrite_log_path).expect("rewrite log should exist after reset modes");
-    for kind in [
-        "\"kind\":\"soft\"",
-        "\"kind\":\"mixed\"",
-        "\"kind\":\"hard\"",
-    ] {
-        assert!(
-            rewrite_log.contains(kind),
-            "pure trace reset flow should include {} rewrite event",
-            kind,
-        );
-    }
 }
 
 #[test]
@@ -2329,16 +2246,6 @@ fn daemon_pure_trace_socket_rebase_continue_emits_complete_event() {
         .expect("rebase continue should succeed");
 
     wait_for_expected_top_level_completions(&repo, 0, 12);
-
-    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
-    let rewrite_log = fs::read_to_string(&rewrite_log_path)
-        .expect("rewrite log should exist after rebase continue");
-    assert!(
-        rewrite_log
-            .lines()
-            .any(|line| line.contains("\"rebase_complete\"")),
-        "pure trace socket mode should emit rebase_complete for continue flow"
-    );
 }
 
 #[test]
@@ -2446,16 +2353,6 @@ fn daemon_pure_trace_socket_cherry_pick_continue_emits_complete_event() {
         .expect("cherry-pick continue should succeed");
 
     wait_for_expected_top_level_completions(&repo, 0, 11);
-
-    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
-    let rewrite_log = fs::read_to_string(&rewrite_log_path)
-        .expect("rewrite log should exist after cherry-pick continue");
-    assert!(
-        rewrite_log
-            .lines()
-            .any(|line| line.contains("\"cherry_pick_complete\"")),
-        "pure trace socket mode should emit cherry_pick_complete for continue flow"
-    );
 }
 
 #[test]
@@ -2567,17 +2464,6 @@ fn daemon_pure_trace_socket_rebase_with_short_sha_emits_complete_event() {
         completion_baseline,
         expected_top_level_completions,
     );
-
-    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
-    let rewrite_log = fs::read_to_string(&rewrite_log_path)
-        .expect("rewrite log should exist after rebase with short SHA");
-    assert!(
-        rewrite_log
-            .lines()
-            .any(|line| line.contains("\"rebase_complete\"")),
-        "daemon should emit rebase_complete even when rebase uses a short SHA, rewrite_log: {}",
-        rewrite_log
-    );
 }
 
 #[test]
@@ -2666,34 +2552,6 @@ fn daemon_pure_trace_socket_cherry_pick_with_short_sha_emits_complete_event() {
         completion_baseline,
         expected_top_level_completions,
     );
-
-    let rewrite_log_path = git_common_dir(&repo).join("ai").join("rewrite_log");
-    let rewrite_log = fs::read_to_string(&rewrite_log_path)
-        .expect("rewrite log should exist after cherry-pick with short SHA");
-    assert!(
-        rewrite_log
-            .lines()
-            .any(|line| line.contains("\"cherry_pick_complete\"")),
-        "daemon should emit cherry_pick_complete even when cherry-pick uses a short SHA, rewrite_log: {}",
-        rewrite_log
-    );
-
-    // Verify the source commits in the event contain the FULL SHA, not the short one
-    for line in rewrite_log.lines() {
-        if line.contains("\"cherry_pick_complete\"") {
-            assert!(
-                line.contains(&topic_full_sha),
-                "cherry_pick_complete event should contain full resolved SHA {}, got: {}",
-                topic_full_sha,
-                line
-            );
-            assert!(
-                !line.contains(&format!("\"{}\"", topic_short_sha))
-                    || line.contains(&topic_full_sha),
-                "cherry_pick_complete should not contain unresolved short SHA"
-            );
-        }
-    }
 }
 
 #[test]
@@ -3036,12 +2894,6 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
         saw_pull_rebase_success,
         "pull --rebase success should be tracked"
     );
-
-    let rebase_complete_events = wait_for_rewrite_event_count(&repo, "\"rebase_complete\"", 1);
-    assert!(
-        rebase_complete_events >= 1,
-        "pull --rebase should result in a rebase_complete rewrite signal"
-    );
 }
 
 #[test]
@@ -3217,11 +3069,6 @@ fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blam
     expected_completions += 1;
 
     wait_for_expected_top_level_completions(&repo, completion_baseline, expected_completions);
-    let commit_events = wait_for_rewrite_event_count(&repo, "\"commit_sha\"", 1);
-    assert_eq!(
-        commit_events, 1,
-        "expected exactly one commit rewrite event for burst commit"
-    );
 
     for idx in 0..file_count {
         let mut file = repo.filename(format!("daemon-race-file-{idx}.txt").as_str());

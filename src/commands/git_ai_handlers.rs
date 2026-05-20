@@ -172,11 +172,9 @@ pub fn handle_git_ai(args: &[String]) {
         "git-hooks" => {
             handle_git_hooks(&args[1..]);
         }
-        "squash-authorship" => {
-            commands::squash_authorship::handle_squash_authorship(&args[1..]);
-        }
-        "ci" => {
-            commands::ci_handlers::handle_ci(&args[1..]);
+        "squash-authorship" | "ci" => {
+            eprintln!("git-ai: the '{}' command has been removed.", args[0]);
+            std::process::exit(1);
         }
         "upgrade" => {
             commands::upgrade::run_with_args(&args[1..]);
