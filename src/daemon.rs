@@ -1617,7 +1617,7 @@ fn apply_checkout_switch_working_log_side_effect(
                 // Fix #957: When --merge produced conflict markers (exit_code != 0),
                 // the snapshot files contain conflict markers.  Strip them before
                 // restoring working-log carryover so byte-level attributions align
-                // with the clean content that restore_stashed_va would see.
+                // with the clean content.
                 let clean_snapshot: HashMap<String, String> = if cmd.exit_code != 0 {
                     snapshot
                         .iter()
