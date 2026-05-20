@@ -95,13 +95,8 @@ pub fn read_authorship_v3(
 ///
 /// 1. `authorship_traversal::load_ai_touched_files_for_commits` — passes OIDs
 ///    to `batch_read_blobs_with_oids`; must be real git OIDs.
-/// 2. `rebase_authorship::build_rebase_note_cache` — passes OIDs to
-///    `batch_read_blob_contents`; must be real git OIDs.
-/// 3. `rebase_authorship::load_note_contents_for_commits` — same pattern.
-/// 4. `rebase_authorship::try_fast_path_cherry_pick_remap` — passes OIDs to
-///    `batch_read_blob_contents`; also checks `len() != source_commits.len()`
-///    and returns `false` on mismatch, which is the correct behaviour when
-///    notes are not in git refs.
+/// 2. `rewrite::shift_authorship_notes` — reads notes by OID;
+///    must be real git OIDs.
 ///
 /// **HTTP backend**: notes do not live in `refs/notes/ai`, so there are no
 /// git blob OIDs to return.  Returning an empty map causes callers to handle

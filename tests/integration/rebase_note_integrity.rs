@@ -2,7 +2,7 @@
 ///
 /// ## The Bug
 ///
-/// `rewrite_authorship_after_rebase_v2` (src/authorship/rebase_authorship.rs) has a
+/// The old rebase authorship rewriter had a
 /// slow-path processing loop that seeds `cached_file_attestation_text` and
 /// `existing_files` from the **full cumulative state of the last pre-rebase commit**
 /// (all commits in the chain combined). When it writes the note for an *intermediate*
