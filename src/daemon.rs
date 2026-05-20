@@ -4616,13 +4616,29 @@ impl ActorDaemonCoordinator {
         let repo = find_repository_in_path(&worktree.to_string_lossy())?;
 
         // Collect branch ref changes (skip notes, tags, etc.)
-        let branch_changes: Vec<_> = cmd
+        let mut branch_changes: Vec<_> = cmd
             .ref_changes
             .iter()
             .filter(|rc| rc.reference.starts_with("refs/heads/"))
             .filter(|rc| is_valid_oid(&rc.old) && !is_zero_oid(&rc.old))
             .filter(|rc| is_valid_oid(&rc.new) && !is_zero_oid(&rc.new))
+            .cloned()
             .collect();
+
+        // If no branch ref changes found, fall back to HEAD changes (common for reset)
+        if branch_changes.is_empty() {
+            let head_changes: Vec<_> = cmd
+                .ref_changes
+                .iter()
+                .filter(|rc| rc.reference == "HEAD")
+                .filter(|rc| is_valid_oid(&rc.old) && !is_zero_oid(&rc.old))
+                .filter(|rc| is_valid_oid(&rc.new) && !is_zero_oid(&rc.new))
+                .cloned()
+                .collect();
+            if !head_changes.is_empty() {
+                branch_changes = head_changes;
+            }
+        }
 
         if branch_changes.is_empty() {
             return Ok(());
@@ -4645,11 +4661,6 @@ impl ActorDaemonCoordinator {
 
             // Fast-forward — not a rewrite
             if is_ancestor_commit(&repo, old_tip, new_tip) {
-                continue;
-            }
-
-            // Backward reset (new_tip is ancestor of old_tip) — handled by old pipeline
-            if is_ancestor_commit(&repo, new_tip, old_tip) {
                 continue;
             }
 
@@ -4825,8 +4836,21 @@ impl ActorDaemonCoordinator {
             }
         }
 
-        // New unified rewrite detection
-        if let Err(e) = self.detect_and_handle_non_ff_rewrites(cmd) {
+        // Non-FF rewrite detection: only for commands that actually rewrite history.
+        // Skip for: commits (handled by CommitAmended/CommitCreated), checkout/switch,
+        // branch moves, cherry-pick (handled separately via CherryPickComplete event).
+        let skip_non_ff = events.iter().any(|event| {
+            matches!(
+                event,
+                crate::daemon::domain::SemanticEvent::CommitAmended { .. }
+                    | crate::daemon::domain::SemanticEvent::CommitCreated { .. }
+                    | crate::daemon::domain::SemanticEvent::CherryPickComplete { .. }
+            )
+        }) || matches!(
+            cmd.primary_command.as_deref(),
+            Some("checkout" | "switch" | "branch")
+        );
+        if !skip_non_ff && let Err(e) = self.detect_and_handle_non_ff_rewrites(cmd) {
             tracing::debug!(
                 sid = %cmd.root_sid,
                 %e,
@@ -5055,12 +5079,11 @@ impl ActorDaemonCoordinator {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.git_author_identity().formatted_or_unknown();
                             if let Err(e) =
-                                crate::authorship::post_commit::post_commit_with_final_state(
+                                crate::authorship::post_commit::post_commit_amend_with_final_state(
                                     &repo,
-                                    Some(old_head.clone()),
-                                    new_head.clone(),
+                                    old_head,
+                                    new_head,
                                     author,
-                                    true,
                                     carryover_snapshot.as_ref(),
                                 )
                             {
@@ -5121,10 +5144,8 @@ impl ActorDaemonCoordinator {
             }
         }
 
-        // Handle fast-forward update-ref: rename working log when the ref update
-        // is a fast-forward that affects the currently checked-out branch.
-        // Non-ancestor (rewrite) cases are already handled by
-        // rewrite_events_from_semantic_events() above.
+        // Handle update-ref: migrate working logs and authorship notes when the ref
+        // update affects the currently checked-out branch.
         if primary == "update-ref"
             && let Some(worktree) = cmd.worktree.as_ref()
         {
@@ -5145,15 +5166,25 @@ impl ActorDaemonCoordinator {
                     {
                         continue;
                     }
-                    let affects_checked_out_branch =
-                        current_branch.as_deref().is_some_and(|branch| {
-                            reference == &format!("refs/heads/{}", branch) || reference == branch
-                        });
-                    if affects_checked_out_branch
-                        && let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy())
-                        && repo_is_ancestor(&repo, old, new)
-                    {
-                        let _ = repo.storage.rename_working_log(old, new);
+                    if let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy()) {
+                        if repo_is_ancestor(&repo, old, new) {
+                            let affects_checked_out_branch =
+                                current_branch.as_deref().is_some_and(|branch| {
+                                    reference == &format!("refs/heads/{}", branch)
+                                        || reference == branch
+                                });
+                            if affects_checked_out_branch {
+                                let _ = repo.storage.rename_working_log(old, new);
+                            }
+                        } else {
+                            let _ = crate::authorship::rewrite::handle_rewrite_event(
+                                &repo,
+                                crate::authorship::rewrite::RewriteEvent::NonFastForward {
+                                    old_tip: old.to_string(),
+                                    new_tip: new.to_string(),
+                                },
+                            );
+                        }
                     }
                 }
             }

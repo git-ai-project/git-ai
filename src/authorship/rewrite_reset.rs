@@ -20,12 +20,9 @@ pub fn reconstruct_working_log_after_backward_reset(
 
     let new_dir = working_logs_dir.join(new_tip);
     if new_dir.exists() {
-        // new_tip already has a working log — don't overwrite
         return Ok(());
     }
 
-    // After reset --soft, working tree hasn't changed, so attributions
-    // are still valid in their current coordinate space. Just re-key.
     std::fs::rename(&old_dir, &new_dir)?;
     Ok(())
 }

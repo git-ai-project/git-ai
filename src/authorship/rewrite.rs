@@ -48,6 +48,10 @@ pub fn shift_authorship_notes(
     let mut notes_to_write: Vec<(String, String)> = Vec::new();
 
     for (source_sha, new_sha) in mappings {
+        // Don't overwrite existing notes on the target commit
+        if read_authorship_note(repo, new_sha)?.is_some() {
+            continue;
+        }
         let Some(raw_note) = read_authorship_note(repo, source_sha)? else {
             continue;
         };
