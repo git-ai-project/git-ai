@@ -2283,6 +2283,7 @@ pub fn collect_changed_file_contents_from_diff(
     Ok((changed_files, file_contents))
 }
 
+#[allow(dead_code)]
 pub(crate) fn committed_file_snapshot_between_commits(
     repo: &Repository,
     from_commit: Option<&str>,
