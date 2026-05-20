@@ -12,7 +12,22 @@ fn is_denied_key(key: &str) -> bool {
     }
     matches!(
         lower.as_str(),
-        "timestamp" | "type" | "role" | "model" | "version"
+        "timestamp"
+            | "starttime"
+            | "type"
+            | "role"
+            | "model"
+            | "version"
+            | "cwd"
+            | "gitbranch"
+            | "branch"
+            | "path"
+            | "file_path"
+            | "filepath"
+            | "producer"
+            | "name"
+            | "kind"
+            | "status"
     )
 }
 
@@ -173,10 +188,21 @@ mod tests {
         assert!(is_denied_key("parentUuid"));
         assert!(is_denied_key("messageUUID"));
         assert!(is_denied_key("timestamp"));
+        assert!(is_denied_key("startTime"));
         assert!(is_denied_key("type"));
         assert!(is_denied_key("role"));
         assert!(is_denied_key("model"));
         assert!(is_denied_key("version"));
+        assert!(is_denied_key("cwd"));
+        assert!(is_denied_key("gitBranch"));
+        assert!(is_denied_key("branch"));
+        assert!(is_denied_key("path"));
+        assert!(is_denied_key("file_path"));
+        assert!(is_denied_key("filePath"));
+        assert!(is_denied_key("producer"));
+        assert!(is_denied_key("name"));
+        assert!(is_denied_key("kind"));
+        assert!(is_denied_key("status"));
 
         // Should NOT deny (these are content-like fields)
         assert!(!is_denied_key("content"));
@@ -184,7 +210,6 @@ mod tests {
         assert!(!is_denied_key("message"));
         assert!(!is_denied_key("output"));
         assert!(!is_denied_key("value"));
-        assert!(!is_denied_key("name"));
         assert!(!is_denied_key("valid")); // ends in "id" letters but not a real ID field
     }
 }
