@@ -78,7 +78,6 @@ macro_rules! define_feature_flags {
 // Define all feature flags in one place
 // Format: struct_field: file_and_env_name, debug = <bool>, release = <bool>
 define_feature_flags!(
-    rewrite_stash: rewrite_stash, debug = true, release = true,
     auth_keyring: auth_keyring, debug = false, release = false,
     transcript_streaming: transcript_streaming, debug = true, release = true,
     transcript_sweep: transcript_sweep, debug = true, release = true,
@@ -93,7 +92,7 @@ impl FeatureFlags {
 
     /// Build FeatureFlags from environment variables
     /// Reads from GIT_AI_* prefixed environment variables
-    /// Example: GIT_AI_REWRITE_STASH=true, GIT_AI_AUTH_KEYRING=false
+    /// Example: GIT_AI_AUTH_KEYRING=true
     /// Falls back to defaults for any invalid or missing values
     #[allow(dead_code)]
     pub fn from_env() -> Self {
@@ -130,10 +129,8 @@ mod tests {
     #[test]
     fn test_default_feature_flags() {
         let flags = FeatureFlags::default();
-        // Test that defaults are set correctly based on debug/release mode
         #[cfg(debug_assertions)]
         {
-            assert!(flags.rewrite_stash);
             assert!(!flags.auth_keyring);
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
@@ -141,7 +138,6 @@ mod tests {
         }
         #[cfg(not(debug_assertions))]
         {
-            assert!(flags.rewrite_stash);
             assert!(!flags.auth_keyring);
             assert!(flags.transcript_streaming);
             assert!(flags.transcript_sweep);
@@ -152,28 +148,23 @@ mod tests {
     #[test]
     fn test_from_deserializable() {
         let deserializable = DeserializableFeatureFlags {
-            rewrite_stash: Some(false),
             auth_keyring: Some(true),
             ..Default::default()
         };
 
         let flags = FeatureFlags::from_deserializable(deserializable);
-        assert!(!flags.rewrite_stash);
         assert!(flags.auth_keyring);
     }
 
     #[test]
     #[serial_test::serial]
     fn test_from_env_and_file_defaults_only() {
-        // No file flags, env should be empty
         unsafe {
-            std::env::remove_var("GIT_AI_REWRITE_STASH");
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
         }
 
         let flags = FeatureFlags::from_env_and_file(None);
         let defaults = FeatureFlags::default();
-        assert_eq!(flags.rewrite_stash, defaults.rewrite_stash);
         assert_eq!(flags.auth_keyring, defaults.auth_keyring);
     }
 
@@ -181,25 +172,21 @@ mod tests {
     #[serial_test::serial]
     fn test_from_env_and_file_file_overrides() {
         unsafe {
-            std::env::remove_var("GIT_AI_REWRITE_STASH");
             std::env::remove_var("GIT_AI_AUTH_KEYRING");
         }
 
         let file_flags = DeserializableFeatureFlags {
-            rewrite_stash: Some(true),
             auth_keyring: Some(true),
             ..Default::default()
         };
 
         let flags = FeatureFlags::from_env_and_file(Some(file_flags));
-        assert!(flags.rewrite_stash);
         assert!(flags.auth_keyring);
     }
 
     #[test]
     fn test_serialization() {
         let flags = FeatureFlags {
-            rewrite_stash: true,
             auth_keyring: true,
             transcript_streaming: true,
             transcript_sweep: true,
@@ -207,7 +194,6 @@ mod tests {
         };
 
         let serialized = serde_json::to_string(&flags).unwrap();
-        assert!(serialized.contains("rewrite_stash"));
         assert!(serialized.contains("auth_keyring"));
         assert!(serialized.contains("transcript_streaming"));
         assert!(serialized.contains("transcript_sweep"));
@@ -217,14 +203,12 @@ mod tests {
     #[test]
     fn test_clone_trait() {
         let flags = FeatureFlags {
-            rewrite_stash: true,
             auth_keyring: true,
             transcript_streaming: true,
             transcript_sweep: true,
             checkpoint_debug_log: true,
         };
         let cloned = flags.clone();
-        assert_eq!(cloned.rewrite_stash, flags.rewrite_stash);
         assert_eq!(cloned.auth_keyring, flags.auth_keyring);
         assert_eq!(cloned.transcript_streaming, flags.transcript_streaming);
         assert_eq!(cloned.transcript_sweep, flags.transcript_sweep);
