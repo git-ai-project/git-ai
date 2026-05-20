@@ -194,7 +194,6 @@ impl AuthorshipLog {
         Ok(output)
     }
 
-
     /// Deserialize from the new text format
     pub fn deserialize_from_string(content: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let lines: Vec<&str> = content.lines().collect();
@@ -219,7 +218,6 @@ impl AuthorshipLog {
             metadata,
         })
     }
-
 
     /// Lookup the author and optional prompt for a given file and line
     pub fn get_line_attribution(
@@ -337,7 +335,6 @@ impl AuthorshipLog {
         }
         None
     }
-
 }
 
 impl Default for AuthorshipLog {
@@ -820,8 +817,6 @@ mod tests {
         assert_eq!(entry.line_ranges[1], LineRange::Range(8, 10));
     }
 
-
-
     #[test]
     fn test_generate_human_short_hash() {
         let hash = generate_human_short_hash("Alice Smith <alice@example.com>");
@@ -840,7 +835,6 @@ mod tests {
             generate_human_short_hash("Bob Jones <bob@example.com>")
         );
     }
-
 
     // TODO: `get_line_attribution` routing for h_ hashes requires a live `Repository` instance
     // and cannot be unit-tested here without significant mocking infrastructure.
