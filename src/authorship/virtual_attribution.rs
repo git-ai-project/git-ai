@@ -2466,7 +2466,6 @@ pub fn merge_attributions_favoring_first(
     Ok(merged)
 }
 
-
 /// Check whether a file's content contains git conflict markers.
 ///
 /// Requires both an opening `<<<<<<<` and a closing `>>>>>>>` marker to avoid
