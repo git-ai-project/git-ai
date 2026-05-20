@@ -845,11 +845,8 @@ mod tests {
             "Config::fresh() should reflect GIT_AI_NOTES_BACKEND_KIND=http"
         );
 
-        // The actual early-return code in run_pre_push_hook_managed was added
-        // in Phase 2.6. Verify it compiles and is reachable by referencing the
-        // function pointer. Structural verification: when kind == Http, the
-        // function returns before doing any work.
-        let _ = crate::commands::hooks::push_hooks::run_pre_push_hook_managed as fn(_, _);
+        // Structural verification: the Http backend skip is now inlined in
+        // apply_push_side_effect in daemon.rs — no separate hook function needed.
     }
 
     // --- warm_cache_for_remote tests ---
