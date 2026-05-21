@@ -57,6 +57,7 @@ mod fast_reader;
 mod fetch_notes;
 mod firebender;
 mod formatting_non_substantial_ai_attribution;
+mod fuzzer;
 mod gemini;
 mod git_alias_resolution;
 mod git_cli_arg_parsing;
