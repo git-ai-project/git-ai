@@ -80,6 +80,7 @@ pub mod telemetry_handle;
 pub mod telemetry_worker;
 pub mod test_sync;
 pub mod trace_normalizer;
+pub mod transcript_redaction;
 pub mod transcript_worker;
 
 pub use control_api::{
