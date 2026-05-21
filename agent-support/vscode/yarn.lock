@@ -385,17 +385,17 @@
     "@nodelib/fs.scandir" "2.1.5"
     fastq "^1.6.0"
 
-"@posthog/core@1.28.2":
-  version "1.28.2"
-  resolved "https://registry.yarnpkg.com/@posthog/core/-/core-1.28.2.tgz#9baf88b95f13d3a71a983cd644084ae61b820cba"
-  integrity sha512-Dii3pxDheG1WioztvV/MqHQMnb16jSFrl2HkDR1T5yf5/R7lPqJCFYt+eXkEdp/oAv/PD+1joyG6Ap/2quFmtQ==
+"@posthog/core@1.29.0":
+  version "1.29.0"
+  resolved "https://registry.yarnpkg.com/@posthog/core/-/core-1.29.0.tgz#81aa735ce77ddcfc041b2c4df55bc445b02d631d"
+  integrity sha512-tkTO1vnbSR8HdBM6MFieQX5SbeupA1LXGYHQARtFpFLF3kXr1V4S75eec49MBYPRQnYczSICWS7akL0M75K3Ag==
   dependencies:
-    "@posthog/types" "1.372.8"
+    "@posthog/types" "1.373.3"
 
-"@posthog/types@1.372.8":
-  version "1.372.8"
-  resolved "https://registry.yarnpkg.com/@posthog/types/-/types-1.372.8.tgz#651a9089a1adf45845e844e9e8a2a7c7550c1a8a"
-  integrity sha512-ALpfCnWsMSM9Cw/6kyLPVpd81ZReEdZwmDxOi+DTJuIo7wDxBiu2cAsjOuA6D/AL22v7HOJrHsmBAPAWqS5X7Q==
+"@posthog/types@1.373.3":
+  version "1.373.3"
+  resolved "https://registry.yarnpkg.com/@posthog/types/-/types-1.373.3.tgz#e665779d724d50f8fe106a48fb4245156e4161ea"
+  integrity sha512-nuHXMtielw/oJTh3GIYGNHKiexE5sqQuhPISVAf9Nj8dnPJDaYr26iY9qnv1aRo0VFLmubCrFISg7vwEfmFitQ==
 
 "@secretlint/config-creator@^10.2.2":
   version "10.2.2"
@@ -2703,12 +2703,12 @@ pluralize@^8.0.0:
   resolved "https://registry.yarnpkg.com/pluralize/-/pluralize-8.0.0.tgz#1a6fa16a38d12a1901e0320fa017051c539ce3b1"
   integrity sha512-Nc3IT5yHzflTfbjgqWcCPpo7DaKy4FnpB0l/zCAW0Tc7jxAiuqSxHasntB3D7887LSrA93kDJ9IXovxJYxyLCA==
 
-posthog-node@^5.33.2:
-  version "5.33.2"
-  resolved "https://registry.yarnpkg.com/posthog-node/-/posthog-node-5.33.2.tgz#54b27ab80df7020636d6b79dc5b89d245063609a"
-  integrity sha512-QZOT2uoEue4BGh/mrBUc7zfddtuLgCU7tTmW0MH8sTr8iK6argv82M7pQbJP/ENsiRYZa/ojpOIjTM9vO1xa6Q==
+posthog-node@^5.34.0:
+  version "5.34.0"
+  resolved "https://registry.yarnpkg.com/posthog-node/-/posthog-node-5.34.0.tgz#03da9325b1ccd113d96363286d63b29cc1e4406e"
+  integrity sha512-0cC5+QFJBEx1/oEuEjTsdyx1C0YAYcXN0pyUGsrxrkqQLHKkmQKv9JFpDYtT6eqBJmRlH8d4/SrBN3X+5IT9JA==
   dependencies:
-    "@posthog/core" "1.28.2"
+    "@posthog/core" "1.29.0"
 
 prebuild-install@^7.0.1:
   version "7.1.3"
