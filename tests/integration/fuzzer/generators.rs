@@ -18,7 +18,7 @@ pub enum EditStrategy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RewriteOp {
     Amend,
-    CherryPick,
+    FfMerge,
     Rebase,
     SquashMerge,
 }
@@ -72,7 +72,7 @@ pub fn gen_line_count(rng: &mut impl Rng, max: usize) -> usize {
 pub fn gen_rewrite_op(rng: &mut impl Rng) -> RewriteOp {
     match rng.random_range(0..4u32) {
         0 => RewriteOp::Amend,
-        1 => RewriteOp::CherryPick,
+        1 => RewriteOp::FfMerge,
         2 => RewriteOp::Rebase,
         _ => RewriteOp::SquashMerge,
     }
