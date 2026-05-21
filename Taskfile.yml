@@ -77,6 +77,31 @@ tasks:
         vars:
           GIT_AI_TEST_GIT_MODE: wrapper-daemon
 
+  test:fuzz:
+    desc: Run the attribution fuzzer (fixed seeds only)
+    cmds:
+      - task: test:base
+        vars:
+          GIT_AI_TEST_GIT_MODE: daemon
+          TEST_FILTER: fuzz_seed_
+
+  test:fuzz:all:
+    desc: Run all fuzzer tests including random seed and heavy variants
+    cmds:
+      - task: test:base
+        vars:
+          GIT_AI_TEST_GIT_MODE: daemon
+          TEST_FILTER: fuzz_
+
+  test:fuzz:heavy:
+    desc: Run all fuzzer tests with verbose output
+    cmds:
+      - task: test:base
+        vars:
+          GIT_AI_TEST_GIT_MODE: daemon
+          TEST_FILTER: fuzz_
+          NO_CAPTURE: "true"
+
   lint:
     desc: Run cargo check and clippy with warnings as errors
     cmds:
