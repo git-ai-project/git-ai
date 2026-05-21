@@ -6,8 +6,8 @@ use crate::repos::test_repo::TestRepo;
 
 use super::generators::{self, EditStrategy, RewriteOp};
 use super::operations::{
-    EditParams, FileState, execute_amend_chain, execute_cherry_pick_same_file, execute_commit,
-    execute_edit_and_checkpoint, execute_interleaved_multi_file, execute_rebase_same_file,
+    EditParams, FileState, execute_amend_chain, execute_commit, execute_edit_and_checkpoint,
+    execute_ff_merge, execute_interleaved_multi_file, execute_rebase_same_file,
     execute_squash_same_file,
 };
 use super::oracle::CharRegistry;
@@ -128,16 +128,15 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut operation_log,
                     );
                 }
-                RewriteOp::CherryPick => {
-                    execute_cherry_pick_same_file(
+                RewriteOp::FfMerge => {
+                    execute_ff_merge(
                         &repo,
-                        &mut file_state,
                         &mut registry,
                         config.max_edits_per_commit,
                         config.max_lines_per_edit,
-                        config.allow_destructive,
                         &mut rng,
                         &mut operation_log,
+                        config.seed,
                     );
                 }
                 RewriteOp::Rebase => {

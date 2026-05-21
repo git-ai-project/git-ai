@@ -214,15 +214,14 @@ pub fn execute_amend_chain(
 /// NOTE: cherry-pick is intentionally excluded because the daemon has a known
 /// reflog ambiguity issue (ambiguous HEAD reflog chain) in repos with many commits.
 #[allow(clippy::too_many_arguments)]
-pub fn execute_cherry_pick_same_file(
+pub fn execute_ff_merge(
     repo: &TestRepo,
-    _file_state: &mut FileState,
     registry: &mut CharRegistry,
     max_edits: usize,
     max_lines: usize,
-    _allow_destructive: bool,
     rng: &mut impl Rng,
     operation_log: &mut Vec<String>,
+    seed: u64,
 ) {
     let idx = registry.next_index();
     let branch_name = format!("ffmerge-{}", idx);
@@ -274,7 +273,7 @@ pub fn execute_cherry_pick_same_file(
         &merge_filename,
         &merge_file_state.lines,
         operation_log,
-        0,
+        seed,
     );
 
     // Cleanup
