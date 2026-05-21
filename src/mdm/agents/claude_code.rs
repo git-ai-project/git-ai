@@ -3,8 +3,7 @@ use crate::mdm::hook_installer::{HookCheckResult, HookInstaller, HookInstallerPa
 use crate::mdm::utils::{
     MIN_CLAUDE_VERSION, binary_exists, claude_config_dir, generate_diff, get_binary_version,
     is_git_ai_checkpoint_command, normalize_windows_path_for_shell, parse_version,
-    version_meets_requirement,
-    write_atomic,
+    version_meets_requirement, write_atomic,
 };
 use serde_json::{Value, json};
 use std::fs;
