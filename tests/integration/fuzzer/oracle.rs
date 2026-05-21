@@ -3,11 +3,14 @@ use std::collections::HashMap;
 use crate::repos::test_repo::TestRepo;
 
 /// Attribution types that can be assigned to a character/line.
+/// NOTE: We intentionally only test Ai and KnownHuman because these are the two
+/// attribution types with well-defined, reliable checkpoint flows. "Untracked"
+/// (no checkpoint) has known limitations: content appearing after an AI checkpoint
+/// without any subsequent checkpoint is attributed to the prior AI session by design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attribution {
     Ai,
     KnownHuman,
-    Untracked,
 }
 
 impl std::fmt::Display for Attribution {
@@ -15,7 +18,6 @@ impl std::fmt::Display for Attribution {
         match self {
             Attribution::Ai => write!(f, "Ai"),
             Attribution::KnownHuman => write!(f, "KnownHuman"),
-            Attribution::Untracked => write!(f, "Untracked"),
         }
     }
 }

@@ -4,56 +4,62 @@ use rand::rngs::SmallRng;
 
 use crate::repos::test_repo::TestRepo;
 
-use super::generators::{EditStrategy, RewriteOp, gen_attribution, gen_line_count, gen_rewrite_op};
+use super::generators::{self, EditStrategy, RewriteOp};
 use super::operations::{
-    EditParams, FileState, execute_amend, execute_cherry_pick, execute_commit,
-    execute_edit_and_checkpoint, execute_rebase, execute_squash_merge,
+    EditParams, FileState, execute_amend_chain, execute_cherry_pick_same_file, execute_commit,
+    execute_edit_and_checkpoint, execute_interleaved_multi_file, execute_rebase_same_file,
+    execute_squash_same_file,
 };
 use super::oracle::CharRegistry;
 
-/// Configuration for a fuzzer run.
 pub struct FuzzerConfig {
     pub seed: u64,
     pub ops: usize,
-    /// Ratio of rewrite ops vs normal edits (0.0 to 1.0).
     pub rewrite_ratio: f64,
+    pub max_edits_per_commit: usize,
+    pub max_lines_per_edit: usize,
+    pub multi_file_enabled: bool,
+    pub allow_destructive: bool,
 }
 
 impl FuzzerConfig {
-    /// Standard fuzzer: balanced mix of edits and occasional rewrites.
     pub fn standard(seed: u64, ops: usize) -> Self {
         Self {
             seed,
             ops,
-            rewrite_ratio: 0.15,
+            rewrite_ratio: 0.25,
+            max_edits_per_commit: 5,
+            max_lines_per_edit: 8,
+            multi_file_enabled: true,
+            allow_destructive: true,
         }
     }
 
-    /// Rewrite-heavy: more amend/cherry-pick/rebase/squash operations.
     pub fn rewrite_heavy(seed: u64, ops: usize) -> Self {
         Self {
             seed,
             ops,
-            rewrite_ratio: 0.5,
+            rewrite_ratio: 0.6,
+            max_edits_per_commit: 4,
+            max_lines_per_edit: 6,
+            multi_file_enabled: true,
+            allow_destructive: true,
         }
     }
 
-    /// Checkpoint-heavy: lots of edits with frequent commits to stress checkpoint logic.
     pub fn checkpoint_heavy(seed: u64, ops: usize) -> Self {
         Self {
             seed,
             ops,
-            rewrite_ratio: 0.05,
+            rewrite_ratio: 0.1,
+            max_edits_per_commit: 8,
+            max_lines_per_edit: 10,
+            multi_file_enabled: true,
+            allow_destructive: true,
         }
     }
 }
 
-/// Run the fuzzer with the given configuration.
-///
-/// Each operation is one edit+commit cycle. This ensures clean attribution
-/// boundaries: each commit has exactly one attribution type (AI, KnownHuman,
-/// or Untracked), matching how real usage works (one AI session per commit
-/// or one human editing session per commit).
 pub fn run_fuzzer(config: FuzzerConfig) {
     let mut rng = SmallRng::seed_from_u64(config.seed);
     let repo = TestRepo::new();
@@ -61,158 +67,26 @@ pub fn run_fuzzer(config: FuzzerConfig) {
     let mut operation_log: Vec<String> = Vec::new();
     let mut file_state = FileState::new("fuzz_main.txt");
 
+    // Secondary files for multi-file interleaving
+    let mut secondary_files: Vec<FileState> = vec![
+        FileState::new("fuzz_secondary_1.txt"),
+        FileState::new("fuzz_secondary_2.txt"),
+    ];
+
     operation_log.push(format!(
-        "=== Fuzzer seed={} ops={} ===",
-        config.seed, config.ops
+        "=== Fuzzer seed={} ops={} rewrite_ratio={} max_edits_per_commit={} ===",
+        config.seed, config.ops, config.rewrite_ratio, config.max_edits_per_commit
     ));
 
-    // Phase 1: Initial edit + commit + verify
+    // Phase 1: Bootstrap — create file with multiple interleaved edits before first commit
     {
-        let params = EditParams {
-            attribution: gen_attribution(&mut rng),
-            strategy: EditStrategy::Append,
-            line_count: gen_line_count(&mut rng, 5),
-        };
-
-        execute_edit_and_checkpoint(
-            &repo,
-            &mut file_state,
-            &mut registry,
-            &params,
-            &mut rng,
-            &mut operation_log,
-        );
-
-        execute_commit(&repo, "initial fuzzer commit", &mut operation_log);
-
-        registry.verify_blame(
-            &repo,
-            &file_state.filename,
-            &file_state.lines,
-            &operation_log,
-            config.seed,
-        );
-    }
-
-    // Phase 2: Linear edit+commit cycles
-    let phase2_ops = (config.ops as f64 * 0.6) as usize;
-    let phase3_ops = config.ops - phase2_ops - 1; // -1 for phase 1
-
-    for i in 0..phase2_ops {
-        let params = EditParams {
-            attribution: gen_attribution(&mut rng),
-            strategy: EditStrategy::random_non_destructive(&mut rng),
-            line_count: gen_line_count(&mut rng, 4),
-        };
-
-        execute_edit_and_checkpoint(
-            &repo,
-            &mut file_state,
-            &mut registry,
-            &params,
-            &mut rng,
-            &mut operation_log,
-        );
-
-        execute_commit(
-            &repo,
-            &format!("fuzzer commit phase2 op {}", i),
-            &mut operation_log,
-        );
-
-        registry.verify_blame(
-            &repo,
-            &file_state.filename,
-            &file_state.lines,
-            &operation_log,
-            config.seed,
-        );
-    }
-
-    // Phase 3: Rewrite operations mixed with normal edits
-    for i in 0..phase3_ops {
-        let do_rewrite = rng.random_range(0.0..1.0f64) < config.rewrite_ratio;
-
-        if do_rewrite {
-            let op = gen_rewrite_op(&mut rng);
-            match op {
-                RewriteOp::Amend => {
-                    execute_amend(
-                        &repo,
-                        &mut file_state,
-                        &mut registry,
-                        &mut rng,
-                        &mut operation_log,
-                    );
-
-                    registry.verify_blame(
-                        &repo,
-                        &file_state.filename,
-                        &file_state.lines,
-                        &operation_log,
-                        config.seed,
-                    );
-                }
-                RewriteOp::CherryPick => {
-                    execute_cherry_pick(
-                        &repo,
-                        &mut file_state,
-                        &mut registry,
-                        &mut rng,
-                        &mut operation_log,
-                    );
-
-                    registry.verify_blame(
-                        &repo,
-                        &file_state.filename,
-                        &file_state.lines,
-                        &operation_log,
-                        config.seed,
-                    );
-                }
-                RewriteOp::Rebase => {
-                    execute_rebase(
-                        &repo,
-                        &mut file_state,
-                        &mut registry,
-                        &mut rng,
-                        &mut operation_log,
-                    );
-                    // Rebase uses separate files, main file_state unchanged
-                    registry.verify_blame(
-                        &repo,
-                        &file_state.filename,
-                        &file_state.lines,
-                        &operation_log,
-                        config.seed,
-                    );
-                }
-                RewriteOp::SquashMerge => {
-                    execute_squash_merge(
-                        &repo,
-                        &mut file_state,
-                        &mut registry,
-                        &mut rng,
-                        &mut operation_log,
-                    );
-                    // Squash merge uses separate files, main file_state unchanged
-                    registry.verify_blame(
-                        &repo,
-                        &file_state.filename,
-                        &file_state.lines,
-                        &operation_log,
-                        config.seed,
-                    );
-                }
-            }
-        } else {
-            // Normal edit + commit
+        let edit_count = rng.random_range(2..=config.max_edits_per_commit);
+        for _ in 0..edit_count {
             let params = EditParams {
-                attribution: gen_attribution(&mut rng),
-                strategy: EditStrategy::random_non_destructive(&mut rng),
-                line_count: gen_line_count(&mut rng, 3),
+                attribution: generators::gen_attribution(&mut rng),
+                strategy: EditStrategy::Append, // Append for bootstrap to guarantee content
+                line_count: generators::gen_line_count(&mut rng, config.max_lines_per_edit),
             };
-
             execute_edit_and_checkpoint(
                 &repo,
                 &mut file_state,
@@ -221,10 +95,124 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 &mut rng,
                 &mut operation_log,
             );
+        }
+        execute_commit(&repo, "initial fuzzer commit", &mut operation_log);
+        registry.verify_blame(
+            &repo,
+            &file_state.filename,
+            &file_state.lines,
+            &operation_log,
+            config.seed,
+        );
+    }
+
+    // Main loop: ops are either multi-edit-commit cycles or rewrite operations
+    let mut completed_ops = 1; // phase 1 counts as 1
+    while completed_ops < config.ops {
+        let do_rewrite =
+            file_state.lines.len() > 3 && rng.random_range(0.0..1.0f64) < config.rewrite_ratio;
+
+        if do_rewrite {
+            let op = generators::gen_rewrite_op(&mut rng);
+            match op {
+                RewriteOp::Amend => {
+                    let chain_len = rng.random_range(1..=3);
+                    execute_amend_chain(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        chain_len,
+                        config.max_lines_per_edit,
+                        config.allow_destructive,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                }
+                RewriteOp::CherryPick => {
+                    execute_cherry_pick_same_file(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_edits_per_commit,
+                        config.max_lines_per_edit,
+                        config.allow_destructive,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                }
+                RewriteOp::Rebase => {
+                    execute_rebase_same_file(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_edits_per_commit,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                }
+                RewriteOp::SquashMerge => {
+                    execute_squash_same_file(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                }
+            }
+            registry.verify_blame(
+                &repo,
+                &file_state.filename,
+                &file_state.lines,
+                &operation_log,
+                config.seed,
+            );
+        } else {
+            // Multi-edit commit: multiple interleaved AI/human/untracked edits, then one commit
+            let edit_count = rng.random_range(1..=config.max_edits_per_commit);
+            for _ in 0..edit_count {
+                let strategy = if config.allow_destructive && file_state.lines.len() > 2 {
+                    EditStrategy::random(&mut rng)
+                } else if file_state.lines.is_empty() {
+                    EditStrategy::Append
+                } else {
+                    EditStrategy::random_non_destructive(&mut rng)
+                };
+
+                let params = EditParams {
+                    attribution: generators::gen_attribution(&mut rng),
+                    strategy,
+                    line_count: generators::gen_line_count(&mut rng, config.max_lines_per_edit),
+                };
+                execute_edit_and_checkpoint(
+                    &repo,
+                    &mut file_state,
+                    &mut registry,
+                    &params,
+                    &mut rng,
+                    &mut operation_log,
+                );
+            }
+
+            // Occasionally interleave edits to secondary files (stresses daemon with
+            // rapid cross-file checkpoints before the commit)
+            if config.multi_file_enabled && rng.random_range(0..100u32) < 30 {
+                let sec_idx = rng.random_range(0..secondary_files.len());
+                execute_interleaved_multi_file(
+                    &repo,
+                    &mut secondary_files[sec_idx],
+                    &mut registry,
+                    config.max_lines_per_edit,
+                    &mut rng,
+                    &mut operation_log,
+                );
+            }
 
             execute_commit(
                 &repo,
-                &format!("fuzzer commit phase3 op {}", i),
+                &format!("fuzzer commit op {}", completed_ops),
                 &mut operation_log,
             );
 
@@ -235,13 +223,29 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 &operation_log,
                 config.seed,
             );
+
+            // Also verify secondary files if they have content
+            for sec_file in &secondary_files {
+                if !sec_file.lines.is_empty() {
+                    registry.verify_blame(
+                        &repo,
+                        &sec_file.filename,
+                        &sec_file.lines,
+                        &operation_log,
+                        config.seed,
+                    );
+                }
+            }
         }
+
+        completed_ops += 1;
     }
 
     eprintln!(
-        "[fuzzer] seed={} ops={} chars_allocated={} -- PASSED",
+        "[fuzzer] seed={} ops={} chars_allocated={} final_lines={} -- PASSED",
         config.seed,
         config.ops,
-        registry.next_index()
+        registry.next_index(),
+        file_state.lines.len()
     );
 }

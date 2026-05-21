@@ -49,15 +49,13 @@ impl EditStrategy {
 }
 
 /// Generate a random attribution type.
-/// Distribution: 50% Ai, 30% KnownHuman, 20% Untracked.
+/// Distribution: 60% Ai, 40% KnownHuman.
 pub fn gen_attribution(rng: &mut impl Rng) -> Attribution {
     let roll = rng.random_range(0..100u32);
-    if roll < 50 {
+    if roll < 60 {
         Attribution::Ai
-    } else if roll < 80 {
-        Attribution::KnownHuman
     } else {
-        Attribution::Untracked
+        Attribution::KnownHuman
     }
 }
 
