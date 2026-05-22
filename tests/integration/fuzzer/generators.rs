@@ -23,6 +23,26 @@ pub enum RewriteOp {
     SquashMerge,
 }
 
+/// Destructive/pathological operations that stress the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestructiveOp {
+    HardReset,
+    SoftResetRecommit,
+    CheckoutDiscard,
+    StashPop,
+    BranchSwitchDirty,
+    ResetAndReedit,
+    CheckpointOverwrite,
+}
+
+/// Partial staging strategies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartialStageOp {
+    PartialLineStage,
+    SelectiveFileCommit,
+    InterleavedPartialCommits,
+}
+
 impl EditStrategy {
     /// Generate a random edit strategy.
     pub fn random(rng: &mut impl Rng) -> Self {
@@ -75,5 +95,27 @@ pub fn gen_rewrite_op(rng: &mut impl Rng) -> RewriteOp {
         1 => RewriteOp::FfMerge,
         2 => RewriteOp::Rebase,
         _ => RewriteOp::SquashMerge,
+    }
+}
+
+/// Generate a random destructive operation.
+pub fn gen_destructive_op(rng: &mut impl Rng) -> DestructiveOp {
+    match rng.random_range(0..7u32) {
+        0 => DestructiveOp::HardReset,
+        1 => DestructiveOp::SoftResetRecommit,
+        2 => DestructiveOp::CheckoutDiscard,
+        3 => DestructiveOp::StashPop,
+        4 => DestructiveOp::BranchSwitchDirty,
+        5 => DestructiveOp::ResetAndReedit,
+        _ => DestructiveOp::CheckpointOverwrite,
+    }
+}
+
+/// Generate a random partial staging operation.
+pub fn gen_partial_stage_op(rng: &mut impl Rng) -> PartialStageOp {
+    match rng.random_range(0..3u32) {
+        0 => PartialStageOp::PartialLineStage,
+        1 => PartialStageOp::SelectiveFileCommit,
+        _ => PartialStageOp::InterleavedPartialCommits,
     }
 }

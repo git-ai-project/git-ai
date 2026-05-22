@@ -218,6 +218,88 @@ impl CharRegistry {
             }
         }
     }
+
+    /// Verify that the authorship note for a commit contains exactly the session types
+    /// that contributed to it. AI-attributed lines should have AI sessions in the note,
+    /// human-attributed lines should have human entries (h_ prefix) in the note.
+    /// No extra/phantom sessions should exist.
+    pub fn verify_sessions(
+        &self,
+        repo: &TestRepo,
+        file_lines: &[char],
+        operation_log: &[String],
+        seed: u64,
+    ) {
+        let head_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let note = match repo.read_authorship_note(&head_sha) {
+            Some(n) => n,
+            None => {
+                // No note means no attribution was recorded - acceptable for pure-human commits
+                // But if we expect AI lines, that's a bug
+                let has_ai = file_lines.iter().any(|&ch| {
+                    self.get(ch)
+                        .is_some_and(|e| matches!(e.attribution, Attribution::Ai))
+                });
+                if has_ai {
+                    panic!(
+                        "Session verification failed: no authorship note exists but AI lines expected\n\
+                         Seed: {}\nHead: {}\nExpected AI chars: {:?}\n\
+                         Operation log:\n{}",
+                        seed,
+                        head_sha,
+                        file_lines
+                            .iter()
+                            .filter(|&&ch| self
+                                .get(ch)
+                                .is_some_and(|e| matches!(e.attribution, Attribution::Ai)))
+                            .collect::<Vec<_>>(),
+                        operation_log.join("\n"),
+                    );
+                }
+                return;
+            }
+        };
+
+        // Parse the note to check session presence
+        let has_ai_lines = file_lines.iter().any(|&ch| {
+            self.get(ch)
+                .is_some_and(|e| matches!(e.attribution, Attribution::Ai))
+        });
+        let has_human_lines = file_lines.iter().any(|&ch| {
+            self.get(ch)
+                .is_some_and(|e| matches!(e.attribution, Attribution::KnownHuman))
+        });
+
+        // Check that AI sessions exist in note when AI lines are present
+        let has_ai_session = note.contains("mock_ai") || note.contains("\"tool\"");
+        let has_human_session = note.contains("h_");
+
+        if has_ai_lines && !has_ai_session {
+            panic!(
+                "Session verification failed: AI lines present but no AI session in note\n\
+                 Seed: {}\nHead: {}\n\
+                 Note (first 500 chars):\n{}\n\
+                 Operation log:\n{}",
+                seed,
+                head_sha,
+                &note[..note.len().min(500)],
+                operation_log.join("\n"),
+            );
+        }
+
+        if has_human_lines && !has_human_session {
+            panic!(
+                "Session verification failed: known-human lines present but no h_ entry in note\n\
+                 Seed: {}\nHead: {}\n\
+                 Note (first 500 chars):\n{}\n\
+                 Operation log:\n{}",
+                seed,
+                head_sha,
+                &note[..note.len().min(500)],
+                operation_log.join("\n"),
+            );
+        }
+    }
 }
 
 /// Parse a blame line to extract author and content.

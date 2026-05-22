@@ -134,3 +134,61 @@ fn fuzz_checkpoint_heavy_55() {
 fn fuzz_checkpoint_heavy_999() {
     run_fuzzer(FuzzerConfig::checkpoint_heavy(999, 100));
 }
+
+// =============================================================================
+// Partial staging tests (60% partial stage ratio — extremely pathological)
+// =============================================================================
+
+#[test]
+fn fuzz_partial_stage_0() {
+    run_fuzzer(FuzzerConfig::partial_stage_heavy(0, 40));
+}
+
+#[test]
+fn fuzz_partial_stage_1() {
+    run_fuzzer(FuzzerConfig::partial_stage_heavy(1, 40));
+}
+
+#[test]
+fn fuzz_partial_stage_2() {
+    run_fuzzer(FuzzerConfig::partial_stage_heavy(2, 40));
+}
+
+#[test]
+fn fuzz_partial_stage_42() {
+    run_fuzzer(FuzzerConfig::partial_stage_heavy(42, 40));
+}
+
+#[test]
+fn fuzz_partial_stage_99() {
+    run_fuzzer(FuzzerConfig::partial_stage_heavy(99, 40));
+}
+
+// =============================================================================
+// Destructive-heavy tests (50% destructive ops — resets, stash, checkouts)
+// =============================================================================
+
+#[test]
+fn fuzz_destructive_0() {
+    run_fuzzer(FuzzerConfig::destructive_heavy(0, 40));
+}
+
+#[test]
+fn fuzz_destructive_1() {
+    run_fuzzer(FuzzerConfig::destructive_heavy(1, 40));
+}
+
+#[test]
+fn fuzz_destructive_2() {
+    run_fuzzer(FuzzerConfig::destructive_heavy(2, 40));
+}
+
+#[test]
+fn fuzz_destructive_42() {
+    run_fuzzer(FuzzerConfig::destructive_heavy(42, 40));
+}
+
+#[test]
+fn fuzz_destructive_99() {
+    run_fuzzer(FuzzerConfig::destructive_heavy(99, 40));
+}
