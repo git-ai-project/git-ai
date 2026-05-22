@@ -131,17 +131,21 @@ pub enum BucketGranularity {
 }
 
 /// Aggregate local_events since `since_ts` (Unix seconds) into activity stats.
+///
+/// When `repo_filter` is `Some(url)`, only events from that repository are
+/// aggregated. When `None`, events from all repositories are included.
 pub fn compute_activity(
     since_ts: u32,
     period_label: String,
     granularity: BucketGranularity,
+    repo_filter: Option<&str>,
 ) -> Result<LocalActivityStats, GitAiError> {
     let records = {
         let db = MetricsDatabase::global()?;
         let db_lock = db
             .lock()
             .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
-        db_lock.get_local_events(since_ts)?
+        db_lock.get_local_events(since_ts, repo_filter)?
     };
 
     let mut total_commits = 0u32;
@@ -926,4 +930,58 @@ fn aggregate_codex_tokens(
         entry.cached_input_tokens = entry.cached_input_tokens.max(get("cached_input_tokens"));
         entry.output_tokens = entry.output_tokens.max(get("output_tokens"));
     }
+}
+
+// ─── Per-repository breakdown ─────────────────────────────────────────────────
+
+/// Summary of activity for a single repository.
+#[derive(Debug, Serialize)]
+pub struct RepoActivitySummary {
+    /// Normalised repository URL (e.g. `github.com/org/repo`).
+    pub repo_url: String,
+    pub ai_lines: u32,
+    pub commits: u32,
+    pub sessions: u32,
+    pub estimated_cost_usd: f64,
+}
+
+/// Compute a per-repository breakdown for the given time window.
+///
+/// Queries the DB for distinct repo_urls and computes lightweight stats for
+/// each one.  Sorted by `ai_lines` descending.
+pub fn compute_repo_summaries(
+    since_ts: u32,
+    granularity: BucketGranularity,
+) -> Result<Vec<RepoActivitySummary>, GitAiError> {
+    let repo_urls = {
+        let db = MetricsDatabase::global()?;
+        let db_lock = db
+            .lock()
+            .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+        db_lock.get_distinct_repo_urls(since_ts)?
+    };
+
+    let mut summaries: Vec<RepoActivitySummary> = repo_urls
+        .iter()
+        .filter_map(|url| {
+            let stats = compute_activity(
+                since_ts,
+                String::new(), // period_label not used here
+                granularity,
+                Some(url.as_str()),
+            )
+            .ok()?;
+
+            Some(RepoActivitySummary {
+                repo_url: url.clone(),
+                ai_lines: stats.commits.ai_lines,
+                commits: stats.commits.total,
+                sessions: stats.sessions.total,
+                estimated_cost_usd: stats.tokens.estimated_cost_usd,
+            })
+        })
+        .collect();
+
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.ai_lines));
+    Ok(summaries)
 }

@@ -6,7 +6,9 @@
 use crate::api::{ApiClient, ApiContext, CasObject, CasUploadRequest};
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
+use crate::metrics::attrs::attr_pos;
 use crate::metrics::db::MetricsDatabase;
+use crate::metrics::pos_encoded::sparse_get_string;
 use crate::metrics::{MetricEvent, MetricsBatch};
 use crate::observability::MAX_METRICS_PER_ENVELOPE;
 use serde_json::{Value, json};
@@ -370,13 +372,14 @@ fn store_local_events(events: &[MetricEvent]) {
         5, // SessionEvent
     ];
 
-    let tuples: Vec<(u16, u32, String)> = events
+    let tuples: Vec<(u16, u32, Option<String>, String)> = events
         .iter()
         .filter(|e| INTERESTING.contains(&e.event_id))
         .filter_map(|e| {
+            let repo_url = sparse_get_string(&e.attrs, attr_pos::REPO_URL).flatten();
             serde_json::to_string(e)
                 .ok()
-                .map(|json| (e.event_id, e.timestamp, json))
+                .map(|json| (e.event_id, e.timestamp, repo_url, json))
         })
         .collect();
 
