@@ -2,20 +2,60 @@
 
 use crate::error::GitAiError;
 use crate::metrics::local_stats::{
-    BucketGranularity, LocalActivityStats, RepoActivitySummary, compute_activity,
-    compute_repo_summaries,
+    BucketGranularity, LocalActivityStats, RepoActivitySummary, SessionRecord, compute_activity,
+    compute_repo_summaries, compute_session_list,
 };
+use chrono::{DateTime, Local, TimeZone};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Bar, BarChart, Block, Cell, Clear, Gauge, Paragraph, Row, Table, Tabs},
+    widgets::{Bar, BarChart, Block, Cell, Clear, Gauge, Padding, Paragraph, Row, Table, Tabs},
 };
+use std::cmp::Reverse;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const TAB_NAMES: &[&str] = &["Summary", "Models"];
+const TAB_NAMES: &[&str] = &["Summary", "Models", "Sessions"];
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SessionSort {
+    Time,
+    Tokens,
+    Cost,
+}
+
+impl SessionSort {
+    fn next(self) -> Self {
+        match self {
+            Self::Time => Self::Tokens,
+            Self::Tokens => Self::Cost,
+            Self::Cost => Self::Time,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Time => "time",
+            Self::Tokens => "tokens",
+            Self::Cost => "cost",
+        }
+    }
+}
+
+fn sort_sessions(sessions: &mut [SessionRecord], sort: SessionSort) {
+    match sort {
+        SessionSort::Time => sessions.sort_by_key(|r| Reverse(r.first_ts)),
+        SessionSort::Tokens => sessions.sort_by_key(|r| Reverse(r.total_tokens)),
+        SessionSort::Cost => sessions.sort_by(|a, b| {
+            b.estimated_cost_usd
+                .unwrap_or(0.0)
+                .partial_cmp(&a.estimated_cost_usd.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }),
+    }
+}
 
 struct Period {
     label: &'static str,
@@ -72,6 +112,10 @@ struct AppState {
     current_repo: Option<String>,
     /// Per-repo summaries; only populated when `current_repo` is None.
     repo_summaries: Vec<RepoActivitySummary>,
+    session_list: Vec<SessionRecord>,
+    session_sort: SessionSort,
+    /// Index of the highlighted row in `session_list`.
+    session_cursor: usize,
 }
 
 impl AppState {
@@ -80,6 +124,7 @@ impl AppState {
         period_idx: usize,
         current_repo: Option<String>,
         repo_summaries: Vec<RepoActivitySummary>,
+        session_list: Vec<SessionRecord>,
     ) -> Self {
         Self {
             selected_tab: 0,
@@ -87,17 +132,28 @@ impl AppState {
             stats,
             current_repo,
             repo_summaries,
+            session_list,
+            session_sort: SessionSort::Time,
+            session_cursor: 0,
         }
     }
 
     fn load_period(&mut self, idx: usize) -> Result<(), GitAiError> {
         let p = &PERIODS[idx];
         let ts = since_ts(idx);
-        self.stats =
-            compute_activity(ts, p.label.to_string(), p.granularity, self.current_repo.as_deref())?;
+        self.stats = compute_activity(
+            ts,
+            p.label.to_string(),
+            p.granularity,
+            self.current_repo.as_deref(),
+        )?;
         if self.current_repo.is_none() {
             self.repo_summaries = compute_repo_summaries(ts, p.granularity).unwrap_or_default();
         }
+        self.session_list =
+            compute_session_list(ts, self.current_repo.as_deref()).unwrap_or_default();
+        sort_sessions(&mut self.session_list, self.session_sort);
+        self.session_cursor = 0;
         self.period_idx = idx;
         Ok(())
     }
@@ -108,6 +164,7 @@ pub fn run_tui(
     period_idx: usize,
     current_repo: Option<String>,
     repo_summaries: Vec<RepoActivitySummary>,
+    session_list: Vec<SessionRecord>,
 ) -> Result<(), GitAiError> {
     let mut terminal = ratatui::init();
     let result = run_app(
@@ -116,6 +173,7 @@ pub fn run_tui(
         period_idx,
         current_repo,
         repo_summaries,
+        session_list,
     );
     ratatui::restore();
     result
@@ -127,8 +185,15 @@ fn run_app(
     period_idx: usize,
     current_repo: Option<String>,
     repo_summaries: Vec<RepoActivitySummary>,
+    session_list: Vec<SessionRecord>,
 ) -> Result<(), GitAiError> {
-    let mut app = AppState::new(initial_stats, period_idx, current_repo, repo_summaries);
+    let mut app = AppState::new(
+        initial_stats,
+        period_idx,
+        current_repo,
+        repo_summaries,
+        session_list,
+    );
     loop {
         terminal
             .draw(|frame| render(frame, &app))
@@ -151,6 +216,19 @@ fn run_app(
                     if idx < PERIODS.len() {
                         app.load_period(idx)?;
                     }
+                }
+                KeyCode::Down | KeyCode::Char('j')
+                    if app.selected_tab == 2 && !app.session_list.is_empty() =>
+                {
+                    app.session_cursor = (app.session_cursor + 1).min(app.session_list.len() - 1);
+                }
+                KeyCode::Up | KeyCode::Char('k') if app.selected_tab == 2 => {
+                    app.session_cursor = app.session_cursor.saturating_sub(1);
+                }
+                KeyCode::Char('s') if app.selected_tab == 2 => {
+                    app.session_sort = app.session_sort.next();
+                    sort_sessions(&mut app.session_list, app.session_sort);
+                    app.session_cursor = 0;
                 }
                 _ => {}
             }
@@ -187,11 +265,12 @@ fn render(frame: &mut Frame, app: &AppState) {
     .areas(padded);
 
     render_header(frame, header_area, app);
-    render_footer(frame, footer_area);
+    render_footer(frame, footer_area, app);
 
     match app.selected_tab {
         0 => render_summary(frame, content_area, app),
         1 => render_models(frame, content_area, app),
+        2 => render_sessions(frame, content_area, app),
         _ => {}
     }
 }
@@ -222,16 +301,22 @@ fn render_header(frame: &mut Frame, area: Rect, app: &AppState) {
     frame.render_widget(tabs, tabs_area);
 }
 
-fn render_footer(frame: &mut Frame, area: Rect) {
-    let footer = Line::from(vec![
+fn render_footer(frame: &mut Frame, area: Rect, app: &AppState) {
+    let mut spans = vec![
         Span::from("tab/←/→").bold(),
         Span::from(": navigate  ").dim(),
         Span::from("1-5").bold(),
         Span::from(": period (1d 3d 7d 30d all)  ").dim(),
-        Span::from("q").bold(),
-        Span::from(": quit").dim(),
-    ]);
-    frame.render_widget(footer, area);
+    ];
+    if app.selected_tab == 2 {
+        spans.push(Span::from("↑↓/j/k").bold());
+        spans.push(Span::from(": scroll  ").dim());
+        spans.push(Span::from("s").bold());
+        spans.push(Span::from(format!(": sort (now: {})  ", app.session_sort.label())).dim());
+    }
+    spans.push(Span::from("q").bold());
+    spans.push(Span::from(": quit").dim());
+    frame.render_widget(Line::from(spans), area);
 }
 
 // ─── Summary tab ─────────────────────────────────────────────────────────────
@@ -293,13 +378,17 @@ fn render_stat_boxes(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) 
             Line::from(Span::from("Total lines").dim()),
             Line::from(Span::from(fmt_num(total as u64)).bold()),
         ])
-        .block(Block::bordered()),
+        .block(Block::bordered().padding(Padding::horizontal(1))),
         lines_area,
     );
 
     // AI share gauge
     let gauge = Gauge::default()
-        .block(Block::bordered().title(Span::from("AI share").dim()))
+        .block(
+            Block::bordered()
+                .title(Span::from("AI share").dim())
+                .padding(Padding::horizontal(1)),
+        )
         .ratio(if total > 0 {
             ai_pct as f64 / 100.0
         } else {
@@ -333,7 +422,7 @@ fn render_stat_boxes(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) 
             Line::from(Span::from("Sessions").dim()),
             Line::from(Span::from(sessions_label).bold()),
         ])
-        .block(Block::bordered()),
+        .block(Block::bordered().padding(Padding::horizontal(1))),
         sessions_area,
     );
 
@@ -350,7 +439,7 @@ fn render_stat_boxes(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) 
                 .bold(),
             ),
         ])
-        .block(Block::bordered()),
+        .block(Block::bordered().padding(Padding::horizontal(1))),
         cost_area,
     );
 }
@@ -378,7 +467,10 @@ fn render_session_stats(frame: &mut Frame, area: Rect, stats: &LocalActivityStat
         spans.push(Span::from(format!("{}%", pct)).bold());
     }
 
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).block(Block::new().padding(Padding::horizontal(1))),
+        area,
+    );
 }
 
 fn render_heatmaps(
@@ -402,12 +494,18 @@ fn render_heatmaps(
 }
 
 fn render_time_of_day(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) {
-    let block = Block::bordered().title(Span::from("Time of day").bold());
+    let block = Block::bordered()
+        .title(Span::from("Time of day").bold())
+        .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [spark_area, label_area] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    let [_pad, spark_area, label_area] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
 
     let max_val = stats.hourly.iter().copied().max().unwrap_or(1).max(1);
     let spark: String = stats
@@ -435,12 +533,18 @@ fn render_time_of_day(frame: &mut Frame, area: Rect, stats: &LocalActivityStats)
 }
 
 fn render_day_of_week(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) {
-    let block = Block::bordered().title(Span::from("Day of week").bold());
+    let block = Block::bordered()
+        .title(Span::from("Day of week").bold())
+        .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [spark_area, label_area] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    let [_pad, spark_area, label_area] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
 
     let max_val = stats.daily.iter().copied().max().unwrap_or(1).max(1);
     let spark: String = stats
@@ -506,7 +610,9 @@ fn render_models(frame: &mut Frame, area: Rect, app: &AppState) {
 
 fn render_spend_summary(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) {
     let t = &stats.tokens;
-    let block = Block::bordered().title(Span::from("Spend").bold());
+    let block = Block::bordered()
+        .title(Span::from("Spend").bold())
+        .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -555,7 +661,11 @@ fn render_cache_gauge(frame: &mut Frame, area: Rect, stats: &LocalActivityStats)
     };
 
     let gauge = Gauge::default()
-        .block(Block::bordered().title(Span::from("Cache hit rate").bold()))
+        .block(
+            Block::bordered()
+                .title(Span::from("Cache hit rate").bold())
+                .padding(Padding::horizontal(1)),
+        )
         .ratio(cache_hit_ratio.unwrap_or(0.0))
         .label(
             cache_hit_ratio
@@ -567,7 +677,9 @@ fn render_cache_gauge(frame: &mut Frame, area: Rect, stats: &LocalActivityStats)
 }
 
 fn render_model_table(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) {
-    let block = Block::bordered().title(Span::from("Models").bold());
+    let block = Block::bordered()
+        .title(Span::from("Models").bold())
+        .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -643,7 +755,9 @@ fn render_model_table(frame: &mut Frame, area: Rect, stats: &LocalActivityStats)
 // ─── Per-repository breakdown table ──────────────────────────────────────────
 
 fn render_repo_table(frame: &mut Frame, area: Rect, repos: &[RepoActivitySummary]) {
-    let block = Block::bordered().title(Span::from("Activity by repository").bold());
+    let block = Block::bordered()
+        .title(Span::from("Activity by repository").bold())
+        .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -695,10 +809,146 @@ fn render_repo_table(frame: &mut Frame, area: Rect, repos: &[RepoActivitySummary
     frame.render_widget(table, inner);
 }
 
+// ─── Sessions tab ─────────────────────────────────────────────────────────────
+
+fn shorten_model(model: &str) -> String {
+    match model.rsplit_once('-') {
+        Some((head, tail)) if tail.len() == 8 && tail.chars().all(|c| c.is_ascii_digit()) => {
+            head.to_string()
+        }
+        _ => model.to_string(),
+    }
+}
+
+fn render_sessions(frame: &mut Frame, area: Rect, app: &AppState) {
+    let sort_indicator = |col: SessionSort| {
+        if col == app.session_sort { " ▼" } else { "" }
+    };
+
+    let block = Block::bordered()
+        .title(Span::from("Sessions").bold())
+        .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if app.session_list.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::from("No session data for this period.").dim()),
+            inner,
+        );
+        return;
+    }
+
+    let header = Row::new(vec![
+        format!("Time{}", sort_indicator(SessionSort::Time)),
+        "Tool".to_string(),
+        "Model".to_string(),
+        format!("Tokens{}", sort_indicator(SessionSort::Tokens)),
+        format!("Cost{}", sort_indicator(SessionSort::Cost)),
+        "Status".to_string(),
+    ])
+    .style(Style::default().bold())
+    .bottom_margin(1);
+
+    // Header + margin uses 2 rows; compute how many data rows fit.
+    let visible_count = (inner.height as usize).saturating_sub(2);
+    // Keep the cursor visible: scroll the window so the cursor row is always shown.
+    let offset = if app.session_cursor < visible_count {
+        0
+    } else {
+        app.session_cursor - visible_count + 1
+    }
+    .min(app.session_list.len().saturating_sub(visible_count));
+
+    let now_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as u32;
+
+    let rows: Vec<Row> = app.session_list[offset..]
+        .iter()
+        .take(visible_count)
+        .enumerate()
+        .map(|(i, r)| {
+            let abs_idx = offset + i;
+            let time_str = fmt_session_time(r.first_ts, now_ts);
+            let model_str = r
+                .model
+                .as_deref()
+                .map(shorten_model)
+                .unwrap_or_else(|| "—".to_string());
+            let tokens_str = if r.total_tokens > 0 {
+                fmt_num_tokens(r.total_tokens)
+            } else {
+                "—".to_string()
+            };
+            let cost_str = r
+                .estimated_cost_usd
+                .filter(|&c| c > 0.0)
+                .map(|c| format!("~${:.2}", c))
+                .unwrap_or_else(|| "—".to_string());
+            let status_str = if r.shipped { "shipped" } else { "—" };
+
+            let row = Row::new(vec![
+                Cell::from(time_str),
+                Cell::from(r.tool.clone()),
+                Cell::from(model_str),
+                Cell::from(tokens_str),
+                Cell::from(cost_str),
+                Cell::from(status_str),
+            ]);
+
+            if abs_idx == app.session_cursor {
+                row.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                row
+            }
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(16),
+            Constraint::Length(10),
+            Constraint::Fill(1),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header);
+    frame.render_widget(table, inner);
+}
+
+fn fmt_session_time(ts: u32, now_ts: u32) -> String {
+    let secs_ago = now_ts.saturating_sub(ts) as u64;
+    if secs_ago < 60 {
+        return "just now".to_string();
+    }
+    if secs_ago < 3600 {
+        return format!("{}m ago", secs_ago / 60);
+    }
+    if secs_ago < 24 * 3600 {
+        return format!("{}h ago", secs_ago / 3600);
+    }
+    if secs_ago < 2 * 24 * 3600 {
+        return "yesterday".to_string();
+    }
+    // Older: show date in local time.
+    let dt: DateTime<Local> = Local
+        .timestamp_opt(ts as i64, 0)
+        .single()
+        .unwrap_or_else(Local::now);
+    dt.format("%b %d %H:%M").to_string()
+}
+
 // ─── Activity bar chart ───────────────────────────────────────────────────────
 
 fn render_activity_chart(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) {
-    let block = Block::bordered().title(Span::from("AI lines over time").bold());
+    let block = Block::bordered()
+        .title(Span::from("AI lines over time").bold())
+        .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -710,16 +960,41 @@ fn render_activity_chart(frame: &mut Frame, area: Rect, stats: &LocalActivitySta
         return;
     }
 
+    const BAR_W: u16 = 6;
+    const GAP_W: u16 = 1;
+
+    let [chart_area, label_area] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+
     let bars: Vec<Bar> = stats
         .buckets
         .iter()
         .map(|b| {
-            Bar::with_label(shorten_label(&b.label), b.ai_lines as u64)
+            Bar::default()
+                .value(b.ai_lines as u64)
                 .style(Style::default().fg(Color::Cyan))
         })
         .collect();
 
-    frame.render_widget(BarChart::vertical(bars).bar_width(4).bar_gap(1), inner);
+    frame.render_widget(
+        BarChart::vertical(bars).bar_width(BAR_W).bar_gap(GAP_W),
+        chart_area,
+    );
+
+    // Build a label row that aligns with bar positions.
+    // Each slot is BAR_W chars wide, separated by a single '·' (= GAP_W=1 char).
+    let n = stats.buckets.len();
+    let mut spans: Vec<Span> = Vec::with_capacity(n * 2);
+    for (i, b) in stats.buckets.iter().enumerate() {
+        let label = tui_bucket_label(&b.label);
+        let padded = format!("{:<width$}", label, width = BAR_W as usize);
+        spans.push(Span::from(padded).dim());
+        if i + 1 < n {
+            spans.push(Span::from("·").style(Style::default().fg(Color::DarkGray)));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), label_area);
 }
 
 // ─── Formatting helpers ───────────────────────────────────────────────────────
@@ -754,8 +1029,32 @@ fn fmt_num_tokens(n: u64) -> String {
     }
 }
 
-fn shorten_label(label: &str) -> &str {
-    if label.len() <= 6 { label } else { &label[..6] }
+/// Produces a ≤6-char label for the bar chart from the bucket label string.
+///
+/// Input formats from `bucket_key`:
+///   Daily:   "May 22"
+///   Weekly:  "May 18 – May 24"
+///   Monthly: "May 2026"
+fn tui_bucket_label(label: &str) -> String {
+    // Weekly: take only the start date.
+    if let Some(pos) = label.find(" \u{2013} ") {
+        let start = &label[..pos];
+        return if start.len() <= 6 {
+            start.to_string()
+        } else {
+            start[..6].to_string()
+        };
+    }
+    // Monthly: "May 2026" → "May '26"
+    if label.len() >= 8 {
+        let parts: Vec<&str> = label.splitn(2, ' ').collect();
+        if parts.len() == 2 && parts[1].len() == 4 {
+            let yr = &parts[1][2..]; // last two digits
+            return format!("{} '{}", parts[0], yr);
+        }
+    }
+    // Daily (and fallback): fits as-is.
+    label.to_string()
 }
 
 /// Strip leading `https://` / `http://` from a repo URL for compact display.
