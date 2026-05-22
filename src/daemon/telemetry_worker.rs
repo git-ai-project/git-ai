@@ -316,6 +316,9 @@ fn flush_telemetry_batch(batch: TelemetryBuffer) {
 }
 
 fn flush_metrics(events: &[MetricEvent]) {
+    // Persist interesting events to local_events before attempting upload.
+    store_local_events(events);
+
     let context = ApiContext::new(None);
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
@@ -356,6 +359,35 @@ fn store_metrics_in_db(events: &[MetricEvent]) {
         && let Ok(mut db_lock) = db.lock()
     {
         let _ = db_lock.insert_events(&event_jsons);
+    }
+}
+
+fn store_local_events(events: &[MetricEvent]) {
+    // Only persist event types that are useful for local activity stats.
+    const INTERESTING: &[u16] = &[
+        1, // Committed
+        4, // Checkpoint
+        5, // SessionEvent
+    ];
+
+    let tuples: Vec<(u16, u32, String)> = events
+        .iter()
+        .filter(|e| INTERESTING.contains(&e.event_id))
+        .filter_map(|e| {
+            serde_json::to_string(e)
+                .ok()
+                .map(|json| (e.event_id, e.timestamp, json))
+        })
+        .collect();
+
+    if tuples.is_empty() {
+        return;
+    }
+
+    if let Ok(db) = MetricsDatabase::global()
+        && let Ok(mut db_lock) = db.lock()
+    {
+        let _ = db_lock.insert_local_events(&tuples);
     }
 }
 

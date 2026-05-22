@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Current schema version (must match MIGRATIONS.len())
-const SCHEMA_VERSION: usize = 2;
+const SCHEMA_VERSION: usize = 3;
 
 /// Database migrations - each migration upgrades the schema by one version
 const MIGRATIONS: &[&str] = &[
@@ -27,6 +27,17 @@ const MIGRATIONS: &[&str] = &[
         last_sent_ts INTEGER NOT NULL
     );
     "#,
+    // Migration 2 -> 3: Persistent local event history for `git-ai activity`
+    r#"
+    CREATE TABLE IF NOT EXISTS local_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id INTEGER NOT NULL,
+        ts INTEGER NOT NULL,
+        event_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS local_events_ts ON local_events (ts);
+    CREATE INDEX IF NOT EXISTS local_events_event_id ON local_events (event_id);
+    "#,
 ];
 
 /// Global database singleton
@@ -36,6 +47,14 @@ static METRICS_DB: OnceLock<Mutex<MetricsDatabase>> = OnceLock::new();
 #[derive(Debug, Clone)]
 pub struct MetricRecord {
     pub id: i64,
+    pub event_json: String,
+}
+
+/// Record from the local_events table
+#[derive(Debug, Clone)]
+pub struct LocalEventRecord {
+    pub event_id: u16,
+    pub ts: u32,
     pub event_json: String,
 }
 
@@ -261,6 +280,55 @@ impl MetricsDatabase {
         Ok(count as usize)
     }
 
+    /// Insert events into the local_events table (persistent, never deleted).
+    ///
+    /// Each tuple is (event_id, ts, event_json). Call this with events filtered to
+    /// only the interesting event types before inserting.
+    pub fn insert_local_events(&mut self, events: &[(u16, u32, String)]) -> Result<(), GitAiError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        let tx = self.conn.transaction()?;
+
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO local_events (event_id, ts, event_json) VALUES (?1, ?2, ?3)",
+            )?;
+
+            for (event_id, ts, json) in events {
+                stmt.execute(params![*event_id as i64, *ts as i64, json])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Query local_events since `since_ts` (Unix seconds), returning all interesting event types.
+    pub fn get_local_events(&self, since_ts: u32) -> Result<Vec<LocalEventRecord>, GitAiError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, ts, event_json FROM local_events \
+             WHERE ts >= ?1 \
+             ORDER BY ts ASC",
+        )?;
+
+        let rows = stmt.query_map(params![since_ts as i64], |row| {
+            Ok(LocalEventRecord {
+                event_id: row.get::<_, i64>(0)? as u16,
+                ts: row.get::<_, i64>(1)? as u32,
+                event_json: row.get(2)?,
+            })
+        })?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
+    }
+
     /// Returns whether an `agent_usage` event should be emitted for this prompt_id.
     ///
     /// If emitted, this method also updates the prompt's last-sent timestamp.
@@ -345,7 +413,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
     }
 
     #[test]
@@ -383,7 +451,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
     }
 
     #[test]
