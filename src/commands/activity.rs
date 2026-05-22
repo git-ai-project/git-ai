@@ -146,7 +146,16 @@ fn print_terminal(stats: &LocalActivityStats) {
         println!("    Acceptance rate   {:>5}%", acceptance_pct);
     }
     for (tool, count) in &stats.commits.by_tool {
-        println!("    {GRAY}{}: {}{RESET}", tool, format_num(*count));
+        // Inline per-tool acceptance rate when available (keyed by plain tool name).
+        let tool_name = tool.split(" · ").next().unwrap_or(tool.as_str());
+        let accept_str = stats
+            .commits
+            .acceptance_by_tool
+            .iter()
+            .find(|(t, _)| t == tool_name)
+            .map(|(_, pct)| format!("  {GRAY}({pct}% accept){RESET}"))
+            .unwrap_or_default();
+        println!("    {GRAY}{}: {}{RESET}{}", tool, format_num(*count), accept_str);
     }
 
     // --- Human section ---
