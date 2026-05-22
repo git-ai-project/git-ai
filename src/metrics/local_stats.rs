@@ -37,6 +37,10 @@ pub struct CommitSummary {
     pub total: u32,
     pub ai_lines: u32,
     pub human_lines: u32,
+    /// Total lines added across all commits (git diff additions), used to
+    /// measure attribution coverage: lines not attributed to AI or known-human
+    /// are "untracked" holes in the data.
+    pub diff_added_lines: u32,
     /// Per-tool AI line counts, sorted descending. Tool name only (strips "::model" suffix).
     pub by_tool: Vec<(String, u32)>,
 }
@@ -79,6 +83,7 @@ pub fn compute_activity(
     let mut total_commits = 0u32;
     let mut total_ai_lines = 0u32;
     let mut total_human_lines = 0u32;
+    let mut total_diff_added = 0u32;
     let mut commit_tool_counts: HashMap<String, u32> = HashMap::new();
 
     let mut total_checkpoints = 0u32;
@@ -109,6 +114,7 @@ pub fn compute_activity(
                     &mut total_commits,
                     &mut total_ai_lines,
                     &mut total_human_lines,
+                    &mut total_diff_added,
                     &mut commit_tool_counts,
                 );
 
@@ -161,6 +167,7 @@ pub fn compute_activity(
             total: total_commits,
             ai_lines: total_ai_lines,
             human_lines: total_human_lines,
+            diff_added_lines: total_diff_added,
             by_tool: commit_by_tool,
         },
         checkpoints: CheckpointSummary {
@@ -295,9 +302,13 @@ fn aggregate_committed(
     total_commits: &mut u32,
     total_ai_lines: &mut u32,
     total_human_lines: &mut u32,
+    total_diff_added: &mut u32,
     commit_tool_counts: &mut HashMap<String, u32>,
 ) -> u32 {
     let human = sparse_get_u32(&event.values, committed_pos::HUMAN_ADDITIONS)
+        .flatten()
+        .unwrap_or(0);
+    let diff_added = sparse_get_u32(&event.values, committed_pos::GIT_DIFF_ADDED_LINES)
         .flatten()
         .unwrap_or(0);
     let ai_vecs = sparse_get_vec_u32(&event.values, committed_pos::AI_ADDITIONS)
@@ -305,8 +316,10 @@ fn aggregate_committed(
         .unwrap_or_default();
     let total_ai = ai_vecs.first().copied().unwrap_or(0);
 
-    // Always accumulate human lines regardless of whether the commit has AI lines.
+    // Always accumulate human lines and total diff additions regardless of
+    // whether the commit has AI lines (coverage spans all committed code).
     *total_human_lines += human;
+    *total_diff_added += diff_added;
 
     // Only count the commit and accumulate AI lines when AI was involved.
     if total_ai == 0 {
