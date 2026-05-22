@@ -49,8 +49,10 @@ pub struct TokenSummary {
 pub struct WowSpend {
     pub this_week_usd: f64,
     pub last_week_usd: f64,
-    /// Percentage change: positive = up, negative = down.
-    pub change_pct: f64,
+    /// Percentage change: positive = up, negative = down. None when last week
+    /// was zero and this week has spend.
+    pub change_pct: Option<f64>,
+    pub new_this_week: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -494,12 +496,20 @@ fn build_token_summary(
         cost_for_message_slice(last_week_msgs.into_iter().chain(last_week_codex));
 
     let wow_spend = if wow_eligible && (this_week_cost > 0.0 || last_week_cost > 0.0) {
-        let change_pct = if last_week_cost > 0.0 {
-            (this_week_cost - last_week_cost) / last_week_cost * 100.0
+        let (change_pct, new_this_week) = if last_week_cost > 0.0 {
+            (
+                Some((this_week_cost - last_week_cost) / last_week_cost * 100.0),
+                false,
+            )
         } else {
-            f64::INFINITY
+            (None, true)
         };
-        Some(WowSpend { this_week_usd: this_week_cost, last_week_usd: last_week_cost, change_pct })
+        Some(WowSpend {
+            this_week_usd: this_week_cost,
+            last_week_usd: last_week_cost,
+            change_pct,
+            new_this_week,
+        })
     } else {
         None
     };

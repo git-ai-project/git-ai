@@ -194,11 +194,15 @@ fn print_terminal(stats: &LocalActivityStats) {
             );
         }
         if let Some(wow) = &t.wow_spend {
-            let arrow = if wow.change_pct > 0.0 { "↑" } else { "↓" };
-            let change_str = if wow.change_pct.is_infinite() {
-                format!("{arrow} new this week")
-            } else {
-                format!("{arrow} {:.0}% vs last week", wow.change_pct.abs())
+            let change_str = match (wow.new_this_week, wow.change_pct) {
+                (true, _) => "↑ new this week".to_string(),
+                (_, Some(change_pct)) if change_pct > 0.0 => {
+                    format!("↑ {:.0}% vs last week", change_pct)
+                }
+                (_, Some(change_pct)) if change_pct < 0.0 => {
+                    format!("↓ {:.0}% vs last week", change_pct.abs())
+                }
+                _ => "no change vs last week".to_string(),
             };
             println!(
                 "    {GRAY}This week ~${:.2} · Last week ~${:.2}  {}{RESET}",
