@@ -944,12 +944,18 @@ pub struct SessionRecord {
     pub tool: String,
     /// Dominant model used, if known.
     pub model: Option<String>,
+    /// First user-visible prompt / task, extracted from the transcript.
+    /// `None` when the relevant event was not stored or not parseable.
+    pub title: Option<String>,
     /// Total tokens (input + output + cache_read + cache_creation).
     pub total_tokens: u64,
     /// Estimated cost in USD; `None` when pricing data is unavailable.
     pub estimated_cost_usd: Option<f64>,
     /// Whether a commit landed within 4 h of the session's last event.
     pub shipped: bool,
+    /// Approximate AI lines committed during or within 4 h after this session.
+    /// Approximate because a commit may span code from multiple sessions.
+    pub ai_lines_committed: u32,
 }
 
 /// Build a per-session list from raw events.  Default order: newest first.
@@ -968,11 +974,13 @@ pub fn compute_session_list(
     let mut session_first_ts: HashMap<String, u32> = HashMap::new();
     let mut session_last_ts: HashMap<String, u32> = HashMap::new();
     let mut session_tool: HashMap<String, String> = HashMap::new();
+    let mut session_title: HashMap<String, String> = HashMap::new();
     // sid -> mid -> (model, accum) for Claude-style per-message token data.
     let mut session_messages: HashMap<String, HashMap<String, (String, TokenAccum)>> =
         HashMap::new();
     let mut codex_sessions: HashMap<String, CodexSessionAccum> = HashMap::new();
-    let mut commit_timestamps: Vec<u32> = Vec::new();
+    // (timestamp, ai_lines) — sorted after the loop for binary-search per session.
+    let mut commit_data: Vec<(u32, u32)> = Vec::new();
 
     for record in &events {
         let event: MetricEvent = match serde_json::from_str(&record.event_json) {
@@ -981,7 +989,15 @@ pub fn compute_session_list(
         };
 
         match record.event_id {
-            1 => commit_timestamps.push(record.ts),
+            1 => {
+                let ai_lines = sparse_get_vec_u32(&event.values, committed_pos::AI_ADDITIONS)
+                    .flatten()
+                    .unwrap_or_default()
+                    .first()
+                    .copied()
+                    .unwrap_or(0);
+                commit_data.push((record.ts, ai_lines));
+            }
             5 => {
                 let Some(sid) = sparse_get_string(&event.attrs, attr_pos::SESSION_ID).flatten()
                 else {
@@ -997,13 +1013,32 @@ pub fn compute_session_list(
                 *last = (*last).max(record.ts);
                 session_tool.entry(sid.clone()).or_insert(tool.clone());
 
+                let Some(raw) = event.values.get(&session_event_pos::RAW_JSON.to_string()) else {
+                    continue;
+                };
+                let raw_type = raw.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
                 if tool == "codex" {
+                    // Title: first response_item with a user role and non-system text.
+                    if raw_type == "response_item"
+                        && !session_title.contains_key(&sid)
+                        && let Some(payload) = raw.get("payload")
+                        && payload.get("role").and_then(|r| r.as_str()) == Some("user")
+                        && let Some(text) = extract_codex_user_text(payload.get("content"))
+                    {
+                        session_title.insert(sid.clone(), text);
+                    }
                     aggregate_codex_tokens(&event, record.ts, &mut codex_sessions);
                 } else {
-                    let Some(raw) = event.values.get(&session_event_pos::RAW_JSON.to_string())
-                    else {
-                        continue;
-                    };
+                    // Title: first user message with real text content.
+                    if raw_type == "user"
+                        && !session_title.contains_key(&sid)
+                        && let Some(msg) = raw.get("message")
+                        && let Some(text) = extract_claude_user_text(msg)
+                    {
+                        session_title.insert(sid.clone(), text);
+                    }
+
                     let Some(message) = raw.get("message") else {
                         continue;
                     };
@@ -1036,7 +1071,7 @@ pub fn compute_session_list(
         }
     }
 
-    commit_timestamps.sort_unstable();
+    commit_data.sort_unstable_by_key(|&(ts, _)| ts);
     const YIELD_WINDOW_SECS: u32 = 4 * 3600;
 
     let mut out: Vec<SessionRecord> = session_first_ts
@@ -1049,8 +1084,13 @@ pub fn compute_session_list(
                 .unwrap_or_else(|| "unknown".to_string());
 
             let window_end = last_ts.saturating_add(YIELD_WINDOW_SECS);
-            let pos = commit_timestamps.partition_point(|&t| t < last_ts);
-            let shipped = commit_timestamps.get(pos).is_some_and(|&t| t <= window_end);
+            let pos = commit_data.partition_point(|&(t, _)| t < last_ts);
+            let shipped = commit_data.get(pos).is_some_and(|&(t, _)| t <= window_end);
+
+            // Sum ai_lines from commits that fall in [first_ts, last_ts + 4h].
+            let lo = commit_data.partition_point(|&(t, _)| t < first_ts);
+            let hi = commit_data.partition_point(|&(t, _)| t <= window_end);
+            let ai_lines_committed: u32 = commit_data[lo..hi].iter().map(|&(_, l)| l).sum();
 
             let (model, total_tokens, estimated_cost_usd) = if tool == "codex" {
                 if let Some(acc) = codex_sessions.get(sid) {
@@ -1105,15 +1145,71 @@ pub fn compute_session_list(
                 first_ts,
                 tool,
                 model,
+                title: session_title.get(sid).cloned(),
                 total_tokens,
                 estimated_cost_usd,
                 shipped,
+                ai_lines_committed,
             }
         })
         .collect();
 
     out.sort_by_key(|r| Reverse(r.first_ts));
     Ok(out)
+}
+
+/// Extract the first meaningful text from a Claude user message content array.
+/// Returns `None` if the only text blocks are XML system messages.
+fn extract_claude_user_text(message: &serde_json::Value) -> Option<String> {
+    let content = message.get("content")?;
+    let text = match content {
+        serde_json::Value::Array(blocks) => blocks.iter().find_map(|b| {
+            if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                b.get("text")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        }),
+        serde_json::Value::String(s) => Some(s.clone()),
+        _ => None,
+    }?;
+    if text.starts_with('<') {
+        return None;
+    }
+    Some(normalize_title(&text))
+}
+
+/// Extract the first meaningful text from a Codex `response_item` payload content.
+/// Skips system preamble blocks (AGENTS.md instructions, environment context XML).
+fn extract_codex_user_text(content: Option<&serde_json::Value>) -> Option<String> {
+    let blocks = content?.as_array()?;
+    for block in blocks {
+        if block.get("type").and_then(|t| t.as_str()) == Some("input_text") {
+            let text = block.get("text").and_then(|t| t.as_str())?;
+            if !text.starts_with('#') && !text.starts_with('<') {
+                return Some(normalize_title(text));
+            }
+        }
+    }
+    None
+}
+
+/// Collapse whitespace and truncate a title string to at most 120 chars.
+fn normalize_title(s: &str) -> String {
+    let single_line: String = s
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    if single_line.chars().count() > 120 {
+        let truncated: String = single_line.chars().take(117).collect();
+        format!("{}…", truncated)
+    } else {
+        single_line
+    }
 }
 
 // ─── Per-repository breakdown ─────────────────────────────────────────────────

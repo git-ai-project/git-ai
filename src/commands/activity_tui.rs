@@ -841,10 +841,11 @@ fn render_sessions(frame: &mut Frame, area: Rect, app: &AppState) {
 
     let header = Row::new(vec![
         format!("Time{}", sort_indicator(SessionSort::Time)),
-        "Tool".to_string(),
-        "Model".to_string(),
+        "Agent".to_string(),
+        "Title".to_string(),
         format!("Tokens{}", sort_indicator(SessionSort::Tokens)),
         format!("Cost{}", sort_indicator(SessionSort::Cost)),
+        "~Lines".to_string(),
         "Status".to_string(),
     ])
     .style(Style::default().bold())
@@ -872,11 +873,11 @@ fn render_sessions(frame: &mut Frame, area: Rect, app: &AppState) {
         .map(|(i, r)| {
             let abs_idx = offset + i;
             let time_str = fmt_session_time(r.first_ts, now_ts);
-            let model_str = r
-                .model
-                .as_deref()
-                .map(shorten_model)
-                .unwrap_or_else(|| "—".to_string());
+            let agent_str = match r.model.as_deref().map(shorten_model).as_deref() {
+                Some(m) => format!("{} · {}", r.tool, m),
+                None => r.tool.clone(),
+            };
+            let title_str = r.title.as_deref().unwrap_or("—").to_string();
             let tokens_str = if r.total_tokens > 0 {
                 fmt_num_tokens(r.total_tokens)
             } else {
@@ -887,14 +888,20 @@ fn render_sessions(frame: &mut Frame, area: Rect, app: &AppState) {
                 .filter(|&c| c > 0.0)
                 .map(|c| format!("~${:.2}", c))
                 .unwrap_or_else(|| "—".to_string());
+            let lines_str = if r.ai_lines_committed > 0 {
+                format!("~{}", fmt_num(r.ai_lines_committed as u64))
+            } else {
+                "—".to_string()
+            };
             let status_str = if r.shipped { "shipped" } else { "—" };
 
             let row = Row::new(vec![
                 Cell::from(time_str),
-                Cell::from(r.tool.clone()),
-                Cell::from(model_str),
+                Cell::from(agent_str),
+                Cell::from(title_str),
                 Cell::from(tokens_str),
                 Cell::from(cost_str),
+                Cell::from(lines_str),
                 Cell::from(status_str),
             ]);
 
@@ -910,10 +917,11 @@ fn render_sessions(frame: &mut Frame, area: Rect, app: &AppState) {
         rows,
         [
             Constraint::Length(16),
-            Constraint::Length(10),
+            Constraint::Length(26),
             Constraint::Fill(1),
             Constraint::Length(10),
             Constraint::Length(10),
+            Constraint::Length(9),
             Constraint::Length(8),
         ],
     )
