@@ -257,6 +257,11 @@ pub fn compute_activity(
 
     // Yield classification: for each unique session, check if a commit landed
     // within 4 hours of the session's last observed event.
+    //
+    // Limitation: local_events aggregates activity across all repos globally,
+    // so a commit in repo-A can incorrectly "claim" a nearby session that was
+    // working in repo-B. Fixing this properly requires storing the repo path
+    // on both session and committed events (a future schema change).
     const YIELD_WINDOW_SECS: u32 = 4 * 3600;
     commit_timestamps.sort_unstable();
     let mut yield_shipped = 0u32;
