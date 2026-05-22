@@ -126,6 +126,15 @@ tasks:
           GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_combined_
 
+  test:fuzz:marathon:
+    desc: Run marathon fuzzer tests (150-200 ops, very long running)
+    cmds:
+      - task: test:base
+        vars:
+          GIT_AI_TEST_GIT_MODE: daemon
+          TEST_FILTER: fuzz_marathon_
+          EXTRA_TEST_BINARY_ARGS: "--ignored"
+
   lint:
     desc: Run cargo check and clippy with warnings as errors
     cmds:
