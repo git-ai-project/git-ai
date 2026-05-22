@@ -1,7 +1,10 @@
 //! Ratatui TUI for `git-ai activity`.
 
 use crate::error::GitAiError;
-use crate::metrics::local_stats::{BucketGranularity, LocalActivityStats, compute_activity};
+use crate::metrics::local_stats::{
+    BucketGranularity, LocalActivityStats, RepoActivitySummary, compute_activity,
+    compute_repo_summaries,
+};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
     DefaultTerminal, Frame,
@@ -21,11 +24,31 @@ struct Period {
 }
 
 const PERIODS: &[Period] = &[
-    Period { label: "last 1 day",   granularity: BucketGranularity::Daily,   days: Some(1)  },
-    Period { label: "last 3 days",  granularity: BucketGranularity::Daily,   days: Some(3)  },
-    Period { label: "last 7 days",  granularity: BucketGranularity::Daily,   days: Some(7)  },
-    Period { label: "last 30 days", granularity: BucketGranularity::Weekly,  days: Some(30) },
-    Period { label: "all time",     granularity: BucketGranularity::Monthly, days: None     },
+    Period {
+        label: "last 1 day",
+        granularity: BucketGranularity::Daily,
+        days: Some(1),
+    },
+    Period {
+        label: "last 3 days",
+        granularity: BucketGranularity::Daily,
+        days: Some(3),
+    },
+    Period {
+        label: "last 7 days",
+        granularity: BucketGranularity::Daily,
+        days: Some(7),
+    },
+    Period {
+        label: "last 30 days",
+        granularity: BucketGranularity::Weekly,
+        days: Some(30),
+    },
+    Period {
+        label: "all time",
+        granularity: BucketGranularity::Monthly,
+        days: None,
+    },
 ];
 
 fn since_ts(period_idx: usize) -> u32 {
@@ -45,25 +68,59 @@ struct AppState {
     selected_tab: usize,
     period_idx: usize,
     stats: LocalActivityStats,
+    /// The repo URL we're scoped to, or None for global (all repos) view.
+    current_repo: Option<String>,
+    /// Per-repo summaries; only populated when `current_repo` is None.
+    repo_summaries: Vec<RepoActivitySummary>,
 }
 
 impl AppState {
-    fn new(stats: LocalActivityStats, period_idx: usize) -> Self {
-        Self { selected_tab: 0, period_idx, stats }
+    fn new(
+        stats: LocalActivityStats,
+        period_idx: usize,
+        current_repo: Option<String>,
+        repo_summaries: Vec<RepoActivitySummary>,
+    ) -> Self {
+        Self {
+            selected_tab: 0,
+            period_idx,
+            stats,
+            current_repo,
+            repo_summaries,
+        }
     }
 
     fn load_period(&mut self, idx: usize) -> Result<(), GitAiError> {
         let p = &PERIODS[idx];
         let ts = since_ts(idx);
-        self.stats = compute_activity(ts, p.label.to_string(), p.granularity)?;
+        self.stats = compute_activity(
+            ts,
+            p.label.to_string(),
+            p.granularity,
+            self.current_repo.as_deref(),
+        )?;
+        if self.current_repo.is_none() {
+            self.repo_summaries = compute_repo_summaries(ts, p.granularity).unwrap_or_default();
+        }
         self.period_idx = idx;
         Ok(())
     }
 }
 
-pub fn run_tui(initial_stats: LocalActivityStats, period_idx: usize) -> Result<(), GitAiError> {
+pub fn run_tui(
+    initial_stats: LocalActivityStats,
+    period_idx: usize,
+    current_repo: Option<String>,
+    repo_summaries: Vec<RepoActivitySummary>,
+) -> Result<(), GitAiError> {
     let mut terminal = ratatui::init();
-    let result = run_app(&mut terminal, initial_stats, period_idx);
+    let result = run_app(
+        &mut terminal,
+        initial_stats,
+        period_idx,
+        current_repo,
+        repo_summaries,
+    );
     ratatui::restore();
     result
 }
@@ -72,8 +129,10 @@ fn run_app(
     terminal: &mut DefaultTerminal,
     initial_stats: LocalActivityStats,
     period_idx: usize,
+    current_repo: Option<String>,
+    repo_summaries: Vec<RepoActivitySummary>,
 ) -> Result<(), GitAiError> {
-    let mut app = AppState::new(initial_stats, period_idx);
+    let mut app = AppState::new(initial_stats, period_idx, current_repo, repo_summaries);
     loop {
         terminal
             .draw(|frame| render(frame, &app))
@@ -146,11 +205,16 @@ fn render_header(frame: &mut Frame, area: Rect, app: &AppState) {
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
 
     let period = PERIODS[app.period_idx].label;
-    let title = Line::from(vec![
+    let mut title_spans = vec![
         Span::from("git-ai activity").bold(),
         Span::from("  ─  ").dim(),
         Span::from(period).dim(),
-    ]);
+    ];
+    if let Some(repo) = &app.current_repo {
+        title_spans.push(Span::from("  ─  ").dim());
+        title_spans.push(Span::from(repo.clone()).dim());
+    }
+    let title = Line::from(title_spans);
     frame.render_widget(title, title_area);
 
     let tabs = Tabs::new(TAB_NAMES.to_vec())
@@ -197,7 +261,15 @@ fn render_summary(frame: &mut Frame, area: Rect, app: &AppState) {
     .areas(area);
 
     render_stat_boxes(frame, stat_area, stats);
-    render_activity_chart(frame, chart_area, stats);
+
+    // When not scoped to a repo, show a per-repo breakdown in place of the
+    // activity chart.  When scoped, show the normal AI-lines bar chart.
+    if app.current_repo.is_none() && !app.repo_summaries.is_empty() {
+        render_repo_table(frame, chart_area, &app.repo_summaries);
+    } else {
+        render_activity_chart(frame, chart_area, stats);
+    }
+
     render_session_stats(frame, session_area, stats);
     if heatmap_height > 0 {
         render_heatmaps(frame, heatmap_area, stats, has_hourly, has_daily);
@@ -232,7 +304,11 @@ fn render_stat_boxes(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) 
     // AI share gauge
     let gauge = Gauge::default()
         .block(Block::bordered().title(Span::from("AI share").dim()))
-        .ratio(if total > 0 { ai_pct as f64 / 100.0 } else { 0.0 })
+        .ratio(if total > 0 {
+            ai_pct as f64 / 100.0
+        } else {
+            0.0
+        })
         .label(format!(
             "{}%  ·  {} AI / {} human",
             ai_pct,
@@ -348,10 +424,8 @@ fn render_time_of_day(frame: &mut Frame, area: Rect, stats: &LocalActivityStats)
     );
     frame.render_widget(
         Paragraph::new(
-            Span::from(
-                "am  1  2  3  4  5  6  7  8  9 10 11 pm  1  2  3  4  5  6  7  8  9 10 11",
-            )
-            .dim(),
+            Span::from("am  1  2  3  4  5  6  7  8  9 10 11 pm  1  2  3  4  5  6  7  8  9 10 11")
+                .dim(),
         ),
         label_area,
     );
@@ -433,7 +507,10 @@ fn render_spend_summary(frame: &mut Frame, area: Rect, stats: &LocalActivityStat
         } else {
             String::new()
         };
-        format!("This week: ~${:.2}{}  {}", w.this_week_usd, last_week, delta)
+        format!(
+            "This week: ~${:.2}{}  {}",
+            w.this_week_usd, last_week, delta
+        )
     });
 
     let mut lines = vec![Line::from(Span::from(cost_line).bold())];
@@ -445,7 +522,11 @@ fn render_spend_summary(frame: &mut Frame, area: Rect, stats: &LocalActivityStat
 
 fn render_cache_gauge(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) {
     let t = &stats.tokens;
-    let with_ratio: Vec<f64> = t.by_model.iter().filter_map(|m| m.cache_hit_ratio).collect();
+    let with_ratio: Vec<f64> = t
+        .by_model
+        .iter()
+        .filter_map(|m| m.cache_hit_ratio)
+        .collect();
     let cache_hit_ratio = if with_ratio.is_empty() {
         None
     } else {
@@ -538,6 +619,61 @@ fn render_model_table(frame: &mut Frame, area: Rect, stats: &LocalActivityStats)
     frame.render_widget(table, inner);
 }
 
+// ─── Per-repository breakdown table ──────────────────────────────────────────
+
+fn render_repo_table(frame: &mut Frame, area: Rect, repos: &[RepoActivitySummary]) {
+    let block = Block::bordered().title(Span::from("Activity by repository").bold());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let header = Row::new(vec![
+        "Repository",
+        "AI Lines",
+        "Commits",
+        "Sessions",
+        "Est. Cost",
+    ])
+    .style(Style::default().bold())
+    .bottom_margin(1);
+
+    let total_ai: u32 = repos.iter().map(|r| r.ai_lines).sum();
+
+    let rows: Vec<Row> = repos
+        .iter()
+        .map(|r| {
+            let pct = (r.ai_lines as u64 * 100)
+                .checked_div(total_ai as u64)
+                .unwrap_or(0);
+            let repo_display = shorten_repo_url(&r.repo_url);
+            let cost = if r.estimated_cost_usd > 0.0 {
+                format!("~${:.2}", r.estimated_cost_usd)
+            } else {
+                "—".to_string()
+            };
+            Row::new(vec![
+                Cell::from(repo_display.to_string()),
+                Cell::from(format!("{}  ({}%)", fmt_num(r.ai_lines as u64), pct)),
+                Cell::from(fmt_num(r.commits as u64)),
+                Cell::from(fmt_num(r.sessions as u64)),
+                Cell::from(cost),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Fill(1),
+            Constraint::Length(18),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(12),
+        ],
+    )
+    .header(header);
+    frame.render_widget(table, inner);
+}
+
 // ─── Activity bar chart ───────────────────────────────────────────────────────
 
 fn render_activity_chart(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) {
@@ -599,4 +735,10 @@ fn fmt_num_tokens(n: u64) -> String {
 
 fn shorten_label(label: &str) -> &str {
     if label.len() <= 6 { label } else { &label[..6] }
+}
+
+/// Strip leading `https://` / `http://` from a repo URL for compact display.
+fn shorten_repo_url(url: &str) -> &str {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
 }

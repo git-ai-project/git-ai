@@ -1,7 +1,10 @@
 //! `git-ai activity` — local statistics from persisted metric events.
 
 use crate::commands::activity_tui;
-use crate::metrics::local_stats::{BucketGranularity, LocalActivityStats, compute_activity};
+use crate::metrics::local_stats::{
+    BucketGranularity, LocalActivityStats, compute_activity, compute_repo_summaries,
+};
+use crate::repo_url::resolve_repo_url_from_path;
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -72,7 +75,13 @@ pub fn handle_activity(args: &[String]) {
         }
     };
 
-    let stats = match compute_activity(since_ts, period_label, granularity) {
+    // Auto-detect which repo we're in (if any) to scope the stats.
+    let current_repo = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| resolve_repo_url_from_path(&cwd));
+
+    let stats = match compute_activity(since_ts, period_label, granularity, current_repo.as_deref())
+    {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -89,7 +98,13 @@ pub fn handle_activity(args: &[String]) {
             }
         }
     } else if std::io::stdout().is_terminal() {
-        if let Err(e) = activity_tui::run_tui(stats, tui_period_idx) {
+        // Pre-compute repo summaries for the global view (used when not inside a repo).
+        let repo_summaries = if current_repo.is_none() {
+            compute_repo_summaries(since_ts, granularity).unwrap_or_default()
+        } else {
+            vec![]
+        };
+        if let Err(e) = activity_tui::run_tui(stats, tui_period_idx, current_repo, repo_summaries) {
             eprintln!("error: {}", e);
             std::process::exit(1);
         }
