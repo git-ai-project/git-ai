@@ -193,12 +193,17 @@ fn print_terminal(stats: &LocalActivityStats) {
                 .estimated_cost_usd
                 .map(|c| format!("  ~${:.2}", c))
                 .unwrap_or_default();
+            let cache = m
+                .cache_hit_ratio
+                .map(|r| format!("  cache {:.0}% hit", r * 100.0))
+                .unwrap_or_default();
             let total = m.input + m.output + m.cache_read + m.cache_creation;
             println!(
-                "    {GRAY}{}: {} tokens{}{RESET}",
+                "    {GRAY}{}: {} tokens{}{}{RESET}",
                 m.model,
                 format_num_u64(total),
                 cost,
+                cache,
             );
         }
     }
