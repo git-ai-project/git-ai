@@ -1,6 +1,7 @@
 //! `git-ai activity` — local statistics from persisted metric events.
 
 use crate::metrics::local_stats::{BucketGranularity, LocalActivityStats, compute_activity};
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn handle_activity(args: &[String]) {
@@ -145,16 +146,23 @@ fn print_terminal(stats: &LocalActivityStats) {
     {
         println!("    Acceptance rate   {:>5}%", acceptance_pct);
     }
+    // Track which tools have already had their acceptance rate shown so we
+    // don't repeat the same tool-level rate on every model variant line.
+    let mut shown_accept: HashSet<&str> = HashSet::new();
     for (tool, count) in &stats.commits.by_tool {
-        // Inline per-tool acceptance rate when available (keyed by plain tool name).
         let tool_name = tool.split(" · ").next().unwrap_or(tool.as_str());
-        let accept_str = stats
-            .commits
-            .acceptance_by_tool
-            .iter()
-            .find(|(t, _)| t == tool_name)
-            .map(|(_, pct)| format!("  {GRAY}({pct}% accept){RESET}"))
-            .unwrap_or_default();
+        let accept_str = if shown_accept.insert(tool_name) {
+            // First line for this tool — show the acceptance rate once.
+            stats
+                .commits
+                .acceptance_by_tool
+                .iter()
+                .find(|(t, _)| t == tool_name)
+                .map(|(_, pct)| format!("  {GRAY}({pct}% accept){RESET}"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         println!("    {GRAY}{}: {}{RESET}{}", tool, format_num(*count), accept_str);
     }
 
