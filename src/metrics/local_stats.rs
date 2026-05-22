@@ -62,6 +62,10 @@ pub struct TokenModelStat {
     pub cache_creation: u64,
     /// Estimated cost in USD; None if the model has no pricing entry.
     pub estimated_cost_usd: Option<f64>,
+    /// Cache hit ratio: cache_read / (cache_read + cache_creation), 0.0–1.0.
+    /// None when neither cache_read nor cache_creation is non-zero (model
+    /// doesn't use prompt caching, e.g. codex).
+    pub cache_hit_ratio: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -481,6 +485,13 @@ fn build_token_summary(
             summary.estimated_cost_usd += c;
         }
 
+        let cache_total = acc.cache_read + acc.cache_creation;
+        let cache_hit_ratio = if cache_total > 0 {
+            Some(acc.cache_read as f64 / cache_total as f64)
+        } else {
+            None
+        };
+
         by_model.push(TokenModelStat {
             model: shorten_model(&model),
             input: acc.input,
@@ -488,6 +499,7 @@ fn build_token_summary(
             cache_read: acc.cache_read,
             cache_creation: acc.cache_creation,
             estimated_cost_usd: cost,
+            cache_hit_ratio,
         });
     }
 
