@@ -100,10 +100,9 @@ fn print_terminal(stats: &LocalActivityStats) {
     if let Some(ai_pct) = (stats.commits.ai_lines * 100).checked_div(total_lines) {
         let human_pct = 100 - ai_pct;
         println!(
-            "  {BOLD}AI{RESET}  {}  {:>3}%     {BOLD}Human{RESET}  {}  {:>3}%",
-            bar(ai_pct, BAR_WIDTH),
+            "  {}  {BOLD}AI{RESET} {:>3}%  ·  {BOLD}Human{RESET} {:>3}%",
+            bar(ai_pct, 40),
             ai_pct,
-            bar(human_pct, BAR_WIDTH),
             human_pct,
         );
     }
