@@ -1,6 +1,6 @@
 //! `git-ai activity` — local statistics from persisted metric events.
 
-use crate::metrics::local_stats::{LocalActivityStats, compute_activity};
+use crate::metrics::local_stats::{BucketGranularity, LocalActivityStats, compute_activity};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn handle_activity(args: &[String]) {
@@ -28,19 +28,19 @@ pub fn handle_activity(args: &[String]) {
         i += 1;
     }
 
-    let (since_ts, period_label) = match period.as_str() {
-        "1d" => (days_ago(1), "last 1 days".to_string()),
-        "3d" => (days_ago(3), "last 3 days".to_string()),
-        "7d" => (days_ago(7), "last 7 days".to_string()),
-        "30d" => (days_ago(30), "last 30 days".to_string()),
-        "all" => (0u32, "all time".to_string()),
+    let (since_ts, period_label, granularity) = match period.as_str() {
+        "1d" => (days_ago(1), "last 1 day".to_string(), BucketGranularity::Daily),
+        "3d" => (days_ago(3), "last 3 days".to_string(), BucketGranularity::Daily),
+        "7d" => (days_ago(7), "last 7 days".to_string(), BucketGranularity::Daily),
+        "30d" => (days_ago(30), "last 30 days".to_string(), BucketGranularity::Weekly),
+        "all" => (0u32, "all time".to_string(), BucketGranularity::Monthly),
         other => {
-            eprintln!("Unknown period '{}'. Use 7d, 30d, or all.", other);
+            eprintln!("Unknown period '{}'. Use 1d, 3d, 7d, 30d, or all.", other);
             std::process::exit(1);
         }
     };
 
-    let stats = match compute_activity(since_ts, period_label) {
+    let stats = match compute_activity(since_ts, period_label, granularity) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -75,9 +75,9 @@ fn print_help() {
     eprintln!("Usage: git-ai activity [options]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --period <7d|30d|all>   Time window (default: 30d)");
-    eprintln!("  --json                  Output as JSON");
-    eprintln!("  --help                  Show this help");
+    eprintln!("  --period <1d|3d|7d|30d|all>   Time window (default: 30d)");
+    eprintln!("  --json                          Output as JSON");
+    eprintln!("  --help                          Show this help");
     eprintln!();
     eprintln!("Statistics are sourced from locally recorded metric events.");
     eprintln!("Events accumulate over time and are never deleted from local storage.");
@@ -149,6 +149,29 @@ fn print_terminal(stats: &LocalActivityStats) {
         );
     }
 
+    // --- Activity over time ---
+    if !stats.buckets.is_empty() {
+        println!();
+        println!("  {BOLD}Activity over time{RESET}");
+        let max_ai = stats.buckets.iter().map(|b| b.ai_lines).max().unwrap_or(1).max(1);
+        for bucket in &stats.buckets {
+            let filled = (bucket.ai_lines * BAR_WIDTH / max_ai).min(BAR_WIDTH);
+            let empty = BAR_WIDTH - filled;
+            let bar_str = format!("{}{}", "█".repeat(filled as usize), "░".repeat(empty as usize));
+            if bucket.ai_lines > 0 {
+                println!(
+                    "  {GRAY}{}{RESET}  {}  {GRAY}{} lines · {} commits{RESET}",
+                    bucket.label,
+                    bar_str,
+                    format_num(bucket.ai_lines),
+                    bucket.commit_count,
+                );
+            } else {
+                println!("  {GRAY}{}  {}{RESET}", bucket.label, bar_str);
+            }
+        }
+    }
+
     // --- Checkpoints section ---
     println!();
     println!(
@@ -203,7 +226,56 @@ fn print_terminal(stats: &LocalActivityStats) {
         println!("  {GRAY}By tool: {}{RESET}", parts.join("  ·  "));
     }
 
+    // --- Time of day heatmap ---
+    if stats.hourly.iter().any(|&v| v > 0) {
+        println!();
+        println!("  {BOLD}Time of day{RESET} {GRAY}(AI lines committed){RESET}");
+        let max_hour = stats.hourly.iter().copied().max().unwrap_or(1).max(1);
+
+        // Render two rows: sparkline + hour labels
+        // Each slot is 3 chars: spark char + 2 spaces. Labels are left-padded to 3.
+        let spark: String = stats
+            .hourly
+            .iter()
+            .map(|&v| spark_char(v, max_hour))
+            .collect::<Vec<_>>()
+            .join("  ");
+        println!("  {}", spark);
+
+        let labels: Vec<String> = (0..24)
+            .map(|h| match h {
+                0 => "am".to_string(),
+                12 => "pm".to_string(),
+                h if h < 12 => format!("{h}"),
+                h => format!("{}", h - 12),
+            })
+            .collect();
+        let label_row: String = labels
+            .iter()
+            .map(|l| format!("{:<3}", l))
+            .collect::<Vec<_>>()
+            .join("");
+        println!("  {GRAY}{}{RESET}", label_row.trim_end());
+    }
+
     println!();
+}
+
+fn spark_char(value: u32, max: u32) -> &'static str {
+    if value == 0 {
+        return "·";
+    }
+    let pct = value * 8 / max;
+    match pct {
+        0 => "▁",
+        1 => "▂",
+        2 => "▃",
+        3 => "▄",
+        4 => "▅",
+        5 => "▆",
+        6 => "▇",
+        _ => "█",
+    }
 }
 
 fn bar(pct: u32, width: u32) -> String {
