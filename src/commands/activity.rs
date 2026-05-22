@@ -132,14 +132,8 @@ fn print_terminal(stats: &LocalActivityStats) {
     {
         println!("    Acceptance rate   {:>5}%", acceptance_pct);
     }
-    if !stats.commits.by_tool.is_empty() {
-        let parts: Vec<String> = stats
-            .commits
-            .by_tool
-            .iter()
-            .map(|(tool, count)| format!("{}: {}", tool, format_num(*count)))
-            .collect();
-        println!("    {GRAY}{}{RESET}", parts.join("  ·  "));
+    for (tool, count) in &stats.commits.by_tool {
+        println!("    {GRAY}{}: {}{RESET}", tool, format_num(*count));
     }
 
     // --- Human section ---
