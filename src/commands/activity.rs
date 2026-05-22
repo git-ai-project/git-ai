@@ -380,6 +380,10 @@ fn print_terminal(stats: &LocalActivityStats) {
     }
 
     println!();
+    println!(
+        "  {GRAY}Local data only · See full history and team insights at https://usegitai.com/dashboard{RESET}"
+    );
+    println!();
 }
 
 fn spark_char(value: u32, max: u32) -> &'static str {
