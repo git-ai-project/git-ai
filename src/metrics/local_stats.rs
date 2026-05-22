@@ -85,6 +85,17 @@ pub struct CheckpointSummary {
 pub struct SessionSummary {
     pub total: u32,
     pub by_tool: Vec<(String, u32)>,
+    pub yield_stats: YieldStats,
+}
+
+/// Classifies sessions by whether they were followed by a commit within
+/// a short window — a proxy for "did this AI session actually ship work?"
+#[derive(Debug, Default, Serialize)]
+pub struct YieldStats {
+    /// Sessions followed by at least one commit within `YIELD_WINDOW_SECS`.
+    pub shipped: u32,
+    /// Sessions with no commit found within the window.
+    pub abandoned: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -140,6 +151,11 @@ pub fn compute_activity(
 
     let mut hourly: Vec<u32> = vec![0u32; 24];
 
+    // Yield classification: track the latest timestamp seen per session, and
+    // all commit timestamps, then correlate after the loop.
+    let mut session_last_ts: HashMap<String, u32> = HashMap::new();
+    let mut commit_timestamps: Vec<u32> = Vec::new();
+
     for record in &records {
         let event: MetricEvent = match serde_json::from_str(&record.event_json) {
             Ok(e) => e,
@@ -148,6 +164,7 @@ pub fn compute_activity(
 
         match record.event_id {
             1 => {
+                commit_timestamps.push(record.ts);
                 let c = aggregate_committed(
                     &event,
                     &mut total_commits,
@@ -186,6 +203,14 @@ pub fn compute_activity(
             ),
             5 => {
                 aggregate_session(&event, &mut session_ids, &mut session_tool_counts);
+
+                // Track last-seen timestamp per session for yield classification.
+                if let Some(sid) =
+                    sparse_get_string(&event.attrs, attr_pos::SESSION_ID).flatten()
+                {
+                    let entry = session_last_ts.entry(sid).or_insert(0);
+                    *entry = (*entry).max(record.ts);
+                }
                 let tool = sparse_get_string(&event.attrs, attr_pos::TOOL)
                     .flatten()
                     .unwrap_or_default();
@@ -196,6 +221,23 @@ pub fn compute_activity(
                 }
             }
             _ => {}
+        }
+    }
+
+    // Yield classification: for each unique session, check if a commit landed
+    // within 4 hours of the session's last observed event.
+    const YIELD_WINDOW_SECS: u32 = 4 * 3600;
+    commit_timestamps.sort_unstable();
+    let mut yield_shipped = 0u32;
+    let mut yield_abandoned = 0u32;
+    for (_sid, last_ts) in &session_last_ts {
+        let window_end = last_ts.saturating_add(YIELD_WINDOW_SECS);
+        // Find the first commit at or after this session's last event.
+        let pos = commit_timestamps.partition_point(|&t| t < *last_ts);
+        if commit_timestamps.get(pos).map_or(false, |&t| t <= window_end) {
+            yield_shipped += 1;
+        } else {
+            yield_abandoned += 1;
         }
     }
 
@@ -234,6 +276,7 @@ pub fn compute_activity(
         sessions: SessionSummary {
             total: session_ids.len() as u32,
             by_tool: session_by_tool,
+            yield_stats: YieldStats { shipped: yield_shipped, abandoned: yield_abandoned },
         },
         tokens,
         buckets: filled,
