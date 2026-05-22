@@ -321,14 +321,28 @@ fn aggregate_committed(
         .flatten()
         .unwrap_or_default();
     for (i, pair) in pairs.iter().enumerate().skip(1) {
-        let tool = pair.split("::").next().unwrap_or(pair).to_string();
+        let label = format_tool_model(pair);
         let ai_for_tool = ai_vecs.get(i).copied().unwrap_or(0);
         if ai_for_tool > 0 {
-            *commit_tool_counts.entry(tool).or_insert(0) += ai_for_tool;
+            *commit_tool_counts.entry(label).or_insert(0) += ai_for_tool;
         }
     }
 
     total_ai
+}
+
+/// Format a "tool::model" pair into a readable "tool · model" label,
+/// trimming a redundant tool prefix from the model (e.g. "claude::claude-sonnet-4-6"
+/// becomes "claude · sonnet-4-6").
+fn format_tool_model(pair: &str) -> String {
+    match pair.split_once("::") {
+        Some((tool, model)) if !model.is_empty() => {
+            let prefix = format!("{tool}-");
+            let model = model.strip_prefix(&prefix).unwrap_or(model);
+            format!("{tool} · {model}")
+        }
+        _ => pair.to_string(),
+    }
 }
 
 fn aggregate_checkpoint(
