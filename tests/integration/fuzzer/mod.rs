@@ -57,3 +57,36 @@ fn fuzz_random() {
         .as_nanos() as u64;
     run_fuzzer(FuzzerConfig::standard(seed, 20));
 }
+
+// =============================================================================
+// Marathon tests (150+ ops, maximum pathological coverage)
+// =============================================================================
+
+#[test]
+#[ignore]
+fn fuzz_marathon_0() {
+    run_fuzzer(FuzzerConfig::chaos(0, 150));
+}
+
+#[test]
+#[ignore]
+fn fuzz_marathon_42() {
+    run_fuzzer(FuzzerConfig::chaos(42, 150));
+}
+
+#[test]
+#[ignore]
+fn fuzz_marathon_1337() {
+    run_fuzzer(FuzzerConfig::chaos(1337, 200));
+}
+
+#[test]
+#[ignore]
+fn fuzz_marathon_random() {
+    let seed: u64 = rand::random_range(0..u64::MAX);
+    eprintln!(
+        "[fuzzer] MARATHON RANDOM SEED: {} — use this to reproduce failures",
+        seed
+    );
+    run_fuzzer(FuzzerConfig::chaos(seed, 200));
+}
