@@ -5531,24 +5531,38 @@ impl ActorDaemonCoordinator {
                                             })
                                             .filter(|s| !s.is_empty())
                                     });
-                                let resolved_head = head.clone().or_else(|| {
-                                    let mut args = repo.global_args_for_exec();
-                                    args.extend(["rev-parse".to_string(), "HEAD".to_string()]);
-                                    crate::git::repository::exec_git_allow_nonzero(&args)
+                                if let Some(stash_sha) = resolved_stash.as_deref() {
+                                    // Resolve head from stash commit's parent (most reliable)
+                                    // or fall back to semantic head / rev-parse HEAD.
+                                    let resolved_head = repo
+                                        .find_commit(stash_sha.to_string())
                                         .ok()
-                                        .filter(|o| o.status.success())
-                                        .map(|o| {
-                                            String::from_utf8_lossy(&o.stdout).trim().to_string()
-                                        })
-                                        .filter(|s| !s.is_empty())
-                                });
-                                if let (Some(stash_sha), Some(head_sha)) =
-                                    (resolved_stash.as_deref(), resolved_head.as_deref())
-                                {
-                                    let pathspecs = Self::stash_pathspecs_from_command(cmd);
-                                    let _ = crate::authorship::rewrite_stash::handle_stash_create(
-                                        &repo, stash_sha, head_sha, pathspecs,
-                                    );
+                                        .and_then(|c| c.parent(0).ok())
+                                        .map(|p| p.id().to_string())
+                                        .or_else(|| head.clone())
+                                        .or_else(|| {
+                                            let mut args = repo.global_args_for_exec();
+                                            args.extend([
+                                                "rev-parse".to_string(),
+                                                "HEAD".to_string(),
+                                            ]);
+                                            crate::git::repository::exec_git_allow_nonzero(&args)
+                                                .ok()
+                                                .filter(|o| o.status.success())
+                                                .map(|o| {
+                                                    String::from_utf8_lossy(&o.stdout)
+                                                        .trim()
+                                                        .to_string()
+                                                })
+                                                .filter(|s| !s.is_empty())
+                                        });
+                                    if let Some(head_sha) = resolved_head.as_deref() {
+                                        let pathspecs = Self::stash_pathspecs_from_command(cmd);
+                                        let _ =
+                                            crate::authorship::rewrite_stash::handle_stash_create(
+                                                &repo, stash_sha, head_sha, pathspecs,
+                                            );
+                                    }
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Pop => {
