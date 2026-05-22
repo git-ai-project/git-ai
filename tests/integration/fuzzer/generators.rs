@@ -111,6 +111,11 @@ pub enum CombinedOp {
     RapidHeadChange,
     ThreeWayMerge,
     EdgeCaseCommitFlags,
+    RapidLifecycle,
+    MultiStash,
+    OverwriteAndRollback,
+    CherryPickChain,
+    InterleavedAmendNew,
 }
 
 impl EditStrategy {
@@ -232,7 +237,7 @@ pub fn gen_stress_op(rng: &mut impl Rng) -> StressOp {
 
 /// Generate a random combined operation.
 pub fn gen_combined_op(rng: &mut impl Rng) -> CombinedOp {
-    match rng.random_range(0..27u32) {
+    match rng.random_range(0..32u32) {
         0 => CombinedOp::CherryPickConflict,
         1 => CombinedOp::RapidBranchMerge,
         2 => CombinedOp::RebaseCherryPickCombo,
@@ -259,6 +264,11 @@ pub fn gen_combined_op(rng: &mut impl Rng) -> CombinedOp {
         23 => CombinedOp::UntrackedInterleave,
         24 => CombinedOp::RapidHeadChange,
         25 => CombinedOp::ThreeWayMerge,
-        _ => CombinedOp::EdgeCaseCommitFlags,
+        26 => CombinedOp::EdgeCaseCommitFlags,
+        27 => CombinedOp::RapidLifecycle,
+        28 => CombinedOp::MultiStash,
+        29 => CombinedOp::OverwriteAndRollback,
+        30 => CombinedOp::CherryPickChain,
+        _ => CombinedOp::InterleavedAmendNew,
     }
 }

@@ -4306,6 +4306,294 @@ pub fn execute_edge_case_commit_flags(
     operation_log.push("edge-case-commit-flags: done".to_string());
 }
 
+/// Checkpoint→commit→amend→checkpoint→commit rapid cycle: exercises the working
+/// log lifecycle in the most compressed time possible.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_rapid_lifecycle(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let cycles = rng.random_range(3..=6);
+    operation_log.push(format!("rapid-lifecycle: {} cycles", cycles));
+
+    for i in 0..cycles {
+        // Edit + checkpoint
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: if file_state.lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                EditStrategy::random_non_destructive(rng)
+            },
+            line_count: gen_line_count(rng, max_lines.min(2)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+
+        // Commit
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("rapid-lifecycle: cycle {} commit", i))
+            .unwrap();
+
+        // Immediately amend with more content
+        let amend_params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(2)),
+        };
+        execute_edit_and_checkpoint(
+            repo,
+            file_state,
+            registry,
+            &amend_params,
+            rng,
+            operation_log,
+        );
+        repo.git(&["add", "-A"]).unwrap();
+        repo.git(&[
+            "commit",
+            "--amend",
+            "-m",
+            &format!("rapid-lifecycle: cycle {} amended", i),
+        ])
+        .unwrap();
+    }
+
+    operation_log.push("rapid-lifecycle: done".to_string());
+}
+
+/// Stash with multiple entries: create several stash entries, then pop them
+/// in random order. Tests that the stash hook correctly handles multiple
+/// stash entries and that attribution is preserved through save/pop cycles.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_multi_stash(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let stash_count = rng.random_range(2..=4);
+    operation_log.push(format!("multi-stash: {} stashes", stash_count));
+
+    let mut stashed = 0;
+
+    for i in 0..stash_count {
+        // Make an edit
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: if file_state.lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                EditStrategy::random_non_destructive(rng)
+            },
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+
+        // Stash it
+        let result = repo.git(&["stash", "push", "-m", &format!("multi-stash entry {}", i)]);
+        if result.is_ok() {
+            stashed += 1;
+            // After stash, re-read file (reverts to committed state)
+            file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+        }
+    }
+
+    // Pop all stashes (newest first)
+    for _ in 0..stashed {
+        let pop_result = repo.git(&["stash", "pop"]);
+        if pop_result.is_err() {
+            repo.git(&["checkout", "--", "."]).ok();
+            repo.git(&["stash", "drop"]).ok();
+        }
+        file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+    }
+
+    // Commit whatever state we're in
+    repo.git(&["add", "-A"]).unwrap();
+    let status = repo.git(&["status", "--porcelain"]).unwrap();
+    if !status.trim().is_empty() {
+        repo.commit("multi-stash: final commit").unwrap();
+    }
+
+    operation_log.push("multi-stash: done".to_string());
+}
+
+/// Overwrite-all then partial rollback: write entirely new content (destroying
+/// all previous attributions), commit, then soft reset and partially restore.
+/// Tests that OverwriteAll strategy + reset correctly handles attribution wipe.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_overwrite_and_rollback(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("overwrite-and-rollback: starting".to_string());
+
+    // Complete overwrite
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::OverwriteAll,
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("overwrite-and-rollback: overwrite").unwrap();
+
+    // Soft reset
+    repo.git(&["reset", "--soft", "HEAD~1"]).unwrap();
+
+    // Add more content on top of the overwritten state
+    let extra_params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &extra_params,
+        rng,
+        operation_log,
+    );
+
+    // Recommit
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("overwrite-and-rollback: recommit with extra")
+        .unwrap();
+
+    operation_log.push("overwrite-and-rollback: done".to_string());
+}
+
+/// Cherry-pick chain: make 3 commits, then cherry-pick them one by one
+/// onto a different branch. Each cherry-pick should carry its authorship.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_cherry_pick_chain(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let chain_len = rng.random_range(2..=4);
+    operation_log.push(format!("cherry-pick-chain: {} picks", chain_len));
+
+    let base_branch = repo
+        .git(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let source_branch = format!("cp-source-{}", rng.random_range(0..10000u32));
+
+    // Create source branch with commits
+    repo.git(&["checkout", "-b", &source_branch]).unwrap();
+    let mut shas = Vec::new();
+
+    for i in 0..chain_len {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(2)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("cherry-pick-chain: source {}", i))
+            .unwrap();
+        shas.push(repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string());
+    }
+
+    // Go back to base
+    repo.git(&["checkout", &base_branch]).unwrap();
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    // Cherry-pick each commit one by one
+    for (i, sha) in shas.iter().enumerate() {
+        let cp_result = repo.git(&["cherry-pick", sha]);
+        if cp_result.is_err() {
+            repo.git(&["cherry-pick", "--abort"]).ok();
+            operation_log.push(format!("cherry-pick-chain: pick {} failed", i));
+            break;
+        }
+        file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+    }
+
+    // Clean up
+    repo.git(&["branch", "-D", &source_branch]).ok();
+
+    operation_log.push("cherry-pick-chain: done".to_string());
+}
+
+/// Interleaved amend and new commits: make a commit, amend it, make a NEW
+/// commit, amend THAT one, etc. Tests that amend doesn't bleed into the
+/// previous commit's authorship note.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_interleaved_amend_new(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let pair_count = rng.random_range(2..=4);
+    operation_log.push(format!(
+        "interleaved-amend-new: {} commit+amend pairs",
+        pair_count
+    ));
+
+    for i in 0..pair_count {
+        // New commit
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: if file_state.lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                EditStrategy::random_non_destructive(rng)
+            },
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("interleaved-amend-new: new {}", i))
+            .unwrap();
+
+        // Immediately amend with different attribution
+        let amend_params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(2)),
+        };
+        execute_edit_and_checkpoint(
+            repo,
+            file_state,
+            registry,
+            &amend_params,
+            rng,
+            operation_log,
+        );
+        repo.git(&["add", "-A"]).unwrap();
+        repo.git(&[
+            "commit",
+            "--amend",
+            "-m",
+            &format!("interleaved-amend-new: amended {}", i),
+        ])
+        .unwrap();
+    }
+
+    operation_log.push("interleaved-amend-new: done".to_string());
+}
+
 /// Reconstruct the char-per-line model from actual file content on disk.
 pub fn reconstruct_lines_from_content(content: &str) -> Vec<char> {
     content
