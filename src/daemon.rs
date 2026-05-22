@@ -831,6 +831,54 @@ fn stash_sha_from_ref_changes(cmd: &crate::daemon::domain::NormalizedCommand) ->
         .filter(|s| !s.is_empty() && *s != "0000000000000000000000000000000000000000")
 }
 
+fn resolve_stash_sha(
+    cmd: &crate::daemon::domain::NormalizedCommand,
+    stash_ref: Option<&str>,
+    repo: &Repository,
+) -> Option<String> {
+    if let Some(oid) = cmd.stash_target_oid.as_deref() {
+        return Some(oid.to_string());
+    }
+    if let Some(sha) = stash_sha_from_ref_changes(cmd) {
+        return Some(sha.to_string());
+    }
+    if let Some(spec) = stash_ref {
+        let mut args = repo.global_args_for_exec();
+        args.extend(["rev-parse".to_string(), spec.to_string()]);
+        if let Ok(output) = crate::git::repository::exec_git_allow_nonzero(&args)
+            && output.status.success()
+        {
+            let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !sha.is_empty() {
+                return Some(sha);
+            }
+        }
+    }
+    // Last resort: find most recent stash metadata in .git/ai/stashes/
+    let stashes_dir = repo.storage.ai_dir.join("stashes");
+    if let Ok(entries) = std::fs::read_dir(&stashes_dir) {
+        let mut best: Option<(u64, String)> = None;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if let Some(sha) = name_str.strip_suffix(".json")
+                && !sha.ends_with("_attrs")
+                && let Ok(content) = std::fs::read_to_string(entry.path())
+                && let Ok(meta) = serde_json::from_str::<
+                    crate::authorship::rewrite_stash::StashMetadata,
+                >(&content)
+                && best.as_ref().is_none_or(|(ts, _)| meta.timestamp > *ts)
+            {
+                best = Some((meta.timestamp, sha.to_string()));
+            }
+        }
+        if let Some((_, sha)) = best {
+            return Some(sha);
+        }
+    }
+    None
+}
+
 /// After a rebase completes, check if any newly-rebased commits were created
 /// from conflict resolution with AI checkpoints. If so, run post_commit on
 /// those commits to incorporate the AI attribution from the working log.
@@ -5484,35 +5532,29 @@ impl ActorDaemonCoordinator {
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Pop => {
-                                let resolved =
-                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref())
-                                        .or_else(|| stash_sha_from_ref_changes(cmd));
+                                let resolved = resolve_stash_sha(cmd, stash_ref.as_deref(), &repo);
                                 if let Some(stash_sha) = resolved {
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
-                                            &repo, stash_sha, true,
+                                            &repo, &stash_sha, true,
                                         );
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Apply
                             | crate::daemon::domain::StashOpKind::Branch => {
-                                let resolved =
-                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref())
-                                        .or_else(|| stash_sha_from_ref_changes(cmd));
+                                let resolved = resolve_stash_sha(cmd, stash_ref.as_deref(), &repo);
                                 if let Some(stash_sha) = resolved {
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
-                                            &repo, stash_sha, false,
+                                            &repo, &stash_sha, false,
                                         );
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Drop => {
-                                let resolved =
-                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref())
-                                        .or_else(|| stash_sha_from_ref_changes(cmd));
+                                let resolved = resolve_stash_sha(cmd, stash_ref.as_deref(), &repo);
                                 if let Some(stash_sha) = resolved {
                                     let _ = crate::authorship::rewrite_stash::handle_stash_drop(
-                                        &repo, stash_sha,
+                                        &repo, &stash_sha,
                                     );
                                 }
                             }
