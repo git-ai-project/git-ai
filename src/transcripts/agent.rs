@@ -102,6 +102,7 @@ const ALL_AGENT_TYPES: &[&str] = &[
     "codex",
     "amp",
     "opencode",
+    "kilo",
     "pi",
 ];
 
@@ -123,6 +124,7 @@ pub fn get_agent(agent_type: &str) -> Option<Box<dyn Agent>> {
         "codex" => Some(Box::new(super::agents::CodexAgent::new())),
         "amp" => Some(Box::new(super::agents::AmpAgent::new())),
         "opencode" => Some(Box::new(super::agents::OpenCodeAgent::new())),
+        "kilo" => Some(Box::new(super::agents::OpenCodeAgent::new())),
         "pi" => Some(Box::new(super::agents::PiAgent::new())),
         _ => None,
     }

@@ -15,6 +15,7 @@ mod human;
 mod known_human;
 mod mock_ai;
 mod mock_known_human;
+mod kilo;
 mod opencode;
 mod pi;
 mod windsurf;
@@ -161,6 +162,7 @@ pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
         "agent-v1" => Ok(Box::new(agent_v1::AgentV1Preset)),
         "droid" => Ok(Box::new(droid::DroidPreset)),
         "opencode" => Ok(Box::new(opencode::OpenCodePreset)),
+        "kilo" => Ok(Box::new(kilo::KiloPreset)),
         "pi" => Ok(Box::new(pi::PiPreset)),
         "human" => Ok(Box::new(human::HumanPreset)),
         "mock_ai" => Ok(Box::new(mock_ai::MockAiPreset)),

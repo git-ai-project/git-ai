@@ -12,6 +12,230 @@ use std::path::{Path, PathBuf};
 
 pub struct OpenCodePreset;
 
+/// Configuration for OpenCode-family presets (OpenCode, Kilo Code, etc.)
+/// These tools share the same plugin API and hook input format.
+pub(crate) struct OpenCodeFamilyConfig {
+    pub tool_name: &'static str,
+    pub db_filename: &'static str,
+    pub data_dir_name: &'static str,
+    pub storage_env_var: &'static str,
+    pub bash_agent: Agent,
+}
+
+pub(crate) static OPENCODE_CONFIG: OpenCodeFamilyConfig = OpenCodeFamilyConfig {
+    tool_name: "opencode",
+    db_filename: "opencode.db",
+    data_dir_name: "opencode",
+    storage_env_var: "GIT_AI_OPENCODE_STORAGE_PATH",
+    bash_agent: Agent::OpenCode,
+};
+
+pub(crate) fn resolve_data_path(dir_name: &str) -> Result<PathBuf, GitAiError> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = dirs::home_dir().ok_or_else(|| {
+            GitAiError::Generic("Could not determine home directory".to_string())
+        })?;
+        Ok(home.join(".local").join("share").join(dir_name))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
+            Ok(PathBuf::from(xdg_data).join(dir_name))
+        } else {
+            let home = dirs::home_dir().ok_or_else(|| {
+                GitAiError::Generic("Could not determine home directory".to_string())
+            })?;
+            Ok(home.join(".local").join("share").join(dir_name))
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(app_data) = std::env::var("APPDATA") {
+            Ok(PathBuf::from(app_data).join(dir_name))
+        } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            Ok(PathBuf::from(local_app_data).join(dir_name))
+        } else {
+            Err(GitAiError::Generic(
+                "Neither APPDATA nor LOCALAPPDATA is set".to_string(),
+            ))
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        Err(GitAiError::PresetError(format!(
+            "{} storage path not supported on this platform",
+            dir_name
+        )))
+    }
+}
+
+pub(crate) fn resolve_db_path(path: &Path, db_filename: &str) -> Option<PathBuf> {
+    if path.is_file() {
+        return path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| *name == db_filename)
+            .map(|_| path.to_path_buf());
+    }
+
+    if !path.is_dir() {
+        return None;
+    }
+
+    let direct_db = path.join(db_filename);
+    if direct_db.exists() {
+        return Some(direct_db);
+    }
+
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "storage")
+    {
+        let sibling_db = path.parent()?.join(db_filename);
+        if sibling_db.exists() {
+            return Some(sibling_db);
+        }
+    }
+
+    None
+}
+
+pub(crate) fn lookup_parent_session(db_path: &Path, session_id: &str) -> Option<String> {
+    let conn = crate::transcripts::agents::opencode::open_sqlite_readonly(db_path).ok()?;
+    conn.query_row(
+        "SELECT parent_id FROM session WHERE id = ?",
+        [session_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+pub(crate) fn resolve_family_transcript_source(
+    config: &OpenCodeFamilyConfig,
+    session_id: &str,
+) -> Option<(TranscriptSource, PathBuf)> {
+    let data_path = if let Ok(test_path) = std::env::var(config.storage_env_var) {
+        PathBuf::from(test_path)
+    } else {
+        resolve_data_path(config.data_dir_name).ok()?
+    };
+
+    // Try sqlite first
+    let db_path = resolve_db_path(&data_path, config.db_filename);
+    if let Some(db_path) = db_path {
+        let parent_id = lookup_parent_session(&db_path, session_id);
+        return Some((
+            TranscriptSource {
+                path: db_path,
+                format: TranscriptFormat::OpenCodeSqlite,
+                session_id: generate_session_id(session_id, config.tool_name),
+                external_session_id: session_id.to_string(),
+                external_parent_session_id: parent_id,
+            },
+            data_path,
+        ));
+    }
+
+    None
+}
+
+pub(crate) fn parse_opencode_family(
+    config: &OpenCodeFamilyConfig,
+    hook_input: &str,
+    trace_id: &str,
+) -> Result<Vec<ParsedHookEvent>, GitAiError> {
+    let hook_input: OpenCodeHookInput = serde_json::from_str(hook_input)
+        .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
+
+    let is_bash = hook_input
+        .tool_name
+        .as_deref()
+        .map(|name| bash_tool::classify_tool(config.bash_agent, name) == ToolClass::Bash)
+        .unwrap_or(false);
+
+    let is_pre = hook_input.hook_event_name == "PreToolUse";
+
+    let OpenCodeHookInput {
+        hook_event_name: _,
+        session_id,
+        cwd,
+        tool_input,
+        tool_name: _,
+        tool_use_id,
+    } = hook_input;
+
+    let file_paths =
+        OpenCodePreset::extract_filepaths_from_tool_input(tool_input.as_ref(), &cwd);
+    let tool_use_id_str = tool_use_id.as_deref().unwrap_or("bash").to_string();
+
+    // Build metadata
+    let mut metadata = HashMap::new();
+    metadata.insert("session_id".to_string(), session_id.clone());
+    if let Ok(test_path) = std::env::var(config.storage_env_var) {
+        metadata.insert("__test_storage_path".to_string(), test_path);
+    }
+
+    // Resolve transcript source
+    let transcript_result = resolve_family_transcript_source(config, &session_id);
+
+    let extracted_model = transcript_result.as_ref().and_then(|(ts, _)| {
+        crate::transcripts::model_extraction::extract_model(
+            &ts.path,
+            crate::transcripts::sweep::TranscriptFormat::OpenCodeSqlite,
+            Some(session_id.as_str()),
+        )
+        .ok()
+        .flatten()
+    });
+
+    let context = PresetContext {
+        agent_id: AgentId {
+            tool: config.tool_name.to_string(),
+            id: session_id.clone(),
+            model: extracted_model.unwrap_or_else(|| "unknown".to_string()),
+        },
+        external_session_id: session_id,
+        trace_id: trace_id.to_string(),
+        cwd: PathBuf::from(&cwd),
+        metadata,
+    };
+
+    let transcript_source = transcript_result.map(|(source, _)| source);
+
+    let event = match (is_pre, is_bash) {
+        (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
+            context,
+            tool_use_id: tool_use_id_str,
+        }),
+        (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
+            context,
+            file_paths,
+            dirty_files: None,
+            tool_use_id: Some(tool_use_id_str.clone()),
+        }),
+        (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
+            context,
+            tool_use_id: tool_use_id_str,
+            transcript_source,
+        }),
+        (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
+            context,
+            file_paths,
+            dirty_files: None,
+            transcript_source,
+            tool_use_id: Some(tool_use_id_str),
+        }),
+    };
+
+    Ok(vec![event])
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenCodeHookInput {
     hook_event_name: String,
@@ -143,204 +367,11 @@ impl OpenCodePreset {
 
         Some(joined.to_string_lossy().replace('\\', "/"))
     }
-
-    fn resolve_transcript_source(session_id: &str) -> Option<(TranscriptSource, PathBuf)> {
-        let opencode_path = if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
-            PathBuf::from(test_path)
-        } else {
-            Self::opencode_data_path().ok()?
-        };
-
-        // Try sqlite first
-        let db_path = Self::resolve_sqlite_db_path(&opencode_path);
-        if let Some(db_path) = db_path {
-            let parent_id = Self::lookup_parent_session(&db_path, session_id);
-            return Some((
-                TranscriptSource {
-                    path: db_path,
-                    format: TranscriptFormat::OpenCodeSqlite,
-                    session_id: generate_session_id(session_id, "opencode"),
-                    external_session_id: session_id.to_string(),
-                    external_parent_session_id: parent_id,
-                },
-                opencode_path,
-            ));
-        }
-
-        None
-    }
-
-    fn lookup_parent_session(db_path: &Path, session_id: &str) -> Option<String> {
-        let conn = crate::transcripts::agents::opencode::open_sqlite_readonly(db_path).ok()?;
-        conn.query_row(
-            "SELECT parent_id FROM session WHERE id = ?",
-            [session_id],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .ok()
-        .flatten()
-    }
-
-    fn opencode_data_path() -> Result<PathBuf, GitAiError> {
-        #[cfg(target_os = "macos")]
-        {
-            let home = dirs::home_dir().ok_or_else(|| {
-                GitAiError::Generic("Could not determine home directory".to_string())
-            })?;
-            Ok(home.join(".local").join("share").join("opencode"))
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(xdg_data) = std::env::var("XDG_DATA_HOME") {
-                Ok(PathBuf::from(xdg_data).join("opencode"))
-            } else {
-                let home = dirs::home_dir().ok_or_else(|| {
-                    GitAiError::Generic("Could not determine home directory".to_string())
-                })?;
-                Ok(home.join(".local").join("share").join("opencode"))
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            if let Ok(app_data) = std::env::var("APPDATA") {
-                Ok(PathBuf::from(app_data).join("opencode"))
-            } else if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-                Ok(PathBuf::from(local_app_data).join("opencode"))
-            } else {
-                Err(GitAiError::Generic(
-                    "Neither APPDATA nor LOCALAPPDATA is set".to_string(),
-                ))
-            }
-        }
-
-        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        {
-            Err(GitAiError::PresetError(
-                "OpenCode storage path not supported on this platform".to_string(),
-            ))
-        }
-    }
-
-    fn resolve_sqlite_db_path(path: &Path) -> Option<PathBuf> {
-        if path.is_file() {
-            return path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .filter(|name| *name == "opencode.db")
-                .map(|_| path.to_path_buf());
-        }
-
-        if !path.is_dir() {
-            return None;
-        }
-
-        let direct_db = path.join("opencode.db");
-        if direct_db.exists() {
-            return Some(direct_db);
-        }
-
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name == "storage")
-        {
-            let sibling_db = path.parent()?.join("opencode.db");
-            if sibling_db.exists() {
-                return Some(sibling_db);
-            }
-        }
-
-        None
-    }
 }
 
 impl AgentPreset for OpenCodePreset {
     fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
-        let hook_input: OpenCodeHookInput = serde_json::from_str(hook_input)
-            .map_err(|e| GitAiError::PresetError(format!("Invalid JSON in hook_input: {}", e)))?;
-
-        let is_bash = hook_input
-            .tool_name
-            .as_deref()
-            .map(|name| bash_tool::classify_tool(Agent::OpenCode, name) == ToolClass::Bash)
-            .unwrap_or(false);
-
-        let is_pre = hook_input.hook_event_name == "PreToolUse";
-
-        let OpenCodeHookInput {
-            hook_event_name: _,
-            session_id,
-            cwd,
-            tool_input,
-            tool_name: _,
-            tool_use_id,
-        } = hook_input;
-
-        let file_paths = Self::extract_filepaths_from_tool_input(tool_input.as_ref(), &cwd);
-        let tool_use_id_str = tool_use_id.as_deref().unwrap_or("bash").to_string();
-
-        // Build metadata
-        let mut metadata = HashMap::new();
-        metadata.insert("session_id".to_string(), session_id.clone());
-        if let Ok(test_path) = std::env::var("GIT_AI_OPENCODE_STORAGE_PATH") {
-            metadata.insert("__test_storage_path".to_string(), test_path);
-        }
-
-        // Resolve transcript source
-        let transcript_result = Self::resolve_transcript_source(&session_id);
-
-        let extracted_model = transcript_result.as_ref().and_then(|(ts, _)| {
-            crate::transcripts::model_extraction::extract_model(
-                &ts.path,
-                crate::transcripts::sweep::TranscriptFormat::OpenCodeSqlite,
-                Some(session_id.as_str()),
-            )
-            .ok()
-            .flatten()
-        });
-
-        let context = PresetContext {
-            agent_id: AgentId {
-                tool: "opencode".to_string(),
-                id: session_id.clone(),
-                model: extracted_model.unwrap_or_else(|| "unknown".to_string()),
-            },
-            external_session_id: session_id,
-            trace_id: trace_id.to_string(),
-            cwd: PathBuf::from(&cwd),
-            metadata,
-        };
-
-        let transcript_source = transcript_result.map(|(source, _)| source);
-
-        let event = match (is_pre, is_bash) {
-            (true, true) => ParsedHookEvent::PreBashCall(PreBashCall {
-                context,
-                tool_use_id: tool_use_id_str,
-            }),
-            (true, false) => ParsedHookEvent::PreFileEdit(PreFileEdit {
-                context,
-                file_paths,
-                dirty_files: None,
-                tool_use_id: Some(tool_use_id_str),
-            }),
-            (false, true) => ParsedHookEvent::PostBashCall(PostBashCall {
-                context,
-                tool_use_id: tool_use_id_str,
-                transcript_source,
-            }),
-            (false, false) => ParsedHookEvent::PostFileEdit(PostFileEdit {
-                context,
-                file_paths,
-                dirty_files: None,
-                transcript_source,
-                tool_use_id: Some(tool_use_id_str),
-            }),
-        };
-
-        Ok(vec![event])
+        parse_opencode_family(&OPENCODE_CONFIG, hook_input, trace_id)
     }
 }
 

@@ -4,42 +4,79 @@ use crate::mdm::utils::{binary_exists, generate_diff, home_dir, write_atomic};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-// OpenCode plugin content (TypeScript), embedded from the source file
-const OPENCODE_PLUGIN_CONTENT: &str = include_str!(concat!(
+// OpenCode plugin template (TypeScript), embedded from the source file.
+// Contains placeholders: __GIT_AI_BINARY_PATH__, __CHECKPOINT_PRESET__, __PLUGIN_PACKAGE__
+pub(crate) const OPENCODE_PLUGIN_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/agent-support/opencode/git-ai.ts"
 ));
+
+/// Configuration for OpenCode-family hook installers
+pub(crate) struct OpenCodeFamilyInstallerConfig {
+    pub name: &'static str,
+    pub id: &'static str,
+    pub process_names: &'static [&'static str],
+    pub config_dir_name: &'static str,
+    pub checkpoint_preset: &'static str,
+    pub plugin_package: &'static str,
+}
+
+pub(crate) static OPENCODE_INSTALLER_CONFIG: OpenCodeFamilyInstallerConfig =
+    OpenCodeFamilyInstallerConfig {
+        name: "OpenCode",
+        id: "opencode",
+        process_names: &["opencode"],
+        config_dir_name: "opencode",
+        checkpoint_preset: "opencode",
+        plugin_package: "@opencode-ai/plugin",
+    };
+
+/// Returns the plugin file path for an OpenCode-family agent
+pub(crate) fn family_plugin_path(config: &OpenCodeFamilyInstallerConfig) -> PathBuf {
+    home_dir()
+        .join(".config")
+        .join(config.config_dir_name)
+        .join("plugins")
+        .join("git-ai.ts")
+}
+
+/// Generates the plugin content with all placeholders substituted
+pub(crate) fn generate_family_plugin_content(
+    config: &OpenCodeFamilyInstallerConfig,
+    binary_path: &Path,
+) -> String {
+    // Escape backslashes for the TypeScript string literal (needed for Windows paths)
+    let path_str = binary_path.display().to_string().replace('\\', "\\\\");
+    OPENCODE_PLUGIN_TEMPLATE
+        .replace("__GIT_AI_BINARY_PATH__", &path_str)
+        .replace("__CHECKPOINT_PRESET__", config.checkpoint_preset)
+        .replace("__PLUGIN_PACKAGE__", config.plugin_package)
+}
 
 pub struct OpenCodeInstaller;
 
 impl OpenCodeInstaller {
     fn plugin_path() -> PathBuf {
-        home_dir()
-            .join(".config")
-            .join("opencode")
-            .join("plugins")
-            .join("git-ai.ts")
+        family_plugin_path(&OPENCODE_INSTALLER_CONFIG)
     }
 
     /// Generate plugin content with the absolute binary path substituted in
     fn generate_plugin_content(binary_path: &Path) -> String {
-        // Escape backslashes for the TypeScript string literal (needed for Windows paths)
-        let path_str = binary_path.display().to_string().replace('\\', "\\\\");
-        OPENCODE_PLUGIN_CONTENT.replace("__GIT_AI_BINARY_PATH__", &path_str)
+        generate_family_plugin_content(&OPENCODE_INSTALLER_CONFIG, binary_path)
     }
 }
 
 impl HookInstaller for OpenCodeInstaller {
     fn name(&self) -> &str {
-        "OpenCode"
+        OPENCODE_INSTALLER_CONFIG.name
     }
 
     fn id(&self) -> &str {
-        "opencode"
+        OPENCODE_INSTALLER_CONFIG.id
     }
 
     fn process_names(&self) -> Vec<&str> {
-        vec!["opencode"]
+        OPENCODE_INSTALLER_CONFIG.process_names.to_vec()
     }
 
     fn check_hooks(&self, params: &HookInstallerParams) -> Result<HookCheckResult, GitAiError> {
@@ -65,7 +102,7 @@ impl HookInstaller for OpenCodeInstaller {
             });
         }
 
-        // Check if plugin is up to date (compare against content with binary path substituted)
+        // Check if plugin is up to date (compare against content with all placeholders substituted)
         let current_content = fs::read_to_string(&plugin_path).unwrap_or_default();
         let expected_content = Self::generate_plugin_content(&params.binary_path);
         let is_up_to_date = current_content.trim() == expected_content.trim();
@@ -209,19 +246,21 @@ mod tests {
     }
 
     #[test]
-    fn test_opencode_plugin_content_is_valid_typescript() {
-        let content = OPENCODE_PLUGIN_CONTENT;
+    fn test_opencode_plugin_template_is_valid_typescript() {
+        let content = OPENCODE_PLUGIN_TEMPLATE;
 
         assert!(content.contains("import type { Plugin }"));
-        assert!(content.contains("@opencode-ai/plugin"));
+        // Template uses placeholder, not the literal package name
+        assert!(content.contains("__PLUGIN_PACKAGE__"));
         assert!(content.contains("export const GitAiPlugin: Plugin"));
         assert!(content.contains("\"tool.execute.before\""));
         assert!(content.contains("\"tool.execute.after\""));
         assert!(content.contains("FILE_EDIT_TOOLS"));
         assert!(content.contains("isBashTool"));
         assert!(content.contains("apply_patch"));
-        // Template contains placeholder for binary path
+        // Template contains placeholders
         assert!(content.contains("__GIT_AI_BINARY_PATH__"));
+        assert!(content.contains("__CHECKPOINT_PRESET__"));
         assert!(content.contains("hook_event_name"));
         assert!(content.contains("session_id"));
         assert!(content.contains("PreToolUse"));
@@ -233,12 +272,16 @@ mod tests {
         let binary_path = create_test_binary_path();
         let content = OpenCodeInstaller::generate_plugin_content(&binary_path);
 
-        // Placeholder should be replaced with the actual binary path in the const
+        // All placeholders should be replaced
         assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
+        assert!(!content.contains("__CHECKPOINT_PRESET__"));
+        assert!(!content.contains("__PLUGIN_PACKAGE__"));
         assert!(content.contains(r#"const GIT_AI_BIN = "/usr/local/bin/git-ai""#));
         // Commands reference the const which now holds the absolute path
         assert!(content.contains("${GIT_AI_BIN} --version"));
         assert!(content.contains("${GIT_AI_BIN} checkpoint opencode"));
+        // Package should be substituted
+        assert!(content.contains("@opencode-ai/plugin"));
     }
 
     #[test]
