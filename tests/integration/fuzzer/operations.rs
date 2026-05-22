@@ -3203,6 +3203,354 @@ pub fn execute_alternating_amend_storm(
     operation_log.push("alternating-amend-storm: done".to_string());
 }
 
+/// Rename chain: rename a file through multiple names (A→B→C→D) with edits
+/// between each rename. Tests that git's rename detection and authorship
+/// tracking survive sequential renames.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_rename_chain(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let chain_len = rng.random_range(2..=4);
+    operation_log.push(format!("rename-chain: {} renames", chain_len));
+
+    for i in 0..chain_len {
+        // Edit between renames
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: if file_state.lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                EditStrategy::random_non_destructive(rng)
+            },
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("rename-chain: pre-rename {}", i))
+            .unwrap();
+
+        // Rename
+        let new_name = format!(
+            "renamed_{}_{}.txt",
+            registry.next_index(),
+            rng.random_range(0..1000u32)
+        );
+        repo.git(&["mv", &file_state.filename, &new_name]).unwrap();
+        file_state.filename = new_name;
+        repo.commit(&format!("rename-chain: rename {}", i)).unwrap();
+    }
+
+    operation_log.push(format!("rename-chain: final name={}", file_state.filename));
+}
+
+/// Fixup-style squash: make N commits, then soft reset and recommit (simulating
+/// git rebase --autosquash with fixup commits). Each commit has different
+/// attribution that should be preserved in the final squashed commit.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_fixup_squash(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let fixup_count = rng.random_range(2..=5);
+    operation_log.push(format!("fixup-squash: {} fixups", fixup_count));
+
+    let base_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Main commit
+    let main_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &main_params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("fixup-squash: main commit").unwrap();
+
+    // Fixup commits (small additions)
+    for i in 0..fixup_count {
+        let attr = if i % 2 == 0 {
+            Attribution::KnownHuman
+        } else {
+            Attribution::Ai
+        };
+        let params = EditParams {
+            attribution: attr,
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(2)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("fixup! fixup-squash: fixup {}", i))
+            .unwrap();
+    }
+
+    // Squash all into one (simulate rebase --autosquash)
+    repo.git(&["reset", "--soft", &base_sha]).unwrap();
+    repo.commit("fixup-squash: squashed result").unwrap();
+
+    operation_log.push("fixup-squash: done".to_string());
+}
+
+/// Empty tree commit then rebuild: delete ALL tracked files, commit the empty
+/// tree, then recreate the file from scratch. Tests that authorship starts
+/// fresh after a complete wipe.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_empty_tree_rebuild(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("empty-tree-rebuild: starting".to_string());
+
+    // Delete the main file
+    let path = repo.path().join(&file_state.filename);
+    if path.exists() {
+        std::fs::remove_file(&path).unwrap();
+    }
+    repo.git(&["add", "-A"]).unwrap();
+    let status = repo.git(&["status", "--porcelain"]).unwrap();
+    if !status.trim().is_empty() {
+        repo.commit("empty-tree-rebuild: deleted file").unwrap();
+    }
+
+    // Recreate with new content
+    file_state.lines.clear();
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("empty-tree-rebuild: recreated").unwrap();
+
+    operation_log.push("empty-tree-rebuild: done".to_string());
+}
+
+/// Git revert: commit something, then revert it, then add new content.
+/// Tests that reverted authorship doesn't linger and new attributions are clean.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_revert_then_redo(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("revert-then-redo: starting".to_string());
+
+    // Make a commit we'll revert
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("revert-then-redo: to be reverted").unwrap();
+
+    let sha_to_revert = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Revert it
+    let revert_result = repo.git(&["revert", "--no-edit", &sha_to_revert]);
+    if revert_result.is_err() {
+        // Conflict during revert - abort
+        repo.git(&["revert", "--abort"]).ok();
+        operation_log.push("revert-then-redo: revert conflict, aborted".to_string());
+        return;
+    }
+
+    // Re-read state from disk (revert undid our changes)
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    // Make new edits with different attribution
+    let redo_params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &redo_params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    let status = repo.git(&["status", "--porcelain"]).unwrap();
+    if !status.trim().is_empty() {
+        repo.commit("revert-then-redo: new content after revert")
+            .unwrap();
+    }
+
+    operation_log.push("revert-then-redo: done".to_string());
+}
+
+/// Multiple files with selective staging: edit 3+ files but only commit some,
+/// leaving others dirty, then commit the rest in a second commit.
+/// Tests working log integrity when files are split across commits.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_selective_multi_file_commit(
+    repo: &TestRepo,
+    file_states: &mut [&mut FileState],
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let file_count = file_states.len();
+    operation_log.push(format!("selective-multi-file: {} files", file_count));
+
+    // Edit all files
+    for fs in file_states.iter_mut() {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: if fs.lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                EditStrategy::random_non_destructive(rng)
+            },
+            line_count: gen_line_count(rng, max_lines.min(4)),
+        };
+        execute_edit_and_checkpoint(repo, fs, registry, &params, rng, operation_log);
+    }
+
+    // Stage only first half
+    let first_half = file_count / 2;
+    for fs in file_states[..first_half.max(1)].iter() {
+        repo.git(&["add", &fs.filename]).unwrap();
+    }
+    repo.commit("selective-multi-file: first batch").unwrap();
+
+    // Commit the rest
+    repo.git(&["add", "-A"]).unwrap();
+    let status = repo.git(&["status", "--porcelain"]).unwrap();
+    if !status.trim().is_empty() {
+        repo.commit("selective-multi-file: second batch").unwrap();
+    }
+
+    operation_log.push("selective-multi-file: done".to_string());
+}
+
+/// Amend with file deletion: commit file, then amend the commit to also delete
+/// another file. Tests that amend with mixed add/delete doesn't corrupt attribution.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_amend_with_deletion(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("amend-with-deletion: starting".to_string());
+
+    // Create a temporary file
+    let temp_name = format!("temp_delete_{}.txt", registry.next_index());
+    let temp_path = repo.path().join(&temp_name);
+    let mut temp_state = FileState::new(&temp_name);
+    let temp_params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        &mut temp_state,
+        registry,
+        &temp_params,
+        rng,
+        operation_log,
+    );
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("amend-with-deletion: setup temp file").unwrap();
+
+    // Make edits to main file and commit
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("amend-with-deletion: main edit").unwrap();
+
+    // Now delete the temp file and amend
+    std::fs::remove_file(&temp_path).ok();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&[
+        "commit",
+        "--amend",
+        "-m",
+        "amend-with-deletion: amended with file delete",
+    ])
+    .unwrap();
+
+    operation_log.push("amend-with-deletion: done".to_string());
+}
+
+/// Rapid commit-reset-commit cycle on same content: commit, soft reset,
+/// re-commit, soft reset, re-commit. The same content gets committed
+/// multiple times. Tests that working log handling is idempotent.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_recommit_loop(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let loop_count = rng.random_range(3..=6);
+    operation_log.push(format!("recommit-loop: {} iterations", loop_count));
+
+    // Make edits
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("recommit-loop: initial").unwrap();
+
+    // Repeatedly soft-reset and recommit
+    for i in 0..loop_count {
+        repo.git(&["reset", "--soft", "HEAD~1"]).unwrap();
+        repo.commit(&format!("recommit-loop: iteration {}", i))
+            .unwrap();
+    }
+
+    operation_log.push("recommit-loop: done".to_string());
+}
+
 /// Reconstruct the char-per-line model from actual file content on disk.
 pub fn reconstruct_lines_from_content(content: &str) -> Vec<char> {
     content

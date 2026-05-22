@@ -91,6 +91,13 @@ pub enum CombinedOp {
     PartialAmendFlip,
     DiscardThenReedit,
     CreateDeleteBatch,
+    RenameChain,
+    FixupSquash,
+    EmptyTreeRebuild,
+    RevertThenRedo,
+    AmendWithDeletion,
+    RecommitLoop,
+    SelectiveMultiFile,
 }
 
 impl EditStrategy {
@@ -212,13 +219,20 @@ pub fn gen_stress_op(rng: &mut impl Rng) -> StressOp {
 
 /// Generate a random combined operation.
 pub fn gen_combined_op(rng: &mut impl Rng) -> CombinedOp {
-    match rng.random_range(0..7u32) {
+    match rng.random_range(0..14u32) {
         0 => CombinedOp::CherryPickConflict,
         1 => CombinedOp::RapidBranchMerge,
         2 => CombinedOp::RebaseCherryPickCombo,
         3 => CombinedOp::ResetEditRecommit,
         4 => CombinedOp::PartialAmendFlip,
         5 => CombinedOp::DiscardThenReedit,
-        _ => CombinedOp::CreateDeleteBatch,
+        6 => CombinedOp::CreateDeleteBatch,
+        7 => CombinedOp::RenameChain,
+        8 => CombinedOp::FixupSquash,
+        9 => CombinedOp::EmptyTreeRebuild,
+        10 => CombinedOp::RevertThenRedo,
+        11 => CombinedOp::AmendWithDeletion,
+        12 => CombinedOp::RecommitLoop,
+        _ => CombinedOp::SelectiveMultiFile,
     }
 }
