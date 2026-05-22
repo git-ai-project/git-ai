@@ -579,7 +579,17 @@ fn fill_buckets(
     granularity: BucketGranularity,
 ) -> Vec<BucketStats> {
     let now = Local::now();
-    let since_dt = ts_to_local(since_ts);
+    if since_ts == 0 && data_map.is_empty() {
+        return Vec::new();
+    }
+    let since_date = if since_ts == 0 {
+        let earliest_order = data_map.keys().copied().min();
+        earliest_order
+            .and_then(|order| bucket_start_date(order, granularity))
+            .unwrap_or_else(|| now.date_naive())
+    } else {
+        ts_to_local(since_ts).date_naive()
+    };
 
     let make = |label: String, accum: BucketAccum| BucketStats {
         label,
@@ -593,7 +603,7 @@ fn fill_buckets(
     let mut result = Vec::new();
     match granularity {
         BucketGranularity::Daily => {
-            let mut day = since_dt.date_naive();
+            let mut day = since_date;
             let today = now.date_naive();
             while day <= today {
                 let order = day.num_days_from_ce() as i64;
@@ -603,9 +613,8 @@ fn fill_buckets(
             }
         }
         BucketGranularity::Weekly => {
-            let weekday = since_dt.weekday().num_days_from_monday() as i64;
-            let mut monday: NaiveDate =
-                since_dt.date_naive() - chrono::Duration::days(weekday);
+            let weekday = since_date.weekday().num_days_from_monday() as i64;
+            let mut monday: NaiveDate = since_date - chrono::Duration::days(weekday);
             let today = now.date_naive();
             while monday <= today {
                 let order = monday.num_days_from_ce() as i64;
@@ -618,8 +627,8 @@ fn fill_buckets(
             }
         }
         BucketGranularity::Monthly => {
-            let mut year = since_dt.year();
-            let mut month = since_dt.month();
+            let mut year = since_date.year();
+            let mut month = since_date.month();
             let now_year = now.year();
             let now_month = now.month();
             loop {
@@ -640,6 +649,19 @@ fn fill_buckets(
     }
 
     result
+}
+
+fn bucket_start_date(order: i64, granularity: BucketGranularity) -> Option<NaiveDate> {
+    match granularity {
+        BucketGranularity::Daily | BucketGranularity::Weekly => {
+            NaiveDate::from_num_days_from_ce_opt(order.try_into().ok()?)
+        }
+        BucketGranularity::Monthly => {
+            let year = order.div_euclid(12);
+            let month0 = order.rem_euclid(12);
+            NaiveDate::from_ymd_opt(year.try_into().ok()?, (month0 + 1).try_into().ok()?, 1)
+        }
+    }
 }
 
 /// Per-bucket accumulator for the activity-over-time chart.
