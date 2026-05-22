@@ -149,6 +149,36 @@ fn print_terminal(stats: &LocalActivityStats) {
         format_num(stats.checkpoints.human_lines_added)
     );
 
+    // --- Tokens section ---
+    let t = &stats.tokens;
+    if t.input + t.output + t.cache_read + t.cache_creation > 0 {
+        println!();
+        println!("  {BOLD}Tokens{RESET} {GRAY}(estimated cost){RESET}");
+        println!("    Input             {:>12}", format_num_u64(t.input));
+        println!("    Output            {:>12}", format_num_u64(t.output));
+        println!("    Cache read        {:>12}", format_num_u64(t.cache_read));
+        println!("    Cache write       {:>12}", format_num_u64(t.cache_creation));
+        if t.estimated_cost_usd > 0.0 {
+            println!(
+                "    {BOLD}Est. cost{RESET}         {:>12}",
+                format!("~${:.2}", t.estimated_cost_usd)
+            );
+        }
+        for m in &t.by_model {
+            let cost = m
+                .estimated_cost_usd
+                .map(|c| format!("  ~${:.2}", c))
+                .unwrap_or_default();
+            let total = m.input + m.output + m.cache_read + m.cache_creation;
+            println!(
+                "    {GRAY}{}: {} tokens{}{RESET}",
+                m.model,
+                format_num_u64(total),
+                cost,
+            );
+        }
+    }
+
     // --- Activity over time ---
     if !stats.buckets.is_empty() {
         println!();
@@ -240,6 +270,10 @@ fn bar(pct: u32, width: u32) -> String {
 }
 
 fn format_num(n: u32) -> String {
+    format_num_u64(n as u64)
+}
+
+fn format_num_u64(n: u64) -> String {
     let s = n.to_string();
     let mut result = String::new();
     for (i, c) in s.chars().rev().enumerate() {
