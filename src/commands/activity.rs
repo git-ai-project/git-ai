@@ -1,7 +1,9 @@
 //! `git-ai activity` — local statistics from persisted metric events.
 
+use crate::commands::activity_tui;
 use crate::metrics::local_stats::{BucketGranularity, LocalActivityStats, compute_activity};
 use std::collections::HashSet;
+use std::io::IsTerminal;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn handle_activity(args: &[String]) {
@@ -29,15 +31,43 @@ pub fn handle_activity(args: &[String]) {
         i += 1;
     }
 
-    let (since_ts, period_label, granularity) = match period.as_str() {
-        "1d" => (days_ago(1), "last 1 day".to_string(), BucketGranularity::Daily),
-        "3d" => (days_ago(3), "last 3 days".to_string(), BucketGranularity::Daily),
-        "7d" => (days_ago(7), "last 7 days".to_string(), BucketGranularity::Daily),
-        "30d" => (days_ago(30), "last 30 days".to_string(), BucketGranularity::Weekly),
-        "60d" => (days_ago(60), "last 60 days".to_string(), BucketGranularity::Weekly),
-        "all" => (0u32, "all time".to_string(), BucketGranularity::Monthly),
+    let (since_ts, period_label, granularity, tui_period_idx) = match period.as_str() {
+        "1d" => (
+            days_ago(1),
+            "last 1 day".to_string(),
+            BucketGranularity::Daily,
+            0usize,
+        ),
+        "3d" => (
+            days_ago(3),
+            "last 3 days".to_string(),
+            BucketGranularity::Daily,
+            1,
+        ),
+        "7d" => (
+            days_ago(7),
+            "last 7 days".to_string(),
+            BucketGranularity::Daily,
+            2,
+        ),
+        "30d" => (
+            days_ago(30),
+            "last 30 days".to_string(),
+            BucketGranularity::Weekly,
+            3,
+        ),
+        "60d" => (
+            days_ago(60),
+            "last 60 days".to_string(),
+            BucketGranularity::Weekly,
+            3,
+        ),
+        "all" => (0u32, "all time".to_string(), BucketGranularity::Monthly, 4),
         other => {
-            eprintln!("Unknown period '{}'. Use 1d, 3d, 7d, 30d, 60d, or all.", other);
+            eprintln!(
+                "Unknown period '{}'. Use 1d, 3d, 7d, 30d, 60d, or all.",
+                other
+            );
             std::process::exit(1);
         }
     };
@@ -57,6 +87,11 @@ pub fn handle_activity(args: &[String]) {
                 eprintln!("error serializing JSON: {}", e);
                 std::process::exit(1);
             }
+        }
+    } else if std::io::stdout().is_terminal() {
+        if let Err(e) = activity_tui::run_tui(stats, tui_period_idx) {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
         }
     } else {
         print_terminal(&stats);
@@ -113,8 +148,7 @@ fn print_terminal(stats: &LocalActivityStats) {
     println!();
     println!("  {BOLD}AI{RESET}");
     let yield_total = stats.sessions.yield_stats.shipped + stats.sessions.yield_stats.abandoned;
-    if yield_total > 0 {
-        let shipped_pct = stats.sessions.yield_stats.shipped * 100 / yield_total;
+    if let Some(shipped_pct) = (stats.sessions.yield_stats.shipped * 100).checked_div(yield_total) {
         println!(
             "    Sessions          {:>6}  {GRAY}({} shipped · {} abandoned · {}% yield){RESET}",
             format_num(stats.sessions.total),
@@ -163,7 +197,12 @@ fn print_terminal(stats: &LocalActivityStats) {
         } else {
             String::new()
         };
-        println!("    {GRAY}{}: {}{RESET}{}", tool, format_num(*count), accept_str);
+        println!(
+            "    {GRAY}{}: {}{RESET}{}",
+            tool,
+            format_num(*count),
+            accept_str
+        );
     }
 
     // --- Human section ---
@@ -186,7 +225,10 @@ fn print_terminal(stats: &LocalActivityStats) {
         println!("    Input             {:>12}", format_num_u64(t.input));
         println!("    Output            {:>12}", format_num_u64(t.output));
         println!("    Cache read        {:>12}", format_num_u64(t.cache_read));
-        println!("    Cache write       {:>12}", format_num_u64(t.cache_creation));
+        println!(
+            "    Cache write       {:>12}",
+            format_num_u64(t.cache_creation)
+        );
         if t.estimated_cost_usd > 0.0 {
             println!(
                 "    {BOLD}Est. cost{RESET}         {:>12}",
@@ -233,11 +275,21 @@ fn print_terminal(stats: &LocalActivityStats) {
     if !stats.buckets.is_empty() {
         println!();
         println!("  {BOLD}Activity over time{RESET}");
-        let max_ai = stats.buckets.iter().map(|b| b.ai_lines).max().unwrap_or(1).max(1);
+        let max_ai = stats
+            .buckets
+            .iter()
+            .map(|b| b.ai_lines)
+            .max()
+            .unwrap_or(1)
+            .max(1);
         for bucket in &stats.buckets {
             let filled = (bucket.ai_lines * BAR_WIDTH / max_ai).min(BAR_WIDTH);
             let empty = BAR_WIDTH - filled;
-            let bar_str = format!("{}{}", "█".repeat(filled as usize), "░".repeat(empty as usize));
+            let bar_str = format!(
+                "{}{}",
+                "█".repeat(filled as usize),
+                "░".repeat(empty as usize)
+            );
             if bucket.ai_lines > 0 {
                 // Coverage for this bucket: attributed / total diff additions.
                 let coverage = (bucket.attributed_lines * 100)

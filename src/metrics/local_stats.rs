@@ -238,9 +238,7 @@ pub fn compute_activity(
                 aggregate_session(&event, &mut session_ids, &mut session_tool_counts);
 
                 // Track last-seen timestamp per session for yield classification.
-                if let Some(sid) =
-                    sparse_get_string(&event.attrs, attr_pos::SESSION_ID).flatten()
-                {
+                if let Some(sid) = sparse_get_string(&event.attrs, attr_pos::SESSION_ID).flatten() {
                     let entry = session_last_ts.entry(sid).or_insert(0);
                     *entry = (*entry).max(record.ts);
                 }
@@ -268,11 +266,11 @@ pub fn compute_activity(
     commit_timestamps.sort_unstable();
     let mut yield_shipped = 0u32;
     let mut yield_abandoned = 0u32;
-    for (_sid, last_ts) in &session_last_ts {
+    for last_ts in session_last_ts.values() {
         let window_end = last_ts.saturating_add(YIELD_WINDOW_SECS);
         // Find the first commit at or after this session's last event.
         let pos = commit_timestamps.partition_point(|&t| t < *last_ts);
-        if commit_timestamps.get(pos).map_or(false, |&t| t <= window_end) {
+        if commit_timestamps.get(pos).is_some_and(|&t| t <= window_end) {
             yield_shipped += 1;
         } else {
             yield_abandoned += 1;
@@ -285,7 +283,11 @@ pub fn compute_activity(
         .filter_map(|(tool, &committed)| {
             let checkpoint = *checkpoint_ai_by_tool.get(tool)?;
             let pct = (committed * 100).checked_div(checkpoint)?;
-            if pct <= 100 { Some((tool.clone(), pct)) } else { None }
+            if pct <= 100 {
+                Some((tool.clone(), pct))
+            } else {
+                None
+            }
         })
         .collect();
     acceptance_by_tool.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -330,7 +332,10 @@ pub fn compute_activity(
         sessions: SessionSummary {
             total: session_ids.len() as u32,
             by_tool: session_by_tool,
-            yield_stats: YieldStats { shipped: yield_shipped, abandoned: yield_abandoned },
+            yield_stats: YieldStats {
+                shipped: yield_shipped,
+                abandoned: yield_abandoned,
+            },
         },
         tokens,
         buckets: filled,
@@ -379,15 +384,35 @@ struct ModelPricing {
 fn pricing_for(model: &str) -> Option<ModelPricing> {
     let m = model.to_lowercase();
     if m.contains("opus") {
-        Some(ModelPricing { input: 15.0, output: 75.0, cache_write: 18.75, cache_read: 1.5 })
+        Some(ModelPricing {
+            input: 15.0,
+            output: 75.0,
+            cache_write: 18.75,
+            cache_read: 1.5,
+        })
     } else if m.contains("sonnet") {
-        Some(ModelPricing { input: 3.0, output: 15.0, cache_write: 3.75, cache_read: 0.3 })
+        Some(ModelPricing {
+            input: 3.0,
+            output: 15.0,
+            cache_write: 3.75,
+            cache_read: 0.3,
+        })
     } else if m.contains("haiku") {
-        Some(ModelPricing { input: 0.8, output: 4.0, cache_write: 1.0, cache_read: 0.08 })
+        Some(ModelPricing {
+            input: 0.8,
+            output: 4.0,
+            cache_write: 1.0,
+            cache_read: 0.08,
+        })
     } else if m.contains("gpt") {
         // OpenAI GPT-5 family estimate; cache_write unused (codex reports no
         // cache-creation tokens).
-        Some(ModelPricing { input: 1.25, output: 10.0, cache_write: 1.25, cache_read: 0.125 })
+        Some(ModelPricing {
+            input: 1.25,
+            output: 10.0,
+            cache_write: 1.25,
+            cache_read: 0.125,
+        })
     } else {
         None
     }
@@ -490,10 +515,8 @@ fn build_token_summary(
     }
 
     // Compute WoW spend from the two half-slices.
-    let this_week_cost =
-        cost_for_message_slice(this_week_msgs.into_iter().chain(this_week_codex));
-    let last_week_cost =
-        cost_for_message_slice(last_week_msgs.into_iter().chain(last_week_codex));
+    let this_week_cost = cost_for_message_slice(this_week_msgs.into_iter().chain(this_week_codex));
+    let last_week_cost = cost_for_message_slice(last_week_msgs.into_iter().chain(last_week_codex));
 
     let wow_spend = if wow_eligible && (this_week_cost > 0.0 || last_week_cost > 0.0) {
         let (change_pct, new_this_week) = if last_week_cost > 0.0 {
@@ -739,9 +762,13 @@ fn aggregate_committed(
     for (i, pair) in pairs.iter().enumerate().skip(1) {
         let ai_for_tool = ai_vecs.get(i).copied().unwrap_or(0);
         if ai_for_tool > 0 {
-            *commit_tool_counts.entry(format_tool_model(pair)).or_insert(0) += ai_for_tool;
+            *commit_tool_counts
+                .entry(format_tool_model(pair))
+                .or_insert(0) += ai_for_tool;
             let plain_tool = pair.split_once("::").map(|(t, _)| t).unwrap_or(pair);
-            *committed_ai_by_plain_tool.entry(plain_tool.to_string()).or_insert(0) += ai_for_tool;
+            *committed_ai_by_plain_tool
+                .entry(plain_tool.to_string())
+                .or_insert(0) += ai_for_tool;
         }
     }
 
