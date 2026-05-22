@@ -5,21 +5,26 @@ use rand::rngs::SmallRng;
 use crate::repos::test_repo::TestRepo;
 
 use super::generators::{
-    self, DestructiveOp, EditStrategy, FileOp, PartialStageOp, RewriteOp, StressOp,
+    self, CombinedOp, DestructiveOp, EditStrategy, FileOp, PartialStageOp, RewriteOp, StressOp,
 };
 use super::operations::{
-    EditParams, FileState, execute_alternating_amend, execute_amend_attribution_flip,
-    execute_amend_chain, execute_branch_switch_dirty, execute_checkout_discard,
-    execute_checkpoint_nonexistent, execute_checkpoint_then_overwrite, execute_commit,
-    execute_concurrent_file_creation, execute_delete_and_recreate, execute_double_commit_rapid,
-    execute_edit_and_checkpoint, execute_empty_commit_interleave, execute_exponential_amend,
-    execute_ff_merge, execute_file_rename, execute_hard_reset, execute_interleaved_multi_file,
-    execute_interleaved_partial_commits, execute_mixed_reset, execute_move_to_subdir,
-    execute_multi_commit_rebase, execute_orphaned_checkpoints, execute_partial_stage_commit,
-    execute_rapid_checkpoint_burst, execute_rebase_same_file, execute_rebase_then_amend,
-    execute_reset_and_reedit, execute_selective_file_commit, execute_session_interleave,
-    execute_soft_reset_recommit, execute_squash_partial_stage, execute_squash_same_file,
-    execute_stash_pathspec, execute_stash_pop_cycle, execute_thrash, execute_two_branch_merge,
+    EditParams, FileState, execute_alternating_amend, execute_alternating_amend_storm,
+    execute_amend_attribution_flip, execute_amend_chain, execute_amend_reset_cycle,
+    execute_branch_switch_dirty, execute_checkout_discard, execute_checkpoint_nonexistent,
+    execute_checkpoint_storm, execute_checkpoint_then_overwrite, execute_cherry_pick_conflict,
+    execute_commit, execute_concurrent_file_creation, execute_create_delete_batch,
+    execute_cross_file_checkpoint_race, execute_delete_and_recreate, execute_discard_then_reedit,
+    execute_double_commit_rapid, execute_edit_and_checkpoint, execute_empty_commit_interleave,
+    execute_exponential_amend, execute_ff_merge, execute_file_rename, execute_hard_reset,
+    execute_interleaved_multi_file, execute_interleaved_partial_commits, execute_mixed_reset,
+    execute_move_to_subdir, execute_multi_commit_rebase, execute_multi_squash,
+    execute_orphaned_checkpoints, execute_partial_amend_flip, execute_partial_stage_commit,
+    execute_partial_then_amend, execute_rapid_branch_merge, execute_rapid_checkpoint_burst,
+    execute_rebase_cherry_pick_combo, execute_rebase_same_file, execute_rebase_then_amend,
+    execute_reset_and_reedit, execute_reset_edit_recommit, execute_selective_file_commit,
+    execute_session_interleave, execute_soft_reset_recommit, execute_squash_partial_stage,
+    execute_squash_same_file, execute_stash_during_work, execute_stash_pathspec,
+    execute_stash_pop_cycle, execute_thrash, execute_two_branch_merge, execute_whitespace_noise,
     read_file_state_from_disk,
 };
 use super::oracle::CharRegistry;
@@ -32,6 +37,7 @@ pub struct FuzzerConfig {
     pub partial_stage_ratio: f64,
     pub file_op_ratio: f64,
     pub stress_ratio: f64,
+    pub combined_ratio: f64,
     pub max_edits_per_commit: usize,
     pub max_lines_per_edit: usize,
     pub multi_file_enabled: bool,
@@ -44,11 +50,12 @@ impl FuzzerConfig {
         Self {
             seed,
             ops,
-            rewrite_ratio: 0.15,
-            destructive_ratio: 0.15,
-            partial_stage_ratio: 0.15,
-            file_op_ratio: 0.1,
+            rewrite_ratio: 0.12,
+            destructive_ratio: 0.12,
+            partial_stage_ratio: 0.12,
+            file_op_ratio: 0.08,
             stress_ratio: 0.1,
+            combined_ratio: 0.12,
             max_edits_per_commit: 5,
             max_lines_per_edit: 8,
             multi_file_enabled: true,
@@ -61,11 +68,12 @@ impl FuzzerConfig {
         Self {
             seed,
             ops,
-            rewrite_ratio: 0.5,
-            destructive_ratio: 0.1,
-            partial_stage_ratio: 0.1,
-            file_op_ratio: 0.05,
-            stress_ratio: 0.1,
+            rewrite_ratio: 0.45,
+            destructive_ratio: 0.08,
+            partial_stage_ratio: 0.08,
+            file_op_ratio: 0.04,
+            stress_ratio: 0.08,
+            combined_ratio: 0.1,
             max_edits_per_commit: 4,
             max_lines_per_edit: 6,
             multi_file_enabled: true,
@@ -80,9 +88,10 @@ impl FuzzerConfig {
             ops,
             rewrite_ratio: 0.05,
             destructive_ratio: 0.05,
-            partial_stage_ratio: 0.1,
-            file_op_ratio: 0.05,
-            stress_ratio: 0.4,
+            partial_stage_ratio: 0.08,
+            file_op_ratio: 0.04,
+            stress_ratio: 0.38,
+            combined_ratio: 0.1,
             max_edits_per_commit: 8,
             max_lines_per_edit: 10,
             multi_file_enabled: true,
@@ -97,9 +106,10 @@ impl FuzzerConfig {
             ops,
             rewrite_ratio: 0.05,
             destructive_ratio: 0.05,
-            partial_stage_ratio: 0.5,
-            file_op_ratio: 0.05,
-            stress_ratio: 0.1,
+            partial_stage_ratio: 0.45,
+            file_op_ratio: 0.04,
+            stress_ratio: 0.08,
+            combined_ratio: 0.1,
             max_edits_per_commit: 4,
             max_lines_per_edit: 6,
             multi_file_enabled: true,
@@ -113,10 +123,11 @@ impl FuzzerConfig {
             seed,
             ops,
             rewrite_ratio: 0.05,
-            destructive_ratio: 0.45,
-            partial_stage_ratio: 0.1,
-            file_op_ratio: 0.1,
-            stress_ratio: 0.1,
+            destructive_ratio: 0.4,
+            partial_stage_ratio: 0.08,
+            file_op_ratio: 0.08,
+            stress_ratio: 0.08,
+            combined_ratio: 0.1,
             max_edits_per_commit: 4,
             max_lines_per_edit: 6,
             multi_file_enabled: true,
@@ -130,10 +141,11 @@ impl FuzzerConfig {
             seed,
             ops,
             rewrite_ratio: 0.05,
-            destructive_ratio: 0.1,
-            partial_stage_ratio: 0.1,
-            file_op_ratio: 0.45,
-            stress_ratio: 0.1,
+            destructive_ratio: 0.08,
+            partial_stage_ratio: 0.08,
+            file_op_ratio: 0.4,
+            stress_ratio: 0.08,
+            combined_ratio: 0.1,
             max_edits_per_commit: 4,
             max_lines_per_edit: 6,
             multi_file_enabled: true,
@@ -150,9 +162,28 @@ impl FuzzerConfig {
             destructive_ratio: 0.05,
             partial_stage_ratio: 0.05,
             file_op_ratio: 0.05,
-            stress_ratio: 0.55,
+            stress_ratio: 0.48,
+            combined_ratio: 0.1,
             max_edits_per_commit: 6,
             max_lines_per_edit: 8,
+            multi_file_enabled: true,
+            allow_destructive: true,
+            verify_sessions: true,
+        }
+    }
+
+    pub fn combined_heavy(seed: u64, ops: usize) -> Self {
+        Self {
+            seed,
+            ops,
+            rewrite_ratio: 0.08,
+            destructive_ratio: 0.08,
+            partial_stage_ratio: 0.08,
+            file_op_ratio: 0.05,
+            stress_ratio: 0.08,
+            combined_ratio: 0.45,
+            max_edits_per_commit: 5,
+            max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
             verify_sessions: true,
@@ -163,11 +194,12 @@ impl FuzzerConfig {
         Self {
             seed,
             ops,
-            rewrite_ratio: 0.2,
-            destructive_ratio: 0.2,
-            partial_stage_ratio: 0.2,
-            file_op_ratio: 0.15,
-            stress_ratio: 0.15,
+            rewrite_ratio: 0.15,
+            destructive_ratio: 0.15,
+            partial_stage_ratio: 0.15,
+            file_op_ratio: 0.12,
+            stress_ratio: 0.12,
+            combined_ratio: 0.15,
             max_edits_per_commit: 6,
             max_lines_per_edit: 8,
             multi_file_enabled: true,
@@ -195,7 +227,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
     let mut extra_files: Vec<FileState> = Vec::new();
 
     operation_log.push(format!(
-        "=== Fuzzer seed={} ops={} rewrite={:.0}% destructive={:.0}% partial={:.0}% file={:.0}% stress={:.0}% ===",
+        "=== Fuzzer seed={} ops={} rewrite={:.0}% destructive={:.0}% partial={:.0}% file={:.0}% stress={:.0}% combined={:.0}% ===",
         config.seed,
         config.ops,
         config.rewrite_ratio * 100.0,
@@ -203,6 +235,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
         config.partial_stage_ratio * 100.0,
         config.file_op_ratio * 100.0,
         config.stress_ratio * 100.0,
+        config.combined_ratio * 100.0,
     ));
 
     // Phase 1: Bootstrap
@@ -237,6 +270,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
         let cumulative_partial = cumulative_destructive + config.partial_stage_ratio;
         let cumulative_file_op = cumulative_partial + config.file_op_ratio;
         let cumulative_stress = cumulative_file_op + config.stress_ratio;
+        let cumulative_combined = cumulative_stress + config.combined_ratio;
 
         if file_state.lines.len() > 3 && roll < cumulative_rewrite {
             // === REWRITE OPERATIONS ===
@@ -476,6 +510,16 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 }
                 DestructiveOp::EmptyCommitInterleave => {
                     execute_empty_commit_interleave(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                }
+                DestructiveOp::StashDuringWork => {
+                    execute_stash_during_work(
                         &repo,
                         &mut file_state,
                         &mut registry,
@@ -771,6 +815,188 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut operation_log,
                     );
                     verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                StressOp::CrossFileCheckpointRace => {
+                    let sec_idx = rng.random_range(0..secondary_files.len());
+                    let mut main_ref = &mut file_state;
+                    let mut sec_ref = &mut secondary_files[sec_idx];
+                    execute_cross_file_checkpoint_race(
+                        &repo,
+                        &mut [&mut main_ref, &mut sec_ref],
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    if !secondary_files[sec_idx].lines.is_empty() {
+                        registry.verify_blame(
+                            &repo,
+                            &secondary_files[sec_idx].filename,
+                            &secondary_files[sec_idx].lines,
+                            &operation_log,
+                            config.seed,
+                        );
+                    }
+                }
+                StressOp::WhitespaceNoise => {
+                    execute_whitespace_noise(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                StressOp::AmendResetCycle => {
+                    execute_amend_reset_cycle(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                StressOp::PartialThenAmend => {
+                    execute_partial_then_amend(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                StressOp::CheckpointStorm => {
+                    execute_checkpoint_storm(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                StressOp::AlternatingAmendStorm => {
+                    execute_alternating_amend_storm(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                StressOp::MultiSquash => {
+                    execute_multi_squash(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+            }
+        } else if file_state.lines.len() > 2 && roll < cumulative_combined {
+            // === COMBINED OPERATIONS ===
+            let op = generators::gen_combined_op(&mut rng);
+            match op {
+                CombinedOp::CherryPickConflict => {
+                    execute_cherry_pick_conflict(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::RapidBranchMerge => {
+                    execute_rapid_branch_merge(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::RebaseCherryPickCombo => {
+                    execute_rebase_cherry_pick_combo(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::ResetEditRecommit => {
+                    execute_reset_edit_recommit(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::PartialAmendFlip => {
+                    execute_partial_amend_flip(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::DiscardThenReedit => {
+                    execute_discard_then_reedit(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    let status = repo.git(&["status", "--porcelain"]).unwrap();
+                    if status.trim().is_empty() && !file_state.lines.is_empty() {
+                        verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    }
+                }
+                CombinedOp::CreateDeleteBatch => {
+                    let kept = execute_create_delete_batch(
+                        &repo,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    for f in &kept {
+                        registry.verify_blame(
+                            &repo,
+                            &f.filename,
+                            &f.lines,
+                            &operation_log,
+                            config.seed,
+                        );
+                    }
+                    extra_files.extend(kept);
                 }
             }
         } else {
