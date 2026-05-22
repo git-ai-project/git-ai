@@ -823,6 +823,14 @@ fn tracked_working_log_files(
     Ok(files)
 }
 
+fn stash_sha_from_ref_changes(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<&str> {
+    cmd.ref_changes
+        .iter()
+        .find(|rc| rc.reference == "refs/stash")
+        .map(|rc| rc.old.as_str())
+        .filter(|s| !s.is_empty() && *s != "0000000000000000000000000000000000000000")
+}
+
 /// After a rebase completes, check if any newly-rebased commits were created
 /// from conflict resolution with AI checkpoints. If so, run post_commit on
 /// those commits to incorporate the AI attribution from the working log.
@@ -5437,7 +5445,8 @@ impl ActorDaemonCoordinator {
                             }
                             crate::daemon::domain::StashOpKind::Pop => {
                                 let resolved =
-                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref());
+                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref())
+                                        .or_else(|| stash_sha_from_ref_changes(cmd));
                                 if let Some(stash_sha) = resolved {
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
@@ -5448,7 +5457,8 @@ impl ActorDaemonCoordinator {
                             crate::daemon::domain::StashOpKind::Apply
                             | crate::daemon::domain::StashOpKind::Branch => {
                                 let resolved =
-                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref());
+                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref())
+                                        .or_else(|| stash_sha_from_ref_changes(cmd));
                                 if let Some(stash_sha) = resolved {
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
@@ -5458,7 +5468,8 @@ impl ActorDaemonCoordinator {
                             }
                             crate::daemon::domain::StashOpKind::Drop => {
                                 let resolved =
-                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref());
+                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref())
+                                        .or_else(|| stash_sha_from_ref_changes(cmd));
                                 if let Some(stash_sha) = resolved {
                                     let _ = crate::authorship::rewrite_stash::handle_stash_drop(
                                         &repo, stash_sha,
