@@ -3,7 +3,7 @@
 use crate::error::GitAiError;
 use crate::metrics::attrs::attr_pos;
 use crate::metrics::db::MetricsDatabase;
-use crate::metrics::events::{checkpoint_pos, committed_pos};
+use crate::metrics::events::{checkpoint_pos, committed_pos, session_event_pos};
 use crate::metrics::pos_encoded::{
     sparse_get_string, sparse_get_u32, sparse_get_vec_string, sparse_get_vec_u32,
 };
@@ -19,10 +19,34 @@ pub struct LocalActivityStats {
     pub commits: CommitSummary,
     pub checkpoints: CheckpointSummary,
     pub sessions: SessionSummary,
+    pub tokens: TokenSummary,
     /// Activity bucketed by day/week/month depending on period.
     pub buckets: Vec<BucketStats>,
     /// AI lines committed per hour of day (local time), 24 elements.
     pub hourly: Vec<u32>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct TokenSummary {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+    /// Estimated cost in USD, summed across models with known pricing.
+    pub estimated_cost_usd: f64,
+    /// Per-model breakdown, sorted by total tokens descending.
+    pub by_model: Vec<TokenModelStat>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct TokenModelStat {
+    pub model: String,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+    /// Estimated cost in USD; None if the model has no pricing entry.
+    pub estimated_cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -98,6 +122,12 @@ pub fn compute_activity(
     let mut session_ids: HashSet<String> = HashSet::new();
     let mut session_tool_counts: HashMap<String, u32> = HashMap::new();
 
+    // Token usage keyed by assistant message id. The incremental transcript
+    // reader re-emits the same message multiple times, and streaming partials
+    // carry lower token counts than the final message — so we keep the
+    // field-wise max per message id, then fold into per-model totals.
+    let mut message_usage: HashMap<String, (String, TokenAccum)> = HashMap::new();
+
     // bucket_key -> accumulated stats
     let mut bucket_map: HashMap<String, BucketAccum> = HashMap::new();
     // bucket_key -> sort key (for ordering)
@@ -149,7 +179,10 @@ pub fn compute_activity(
                 &mut human_lines_added,
                 &mut files_edited,
             ),
-            5 => aggregate_session(&event, &mut session_ids, &mut session_tool_counts),
+            5 => {
+                aggregate_session(&event, &mut session_ids, &mut session_tool_counts);
+                aggregate_session_tokens(&event, &mut message_usage);
+            }
             _ => {}
         }
     }
@@ -159,6 +192,8 @@ pub fn compute_activity(
 
     let mut session_by_tool: Vec<(String, u32)> = session_tool_counts.into_iter().collect();
     session_by_tool.sort_by_key(|&(_, count)| Reverse(count));
+
+    let tokens = build_token_summary(message_usage);
 
     // Map by order key for fill_buckets to look up real data.
     let bucket_by_order: HashMap<i64, BucketAccum> = bucket_map
@@ -188,9 +223,102 @@ pub fn compute_activity(
             total: session_ids.len() as u32,
             by_tool: session_by_tool,
         },
+        tokens,
         buckets: filled,
         hourly,
     })
+}
+
+/// Per-model token accumulator.
+#[derive(Debug, Default, Clone)]
+struct TokenAccum {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_creation: u64,
+}
+
+/// Per-million-token pricing for a model (USD).
+struct ModelPricing {
+    input: f64,
+    output: f64,
+    cache_write: f64,
+    cache_read: f64,
+}
+
+/// Built-in pricing estimate, matched by substring of the model id.
+/// Rates are public Anthropic list prices (USD per million tokens) and are
+/// only an estimate — they go stale as pricing changes.
+fn pricing_for(model: &str) -> Option<ModelPricing> {
+    let m = model.to_lowercase();
+    if m.contains("opus") {
+        Some(ModelPricing { input: 15.0, output: 75.0, cache_write: 18.75, cache_read: 1.5 })
+    } else if m.contains("sonnet") {
+        Some(ModelPricing { input: 3.0, output: 15.0, cache_write: 3.75, cache_read: 0.3 })
+    } else if m.contains("haiku") {
+        Some(ModelPricing { input: 0.8, output: 4.0, cache_write: 1.0, cache_read: 0.08 })
+    } else {
+        None
+    }
+}
+
+fn estimate_cost(acc: &TokenAccum, pricing: &ModelPricing) -> f64 {
+    (acc.input as f64 * pricing.input
+        + acc.output as f64 * pricing.output
+        + acc.cache_creation as f64 * pricing.cache_write
+        + acc.cache_read as f64 * pricing.cache_read)
+        / 1_000_000.0
+}
+
+/// Shorten a model id for display: strip a trailing "-YYYYMMDD" date snapshot
+/// (e.g. "claude-haiku-4-5-20251001" -> "claude-haiku-4-5").
+fn shorten_model(model: &str) -> String {
+    match model.rsplit_once('-') {
+        Some((head, tail)) if tail.len() == 8 && tail.chars().all(|c| c.is_ascii_digit()) => {
+            head.to_string()
+        }
+        _ => model.to_string(),
+    }
+}
+
+fn build_token_summary(message_usage: HashMap<String, (String, TokenAccum)>) -> TokenSummary {
+    // Fold per-message (deduped, max) usage into per-model totals.
+    let mut model_tokens: HashMap<String, TokenAccum> = HashMap::new();
+    for (_id, (model, acc)) in message_usage {
+        let entry = model_tokens.entry(model).or_default();
+        entry.input += acc.input;
+        entry.output += acc.output;
+        entry.cache_read += acc.cache_read;
+        entry.cache_creation += acc.cache_creation;
+    }
+
+    let mut summary = TokenSummary::default();
+    let mut by_model: Vec<TokenModelStat> = Vec::new();
+
+    for (model, acc) in model_tokens {
+        summary.input += acc.input;
+        summary.output += acc.output;
+        summary.cache_read += acc.cache_read;
+        summary.cache_creation += acc.cache_creation;
+
+        let cost = pricing_for(&model).map(|p| estimate_cost(&acc, &p));
+        if let Some(c) = cost {
+            summary.estimated_cost_usd += c;
+        }
+
+        by_model.push(TokenModelStat {
+            model: shorten_model(&model),
+            input: acc.input,
+            output: acc.output,
+            cache_read: acc.cache_read,
+            cache_creation: acc.cache_creation,
+            estimated_cost_usd: cost,
+        });
+    }
+
+    by_model.sort_by_key(|m| Reverse(m.input + m.output + m.cache_read + m.cache_creation));
+    summary.by_model = by_model;
+    summary
 }
 
 fn ts_to_local(ts: u32) -> DateTime<Local> {
@@ -422,4 +550,47 @@ fn aggregate_session(
     {
         *session_tool_counts.entry(tool).or_insert(0) += 1;
     }
+}
+
+/// Extract token usage from a session event's raw transcript JSON (position 0).
+/// Only assistant messages carry usage. Keyed by message id, keeping the
+/// field-wise max across re-emitted copies (streaming partials report lower
+/// counts than the final message).
+fn aggregate_session_tokens(
+    event: &MetricEvent,
+    message_usage: &mut HashMap<String, (String, TokenAccum)>,
+) {
+    let Some(raw) = event.values.get(&session_event_pos::RAW_JSON.to_string()) else {
+        return;
+    };
+    let Some(message) = raw.get("message") else {
+        return;
+    };
+    if message.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+        return;
+    }
+    let Some(usage) = message.get("usage") else {
+        return;
+    };
+    let Some(id) = message.get("id").and_then(|i| i.as_str()) else {
+        return;
+    };
+
+    let model = message
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let get = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let (_, acc) = message_usage
+        .entry(id.to_string())
+        .or_insert_with(|| (model, TokenAccum::default()));
+    // Field-wise max: input/cache are fixed per message; output grows while
+    // streaming, so the final (largest) value is authoritative.
+    acc.input = acc.input.max(get("input_tokens"));
+    acc.output = acc.output.max(get("output_tokens"));
+    acc.cache_read = acc.cache_read.max(get("cache_read_input_tokens"));
+    acc.cache_creation = acc.cache_creation.max(get("cache_creation_input_tokens"));
 }
