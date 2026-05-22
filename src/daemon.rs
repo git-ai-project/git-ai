@@ -5503,10 +5503,19 @@ impl ActorDaemonCoordinator {
                         let repo = find_repository_in_path(&worktree)?;
                         match kind {
                             crate::daemon::domain::StashOpKind::Push => {
-                                // For push, stash_ref is usually None (no target spec).
-                                // Resolve from refs/stash after the push completes.
-                                let resolved_stash =
-                                    stash_ref.as_deref().map(String::from).or_else(|| {
+                                // For push, resolve stash SHA from ref_changes (new value)
+                                // or git rev-parse refs/stash.
+                                let resolved_stash = cmd
+                                    .ref_changes
+                                    .iter()
+                                    .find(|rc| rc.reference == "refs/stash")
+                                    .map(|rc| rc.new.as_str())
+                                    .filter(|s| {
+                                        !s.is_empty()
+                                            && *s != "0000000000000000000000000000000000000000"
+                                    })
+                                    .map(String::from)
+                                    .or_else(|| {
                                         let mut args = repo.global_args_for_exec();
                                         args.extend([
                                             "rev-parse".to_string(),
@@ -5522,8 +5531,19 @@ impl ActorDaemonCoordinator {
                                             })
                                             .filter(|s| !s.is_empty())
                                     });
+                                let resolved_head = head.clone().or_else(|| {
+                                    let mut args = repo.global_args_for_exec();
+                                    args.extend(["rev-parse".to_string(), "HEAD".to_string()]);
+                                    crate::git::repository::exec_git_allow_nonzero(&args)
+                                        .ok()
+                                        .filter(|o| o.status.success())
+                                        .map(|o| {
+                                            String::from_utf8_lossy(&o.stdout).trim().to_string()
+                                        })
+                                        .filter(|s| !s.is_empty())
+                                });
                                 if let (Some(stash_sha), Some(head_sha)) =
-                                    (resolved_stash.as_deref(), head.as_deref())
+                                    (resolved_stash.as_deref(), resolved_head.as_deref())
                                 {
                                     let pathspecs = Self::stash_pathspecs_from_command(cmd);
                                     let _ = crate::authorship::rewrite_stash::handle_stash_create(
@@ -5687,6 +5707,15 @@ impl ActorDaemonCoordinator {
                                     if is_ancestor_commit(&repo, new_head, old_head) {
                                         let _ = crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
                                             &repo, old_head, new_head,
+                                        );
+                                    } else if !is_ancestor_commit(&repo, old_head, new_head) {
+                                        let _ = crate::authorship::rewrite::handle_rewrite_event(
+                                            &repo,
+                                            crate::authorship::rewrite::RewriteEvent::NonFastForward {
+                                                old_tip: old_head.to_string(),
+                                                new_tip: new_head.to_string(),
+                                                onto: None,
+                                            },
                                         );
                                     }
                                 }
