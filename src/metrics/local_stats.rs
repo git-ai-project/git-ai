@@ -199,25 +199,8 @@ pub fn compute_activity(
                     &mut total_human_lines,
                     &mut total_diff_added,
                     &mut commit_tool_counts,
+                    &mut committed_ai_by_plain_tool,
                 );
-
-                // Track committed AI lines per plain tool for acceptance rate.
-                if c.ai_lines > 0 {
-                    let pairs = sparse_get_vec_string(&event.values, committed_pos::TOOL_MODEL_PAIRS)
-                        .flatten()
-                        .unwrap_or_default();
-                    let ai_vecs = sparse_get_vec_u32(&event.values, committed_pos::AI_ADDITIONS)
-                        .flatten()
-                        .unwrap_or_default();
-                    for (i, pair) in pairs.iter().enumerate().skip(1) {
-                        let tool = pair.split_once("::").map(|(t, _)| t).unwrap_or(pair);
-                        let ai_for_tool = ai_vecs.get(i).copied().unwrap_or(0);
-                        if ai_for_tool > 0 {
-                            *committed_ai_by_plain_tool.entry(tool.to_string()).or_insert(0) +=
-                                ai_for_tool;
-                        }
-                    }
-                }
 
                 // Bucket every commit that added lines so coverage spans all
                 // committed code, not just AI commits.
@@ -677,6 +660,7 @@ fn aggregate_committed(
     total_human_lines: &mut u32,
     total_diff_added: &mut u32,
     commit_tool_counts: &mut HashMap<String, u32>,
+    committed_ai_by_plain_tool: &mut HashMap<String, u32>,
 ) -> CommitContribution {
     let human = sparse_get_u32(&event.values, committed_pos::HUMAN_ADDITIONS)
         .flatten()
@@ -709,14 +693,17 @@ fn aggregate_committed(
     *total_ai_lines += total_ai;
 
     // Per-tool breakdown: index 0 = "all" aggregate, 1+ = per tool::model.
+    // Parse pairs once and use them for both the display label map and the
+    // plain-tool map used for acceptance rate — no second parse needed.
     let pairs = sparse_get_vec_string(&event.values, committed_pos::TOOL_MODEL_PAIRS)
         .flatten()
         .unwrap_or_default();
     for (i, pair) in pairs.iter().enumerate().skip(1) {
-        let label = format_tool_model(pair);
         let ai_for_tool = ai_vecs.get(i).copied().unwrap_or(0);
         if ai_for_tool > 0 {
-            *commit_tool_counts.entry(label).or_insert(0) += ai_for_tool;
+            *commit_tool_counts.entry(format_tool_model(pair)).or_insert(0) += ai_for_tool;
+            let plain_tool = pair.split_once("::").map(|(t, _)| t).unwrap_or(pair);
+            *committed_ai_by_plain_tool.entry(plain_tool.to_string()).or_insert(0) += ai_for_tool;
         }
     }
 
