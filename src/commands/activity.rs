@@ -1,4 +1,4 @@
-//! `git-ai activity` — local statistics from persisted metric events.
+//! `git-ai usage` — local statistics from persisted metric events.
 
 use crate::commands::activity_tui;
 use crate::metrics::local_stats::{
@@ -29,7 +29,7 @@ pub fn handle_activity(args: &[String]) {
             }
             other => {
                 eprintln!("Unknown argument: {}", other);
-                eprintln!("Run 'git-ai activity --help' for usage.");
+                eprintln!("Run 'git-ai usage --help' for usage.");
                 std::process::exit(1);
             }
         }
@@ -101,12 +101,7 @@ pub fn handle_activity(args: &[String]) {
             }
         }
     } else if tui {
-        // Pre-compute repo summaries for the global view (used when not inside a repo).
-        let repo_summaries = if current_repo.is_none() {
-            compute_repo_summaries(since_ts, granularity).unwrap_or_default()
-        } else {
-            vec![]
-        };
+        let repo_summaries = compute_repo_summaries(since_ts, granularity).unwrap_or_default();
         let session_list =
             compute_session_list(since_ts, current_repo.as_deref()).unwrap_or_default();
         if let Err(e) = activity_tui::run_tui(
@@ -133,9 +128,9 @@ fn days_ago(days: u64) -> u32 {
 }
 
 fn print_help() {
-    eprintln!("git-ai activity - Show local activity statistics");
+    eprintln!("git-ai usage - Show local activity statistics");
     eprintln!();
-    eprintln!("Usage: git-ai activity [options]");
+    eprintln!("Usage: git-ai usage [options]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --period <1d|3d|7d|30d|60d|all>   Time window (default: 30d)");
@@ -154,7 +149,7 @@ fn print_terminal(stats: &LocalActivityStats) {
     const BAR_WIDTH: u32 = 20;
 
     println!(
-        "{BOLD}git-ai activity{RESET} {GRAY}— {}{RESET}",
+        "{BOLD}git-ai usage{RESET} {GRAY}— {}{RESET}",
         stats.period_label
     );
 

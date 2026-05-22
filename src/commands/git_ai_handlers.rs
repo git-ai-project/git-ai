@@ -53,7 +53,7 @@ pub fn handle_git_ai(args: &[String]) {
             | "install-hooks"
             | "install"
             | "uninstall-hooks"
-            | "activity"
+            | "usage"
     );
     if needs_daemon {
         use crate::daemon::telemetry_handle::{
@@ -109,7 +109,7 @@ pub fn handle_git_ai(args: &[String]) {
             }
             handle_stats(&args[1..]);
         }
-        "activity" => {
+        "usage" => {
             commands::activity::handle_activity(&args[1..]);
         }
         "status" => {
@@ -339,7 +339,7 @@ fn print_help() {
     );
     eprintln!("  stats [commit]     Show AI authorship statistics for a commit");
     eprintln!("    --json                 Output in JSON format");
-    eprintln!("  activity           Show local AI activity statistics");
+    eprintln!("  usage              Show local AI usage statistics");
     eprintln!("    --period <7d|30d|all>  Time window (default: 30d)");
     eprintln!("    --json                 Output in JSON format");
     eprintln!("  status             Show uncommitted AI authorship status (debug)");
