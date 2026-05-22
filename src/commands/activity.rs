@@ -36,7 +36,7 @@ pub fn handle_activity(args: &[String]) {
         "60d" => (days_ago(60), "last 60 days".to_string(), BucketGranularity::Weekly),
         "all" => (0u32, "all time".to_string(), BucketGranularity::Monthly),
         other => {
-            eprintln!("Unknown period '{}'. Use 1d, 3d, 7d, 30d, or all.", other);
+            eprintln!("Unknown period '{}'. Use 1d, 3d, 7d, 30d, 60d, or all.", other);
             std::process::exit(1);
         }
     };
