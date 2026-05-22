@@ -4,6 +4,7 @@ use crate::commands::activity_tui;
 use crate::metrics::local_stats::{
     BucketGranularity, LocalActivityStats, compute_activity, compute_repo_summaries,
 };
+use crate::metrics::notes_backfill::backfill_todays_notes;
 use crate::repo_url::resolve_repo_url_from_path;
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -79,9 +80,15 @@ pub fn handle_activity(args: &[String]) {
     // Auto-detect which repo we're in (if any).  When Some, stats are scoped
     // to that repo; the header shows the repo name.  When None (outside any
     // repo), stats are global and the Summary tab shows a per-repo table.
-    let current_repo = std::env::current_dir()
-        .ok()
-        .and_then(|cwd| resolve_repo_url_from_path(&cwd));
+    let current_dir = std::env::current_dir().ok();
+    let current_repo = current_dir
+        .as_deref()
+        .and_then(resolve_repo_url_from_path);
+
+    // Backfill any of today's commits whose notes aren't in local_events yet.
+    if let (Some(cwd), Some(repo)) = (current_dir.as_deref(), current_repo.as_deref()) {
+        let _ = backfill_todays_notes(cwd, repo);
+    }
 
     let stats = match compute_activity(since_ts, period_label, granularity, current_repo.as_deref())
     {
