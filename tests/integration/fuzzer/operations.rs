@@ -4011,6 +4011,301 @@ pub fn execute_amend_shrink(
     ));
 }
 
+/// Deep rebase chain: create a branch with N commits, then rebase it onto
+/// a diverged main. Each commit in the chain has different attribution.
+/// The rebase rewrites ALL commits, so ALL authorship notes must be rewritten.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_deep_rebase_chain(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let chain_depth = rng.random_range(3..=7);
+    operation_log.push(format!("deep-rebase-chain: depth={}", chain_depth));
+
+    let branch_name = format!("deep-rebase-{}", rng.random_range(0..10000u32));
+
+    // Create feature branch
+    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+    // Make N commits on the branch
+    for i in 0..chain_depth {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(2)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("deep-rebase-chain: commit {}", i))
+            .unwrap();
+    }
+
+    // Go back to base and make a commit to create divergence
+    repo.git(&["checkout", "-"]).unwrap();
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    // Use a DIFFERENT file for the base commit to avoid merge conflicts
+    let diverge_file = format!("diverge_{}.txt", rng.random_range(0..10000u32));
+    fs::write(repo.path().join(&diverge_file), "divergence\n").unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("deep-rebase-chain: base divergence").unwrap();
+
+    // Rebase the branch onto the new base
+    repo.git(&["checkout", &branch_name]).unwrap();
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    let rebase_result = repo.git(&["rebase", "-"]);
+    if rebase_result.is_err() {
+        repo.git(&["rebase", "--abort"]).ok();
+        operation_log.push("deep-rebase-chain: rebase failed, aborted".to_string());
+        repo.git(&["checkout", "-"]).unwrap();
+        file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+        repo.git(&["branch", "-D", &branch_name]).ok();
+        return;
+    }
+
+    // Fast-forward merge the rebased branch
+    repo.git(&["checkout", "-"]).unwrap();
+    repo.git(&["merge", "--ff-only", &branch_name]).unwrap();
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    // Clean up
+    repo.git(&["branch", "-D", &branch_name]).ok();
+
+    operation_log.push("deep-rebase-chain: done".to_string());
+}
+
+/// Untracked edits interleaved: make edits WITHOUT any checkpoint, then make
+/// checkpointed edits, then commit. The untracked edits should appear as
+/// unattributed human (legacy "human" checkpoint behavior).
+#[allow(clippy::too_many_arguments)]
+pub fn execute_untracked_interleave(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("untracked-interleave: starting".to_string());
+
+    // Make untracked edits (just write to disk, no checkpoint at all).
+    // Use '?' which isn't in the registry - the oracle will skip unknown chars
+    // during blame verification since they represent untracked/unattributed content.
+    let untracked_count = gen_line_count(rng, max_lines.min(3));
+    let raw_lines: Vec<char> = (0..untracked_count).map(|_| '?').collect();
+    file_state.lines.extend(&raw_lines);
+    file_state.write_to_disk(repo);
+
+    // Now fire a "human" checkpoint (untracked/legacy) to capture the untracked state
+    repo.git_ai(&["checkpoint", "human", &file_state.filename])
+        .ok();
+
+    // Make REAL checkpointed edits
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+
+    // Commit
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("untracked-interleave: commit").unwrap();
+
+    operation_log.push("untracked-interleave: done".to_string());
+}
+
+/// Rapid HEAD changes: make multiple commits in rapid succession, then reset
+/// back to the middle one, then make new commits. Tests that working logs
+/// keyed by HEAD sha survive HEAD pointer changes.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_rapid_head_change(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let commit_count = rng.random_range(3..=5);
+    operation_log.push(format!(
+        "rapid-head-change: {} commits then reset",
+        commit_count
+    ));
+
+    let start_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let mut shas = vec![start_sha];
+
+    // Make rapid commits
+    for i in 0..commit_count {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(2)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("rapid-head-change: commit {}", i))
+            .unwrap();
+        shas.push(repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string());
+    }
+
+    // Reset to a middle commit
+    let reset_idx = rng.random_range(1..shas.len() - 1);
+    repo.git(&["reset", "--hard", &shas[reset_idx]]).unwrap();
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    // Make new commits from the reset point
+    let new_params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &new_params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("rapid-head-change: new branch commit").unwrap();
+
+    operation_log.push("rapid-head-change: done".to_string());
+}
+
+/// Three-way merge: create two branches from same base, each with different
+/// attributions, then merge them together. Tests merge commit authorship.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_three_way_merge(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("three-way-merge: starting".to_string());
+
+    let base_branch = repo
+        .git(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+    let branch_a = format!("three-way-a-{}", rng.random_range(0..10000u32));
+    let branch_b = format!("three-way-b-{}", rng.random_range(0..10000u32));
+
+    // Branch A: append AI content
+    repo.git(&["checkout", "-b", &branch_a]).unwrap();
+    let a_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &a_params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("three-way-merge: branch A").unwrap();
+
+    // Branch B from base: prepend human content (different location to avoid conflict)
+    repo.git(&["checkout", &base_branch]).unwrap();
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+    repo.git(&["checkout", "-b", &branch_b]).unwrap();
+    let b_params = EditParams {
+        attribution: Attribution::KnownHuman,
+        strategy: EditStrategy::Prepend,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &b_params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("three-way-merge: branch B").unwrap();
+
+    // Back to base, merge A first
+    repo.git(&["checkout", &base_branch]).unwrap();
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    let merge_a = repo.git(&["merge", &branch_a, "--no-edit"]);
+    if merge_a.is_err() {
+        repo.git(&["merge", "--abort"]).ok();
+        repo.git(&["branch", "-D", &branch_a]).ok();
+        repo.git(&["branch", "-D", &branch_b]).ok();
+        operation_log.push("three-way-merge: merge A failed, aborted".to_string());
+        return;
+    }
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    // Merge B
+    let merge_b = repo.git(&["merge", &branch_b, "--no-edit"]);
+    if merge_b.is_err() {
+        repo.git(&["merge", "--abort"]).ok();
+        operation_log.push("three-way-merge: merge B failed, aborted".to_string());
+    } else {
+        file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+        operation_log.push("three-way-merge: both merged".to_string());
+    }
+
+    // Clean up
+    repo.git(&["branch", "-D", &branch_a]).ok();
+    repo.git(&["branch", "-D", &branch_b]).ok();
+
+    operation_log.push("three-way-merge: done".to_string());
+}
+
+/// Checkpoint then immediately commit with --allow-empty-message: tests that
+/// the post-commit hook fires correctly even with edge-case commit flags.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_edge_case_commit_flags(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("edge-case-commit-flags: starting".to_string());
+
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+
+    // Use various commit flags that might confuse the post-commit hook
+    let flag_choice = rng.random_range(0..3u32);
+    match flag_choice {
+        0 => {
+            repo.git(&["commit", "--allow-empty-message", "-m", ""])
+                .unwrap();
+        }
+        1 => {
+            repo.git(&[
+                "commit",
+                "-m",
+                "edge-case: very long message ".repeat(50).trim_end(),
+            ])
+            .unwrap();
+        }
+        _ => {
+            repo.git(&[
+                "commit",
+                "-m",
+                "edge-case: special chars !@#$%^&*(){}[]|\\:\";<>?,./~`",
+            ])
+            .unwrap();
+        }
+    }
+
+    operation_log.push("edge-case-commit-flags: done".to_string());
+}
+
 /// Reconstruct the char-per-line model from actual file content on disk.
 pub fn reconstruct_lines_from_content(content: &str) -> Vec<char> {
     content

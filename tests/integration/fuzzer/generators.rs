@@ -106,6 +106,11 @@ pub enum CombinedOp {
     NoopOverwrite,
     ConcurrentSessions,
     AmendShrink,
+    DeepRebaseChain,
+    UntrackedInterleave,
+    RapidHeadChange,
+    ThreeWayMerge,
+    EdgeCaseCommitFlags,
 }
 
 impl EditStrategy {
@@ -227,7 +232,7 @@ pub fn gen_stress_op(rng: &mut impl Rng) -> StressOp {
 
 /// Generate a random combined operation.
 pub fn gen_combined_op(rng: &mut impl Rng) -> CombinedOp {
-    match rng.random_range(0..22u32) {
+    match rng.random_range(0..27u32) {
         0 => CombinedOp::CherryPickConflict,
         1 => CombinedOp::RapidBranchMerge,
         2 => CombinedOp::RebaseCherryPickCombo,
@@ -249,6 +254,11 @@ pub fn gen_combined_op(rng: &mut impl Rng) -> CombinedOp {
         18 => CombinedOp::RenameDuringEdit,
         19 => CombinedOp::NoopOverwrite,
         20 => CombinedOp::ConcurrentSessions,
-        _ => CombinedOp::AmendShrink,
+        21 => CombinedOp::AmendShrink,
+        22 => CombinedOp::DeepRebaseChain,
+        23 => CombinedOp::UntrackedInterleave,
+        24 => CombinedOp::RapidHeadChange,
+        25 => CombinedOp::ThreeWayMerge,
+        _ => CombinedOp::EdgeCaseCommitFlags,
     }
 }
