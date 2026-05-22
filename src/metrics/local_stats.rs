@@ -122,11 +122,16 @@ pub fn compute_activity(
     let mut session_ids: HashSet<String> = HashSet::new();
     let mut session_tool_counts: HashMap<String, u32> = HashMap::new();
 
-    // Token usage keyed by assistant message id. The incremental transcript
-    // reader re-emits the same message multiple times, and streaming partials
-    // carry lower token counts than the final message — so we keep the
+    // Claude-shaped token usage keyed by assistant message id. The incremental
+    // transcript reader re-emits the same message multiple times, and streaming
+    // partials carry lower token counts than the final message — so we keep the
     // field-wise max per message id, then fold into per-model totals.
     let mut message_usage: HashMap<String, (String, TokenAccum)> = HashMap::new();
+
+    // Codex-shaped token usage keyed by session id. Codex reports cumulative
+    // session totals (total_token_usage) on each token_count event, so we keep
+    // the per-session max rather than summing.
+    let mut codex_sessions: HashMap<String, CodexSessionAccum> = HashMap::new();
 
     // bucket_key -> accumulated stats
     let mut bucket_map: HashMap<String, BucketAccum> = HashMap::new();
@@ -181,7 +186,14 @@ pub fn compute_activity(
             ),
             5 => {
                 aggregate_session(&event, &mut session_ids, &mut session_tool_counts);
-                aggregate_session_tokens(&event, &mut message_usage);
+                let tool = sparse_get_string(&event.attrs, attr_pos::TOOL)
+                    .flatten()
+                    .unwrap_or_default();
+                if tool == "codex" {
+                    aggregate_codex_tokens(&event, &mut codex_sessions);
+                } else {
+                    aggregate_session_tokens(&event, &mut message_usage);
+                }
             }
             _ => {}
         }
@@ -193,7 +205,7 @@ pub fn compute_activity(
     let mut session_by_tool: Vec<(String, u32)> = session_tool_counts.into_iter().collect();
     session_by_tool.sort_by_key(|&(_, count)| Reverse(count));
 
-    let tokens = build_token_summary(message_usage);
+    let tokens = build_token_summary(message_usage, codex_sessions);
 
     // Map by order key for fill_buckets to look up real data.
     let bucket_by_order: HashMap<i64, BucketAccum> = bucket_map
@@ -238,6 +250,20 @@ struct TokenAccum {
     cache_creation: u64,
 }
 
+/// Per-session codex accumulator. Codex reports *cumulative* session totals on
+/// each `token_count` event, so we track the max of each raw field. The model
+/// name arrives on a separate event (`payload.model`), captured when seen.
+#[derive(Debug, Default, Clone)]
+struct CodexSessionAccum {
+    model: Option<String>,
+    /// Cumulative input tokens (includes cached).
+    input_tokens: u64,
+    /// Cumulative cached input tokens (subset of input_tokens).
+    cached_input_tokens: u64,
+    /// Cumulative output tokens (includes reasoning).
+    output_tokens: u64,
+}
+
 /// Per-million-token pricing for a model (USD).
 struct ModelPricing {
     input: f64,
@@ -257,6 +283,10 @@ fn pricing_for(model: &str) -> Option<ModelPricing> {
         Some(ModelPricing { input: 3.0, output: 15.0, cache_write: 3.75, cache_read: 0.3 })
     } else if m.contains("haiku") {
         Some(ModelPricing { input: 0.8, output: 4.0, cache_write: 1.0, cache_read: 0.08 })
+    } else if m.contains("gpt") {
+        // OpenAI GPT-5 family estimate; cache_write unused (codex reports no
+        // cache-creation tokens).
+        Some(ModelPricing { input: 1.25, output: 10.0, cache_write: 1.25, cache_read: 0.125 })
     } else {
         None
     }
@@ -281,7 +311,10 @@ fn shorten_model(model: &str) -> String {
     }
 }
 
-fn build_token_summary(message_usage: HashMap<String, (String, TokenAccum)>) -> TokenSummary {
+fn build_token_summary(
+    message_usage: HashMap<String, (String, TokenAccum)>,
+    codex_sessions: HashMap<String, CodexSessionAccum>,
+) -> TokenSummary {
     // Fold per-message (deduped, max) usage into per-model totals.
     let mut model_tokens: HashMap<String, TokenAccum> = HashMap::new();
     for (_id, (model, acc)) in message_usage {
@@ -290,6 +323,18 @@ fn build_token_summary(message_usage: HashMap<String, (String, TokenAccum)>) -> 
         entry.output += acc.output;
         entry.cache_read += acc.cache_read;
         entry.cache_creation += acc.cache_creation;
+    }
+
+    // Fold per-session codex totals into per-model totals, mapping codex's
+    // field semantics onto ours: codex input_tokens *includes* cached, so the
+    // non-cached input is the difference; cached maps to cache_read; codex has
+    // no cache-creation concept.
+    for (_sid, acc) in codex_sessions {
+        let model = acc.model.unwrap_or_else(|| "codex".to_string());
+        let entry = model_tokens.entry(model).or_default();
+        entry.input += acc.input_tokens.saturating_sub(acc.cached_input_tokens);
+        entry.output += acc.output_tokens;
+        entry.cache_read += acc.cached_input_tokens;
     }
 
     let mut summary = TokenSummary::default();
@@ -593,4 +638,40 @@ fn aggregate_session_tokens(
     acc.output = acc.output.max(get("output_tokens"));
     acc.cache_read = acc.cache_read.max(get("cache_read_input_tokens"));
     acc.cache_creation = acc.cache_creation.max(get("cache_creation_input_tokens"));
+}
+
+/// Extract token usage from a codex session event. Codex emits `token_count`
+/// events carrying cumulative `payload.info.total_token_usage`, and reports its
+/// model on a separate event via `payload.model`. Both are keyed by session id;
+/// cumulative totals are tracked as a per-session max.
+fn aggregate_codex_tokens(
+    event: &MetricEvent,
+    codex_sessions: &mut HashMap<String, CodexSessionAccum>,
+) {
+    let Some(session_id) = sparse_get_string(&event.attrs, attr_pos::SESSION_ID).flatten() else {
+        return;
+    };
+    let Some(raw) = event.values.get(&session_event_pos::RAW_JSON.to_string()) else {
+        return;
+    };
+    let Some(payload) = raw.get("payload") else {
+        return;
+    };
+
+    let entry = codex_sessions.entry(session_id).or_default();
+
+    // Capture the model name when it appears (not on token_count events).
+    if let Some(model) = payload.get("model").and_then(|m| m.as_str())
+        && entry.model.is_none()
+    {
+        entry.model = Some(model.to_string());
+    }
+
+    // Cumulative session totals; keep the running max.
+    if let Some(usage) = payload.get("info").and_then(|i| i.get("total_token_usage")) {
+        let get = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+        entry.input_tokens = entry.input_tokens.max(get("input_tokens"));
+        entry.cached_input_tokens = entry.cached_input_tokens.max(get("cached_input_tokens"));
+        entry.output_tokens = entry.output_tokens.max(get("output_tokens"));
+    }
 }
