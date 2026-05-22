@@ -118,6 +118,14 @@ tasks:
           GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_destructive_
 
+  test:fuzz:combined:
+    desc: Run combined ops fuzzer tests (cherry-pick, branch merge, squash combos)
+    cmds:
+      - task: test:base
+        vars:
+          GIT_AI_TEST_GIT_MODE: daemon
+          TEST_FILTER: fuzz_combined_
+
   lint:
     desc: Run cargo check and clippy with warnings as errors
     cmds:

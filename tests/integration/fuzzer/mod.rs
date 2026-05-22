@@ -304,3 +304,47 @@ fn fuzz_chaos_random() {
     );
     run_fuzzer(FuzzerConfig::chaos(seed, 80));
 }
+
+// =============================================================================
+// Combined operations tests (cherry-pick, branch merge, multi-squash, etc.)
+// =============================================================================
+
+#[test]
+fn fuzz_combined_0() {
+    run_fuzzer(FuzzerConfig::combined_heavy(0, 40));
+}
+
+#[test]
+fn fuzz_combined_1() {
+    run_fuzzer(FuzzerConfig::combined_heavy(1, 40));
+}
+
+#[test]
+fn fuzz_combined_2() {
+    run_fuzzer(FuzzerConfig::combined_heavy(2, 40));
+}
+
+#[test]
+fn fuzz_combined_42() {
+    run_fuzzer(FuzzerConfig::combined_heavy(42, 40));
+}
+
+#[test]
+fn fuzz_combined_99() {
+    run_fuzzer(FuzzerConfig::combined_heavy(99, 40));
+}
+
+#[test]
+fn fuzz_combined_1337() {
+    run_fuzzer(FuzzerConfig::combined_heavy(1337, 40));
+}
+
+#[test]
+fn fuzz_combined_random() {
+    let seed: u64 = rand::random_range(0..u64::MAX);
+    eprintln!(
+        "[fuzzer] COMBINED RANDOM SEED: {} — use this to reproduce failures",
+        seed
+    );
+    run_fuzzer(FuzzerConfig::combined_heavy(seed, 60));
+}

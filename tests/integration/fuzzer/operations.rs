@@ -2309,6 +2309,900 @@ pub fn execute_session_interleave(
     ));
 }
 
+/// Partial stage then amend: partially stage a file, commit, then immediately
+/// amend with the rest. This combines partial staging with amend, one of the most
+/// complex interactions for working log management.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_partial_then_amend(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("partial-then-amend: starting".to_string());
+
+    let pre_edit_lines = file_state.lines.clone();
+
+    // Make several edits
+    let edit_count = rng.random_range(3..=5);
+    for _ in 0..edit_count {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    }
+
+    let new_line_count = file_state.lines.len() - pre_edit_lines.len();
+    if new_line_count < 2 {
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit("partial-then-amend: degenerate").unwrap();
+        operation_log.push("partial-then-amend: degenerate (too few lines)".to_string());
+        return;
+    }
+
+    // Stage first half
+    let half = new_line_count / 2;
+    let partial_lines: Vec<char> = pre_edit_lines
+        .iter()
+        .chain(file_state.lines[pre_edit_lines.len()..pre_edit_lines.len() + half].iter())
+        .copied()
+        .collect();
+
+    let full_lines = file_state.lines.clone();
+
+    // Write partial, stage it
+    let partial_state = FileState {
+        lines: partial_lines,
+        filename: file_state.filename.clone(),
+    };
+    partial_state.write_to_disk(repo);
+    repo.git(&["add", &file_state.filename]).unwrap();
+
+    // Write full back
+    file_state.write_to_disk(repo);
+
+    // Commit (only partial is staged)
+    repo.commit("partial-then-amend: partial commit").unwrap();
+
+    // Now immediately amend with the full content
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&[
+        "commit",
+        "--amend",
+        "-m",
+        "partial-then-amend: amended with full content",
+    ])
+    .unwrap();
+
+    file_state.lines = full_lines;
+    operation_log.push("partial-then-amend: done".to_string());
+}
+
+/// Stash during rebase: start a rebase, then stash uncommitted changes mid-way.
+/// This simulates a user who gets interrupted during a rebase.
+/// We approximate this by: creating a branch, making edits, starting rebase,
+/// and if it succeeds, making more edits + stash + pop before merging back.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_stash_during_work(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("stash-during-work: starting".to_string());
+
+    // Make some edits with checkpoints
+    let edit_count = rng.random_range(2..=4);
+    for _ in 0..edit_count {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: if file_state.lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                EditStrategy::random_non_destructive(rng)
+            },
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    }
+
+    // Stash everything
+    let stash_result = repo.git(&["stash", "push", "-m", "mid-work stash"]);
+    if stash_result.is_err() {
+        // Nothing to stash (no changes from committed state)
+        operation_log.push("stash-during-work: nothing to stash, committing directly".to_string());
+        repo.git(&["add", "-A"]).unwrap();
+        let status = repo.git(&["status", "--porcelain"]).unwrap();
+        if !status.trim().is_empty() {
+            repo.commit("stash-during-work: direct commit").unwrap();
+        }
+        return;
+    }
+
+    // Re-read file state from disk (stash reverts to committed state)
+    let path = repo.path().join(&file_state.filename);
+    if path.exists() {
+        let content = fs::read_to_string(&path).unwrap();
+        file_state.lines = reconstruct_lines_from_content(&content);
+    }
+
+    // Make a DIFFERENT edit and commit while stash is active
+    let interim_params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Prepend,
+        line_count: gen_line_count(rng, max_lines.min(2)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &interim_params,
+        rng,
+        operation_log,
+    );
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("stash-during-work: interim commit").unwrap();
+
+    // Pop stash
+    let pop_result = repo.git(&["stash", "pop"]);
+    if pop_result.is_err() {
+        // Conflict: drop the stash
+        repo.git(&["checkout", "--", "."]).ok();
+        repo.git(&["stash", "drop"]).ok();
+        operation_log.push("stash-during-work: pop conflict, dropped stash".to_string());
+        // Re-read from disk
+        let path = repo.path().join(&file_state.filename);
+        if path.exists() {
+            let content = fs::read_to_string(&path).unwrap();
+            file_state.lines = reconstruct_lines_from_content(&content);
+        }
+        return;
+    }
+
+    // After pop: re-read from disk to get merged state
+    let path = repo.path().join(&file_state.filename);
+    if path.exists() {
+        let content = fs::read_to_string(&path).unwrap();
+        file_state.lines = reconstruct_lines_from_content(&content);
+    }
+
+    // Commit the popped changes
+    repo.git(&["add", "-A"]).unwrap();
+    let status = repo.git(&["status", "--porcelain"]).unwrap();
+    if !status.trim().is_empty() {
+        repo.commit("stash-during-work: after pop commit").unwrap();
+    }
+
+    operation_log.push("stash-during-work: done".to_string());
+}
+
+/// Cross-file checkpoint race: fire checkpoints on multiple files in rapid
+/// succession, interleaving AI and human checkpoints across files, then
+/// commit everything at once. Stresses the daemon's per-file sequencer.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_cross_file_checkpoint_race(
+    repo: &TestRepo,
+    file_states: &mut [&mut FileState],
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let rounds = rng.random_range(3..=8);
+    operation_log.push(format!(
+        "cross-file-race: {} rounds across {} files",
+        rounds,
+        file_states.len()
+    ));
+
+    for _ in 0..rounds {
+        // Pick a random file and make an edit
+        let file_idx = rng.random_range(0..file_states.len());
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: if file_states[file_idx].lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                EditStrategy::random_non_destructive(rng)
+            },
+            line_count: gen_line_count(rng, max_lines.min(2)),
+        };
+        execute_edit_and_checkpoint(
+            repo,
+            file_states[file_idx],
+            registry,
+            &params,
+            rng,
+            operation_log,
+        );
+    }
+
+    // Single commit
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("cross-file checkpoint race commit").unwrap();
+
+    operation_log.push("cross-file-race: done".to_string());
+}
+
+/// Commit with only whitespace changes alongside attributed changes.
+/// The whitespace-only file should not interfere with attribution of other files.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_whitespace_noise(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("whitespace-noise: starting".to_string());
+
+    let idx = registry.next_index();
+    let noise_file = format!("whitespace_noise_{}.txt", idx);
+
+    // Create a file with just whitespace/newlines (no meaningful content)
+    let noise_content = "\n\n   \n\t\n   \n\n";
+    fs::write(repo.path().join(&noise_file), noise_content).unwrap();
+
+    // Make a real attributed edit to the main file
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+
+    // Commit both together
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("commit with whitespace noise file").unwrap();
+
+    operation_log.push("whitespace-noise: done".to_string());
+}
+
+/// Multiple sequential amend-then-reset cycles: amend a commit, then soft-reset,
+/// then recommit, then amend again. This creates maximum confusion for working logs.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_amend_reset_cycle(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let cycles = rng.random_range(2..=4);
+    operation_log.push(format!("amend-reset-cycle: {} cycles", cycles));
+
+    // Initial commit
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("amend-reset-cycle base").unwrap();
+
+    for i in 0..cycles {
+        // Amend with new content
+        let amend_params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(
+            repo,
+            file_state,
+            registry,
+            &amend_params,
+            rng,
+            operation_log,
+        );
+        repo.git(&["add", "-A"]).unwrap();
+        repo.git(&[
+            "commit",
+            "--amend",
+            "-m",
+            &format!("amend-reset cycle {} amend", i),
+        ])
+        .unwrap();
+
+        // Soft reset
+        repo.git(&["reset", "--soft", "HEAD~1"]).unwrap();
+
+        // Recommit (all changes are staged from soft reset)
+        repo.commit(&format!("amend-reset cycle {} recommit", i))
+            .unwrap();
+    }
+
+    operation_log.push("amend-reset-cycle: done".to_string());
+}
+
+/// Cherry-pick with conflicts: create a branch, make conflicting edits on both
+/// branches, then cherry-pick from one to the other, aborting if it conflicts.
+/// Tests that attribution survives or is correctly invalidated through cherry-pick.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_cherry_pick_conflict(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("cherry-pick-conflict: starting".to_string());
+
+    let branch_name = format!("cherry-pick-conflict-{}", rng.random_range(0..10000u32));
+
+    // Create and switch to feature branch
+    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+    // Make edits on the feature branch
+    let feature_params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::Prepend
+        },
+        line_count: gen_line_count(rng, max_lines.min(4)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &feature_params,
+        rng,
+        operation_log,
+    );
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("cherry-pick-conflict: feature commit").unwrap();
+
+    let feature_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Switch back to previous branch
+    repo.git(&["checkout", "-"]).unwrap();
+
+    // Make a conflicting edit on main (different content at same position)
+    let main_params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Prepend,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &main_params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("cherry-pick-conflict: main commit").unwrap();
+
+    // Try cherry-pick
+    let cp_result = repo.git(&["cherry-pick", &feature_sha]);
+    if cp_result.is_err() {
+        // Conflict - abort
+        repo.git(&["cherry-pick", "--abort"]).unwrap();
+        operation_log.push("cherry-pick-conflict: conflict, aborted".to_string());
+    } else {
+        operation_log.push("cherry-pick-conflict: clean apply".to_string());
+    }
+
+    // Re-read file state from disk
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    // Clean up branch
+    repo.git(&["branch", "-D", &branch_name]).ok();
+
+    operation_log.push("cherry-pick-conflict: done".to_string());
+}
+
+/// Rapid branch create-commit-merge cycles: create multiple short-lived branches,
+/// each with a single commit, and merge them all back. Tests merge attribution
+/// under rapid succession.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_rapid_branch_merge(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let branch_count = rng.random_range(2..=4);
+    operation_log.push(format!("rapid-branch-merge: {} branches", branch_count));
+
+    let base_branch = repo
+        .git(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    for i in 0..branch_count {
+        let branch_name = format!("rapid-merge-{}-{}", rng.random_range(0..10000u32), i);
+
+        // Create branch from current HEAD
+        repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+        // Make an edit (append only to avoid conflicts)
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(2)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("rapid-branch-merge: branch {} commit", i))
+            .unwrap();
+
+        // Merge back immediately
+        repo.git(&["checkout", &base_branch]).unwrap();
+        let merge_result = repo.git(&["merge", &branch_name, "--no-edit"]);
+        if merge_result.is_err() {
+            // Conflict - just abort and move on
+            repo.git(&["merge", "--abort"]).ok();
+            operation_log.push(format!("rapid-branch-merge: branch {} conflict", i));
+        }
+
+        // Clean up
+        repo.git(&["branch", "-D", &branch_name]).ok();
+
+        // Re-read state
+        file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+    }
+
+    operation_log.push("rapid-branch-merge: done".to_string());
+}
+
+/// Interleaved rebase and cherry-pick: rebase some commits, then cherry-pick
+/// others from the pre-rebase history. Maximum confusion for authorship tracking.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_rebase_cherry_pick_combo(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("rebase-cherry-pick-combo: starting".to_string());
+
+    // Make 3 commits on a branch
+    let branch_name = format!("rebase-cp-{}", rng.random_range(0..10000u32));
+    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+    let mut branch_shas = Vec::new();
+    for i in 0..3 {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(2)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("rebase-cp branch commit {}", i))
+            .unwrap();
+        branch_shas.push(repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string());
+    }
+
+    // Switch back to base
+    repo.git(&["checkout", "-"]).unwrap();
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    // Make a commit on the base to create divergence
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(2)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("rebase-cp: base divergence commit").unwrap();
+
+    // Try cherry-pick of first branch commit
+    let cp_result = repo.git(&["cherry-pick", &branch_shas[0]]);
+    if cp_result.is_err() {
+        repo.git(&["cherry-pick", "--abort"]).ok();
+        operation_log.push("rebase-cherry-pick-combo: cherry-pick failed, skipping".to_string());
+    } else {
+        operation_log.push("rebase-cherry-pick-combo: cherry-pick succeeded".to_string());
+    }
+
+    // Re-read state
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    // Clean up branch
+    repo.git(&["branch", "-D", &branch_name]).ok();
+
+    operation_log.push("rebase-cherry-pick-combo: done".to_string());
+}
+
+/// Commit, then immediately `git reset --mixed HEAD~1`, edit more, re-commit.
+/// This simulates "oops, forgot something" which is extremely common.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_reset_edit_recommit(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("reset-edit-recommit: starting".to_string());
+
+    // First make an edit and commit
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("reset-edit-recommit: initial").unwrap();
+
+    // Mixed reset (changes go back to working tree)
+    repo.git(&["reset", "--mixed", "HEAD~1"]).unwrap();
+
+    // Make MORE edits on top
+    let extra_params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &extra_params,
+        rng,
+        operation_log,
+    );
+
+    // Recommit everything
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("reset-edit-recommit: recommitted with extra")
+        .unwrap();
+
+    operation_log.push("reset-edit-recommit: done".to_string());
+}
+
+/// Multiple sequential checkpoints without any git operations between them.
+/// The daemon should handle the rapid-fire checkpoints on the same file
+/// without losing or duplicating data.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_checkpoint_storm(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let storm_count = rng.random_range(5..=15);
+    operation_log.push(format!("checkpoint-storm: {} checkpoints", storm_count));
+
+    for i in 0..storm_count {
+        let attr = if i % 3 == 0 {
+            Attribution::KnownHuman
+        } else {
+            Attribution::Ai
+        };
+        let strategy = if file_state.lines.is_empty() || i % 4 == 0 {
+            EditStrategy::Append
+        } else {
+            match i % 5 {
+                0 => EditStrategy::Append,
+                1 => EditStrategy::Prepend,
+                2 => EditStrategy::InsertRandom,
+                3 => EditStrategy::ReplaceRandom,
+                _ => EditStrategy::Append,
+            }
+        };
+        let params = EditParams {
+            attribution: attr,
+            strategy,
+            line_count: gen_line_count(rng, max_lines.min(2)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    }
+
+    // Single commit after the storm
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("checkpoint storm commit").unwrap();
+
+    operation_log.push(format!(
+        "checkpoint-storm: done ({} lines)",
+        file_state.lines.len()
+    ));
+}
+
+/// Partial stage with amend: stage only SOME lines, commit, then amend
+/// with different attribution lines. Tests that amend correctly handles
+/// the working log split between committed and uncommitted.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_partial_amend_flip(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("partial-amend-flip: starting".to_string());
+
+    // Make AI edits (append)
+    let ai_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(4)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &ai_params, rng, operation_log);
+
+    // Make human edits (also append)
+    let human_params = EditParams {
+        attribution: Attribution::KnownHuman,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(4)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &human_params,
+        rng,
+        operation_log,
+    );
+
+    // Commit all
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("partial-amend-flip: initial").unwrap();
+
+    // Now amend with the OPPOSITE attribution
+    let flip_params = EditParams {
+        attribution: Attribution::KnownHuman,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(2)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &flip_params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&["commit", "--amend", "-m", "partial-amend-flip: amended"])
+        .unwrap();
+
+    operation_log.push("partial-amend-flip: done".to_string());
+}
+
+/// Make edits, checkpoint, then `git checkout -- file` to discard, then
+/// make NEW edits with different attribution and commit. The discarded
+/// checkpoints should not appear in the final authorship.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_discard_then_reedit(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("discard-then-reedit: starting".to_string());
+
+    // Make some AI edits
+    let ai_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &ai_params, rng, operation_log);
+
+    // Discard all changes
+    repo.git(&["checkout", "--", &file_state.filename]).ok();
+
+    // Re-read from disk (back to committed state)
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    // Make NEW edits with human attribution
+    let human_params = EditParams {
+        attribution: Attribution::KnownHuman,
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &human_params,
+        rng,
+        operation_log,
+    );
+
+    // Commit
+    repo.git(&["add", "-A"]).unwrap();
+    let status = repo.git(&["status", "--porcelain"]).unwrap();
+    if !status.trim().is_empty() {
+        repo.commit("discard-then-reedit: commit").unwrap();
+    }
+
+    operation_log.push("discard-then-reedit: done".to_string());
+}
+
+/// Create multiple files, checkpoint them all with different attributions,
+/// then delete some and commit. Tests that deletion doesn't corrupt
+/// attribution of remaining files.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_create_delete_batch(
+    repo: &TestRepo,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) -> Vec<FileState> {
+    let file_count = rng.random_range(3..=5);
+    operation_log.push(format!("create-delete-batch: {} files", file_count));
+
+    let mut batch_files: Vec<FileState> = Vec::new();
+    let base_idx = registry.next_index();
+
+    // Create all files with different attributions
+    for i in 0..file_count {
+        let filename = format!("batch_{}_{}.txt", base_idx, i);
+        let mut fs = FileState::new(&filename);
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(4)),
+        };
+        execute_edit_and_checkpoint(repo, &mut fs, registry, &params, rng, operation_log);
+        batch_files.push(fs);
+    }
+
+    // Commit all
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("create-delete-batch: all files").unwrap();
+
+    // Delete a random subset
+    let delete_count = rng.random_range(1..file_count);
+    let mut kept_files = Vec::new();
+    for (i, fs) in batch_files.into_iter().enumerate() {
+        if i < delete_count {
+            let path = repo.path().join(&fs.filename);
+            std::fs::remove_file(&path).ok();
+            operation_log.push(format!("create-delete-batch: deleted {}", fs.filename));
+        } else {
+            kept_files.push(fs);
+        }
+    }
+
+    // Commit the deletions
+    repo.git(&["add", "-A"]).unwrap();
+    let status = repo.git(&["status", "--porcelain"]).unwrap();
+    if !status.trim().is_empty() {
+        repo.commit("create-delete-batch: deletions").unwrap();
+    }
+
+    operation_log.push("create-delete-batch: done".to_string());
+    kept_files
+}
+
+/// Simulate an interactive rebase (squash): make N commits, then squash them all
+/// into one. All attribution from all N commits should appear in the squashed result.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_multi_squash(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let commit_count = rng.random_range(3..=6);
+    operation_log.push(format!("multi-squash: {} commits", commit_count));
+
+    let base_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    for i in 0..commit_count {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: if file_state.lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                EditStrategy::random_non_destructive(rng)
+            },
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("multi-squash commit {}", i)).unwrap();
+    }
+
+    // Squash all commits since base into one
+    repo.git(&["reset", "--soft", &base_sha]).unwrap();
+    repo.commit("multi-squash: squashed all").unwrap();
+
+    operation_log.push("multi-squash: done".to_string());
+}
+
+/// Back-to-back amends with alternating AI/human: make a commit, then amend
+/// it N times, alternating between AI and human attribution. The final
+/// authorship should reflect the cumulative state.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_alternating_amend_storm(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let amend_count = rng.random_range(4..=10);
+    operation_log.push(format!("alternating-amend-storm: {} amends", amend_count));
+
+    // Initial commit
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("alternating-amend-storm: base").unwrap();
+
+    // Rapid amends
+    for i in 0..amend_count {
+        let attr = if i % 2 == 0 {
+            Attribution::Ai
+        } else {
+            Attribution::KnownHuman
+        };
+        let amend_params = EditParams {
+            attribution: attr,
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(2)),
+        };
+        execute_edit_and_checkpoint(
+            repo,
+            file_state,
+            registry,
+            &amend_params,
+            rng,
+            operation_log,
+        );
+        repo.git(&["add", "-A"]).unwrap();
+        repo.git(&[
+            "commit",
+            "--amend",
+            "-m",
+            &format!("alternating-amend-storm: amend {}", i),
+        ])
+        .unwrap();
+    }
+
+    operation_log.push("alternating-amend-storm: done".to_string());
+}
+
 /// Reconstruct the char-per-line model from actual file content on disk.
 pub fn reconstruct_lines_from_content(content: &str) -> Vec<char> {
     content
