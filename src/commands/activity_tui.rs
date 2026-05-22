@@ -1,4 +1,4 @@
-//! Ratatui TUI for `git-ai activity`.
+//! Ratatui TUI for `git-ai usage`.
 
 use crate::error::GitAiError;
 use crate::metrics::local_stats::{
@@ -17,7 +17,7 @@ use ratatui::{
 use std::cmp::Reverse;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const TAB_NAMES: &[&str] = &["Summary", "Models", "Sessions"];
+const TAB_NAMES: &[&str] = &["Activity", "Cost", "Sessions"];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SessionSort {
@@ -147,9 +147,7 @@ impl AppState {
             p.granularity,
             self.current_repo.as_deref(),
         )?;
-        if self.current_repo.is_none() {
-            self.repo_summaries = compute_repo_summaries(ts, p.granularity).unwrap_or_default();
-        }
+        self.repo_summaries = compute_repo_summaries(ts, p.granularity).unwrap_or_default();
         self.session_list =
             compute_session_list(ts, self.current_repo.as_deref()).unwrap_or_default();
         sort_sessions(&mut self.session_list, self.session_sort);
@@ -268,8 +266,8 @@ fn render(frame: &mut Frame, app: &AppState) {
     render_footer(frame, footer_area, app);
 
     match app.selected_tab {
-        0 => render_summary(frame, content_area, app),
-        1 => render_models(frame, content_area, app),
+        0 => render_activity(frame, content_area, app),
+        1 => render_cost(frame, content_area, app),
         2 => render_sessions(frame, content_area, app),
         _ => {}
     }
@@ -281,7 +279,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &AppState) {
 
     let period = PERIODS[app.period_idx].label;
     let mut title_spans = vec![
-        Span::from("git-ai activity").bold(),
+        Span::from("git-ai usage").bold(),
         Span::from("  ─  ").dim(),
         Span::from(period).dim(),
     ];
@@ -319,39 +317,32 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &AppState) {
     frame.render_widget(Line::from(spans), area);
 }
 
-// ─── Summary tab ─────────────────────────────────────────────────────────────
+// ─── Activity tab ─────────────────────────────────────────────────────────────
 //
 // Layout (top → bottom):
-//   [4 stat boxes]
+//   [4 stat boxes: Lines | AI share | Acceptance | Edits]
 //   [AI lines bar chart — fills remaining height]
-//   [session / yield / acceptance stats line]
 //   [Time of day  |  Day of week heatmaps]
 
-fn render_summary(frame: &mut Frame, area: Rect, app: &AppState) {
+fn render_activity(frame: &mut Frame, area: Rect, app: &AppState) {
     let stats = &app.stats;
     let has_hourly = stats.hourly.iter().any(|&v| v > 0);
     let has_daily = stats.daily.iter().any(|&v| v > 0);
     let heatmap_height = if has_hourly || has_daily { 7u16 } else { 0 };
 
-    let [stat_area, chart_area, session_area, heatmap_area] = Layout::vertical([
+    let [stat_area, chart_area, heatmap_area] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Fill(1),
-        Constraint::Length(2),
         Constraint::Length(heatmap_height),
     ])
     .areas(area);
 
     render_stat_boxes(frame, stat_area, stats);
-
-    // When not scoped to a repo, show a per-repo breakdown in place of the
-    // activity chart.  When scoped, show the normal AI-lines bar chart.
     if app.current_repo.is_none() && !app.repo_summaries.is_empty() {
         render_repo_table(frame, chart_area, &app.repo_summaries);
     } else {
         render_activity_chart(frame, chart_area, stats);
     }
-
-    render_session_stats(frame, session_area, stats);
     if heatmap_height > 0 {
         render_heatmaps(frame, heatmap_area, stats, has_hourly, has_daily);
     }
@@ -362,20 +353,22 @@ fn render_stat_boxes(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) 
     let ai_pct = (stats.commits.ai_lines * 100)
         .checked_div(total)
         .unwrap_or(0);
-    let cost = stats.tokens.estimated_cost_usd;
+    let accept_pct = (stats.commits.ai_lines * 100)
+        .checked_div(stats.checkpoints.ai_lines_added)
+        .filter(|&p| p <= 100);
 
-    let [lines_area, ai_area, sessions_area, cost_area] = Layout::horizontal([
+    let [lines_area, ai_area, accept_area, edits_area] = Layout::horizontal([
         Constraint::Length(18),
         Constraint::Fill(1),
-        Constraint::Length(20),
-        Constraint::Length(14),
+        Constraint::Length(18),
+        Constraint::Length(16),
     ])
     .areas(area);
 
-    // Total lines box
+    // Total lines committed
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(Span::from("Total lines").dim()),
+            Line::from(Span::from("Lines committed").dim()),
             Line::from(Span::from(fmt_num(total as u64)).bold()),
         ])
         .block(Block::bordered().padding(Padding::horizontal(1))),
@@ -383,93 +376,49 @@ fn render_stat_boxes(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) 
     );
 
     // AI share gauge
-    let gauge = Gauge::default()
-        .block(
-            Block::bordered()
-                .title(Span::from("AI share").dim())
-                .padding(Padding::horizontal(1)),
-        )
-        .ratio(if total > 0 {
-            ai_pct as f64 / 100.0
-        } else {
-            0.0
-        })
-        .label(format!(
-            "{}%  ·  {} AI / {} human",
-            ai_pct,
-            fmt_k(stats.commits.ai_lines as u64),
-            fmt_k(stats.commits.human_lines as u64),
-        ))
-        .gauge_style(Style::default().fg(Color::Cyan));
-    frame.render_widget(gauge, ai_area);
-
-    // Sessions box (replaces old "Models used" — more useful at a glance)
-    let yield_total = stats.sessions.yield_stats.shipped + stats.sessions.yield_stats.abandoned;
-    let yield_pct = (stats.sessions.yield_stats.shipped * 100)
-        .checked_div(yield_total)
-        .unwrap_or(0);
-    let sessions_label = if yield_total > 0 {
-        format!(
-            "{}  ({}% shipped)",
-            fmt_num(stats.sessions.total as u64),
-            yield_pct
-        )
-    } else {
-        fmt_num(stats.sessions.total as u64)
-    };
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::from("Sessions").dim()),
-            Line::from(Span::from(sessions_label).bold()),
-        ])
-        .block(Block::bordered().padding(Padding::horizontal(1))),
-        sessions_area,
+        Gauge::default()
+            .block(
+                Block::bordered()
+                    .title(Span::from("AI share").dim())
+                    .padding(Padding::horizontal(1)),
+            )
+            .ratio(if total > 0 {
+                ai_pct as f64 / 100.0
+            } else {
+                0.0
+            })
+            .label(format!(
+                "{}%  ·  {} AI / {} human",
+                ai_pct,
+                fmt_k(stats.commits.ai_lines as u64),
+                fmt_k(stats.commits.human_lines as u64),
+            ))
+            .gauge_style(Style::default().fg(Color::Cyan)),
+        ai_area,
     );
 
-    // Est. cost box
+    // Acceptance rate
+    let accept_label = accept_pct
+        .map(|p| format!("{}%", p))
+        .unwrap_or_else(|| "—".to_string());
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(Span::from("Est. cost").dim()),
-            Line::from(
-                Span::from(if cost > 0.0 {
-                    format!("~${:.2}", cost)
-                } else {
-                    "—".to_string()
-                })
-                .bold(),
-            ),
+            Line::from(Span::from("Acceptance rate").dim()),
+            Line::from(Span::from(accept_label).bold()),
         ])
         .block(Block::bordered().padding(Padding::horizontal(1))),
-        cost_area,
+        accept_area,
     );
-}
 
-fn render_session_stats(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) {
-    let yield_total = stats.sessions.yield_stats.shipped + stats.sessions.yield_stats.abandoned;
-    let yield_pct = (stats.sessions.yield_stats.shipped * 100)
-        .checked_div(yield_total)
-        .unwrap_or(0);
-    let accept_pct = (stats.commits.ai_lines * 100)
-        .checked_div(stats.checkpoints.ai_lines_added)
-        .filter(|&p| p <= 100);
-
-    let mut spans = vec![
-        Span::from("Sessions: ").dim(),
-        Span::from(fmt_num(stats.sessions.total as u64)).bold(),
-        Span::from("  ·  Shipped: ").dim(),
-        Span::from(fmt_num(stats.sessions.yield_stats.shipped as u64)).bold(),
-        Span::from(format!(" ({}%)", yield_pct)).dim(),
-        Span::from("  ·  Commits: ").dim(),
-        Span::from(fmt_num(stats.commits.total as u64)).bold(),
-    ];
-    if let Some(pct) = accept_pct {
-        spans.push(Span::from("  ·  Accept rate: ").dim());
-        spans.push(Span::from(format!("{}%", pct)).bold());
-    }
-
+    // AI edits (checkpoint lines)
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).block(Block::new().padding(Padding::horizontal(1))),
-        area,
+        Paragraph::new(vec![
+            Line::from(Span::from("AI edits").dim()),
+            Line::from(Span::from(fmt_num(stats.checkpoints.ai_lines_added as u64)).bold()),
+        ])
+        .block(Block::bordered().padding(Padding::horizontal(1))),
+        edits_area,
     );
 }
 
@@ -579,14 +528,13 @@ fn heatmap_char(value: u32, max: u32) -> &'static str {
     }
 }
 
-// ─── Models tab ──────────────────────────────────────────────────────────────
+// ─── Cost tab ────────────────────────────────────────────────────────────────
 //
 // Layout (top → bottom):
-//   [Spend summary: total cost + WoW delta]
-//   [Cache hit rate gauge]
-//   [Model table: Model | Sessions | Tokens | Cost | Cache hit]
+//   top half: [Spend summary] [Cache gauge] [Model table]
+//   bottom half: [Per-repo breakdown table]
 
-fn render_models(frame: &mut Frame, area: Rect, app: &AppState) {
+fn render_cost(frame: &mut Frame, area: Rect, app: &AppState) {
     let stats = &app.stats;
     let t = &stats.tokens;
     let has_token_data = t.input + t.output + t.cache_read + t.cache_creation > 0;
@@ -838,6 +786,60 @@ fn render_sessions(frame: &mut Frame, area: Rect, app: &AppState) {
         );
         return;
     }
+
+    // Summary header: aggregate stats across visible sessions.
+    let [summary_area, table_area] =
+        Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(inner);
+
+    let n = app.session_list.len();
+    let shipped = app.session_list.iter().filter(|r| r.shipped).count();
+    let shipped_pct = (shipped * 100).checked_div(n).unwrap_or(0);
+    let avg_cost = {
+        let with_cost: Vec<f64> = app
+            .session_list
+            .iter()
+            .filter_map(|r| r.estimated_cost_usd)
+            .filter(|&c| c > 0.0)
+            .collect();
+        if with_cost.is_empty() {
+            None
+        } else {
+            Some(with_cost.iter().sum::<f64>() / with_cost.len() as f64)
+        }
+    };
+    let avg_tokens = {
+        let with_tokens: Vec<u64> = app
+            .session_list
+            .iter()
+            .map(|r| r.total_tokens)
+            .filter(|&t| t > 0)
+            .collect();
+        if with_tokens.is_empty() {
+            None
+        } else {
+            Some(with_tokens.iter().sum::<u64>() / with_tokens.len() as u64)
+        }
+    };
+
+    let mut summary_spans = vec![
+        Span::from(fmt_num(n as u64)).bold(),
+        Span::from(" sessions  ·  ").dim(),
+        Span::from(format!("{}%", shipped_pct)).bold(),
+        Span::from(" shipped").dim(),
+    ];
+    if let Some(cost) = avg_cost {
+        summary_spans.push(Span::from("  ·  avg ").dim());
+        summary_spans.push(Span::from(format!("~${:.2}", cost)).bold());
+        summary_spans.push(Span::from("/session").dim());
+    }
+    if let Some(tokens) = avg_tokens {
+        summary_spans.push(Span::from("  ·  avg ").dim());
+        summary_spans.push(Span::from(fmt_num_tokens(tokens)).bold());
+        summary_spans.push(Span::from(" tokens").dim());
+    }
+    frame.render_widget(Paragraph::new(Line::from(summary_spans)), summary_area);
+
+    let inner = table_area;
 
     let header = Row::new(vec![
         format!("Time{}", sort_indicator(SessionSort::Time)),
