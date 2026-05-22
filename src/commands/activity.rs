@@ -75,12 +75,15 @@ pub fn handle_activity(args: &[String]) {
         }
     };
 
-    // Auto-detect which repo we're in (if any) to scope the stats.
+    // Auto-detect which repo we're in (if any).  Used for the header label and
+    // to decide whether to show the per-repo breakdown table.  Stats themselves
+    // are always global — events written before the repo_url column existed have
+    // NULL there, so filtering would silently drop all historical data.
     let current_repo = std::env::current_dir()
         .ok()
         .and_then(|cwd| resolve_repo_url_from_path(&cwd));
 
-    let stats = match compute_activity(since_ts, period_label, granularity, current_repo.as_deref())
+    let stats = match compute_activity(since_ts, period_label, granularity, None)
     {
         Ok(s) => s,
         Err(e) => {
