@@ -196,7 +196,8 @@ fn bucket_key(dt: &DateTime<Local>, granularity: BucketGranularity) -> (String, 
             // ISO week: key on Monday of the week.
             let weekday = dt.weekday().num_days_from_monday() as i64;
             let monday = dt.date_naive() - chrono::Duration::days(weekday);
-            let label = monday.format("%b %d").to_string();
+            let sunday = monday + chrono::Duration::days(6);
+            let label = format!("{} – {}", monday.format("%b %d"), sunday.format("%b %d"));
             let order = monday.num_days_from_ce() as i64;
             (label, order)
         }
@@ -247,7 +248,8 @@ fn fill_buckets(
             let today = now.date_naive();
             while monday <= today {
                 let order = monday.num_days_from_ce() as i64;
-                let label = monday.format("%b %d").to_string();
+                let sunday = monday + chrono::Duration::days(6);
+                let label = format!("{} – {}", monday.format("%b %d"), sunday.format("%b %d"));
                 let (ai, commits) = data_map
                     .remove(&order)
                     .map(|(_, ai, c)| (ai, c))

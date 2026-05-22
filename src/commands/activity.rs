@@ -149,29 +149,6 @@ fn print_terminal(stats: &LocalActivityStats) {
         );
     }
 
-    // --- Activity over time ---
-    if !stats.buckets.is_empty() {
-        println!();
-        println!("  {BOLD}Activity over time{RESET}");
-        let max_ai = stats.buckets.iter().map(|b| b.ai_lines).max().unwrap_or(1).max(1);
-        for bucket in &stats.buckets {
-            let filled = (bucket.ai_lines * BAR_WIDTH / max_ai).min(BAR_WIDTH);
-            let empty = BAR_WIDTH - filled;
-            let bar_str = format!("{}{}", "█".repeat(filled as usize), "░".repeat(empty as usize));
-            if bucket.ai_lines > 0 {
-                println!(
-                    "  {GRAY}{}{RESET}  {}  {GRAY}{} lines · {} commits{RESET}",
-                    bucket.label,
-                    bar_str,
-                    format_num(bucket.ai_lines),
-                    bucket.commit_count,
-                );
-            } else {
-                println!("  {GRAY}{}  {}{RESET}", bucket.label, bar_str);
-            }
-        }
-    }
-
     // --- Checkpoints section ---
     println!();
     println!(
@@ -224,6 +201,29 @@ fn print_terminal(stats: &LocalActivityStats) {
             .map(|(tool, count)| format!("{}: {}", tool, count))
             .collect();
         println!("  {GRAY}By tool: {}{RESET}", parts.join("  ·  "));
+    }
+
+    // --- Activity over time ---
+    if !stats.buckets.is_empty() {
+        println!();
+        println!("  {BOLD}Activity over time{RESET}");
+        let max_ai = stats.buckets.iter().map(|b| b.ai_lines).max().unwrap_or(1).max(1);
+        for bucket in &stats.buckets {
+            let filled = (bucket.ai_lines * BAR_WIDTH / max_ai).min(BAR_WIDTH);
+            let empty = BAR_WIDTH - filled;
+            let bar_str = format!("{}{}", "█".repeat(filled as usize), "░".repeat(empty as usize));
+            if bucket.ai_lines > 0 {
+                println!(
+                    "  {GRAY}{}{RESET}  {}  {GRAY}{} lines · {} commits{RESET}",
+                    bucket.label,
+                    bar_str,
+                    format_num(bucket.ai_lines),
+                    bucket.commit_count,
+                );
+            } else {
+                println!("  {GRAY}{}  {}{RESET}", bucket.label, bar_str);
+            }
+        }
     }
 
     // --- Time of day heatmap ---
