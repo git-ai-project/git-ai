@@ -1,9 +1,9 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
-import { exec, spawn } from "child_process";
+import { execFile, spawn } from "child_process";
 import { isVersionSatisfied } from "./utils/semver";
-import { getGitAiBinary } from "./utils/binary-path";
+import { getGitAiBinary, resolveGitAiBinary } from "./utils/binary-path";
 import { MIN_GIT_AI_VERSION, GIT_AI_INSTALL_DOCS_URL } from "./consts";
 import { getGitRepoRoot } from "./utils/git-api";
 import { shouldSkipLegacyCopilotHooks } from "./utils/vscode-hooks";
@@ -63,6 +63,11 @@ export class AIEditManager {
 
   public areLegacyCopilotHooksEnabled(): boolean {
     return this.legacyCopilotHooksEnabled;
+  }
+
+  public resetGitAiCheckCache(): void {
+    this.gitAiVersion = null;
+    this.hasShownGitAiErrorMessage = false;
   }
 
   private cleanupOldCheckpointEntries(): void {
@@ -493,8 +498,9 @@ export class AIEditManager {
       return true;
     }
     // TODO Consider only re-checking every X attempts
+    await resolveGitAiBinary();
     return new Promise((resolve) => {
-      exec("git-ai --version", (error, stdout, stderr) => {
+      execFile(getGitAiBinary(), ["--version"], (error, stdout, stderr) => {
         if (error) {
           if (!this.hasShownGitAiErrorMessage) {
             // Show startup notification

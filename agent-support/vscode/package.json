@@ -29,6 +29,12 @@
           "default": false,
           "description": "Enable notifications for AI and human edit detection."
         },
+        "gitai.binaryPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Path to the git-ai binary. Leave empty to use git-ai from PATH."
+        },
         "gitai.experiments.aiTabTracking": {
           "type": "boolean",
           "default": false,
