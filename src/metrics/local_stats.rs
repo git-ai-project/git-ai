@@ -30,6 +30,10 @@ pub struct BucketStats {
     pub label: String,
     pub ai_lines: u32,
     pub commit_count: u32,
+    /// Total git diff additions in this bucket (across all commits).
+    pub diff_added_lines: u32,
+    /// Lines attributed to AI or known-human in this bucket.
+    pub attributed_lines: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,8 +98,8 @@ pub fn compute_activity(
     let mut session_ids: HashSet<String> = HashSet::new();
     let mut session_tool_counts: HashMap<String, u32> = HashMap::new();
 
-    // bucket_key -> (ai_lines, commit_count)
-    let mut bucket_map: HashMap<String, (u32, u32)> = HashMap::new();
+    // bucket_key -> accumulated stats
+    let mut bucket_map: HashMap<String, BucketAccum> = HashMap::new();
     // bucket_key -> sort key (for ordering)
     let mut bucket_order: HashMap<String, i64> = HashMap::new();
 
@@ -109,7 +113,7 @@ pub fn compute_activity(
 
         match record.event_id {
             1 => {
-                let ai_lines_this = aggregate_committed(
+                let c = aggregate_committed(
                     &event,
                     &mut total_commits,
                     &mut total_ai_lines,
@@ -118,15 +122,23 @@ pub fn compute_activity(
                     &mut commit_tool_counts,
                 );
 
-                if ai_lines_this > 0 {
+                // Bucket every commit that added lines so coverage spans all
+                // committed code, not just AI commits.
+                if c.diff_added > 0 {
                     let local_dt = ts_to_local(record.ts);
-                    let hour = local_dt.hour() as usize;
-                    hourly[hour] += ai_lines_this;
+                    if c.ai_lines > 0 {
+                        hourly[local_dt.hour() as usize] += c.ai_lines;
+                    }
 
                     let (key, order_key) = bucket_key(&local_dt, granularity);
-                    let entry = bucket_map.entry(key.clone()).or_insert((0, 0));
-                    entry.0 += ai_lines_this;
-                    entry.1 += 1;
+                    let entry = bucket_map.entry(key.clone()).or_default();
+                    entry.ai_lines += c.ai_lines;
+                    // Count AI commits only, to match the AI-lines bar.
+                    if c.ai_lines > 0 {
+                        entry.commit_count += 1;
+                    }
+                    entry.diff_added += c.diff_added;
+                    entry.attributed += c.ai_lines + c.human_lines;
                     bucket_order.entry(key).or_insert(order_key);
                 }
             }
@@ -148,18 +160,14 @@ pub fn compute_activity(
     let mut session_by_tool: Vec<(String, u32)> = session_tool_counts.into_iter().collect();
     session_by_tool.sort_by_key(|&(_, count)| Reverse(count));
 
-    // Sort buckets chronologically using their order key.
-    let mut bucket_pairs: Vec<(String, i64, u32, u32)> = bucket_map
+    // Map by order key for fill_buckets to look up real data.
+    let bucket_by_order: HashMap<i64, BucketAccum> = bucket_map
         .into_iter()
-        .map(|(label, (ai, commits))| {
-            let order = bucket_order[&label];
-            (label, order, ai, commits)
-        })
+        .map(|(label, accum)| (bucket_order[&label], accum))
         .collect();
-    bucket_pairs.sort_by_key(|&(_, order, _, _)| order);
 
     // Fill in empty buckets between since_ts and now so the chart has no gaps.
-    let filled = fill_buckets(bucket_pairs, since_ts, granularity);
+    let filled = fill_buckets(bucket_by_order, since_ts, granularity);
 
     Ok(LocalActivityStats {
         period_label,
@@ -218,18 +226,20 @@ fn bucket_key(dt: &DateTime<Local>, granularity: BucketGranularity) -> (String, 
 
 /// Fill gaps between `since_ts` and today so charts have contiguous buckets.
 fn fill_buckets(
-    data: Vec<(String, i64, u32, u32)>,
+    mut data_map: HashMap<i64, BucketAccum>,
     since_ts: u32,
     granularity: BucketGranularity,
 ) -> Vec<BucketStats> {
-    // Build a map from order_key → (label, ai, commits) from real data.
-    let mut data_map: HashMap<i64, (String, u32, u32)> = data
-        .into_iter()
-        .map(|(label, order, ai, commits)| (order, (label, ai, commits)))
-        .collect();
-
     let now = Local::now();
     let since_dt = ts_to_local(since_ts);
+
+    let make = |label: String, accum: BucketAccum| BucketStats {
+        label,
+        ai_lines: accum.ai_lines,
+        commit_count: accum.commit_count,
+        diff_added_lines: accum.diff_added,
+        attributed_lines: accum.attributed,
+    };
 
     // Generate all expected bucket keys between since and now.
     let mut result = Vec::new();
@@ -240,11 +250,7 @@ fn fill_buckets(
             while day <= today {
                 let order = day.num_days_from_ce() as i64;
                 let label = day.format("%b %d").to_string();
-                let (ai, commits) = data_map
-                    .remove(&order)
-                    .map(|(_, ai, c)| (ai, c))
-                    .unwrap_or((0, 0));
-                result.push(BucketStats { label, ai_lines: ai, commit_count: commits });
+                result.push(make(label, data_map.remove(&order).unwrap_or_default()));
                 day = day.succ_opt().unwrap_or(today);
             }
         }
@@ -257,11 +263,7 @@ fn fill_buckets(
                 let order = monday.num_days_from_ce() as i64;
                 let sunday = monday + chrono::Duration::days(6);
                 let label = format!("{} – {}", monday.format("%b %d"), sunday.format("%b %d"));
-                let (ai, commits) = data_map
-                    .remove(&order)
-                    .map(|(_, ai, c)| (ai, c))
-                    .unwrap_or((0, 0));
-                result.push(BucketStats { label, ai_lines: ai, commit_count: commits });
+                result.push(make(label, data_map.remove(&order).unwrap_or_default()));
                 monday = monday
                     .checked_add_signed(chrono::Duration::weeks(1))
                     .unwrap_or(today);
@@ -276,11 +278,7 @@ fn fill_buckets(
                 let order = year as i64 * 12 + (month - 1) as i64;
                 let date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
                 let label = date.format("%b %Y").to_string();
-                let (ai, commits) = data_map
-                    .remove(&order)
-                    .map(|(_, ai, c)| (ai, c))
-                    .unwrap_or((0, 0));
-                result.push(BucketStats { label, ai_lines: ai, commit_count: commits });
+                result.push(make(label, data_map.remove(&order).unwrap_or_default()));
                 if year == now_year && month == now_month {
                     break;
                 }
@@ -296,7 +294,22 @@ fn fill_buckets(
     result
 }
 
-/// Returns the AI lines for this commit (0 if none).
+/// Per-bucket accumulator for the activity-over-time chart.
+#[derive(Debug, Default, Clone)]
+struct BucketAccum {
+    ai_lines: u32,
+    commit_count: u32,
+    diff_added: u32,
+    attributed: u32,
+}
+
+/// Per-commit contribution returned by `aggregate_committed` for bucketing.
+struct CommitContribution {
+    ai_lines: u32,
+    human_lines: u32,
+    diff_added: u32,
+}
+
 fn aggregate_committed(
     event: &MetricEvent,
     total_commits: &mut u32,
@@ -304,7 +317,7 @@ fn aggregate_committed(
     total_human_lines: &mut u32,
     total_diff_added: &mut u32,
     commit_tool_counts: &mut HashMap<String, u32>,
-) -> u32 {
+) -> CommitContribution {
     let human = sparse_get_u32(&event.values, committed_pos::HUMAN_ADDITIONS)
         .flatten()
         .unwrap_or(0);
@@ -321,9 +334,15 @@ fn aggregate_committed(
     *total_human_lines += human;
     *total_diff_added += diff_added;
 
+    let contribution = CommitContribution {
+        ai_lines: total_ai,
+        human_lines: human,
+        diff_added,
+    };
+
     // Only count the commit and accumulate AI lines when AI was involved.
     if total_ai == 0 {
-        return 0;
+        return contribution;
     }
 
     *total_commits += 1;
@@ -341,7 +360,7 @@ fn aggregate_committed(
         }
     }
 
-    total_ai
+    contribution
 }
 
 /// Format a "tool::model" pair into a readable "tool · model" label,
