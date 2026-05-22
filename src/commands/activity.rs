@@ -94,39 +94,45 @@ fn print_terminal(stats: &LocalActivityStats) {
         stats.period_label
     );
 
-    // --- Commits section ---
+    // --- Top bar: AI vs Human split ---
     println!();
-    println!(
-        "  {BOLD}Commits with AI{RESET}       {:>6}",
-        stats.commits.total
-    );
-
     let total_lines = stats.commits.ai_lines + stats.commits.human_lines;
     if let Some(ai_pct) = (stats.commits.ai_lines * 100).checked_div(total_lines) {
         let human_pct = 100 - ai_pct;
         println!(
-            "  AI lines added        {:>6}   {}  {:>3}%",
-            format_num(stats.commits.ai_lines),
+            "  {BOLD}AI{RESET}  {}  {:>3}%     {BOLD}Human{RESET}  {}  {:>3}%",
             bar(ai_pct, BAR_WIDTH),
             ai_pct,
-        );
-        println!(
-            "  Human lines added     {:>6}   {}  {:>3}%",
-            format_num(stats.commits.human_lines),
             bar(human_pct, BAR_WIDTH),
             human_pct,
         );
-    } else {
-        println!(
-            "  AI lines added        {:>6}",
-            format_num(stats.commits.ai_lines)
-        );
-        println!(
-            "  Human lines added     {:>6}",
-            format_num(stats.commits.human_lines)
-        );
     }
 
+    // --- AI section ---
+    println!();
+    println!("  {BOLD}AI{RESET}");
+    println!(
+        "    Sessions          {:>6}",
+        format_num(stats.sessions.total)
+    );
+    println!(
+        "    Commits           {:>6}",
+        format_num(stats.commits.total)
+    );
+    println!(
+        "    Lines committed   {:>6}",
+        format_num(stats.commits.ai_lines)
+    );
+    println!(
+        "    Edits             {:>6}",
+        format_num(stats.checkpoints.ai_lines_added)
+    );
+    if let Some(acceptance_pct) =
+        (stats.commits.ai_lines * 100).checked_div(stats.checkpoints.ai_lines_added)
+        && acceptance_pct <= 100
+    {
+        println!("    Acceptance rate   {:>5}%", acceptance_pct);
+    }
     if !stats.commits.by_tool.is_empty() {
         let parts: Vec<String> = stats
             .commits
@@ -134,74 +140,20 @@ fn print_terminal(stats: &LocalActivityStats) {
             .iter()
             .map(|(tool, count)| format!("{}: {}", tool, format_num(*count)))
             .collect();
-        println!("  {GRAY}By tool: {}{RESET}", parts.join("  ·  "));
+        println!("    {GRAY}{}{RESET}", parts.join("  ·  "));
     }
 
-    if let Some(acceptance_pct) =
-        (stats.commits.ai_lines * 100).checked_div(stats.checkpoints.ai_lines_added)
-        && acceptance_pct <= 100
-    {
-        println!(
-            "  AI acceptance rate    {:>6}   {}  {:>3}%",
-            "",
-            bar(acceptance_pct, BAR_WIDTH),
-            acceptance_pct,
-        );
-    }
-
-    // --- Checkpoints section ---
+    // --- Human section ---
     println!();
+    println!("  {BOLD}Human{RESET}");
     println!(
-        "  {BOLD}Checkpoints{RESET}           {:>6}",
-        format_num(stats.checkpoints.total)
+        "    Lines committed   {:>6}",
+        format_num(stats.commits.human_lines)
     );
-
-    let total_cp_lines = stats.checkpoints.ai_lines_added + stats.checkpoints.human_lines_added;
-    if let Some(ai_pct) = (stats.checkpoints.ai_lines_added * 100).checked_div(total_cp_lines) {
-        let human_pct = 100 - ai_pct;
-        println!(
-            "  AI edits              {:>6}   {}  {:>3}%",
-            format_num(stats.checkpoints.ai_lines_added),
-            bar(ai_pct, BAR_WIDTH),
-            ai_pct,
-        );
-        println!(
-            "  Human edits           {:>6}   {}  {:>3}%",
-            format_num(stats.checkpoints.human_lines_added),
-            bar(human_pct, BAR_WIDTH),
-            human_pct,
-        );
-    } else {
-        println!(
-            "  AI edits              {:>6}",
-            format_num(stats.checkpoints.ai_lines_added)
-        );
-        println!(
-            "  Human edits           {:>6}",
-            format_num(stats.checkpoints.human_lines_added)
-        );
-    }
     println!(
-        "  Files touched         {:>6}",
-        format_num(stats.checkpoints.files_edited)
+        "    Edits             {:>6}",
+        format_num(stats.checkpoints.human_lines_added)
     );
-
-    // --- Sessions section ---
-    println!();
-    println!(
-        "  {BOLD}Sessions{RESET}              {:>6}",
-        format_num(stats.sessions.total)
-    );
-
-    if !stats.sessions.by_tool.is_empty() {
-        let parts: Vec<String> = stats
-            .sessions
-            .by_tool
-            .iter()
-            .map(|(tool, count)| format!("{}: {}", tool, count))
-            .collect();
-        println!("  {GRAY}By tool: {}{RESET}", parts.join("  ·  "));
-    }
 
     // --- Activity over time ---
     if !stats.buckets.is_empty() {
@@ -232,7 +184,6 @@ fn print_terminal(stats: &LocalActivityStats) {
         println!("  {BOLD}Time of day{RESET} {GRAY}(AI lines committed){RESET}");
         let max_hour = stats.hourly.iter().copied().max().unwrap_or(1).max(1);
 
-        // Render two rows: sparkline + hour labels
         // Each slot is 3 chars: spark char + 2 spaces. Labels are left-padded to 3.
         let spark: String = stats
             .hourly
