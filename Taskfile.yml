@@ -102,6 +102,22 @@ tasks:
           TEST_FILTER: fuzz_
           NO_CAPTURE: "true"
 
+  test:fuzz:partial:
+    desc: Run partial staging fuzzer tests
+    cmds:
+      - task: test:base
+        vars:
+          GIT_AI_TEST_GIT_MODE: daemon
+          TEST_FILTER: fuzz_partial_stage_
+
+  test:fuzz:destructive:
+    desc: Run destructive ops fuzzer tests (resets, stash, checkouts)
+    cmds:
+      - task: test:base
+        vars:
+          GIT_AI_TEST_GIT_MODE: daemon
+          TEST_FILTER: fuzz_destructive_
+
   lint:
     desc: Run cargo check and clippy with warnings as errors
     cmds:
