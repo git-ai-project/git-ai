@@ -1867,6 +1867,448 @@ pub fn execute_double_commit_rapid(
     operation_log.push("double-commit-rapid: done".to_string());
 }
 
+/// Thrash operation: rapidly alternate between editing, committing, resetting,
+/// and re-editing on the same file. Creates maximum chaos for the daemon's
+/// working log management.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_thrash(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let thrash_cycles = rng.random_range(2..=5);
+    operation_log.push(format!("thrash: {} cycles starting", thrash_cycles));
+
+    for cycle in 0..thrash_cycles {
+        // Step 1: Make edits and checkpoint
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: if file_state.lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                EditStrategy::random_non_destructive(rng)
+            },
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+
+        // Step 2: Commit
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("thrash cycle {} commit", cycle))
+            .unwrap();
+
+        // Step 3: Immediately make more edits
+        let params2 = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: if file_state.lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                EditStrategy::random_non_destructive(rng)
+            },
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params2, rng, operation_log);
+
+        // Step 4: Sometimes discard, sometimes amend, sometimes commit fresh
+        match rng.random_range(0..3u32) {
+            0 => {
+                // Discard and reset
+                repo.git(&["checkout", "--", "."]).unwrap();
+                let path = repo.path().join(&file_state.filename);
+                if path.exists() {
+                    let content = fs::read_to_string(&path).unwrap();
+                    file_state.lines = reconstruct_lines_from_content(&content);
+                }
+                operation_log.push(format!("thrash cycle {}: discarded", cycle));
+            }
+            1 => {
+                // Amend into previous
+                repo.git(&["add", "-A"]).unwrap();
+                repo.git(&[
+                    "commit",
+                    "--amend",
+                    "-m",
+                    &format!("thrash cycle {} amended", cycle),
+                ])
+                .unwrap();
+                operation_log.push(format!("thrash cycle {}: amended", cycle));
+            }
+            _ => {
+                // Fresh commit
+                repo.git(&["add", "-A"]).unwrap();
+                repo.commit(&format!("thrash cycle {} extra commit", cycle))
+                    .unwrap();
+                operation_log.push(format!("thrash cycle {}: extra commit", cycle));
+            }
+        }
+    }
+
+    // Final state sync
+    let path = repo.path().join(&file_state.filename);
+    if path.exists() {
+        let content = fs::read_to_string(&path).unwrap();
+        file_state.lines = reconstruct_lines_from_content(&content);
+    }
+
+    operation_log.push("thrash: done".to_string());
+}
+
+/// Rebase-then-amend: rebase a branch, then immediately amend the rebased commits.
+/// This is one of the most pathological operations because it combines two
+/// history-rewriting operations back-to-back.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_rebase_then_amend(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let idx = registry.next_index();
+    let branch_name = format!("rebase-amend-{}", idx);
+    let main_branch = repo.current_branch();
+
+    operation_log.push(format!("rebase-then-amend: start branch={}", branch_name));
+
+    // Ensure clean state
+    let status = repo.git(&["status", "--porcelain"]).unwrap();
+    if !status.trim().is_empty() {
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit("pre-rebase-amend commit").unwrap();
+    }
+
+    // Create feature branch with appends
+    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+    let params_feature = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &params_feature,
+        rng,
+        operation_log,
+    );
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("rebase-amend feature commit").unwrap();
+
+    // Advance main with prepends
+    repo.git(&["checkout", &main_branch]).unwrap();
+    let main_content = fs::read_to_string(repo.path().join(&file_state.filename)).unwrap();
+    file_state.lines = reconstruct_lines_from_content(&main_content);
+
+    let params_main = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Prepend,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params_main, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("advance main for rebase-amend").unwrap();
+
+    // Rebase feature onto main
+    repo.git(&["checkout", &branch_name]).unwrap();
+    let rebase_result = repo.git(&["rebase", &main_branch]);
+    if rebase_result.is_err() {
+        repo.git(&["rebase", "--abort"]).ok();
+        repo.git(&["checkout", &main_branch]).unwrap();
+        repo.git(&["branch", "-D", &branch_name]).unwrap();
+        operation_log.push("rebase-then-amend: aborted (conflict)".to_string());
+        return;
+    }
+
+    // Now AMEND the rebased commit with new content
+    let params_amend = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &params_amend,
+        rng,
+        operation_log,
+    );
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&[
+        "commit",
+        "--amend",
+        "-m",
+        "rebase-amend: amended after rebase",
+    ])
+    .unwrap();
+
+    // Read actual state from disk (rebase + amend makes model complex)
+    let actual_content = fs::read_to_string(repo.path().join(&file_state.filename)).unwrap();
+    file_state.lines = reconstruct_lines_from_content(&actual_content);
+
+    // Merge back to main
+    repo.git(&["checkout", &main_branch]).unwrap();
+    repo.git(&["merge", &branch_name]).unwrap();
+    repo.git(&["branch", "-d", &branch_name]).unwrap();
+
+    // Re-sync from disk
+    let final_content = fs::read_to_string(repo.path().join(&file_state.filename)).unwrap();
+    file_state.lines = reconstruct_lines_from_content(&final_content);
+
+    operation_log.push("rebase-then-amend: done".to_string());
+}
+
+/// Checkpoint on non-existent file: fire a checkpoint on a file that doesn't
+/// exist yet, then create it. Tests daemon resilience to out-of-order operations.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_checkpoint_nonexistent(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let idx = registry.next_index();
+    let ghost_filename = format!("ghost_{}.txt", idx);
+
+    operation_log.push(format!(
+        "checkpoint-nonexistent: firing checkpoint on '{}'",
+        ghost_filename
+    ));
+
+    // Fire checkpoint on a file that doesn't exist
+    repo.git_ai(&["checkpoint", "human", &ghost_filename]).ok();
+    repo.git_ai(&["checkpoint", "mock_ai", &ghost_filename])
+        .ok();
+
+    // Now actually create the file with real content
+    let mut ghost_state = FileState::new(&ghost_filename);
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        &mut ghost_state,
+        registry,
+        &params,
+        rng,
+        operation_log,
+    );
+
+    // Also make an edit to the main file
+    let main_params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &main_params, rng, operation_log);
+
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("commit after ghost checkpoint").unwrap();
+
+    operation_log.push("checkpoint-nonexistent: done".to_string());
+}
+
+/// Interleaved branch commits: create two branches from the same point,
+/// make different edits on each, merge one, then merge the other (non-ff).
+/// Tests attribution through merge commits with actual merge parents.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_two_branch_merge(
+    repo: &TestRepo,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+    seed: u64,
+) {
+    let idx = registry.next_index();
+    let branch_a = format!("merge-a-{}", idx);
+    let branch_b = format!("merge-b-{}", idx + 1);
+    let main_branch = repo.current_branch();
+
+    operation_log.push(format!(
+        "two-branch-merge: branches={}, {}",
+        branch_a, branch_b
+    ));
+
+    // Ensure clean state
+    let status = repo.git(&["status", "--porcelain"]).unwrap();
+    if !status.trim().is_empty() {
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit("pre-two-branch commit").unwrap();
+    }
+
+    // Create two separate files, one per branch, to avoid conflicts
+    let file_a_name = format!("branch_a_{}.txt", idx);
+    let file_b_name = format!("branch_b_{}.txt", idx);
+
+    // Branch A: create file_a with AI edits
+    repo.git(&["checkout", "-b", &branch_a]).unwrap();
+    let mut file_a = FileState::new(&file_a_name);
+    let params_a = EditParams {
+        attribution: Attribution::Ai,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, &mut file_a, registry, &params_a, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("branch A commit").unwrap();
+
+    // Back to main, create branch B
+    repo.git(&["checkout", &main_branch]).unwrap();
+    repo.git(&["checkout", "-b", &branch_b]).unwrap();
+    let mut file_b = FileState::new(&file_b_name);
+    let params_b = EditParams {
+        attribution: Attribution::KnownHuman,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, &mut file_b, registry, &params_b, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("branch B commit").unwrap();
+
+    // Back to main, merge A (fast-forward)
+    repo.git(&["checkout", &main_branch]).unwrap();
+    repo.git(&["merge", &branch_a]).unwrap();
+
+    // Now merge B (creates a real merge commit since main advanced)
+    let merge_result = repo.git(&["merge", &branch_b, "-m", "merge branch B"]);
+    if merge_result.is_err() {
+        // Conflict: abort
+        repo.git(&["merge", "--abort"]).ok();
+        repo.git(&["branch", "-D", &branch_a]).ok();
+        repo.git(&["branch", "-D", &branch_b]).ok();
+        operation_log.push("two-branch-merge: conflict, aborted".to_string());
+        return;
+    }
+
+    // Verify both files
+    registry.verify_blame(repo, &file_a_name, &file_a.lines, operation_log, seed);
+    registry.verify_blame(repo, &file_b_name, &file_b.lines, operation_log, seed);
+
+    // Cleanup
+    repo.git(&["branch", "-d", &branch_a]).ok();
+    repo.git(&["branch", "-d", &branch_b]).ok();
+
+    operation_log.push("two-branch-merge: done".to_string());
+}
+
+/// Rapid successive amends with increasing file size: start with 1 line,
+/// amend to 2, amend to 4, amend to 8... doubling each time.
+/// Stresses the daemon's working log diff computation on growing files.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_exponential_amend(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let steps = rng.random_range(3..=5);
+    operation_log.push(format!("exponential-amend: {} doubling steps", steps));
+
+    // Initial commit with 1 line
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: 1,
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("exponential amend base").unwrap();
+
+    // Each step: overwrite with double the lines, then amend
+    let mut size = 2;
+    for _ in 0..steps {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::OverwriteAll,
+            line_count: size,
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.git(&[
+            "commit",
+            "--amend",
+            "-m",
+            &format!("exponential amend size={}", size),
+        ])
+        .unwrap();
+        size = (size * 2).min(32); // Cap at 32 to avoid excessive test time
+    }
+
+    operation_log.push(format!(
+        "exponential-amend: done (final size={})",
+        file_state.lines.len()
+    ));
+}
+
+/// Edit the same file from two "sessions" (AI and human) in rapid alternation
+/// without any commits in between, then commit once. Each session checkpoints
+/// after its edit. Tests that the daemon correctly interleaves attributions.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_session_interleave(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let interleave_count = rng.random_range(4..=10);
+    operation_log.push(format!(
+        "session-interleave: {} alternating edits",
+        interleave_count
+    ));
+
+    for i in 0..interleave_count {
+        let attr = if i % 2 == 0 {
+            Attribution::Ai
+        } else {
+            Attribution::KnownHuman
+        };
+        let strategy = if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            // Mix of appends and prepends for maximum interleaving
+            match i % 4 {
+                0 => EditStrategy::Append,
+                1 => EditStrategy::Prepend,
+                2 => EditStrategy::InsertRandom,
+                _ => EditStrategy::Append,
+            }
+        };
+        let params = EditParams {
+            attribution: attr,
+            strategy,
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    }
+
+    // Single commit after all the interleaved edits
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("commit after session interleave").unwrap();
+
+    operation_log.push(format!(
+        "session-interleave: done ({} lines)",
+        file_state.lines.len()
+    ));
+}
+
 /// Reconstruct the char-per-line model from actual file content on disk.
 pub fn reconstruct_lines_from_content(content: &str) -> Vec<char> {
     content

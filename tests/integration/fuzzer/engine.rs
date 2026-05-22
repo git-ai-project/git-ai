@@ -10,15 +10,17 @@ use super::generators::{
 use super::operations::{
     EditParams, FileState, execute_alternating_amend, execute_amend_attribution_flip,
     execute_amend_chain, execute_branch_switch_dirty, execute_checkout_discard,
-    execute_checkpoint_then_overwrite, execute_commit, execute_concurrent_file_creation,
-    execute_delete_and_recreate, execute_double_commit_rapid, execute_edit_and_checkpoint,
-    execute_empty_commit_interleave, execute_ff_merge, execute_file_rename, execute_hard_reset,
-    execute_interleaved_multi_file, execute_interleaved_partial_commits, execute_mixed_reset,
-    execute_move_to_subdir, execute_multi_commit_rebase, execute_orphaned_checkpoints,
-    execute_partial_stage_commit, execute_rapid_checkpoint_burst, execute_rebase_same_file,
-    execute_reset_and_reedit, execute_selective_file_commit, execute_soft_reset_recommit,
-    execute_squash_partial_stage, execute_squash_same_file, execute_stash_pathspec,
-    execute_stash_pop_cycle, read_file_state_from_disk,
+    execute_checkpoint_nonexistent, execute_checkpoint_then_overwrite, execute_commit,
+    execute_concurrent_file_creation, execute_delete_and_recreate, execute_double_commit_rapid,
+    execute_edit_and_checkpoint, execute_empty_commit_interleave, execute_exponential_amend,
+    execute_ff_merge, execute_file_rename, execute_hard_reset, execute_interleaved_multi_file,
+    execute_interleaved_partial_commits, execute_mixed_reset, execute_move_to_subdir,
+    execute_multi_commit_rebase, execute_orphaned_checkpoints, execute_partial_stage_commit,
+    execute_rapid_checkpoint_burst, execute_rebase_same_file, execute_rebase_then_amend,
+    execute_reset_and_reedit, execute_selective_file_commit, execute_session_interleave,
+    execute_soft_reset_recommit, execute_squash_partial_stage, execute_squash_same_file,
+    execute_stash_pathspec, execute_stash_pop_cycle, execute_thrash, execute_two_branch_merge,
+    read_file_state_from_disk,
 };
 use super::oracle::CharRegistry;
 
@@ -694,6 +696,73 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 }
                 StressOp::MultiCommitRebase => {
                     execute_multi_commit_rebase(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                StressOp::Thrash => {
+                    execute_thrash(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    let status = repo.git(&["status", "--porcelain"]).unwrap();
+                    if status.trim().is_empty() && !file_state.lines.is_empty() {
+                        verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    }
+                }
+                StressOp::RebaseThenAmend => {
+                    execute_rebase_then_amend(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                StressOp::CheckpointNonexistent => {
+                    execute_checkpoint_nonexistent(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                StressOp::TwoBranchMerge => {
+                    execute_two_branch_merge(
+                        &repo,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                StressOp::ExponentialAmend => {
+                    execute_exponential_amend(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                StressOp::SessionInterleave => {
+                    execute_session_interleave(
                         &repo,
                         &mut file_state,
                         &mut registry,

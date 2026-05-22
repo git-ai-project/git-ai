@@ -65,6 +65,12 @@ pub enum StressOp {
     AlternatingAmend,
     AmendAttributionFlip,
     MultiCommitRebase,
+    Thrash,
+    RebaseThenAmend,
+    CheckpointNonexistent,
+    TwoBranchMerge,
+    ExponentialAmend,
+    SessionInterleave,
 }
 
 impl EditStrategy {
@@ -161,11 +167,17 @@ pub fn gen_file_op(rng: &mut impl Rng) -> FileOp {
 
 /// Generate a random stress operation.
 pub fn gen_stress_op(rng: &mut impl Rng) -> StressOp {
-    match rng.random_range(0..5u32) {
+    match rng.random_range(0..11u32) {
         0 => StressOp::RapidCheckpointBurst,
         1 => StressOp::DoubleCommitRapid,
         2 => StressOp::AlternatingAmend,
         3 => StressOp::AmendAttributionFlip,
-        _ => StressOp::MultiCommitRebase,
+        4 => StressOp::MultiCommitRebase,
+        5 => StressOp::Thrash,
+        6 => StressOp::RebaseThenAmend,
+        7 => StressOp::CheckpointNonexistent,
+        8 => StressOp::TwoBranchMerge,
+        9 => StressOp::ExponentialAmend,
+        _ => StressOp::SessionInterleave,
     }
 }
