@@ -37,6 +37,7 @@ pub enum DestructiveOp {
     CheckpointOverwrite,
     OrphanedCheckpoints,
     EmptyCommitInterleave,
+    StashDuringWork,
 }
 
 /// Partial staging strategies.
@@ -71,6 +72,25 @@ pub enum StressOp {
     TwoBranchMerge,
     ExponentialAmend,
     SessionInterleave,
+    CrossFileCheckpointRace,
+    WhitespaceNoise,
+    AmendResetCycle,
+    PartialThenAmend,
+    CheckpointStorm,
+    AlternatingAmendStorm,
+    MultiSquash,
+}
+
+/// Combined/extreme operations that test multiple git features simultaneously.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombinedOp {
+    CherryPickConflict,
+    RapidBranchMerge,
+    RebaseCherryPickCombo,
+    ResetEditRecommit,
+    PartialAmendFlip,
+    DiscardThenReedit,
+    CreateDeleteBatch,
 }
 
 impl EditStrategy {
@@ -130,7 +150,7 @@ pub fn gen_rewrite_op(rng: &mut impl Rng) -> RewriteOp {
 
 /// Generate a random destructive operation.
 pub fn gen_destructive_op(rng: &mut impl Rng) -> DestructiveOp {
-    match rng.random_range(0..11u32) {
+    match rng.random_range(0..12u32) {
         0 => DestructiveOp::HardReset,
         1 => DestructiveOp::SoftResetRecommit,
         2 => DestructiveOp::MixedReset,
@@ -141,7 +161,8 @@ pub fn gen_destructive_op(rng: &mut impl Rng) -> DestructiveOp {
         7 => DestructiveOp::ResetAndReedit,
         8 => DestructiveOp::CheckpointOverwrite,
         9 => DestructiveOp::OrphanedCheckpoints,
-        _ => DestructiveOp::EmptyCommitInterleave,
+        10 => DestructiveOp::EmptyCommitInterleave,
+        _ => DestructiveOp::StashDuringWork,
     }
 }
 
@@ -167,7 +188,7 @@ pub fn gen_file_op(rng: &mut impl Rng) -> FileOp {
 
 /// Generate a random stress operation.
 pub fn gen_stress_op(rng: &mut impl Rng) -> StressOp {
-    match rng.random_range(0..11u32) {
+    match rng.random_range(0..18u32) {
         0 => StressOp::RapidCheckpointBurst,
         1 => StressOp::DoubleCommitRapid,
         2 => StressOp::AlternatingAmend,
@@ -178,6 +199,26 @@ pub fn gen_stress_op(rng: &mut impl Rng) -> StressOp {
         7 => StressOp::CheckpointNonexistent,
         8 => StressOp::TwoBranchMerge,
         9 => StressOp::ExponentialAmend,
-        _ => StressOp::SessionInterleave,
+        10 => StressOp::SessionInterleave,
+        11 => StressOp::CrossFileCheckpointRace,
+        12 => StressOp::WhitespaceNoise,
+        13 => StressOp::AmendResetCycle,
+        14 => StressOp::PartialThenAmend,
+        15 => StressOp::CheckpointStorm,
+        16 => StressOp::AlternatingAmendStorm,
+        _ => StressOp::MultiSquash,
+    }
+}
+
+/// Generate a random combined operation.
+pub fn gen_combined_op(rng: &mut impl Rng) -> CombinedOp {
+    match rng.random_range(0..7u32) {
+        0 => CombinedOp::CherryPickConflict,
+        1 => CombinedOp::RapidBranchMerge,
+        2 => CombinedOp::RebaseCherryPickCombo,
+        3 => CombinedOp::ResetEditRecommit,
+        4 => CombinedOp::PartialAmendFlip,
+        5 => CombinedOp::DiscardThenReedit,
+        _ => CombinedOp::CreateDeleteBatch,
     }
 }
