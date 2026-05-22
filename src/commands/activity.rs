@@ -76,9 +76,9 @@ fn print_help() {
     eprintln!("Usage: git-ai activity [options]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --period <1d|3d|7d|30d|all>   Time window (default: 30d)");
-    eprintln!("  --json                          Output as JSON");
-    eprintln!("  --help                          Show this help");
+    eprintln!("  --period <1d|3d|7d|30d|60d|all>   Time window (default: 30d)");
+    eprintln!("  --json                            Output as JSON");
+    eprintln!("  --help                            Show this help");
     eprintln!();
     eprintln!("Statistics are sourced from locally recorded metric events.");
     eprintln!("Events accumulate over time and are never deleted from local storage.");
