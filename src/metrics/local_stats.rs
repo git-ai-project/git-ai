@@ -88,8 +88,12 @@ pub struct CommitSummary {
     /// measure attribution coverage: lines not attributed to AI or known-human
     /// are "untracked" holes in the data.
     pub diff_added_lines: u32,
-    /// Per-tool AI line counts, sorted descending. Tool name only (strips "::model" suffix).
+    /// Per-tool AI line counts (tool · model label), sorted descending.
     pub by_tool: Vec<(String, u32)>,
+    /// Per-tool acceptance rate: committed AI lines / checkpoint AI lines (0–100).
+    /// Only includes tools where both sides have data and the rate is ≤ 100%.
+    /// Sorted by tool name.
+    pub acceptance_by_tool: Vec<(String, u32)>,
 }
 
 #[derive(Debug, Serialize)]
@@ -148,6 +152,10 @@ pub fn compute_activity(
     let mut ai_lines_added = 0u32;
     let mut human_lines_added = 0u32;
     let mut files_edited: HashSet<String> = HashSet::new();
+    // Checkpoint AI lines keyed by plain tool name, for per-tool acceptance rate.
+    let mut checkpoint_ai_by_tool: HashMap<String, u32> = HashMap::new();
+    // Committed AI lines keyed by plain tool name (extracted from tool::model pairs).
+    let mut committed_ai_by_plain_tool: HashMap<String, u32> = HashMap::new();
 
     let mut session_ids: HashSet<String> = HashSet::new();
     let mut session_tool_counts: HashMap<String, u32> = HashMap::new();
@@ -193,6 +201,24 @@ pub fn compute_activity(
                     &mut commit_tool_counts,
                 );
 
+                // Track committed AI lines per plain tool for acceptance rate.
+                if c.ai_lines > 0 {
+                    let pairs = sparse_get_vec_string(&event.values, committed_pos::TOOL_MODEL_PAIRS)
+                        .flatten()
+                        .unwrap_or_default();
+                    let ai_vecs = sparse_get_vec_u32(&event.values, committed_pos::AI_ADDITIONS)
+                        .flatten()
+                        .unwrap_or_default();
+                    for (i, pair) in pairs.iter().enumerate().skip(1) {
+                        let tool = pair.split_once("::").map(|(t, _)| t).unwrap_or(pair);
+                        let ai_for_tool = ai_vecs.get(i).copied().unwrap_or(0);
+                        if ai_for_tool > 0 {
+                            *committed_ai_by_plain_tool.entry(tool.to_string()).or_insert(0) +=
+                                ai_for_tool;
+                        }
+                    }
+                }
+
                 // Bucket every commit that added lines so coverage spans all
                 // committed code, not just AI commits.
                 if c.diff_added > 0 {
@@ -221,6 +247,7 @@ pub fn compute_activity(
                 &mut ai_lines_added,
                 &mut human_lines_added,
                 &mut files_edited,
+                &mut checkpoint_ai_by_tool,
             ),
             5 => {
                 aggregate_session(&event, &mut session_ids, &mut session_tool_counts);
@@ -262,6 +289,17 @@ pub fn compute_activity(
         }
     }
 
+    // Per-tool acceptance rate: committed AI lines / checkpoint AI lines.
+    let mut acceptance_by_tool: Vec<(String, u32)> = committed_ai_by_plain_tool
+        .iter()
+        .filter_map(|(tool, &committed)| {
+            let checkpoint = *checkpoint_ai_by_tool.get(tool)?;
+            let pct = (committed * 100).checked_div(checkpoint)?;
+            if pct <= 100 { Some((tool.clone(), pct)) } else { None }
+        })
+        .collect();
+    acceptance_by_tool.sort_by(|(a, _), (b, _)| a.cmp(b));
+
     let mut commit_by_tool: Vec<(String, u32)> = commit_tool_counts.into_iter().collect();
     commit_by_tool.sort_by_key(|&(_, count)| Reverse(count));
 
@@ -291,6 +329,7 @@ pub fn compute_activity(
             human_lines: total_human_lines,
             diff_added_lines: total_diff_added,
             by_tool: commit_by_tool,
+            acceptance_by_tool,
         },
         checkpoints: CheckpointSummary {
             total: total_checkpoints,
@@ -699,6 +738,7 @@ fn aggregate_checkpoint(
     ai_lines_added: &mut u32,
     human_lines_added: &mut u32,
     files_edited: &mut HashSet<String>,
+    checkpoint_ai_by_tool: &mut HashMap<String, u32>,
 ) {
     *total_checkpoints += 1;
 
@@ -717,7 +757,15 @@ fn aggregate_checkpoint(
     }
 
     match kind.as_str() {
-        "ai_agent" | "ai_tab" => *ai_lines_added += lines_added,
+        "ai_agent" | "ai_tab" => {
+            *ai_lines_added += lines_added;
+            if lines_added > 0 {
+                let tool = sparse_get_string(&event.attrs, attr_pos::TOOL)
+                    .flatten()
+                    .unwrap_or_else(|| "unknown".to_string());
+                *checkpoint_ai_by_tool.entry(tool).or_insert(0) += lines_added;
+            }
+        }
         "known_human" => *human_lines_added += lines_added,
         _ => {}
     }
