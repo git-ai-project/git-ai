@@ -137,6 +137,18 @@ fn print_terminal(stats: &LocalActivityStats) {
         println!("  {GRAY}By tool: {}{RESET}", parts.join("  ·  "));
     }
 
+    if let Some(acceptance_pct) =
+        (stats.commits.ai_lines * 100).checked_div(stats.checkpoints.ai_lines_added)
+        && acceptance_pct <= 100
+    {
+        println!(
+            "  AI acceptance rate    {:>6}   {}  {:>3}%",
+            "",
+            bar(acceptance_pct, BAR_WIDTH),
+            acceptance_pct,
+        );
+    }
+
     // --- Checkpoints section ---
     println!();
     println!(
