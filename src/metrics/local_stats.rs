@@ -310,7 +310,7 @@ pub fn compute_activity(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as u32;
-    let tokens = build_token_summary(message_usage, codex_sessions, now_ts);
+    let tokens = build_token_summary(message_usage, codex_sessions, now_ts, since_ts);
 
     // Map by order key for fill_buckets to look up real data.
     let bucket_by_order: HashMap<i64, BucketAccum> = bucket_map
@@ -442,10 +442,15 @@ fn build_token_summary(
     message_usage: HashMap<String, (String, TokenAccum, u32)>,
     codex_sessions: HashMap<String, CodexSessionAccum>,
     now_ts: u32,
+    since_ts: u32,
 ) -> TokenSummary {
     // Week-over-week split: "this week" = last 7 days, "last week" = 7–14 days ago.
+    // Only meaningful when the query window covers at least 14 days; otherwise
+    // last-week events were never fetched and last_week_cost would be 0 by
+    // omission rather than by fact.
     let this_week_start = now_ts.saturating_sub(7 * 24 * 3600);
     let last_week_start = now_ts.saturating_sub(14 * 24 * 3600);
+    let wow_eligible = since_ts <= last_week_start;
 
     let mut this_week_msgs: Vec<(String, TokenAccum)> = Vec::new();
     let mut last_week_msgs: Vec<(String, TokenAccum)> = Vec::new();
@@ -499,7 +504,7 @@ fn build_token_summary(
     let last_week_cost =
         cost_for_message_slice(last_week_msgs.into_iter().chain(last_week_codex));
 
-    let wow_spend = if this_week_cost > 0.0 || last_week_cost > 0.0 {
+    let wow_spend = if wow_eligible && (this_week_cost > 0.0 || last_week_cost > 0.0) {
         let change_pct = if last_week_cost > 0.0 {
             (this_week_cost - last_week_cost) / last_week_cost * 100.0
         } else {
