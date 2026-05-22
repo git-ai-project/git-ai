@@ -5502,9 +5502,8 @@ impl ActorDaemonCoordinator {
                     } => {
                         let repo = find_repository_in_path(&worktree)?;
                         match kind {
-                            crate::daemon::domain::StashOpKind::Push => {
-                                // For push, resolve stash SHA from ref_changes (new value)
-                                // or git rev-parse refs/stash.
+                            crate::daemon::domain::StashOpKind::Push
+                            | crate::daemon::domain::StashOpKind::Unknown => {
                                 let resolved_stash = cmd
                                     .ref_changes
                                     .iter()
@@ -5513,49 +5512,14 @@ impl ActorDaemonCoordinator {
                                     .filter(|s| {
                                         !s.is_empty()
                                             && *s != "0000000000000000000000000000000000000000"
-                                    })
-                                    .map(String::from)
-                                    .or_else(|| {
-                                        let mut args = repo.global_args_for_exec();
-                                        args.extend([
-                                            "rev-parse".to_string(),
-                                            "refs/stash".to_string(),
-                                        ]);
-                                        crate::git::repository::exec_git_allow_nonzero(&args)
-                                            .ok()
-                                            .filter(|o| o.status.success())
-                                            .map(|o| {
-                                                String::from_utf8_lossy(&o.stdout)
-                                                    .trim()
-                                                    .to_string()
-                                            })
-                                            .filter(|s| !s.is_empty())
                                     });
-                                if let Some(stash_sha) = resolved_stash.as_deref() {
-                                    // Resolve head from stash commit's parent (most reliable)
-                                    // or fall back to semantic head / rev-parse HEAD.
+                                if let Some(stash_sha) = resolved_stash {
                                     let resolved_head = repo
                                         .find_commit(stash_sha.to_string())
                                         .ok()
                                         .and_then(|c| c.parent(0).ok())
                                         .map(|p| p.id().to_string())
-                                        .or_else(|| head.clone())
-                                        .or_else(|| {
-                                            let mut args = repo.global_args_for_exec();
-                                            args.extend([
-                                                "rev-parse".to_string(),
-                                                "HEAD".to_string(),
-                                            ]);
-                                            crate::git::repository::exec_git_allow_nonzero(&args)
-                                                .ok()
-                                                .filter(|o| o.status.success())
-                                                .map(|o| {
-                                                    String::from_utf8_lossy(&o.stdout)
-                                                        .trim()
-                                                        .to_string()
-                                                })
-                                                .filter(|s| !s.is_empty())
-                                        });
+                                        .or_else(|| head.clone());
                                     if let Some(head_sha) = resolved_head.as_deref() {
                                         let pathspecs = Self::stash_pathspecs_from_command(cmd);
                                         let _ =
