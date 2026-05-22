@@ -10,7 +10,7 @@ mod oracle;
 use engine::{FuzzerConfig, run_fuzzer};
 
 // =============================================================================
-// Fixed-seed tests (50 ops each, fully pathological)
+// Fixed-seed standard tests (50 ops, all operation types mixed)
 // =============================================================================
 
 #[test]
@@ -78,7 +78,7 @@ fn fuzz_random_seed() {
 }
 
 // =============================================================================
-// Rewrite-heavy tests (40 ops, 60% rewrite ratio)
+// Rewrite-heavy tests (40 ops, 50% rewrite ratio)
 // =============================================================================
 
 #[test]
@@ -107,36 +107,36 @@ fn fuzz_rewrite_heavy_31415() {
 }
 
 // =============================================================================
-// Checkpoint-heavy tests (100 ops, up to 8 edits per commit)
+// Checkpoint-heavy tests (80 ops, 40% stress ratio)
 // =============================================================================
 
 #[test]
 fn fuzz_checkpoint_heavy_0() {
-    run_fuzzer(FuzzerConfig::checkpoint_heavy(0, 100));
+    run_fuzzer(FuzzerConfig::checkpoint_heavy(0, 80));
 }
 
 #[test]
 fn fuzz_checkpoint_heavy_1() {
-    run_fuzzer(FuzzerConfig::checkpoint_heavy(1, 100));
+    run_fuzzer(FuzzerConfig::checkpoint_heavy(1, 80));
 }
 
 #[test]
 fn fuzz_checkpoint_heavy_2() {
-    run_fuzzer(FuzzerConfig::checkpoint_heavy(2, 100));
+    run_fuzzer(FuzzerConfig::checkpoint_heavy(2, 80));
 }
 
 #[test]
 fn fuzz_checkpoint_heavy_55() {
-    run_fuzzer(FuzzerConfig::checkpoint_heavy(55, 100));
+    run_fuzzer(FuzzerConfig::checkpoint_heavy(55, 80));
 }
 
 #[test]
 fn fuzz_checkpoint_heavy_999() {
-    run_fuzzer(FuzzerConfig::checkpoint_heavy(999, 100));
+    run_fuzzer(FuzzerConfig::checkpoint_heavy(999, 80));
 }
 
 // =============================================================================
-// Partial staging tests (60% partial stage ratio — extremely pathological)
+// Partial staging tests (60% partial stage ratio)
 // =============================================================================
 
 #[test]
@@ -165,7 +165,7 @@ fn fuzz_partial_stage_99() {
 }
 
 // =============================================================================
-// Destructive-heavy tests (50% destructive ops — resets, stash, checkouts)
+// Destructive-heavy tests (45% destructive ops)
 // =============================================================================
 
 #[test]
@@ -191,4 +191,116 @@ fn fuzz_destructive_42() {
 #[test]
 fn fuzz_destructive_99() {
     run_fuzzer(FuzzerConfig::destructive_heavy(99, 40));
+}
+
+// =============================================================================
+// File operations tests (45% file ops — renames, deletes, subdirs, concurrent)
+// =============================================================================
+
+#[test]
+fn fuzz_file_ops_0() {
+    run_fuzzer(FuzzerConfig::file_ops_heavy(0, 30));
+}
+
+#[test]
+fn fuzz_file_ops_1() {
+    run_fuzzer(FuzzerConfig::file_ops_heavy(1, 30));
+}
+
+#[test]
+fn fuzz_file_ops_2() {
+    run_fuzzer(FuzzerConfig::file_ops_heavy(2, 30));
+}
+
+#[test]
+fn fuzz_file_ops_42() {
+    run_fuzzer(FuzzerConfig::file_ops_heavy(42, 30));
+}
+
+#[test]
+fn fuzz_file_ops_99() {
+    run_fuzzer(FuzzerConfig::file_ops_heavy(99, 30));
+}
+
+// =============================================================================
+// Stress tests (55% stress ops — rapid bursts, double commits, alternating amends)
+// =============================================================================
+
+#[test]
+fn fuzz_stress_0() {
+    run_fuzzer(FuzzerConfig::stress_heavy(0, 40));
+}
+
+#[test]
+fn fuzz_stress_1() {
+    run_fuzzer(FuzzerConfig::stress_heavy(1, 40));
+}
+
+#[test]
+fn fuzz_stress_2() {
+    run_fuzzer(FuzzerConfig::stress_heavy(2, 40));
+}
+
+#[test]
+fn fuzz_stress_42() {
+    run_fuzzer(FuzzerConfig::stress_heavy(42, 40));
+}
+
+#[test]
+fn fuzz_stress_99() {
+    run_fuzzer(FuzzerConfig::stress_heavy(99, 40));
+}
+
+// =============================================================================
+// Chaos tests (equal distribution across ALL operation types — max pathological)
+// =============================================================================
+
+#[test]
+fn fuzz_chaos_0() {
+    run_fuzzer(FuzzerConfig::chaos(0, 60));
+}
+
+#[test]
+fn fuzz_chaos_1() {
+    run_fuzzer(FuzzerConfig::chaos(1, 60));
+}
+
+#[test]
+fn fuzz_chaos_2() {
+    run_fuzzer(FuzzerConfig::chaos(2, 60));
+}
+
+#[test]
+fn fuzz_chaos_42() {
+    run_fuzzer(FuzzerConfig::chaos(42, 60));
+}
+
+#[test]
+fn fuzz_chaos_99() {
+    run_fuzzer(FuzzerConfig::chaos(99, 60));
+}
+
+#[test]
+fn fuzz_chaos_1337() {
+    run_fuzzer(FuzzerConfig::chaos(1337, 60));
+}
+
+#[test]
+fn fuzz_chaos_31415() {
+    run_fuzzer(FuzzerConfig::chaos(31415, 60));
+}
+
+#[test]
+fn fuzz_chaos_65535() {
+    run_fuzzer(FuzzerConfig::chaos(65535, 60));
+}
+
+#[test]
+fn fuzz_chaos_random() {
+    let seed: u64 = rand::random_range(0..u64::MAX);
+    eprintln!(
+        "[fuzzer] CHAOS RANDOM SEED: {} — use this to reproduce failures",
+        seed
+    );
+    run_fuzzer(FuzzerConfig::chaos(seed, 80));
 }
