@@ -98,6 +98,14 @@ pub enum CombinedOp {
     AmendWithDeletion,
     RecommitLoop,
     SelectiveMultiFile,
+    InitialCarryover,
+    MergeConflictResolve,
+    DoubleCheckpointRace,
+    HunkPartialStage,
+    RenameDuringEdit,
+    NoopOverwrite,
+    ConcurrentSessions,
+    AmendShrink,
 }
 
 impl EditStrategy {
@@ -219,7 +227,7 @@ pub fn gen_stress_op(rng: &mut impl Rng) -> StressOp {
 
 /// Generate a random combined operation.
 pub fn gen_combined_op(rng: &mut impl Rng) -> CombinedOp {
-    match rng.random_range(0..14u32) {
+    match rng.random_range(0..22u32) {
         0 => CombinedOp::CherryPickConflict,
         1 => CombinedOp::RapidBranchMerge,
         2 => CombinedOp::RebaseCherryPickCombo,
@@ -233,6 +241,14 @@ pub fn gen_combined_op(rng: &mut impl Rng) -> CombinedOp {
         10 => CombinedOp::RevertThenRedo,
         11 => CombinedOp::AmendWithDeletion,
         12 => CombinedOp::RecommitLoop,
-        _ => CombinedOp::SelectiveMultiFile,
+        13 => CombinedOp::SelectiveMultiFile,
+        14 => CombinedOp::InitialCarryover,
+        15 => CombinedOp::MergeConflictResolve,
+        16 => CombinedOp::DoubleCheckpointRace,
+        17 => CombinedOp::HunkPartialStage,
+        18 => CombinedOp::RenameDuringEdit,
+        19 => CombinedOp::NoopOverwrite,
+        20 => CombinedOp::ConcurrentSessions,
+        _ => CombinedOp::AmendShrink,
     }
 }

@@ -10,24 +10,27 @@ use super::generators::{
 use super::operations::{
     EditParams, FileState, execute_alternating_amend, execute_alternating_amend_storm,
     execute_amend_attribution_flip, execute_amend_chain, execute_amend_reset_cycle,
-    execute_amend_with_deletion, execute_branch_switch_dirty, execute_checkout_discard,
-    execute_checkpoint_nonexistent, execute_checkpoint_storm, execute_checkpoint_then_overwrite,
-    execute_cherry_pick_conflict, execute_commit, execute_concurrent_file_creation,
-    execute_create_delete_batch, execute_cross_file_checkpoint_race, execute_delete_and_recreate,
-    execute_discard_then_reedit, execute_double_commit_rapid, execute_edit_and_checkpoint,
+    execute_amend_shrink, execute_amend_with_deletion, execute_branch_switch_dirty,
+    execute_checkout_discard, execute_checkpoint_nonexistent, execute_checkpoint_storm,
+    execute_checkpoint_then_overwrite, execute_cherry_pick_conflict, execute_commit,
+    execute_concurrent_file_creation, execute_concurrent_sessions, execute_create_delete_batch,
+    execute_cross_file_checkpoint_race, execute_delete_and_recreate, execute_discard_then_reedit,
+    execute_double_checkpoint_race, execute_double_commit_rapid, execute_edit_and_checkpoint,
     execute_empty_commit_interleave, execute_empty_tree_rebuild, execute_exponential_amend,
     execute_ff_merge, execute_file_rename, execute_fixup_squash, execute_hard_reset,
-    execute_interleaved_multi_file, execute_interleaved_partial_commits, execute_mixed_reset,
+    execute_hunk_partial_stage, execute_initial_carryover, execute_interleaved_multi_file,
+    execute_interleaved_partial_commits, execute_merge_conflict_resolve, execute_mixed_reset,
     execute_move_to_subdir, execute_multi_commit_rebase, execute_multi_squash,
-    execute_orphaned_checkpoints, execute_partial_amend_flip, execute_partial_stage_commit,
-    execute_partial_then_amend, execute_rapid_branch_merge, execute_rapid_checkpoint_burst,
-    execute_rebase_cherry_pick_combo, execute_rebase_same_file, execute_rebase_then_amend,
-    execute_recommit_loop, execute_rename_chain, execute_reset_and_reedit,
-    execute_reset_edit_recommit, execute_revert_then_redo, execute_selective_file_commit,
-    execute_selective_multi_file_commit, execute_session_interleave, execute_soft_reset_recommit,
-    execute_squash_partial_stage, execute_squash_same_file, execute_stash_during_work,
-    execute_stash_pathspec, execute_stash_pop_cycle, execute_thrash, execute_two_branch_merge,
-    execute_whitespace_noise, read_file_state_from_disk,
+    execute_noop_overwrite, execute_orphaned_checkpoints, execute_partial_amend_flip,
+    execute_partial_stage_commit, execute_partial_then_amend, execute_rapid_branch_merge,
+    execute_rapid_checkpoint_burst, execute_rebase_cherry_pick_combo, execute_rebase_same_file,
+    execute_rebase_then_amend, execute_recommit_loop, execute_rename_chain,
+    execute_rename_during_edit, execute_reset_and_reedit, execute_reset_edit_recommit,
+    execute_revert_then_redo, execute_selective_file_commit, execute_selective_multi_file_commit,
+    execute_session_interleave, execute_soft_reset_recommit, execute_squash_partial_stage,
+    execute_squash_same_file, execute_stash_during_work, execute_stash_pathspec,
+    execute_stash_pop_cycle, execute_thrash, execute_two_branch_merge, execute_whitespace_noise,
+    read_file_state_from_disk,
 };
 use super::oracle::CharRegistry;
 
@@ -1091,6 +1094,99 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                             config.seed,
                         );
                     }
+                }
+                CombinedOp::InitialCarryover => {
+                    execute_initial_carryover(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::MergeConflictResolve => {
+                    execute_merge_conflict_resolve(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    let status = repo.git(&["status", "--porcelain"]).unwrap();
+                    if status.trim().is_empty() && !file_state.lines.is_empty() {
+                        verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    }
+                }
+                CombinedOp::DoubleCheckpointRace => {
+                    execute_double_checkpoint_race(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::HunkPartialStage => {
+                    execute_hunk_partial_stage(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::RenameDuringEdit => {
+                    let sec_idx = rng.random_range(0..secondary_files.len());
+                    execute_rename_during_edit(
+                        &repo,
+                        &mut file_state,
+                        &mut secondary_files[sec_idx],
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::NoopOverwrite => {
+                    execute_noop_overwrite(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::ConcurrentSessions => {
+                    execute_concurrent_sessions(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::AmendShrink => {
+                    execute_amend_shrink(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
                 }
             }
         } else {

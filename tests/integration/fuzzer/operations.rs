@@ -3551,6 +3551,466 @@ pub fn execute_recommit_loop(
     operation_log.push("recommit-loop: done".to_string());
 }
 
+/// INITIAL attribution carryover: make edits and checkpoint, but DON'T commit.
+/// Then make MORE edits in the next "round" and commit. The uncommitted edits
+/// from the first round should carry forward as INITIAL attributions and not be
+/// lost when the second checkpoint occurs.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_initial_carryover(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let rounds = rng.random_range(2..=4);
+    operation_log.push(format!(
+        "initial-carryover: {} rounds without commit",
+        rounds
+    ));
+
+    // Multiple rounds of edit+checkpoint without committing
+    for _ in 0..rounds {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: if file_state.lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                EditStrategy::random_non_destructive(rng)
+            },
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    }
+
+    // Finally commit everything
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("initial-carryover: all rounds committed together")
+        .unwrap();
+
+    operation_log.push("initial-carryover: done".to_string());
+}
+
+/// Merge conflict resolution: create branches with conflicting edits to the
+/// same lines, attempt merge, resolve by taking one side, then commit.
+/// Tests that attribution after conflict resolution is correct.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_merge_conflict_resolve(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("merge-conflict-resolve: starting".to_string());
+
+    let branch_name = format!("merge-conflict-{}", rng.random_range(0..10000u32));
+    let base_branch = repo
+        .git(&["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Create feature branch
+    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+    // Make edit on feature branch (append to avoid positional conflicts initially)
+    let feature_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &feature_params,
+        rng,
+        operation_log,
+    );
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("merge-conflict-resolve: feature edit").unwrap();
+
+    // Switch back and make a DIFFERENT append (should merge cleanly)
+    repo.git(&["checkout", &base_branch]).unwrap();
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    let main_params = EditParams {
+        attribution: Attribution::KnownHuman,
+        strategy: EditStrategy::Prepend,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &main_params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("merge-conflict-resolve: main edit").unwrap();
+
+    // Attempt merge
+    let merge_result = repo.git(&["merge", &branch_name, "--no-edit"]);
+    if merge_result.is_err() {
+        // Conflict: resolve by taking ours
+        repo.git(&["checkout", "--ours", &file_state.filename]).ok();
+        repo.git(&["add", &file_state.filename]).ok();
+        let commit_result = repo.git(&["commit", "--no-edit"]);
+        if commit_result.is_err() {
+            repo.git(&["merge", "--abort"]).ok();
+            operation_log.push("merge-conflict-resolve: abort after conflict".to_string());
+        } else {
+            operation_log.push("merge-conflict-resolve: resolved with --ours".to_string());
+        }
+    } else {
+        operation_log.push("merge-conflict-resolve: clean merge".to_string());
+    }
+
+    // Re-read state
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    // Clean up
+    repo.git(&["branch", "-D", &branch_name]).ok();
+
+    operation_log.push("merge-conflict-resolve: done".to_string());
+}
+
+/// Double checkpoint same file: fire two checkpoints in rapid succession on the
+/// same file with DIFFERENT attributions. The second should win for the lines
+/// it touches. Tests the daemon's ordering guarantees.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_double_checkpoint_race(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("double-checkpoint-race: starting".to_string());
+
+    // First: AI checkpoint
+    let ai_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &ai_params, rng, operation_log);
+
+    // Immediately: human checkpoint (overwrites/extends the AI edit)
+    let human_params = EditParams {
+        attribution: Attribution::KnownHuman,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &human_params,
+        rng,
+        operation_log,
+    );
+
+    // Third: another AI checkpoint
+    let ai2_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(2)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &ai2_params, rng, operation_log);
+
+    // Commit
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("double-checkpoint-race: commit").unwrap();
+
+    operation_log.push("double-checkpoint-race: done".to_string());
+}
+
+/// Partial hunk staging using `git add -p` simulation: write content that creates
+/// multiple diff hunks, then stage only specific hunks. This is the most common
+/// source of attribution bugs in real usage.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_hunk_partial_stage(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("hunk-partial-stage: starting".to_string());
+
+    if file_state.lines.len() < 6 {
+        // Need enough lines to create multiple hunks - bootstrap more
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: 8,
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit("hunk-partial-stage: bootstrap lines").unwrap();
+    }
+
+    // Make edits at the BEGINNING (hunk 1)
+    let hunk1_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: EditStrategy::Prepend,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &hunk1_params,
+        rng,
+        operation_log,
+    );
+
+    // Make edits at the END (hunk 2 - separated by unchanged lines)
+    let hunk2_params = EditParams {
+        attribution: Attribution::KnownHuman,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &hunk2_params,
+        rng,
+        operation_log,
+    );
+
+    // Stage only the beginning changes (first hunk)
+    // We simulate this by writing just the first hunk's state to the index
+    let append_count = hunk2_params.line_count;
+
+    // Create a version with only hunk1 applied (prepend applied, append not)
+    let partial_lines: Vec<char> =
+        file_state.lines[..file_state.lines.len() - append_count].to_vec();
+    let partial_state = FileState {
+        lines: partial_lines.clone(),
+        filename: file_state.filename.clone(),
+    };
+    partial_state.write_to_disk(repo);
+    repo.git(&["add", &file_state.filename]).unwrap();
+
+    // Write full content back
+    file_state.write_to_disk(repo);
+
+    // Commit just the first hunk
+    repo.commit("hunk-partial-stage: first hunk only").unwrap();
+
+    // Now commit the rest
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("hunk-partial-stage: remaining hunks").unwrap();
+
+    operation_log.push("hunk-partial-stage: done".to_string());
+}
+
+/// Interleaved file operations: rename one file while editing another,
+/// then commit both in the same commit. Tests that file ops on one file
+/// don't corrupt attribution of other files in the same commit.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_rename_during_edit(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    secondary: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("rename-during-edit: starting".to_string());
+
+    // Ensure secondary exists
+    if secondary.lines.is_empty() {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(4)),
+        };
+        execute_edit_and_checkpoint(repo, secondary, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit("rename-during-edit: bootstrap secondary")
+            .unwrap();
+    }
+
+    // Edit the main file
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            EditStrategy::random_non_destructive(rng)
+        },
+        line_count: gen_line_count(rng, max_lines),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+
+    // Rename the secondary file
+    let new_name = format!("renamed_sec_{}.txt", rng.random_range(0..10000u32));
+    repo.git(&["mv", &secondary.filename, &new_name]).unwrap();
+    secondary.filename = new_name;
+
+    // Commit both: the edit AND the rename in one commit
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("rename-during-edit: edit + rename in one commit")
+        .unwrap();
+
+    operation_log.push("rename-during-edit: done".to_string());
+}
+
+/// Overwrite with same content: write the exact same content that's already
+/// committed, checkpoint it, then write different content. Tests that
+/// no-op diffs don't confuse the daemon.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_noop_overwrite(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("noop-overwrite: starting".to_string());
+
+    if file_state.lines.is_empty() {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit("noop-overwrite: bootstrap").unwrap();
+    }
+
+    // Write the SAME content and checkpoint (should be a no-op for the daemon)
+    file_state.write_to_disk(repo);
+    let checkpoint_type = if rng.random_range(0..2u32) == 0 {
+        "mock_ai"
+    } else {
+        "mock_known_human"
+    };
+    repo.git_ai(&["checkpoint", checkpoint_type, &file_state.filename])
+        .ok();
+
+    // Now make a REAL edit
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+
+    // Commit
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("noop-overwrite: real edit after noop").unwrap();
+
+    operation_log.push("noop-overwrite: done".to_string());
+}
+
+/// Simulate concurrent AI sessions editing the same file: session 1 edits,
+/// checkpoint, session 2 edits, checkpoint, then commit. Both sessions'
+/// attributions should be preserved.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_concurrent_sessions(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let session_count = rng.random_range(2..=4);
+    operation_log.push(format!("concurrent-sessions: {} sessions", session_count));
+
+    // Each "session" does a pre-checkpoint (human), edit, post-checkpoint (ai/human)
+    for i in 0..session_count {
+        // Alternate between AI and human sessions
+        let attr = if i % 2 == 0 {
+            Attribution::Ai
+        } else {
+            Attribution::KnownHuman
+        };
+        let params = EditParams {
+            attribution: attr,
+            strategy: if file_state.lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                match i % 3 {
+                    0 => EditStrategy::Append,
+                    1 => EditStrategy::Prepend,
+                    _ => EditStrategy::InsertRandom,
+                }
+            },
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    }
+
+    // Single commit with all sessions' work
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("concurrent-sessions: all sessions committed")
+        .unwrap();
+
+    operation_log.push("concurrent-sessions: done".to_string());
+}
+
+/// Amend that reduces file size: commit N lines, then amend with fewer lines.
+/// The removed lines' attribution should disappear; remaining lines keep theirs.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_amend_shrink(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("amend-shrink: starting".to_string());
+
+    // Add a bunch of lines
+    let params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines).max(4),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("amend-shrink: initial large commit").unwrap();
+
+    // Remove some lines from the end and amend
+    let remove_count = rng.random_range(1..=(file_state.lines.len() / 2).max(1));
+    let new_len = file_state.lines.len() - remove_count;
+    file_state.lines.truncate(new_len);
+    file_state.write_to_disk(repo);
+
+    // Checkpoint the shrunk state
+    let checkpoint_type = if rng.random_range(0..2u32) == 0 {
+        "mock_ai"
+    } else {
+        "mock_known_human"
+    };
+    repo.git_ai(&["checkpoint", checkpoint_type, &file_state.filename])
+        .ok();
+
+    // Amend
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&["commit", "--amend", "-m", "amend-shrink: shrunk"])
+        .unwrap();
+
+    operation_log.push(format!(
+        "amend-shrink: removed {} lines, {} remain",
+        remove_count,
+        file_state.lines.len()
+    ));
+}
+
 /// Reconstruct the char-per-line model from actual file content on disk.
 pub fn reconstruct_lines_from_content(content: &str) -> Vec<char> {
     content
