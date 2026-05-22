@@ -69,7 +69,7 @@ fn days_ago(days: u64) -> u32 {
 }
 
 fn print_help() {
-    eprintln!("git-ai activity - Show local AI activity statistics");
+    eprintln!("git-ai activity - Show local activity statistics");
     eprintln!();
     eprintln!("Usage: git-ai activity [options]");
     eprintln!();
