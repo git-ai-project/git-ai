@@ -30,6 +30,7 @@ pub fn handle_activity(args: &[String]) {
 
     let (since_ts, period_label) = match period.as_str() {
         "1d" => (days_ago(1), "last 1 days".to_string()),
+        "3d" => (days_ago(3), "last 3 days".to_string()),
         "7d" => (days_ago(7), "last 7 days".to_string()),
         "30d" => (days_ago(30), "last 30 days".to_string()),
         "all" => (0u32, "all time".to_string()),
