@@ -975,12 +975,14 @@ pub fn compute_session_list(
     let mut session_last_ts: HashMap<String, u32> = HashMap::new();
     let mut session_tool: HashMap<String, String> = HashMap::new();
     let mut session_title: HashMap<String, String> = HashMap::new();
+    // repo_url recorded on the first event seen for each session.
+    let mut session_repo: HashMap<String, Option<String>> = HashMap::new();
     // sid -> mid -> (model, accum) for Claude-style per-message token data.
     let mut session_messages: HashMap<String, HashMap<String, (String, TokenAccum)>> =
         HashMap::new();
     let mut codex_sessions: HashMap<String, CodexSessionAccum> = HashMap::new();
-    // (timestamp, ai_lines) — sorted after the loop for binary-search per session.
-    let mut commit_data: Vec<(u32, u32)> = Vec::new();
+    // (timestamp, ai_lines, repo_url) — sorted after the loop for binary-search per session.
+    let mut commit_data: Vec<(u32, u32, Option<String>)> = Vec::new();
 
     for record in &events {
         let event: MetricEvent = match serde_json::from_str(&record.event_json) {
@@ -996,7 +998,7 @@ pub fn compute_session_list(
                     .first()
                     .copied()
                     .unwrap_or(0);
-                commit_data.push((record.ts, ai_lines));
+                commit_data.push((record.ts, ai_lines, record.repo_url.clone()));
             }
             5 => {
                 let Some(sid) = sparse_get_string(&event.attrs, attr_pos::SESSION_ID).flatten()
@@ -1012,6 +1014,9 @@ pub fn compute_session_list(
                 let last = session_last_ts.entry(sid.clone()).or_insert(0);
                 *last = (*last).max(record.ts);
                 session_tool.entry(sid.clone()).or_insert(tool.clone());
+                session_repo
+                    .entry(sid.clone())
+                    .or_insert(record.repo_url.clone());
 
                 let Some(raw) = event.values.get(&session_event_pos::RAW_JSON.to_string()) else {
                     continue;
@@ -1071,7 +1076,7 @@ pub fn compute_session_list(
         }
     }
 
-    commit_data.sort_unstable_by_key(|&(ts, _)| ts);
+    commit_data.sort_unstable_by_key(|&(ts, _, _)| ts);
     const YIELD_WINDOW_SECS: u32 = 4 * 3600;
 
     let mut out: Vec<SessionRecord> = session_first_ts
@@ -1082,15 +1087,35 @@ pub fn compute_session_list(
                 .get(sid)
                 .cloned()
                 .unwrap_or_else(|| "unknown".to_string());
+            let sess_repo = session_repo.get(sid).and_then(|r| r.as_deref());
 
             let window_end = last_ts.saturating_add(YIELD_WINDOW_SECS);
-            let pos = commit_data.partition_point(|&(t, _)| t < last_ts);
-            let shipped = commit_data.get(pos).is_some_and(|&(t, _)| t <= window_end);
+            let pos = commit_data.partition_point(|&(t, _, _)| t < last_ts);
+            // Only count a commit as "shipped" if it's in the same repo as the
+            // session (or either side has no repo data, as a fallback).
+            let shipped = commit_data[pos..]
+                .iter()
+                .take_while(|&&(t, _, _)| t <= window_end)
+                .any(
+                    |(_, _, commit_repo)| match (sess_repo, commit_repo.as_deref()) {
+                        (Some(s), Some(c)) => s == c,
+                        _ => true,
+                    },
+                );
 
-            // Sum ai_lines from commits that fall in [first_ts, last_ts + 4h].
-            let lo = commit_data.partition_point(|&(t, _)| t < first_ts);
-            let hi = commit_data.partition_point(|&(t, _)| t <= window_end);
-            let ai_lines_committed: u32 = commit_data[lo..hi].iter().map(|&(_, l)| l).sum();
+            // Sum ai_lines from same-repo commits in [first_ts, last_ts + 4h].
+            let lo = commit_data.partition_point(|&(t, _, _)| t < first_ts);
+            let hi = commit_data.partition_point(|&(t, _, _)| t <= window_end);
+            let ai_lines_committed: u32 = commit_data[lo..hi]
+                .iter()
+                .filter(
+                    |(_, _, commit_repo)| match (sess_repo, commit_repo.as_deref()) {
+                        (Some(s), Some(c)) => s == c,
+                        _ => true,
+                    },
+                )
+                .map(|&(_, l, _)| l)
+                .sum();
 
             let (model, total_tokens, estimated_cost_usd) = if tool == "codex" {
                 if let Some(acc) = codex_sessions.get(sid) {
