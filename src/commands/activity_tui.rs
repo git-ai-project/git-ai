@@ -93,12 +93,9 @@ impl AppState {
     fn load_period(&mut self, idx: usize) -> Result<(), GitAiError> {
         let p = &PERIODS[idx];
         let ts = since_ts(idx);
-        self.stats = compute_activity(
-            ts,
-            p.label.to_string(),
-            p.granularity,
-            self.current_repo.as_deref(),
-        )?;
+        // Always pass None — see activity.rs comment about NULL repo_url on
+        // historical events.  current_repo is display-only.
+        self.stats = compute_activity(ts, p.label.to_string(), p.granularity, None)?;
         if self.current_repo.is_none() {
             self.repo_summaries = compute_repo_summaries(ts, p.granularity).unwrap_or_default();
         }
