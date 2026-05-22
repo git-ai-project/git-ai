@@ -24,6 +24,8 @@ pub struct LocalActivityStats {
     pub buckets: Vec<BucketStats>,
     /// AI lines committed per hour of day (local time), 24 elements.
     pub hourly: Vec<u32>,
+    /// AI lines committed per day of week (local time), 7 elements: Mon=0 … Sun=6.
+    pub daily: Vec<u32>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -150,6 +152,7 @@ pub fn compute_activity(
     let mut bucket_order: HashMap<String, i64> = HashMap::new();
 
     let mut hourly: Vec<u32> = vec![0u32; 24];
+    let mut daily: Vec<u32> = vec![0u32; 7];
 
     // Yield classification: track the latest timestamp seen per session, and
     // all commit timestamps, then correlate after the loop.
@@ -180,6 +183,8 @@ pub fn compute_activity(
                     let local_dt = ts_to_local(record.ts);
                     if c.ai_lines > 0 {
                         hourly[local_dt.hour() as usize] += c.ai_lines;
+                        // Weekday: Mon=0 … Sun=6 (chrono's num_days_from_monday).
+                        daily[local_dt.weekday().num_days_from_monday() as usize] += c.ai_lines;
                     }
 
                     let (key, order_key) = bucket_key(&local_dt, granularity);
@@ -281,6 +286,7 @@ pub fn compute_activity(
         tokens,
         buckets: filled,
         hourly,
+        daily,
     })
 }
 

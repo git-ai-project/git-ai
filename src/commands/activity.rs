@@ -251,6 +251,22 @@ fn print_terminal(stats: &LocalActivityStats) {
         println!("  {GRAY}{}{RESET}", label_row.trim_end());
     }
 
+    // --- Day of week heatmap ---
+    if stats.daily.iter().any(|&v| v > 0) {
+        println!();
+        println!("  {BOLD}Day of week{RESET} {GRAY}(AI lines committed){RESET}");
+        let max_day = stats.daily.iter().copied().max().unwrap_or(1).max(1);
+        let spark: String = stats
+            .daily
+            .iter()
+            .map(|&v| spark_char(v, max_day))
+            .collect::<Vec<_>>()
+            .join("    ");
+        println!("  {}", spark);
+        let label_row = "Mon  Tue  Wed  Thu  Fri  Sat  Sun";
+        println!("  {GRAY}{}{RESET}", label_row);
+    }
+
     println!();
 }
 
