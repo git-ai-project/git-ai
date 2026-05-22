@@ -108,20 +108,6 @@ fn print_terminal(stats: &LocalActivityStats) {
         );
     }
 
-    // --- Attribution coverage: how much committed code we confidently attributed ---
-    let attributed = stats.commits.ai_lines + stats.commits.human_lines;
-    if let Some(coverage_pct) = (attributed * 100).checked_div(stats.commits.diff_added_lines) {
-        let untracked = stats.commits.diff_added_lines.saturating_sub(attributed);
-        let untracked_pct = 100 - coverage_pct;
-        println!(
-            "  {}  {BOLD}Attributed{RESET} {:>3}%  {GRAY}· {} untracked ({}%){RESET}",
-            bar(coverage_pct, 40),
-            coverage_pct,
-            format_num(untracked),
-            untracked_pct,
-        );
-    }
-
     // --- AI section ---
     println!();
     println!("  {BOLD}AI{RESET}");
@@ -173,12 +159,18 @@ fn print_terminal(stats: &LocalActivityStats) {
             let empty = BAR_WIDTH - filled;
             let bar_str = format!("{}{}", "█".repeat(filled as usize), "░".repeat(empty as usize));
             if bucket.ai_lines > 0 {
+                // Coverage for this bucket: attributed / total diff additions.
+                let coverage = (bucket.attributed_lines * 100)
+                    .checked_div(bucket.diff_added_lines)
+                    .map(|pct| format!(" · {}% attributed", pct))
+                    .unwrap_or_default();
                 println!(
-                    "  {GRAY}{}{RESET}  {}  {GRAY}{} lines · {} commits{RESET}",
+                    "  {GRAY}{}{RESET}  {}  {GRAY}{} lines · {} commits{}{RESET}",
                     bucket.label,
                     bar_str,
                     format_num(bucket.ai_lines),
                     bucket.commit_count,
+                    coverage,
                 );
             } else {
                 println!("  {GRAY}{}  {}{RESET}", bucket.label, bar_str);
