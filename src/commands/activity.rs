@@ -6,17 +6,18 @@ use crate::metrics::local_stats::{
 };
 use crate::repo_url::resolve_repo_url_from_path;
 use std::collections::HashSet;
-use std::io::IsTerminal;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn handle_activity(args: &[String]) {
     let mut json = false;
+    let mut tui = false;
     let mut period = "30d".to_string();
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => json = true,
+            "--tui" => tui = true,
             "--period" if i + 1 < args.len() => {
                 period = args[i + 1].clone();
                 i += 1;
@@ -75,15 +76,14 @@ pub fn handle_activity(args: &[String]) {
         }
     };
 
-    // Auto-detect which repo we're in (if any).  Used for the header label and
-    // to decide whether to show the per-repo breakdown table.  Stats themselves
-    // are always global — events written before the repo_url column existed have
-    // NULL there, so filtering would silently drop all historical data.
+    // Auto-detect which repo we're in (if any).  When Some, stats are scoped
+    // to that repo; the header shows the repo name.  When None (outside any
+    // repo), stats are global and the Summary tab shows a per-repo table.
     let current_repo = std::env::current_dir()
         .ok()
         .and_then(|cwd| resolve_repo_url_from_path(&cwd));
 
-    let stats = match compute_activity(since_ts, period_label, granularity, None)
+    let stats = match compute_activity(since_ts, period_label, granularity, current_repo.as_deref())
     {
         Ok(s) => s,
         Err(e) => {
@@ -100,7 +100,7 @@ pub fn handle_activity(args: &[String]) {
                 std::process::exit(1);
             }
         }
-    } else if std::io::stdout().is_terminal() {
+    } else if tui {
         // Pre-compute repo summaries for the global view (used when not inside a repo).
         let repo_summaries = if current_repo.is_none() {
             compute_repo_summaries(since_ts, granularity).unwrap_or_default()
@@ -131,6 +131,7 @@ fn print_help() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --period <1d|3d|7d|30d|60d|all>   Time window (default: 30d)");
+    eprintln!("  --tui                             Launch interactive TUI");
     eprintln!("  --json                            Output as JSON");
     eprintln!("  --help                            Show this help");
     eprintln!();

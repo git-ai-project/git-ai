@@ -5,6 +5,7 @@
 
 use crate::error::GitAiError;
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -372,6 +373,46 @@ impl MetricsDatabase {
         )?;
         let rows = stmt.query_map(params![since_ts as i64], |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    // ─── Notes backfill helpers ───────────────────────────────────────────────
+
+    /// Check whether a git-notes backfill has already been completed for `repo_url`.
+    pub fn is_backfilled(&self, repo_url: &str) -> Result<bool, GitAiError> {
+        let key = format!("backfill:{}", repo_url);
+        let result: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(result.is_some())
+    }
+
+    /// Record that a git-notes backfill has been completed for `repo_url`.
+    pub fn mark_backfilled(&mut self, repo_url: &str) -> Result<(), GitAiError> {
+        let key = format!("backfill:{}", repo_url);
+        self.conn.execute(
+            "INSERT OR REPLACE INTO schema_metadata (key, value) VALUES (?1, '1')",
+            params![key],
+        )?;
+        Ok(())
+    }
+
+    /// Return the set of commit SHAs already present in `local_events` for
+    /// event_id = 1 (Committed).  Used by the backfill to avoid duplicates.
+    pub fn get_existing_commit_shas(&self) -> Result<HashSet<String>, GitAiError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT json_extract(event_json, '$.a.3') FROM local_events \
+             WHERE event_id = 1 AND json_extract(event_json, '$.a.3') IS NOT NULL",
+        )?;
+        let shas: HashSet<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(shas)
     }
 
     /// Returns whether an `agent_usage` event should be emitted for this prompt_id.
