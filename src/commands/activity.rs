@@ -176,6 +176,18 @@ fn print_terminal(stats: &LocalActivityStats) {
                 format!("~${:.2}", t.estimated_cost_usd)
             );
         }
+        if let Some(wow) = &t.wow_spend {
+            let arrow = if wow.change_pct > 0.0 { "↑" } else { "↓" };
+            let change_str = if wow.change_pct.is_infinite() {
+                format!("{arrow} new this week")
+            } else {
+                format!("{arrow} {:.0}% vs last week", wow.change_pct.abs())
+            };
+            println!(
+                "    {GRAY}This week ~${:.2} · Last week ~${:.2}  {}{RESET}",
+                wow.this_week_usd, wow.last_week_usd, change_str,
+            );
+        }
         for m in &t.by_model {
             let cost = m
                 .estimated_cost_usd

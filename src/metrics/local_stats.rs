@@ -38,6 +38,19 @@ pub struct TokenSummary {
     pub estimated_cost_usd: f64,
     /// Per-model breakdown, sorted by total tokens descending.
     pub by_model: Vec<TokenModelStat>,
+    /// Week-over-week spend comparison (current 7 days vs previous 7 days).
+    /// None when either week has no cost data (e.g. viewing a period < 14 days
+    /// or when pricing is unavailable for all models).
+    pub wow_spend: Option<WowSpend>,
+}
+
+/// Week-over-week spend comparison.
+#[derive(Debug, Serialize)]
+pub struct WowSpend {
+    pub this_week_usd: f64,
+    pub last_week_usd: f64,
+    /// Percentage change: positive = up, negative = down.
+    pub change_pct: f64,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -135,11 +148,10 @@ pub fn compute_activity(
     let mut session_ids: HashSet<String> = HashSet::new();
     let mut session_tool_counts: HashMap<String, u32> = HashMap::new();
 
-    // Claude-shaped token usage keyed by assistant message id. The incremental
-    // transcript reader re-emits the same message multiple times, and streaming
-    // partials carry lower token counts than the final message — so we keep the
-    // field-wise max per message id, then fold into per-model totals.
-    let mut message_usage: HashMap<String, (String, TokenAccum)> = HashMap::new();
+    // Claude-shaped token usage keyed by assistant message id. Value is
+    // (model, accum, record_ts). `record_ts` is the Unix timestamp of the
+    // first event that introduced this message id — used for WoW bucketing.
+    let mut message_usage: HashMap<String, (String, TokenAccum, u32)> = HashMap::new();
 
     // Codex-shaped token usage keyed by session id. Codex reports cumulative
     // session totals (total_token_usage) on each token_count event, so we keep
@@ -220,9 +232,9 @@ pub fn compute_activity(
                     .flatten()
                     .unwrap_or_default();
                 if tool == "codex" {
-                    aggregate_codex_tokens(&event, &mut codex_sessions);
+                    aggregate_codex_tokens(&event, record.ts, &mut codex_sessions);
                 } else {
-                    aggregate_session_tokens(&event, &mut message_usage);
+                    aggregate_session_tokens(&event, record.ts, &mut message_usage);
                 }
             }
             _ => {}
@@ -252,7 +264,11 @@ pub fn compute_activity(
     let mut session_by_tool: Vec<(String, u32)> = session_tool_counts.into_iter().collect();
     session_by_tool.sort_by_key(|&(_, count)| Reverse(count));
 
-    let tokens = build_token_summary(message_usage, codex_sessions);
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as u32;
+    let tokens = build_token_summary(message_usage, codex_sessions, now_ts);
 
     // Map by order key for fill_buckets to look up real data.
     let bucket_by_order: HashMap<i64, BucketAccum> = bucket_map
@@ -305,6 +321,8 @@ struct TokenAccum {
 #[derive(Debug, Default, Clone)]
 struct CodexSessionAccum {
     model: Option<String>,
+    /// Unix timestamp of the first event seen for this session (WoW bucketing).
+    first_ts: u32,
     /// Cumulative input tokens (includes cached).
     input_tokens: u64,
     /// Cumulative cached input tokens (subset of input_tokens).
@@ -360,31 +378,94 @@ fn shorten_model(model: &str) -> String {
     }
 }
 
+/// Fold a set of message-usage entries into a per-model cost estimate (USD).
+/// Used to compute each WoW half independently.
+fn cost_for_message_slice(entries: impl Iterator<Item = (String, TokenAccum)>) -> f64 {
+    let mut model_totals: HashMap<String, TokenAccum> = HashMap::new();
+    for (model, acc) in entries {
+        let e = model_totals.entry(model).or_default();
+        e.input += acc.input;
+        e.output += acc.output;
+        e.cache_read += acc.cache_read;
+        e.cache_creation += acc.cache_creation;
+    }
+    model_totals
+        .iter()
+        .filter_map(|(model, acc)| pricing_for(model).map(|p| estimate_cost(acc, &p)))
+        .sum()
+}
+
 fn build_token_summary(
-    message_usage: HashMap<String, (String, TokenAccum)>,
+    message_usage: HashMap<String, (String, TokenAccum, u32)>,
     codex_sessions: HashMap<String, CodexSessionAccum>,
+    now_ts: u32,
 ) -> TokenSummary {
+    // Week-over-week split: "this week" = last 7 days, "last week" = 7–14 days ago.
+    let this_week_start = now_ts.saturating_sub(7 * 24 * 3600);
+    let last_week_start = now_ts.saturating_sub(14 * 24 * 3600);
+
+    let mut this_week_msgs: Vec<(String, TokenAccum)> = Vec::new();
+    let mut last_week_msgs: Vec<(String, TokenAccum)> = Vec::new();
+
     // Fold per-message (deduped, max) usage into per-model totals.
     let mut model_tokens: HashMap<String, TokenAccum> = HashMap::new();
-    for (_id, (model, acc)) in message_usage {
-        let entry = model_tokens.entry(model).or_default();
+    for (_id, (model, acc, ts)) in message_usage {
+        let entry = model_tokens.entry(model.clone()).or_default();
         entry.input += acc.input;
         entry.output += acc.output;
         entry.cache_read += acc.cache_read;
         entry.cache_creation += acc.cache_creation;
+
+        if ts >= this_week_start {
+            this_week_msgs.push((model, acc));
+        } else if ts >= last_week_start {
+            last_week_msgs.push((model, acc));
+        }
     }
 
     // Fold per-session codex totals into per-model totals, mapping codex's
     // field semantics onto ours: codex input_tokens *includes* cached, so the
     // non-cached input is the difference; cached maps to cache_read; codex has
     // no cache-creation concept.
+    let mut this_week_codex: Vec<(String, TokenAccum)> = Vec::new();
+    let mut last_week_codex: Vec<(String, TokenAccum)> = Vec::new();
+
     for (_sid, acc) in codex_sessions {
-        let model = acc.model.unwrap_or_else(|| "codex".to_string());
-        let entry = model_tokens.entry(model).or_default();
-        entry.input += acc.input_tokens.saturating_sub(acc.cached_input_tokens);
-        entry.output += acc.output_tokens;
-        entry.cache_read += acc.cached_input_tokens;
+        let model = acc.model.clone().unwrap_or_else(|| "codex".to_string());
+        let mapped = TokenAccum {
+            input: acc.input_tokens.saturating_sub(acc.cached_input_tokens),
+            output: acc.output_tokens,
+            cache_read: acc.cached_input_tokens,
+            cache_creation: 0,
+        };
+        let entry = model_tokens.entry(model.clone()).or_default();
+        entry.input += mapped.input;
+        entry.output += mapped.output;
+        entry.cache_read += mapped.cache_read;
+
+        if acc.first_ts >= this_week_start {
+            this_week_codex.push((model, mapped));
+        } else if acc.first_ts >= last_week_start {
+            last_week_codex.push((model, mapped));
+        }
     }
+
+    // Compute WoW spend from the two half-slices.
+    let this_week_cost =
+        cost_for_message_slice(this_week_msgs.into_iter().chain(this_week_codex));
+    let last_week_cost =
+        cost_for_message_slice(last_week_msgs.into_iter().chain(last_week_codex));
+
+    let wow_spend = if this_week_cost > 0.0 || last_week_cost > 0.0 {
+        let change_pct = if last_week_cost > 0.0 {
+            (this_week_cost - last_week_cost) / last_week_cost * 100.0
+        } else {
+            f64::INFINITY
+        };
+        Some(WowSpend { this_week_usd: this_week_cost, last_week_usd: last_week_cost, change_pct })
+    } else {
+        None
+    };
 
     let mut summary = TokenSummary::default();
     let mut by_model: Vec<TokenModelStat> = Vec::new();
@@ -412,6 +493,7 @@ fn build_token_summary(
 
     by_model.sort_by_key(|m| Reverse(m.input + m.output + m.cache_read + m.cache_creation));
     summary.by_model = by_model;
+    summary.wow_spend = wow_spend;
     summary
 }
 
@@ -649,10 +731,12 @@ fn aggregate_session(
 /// Extract token usage from a session event's raw transcript JSON (position 0).
 /// Only assistant messages carry usage. Keyed by message id, keeping the
 /// field-wise max across re-emitted copies (streaming partials report lower
-/// counts than the final message).
+/// counts than the final message). `record_ts` is stored on first insertion
+/// for week-over-week bucketing.
 fn aggregate_session_tokens(
     event: &MetricEvent,
-    message_usage: &mut HashMap<String, (String, TokenAccum)>,
+    record_ts: u32,
+    message_usage: &mut HashMap<String, (String, TokenAccum, u32)>,
 ) {
     let Some(raw) = event.values.get(&session_event_pos::RAW_JSON.to_string()) else {
         return;
@@ -678,9 +762,9 @@ fn aggregate_session_tokens(
 
     let get = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
 
-    let (_, acc) = message_usage
+    let (_, acc, _ts) = message_usage
         .entry(id.to_string())
-        .or_insert_with(|| (model, TokenAccum::default()));
+        .or_insert_with(|| (model, TokenAccum::default(), record_ts));
     // Field-wise max: input/cache are fixed per message; output grows while
     // streaming, so the final (largest) value is authoritative.
     acc.input = acc.input.max(get("input_tokens"));
@@ -695,6 +779,7 @@ fn aggregate_session_tokens(
 /// cumulative totals are tracked as a per-session max.
 fn aggregate_codex_tokens(
     event: &MetricEvent,
+    record_ts: u32,
     codex_sessions: &mut HashMap<String, CodexSessionAccum>,
 ) {
     let Some(session_id) = sparse_get_string(&event.attrs, attr_pos::SESSION_ID).flatten() else {
@@ -707,7 +792,10 @@ fn aggregate_codex_tokens(
         return;
     };
 
-    let entry = codex_sessions.entry(session_id).or_default();
+    let entry = codex_sessions.entry(session_id).or_insert_with(|| CodexSessionAccum {
+        first_ts: record_ts,
+        ..Default::default()
+    });
 
     // Capture the model name when it appears (not on token_count events).
     if let Some(model) = payload.get("model").and_then(|m| m.as_str())
