@@ -932,6 +932,190 @@ fn aggregate_codex_tokens(
     }
 }
 
+// ─── Per-session list ─────────────────────────────────────────────────────────
+
+/// A single session's summary for the Sessions tab.
+#[derive(Debug)]
+pub struct SessionRecord {
+    pub session_id: String,
+    /// Unix timestamp of the first event observed for this session.
+    pub first_ts: u32,
+    /// Tool / agent name (e.g. "claude", "cursor", "codex").
+    pub tool: String,
+    /// Dominant model used, if known.
+    pub model: Option<String>,
+    /// Total tokens (input + output + cache_read + cache_creation).
+    pub total_tokens: u64,
+    /// Estimated cost in USD; `None` when pricing data is unavailable.
+    pub estimated_cost_usd: Option<f64>,
+    /// Whether a commit landed within 4 h of the session's last event.
+    pub shipped: bool,
+}
+
+/// Build a per-session list from raw events.  Default order: newest first.
+pub fn compute_session_list(
+    since_ts: u32,
+    repo_filter: Option<&str>,
+) -> Result<Vec<SessionRecord>, GitAiError> {
+    let events = {
+        let db = MetricsDatabase::global()?;
+        let db_lock = db
+            .lock()
+            .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+        db_lock.get_local_events(since_ts, repo_filter)?
+    };
+
+    let mut session_first_ts: HashMap<String, u32> = HashMap::new();
+    let mut session_last_ts: HashMap<String, u32> = HashMap::new();
+    let mut session_tool: HashMap<String, String> = HashMap::new();
+    // sid -> mid -> (model, accum) for Claude-style per-message token data.
+    let mut session_messages: HashMap<String, HashMap<String, (String, TokenAccum)>> =
+        HashMap::new();
+    let mut codex_sessions: HashMap<String, CodexSessionAccum> = HashMap::new();
+    let mut commit_timestamps: Vec<u32> = Vec::new();
+
+    for record in &events {
+        let event: MetricEvent = match serde_json::from_str(&record.event_json) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        match record.event_id {
+            1 => commit_timestamps.push(record.ts),
+            5 => {
+                let Some(sid) = sparse_get_string(&event.attrs, attr_pos::SESSION_ID).flatten()
+                else {
+                    continue;
+                };
+                let tool = sparse_get_string(&event.attrs, attr_pos::TOOL)
+                    .flatten()
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                let first = session_first_ts.entry(sid.clone()).or_insert(record.ts);
+                *first = (*first).min(record.ts);
+                let last = session_last_ts.entry(sid.clone()).or_insert(0);
+                *last = (*last).max(record.ts);
+                session_tool.entry(sid.clone()).or_insert(tool.clone());
+
+                if tool == "codex" {
+                    aggregate_codex_tokens(&event, record.ts, &mut codex_sessions);
+                } else {
+                    let Some(raw) = event.values.get(&session_event_pos::RAW_JSON.to_string())
+                    else {
+                        continue;
+                    };
+                    let Some(message) = raw.get("message") else {
+                        continue;
+                    };
+                    if message.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+                        continue;
+                    }
+                    let (Some(usage), Some(id)) = (
+                        message.get("usage"),
+                        message.get("id").and_then(|i| i.as_str()),
+                    ) else {
+                        continue;
+                    };
+                    let model = message
+                        .get("model")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let get = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+                    let msgs = session_messages.entry(sid).or_default();
+                    let (_, acc) = msgs
+                        .entry(id.to_string())
+                        .or_insert_with(|| (model, TokenAccum::default()));
+                    acc.input = acc.input.max(get("input_tokens"));
+                    acc.output = acc.output.max(get("output_tokens"));
+                    acc.cache_read = acc.cache_read.max(get("cache_read_input_tokens"));
+                    acc.cache_creation = acc.cache_creation.max(get("cache_creation_input_tokens"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    commit_timestamps.sort_unstable();
+    const YIELD_WINDOW_SECS: u32 = 4 * 3600;
+
+    let mut out: Vec<SessionRecord> = session_first_ts
+        .iter()
+        .map(|(sid, &first_ts)| {
+            let last_ts = session_last_ts.get(sid).copied().unwrap_or(first_ts);
+            let tool = session_tool
+                .get(sid)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
+
+            let window_end = last_ts.saturating_add(YIELD_WINDOW_SECS);
+            let pos = commit_timestamps.partition_point(|&t| t < last_ts);
+            let shipped = commit_timestamps.get(pos).is_some_and(|&t| t <= window_end);
+
+            let (model, total_tokens, estimated_cost_usd) = if tool == "codex" {
+                if let Some(acc) = codex_sessions.get(sid) {
+                    let mapped = TokenAccum {
+                        input: acc.input_tokens.saturating_sub(acc.cached_input_tokens),
+                        output: acc.output_tokens,
+                        cache_read: acc.cached_input_tokens,
+                        cache_creation: 0,
+                    };
+                    let total =
+                        mapped.input + mapped.output + mapped.cache_read + mapped.cache_creation;
+                    let cost = acc
+                        .model
+                        .as_deref()
+                        .and_then(pricing_for)
+                        .map(|p| estimate_cost(&mapped, &p));
+                    (acc.model.clone(), total, cost)
+                } else {
+                    (None, 0, None)
+                }
+            } else {
+                match session_messages.get(sid) {
+                    None => (None, 0, None),
+                    Some(msgs) => {
+                        let mut total = TokenAccum::default();
+                        let mut model_tokens: HashMap<String, u64> = HashMap::new();
+                        for (model, acc) in msgs.values() {
+                            total.input += acc.input;
+                            total.output += acc.output;
+                            total.cache_read += acc.cache_read;
+                            total.cache_creation += acc.cache_creation;
+                            *model_tokens.entry(model.clone()).or_insert(0) +=
+                                acc.input + acc.output;
+                        }
+                        let tokens =
+                            total.input + total.output + total.cache_read + total.cache_creation;
+                        let dominant = model_tokens
+                            .into_iter()
+                            .max_by_key(|(_, v)| *v)
+                            .map(|(m, _)| m);
+                        let cost = dominant
+                            .as_deref()
+                            .and_then(pricing_for)
+                            .map(|p| estimate_cost(&total, &p));
+                        (dominant, tokens, cost)
+                    }
+                }
+            };
+
+            SessionRecord {
+                session_id: sid.clone(),
+                first_ts,
+                tool,
+                model,
+                total_tokens,
+                estimated_cost_usd,
+                shipped,
+            }
+        })
+        .collect();
+
+    out.sort_by_key(|r| Reverse(r.first_ts));
+    Ok(out)
+}
+
 // ─── Per-repository breakdown ─────────────────────────────────────────────────
 
 /// Summary of activity for a single repository.

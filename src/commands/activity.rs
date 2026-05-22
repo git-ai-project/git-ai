@@ -3,6 +3,7 @@
 use crate::commands::activity_tui;
 use crate::metrics::local_stats::{
     BucketGranularity, LocalActivityStats, compute_activity, compute_repo_summaries,
+    compute_session_list,
 };
 use crate::repo_url::resolve_repo_url_from_path;
 use std::collections::HashSet;
@@ -80,9 +81,7 @@ pub fn handle_activity(args: &[String]) {
     // to that repo; the header shows the repo name.  When None (outside any
     // repo), stats are global and the Summary tab shows a per-repo table.
     let current_dir = std::env::current_dir().ok();
-    let current_repo = current_dir
-        .as_deref()
-        .and_then(resolve_repo_url_from_path);
+    let current_repo = current_dir.as_deref().and_then(resolve_repo_url_from_path);
 
     let stats = match compute_activity(since_ts, period_label, granularity, current_repo.as_deref())
     {
@@ -108,7 +107,15 @@ pub fn handle_activity(args: &[String]) {
         } else {
             vec![]
         };
-        if let Err(e) = activity_tui::run_tui(stats, tui_period_idx, current_repo, repo_summaries) {
+        let session_list =
+            compute_session_list(since_ts, current_repo.as_deref()).unwrap_or_default();
+        if let Err(e) = activity_tui::run_tui(
+            stats,
+            tui_period_idx,
+            current_repo,
+            repo_summaries,
+            session_list,
+        ) {
             eprintln!("error: {}", e);
             std::process::exit(1);
         }
