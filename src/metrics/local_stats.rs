@@ -352,8 +352,9 @@ struct TokenAccum {
 #[derive(Debug, Default, Clone)]
 struct CodexSessionAccum {
     model: Option<String>,
-    /// Unix timestamp of the first event seen for this session (WoW bucketing).
-    first_ts: u32,
+    /// Unix timestamp of the latest token-usage event seen for this session
+    /// (WoW bucketing).
+    last_usage_ts: u32,
     /// Cumulative input tokens (includes cached).
     input_tokens: u64,
     /// Cumulative cached input tokens (subset of input_tokens).
@@ -479,9 +480,9 @@ fn build_token_summary(
         entry.output += mapped.output;
         entry.cache_read += mapped.cache_read;
 
-        if acc.first_ts >= this_week_start {
+        if acc.last_usage_ts >= this_week_start {
             this_week_codex.push((model, mapped));
-        } else if acc.first_ts >= last_week_start {
+        } else if acc.last_usage_ts >= last_week_start {
             last_week_codex.push((model, mapped));
         }
     }
@@ -871,10 +872,7 @@ fn aggregate_codex_tokens(
         return;
     };
 
-    let entry = codex_sessions.entry(session_id).or_insert_with(|| CodexSessionAccum {
-        first_ts: record_ts,
-        ..Default::default()
-    });
+    let entry = codex_sessions.entry(session_id).or_default();
 
     // Capture the model name when it appears (not on token_count events).
     if let Some(model) = payload.get("model").and_then(|m| m.as_str())
@@ -886,6 +884,7 @@ fn aggregate_codex_tokens(
     // Cumulative session totals; keep the running max.
     if let Some(usage) = payload.get("info").and_then(|i| i.get("total_token_usage")) {
         let get = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+        entry.last_usage_ts = entry.last_usage_ts.max(record_ts);
         entry.input_tokens = entry.input_tokens.max(get("input_tokens"));
         entry.cached_input_tokens = entry.cached_input_tokens.max(get("cached_input_tokens"));
         entry.output_tokens = entry.output_tokens.max(get("output_tokens"));
