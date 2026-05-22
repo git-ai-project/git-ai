@@ -5445,12 +5445,28 @@ impl ActorDaemonCoordinator {
                         head,
                     } => {
                         let repo = find_repository_in_path(&worktree)?;
+                        // Helper: resolve stash SHA from ref_changes (new value for create,
+                        // old value for pop/drop/branch).
+                        let stash_sha_from_ref_changes_new = || {
+                            cmd.ref_changes
+                                .iter()
+                                .rfind(|change| change.reference == "refs/stash")
+                                .map(|change| change.new.trim().to_string())
+                                .filter(|oid| !oid.is_empty() && !is_zero_oid(oid))
+                        };
+                        let stash_sha_from_ref_changes_old = || {
+                            cmd.ref_changes
+                                .iter()
+                                .rfind(|change| change.reference == "refs/stash")
+                                .map(|change| change.old.trim().to_string())
+                                .filter(|oid| !oid.is_empty() && !is_zero_oid(oid))
+                        };
                         match kind {
                             crate::daemon::domain::StashOpKind::Push => {
-                                // For push, stash_ref is usually None (no target spec).
-                                // Resolve from refs/stash after the push completes.
+                                // For push/create: use ref_changes NEW value (the created stash),
+                                // then fall back to rev-parse refs/stash.
                                 let resolved_stash =
-                                    stash_ref.as_deref().map(String::from).or_else(|| {
+                                    stash_sha_from_ref_changes_new().or_else(|| {
                                         let mut args = repo.global_args_for_exec();
                                         args.extend([
                                             "rev-parse".to_string(),
@@ -5476,20 +5492,44 @@ impl ActorDaemonCoordinator {
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Pop => {
-                                let resolved =
-                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref());
-                                if let Some(stash_sha) = resolved {
+                                // For pop: use cmd.stash_target_oid (pre-resolved), then
+                                // fall back to ref_changes OLD value (the stash being removed).
+                                let resolved = cmd
+                                    .stash_target_oid
+                                    .clone()
+                                    .or_else(stash_sha_from_ref_changes_old);
+                                if let Some(stash_sha) = resolved.as_deref() {
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
                                             &repo, stash_sha, true,
                                         );
                                 }
                             }
-                            crate::daemon::domain::StashOpKind::Apply
-                            | crate::daemon::domain::StashOpKind::Branch => {
-                                let resolved =
-                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref());
-                                if let Some(stash_sha) = resolved {
+                            crate::daemon::domain::StashOpKind::Apply => {
+                                // For apply: use cmd.stash_target_oid, then resolve from
+                                // current repo state (stash still exists after apply).
+                                let resolved = cmd.stash_target_oid.clone().or_else(|| {
+                                    let worktree_path = cmd.worktree.as_deref()?;
+                                    resolve_stash_target_oid_for_worktree(
+                                        worktree_path,
+                                        stash_ref.as_deref(),
+                                    )
+                                });
+                                if let Some(stash_sha) = resolved.as_deref() {
+                                    let _ =
+                                        crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
+                                            &repo, stash_sha, false,
+                                        );
+                                }
+                            }
+                            crate::daemon::domain::StashOpKind::Branch => {
+                                // For branch: use cmd.stash_target_oid, then fall back to
+                                // ref_changes OLD value.
+                                let resolved = cmd
+                                    .stash_target_oid
+                                    .clone()
+                                    .or_else(stash_sha_from_ref_changes_old);
+                                if let Some(stash_sha) = resolved.as_deref() {
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
                                             &repo, stash_sha, false,
@@ -5497,9 +5537,13 @@ impl ActorDaemonCoordinator {
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Drop => {
-                                let resolved =
-                                    cmd.stash_target_oid.as_deref().or(stash_ref.as_deref());
-                                if let Some(stash_sha) = resolved {
+                                // For drop: use cmd.stash_target_oid, then fall back to
+                                // ref_changes OLD value.
+                                let resolved = cmd
+                                    .stash_target_oid
+                                    .clone()
+                                    .or_else(stash_sha_from_ref_changes_old);
+                                if let Some(stash_sha) = resolved.as_deref() {
                                     let _ = crate::authorship::rewrite_stash::handle_stash_drop(
                                         &repo, stash_sha,
                                     );
