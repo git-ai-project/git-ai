@@ -154,6 +154,7 @@ remove_installed_files() {
 cleanup_empty_dirs() {
     rmdir "$HOME/.local/bin" 2>/dev/null || true
     rmdir "$HOME/.config/fish" 2>/dev/null || true
+    rmdir "$HOME/.git-ai/bin" 2>/dev/null || true
     rmdir "$HOME/.git-ai" 2>/dev/null || true
 }
 
