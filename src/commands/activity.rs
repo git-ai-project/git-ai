@@ -111,10 +111,22 @@ fn print_terminal(stats: &LocalActivityStats) {
     // --- AI section ---
     println!();
     println!("  {BOLD}AI{RESET}");
-    println!(
-        "    Sessions          {:>6}",
-        format_num(stats.sessions.total)
-    );
+    let yield_total = stats.sessions.yield_stats.shipped + stats.sessions.yield_stats.abandoned;
+    if yield_total > 0 {
+        let shipped_pct = stats.sessions.yield_stats.shipped * 100 / yield_total;
+        println!(
+            "    Sessions          {:>6}  {GRAY}({} shipped · {} abandoned · {}% yield){RESET}",
+            format_num(stats.sessions.total),
+            format_num(stats.sessions.yield_stats.shipped),
+            format_num(stats.sessions.yield_stats.abandoned),
+            shipped_pct,
+        );
+    } else {
+        println!(
+            "    Sessions          {:>6}",
+            format_num(stats.sessions.total)
+        );
+    }
     println!(
         "    Commits           {:>6}",
         format_num(stats.commits.total)
