@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Current schema version (must match MIGRATIONS.len())
-const SCHEMA_VERSION: usize = 3;
+const SCHEMA_VERSION: usize = 4;
 
 /// Database migrations - each migration upgrades the schema by one version
 const MIGRATIONS: &[&str] = &[
@@ -38,6 +38,11 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX IF NOT EXISTS local_events_ts ON local_events (ts);
     CREATE INDEX IF NOT EXISTS local_events_event_id ON local_events (event_id);
     "#,
+    // Migration 3 -> 4: Add repo_url column to local_events for per-repo filtering
+    r#"
+    ALTER TABLE local_events ADD COLUMN repo_url TEXT;
+    CREATE INDEX IF NOT EXISTS local_events_repo_url ON local_events (repo_url);
+    "#,
 ];
 
 /// Global database singleton
@@ -55,6 +60,7 @@ pub struct MetricRecord {
 pub struct LocalEventRecord {
     pub event_id: u16,
     pub ts: u32,
+    pub repo_url: Option<String>,
     pub event_json: String,
 }
 
@@ -282,9 +288,12 @@ impl MetricsDatabase {
 
     /// Insert events into the local_events table (persistent, never deleted).
     ///
-    /// Each tuple is (event_id, ts, event_json). Call this with events filtered to
-    /// only the interesting event types before inserting.
-    pub fn insert_local_events(&mut self, events: &[(u16, u32, String)]) -> Result<(), GitAiError> {
+    /// Each tuple is (event_id, ts, repo_url, event_json). Call this with events
+    /// filtered to only the interesting event types before inserting.
+    pub fn insert_local_events(
+        &mut self,
+        events: &[(u16, u32, Option<String>, String)],
+    ) -> Result<(), GitAiError> {
         if events.is_empty() {
             return Ok(());
         }
@@ -293,11 +302,16 @@ impl MetricsDatabase {
 
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO local_events (event_id, ts, event_json) VALUES (?1, ?2, ?3)",
+                "INSERT INTO local_events (event_id, ts, repo_url, event_json) VALUES (?1, ?2, ?3, ?4)",
             )?;
 
-            for (event_id, ts, json) in events {
-                stmt.execute(params![*event_id as i64, *ts as i64, json])?;
+            for (event_id, ts, repo_url, json) in events {
+                stmt.execute(params![
+                    *event_id as i64,
+                    *ts as i64,
+                    repo_url.as_deref(),
+                    json
+                ])?;
             }
         }
 
@@ -306,27 +320,58 @@ impl MetricsDatabase {
     }
 
     /// Query local_events since `since_ts` (Unix seconds), returning all interesting event types.
-    pub fn get_local_events(&self, since_ts: u32) -> Result<Vec<LocalEventRecord>, GitAiError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT event_id, ts, event_json FROM local_events \
-             WHERE ts >= ?1 \
-             ORDER BY ts ASC",
-        )?;
-
-        let rows = stmt.query_map(params![since_ts as i64], |row| {
-            Ok(LocalEventRecord {
-                event_id: row.get::<_, i64>(0)? as u16,
-                ts: row.get::<_, i64>(1)? as u32,
-                event_json: row.get(2)?,
-            })
-        })?;
-
-        let mut records = Vec::new();
-        for row in rows {
-            records.push(row?);
-        }
-
+    ///
+    /// When `repo_filter` is `Some(url)`, only events matching that repo_url are returned.
+    /// When `None`, all events are returned regardless of repo.
+    pub fn get_local_events(
+        &self,
+        since_ts: u32,
+        repo_filter: Option<&str>,
+    ) -> Result<Vec<LocalEventRecord>, GitAiError> {
+        let records = if let Some(repo_url) = repo_filter {
+            let mut stmt = self.conn.prepare(
+                "SELECT event_id, ts, repo_url, event_json FROM local_events \
+                 WHERE ts >= ?1 AND repo_url = ?2 \
+                 ORDER BY ts ASC",
+            )?;
+            let rows = stmt.query_map(params![since_ts as i64, repo_url], |row| {
+                Ok(LocalEventRecord {
+                    event_id: row.get::<_, i64>(0)? as u16,
+                    ts: row.get::<_, i64>(1)? as u32,
+                    repo_url: row.get(2)?,
+                    event_json: row.get(3)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut stmt = self.conn.prepare(
+                "SELECT event_id, ts, repo_url, event_json FROM local_events \
+                 WHERE ts >= ?1 \
+                 ORDER BY ts ASC",
+            )?;
+            let rows = stmt.query_map(params![since_ts as i64], |row| {
+                Ok(LocalEventRecord {
+                    event_id: row.get::<_, i64>(0)? as u16,
+                    ts: row.get::<_, i64>(1)? as u32,
+                    repo_url: row.get(2)?,
+                    event_json: row.get(3)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
         Ok(records)
+    }
+
+    /// Return the distinct repo_urls that have events since `since_ts`, sorted alphabetically.
+    /// NULL repo_url entries are excluded.
+    pub fn get_distinct_repo_urls(&self, since_ts: u32) -> Result<Vec<String>, GitAiError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT repo_url FROM local_events \
+             WHERE ts >= ?1 AND repo_url IS NOT NULL \
+             ORDER BY repo_url ASC",
+        )?;
+        let rows = stmt.query_map(params![since_ts as i64], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Returns whether an `agent_usage` event should be emitted for this prompt_id.
