@@ -9,7 +9,6 @@ pub mod attrs;
 pub mod db;
 pub mod events;
 pub mod local_stats;
-pub mod notes_backfill;
 pub mod pos_encoded;
 pub mod types;
 

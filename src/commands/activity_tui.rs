@@ -11,7 +11,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
-    widgets::{Bar, BarChart, Block, Cell, Clear, Gauge, Paragraph, Row, Sparkline, Table, Tabs},
+    widgets::{Bar, BarChart, Block, Cell, Clear, Gauge, Paragraph, Row, Table, Tabs},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -406,25 +406,32 @@ fn render_time_of_day(frame: &mut Frame, area: Rect, stats: &LocalActivityStats)
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let max_val = stats.hourly.iter().copied().max().unwrap_or(1).max(1) as u64;
-    let data: Vec<u64> = stats.hourly.iter().map(|&v| v as u64).collect();
     let [spark_area, label_area] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
 
+    let max_val = stats.hourly.iter().copied().max().unwrap_or(1).max(1);
+    let spark: String = stats
+        .hourly
+        .iter()
+        .map(|&v| heatmap_char(v, max_val))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let labels: String = (0..24usize)
+        .map(|h| match h {
+            0 => "am".to_string(),
+            12 => "pm".to_string(),
+            h if h < 12 => format!("{h}"),
+            h => format!("{}", h - 12),
+        })
+        .map(|l| format!("{:<3}", l))
+        .collect::<Vec<_>>()
+        .join("");
+
     frame.render_widget(
-        Sparkline::default()
-            .data(&data)
-            .max(max_val)
-            .style(Style::default().fg(Color::Cyan)),
+        Paragraph::new(spark).style(Style::default().fg(Color::Cyan)),
         spark_area,
     );
-    frame.render_widget(
-        Paragraph::new(
-            Span::from("am  1  2  3  4  5  6  7  8  9 10 11 pm  1  2  3  4  5  6  7  8  9 10 11")
-                .dim(),
-        ),
-        label_area,
-    );
+    frame.render_widget(Paragraph::new(Span::from(labels).dim()), label_area);
 }
 
 fn render_day_of_week(frame: &mut Frame, area: Rect, stats: &LocalActivityStats) {
@@ -432,22 +439,40 @@ fn render_day_of_week(frame: &mut Frame, area: Rect, stats: &LocalActivityStats)
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let max_val = stats.daily.iter().copied().max().unwrap_or(1).max(1) as u64;
-    let data: Vec<u64> = stats.daily.iter().map(|&v| v as u64).collect();
     let [spark_area, label_area] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
 
+    let max_val = stats.daily.iter().copied().max().unwrap_or(1).max(1);
+    let spark: String = stats
+        .daily
+        .iter()
+        .map(|&v| heatmap_char(v, max_val))
+        .collect::<Vec<_>>()
+        .join("    ");
+    let labels = "Mon  Tue  Wed  Thu  Fri  Sat  Sun";
+
     frame.render_widget(
-        Sparkline::default()
-            .data(&data)
-            .max(max_val)
-            .style(Style::default().fg(Color::Cyan)),
+        Paragraph::new(spark).style(Style::default().fg(Color::Cyan)),
         spark_area,
     );
-    frame.render_widget(
-        Paragraph::new(Span::from("Mon   Tue   Wed   Thu   Fri   Sat   Sun").dim()),
-        label_area,
-    );
+    frame.render_widget(Paragraph::new(Span::from(labels).dim()), label_area);
+}
+
+fn heatmap_char(value: u32, max: u32) -> &'static str {
+    if value == 0 {
+        return "·";
+    }
+    let pct = value * 8 / max;
+    match pct {
+        0 => "▁",
+        1 => "▂",
+        2 => "▃",
+        3 => "▄",
+        4 => "▅",
+        5 => "▆",
+        6 => "▇",
+        _ => "█",
+    }
 }
 
 // ─── Models tab ──────────────────────────────────────────────────────────────
