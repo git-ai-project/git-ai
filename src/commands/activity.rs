@@ -108,6 +108,20 @@ fn print_terminal(stats: &LocalActivityStats) {
         );
     }
 
+    // --- Attribution coverage: how much committed code we confidently attributed ---
+    let attributed = stats.commits.ai_lines + stats.commits.human_lines;
+    if let Some(coverage_pct) = (attributed * 100).checked_div(stats.commits.diff_added_lines) {
+        let untracked = stats.commits.diff_added_lines.saturating_sub(attributed);
+        let untracked_pct = 100 - coverage_pct;
+        println!(
+            "  {}  {BOLD}Attributed{RESET} {:>3}%  {GRAY}· {} untracked ({}%){RESET}",
+            bar(coverage_pct, 40),
+            coverage_pct,
+            format_num(untracked),
+            untracked_pct,
+        );
+    }
+
     // --- AI section ---
     println!();
     println!("  {BOLD}AI{RESET}");
