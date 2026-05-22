@@ -129,23 +129,24 @@ fn aggregate_committed(
     total_human_lines: &mut u32,
     commit_tool_counts: &mut HashMap<String, u32>,
 ) {
+    let human = sparse_get_u32(&event.values, committed_pos::HUMAN_ADDITIONS)
+        .flatten()
+        .unwrap_or(0);
     let ai_vecs = sparse_get_vec_u32(&event.values, committed_pos::AI_ADDITIONS)
         .flatten()
         .unwrap_or_default();
     let total_ai = ai_vecs.first().copied().unwrap_or(0);
 
-    // Only count commits that actually contain AI-attributed lines.
+    // Always accumulate human lines regardless of whether the commit has AI lines.
+    *total_human_lines += human;
+
+    // Only count the commit and accumulate AI lines when AI was involved.
     if total_ai == 0 {
         return;
     }
 
     *total_commits += 1;
     *total_ai_lines += total_ai;
-
-    let human = sparse_get_u32(&event.values, committed_pos::HUMAN_ADDITIONS)
-        .flatten()
-        .unwrap_or(0);
-    *total_human_lines += human;
 
     // Per-tool breakdown: index 0 = "all" aggregate, 1+ = per tool::model.
     let pairs = sparse_get_vec_string(&event.values, committed_pos::TOOL_MODEL_PAIRS)
