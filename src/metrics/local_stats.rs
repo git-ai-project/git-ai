@@ -58,6 +58,7 @@ pub struct WowSpend {
 #[derive(Debug, Default, Serialize)]
 pub struct TokenModelStat {
     pub model: String,
+    pub sessions: u32,
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
@@ -167,9 +168,9 @@ pub fn compute_activity(
     let mut session_tool_counts: HashMap<String, u32> = HashMap::new();
 
     // Claude-shaped token usage keyed by assistant message id. Value is
-    // (model, accum, record_ts). `record_ts` is the Unix timestamp of the
+    // (model, accum, record_ts, session_id). `record_ts` is the Unix timestamp of the
     // first event that introduced this message id — used for WoW bucketing.
-    let mut message_usage: HashMap<String, (String, TokenAccum, u32)> = HashMap::new();
+    let mut message_usage: HashMap<String, (String, TokenAccum, u32, String)> = HashMap::new();
 
     // Codex-shaped token usage keyed by session id. Codex reports cumulative
     // session totals (total_token_usage) on each token_count event, so we keep
@@ -252,7 +253,10 @@ pub fn compute_activity(
                 if tool == "codex" {
                     aggregate_codex_tokens(&event, record.ts, &mut codex_sessions);
                 } else {
-                    aggregate_session_tokens(&event, record.ts, &mut message_usage);
+                    let sid = sparse_get_string(&event.attrs, attr_pos::SESSION_ID)
+                        .flatten()
+                        .unwrap_or_default();
+                    aggregate_session_tokens(&event, record.ts, sid, &mut message_usage);
                 }
             }
             _ => {}
@@ -459,7 +463,7 @@ fn cost_for_message_slice(entries: impl Iterator<Item = (String, TokenAccum)>) -
 }
 
 fn build_token_summary(
-    message_usage: HashMap<String, (String, TokenAccum, u32)>,
+    message_usage: HashMap<String, (String, TokenAccum, u32, String)>,
     codex_sessions: HashMap<String, CodexSessionAccum>,
     now_ts: u32,
     since_ts: u32,
@@ -477,12 +481,20 @@ fn build_token_summary(
 
     // Fold per-message (deduped, max) usage into per-model totals.
     let mut model_tokens: HashMap<String, TokenAccum> = HashMap::new();
-    for (_id, (model, acc, ts)) in message_usage {
+    let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
+    for (_id, (model, acc, ts, sid)) in message_usage {
         let entry = model_tokens.entry(model.clone()).or_default();
         entry.input += acc.input;
         entry.output += acc.output;
         entry.cache_read += acc.cache_read;
         entry.cache_creation += acc.cache_creation;
+
+        if !sid.is_empty() {
+            model_session_ids
+                .entry(model.clone())
+                .or_default()
+                .insert(sid);
+        }
 
         if ts >= this_week_start {
             this_week_msgs.push((model, acc));
@@ -498,7 +510,7 @@ fn build_token_summary(
     let mut this_week_codex: Vec<(String, TokenAccum)> = Vec::new();
     let mut last_week_codex: Vec<(String, TokenAccum)> = Vec::new();
 
-    for (_sid, acc) in codex_sessions {
+    for (sid, acc) in codex_sessions {
         let model = acc.model.clone().unwrap_or_else(|| "codex".to_string());
         let mapped = TokenAccum {
             input: acc.input_tokens.saturating_sub(acc.cached_input_tokens),
@@ -510,6 +522,10 @@ fn build_token_summary(
         entry.input += mapped.input;
         entry.output += mapped.output;
         entry.cache_read += mapped.cache_read;
+        model_session_ids
+            .entry(model.clone())
+            .or_default()
+            .insert(sid);
 
         if acc.last_usage_ts >= this_week_start {
             this_week_codex.push((model, mapped));
@@ -562,8 +578,13 @@ fn build_token_summary(
             None
         };
 
+        let sessions = model_session_ids
+            .get(&model)
+            .map(|s| s.len() as u32)
+            .unwrap_or(0);
         by_model.push(TokenModelStat {
             model: shorten_model(&model),
+            sessions,
             input: acc.input,
             output: acc.output,
             cache_read: acc.cache_read,
@@ -857,7 +878,8 @@ fn aggregate_session(
 fn aggregate_session_tokens(
     event: &MetricEvent,
     record_ts: u32,
-    message_usage: &mut HashMap<String, (String, TokenAccum, u32)>,
+    session_id: String,
+    message_usage: &mut HashMap<String, (String, TokenAccum, u32, String)>,
 ) {
     let Some(raw) = event.values.get(&session_event_pos::RAW_JSON.to_string()) else {
         return;
@@ -883,9 +905,9 @@ fn aggregate_session_tokens(
 
     let get = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
 
-    let (_, acc, _ts) = message_usage
+    let (_, acc, _ts, _sid) = message_usage
         .entry(id.to_string())
-        .or_insert_with(|| (model, TokenAccum::default(), record_ts));
+        .or_insert_with(|| (model, TokenAccum::default(), record_ts, session_id));
     // Field-wise max: input/cache are fixed per message; output grows while
     // streaming, so the final (largest) value is authoritative.
     acc.input = acc.input.max(get("input_tokens"));

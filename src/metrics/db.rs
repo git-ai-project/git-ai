@@ -323,6 +323,7 @@ impl MetricsDatabase {
     /// Query local_events since `since_ts` (Unix seconds), returning all interesting event types.
     ///
     /// When `repo_filter` is `Some(url)`, only events matching that repo_url are returned.
+    /// An empty string `""` is a sentinel meaning "events with no repo_url (NULL)".
     /// When `None`, all events are returned regardless of repo.
     pub fn get_local_events(
         &self,
@@ -330,20 +331,37 @@ impl MetricsDatabase {
         repo_filter: Option<&str>,
     ) -> Result<Vec<LocalEventRecord>, GitAiError> {
         let records = if let Some(repo_url) = repo_filter {
-            let mut stmt = self.conn.prepare(
-                "SELECT event_id, ts, repo_url, event_json FROM local_events \
+            if repo_url.is_empty() {
+                let mut stmt = self.conn.prepare(
+                    "SELECT event_id, ts, repo_url, event_json FROM local_events \
+                     WHERE ts >= ?1 AND repo_url IS NULL \
+                     ORDER BY ts ASC",
+                )?;
+                let rows = stmt.query_map(params![since_ts as i64], |row| {
+                    Ok(LocalEventRecord {
+                        event_id: row.get::<_, i64>(0)? as u16,
+                        ts: row.get::<_, i64>(1)? as u32,
+                        repo_url: row.get(2)?,
+                        event_json: row.get(3)?,
+                    })
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            } else {
+                let mut stmt = self.conn.prepare(
+                    "SELECT event_id, ts, repo_url, event_json FROM local_events \
                  WHERE ts >= ?1 AND repo_url = ?2 \
                  ORDER BY ts ASC",
-            )?;
-            let rows = stmt.query_map(params![since_ts as i64, repo_url], |row| {
-                Ok(LocalEventRecord {
-                    event_id: row.get::<_, i64>(0)? as u16,
-                    ts: row.get::<_, i64>(1)? as u32,
-                    repo_url: row.get(2)?,
-                    event_json: row.get(3)?,
-                })
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
+                )?;
+                let rows = stmt.query_map(params![since_ts as i64, repo_url], |row| {
+                    Ok(LocalEventRecord {
+                        event_id: row.get::<_, i64>(0)? as u16,
+                        ts: row.get::<_, i64>(1)? as u32,
+                        repo_url: row.get(2)?,
+                        event_json: row.get(3)?,
+                    })
+                })?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            }
         } else {
             let mut stmt = self.conn.prepare(
                 "SELECT event_id, ts, repo_url, event_json FROM local_events \
@@ -364,7 +382,7 @@ impl MetricsDatabase {
     }
 
     /// Return the distinct repo_urls that have events since `since_ts`, sorted alphabetically.
-    /// NULL repo_url entries are excluded.
+    /// An empty string `""` sentinel is appended last when any NULL repo_url entries exist.
     pub fn get_distinct_repo_urls(&self, since_ts: u32) -> Result<Vec<String>, GitAiError> {
         let mut stmt = self.conn.prepare(
             "SELECT DISTINCT repo_url FROM local_events \
@@ -372,7 +390,17 @@ impl MetricsDatabase {
              ORDER BY repo_url ASC",
         )?;
         let rows = stmt.query_map(params![since_ts as i64], |row| row.get::<_, String>(0))?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        let mut urls: Vec<String> = rows.collect::<Result<Vec<_>, _>>()?;
+
+        let has_null: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_events WHERE ts >= ?1 AND repo_url IS NULL AND event_id = 1)",
+            params![since_ts as i64],
+            |row| row.get(0),
+        )?;
+        if has_null {
+            urls.push(String::new());
+        }
+        Ok(urls)
     }
 
     // ─── Notes backfill helpers ───────────────────────────────────────────────
