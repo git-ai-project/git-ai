@@ -5542,8 +5542,9 @@ impl ActorDaemonCoordinator {
                                 } else if let Some(head_sha) = head.as_deref()
                                     && !head_sha.is_empty()
                                 {
+                                    let pathspecs = Self::stash_pathspecs_from_command(cmd);
                                     let _ = crate::authorship::rewrite_stash::save_pending_stash(
-                                        &repo, head_sha,
+                                        &repo, head_sha, pathspecs,
                                     );
                                 }
                             }
