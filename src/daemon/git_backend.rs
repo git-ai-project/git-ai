@@ -297,23 +297,23 @@ impl GitBackend for SystemGitBackend {
     }
 
     fn repo_context(&self, worktree: &Path) -> Result<RepoContext, GitAiError> {
-        // Try gix first (no subprocess) — discover .git dir for this worktree
-        let git_dir = worktree.join(".git");
-        let gix_dir = if git_dir.is_dir() {
-            git_dir
-        } else if git_dir.is_file() {
-            // Linked worktree: .git file contains "gitdir: <path>"
-            if let Ok(content) = std::fs::read_to_string(&git_dir) {
-                if let Some(dir) = content.trim().strip_prefix("gitdir: ") {
-                    PathBuf::from(dir)
-                } else {
-                    git_dir
-                }
-            } else {
+        // Discover the git dir for this worktree path
+        let gix_dir = {
+            let git_dir = worktree.join(".git");
+            if git_dir.is_dir() {
                 git_dir
+            } else if git_dir.is_file() {
+                // Linked worktree: .git file contains "gitdir: <path>"
+                std::fs::read_to_string(&git_dir)
+                    .ok()
+                    .and_then(|content| content.trim().strip_prefix("gitdir: ").map(PathBuf::from))
+                    .unwrap_or(git_dir)
+            } else if worktree.join("HEAD").exists() {
+                // Bare repository: the path itself is the git dir
+                worktree.to_path_buf()
+            } else {
+                worktree.join(".git")
             }
-        } else {
-            git_dir
         };
 
         let gix = GixBackend::new(&gix_dir);

@@ -1910,11 +1910,9 @@ impl Repository {
 }
 
 pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError> {
+    let command_base_dir = resolve_command_base_dir(global_args)?;
     let mut rev_parse_args = global_args.to_owned();
     rev_parse_args.push("rev-parse".to_string());
-    // Use --git-dir instead of --absolute-git-dir for compatibility with Git < 2.13
-    // (--absolute-git-dir was added in Git 2.13; older versions output the literal
-    // string "absolute-git-dir" instead of the resolved path).
     rev_parse_args.push("--is-bare-repository".to_string());
     rev_parse_args.push("--git-dir".to_string());
     rev_parse_args.push("--git-common-dir".to_string());
@@ -1948,7 +1946,6 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
     let git_common_dir_str = lines.next().ok_or_else(|| {
         GitAiError::Generic("Missing --git-common-dir output from git rev-parse".to_string())
     })?;
-    let command_base_dir = resolve_command_base_dir(global_args)?;
     let git_dir = if Path::new(git_dir_str).is_relative() {
         command_base_dir.join(git_dir_str)
     } else {
