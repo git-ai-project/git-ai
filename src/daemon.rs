@@ -1865,8 +1865,10 @@ fn apply_checkout_switch_working_log_side_effect(
         .post_repo
         .as_ref()
         .and_then(|repo| repo.head.as_deref())
-        .unwrap_or_default()
-        .to_string();
+        .filter(|h| !h.is_empty())
+        .map(|h| h.to_string())
+        .or_else(|| read_head_state_for_worktree(worktree).and_then(|s| s.head))
+        .unwrap_or_default();
 
     if cmd.primary_command.as_deref() == Some("checkout") {
         let pathspecs = parsed.pathspecs();
