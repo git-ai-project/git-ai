@@ -5539,7 +5539,8 @@ impl ActorDaemonCoordinator {
                                                 &repo, stash_sha, head_sha, pathspecs,
                                             );
                                     }
-                                } else if let Some(head_sha) = head.as_deref()
+                                } else if matches!(kind, crate::daemon::domain::StashOpKind::Push)
+                                    && let Some(head_sha) = head.as_deref()
                                     && !head_sha.is_empty()
                                 {
                                     let pathspecs = Self::stash_pathspecs_from_command(cmd);
