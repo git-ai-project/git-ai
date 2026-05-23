@@ -823,18 +823,14 @@ fn tracked_working_log_files(
     Ok(files)
 }
 
-fn stash_sha_from_ref_changes(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<&str> {
-    cmd.ref_changes
-        .iter()
-        .find(|rc| rc.reference == "refs/stash")
-        .map(|rc| rc.old.as_str())
-        .filter(|s| !s.is_empty() && *s != "0000000000000000000000000000000000000000")
-}
-
 fn resolve_stash_sha(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<&str> {
-    cmd.stash_target_oid
-        .as_deref()
-        .or_else(|| stash_sha_from_ref_changes(cmd))
+    cmd.stash_target_oid.as_deref().or_else(|| {
+        cmd.ref_changes
+            .iter()
+            .find(|rc| rc.reference == "refs/stash")
+            .map(|rc| rc.old.as_str())
+            .filter(|s| !s.is_empty() && *s != "0000000000000000000000000000000000000000")
+    })
 }
 
 /// After a rebase completes, check if any newly-rebased commits were created
@@ -3112,33 +3108,6 @@ impl ActorDaemonCoordinator {
             let _ = entries.pop_front();
         }
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn recent_replay_prerequisites_for_base(
-        &self,
-        family: &str,
-        base_commit: &str,
-    ) -> Result<Vec<RecentReplayPrerequisite>, GitAiError> {
-        let map = self
-            .recent_replay_prerequisites_by_family
-            .lock()
-            .map_err(|_| {
-                GitAiError::Generic("recent replay prerequisites map lock poisoned".to_string())
-            })?;
-        let Some(entries) = map.get(family) else {
-            return Ok(Vec::new());
-        };
-        Ok(entries
-            .iter()
-            .filter(|p| match p {
-                RecentReplayPrerequisite::CheckoutSwitchRename { target_head, .. }
-                | RecentReplayPrerequisite::CheckoutSwitchMerge { target_head, .. } => {
-                    target_head == base_commit
-                }
-            })
-            .cloned()
-            .collect())
     }
 
     fn maybe_append_test_completion_log(
@@ -5462,11 +5431,7 @@ impl ActorDaemonCoordinator {
                             }
                         }
                     }
-                    crate::daemon::domain::SemanticEvent::StashOperation {
-                        kind,
-                        stash_ref: _,
-                        head,
-                    } => {
+                    crate::daemon::domain::SemanticEvent::StashOperation { kind, head } => {
                         let repo = find_repository_in_path(&worktree)?;
                         match kind {
                             crate::daemon::domain::StashOpKind::Push

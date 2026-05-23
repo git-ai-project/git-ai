@@ -186,7 +186,6 @@ pub enum SemanticEvent {
     CleanedWorkspace,
     StashOperation {
         kind: StashOpKind,
-        stash_ref: Option<String>,
         head: Option<String>,
     },
     FetchCompleted {
