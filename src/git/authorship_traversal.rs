@@ -33,7 +33,11 @@ pub async fn load_ai_touched_files_for_commits(
         let mut blob_oids: Vec<String> = unique_blob_oids.into_iter().collect();
         blob_oids.sort();
 
-        let blob_contents = batch_read_blobs_with_oids(&repo.global_args_for_exec(), &blob_oids)?;
+        let blob_contents =
+            batch_read_blobs_with_oids_gix(&repo, &blob_oids).unwrap_or_else(|_| {
+                batch_read_blobs_with_oids(&repo.global_args_for_exec(), &blob_oids)
+                    .unwrap_or_default()
+            });
 
         let mut all_files = HashSet::new();
         for blob_oid in note_blob_map.into_values() {
@@ -91,6 +95,20 @@ fn get_notes_list(global_args: &[String]) -> Result<Vec<(String, String)>, GitAi
     }
 
     Ok(mappings)
+}
+
+fn batch_read_blobs_with_oids_gix(
+    repo: &Repository,
+    blob_oids: &[String],
+) -> Result<std::collections::HashMap<String, String>, GitAiError> {
+    let mut results = std::collections::HashMap::new();
+    for oid in blob_oids {
+        let data = repo.gix.read_blob(oid)?;
+        let content = String::from_utf8(data)
+            .map_err(|e| GitAiError::GixError(format!("invalid UTF-8 in blob {}: {}", oid, e)))?;
+        results.insert(oid.clone(), content);
+    }
+    Ok(results)
 }
 
 fn batch_read_blobs_with_oids(

@@ -138,14 +138,16 @@ pub fn note_blob_oids_for_commits(
         return Ok(HashMap::new());
     }
 
+    if let Ok(result) = repo.gix.note_blob_oids_batch("refs/notes/ai", commit_shas) {
+        return Ok(result);
+    }
+
     let mut args = repo.global_args_for_exec();
     args.push("cat-file".to_string());
     args.push("--batch-check".to_string());
 
     let mut stdin_data = String::new();
     for commit_sha in commit_shas {
-        // Notes can be stored with either flat paths (<sha>) or fanout paths (<aa>/<bb...>).
-        // Query both forms so this works regardless of repository note fanout state.
         stdin_data.push_str(&flat_note_pathspec_for_commit(commit_sha));
         stdin_data.push('\n');
         stdin_data.push_str(&fanout_note_pathspec_for_commit(commit_sha));

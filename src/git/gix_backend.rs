@@ -372,6 +372,54 @@ impl GixBackend {
         Ok(blob.detach().data)
     }
 
+    /// Batch-lookup note blob OIDs for multiple objects under a notes ref.
+    /// Returns a map of object_sha → note_blob_oid for objects that have notes.
+    pub fn note_blob_oids_batch(
+        &self,
+        notes_ref: &str,
+        object_shas: &[String],
+    ) -> Result<std::collections::HashMap<String, String>, GitAiError> {
+        let repo = self.get_repo()?;
+        let reference = repo
+            .find_reference(notes_ref)
+            .map_err(|e| GitAiError::GixError(format!("find notes ref '{}': {}", notes_ref, e)))?;
+        let commit_id = reference
+            .into_fully_peeled_id()
+            .map_err(|e| GitAiError::GixError(format!("peel notes ref '{}': {}", notes_ref, e)))?;
+        let commit_obj = repo
+            .find_object(commit_id)
+            .map_err(|e| GitAiError::GixError(format!("find notes commit: {}", e)))?;
+        let commit = commit_obj
+            .try_into_commit()
+            .map_err(|e| GitAiError::GixError(format!("notes ref not a commit: {}", e)))?;
+        let tree_id = commit
+            .tree_id()
+            .map_err(|e| GitAiError::GixError(format!("notes commit tree: {}", e)))?;
+        let tree = repo
+            .find_object(tree_id)
+            .map_err(|e| GitAiError::GixError(format!("find notes tree: {}", e)))?
+            .try_into_tree()
+            .map_err(|e| GitAiError::GixError(format!("not a tree: {}", e)))?;
+
+        let mut result = std::collections::HashMap::new();
+        for sha in object_shas {
+            let fanout_path = if sha.len() > 2 {
+                format!("{}/{}", &sha[..2], &sha[2..])
+            } else {
+                sha.to_string()
+            };
+            let entry = tree
+                .lookup_entry_by_path(&fanout_path)
+                .ok()
+                .flatten()
+                .or_else(|| tree.lookup_entry_by_path(sha.as_str()).ok().flatten());
+            if let Some(e) = entry {
+                result.insert(sha.clone(), e.object_id().to_string());
+            }
+        }
+        Ok(result)
+    }
+
     /// Check if a ref exists in the repository.
     pub fn ref_exists(&self, refname: &str) -> Result<bool, GitAiError> {
         let repo = self.get_repo()?;
