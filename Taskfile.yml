@@ -134,6 +134,14 @@ tasks:
           GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_combined_
 
+  test:fuzz:workflow:
+    desc: Run workflow fuzzer tests (plumbing, fixup, cherry-pick ranges, rebase --onto)
+    cmds:
+      - task: test:base
+        vars:
+          GIT_AI_TEST_GIT_MODE: daemon
+          TEST_FILTER: fuzz_workflow_
+
   test:fuzz:marathon:
     desc: Run marathon fuzzer tests (150-200 ops, very long running)
     cmds:

@@ -288,3 +288,50 @@ pub fn gen_combined_op(rng: &mut impl Rng) -> CombinedOp {
         _ => CombinedOp::SquashNonlinearBranch,
     }
 }
+
+/// Multi-step workflow templates and plumbing operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowOp {
+    PlumbingCommitTree,
+    PlumbingRapidUpdateRef,
+    BranchLifecycle,
+    StashSandwich,
+    FixupAutosquash,
+    CherryPickNoCommit,
+    CherryPickRange,
+    RebaseOnto,
+    RapidMultiFileBurst,
+    MergeSquashDirect,
+    RebaseConflictContinue,
+    RestoreFromCommit,
+    RevertCherrypick,
+    MultiBranchMerge,
+    FileCrossRename,
+    FileSpacesPath,
+    WorkingLogBaseRace,
+    InterleavedLineAttribution,
+}
+
+/// Generate a random workflow operation.
+pub fn gen_workflow_op(rng: &mut impl Rng) -> WorkflowOp {
+    match rng.random_range(0..18u32) {
+        0 => WorkflowOp::PlumbingCommitTree,
+        1 => WorkflowOp::PlumbingRapidUpdateRef,
+        2 => WorkflowOp::BranchLifecycle,
+        3 => WorkflowOp::StashSandwich,
+        4 => WorkflowOp::FixupAutosquash,
+        5 => WorkflowOp::CherryPickNoCommit,
+        6 => WorkflowOp::CherryPickRange,
+        7 => WorkflowOp::RebaseOnto,
+        8 => WorkflowOp::RapidMultiFileBurst,
+        9 => WorkflowOp::MergeSquashDirect,
+        10 => WorkflowOp::RebaseConflictContinue,
+        11 => WorkflowOp::RestoreFromCommit,
+        12 => WorkflowOp::RevertCherrypick,
+        13 => WorkflowOp::MultiBranchMerge,
+        14 => WorkflowOp::FileCrossRename,
+        15 => WorkflowOp::FileSpacesPath,
+        16 => WorkflowOp::WorkingLogBaseRace,
+        _ => WorkflowOp::InterleavedLineAttribution,
+    }
+}
