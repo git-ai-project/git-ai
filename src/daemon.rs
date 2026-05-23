@@ -5515,16 +5515,40 @@ impl ActorDaemonCoordinator {
                         match kind {
                             crate::daemon::domain::StashOpKind::Push
                             | crate::daemon::domain::StashOpKind::Unknown => {
-                                let resolved_stash = cmd.stash_target_oid.clone().or_else(|| {
-                                    cmd.ref_changes
-                                        .iter()
-                                        .find(|rc| rc.reference == "refs/stash")
-                                        .map(|rc| rc.new.clone())
-                                        .filter(|s| {
-                                            !s.is_empty()
-                                                && *s != "0000000000000000000000000000000000000000"
-                                        })
-                                });
+                                let resolved_stash = cmd
+                                    .stash_target_oid
+                                    .clone()
+                                    .or_else(|| {
+                                        cmd.ref_changes
+                                            .iter()
+                                            .find(|rc| rc.reference == "refs/stash")
+                                            .map(|rc| rc.new.clone())
+                                            .filter(|s| {
+                                                !s.is_empty()
+                                                    && *s
+                                                        != "0000000000000000000000000000000000000000"
+                                            })
+                                    })
+                                    .or_else(|| {
+                                        // Fallback: resolve refs/stash via rev-parse at handler
+                                        // time. Safe here because the family sequencer guarantees
+                                        // events are processed in order — no subsequent push can
+                                        // overwrite refs/stash before this handler completes.
+                                        let mut args = repo.global_args_for_exec();
+                                        args.extend([
+                                            "rev-parse".to_string(),
+                                            "refs/stash".to_string(),
+                                        ]);
+                                        crate::git::repository::exec_git_allow_nonzero(&args)
+                                            .ok()
+                                            .filter(|o| o.status.success())
+                                            .map(|o| {
+                                                String::from_utf8_lossy(&o.stdout)
+                                                    .trim()
+                                                    .to_string()
+                                            })
+                                            .filter(|s| !s.is_empty())
+                                    });
                                 if let Some(ref stash_sha) = resolved_stash {
                                     let resolved_head = repo
                                         .find_commit(stash_sha.to_string())
