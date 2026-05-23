@@ -1,6 +1,7 @@
 use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
+use crate::git::gix_backend::GixBackend;
 use crate::git::repo_state::{
     common_dir_for_git_dir, git_dir_for_worktree, worktree_root_for_path,
 };
@@ -525,8 +526,7 @@ impl<'a> Commit<'a> {
     }
 
     pub fn tree(&self) -> Result<Tree<'a>, GitAiError> {
-        let reader = crate::git::fast_reader::FastObjectReader::new(&self.repo.git_common_dir);
-        if let Some(tree_oid) = reader.try_read_commit_tree_oid(&self.oid) {
+        if let Some(tree_oid) = self.repo.gix.try_read_commit_tree_oid(&self.oid) {
             return Ok(Tree {
                 repo: self.repo,
                 oid: tree_oid,
@@ -720,8 +720,8 @@ impl<'a> Tree<'a> {
 
     // Retrieve a tree entry contained in a tree or in any of its subtrees, given its relative path.
     pub fn get_path(&self, path: &Path) -> Result<TreeEntry<'a>, GitAiError> {
-        let reader = crate::git::fast_reader::FastObjectReader::new(&self.repo.git_common_dir);
-        if let Some(blob_oid) = reader.try_tree_entry_for_path(&self.oid, path) {
+        let path_str = path.to_string_lossy();
+        if let Some(blob_oid) = self.repo.gix.try_tree_entry_for_path(&self.oid, &path_str) {
             return Ok(TreeEntry {
                 _repo: std::marker::PhantomData,
                 oid: blob_oid,
@@ -797,8 +797,7 @@ impl<'a> Blob<'a> {
     }
 
     pub fn content(&self) -> Result<Vec<u8>, GitAiError> {
-        let reader = crate::git::fast_reader::FastObjectReader::new(&self.repo.git_common_dir);
-        if let Some(data) = reader.try_read_blob(&self.oid) {
+        if let Some(data) = self.repo.gix.try_read_blob(&self.oid) {
             return Ok(data);
         }
 
@@ -1002,6 +1001,7 @@ pub struct Repository {
     canonical_workdir: PathBuf,
     /// Cached git author identity resolved via `git var GIT_COMMITTER_IDENT`.
     cached_author_identity: std::sync::OnceLock<GitAuthorIdentity>,
+    gix: GixBackend,
 }
 
 impl Repository {
@@ -1069,8 +1069,7 @@ impl Repository {
 
     // Internal util to get the git object type for a given OID
     fn object_type(&self, oid: &str) -> Result<String, GitAiError> {
-        let reader = crate::git::fast_reader::FastObjectReader::new(&self.git_common_dir);
-        if let Some(typ) = reader.try_read_object_type(oid) {
+        if let Some(typ) = self.gix.try_object_kind(oid) {
             return Ok(typ);
         }
 
@@ -1543,9 +1542,9 @@ impl Repository {
         tree_oid: &str,
         path: &Path,
     ) -> Result<Vec<u8>, GitAiError> {
-        let reader = crate::git::fast_reader::FastObjectReader::new(&self.git_common_dir);
-        if let Some(blob_oid) = reader.try_tree_entry_for_path(tree_oid, path) {
-            if let Some(content) = reader.try_read_blob(&blob_oid) {
+        let path_str = path.to_string_lossy();
+        if let Some(blob_oid) = self.gix.try_tree_entry_for_path(tree_oid, &path_str) {
+            if let Some(content) = self.gix.try_read_blob(&blob_oid) {
                 return Ok(content);
             }
             let blob = Blob {
@@ -2005,6 +2004,7 @@ pub fn find_repository(global_args: &[String]) -> Result<Repository, GitAiError>
     Ok(Repository {
         global_args: normalized_global_args,
         storage,
+        gix: GixBackend::new(&git_dir),
         git_dir,
         git_common_dir,
         pre_command_base_commit: None,
@@ -2322,6 +2322,7 @@ pub fn from_bare_repository(git_dir: &Path) -> Result<Repository, GitAiError> {
     Ok(Repository {
         global_args,
         storage,
+        gix: GixBackend::new(git_dir),
         git_dir: git_dir.to_path_buf(),
         git_common_dir: git_dir.to_path_buf(),
         pre_command_base_commit: None,
@@ -2379,6 +2380,7 @@ fn repository_from_discovered_paths(
     Ok(Repository {
         global_args: vec!["-C".to_string(), command_root.to_string_lossy().to_string()],
         storage,
+        gix: GixBackend::new(git_dir),
         git_dir: git_dir.to_path_buf(),
         git_common_dir: git_common_dir.to_path_buf(),
         pre_command_base_commit: None,
