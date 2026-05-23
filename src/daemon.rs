@@ -831,52 +831,10 @@ fn stash_sha_from_ref_changes(cmd: &crate::daemon::domain::NormalizedCommand) ->
         .filter(|s| !s.is_empty() && *s != "0000000000000000000000000000000000000000")
 }
 
-fn resolve_stash_sha(
-    cmd: &crate::daemon::domain::NormalizedCommand,
-    stash_ref: Option<&str>,
-    repo: &Repository,
-) -> Option<String> {
-    if let Some(oid) = cmd.stash_target_oid.as_deref() {
-        return Some(oid.to_string());
-    }
-    if let Some(sha) = stash_sha_from_ref_changes(cmd) {
-        return Some(sha.to_string());
-    }
-    if let Some(spec) = stash_ref {
-        let mut args = repo.global_args_for_exec();
-        args.extend(["rev-parse".to_string(), spec.to_string()]);
-        if let Ok(output) = crate::git::repository::exec_git_allow_nonzero(&args)
-            && output.status.success()
-        {
-            let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !sha.is_empty() {
-                return Some(sha);
-            }
-        }
-    }
-    // Last resort: find most recent stash metadata in .git/ai/stashes/
-    let stashes_dir = repo.storage.ai_dir.join("stashes");
-    if let Ok(entries) = std::fs::read_dir(&stashes_dir) {
-        let mut best: Option<(u64, String)> = None;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if let Some(sha) = name_str.strip_suffix(".json")
-                && !sha.ends_with("_attrs")
-                && let Ok(content) = std::fs::read_to_string(entry.path())
-                && let Ok(meta) = serde_json::from_str::<
-                    crate::authorship::rewrite_stash::StashMetadata,
-                >(&content)
-                && best.as_ref().is_none_or(|(ts, _)| meta.timestamp > *ts)
-            {
-                best = Some((meta.timestamp, sha.to_string()));
-            }
-        }
-        if let Some((_, sha)) = best {
-            return Some(sha);
-        }
-    }
-    None
+fn resolve_stash_sha(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<&str> {
+    cmd.stash_target_oid
+        .as_deref()
+        .or_else(|| stash_sha_from_ref_changes(cmd))
 }
 
 /// After a rebase completes, check if any newly-rebased commits were created
@@ -5546,25 +5504,25 @@ impl ActorDaemonCoordinator {
                     }
                     crate::daemon::domain::SemanticEvent::StashOperation {
                         kind,
-                        stash_ref,
+                        stash_ref: _,
                         head,
                     } => {
                         let repo = find_repository_in_path(&worktree)?;
                         match kind {
                             crate::daemon::domain::StashOpKind::Push
                             | crate::daemon::domain::StashOpKind::Unknown => {
-                                let resolved_stash = cmd.stash_target_oid.clone().or_else(|| {
-                                    cmd.ref_changes
+                                let resolved_stash =
+                                    cmd.stash_target_oid.as_deref().or_else(|| {
+                                        cmd.ref_changes
                                         .iter()
                                         .find(|rc| rc.reference == "refs/stash")
-                                        .map(|rc| rc.new.clone())
+                                        .map(|rc| rc.new.as_str())
                                         .filter(|s| {
                                             !s.is_empty()
                                                 && *s != "0000000000000000000000000000000000000000"
                                         })
-                                });
-                                if let Some(ref stash_sha) = resolved_stash {
-                                    // Stash commit's parent IS the HEAD at push time — authoritative.
+                                    });
+                                if let Some(stash_sha) = resolved_stash {
                                     let push_head = repo
                                         .find_commit(stash_sha.to_string())
                                         .ok()
@@ -5578,63 +5536,41 @@ impl ActorDaemonCoordinator {
                                                 &repo, stash_sha, head_sha, pathspecs,
                                             );
                                     }
-                                } else if matches!(kind, crate::daemon::domain::StashOpKind::Push) {
-                                    // Stash SHA couldn't be resolved — use event head as best effort.
-                                    if let Some(head_sha) = head {
-                                        let pathspecs = Self::stash_pathspecs_from_command(cmd);
-                                        let _ =
-                                            crate::authorship::rewrite_stash::save_pending_stash(
-                                                &repo, head_sha, pathspecs,
-                                            );
-                                    }
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Pop => {
-                                let resolved = resolve_stash_sha(cmd, stash_ref.as_deref(), &repo);
-                                if let Some(stash_sha) = resolved {
+                                if let Some(stash_sha) = resolve_stash_sha(cmd) {
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply_with_head(
-                                            &repo, &stash_sha, true, head.as_deref(),
+                                            &repo, stash_sha, true, head.as_deref(),
                                         );
-                                } else {
-                                    let _ = crate::authorship::rewrite_stash::try_restore_any_pending_stash_to(
-                                        &repo, true, head.as_deref(),
-                                    );
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Apply
                             | crate::daemon::domain::StashOpKind::Branch => {
-                                let resolved = resolve_stash_sha(cmd, stash_ref.as_deref(), &repo);
-                                // For branch: target is stash parent (branch resets HEAD to stash base).
-                                // For apply: target is pre-command HEAD (apply doesn't change HEAD).
-                                let effective_head = if let Some(ref stash_sha) = resolved
-                                    && matches!(kind, crate::daemon::domain::StashOpKind::Branch)
-                                {
-                                    repo.find_commit(stash_sha.clone())
-                                        .ok()
-                                        .and_then(|c| c.parent(0).ok())
-                                        .map(|p| p.id().to_string())
-                                } else {
-                                    None
-                                };
-                                let target_head = effective_head.as_deref().or(head.as_deref());
-
-                                if let Some(stash_sha) = resolved {
+                                if let Some(stash_sha) = resolve_stash_sha(cmd) {
+                                    let effective_head = if matches!(
+                                        kind,
+                                        crate::daemon::domain::StashOpKind::Branch
+                                    ) {
+                                        repo.find_commit(stash_sha.to_string())
+                                            .ok()
+                                            .and_then(|c| c.parent(0).ok())
+                                            .map(|p| p.id().to_string())
+                                    } else {
+                                        None
+                                    };
+                                    let target_head = effective_head.as_deref().or(head.as_deref());
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply_with_head(
-                                            &repo, &stash_sha, false, target_head,
+                                            &repo, stash_sha, false, target_head,
                                         );
-                                } else {
-                                    let _ = crate::authorship::rewrite_stash::try_restore_any_pending_stash_to(
-                                        &repo, false, target_head,
-                                    );
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Drop => {
-                                let resolved = resolve_stash_sha(cmd, stash_ref.as_deref(), &repo);
-                                if let Some(stash_sha) = resolved {
+                                if let Some(stash_sha) = resolve_stash_sha(cmd) {
                                     let _ = crate::authorship::rewrite_stash::handle_stash_drop(
-                                        &repo, &stash_sha,
+                                        &repo, stash_sha,
                                     );
                                 }
                             }
