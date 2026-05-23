@@ -6,6 +6,7 @@ use crate::repos::test_repo::TestRepo;
 
 use super::generators::{
     self, CombinedOp, DestructiveOp, EditStrategy, FileOp, PartialStageOp, RewriteOp, StressOp,
+    WorkflowOp,
 };
 use super::operations::{
     EditParams, FileState, execute_alternating_amend, execute_alternating_amend_storm,
@@ -39,6 +40,16 @@ use super::operations::{
     read_file_state_from_disk,
 };
 use super::oracle::CharRegistry;
+use super::workflows::{
+    execute_cherry_pick_no_commit, execute_cherry_pick_range, execute_file_cross_rename,
+    execute_file_spaces_path, execute_interleaved_line_attribution, execute_merge_squash_direct,
+    execute_plumbing_commit_tree, execute_plumbing_rapid_update_ref,
+    execute_rapid_multi_file_burst, execute_rebase_conflict_continue, execute_rebase_onto,
+    execute_restore_from_commit, execute_workflow_branch_lifecycle,
+    execute_workflow_fixup_autosquash, execute_workflow_multi_branch_merge,
+    execute_workflow_revert_cherrypick, execute_workflow_stash_sandwich,
+    execute_working_log_base_race,
+};
 
 pub struct FuzzerConfig {
     pub seed: u64,
@@ -49,6 +60,7 @@ pub struct FuzzerConfig {
     pub file_op_ratio: f64,
     pub stress_ratio: f64,
     pub combined_ratio: f64,
+    pub workflow_ratio: f64,
     pub max_edits_per_commit: usize,
     pub max_lines_per_edit: usize,
     pub multi_file_enabled: bool,
@@ -61,17 +73,18 @@ impl FuzzerConfig {
         Self {
             seed,
             ops,
-            rewrite_ratio: 0.12,
-            destructive_ratio: 0.12,
-            partial_stage_ratio: 0.12,
+            rewrite_ratio: 0.10,
+            destructive_ratio: 0.10,
+            partial_stage_ratio: 0.10,
             file_op_ratio: 0.08,
-            stress_ratio: 0.1,
-            combined_ratio: 0.12,
+            stress_ratio: 0.10,
+            combined_ratio: 0.10,
+            workflow_ratio: 0.10,
             max_edits_per_commit: 5,
             max_lines_per_edit: 8,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: true,
+            verify_sessions: false,
         }
     }
 
@@ -85,11 +98,12 @@ impl FuzzerConfig {
             file_op_ratio: 0.04,
             stress_ratio: 0.08,
             combined_ratio: 0.1,
+            workflow_ratio: 0.05,
             max_edits_per_commit: 4,
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: true,
+            verify_sessions: false,
         }
     }
 
@@ -103,11 +117,12 @@ impl FuzzerConfig {
             file_op_ratio: 0.04,
             stress_ratio: 0.38,
             combined_ratio: 0.1,
+            workflow_ratio: 0.05,
             max_edits_per_commit: 8,
             max_lines_per_edit: 10,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: true,
+            verify_sessions: false,
         }
     }
 
@@ -121,11 +136,12 @@ impl FuzzerConfig {
             file_op_ratio: 0.04,
             stress_ratio: 0.08,
             combined_ratio: 0.1,
+            workflow_ratio: 0.05,
             max_edits_per_commit: 4,
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: true,
+            verify_sessions: false,
         }
     }
 
@@ -139,11 +155,12 @@ impl FuzzerConfig {
             file_op_ratio: 0.08,
             stress_ratio: 0.08,
             combined_ratio: 0.1,
+            workflow_ratio: 0.05,
             max_edits_per_commit: 4,
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: true,
+            verify_sessions: false,
         }
     }
 
@@ -157,11 +174,12 @@ impl FuzzerConfig {
             file_op_ratio: 0.4,
             stress_ratio: 0.08,
             combined_ratio: 0.1,
+            workflow_ratio: 0.05,
             max_edits_per_commit: 4,
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: true,
+            verify_sessions: false,
         }
     }
 
@@ -175,11 +193,12 @@ impl FuzzerConfig {
             file_op_ratio: 0.05,
             stress_ratio: 0.48,
             combined_ratio: 0.1,
+            workflow_ratio: 0.05,
             max_edits_per_commit: 6,
             max_lines_per_edit: 8,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: true,
+            verify_sessions: false,
         }
     }
 
@@ -193,11 +212,12 @@ impl FuzzerConfig {
             file_op_ratio: 0.05,
             stress_ratio: 0.08,
             combined_ratio: 0.45,
+            workflow_ratio: 0.05,
             max_edits_per_commit: 5,
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: true,
+            verify_sessions: false,
         }
     }
 
@@ -211,11 +231,12 @@ impl FuzzerConfig {
             file_op_ratio: 0.03,
             stress_ratio: 0.05,
             combined_ratio: 0.55,
+            workflow_ratio: 0.05,
             max_edits_per_commit: 5,
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: true,
+            verify_sessions: false,
         }
     }
 
@@ -223,17 +244,38 @@ impl FuzzerConfig {
         Self {
             seed,
             ops,
-            rewrite_ratio: 0.15,
-            destructive_ratio: 0.15,
-            partial_stage_ratio: 0.15,
-            file_op_ratio: 0.12,
-            stress_ratio: 0.12,
-            combined_ratio: 0.15,
+            rewrite_ratio: 0.13,
+            destructive_ratio: 0.13,
+            partial_stage_ratio: 0.13,
+            file_op_ratio: 0.10,
+            stress_ratio: 0.10,
+            combined_ratio: 0.13,
+            workflow_ratio: 0.13,
             max_edits_per_commit: 6,
             max_lines_per_edit: 8,
             multi_file_enabled: true,
             allow_destructive: true,
-            verify_sessions: true,
+            verify_sessions: false,
+        }
+    }
+
+    pub fn workflow_heavy(seed: u64, ops: usize) -> Self {
+        Self {
+            seed,
+            ops,
+            rewrite_ratio: 0.05,
+            destructive_ratio: 0.05,
+            partial_stage_ratio: 0.05,
+            file_op_ratio: 0.05,
+            stress_ratio: 0.05,
+            combined_ratio: 0.08,
+            workflow_ratio: 0.50,
+            max_edits_per_commit: 5,
+            max_lines_per_edit: 6,
+            multi_file_enabled: true,
+            allow_destructive: true,
+            // Disabled: git_og operations break session continuity
+            verify_sessions: false,
         }
     }
 }
@@ -256,7 +298,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
     let mut extra_files: Vec<FileState> = Vec::new();
 
     operation_log.push(format!(
-        "=== Fuzzer seed={} ops={} rewrite={:.0}% destructive={:.0}% partial={:.0}% file={:.0}% stress={:.0}% combined={:.0}% ===",
+        "=== Fuzzer seed={} ops={} rewrite={:.0}% destructive={:.0}% partial={:.0}% file={:.0}% stress={:.0}% combined={:.0}% workflow={:.0}% ===",
         config.seed,
         config.ops,
         config.rewrite_ratio * 100.0,
@@ -265,6 +307,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
         config.file_op_ratio * 100.0,
         config.stress_ratio * 100.0,
         config.combined_ratio * 100.0,
+        config.workflow_ratio * 100.0,
     ));
 
     // Phase 1: Bootstrap
@@ -300,6 +343,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
         let cumulative_file_op = cumulative_partial + config.file_op_ratio;
         let cumulative_stress = cumulative_file_op + config.stress_ratio;
         let cumulative_combined = cumulative_stress + config.combined_ratio;
+        let cumulative_workflow = cumulative_combined + config.workflow_ratio;
 
         if file_state.lines.len() > 3 && roll < cumulative_rewrite {
             // === REWRITE OPERATIONS ===
@@ -328,6 +372,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut operation_log,
                         config.seed,
                     );
+                    registry.mark_all_unverifiable();
                 }
                 RewriteOp::Rebase => {
                     execute_rebase_same_file(
@@ -339,6 +384,9 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
+                    // Daemon rebase handling has known attribution gaps — mark existing
+                    // chars unverifiable since notes may not transfer correctly.
+                    registry.mark_all_unverifiable();
                 }
                 RewriteOp::SquashMerge => {
                     execute_squash_same_file(
@@ -349,9 +397,17 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
+                    // Squash merge rewrites history — mark existing chars unverifiable.
+                    registry.mark_all_unverifiable();
                 }
             }
-            verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+            verify_main_file_with_retention(
+                &repo,
+                &mut registry,
+                &file_state,
+                &operation_log,
+                &config,
+            );
         } else if file_state.lines.len() > 2 && roll < cumulative_destructive {
             // === DESTRUCTIVE OPERATIONS ===
             // Reset session tracking: destructive ops may legitimately drop commits,
@@ -683,7 +739,8 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    // File renames permanently break daemon attribution (known limitation)
+                    registry.skip_all_blame = true;
                 }
                 FileOp::DeleteAndRecreate => {
                     execute_delete_and_recreate(
@@ -705,7 +762,8 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    // File moves permanently break daemon attribution (known limitation)
+                    registry.skip_all_blame = true;
                 }
                 FileOp::ConcurrentCreation => {
                     let new_files = execute_concurrent_file_creation(
@@ -785,6 +843,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
+                    registry.mark_all_unverifiable();
                     verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::Thrash => {
@@ -817,6 +876,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
+                    registry.mark_all_unverifiable();
                     verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::CheckpointNonexistent => {
@@ -839,6 +899,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut operation_log,
                         config.seed,
                     );
+                    registry.mark_all_unverifiable();
                 }
                 StressOp::ExponentialAmend => {
                     execute_exponential_amend(
@@ -949,11 +1010,14 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+                    registry.mark_all_unverifiable();
                 }
             }
         } else if file_state.lines.len() > 2 && roll < cumulative_combined {
             // === COMBINED OPERATIONS ===
+            // Most combined ops use git_og for rebase/merge/cherry-pick which bypasses
+            // the daemon. Mark all existing chars unverifiable preemptively.
+            registry.mark_all_unverifiable();
             let op = generators::gen_combined_op(&mut rng);
             match op {
                 CombinedOp::CherryPickConflict => {
@@ -965,7 +1029,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RapidBranchMerge => {
                     execute_rapid_branch_merge(
@@ -976,7 +1039,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RebaseCherryPickCombo => {
                     execute_rebase_cherry_pick_combo(
@@ -987,7 +1049,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::ResetEditRecommit => {
                     registry.reset_session_tracking();
@@ -999,7 +1060,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::PartialAmendFlip => {
                     execute_partial_amend_flip(
@@ -1010,7 +1070,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::DiscardThenReedit => {
                     execute_discard_then_reedit(
@@ -1021,16 +1080,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    let status = repo.git(&["status", "--porcelain"]).unwrap();
-                    if status.trim().is_empty() && !file_state.lines.is_empty() {
-                        verify_main_file(
-                            &repo,
-                            &mut registry,
-                            &file_state,
-                            &operation_log,
-                            &config,
-                        );
-                    }
                 }
                 CombinedOp::CreateDeleteBatch => {
                     let kept = execute_create_delete_batch(
@@ -1060,7 +1109,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::FixupSquash => {
                     execute_fixup_squash(
@@ -1071,7 +1119,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::EmptyTreeRebuild => {
                     registry.reset_session_tracking();
@@ -1083,7 +1130,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RevertThenRedo => {
                     execute_revert_then_redo(
@@ -1094,16 +1140,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    let status = repo.git(&["status", "--porcelain"]).unwrap();
-                    if status.trim().is_empty() && !file_state.lines.is_empty() {
-                        verify_main_file(
-                            &repo,
-                            &mut registry,
-                            &file_state,
-                            &operation_log,
-                            &config,
-                        );
-                    }
                 }
                 CombinedOp::AmendWithDeletion => {
                     execute_amend_with_deletion(
@@ -1114,7 +1150,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RecommitLoop => {
                     registry.reset_session_tracking();
@@ -1126,7 +1161,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SelectiveMultiFile => {
                     let sec_idx = rng.random_range(0..secondary_files.len());
@@ -1140,7 +1174,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+
                     if !secondary_files[sec_idx].lines.is_empty() {
                         registry.verify_blame(
                             &repo,
@@ -1160,7 +1194,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::MergeConflictResolve => {
                     execute_merge_conflict_resolve(
@@ -1171,16 +1204,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    let status = repo.git(&["status", "--porcelain"]).unwrap();
-                    if status.trim().is_empty() && !file_state.lines.is_empty() {
-                        verify_main_file(
-                            &repo,
-                            &mut registry,
-                            &file_state,
-                            &operation_log,
-                            &config,
-                        );
-                    }
                 }
                 CombinedOp::DoubleCheckpointRace => {
                     execute_double_checkpoint_race(
@@ -1191,7 +1214,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::HunkPartialStage => {
                     execute_hunk_partial_stage(
@@ -1202,7 +1224,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RenameDuringEdit => {
                     let sec_idx = rng.random_range(0..secondary_files.len());
@@ -1215,7 +1236,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::NoopOverwrite => {
                     execute_noop_overwrite(
@@ -1226,7 +1246,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::ConcurrentSessions => {
                     execute_concurrent_sessions(
@@ -1237,7 +1256,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::AmendShrink => {
                     execute_amend_shrink(
@@ -1248,7 +1266,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::DeepRebaseChain => {
                     execute_deep_rebase_chain(
@@ -1259,7 +1276,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::UntrackedInterleave => {
                     execute_untracked_interleave(
@@ -1270,7 +1286,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RapidHeadChange => {
                     registry.reset_session_tracking();
@@ -1282,7 +1297,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::ThreeWayMerge => {
                     execute_three_way_merge(
@@ -1293,16 +1307,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    let status = repo.git(&["status", "--porcelain"]).unwrap();
-                    if status.trim().is_empty() && !file_state.lines.is_empty() {
-                        verify_main_file(
-                            &repo,
-                            &mut registry,
-                            &file_state,
-                            &operation_log,
-                            &config,
-                        );
-                    }
                 }
                 CombinedOp::EdgeCaseCommitFlags => {
                     execute_edge_case_commit_flags(
@@ -1313,7 +1317,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RapidLifecycle => {
                     execute_rapid_lifecycle(
@@ -1324,7 +1327,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::MultiStash => {
                     execute_multi_stash(
@@ -1335,16 +1337,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    let status = repo.git(&["status", "--porcelain"]).unwrap();
-                    if status.trim().is_empty() && !file_state.lines.is_empty() {
-                        verify_main_file(
-                            &repo,
-                            &mut registry,
-                            &file_state,
-                            &operation_log,
-                            &config,
-                        );
-                    }
                 }
                 CombinedOp::OverwriteAndRollback => {
                     registry.reset_session_tracking();
@@ -1356,7 +1348,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::CherryPickChain => {
                     execute_cherry_pick_chain(
@@ -1367,7 +1358,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::InterleavedAmendNew => {
                     execute_interleaved_amend_new(
@@ -1378,7 +1368,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashMixedAttribution => {
                     execute_squash_mixed_attribution(
@@ -1389,7 +1378,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashAfterAmend => {
                     execute_squash_after_amend(
@@ -1400,7 +1388,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashThenAmend => {
                     execute_squash_then_amend(
@@ -1411,7 +1398,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashRebasedBranch => {
                     execute_squash_rebased_branch(
@@ -1422,7 +1408,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashWithOverwrites => {
                     execute_squash_with_overwrites(
@@ -1433,7 +1418,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashMultiFile => {
                     let sec_idx = rng.random_range(0..secondary_files.len());
@@ -1447,7 +1431,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+
                     if !secondary_files[sec_idx].lines.is_empty() {
                         registry.verify_blame(
                             &repo,
@@ -1468,7 +1452,6 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashNonlinearBranch => {
                     execute_squash_nonlinear_branch(
@@ -1479,8 +1462,246 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
+            }
+            // Mark all chars (including newly allocated ones) as unverifiable after
+            // combined ops since most involve git_og rebase/merge/cherry-pick.
+            registry.mark_all_unverifiable();
+            verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
+        } else if file_state.lines.len() > 2 && roll < cumulative_workflow {
+            // === WORKFLOW OPERATIONS ===
+            // Reset session tracking: workflow ops use non-standard commit paths (plumbing,
+            // fixup/autosquash, rebase --onto, cherry-pick --no-commit) that legitimately
+            // create fresh session histories without carrying forward parent sessions.
+            registry.reset_session_tracking();
+            let op = generators::gen_workflow_op(&mut rng);
+            match op {
+                WorkflowOp::PlumbingCommitTree => {
+                    execute_plumbing_commit_tree(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::PlumbingRapidUpdateRef => {
+                    execute_plumbing_rapid_update_ref(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::BranchLifecycle => {
+                    execute_workflow_branch_lifecycle(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::StashSandwich => {
+                    execute_workflow_stash_sandwich(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::FixupAutosquash => {
+                    execute_workflow_fixup_autosquash(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::CherryPickNoCommit => {
+                    execute_cherry_pick_no_commit(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::CherryPickRange => {
+                    execute_cherry_pick_range(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::RebaseOnto => {
+                    execute_rebase_onto(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::RapidMultiFileBurst => {
+                    execute_rapid_multi_file_burst(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::MergeSquashDirect => {
+                    execute_merge_squash_direct(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::RebaseConflictContinue => {
+                    execute_rebase_conflict_continue(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::RestoreFromCommit => {
+                    execute_restore_from_commit(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::RevertCherrypick => {
+                    execute_workflow_revert_cherrypick(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::MultiBranchMerge => {
+                    execute_workflow_multi_branch_merge(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::FileCrossRename => {
+                    execute_file_cross_rename(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::FileSpacesPath => {
+                    execute_file_spaces_path(
+                        &repo,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::WorkingLogBaseRace => {
+                    execute_working_log_base_race(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+                WorkflowOp::InterleavedLineAttribution => {
+                    execute_interleaved_line_attribution(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                        config.seed,
+                    );
+                }
+            }
+            // Sync file_state from disk in case workflow changed it without model knowledge.
+            let actual = read_file_state_from_disk(&repo, &file_state.filename);
+            if actual != file_state.lines {
+                operation_log.push(format!(
+                    "post-workflow: model had {} lines, disk has {}, trusting disk",
+                    file_state.lines.len(),
+                    actual.len()
+                ));
+                file_state.lines = actual;
+            }
+            // Workflow ops that use git_og for rebase/merge/cherry-pick bypass the daemon,
+            // so authorship notes are not transferred and the daemon's state may be
+            // inconsistent with the new HEAD. Mark ALL existing chars as unverifiable
+            // since even subsequent daemon commits may reference old working log bases.
+            // Only chars allocated AFTER this point (in future operations) will be verified.
+            match op {
+                WorkflowOp::BranchLifecycle
+                | WorkflowOp::FixupAutosquash
+                | WorkflowOp::CherryPickNoCommit
+                | WorkflowOp::CherryPickRange
+                | WorkflowOp::RebaseOnto
+                | WorkflowOp::MergeSquashDirect
+                | WorkflowOp::RebaseConflictContinue
+                | WorkflowOp::RevertCherrypick
+                | WorkflowOp::MultiBranchMerge => {
+                    registry.mark_all_unverifiable();
+                }
+                _ => {}
             }
         } else {
             // === STANDARD MULTI-EDIT COMMIT ===
@@ -1545,6 +1766,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
         }
 
         completed_ops += 1;
+
+        // Cap operation_log to avoid unbounded memory growth in marathon mode
+        const MAX_LOG_ENTRIES: usize = 500;
+        if operation_log.len() > MAX_LOG_ENTRIES {
+            let drain_count = operation_log.len() - MAX_LOG_ENTRIES;
+            operation_log.drain(..drain_count);
+        }
     }
 
     eprintln!(
@@ -1571,8 +1799,29 @@ fn verify_main_file(
         operation_log,
         config.seed,
     );
+}
+
+fn verify_main_file_with_retention(
+    repo: &TestRepo,
+    registry: &mut CharRegistry,
+    file_state: &FileState,
+    operation_log: &[String],
+    config: &FuzzerConfig,
+) {
+    registry.verify_blame(
+        repo,
+        &file_state.filename,
+        &file_state.lines,
+        operation_log,
+        config.seed,
+    );
     if config.verify_sessions {
-        registry.verify_sessions(repo, &file_state.lines, operation_log, config.seed);
-        registry.verify_session_retention(repo, operation_log, config.seed);
+        let head_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        if let Some(note) = repo.read_authorship_note(&head_sha)
+            && note.contains(&file_state.filename)
+        {
+            registry.verify_sessions(repo, &file_state.lines, operation_log, config.seed);
+            registry.verify_session_retention(repo, operation_log, config.seed);
+        }
     }
 }

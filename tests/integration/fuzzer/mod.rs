@@ -6,6 +6,8 @@ mod generators;
 mod operations;
 #[allow(dead_code)]
 mod oracle;
+#[allow(dead_code)]
+mod workflows;
 
 use engine::{FuzzerConfig, run_fuzzer};
 
@@ -391,6 +393,50 @@ fn fuzz_squash_random() {
         seed
     );
     run_fuzzer(FuzzerConfig::squash_heavy(seed, 60));
+}
+
+// =============================================================================
+// Workflow-heavy tests (50% workflow ops — plumbing, fixup, cherry-pick ranges)
+// =============================================================================
+
+#[test]
+fn fuzz_workflow_0() {
+    run_fuzzer(FuzzerConfig::workflow_heavy(0, 40));
+}
+
+#[test]
+fn fuzz_workflow_1() {
+    run_fuzzer(FuzzerConfig::workflow_heavy(1, 40));
+}
+
+#[test]
+fn fuzz_workflow_2() {
+    run_fuzzer(FuzzerConfig::workflow_heavy(2, 40));
+}
+
+#[test]
+fn fuzz_workflow_42() {
+    run_fuzzer(FuzzerConfig::workflow_heavy(42, 40));
+}
+
+#[test]
+fn fuzz_workflow_99() {
+    run_fuzzer(FuzzerConfig::workflow_heavy(99, 40));
+}
+
+#[test]
+fn fuzz_workflow_1337() {
+    run_fuzzer(FuzzerConfig::workflow_heavy(1337, 40));
+}
+
+#[test]
+fn fuzz_workflow_random() {
+    let seed: u64 = rand::random_range(0..u64::MAX);
+    eprintln!(
+        "[fuzzer] WORKFLOW RANDOM SEED: {} — use this to reproduce failures",
+        seed
+    );
+    run_fuzzer(FuzzerConfig::workflow_heavy(seed, 60));
 }
 
 // =============================================================================
