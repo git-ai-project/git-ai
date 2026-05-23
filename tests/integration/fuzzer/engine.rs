@@ -286,7 +286,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
             );
         }
         execute_commit(&repo, "initial fuzzer commit", &mut operation_log);
-        verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+        verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
     }
 
     // Main loop
@@ -351,9 +351,12 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     );
                 }
             }
-            verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+            verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
         } else if file_state.lines.len() > 2 && roll < cumulative_destructive {
             // === DESTRUCTIVE OPERATIONS ===
+            // Reset session tracking: destructive ops may legitimately drop commits,
+            // so we can't assert monotonic retention across them.
+            registry.reset_session_tracking();
             let op = generators::gen_destructive_op(&mut rng);
             match op {
                 DestructiveOp::HardReset => {
@@ -570,7 +573,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
             }
             let status = repo.git(&["status", "--porcelain"]).unwrap();
             if status.trim().is_empty() && !file_state.lines.is_empty() {
-                verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
             }
         } else if file_state.lines.len() > 1 && roll < cumulative_partial {
             // === PARTIAL STAGING OPERATIONS ===
@@ -595,7 +598,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     if !result.unstaged_lines.is_empty() {
                         repo.git(&["add", "-A"]).unwrap();
                         repo.commit("partial-stage: commit remaining").unwrap();
-                        verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                        verify_main_file(
+                            &repo,
+                            &mut registry,
+                            &file_state,
+                            &operation_log,
+                            &config,
+                        );
                     }
                 }
                 PartialStageOp::SelectiveFileCommit => {
@@ -616,7 +625,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         repo.commit("selective: commit remaining dirty files")
                             .unwrap();
                     }
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                     if !secondary_files[sec_idx].lines.is_empty() {
                         registry.verify_blame(
                             &repo,
@@ -638,7 +647,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                     if !secondary_files[sec_idx].lines.is_empty() {
                         registry.verify_blame(
                             &repo,
@@ -658,7 +667,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
             }
         } else if file_state.lines.len() > 2 && roll < cumulative_file_op {
@@ -674,7 +683,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 FileOp::DeleteAndRecreate => {
                     execute_delete_and_recreate(
@@ -685,7 +694,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 FileOp::MoveToSubdir => {
                     execute_move_to_subdir(
@@ -696,7 +705,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 FileOp::ConcurrentCreation => {
                     let new_files = execute_concurrent_file_creation(
@@ -732,7 +741,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::DoubleCommitRapid => {
                     execute_double_commit_rapid(
@@ -743,7 +752,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::AlternatingAmend => {
                     execute_alternating_amend(
@@ -754,7 +763,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::AmendAttributionFlip => {
                     execute_amend_attribution_flip(
@@ -765,7 +774,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::MultiCommitRebase => {
                     execute_multi_commit_rebase(
@@ -776,9 +785,10 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::Thrash => {
+                    registry.reset_session_tracking();
                     execute_thrash(
                         &repo,
                         &mut file_state,
@@ -789,7 +799,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     );
                     let status = repo.git(&["status", "--porcelain"]).unwrap();
                     if status.trim().is_empty() && !file_state.lines.is_empty() {
-                        verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                        verify_main_file(
+                            &repo,
+                            &mut registry,
+                            &file_state,
+                            &operation_log,
+                            &config,
+                        );
                     }
                 }
                 StressOp::RebaseThenAmend => {
@@ -801,7 +817,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::CheckpointNonexistent => {
                     execute_checkpoint_nonexistent(
@@ -812,7 +828,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::TwoBranchMerge => {
                     execute_two_branch_merge(
@@ -832,7 +848,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::SessionInterleave => {
                     execute_session_interleave(
@@ -843,7 +859,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::CrossFileCheckpointRace => {
                     let sec_idx = rng.random_range(0..secondary_files.len());
@@ -857,7 +873,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                     if !secondary_files[sec_idx].lines.is_empty() {
                         registry.verify_blame(
                             &repo,
@@ -877,9 +893,10 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::AmendResetCycle => {
+                    registry.reset_session_tracking();
                     execute_amend_reset_cycle(
                         &repo,
                         &mut file_state,
@@ -888,7 +905,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::PartialThenAmend => {
                     execute_partial_then_amend(
@@ -899,7 +916,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::CheckpointStorm => {
                     execute_checkpoint_storm(
@@ -910,7 +927,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::AlternatingAmendStorm => {
                     execute_alternating_amend_storm(
@@ -921,7 +938,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 StressOp::MultiSquash => {
                     execute_multi_squash(
@@ -932,7 +949,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
             }
         } else if file_state.lines.len() > 2 && roll < cumulative_combined {
@@ -948,7 +965,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RapidBranchMerge => {
                     execute_rapid_branch_merge(
@@ -959,7 +976,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RebaseCherryPickCombo => {
                     execute_rebase_cherry_pick_combo(
@@ -970,9 +987,10 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::ResetEditRecommit => {
+                    registry.reset_session_tracking();
                     execute_reset_edit_recommit(
                         &repo,
                         &mut file_state,
@@ -981,7 +999,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::PartialAmendFlip => {
                     execute_partial_amend_flip(
@@ -992,7 +1010,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::DiscardThenReedit => {
                     execute_discard_then_reedit(
@@ -1005,7 +1023,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     );
                     let status = repo.git(&["status", "--porcelain"]).unwrap();
                     if status.trim().is_empty() && !file_state.lines.is_empty() {
-                        verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                        verify_main_file(
+                            &repo,
+                            &mut registry,
+                            &file_state,
+                            &operation_log,
+                            &config,
+                        );
                     }
                 }
                 CombinedOp::CreateDeleteBatch => {
@@ -1036,7 +1060,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::FixupSquash => {
                     execute_fixup_squash(
@@ -1047,9 +1071,10 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::EmptyTreeRebuild => {
+                    registry.reset_session_tracking();
                     execute_empty_tree_rebuild(
                         &repo,
                         &mut file_state,
@@ -1058,7 +1083,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RevertThenRedo => {
                     execute_revert_then_redo(
@@ -1071,7 +1096,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     );
                     let status = repo.git(&["status", "--porcelain"]).unwrap();
                     if status.trim().is_empty() && !file_state.lines.is_empty() {
-                        verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                        verify_main_file(
+                            &repo,
+                            &mut registry,
+                            &file_state,
+                            &operation_log,
+                            &config,
+                        );
                     }
                 }
                 CombinedOp::AmendWithDeletion => {
@@ -1083,9 +1114,10 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RecommitLoop => {
+                    registry.reset_session_tracking();
                     execute_recommit_loop(
                         &repo,
                         &mut file_state,
@@ -1094,7 +1126,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SelectiveMultiFile => {
                     let sec_idx = rng.random_range(0..secondary_files.len());
@@ -1108,7 +1140,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                     if !secondary_files[sec_idx].lines.is_empty() {
                         registry.verify_blame(
                             &repo,
@@ -1128,7 +1160,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::MergeConflictResolve => {
                     execute_merge_conflict_resolve(
@@ -1141,7 +1173,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     );
                     let status = repo.git(&["status", "--porcelain"]).unwrap();
                     if status.trim().is_empty() && !file_state.lines.is_empty() {
-                        verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                        verify_main_file(
+                            &repo,
+                            &mut registry,
+                            &file_state,
+                            &operation_log,
+                            &config,
+                        );
                     }
                 }
                 CombinedOp::DoubleCheckpointRace => {
@@ -1153,7 +1191,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::HunkPartialStage => {
                     execute_hunk_partial_stage(
@@ -1164,7 +1202,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RenameDuringEdit => {
                     let sec_idx = rng.random_range(0..secondary_files.len());
@@ -1177,7 +1215,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::NoopOverwrite => {
                     execute_noop_overwrite(
@@ -1188,7 +1226,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::ConcurrentSessions => {
                     execute_concurrent_sessions(
@@ -1199,7 +1237,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::AmendShrink => {
                     execute_amend_shrink(
@@ -1210,7 +1248,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::DeepRebaseChain => {
                     execute_deep_rebase_chain(
@@ -1221,7 +1259,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::UntrackedInterleave => {
                     execute_untracked_interleave(
@@ -1232,9 +1270,10 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RapidHeadChange => {
+                    registry.reset_session_tracking();
                     execute_rapid_head_change(
                         &repo,
                         &mut file_state,
@@ -1243,7 +1282,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::ThreeWayMerge => {
                     execute_three_way_merge(
@@ -1256,7 +1295,13 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     );
                     let status = repo.git(&["status", "--porcelain"]).unwrap();
                     if status.trim().is_empty() && !file_state.lines.is_empty() {
-                        verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                        verify_main_file(
+                            &repo,
+                            &mut registry,
+                            &file_state,
+                            &operation_log,
+                            &config,
+                        );
                     }
                 }
                 CombinedOp::EdgeCaseCommitFlags => {
@@ -1268,7 +1313,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::RapidLifecycle => {
                     execute_rapid_lifecycle(
@@ -1279,7 +1324,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::MultiStash => {
                     execute_multi_stash(
@@ -1292,10 +1337,17 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     );
                     let status = repo.git(&["status", "--porcelain"]).unwrap();
                     if status.trim().is_empty() && !file_state.lines.is_empty() {
-                        verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                        verify_main_file(
+                            &repo,
+                            &mut registry,
+                            &file_state,
+                            &operation_log,
+                            &config,
+                        );
                     }
                 }
                 CombinedOp::OverwriteAndRollback => {
+                    registry.reset_session_tracking();
                     execute_overwrite_and_rollback(
                         &repo,
                         &mut file_state,
@@ -1304,7 +1356,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::CherryPickChain => {
                     execute_cherry_pick_chain(
@@ -1315,7 +1367,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::InterleavedAmendNew => {
                     execute_interleaved_amend_new(
@@ -1326,7 +1378,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashMixedAttribution => {
                     execute_squash_mixed_attribution(
@@ -1337,7 +1389,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashAfterAmend => {
                     execute_squash_after_amend(
@@ -1348,7 +1400,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashThenAmend => {
                     execute_squash_then_amend(
@@ -1359,7 +1411,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashRebasedBranch => {
                     execute_squash_rebased_branch(
@@ -1370,7 +1422,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashWithOverwrites => {
                     execute_squash_with_overwrites(
@@ -1381,7 +1433,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashMultiFile => {
                     let sec_idx = rng.random_range(0..secondary_files.len());
@@ -1395,7 +1447,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                     if !secondary_files[sec_idx].lines.is_empty() {
                         registry.verify_blame(
                             &repo,
@@ -1407,6 +1459,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     }
                 }
                 CombinedOp::SquashResetRecommit => {
+                    registry.reset_session_tracking();
                     execute_squash_reset_recommit(
                         &repo,
                         &mut file_state,
@@ -1415,7 +1468,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 CombinedOp::SquashNonlinearBranch => {
                     execute_squash_nonlinear_branch(
@@ -1426,7 +1479,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
             }
         } else {
@@ -1475,7 +1528,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 &mut operation_log,
             );
 
-            verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+            verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
 
             // Also verify secondary files if they have content
             for sec_file in &secondary_files {
@@ -1506,7 +1559,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
 
 fn verify_main_file(
     repo: &TestRepo,
-    registry: &CharRegistry,
+    registry: &mut CharRegistry,
     file_state: &FileState,
     operation_log: &[String],
     config: &FuzzerConfig,
@@ -1520,5 +1573,6 @@ fn verify_main_file(
     );
     if config.verify_sessions {
         registry.verify_sessions(repo, &file_state.lines, operation_log, config.seed);
+        registry.verify_session_retention(repo, operation_log, config.seed);
     }
 }
