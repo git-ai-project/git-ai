@@ -1205,12 +1205,40 @@ fn resolve_stash_target_oid_for_terminal_payload(
     if parsed.command.as_deref() != Some("stash") {
         return Ok(None);
     }
+
+    let subcommand = parsed
+        .command_args
+        .first()
+        .map(String::as_str)
+        .unwrap_or("push");
+
+    // For push/save: resolve the newly-created stash SHA at terminal time
+    // (refs/stash still points to it before any subsequent pop/drop runs).
+    if matches!(subcommand, "push" | "save" | "") {
+        if let Some(oid) = ref_changes
+            .iter()
+            .rfind(|change| change.reference == "refs/stash")
+            .map(|change| change.new.trim().to_string())
+            .filter(|oid| !oid.is_empty() && !is_zero_oid(oid))
+        {
+            return Ok(Some(oid));
+        }
+        return resolve_stash_target_oid_for_worktree(worktree, Some("refs/stash"))
+            .ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "failed to resolve stash push target oid from terminal repo state (worktree={})",
+                    worktree.display()
+                ))
+            })
+            .map(Some);
+    }
+
     if !stash_requires_target_resolution(&parsed.command_args) {
         return Ok(None);
     }
 
     let target_spec = stash_target_spec(&parsed.command_args);
-    match parsed.command_args.first().map(String::as_str).unwrap_or("push") {
+    match subcommand {
         "apply" => resolve_stash_target_oid_for_worktree(worktree, target_spec)
             .ok_or_else(|| {
                 GitAiError::Generic(format!(
@@ -5505,13 +5533,18 @@ impl ActorDaemonCoordinator {
                             crate::daemon::domain::StashOpKind::Push
                             | crate::daemon::domain::StashOpKind::Unknown => {
                                 let resolved_stash = cmd
-                                    .ref_changes
-                                    .iter()
-                                    .find(|rc| rc.reference == "refs/stash")
-                                    .map(|rc| rc.new.as_str())
-                                    .filter(|s| {
-                                        !s.is_empty()
-                                            && *s != "0000000000000000000000000000000000000000"
+                                    .stash_target_oid
+                                    .as_deref()
+                                    .or_else(|| {
+                                        cmd.ref_changes
+                                            .iter()
+                                            .find(|rc| rc.reference == "refs/stash")
+                                            .map(|rc| rc.new.as_str())
+                                            .filter(|s| {
+                                                !s.is_empty()
+                                                    && *s
+                                                        != "0000000000000000000000000000000000000000"
+                                            })
                                     });
                                 if let Some(stash_sha) = resolved_stash {
                                     let resolved_head = repo
