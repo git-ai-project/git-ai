@@ -1212,21 +1212,17 @@ fn resolve_stash_target_oid_for_terminal_payload(
         .map(String::as_str)
         .unwrap_or("push");
 
-    // For push/save: resolve the newly-created stash SHA at terminal time
-    // (refs/stash still points to it before any subsequent pop/drop runs).
+    // For push/save: resolve the newly-created stash SHA from ref_changes only.
+    // We cannot fall back to reading refs/stash from the filesystem because under
+    // heavy load the ingress may process this terminal event after a subsequent
+    // push has already overwritten refs/stash with a different OID.
     if matches!(subcommand, "push" | "save" | "") {
-        if let Some(oid) = ref_changes
+        let oid = ref_changes
             .iter()
             .rfind(|change| change.reference == "refs/stash")
             .map(|change| change.new.trim().to_string())
-            .filter(|oid| !oid.is_empty() && !is_zero_oid(oid))
-        {
-            return Ok(Some(oid));
-        }
-        return Ok(resolve_stash_target_oid_for_worktree(
-            worktree,
-            Some("refs/stash"),
-        ));
+            .filter(|oid| !oid.is_empty() && !is_zero_oid(oid));
+        return Ok(oid);
     }
 
     if !stash_requires_target_resolution(&parsed.command_args) {
@@ -2593,6 +2589,10 @@ enum RecentReplayPrerequisite {
         old_head: String,
         final_state: HashMap<String, String>,
     },
+    StashRestore {
+        target_head: String,
+        stash_sha: String,
+    },
 }
 
 #[derive(Debug, Default, Clone)]
@@ -3196,6 +3196,33 @@ impl ActorDaemonCoordinator {
             let _ = entries.pop_front();
         }
         Ok(())
+    }
+
+    fn recent_replay_prerequisites_for_base(
+        &self,
+        family: &str,
+        base_commit: &str,
+    ) -> Result<Vec<RecentReplayPrerequisite>, GitAiError> {
+        let map = self
+            .recent_replay_prerequisites_by_family
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("recent replay prerequisites map lock poisoned".to_string())
+            })?;
+        let Some(entries) = map.get(family) else {
+            return Ok(Vec::new());
+        };
+        Ok(entries
+            .iter()
+            .filter(|p| match p {
+                RecentReplayPrerequisite::CheckoutSwitchRename { target_head, .. }
+                | RecentReplayPrerequisite::CheckoutSwitchMerge { target_head, .. }
+                | RecentReplayPrerequisite::StashRestore { target_head, .. } => {
+                    target_head == base_commit
+                }
+            })
+            .cloned()
+            .collect())
     }
 
     fn maybe_append_test_completion_log(
@@ -5541,12 +5568,6 @@ impl ActorDaemonCoordinator {
                                                     && *s
                                                         != "0000000000000000000000000000000000000000"
                                             })
-                                    })
-                                    .or_else(|| {
-                                        crate::git::repo_state::resolve_stash_target_oid_for_worktree(
-                                            std::path::Path::new(&worktree),
-                                            Some("refs/stash"),
-                                        )
                                     });
                                 if let Some(ref stash_sha) = resolved_stash {
                                     let resolved_head = repo
@@ -5567,6 +5588,18 @@ impl ActorDaemonCoordinator {
                             crate::daemon::domain::StashOpKind::Pop => {
                                 let resolved = resolve_stash_sha(cmd, stash_ref.as_deref(), &repo);
                                 if let Some(stash_sha) = resolved {
+                                    if let Some(family) = family {
+                                        let target_head = head.clone().unwrap_or_default();
+                                        if !target_head.is_empty() {
+                                            let _ = self.record_recent_replay_prerequisite(
+                                                family,
+                                                RecentReplayPrerequisite::StashRestore {
+                                                    target_head,
+                                                    stash_sha: stash_sha.clone(),
+                                                },
+                                            );
+                                        }
+                                    }
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
                                             &repo, &stash_sha, true,
@@ -5577,6 +5610,18 @@ impl ActorDaemonCoordinator {
                             | crate::daemon::domain::StashOpKind::Branch => {
                                 let resolved = resolve_stash_sha(cmd, stash_ref.as_deref(), &repo);
                                 if let Some(stash_sha) = resolved {
+                                    if let Some(family) = family {
+                                        let target_head = head.clone().unwrap_or_default();
+                                        if !target_head.is_empty() {
+                                            let _ = self.record_recent_replay_prerequisite(
+                                                family,
+                                                RecentReplayPrerequisite::StashRestore {
+                                                    target_head,
+                                                    stash_sha: stash_sha.clone(),
+                                                },
+                                            );
+                                        }
+                                    }
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
                                             &repo, &stash_sha, false,
@@ -5605,6 +5650,29 @@ impl ActorDaemonCoordinator {
                                 parent_sha,
                                 carryover_snapshot.as_ref(),
                             );
+                            if parent_sha != "initial"
+                                && !repo.storage.has_working_log(parent_sha)
+                                && let Some(family) = family
+                            {
+                                for prerequisite in self
+                                    .recent_replay_prerequisites_for_base(family, parent_sha)
+                                    .unwrap_or_default()
+                                {
+                                    if let RecentReplayPrerequisite::StashRestore {
+                                        stash_sha,
+                                        ..
+                                    } = prerequisite
+                                    {
+                                        let _ =
+                                            crate::authorship::rewrite_stash::handle_stash_pop_or_apply(
+                                                &repo, &stash_sha, false,
+                                            );
+                                        if repo.storage.has_working_log(parent_sha) {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                             if let Err(e) =
                                 crate::authorship::post_commit::post_commit_with_final_state(
                                     &repo,
