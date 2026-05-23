@@ -1,24 +1,18 @@
 //! `git-ai usage` — local statistics from persisted metric events.
 
-use crate::commands::activity_tui;
-use crate::metrics::local_stats::{
-    BucketGranularity, LocalActivityStats, compute_activity, compute_repo_summaries,
-    compute_session_list,
-};
+use crate::metrics::local_stats::{BucketGranularity, LocalActivityStats, compute_activity};
 use crate::repo_url::resolve_repo_url_from_path;
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn handle_activity(args: &[String]) {
     let mut json = false;
-    let mut tui = false;
     let mut period = "30d".to_string();
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--json" => json = true,
-            "--tui" => tui = true,
             "--period" if i + 1 < args.len() => {
                 period = args[i + 1].clone();
                 i += 1;
@@ -36,38 +30,33 @@ pub fn handle_activity(args: &[String]) {
         i += 1;
     }
 
-    let (since_ts, period_label, granularity, tui_period_idx) = match period.as_str() {
+    let (since_ts, period_label, granularity) = match period.as_str() {
         "1d" => (
             days_ago(1),
             "last 1 day".to_string(),
             BucketGranularity::Daily,
-            0usize,
         ),
         "3d" => (
             days_ago(3),
             "last 3 days".to_string(),
             BucketGranularity::Daily,
-            1,
         ),
         "7d" => (
             days_ago(7),
             "last 7 days".to_string(),
             BucketGranularity::Daily,
-            2,
         ),
         "30d" => (
             days_ago(30),
             "last 30 days".to_string(),
             BucketGranularity::Weekly,
-            3,
         ),
         "60d" => (
             days_ago(60),
             "last 60 days".to_string(),
             BucketGranularity::Weekly,
-            3,
         ),
-        "all" => (0u32, "all time".to_string(), BucketGranularity::Monthly, 4),
+        "all" => (0u32, "all time".to_string(), BucketGranularity::Monthly),
         other => {
             eprintln!(
                 "Unknown period '{}'. Use 1d, 3d, 7d, 30d, 60d, or all.",
@@ -100,20 +89,6 @@ pub fn handle_activity(args: &[String]) {
                 std::process::exit(1);
             }
         }
-    } else if tui {
-        let repo_summaries = compute_repo_summaries(since_ts, granularity).unwrap_or_default();
-        let session_list =
-            compute_session_list(since_ts, current_repo.as_deref()).unwrap_or_default();
-        if let Err(e) = activity_tui::run_tui(
-            stats,
-            tui_period_idx,
-            current_repo,
-            repo_summaries,
-            session_list,
-        ) {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
     } else {
         print_terminal(&stats);
     }
@@ -134,7 +109,6 @@ fn print_help() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --period <1d|3d|7d|30d|60d|all>   Time window (default: 30d)");
-    eprintln!("  --tui                             Launch interactive TUI");
     eprintln!("  --json                            Output as JSON");
     eprintln!("  --help                            Show this help");
     eprintln!();
