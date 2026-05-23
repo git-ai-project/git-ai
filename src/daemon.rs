@@ -5530,19 +5530,25 @@ impl ActorDaemonCoordinator {
                             | crate::daemon::domain::StashOpKind::Unknown => {
                                 let resolved_stash = cmd
                                     .stash_target_oid
-                                    .as_deref()
+                                    .clone()
                                     .or_else(|| {
                                         cmd.ref_changes
                                             .iter()
                                             .find(|rc| rc.reference == "refs/stash")
-                                            .map(|rc| rc.new.as_str())
+                                            .map(|rc| rc.new.clone())
                                             .filter(|s| {
                                                 !s.is_empty()
                                                     && *s
                                                         != "0000000000000000000000000000000000000000"
                                             })
+                                    })
+                                    .or_else(|| {
+                                        crate::git::repo_state::resolve_stash_target_oid_for_worktree(
+                                            std::path::Path::new(&worktree),
+                                            Some("refs/stash"),
+                                        )
                                     });
-                                if let Some(stash_sha) = resolved_stash {
+                                if let Some(ref stash_sha) = resolved_stash {
                                     let resolved_head = repo
                                         .find_commit(stash_sha.to_string())
                                         .ok()
