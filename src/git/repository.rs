@@ -1562,6 +1562,35 @@ impl Repository {
         &self,
         file_paths: &[String],
     ) -> Result<HashMap<String, String>, GitAiError> {
+        // Get blob OIDs from the index (already uses gix-index)
+        let staged_oids = self.get_all_staged_file_blob_oids()?;
+
+        // Filter to only requested file paths and collect (path, oid) pairs
+        let oid_pairs: Vec<(&str, &str)> = file_paths
+            .iter()
+            .filter_map(|path| {
+                staged_oids
+                    .get(path.as_str())
+                    .map(|oid| (path.as_str(), oid.as_str()))
+            })
+            .collect();
+
+        if oid_pairs.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Try gix batch read first (reads from ODB, no subprocess)
+        if let Ok(blob_results) = self.gix.read_blobs_by_oids(&oid_pairs) {
+            let mut staged_files = HashMap::new();
+            for (path, data) in blob_results {
+                if let Ok(content) = String::from_utf8(data) {
+                    staged_files.insert(path, content);
+                }
+            }
+            return Ok(staged_files);
+        }
+
+        // Fallback to CLI (original implementation)
         use futures::future::join_all;
         use std::sync::Arc;
 
