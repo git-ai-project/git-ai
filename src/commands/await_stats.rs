@@ -27,6 +27,16 @@ struct AwaitStatsOptions {
     quiet: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct AwaitStatsRuntimeOptions {
+    pub timeout_ms: u64,
+    pub interval_ms: u64,
+    pub json: bool,
+    pub commit: String,
+    pub quiet: bool,
+    pub is_interactive: bool,
+}
+
 impl Default for AwaitStatsOptions {
     // Build the default await-stats configuration used when no flags are provided.
     fn default() -> Self {
@@ -95,12 +105,29 @@ pub fn run(args: &[String]) -> Result<(), AwaitStatsError> {
 // Wait for the requested commit's authorship note and print its stats.
 fn run_with_options(options: &AwaitStatsOptions) -> Result<(), AwaitStatsError> {
     let repo = find_repository(&Vec::<String>::new()).map_err(AwaitStatsError::GitAi)?;
-    let commit_sha = resolve_commit(&repo, &options.commit)?;
+    run_with_repo(
+        &repo,
+        &AwaitStatsRuntimeOptions {
+            timeout_ms: options.timeout_ms,
+            interval_ms: options.interval_ms,
+            json: options.json,
+            commit: options.commit.clone(),
+            quiet: options.quiet,
+            is_interactive: true,
+        },
+    )
+}
+
+pub fn run_with_repo(
+    repo: &Repository,
+    options: &AwaitStatsRuntimeOptions,
+) -> Result<(), AwaitStatsError> {
+    let commit_sha = resolve_commit(repo, &options.commit)?;
 
     // The post-commit hook writes authorship stats asynchronously, so wait until
     // the note appears before trying to render the final commit stats.
-    let raw_note = wait_for_note(
-        &repo,
+    let raw_note = wait_for_authorship_note(
+        repo,
         &commit_sha,
         Duration::from_millis(options.timeout_ms),
         Duration::from_millis(options.interval_ms),
@@ -112,21 +139,8 @@ fn run_with_options(options: &AwaitStatsOptions) -> Result<(), AwaitStatsError> 
 
     // Validate the note separately so corrupt authorship data reports as a note
     // problem instead of looking like a stats rendering failure.
-    AuthorshipLog::deserialize_from_string(&raw_note)
-        .map_err(|err| AwaitStatsError::CorruptNote(err.to_string()))?;
-
-    let effective_patterns = effective_ignore_patterns(&repo, &[], &[]);
-    let stats = stats_for_commit_stats(&repo, &commit_sha, &effective_patterns)
-        .map_err(|err| AwaitStatsError::CorruptNote(err.to_string()))?;
-
-    if options.json {
-        let json = serde_json::to_string(&stats).map_err(GitAiError::from)?;
-        println!("{}", json);
-    } else {
-        write_stats_to_terminal(&stats, true);
-    }
-
-    Ok(())
+    validate_authorship_note(&raw_note)?;
+    render_stats_for_commit(repo, &commit_sha, options.json, options.is_interactive)
 }
 
 // Convert raw CLI flags into validated await-stats options.
@@ -194,7 +208,7 @@ fn parse_u64_option(flag: &str, value: &str) -> Result<u64, AwaitStatsError> {
 }
 
 // Resolve a revision string to the commit SHA whose authorship note should be read.
-fn resolve_commit(repo: &Repository, rev: &str) -> Result<String, AwaitStatsError> {
+pub fn resolve_commit(repo: &Repository, rev: &str) -> Result<String, AwaitStatsError> {
     // Peel tags and other revision objects to the commit that owns the note.
     repo.revparse_single(rev)
         .and_then(|obj| obj.peel_to_commit())
@@ -203,7 +217,7 @@ fn resolve_commit(repo: &Repository, rev: &str) -> Result<String, AwaitStatsErro
 }
 
 // Poll the git-ai notes namespace until the target commit's authorship note appears.
-fn wait_for_note(
+pub fn wait_for_authorship_note(
     repo: &Repository,
     commit_sha: &str,
     timeout: Duration,
@@ -227,6 +241,32 @@ fn wait_for_note(
         let remaining = timeout.saturating_sub(elapsed);
         thread::sleep(interval.min(remaining));
     }
+}
+
+pub fn validate_authorship_note(raw_note: &str) -> Result<(), AwaitStatsError> {
+    AuthorshipLog::deserialize_from_string(raw_note)
+        .map(|_| ())
+        .map_err(|err| AwaitStatsError::CorruptNote(err.to_string()))
+}
+
+pub fn render_stats_for_commit(
+    repo: &Repository,
+    commit_sha: &str,
+    json: bool,
+    is_interactive: bool,
+) -> Result<(), AwaitStatsError> {
+    let effective_patterns = effective_ignore_patterns(repo, &[], &[]);
+    let stats = stats_for_commit_stats(repo, commit_sha, &effective_patterns)
+        .map_err(|err| AwaitStatsError::CorruptNote(err.to_string()))?;
+
+    if json {
+        let json = serde_json::to_string(&stats).map_err(GitAiError::from)?;
+        println!("{}", json);
+    } else {
+        write_stats_to_terminal(&stats, is_interactive);
+    }
+
+    Ok(())
 }
 
 // Detect whether timeout output should be suppressed before parsed options are available.
