@@ -3497,7 +3497,16 @@ fn write_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
         started_at_ns: now_unix_nanos(),
     };
     let path = pid_metadata_path(config);
-    fs::write(path, serde_json::to_string_pretty(&meta)?)?;
+    let content = serde_json::to_string_pretty(&meta)?;
+    if let Err(e) = fs::write(&path, &content) {
+        if e.kind() == std::io::ErrorKind::PermissionDenied && path.exists() {
+            // Stale file owned by another user (e.g. root) — remove and retry.
+            fs::remove_file(&path)?;
+            fs::write(&path, &content)?;
+        } else {
+            return Err(e.into());
+        }
+    }
     Ok(())
 }
 
