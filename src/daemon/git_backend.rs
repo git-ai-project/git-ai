@@ -306,7 +306,15 @@ impl GitBackend for SystemGitBackend {
                 // Linked worktree: .git file contains "gitdir: <path>"
                 std::fs::read_to_string(&git_dir)
                     .ok()
-                    .and_then(|content| content.trim().strip_prefix("gitdir: ").map(PathBuf::from))
+                    .and_then(|content| {
+                        let dir_str = content.trim().strip_prefix("gitdir: ")?;
+                        let path = PathBuf::from(dir_str);
+                        if path.is_absolute() {
+                            Some(path)
+                        } else {
+                            Some(worktree.join(path))
+                        }
+                    })
                     .unwrap_or(git_dir)
             } else if worktree.join("HEAD").exists() {
                 // Bare repository: the path itself is the git dir

@@ -596,7 +596,7 @@ impl<'a> Commit<'a> {
     // Returns an empty string if there is no body.
     pub fn body(&self) -> Result<String, GitAiError> {
         let (_summary, body) = self.repo.gix.commit_message(&self.oid)?;
-        Ok(body.unwrap_or_default())
+        Ok(body.map(|b| b.trim().to_string()).unwrap_or_default())
     }
 
     /// Find the first parent that exists on the specified refname
