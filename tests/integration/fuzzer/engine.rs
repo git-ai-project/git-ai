@@ -30,10 +30,13 @@ use super::operations::{
     execute_recommit_loop, execute_rename_chain, execute_rename_during_edit,
     execute_reset_and_reedit, execute_reset_edit_recommit, execute_revert_then_redo,
     execute_selective_file_commit, execute_selective_multi_file_commit, execute_session_interleave,
-    execute_soft_reset_recommit, execute_squash_partial_stage, execute_squash_same_file,
-    execute_stash_during_work, execute_stash_pathspec, execute_stash_pop_cycle, execute_thrash,
-    execute_three_way_merge, execute_two_branch_merge, execute_untracked_interleave,
-    execute_whitespace_noise, read_file_state_from_disk,
+    execute_soft_reset_recommit, execute_squash_after_amend, execute_squash_mixed_attribution,
+    execute_squash_multi_file, execute_squash_nonlinear_branch, execute_squash_partial_stage,
+    execute_squash_rebased_branch, execute_squash_reset_recommit, execute_squash_same_file,
+    execute_squash_then_amend, execute_squash_with_overwrites, execute_stash_during_work,
+    execute_stash_pathspec, execute_stash_pop_cycle, execute_thrash, execute_three_way_merge,
+    execute_two_branch_merge, execute_untracked_interleave, execute_whitespace_noise,
+    read_file_state_from_disk,
 };
 use super::oracle::CharRegistry;
 
@@ -190,6 +193,24 @@ impl FuzzerConfig {
             file_op_ratio: 0.05,
             stress_ratio: 0.08,
             combined_ratio: 0.45,
+            max_edits_per_commit: 5,
+            max_lines_per_edit: 6,
+            multi_file_enabled: true,
+            allow_destructive: true,
+            verify_sessions: true,
+        }
+    }
+
+    pub fn squash_heavy(seed: u64, ops: usize) -> Self {
+        Self {
+            seed,
+            ops,
+            rewrite_ratio: 0.15,
+            destructive_ratio: 0.05,
+            partial_stage_ratio: 0.05,
+            file_op_ratio: 0.03,
+            stress_ratio: 0.05,
+            combined_ratio: 0.55,
             max_edits_per_commit: 5,
             max_lines_per_edit: 6,
             multi_file_enabled: true,
@@ -1298,6 +1319,106 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                 }
                 CombinedOp::InterleavedAmendNew => {
                     execute_interleaved_amend_new(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::SquashMixedAttribution => {
+                    execute_squash_mixed_attribution(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::SquashAfterAmend => {
+                    execute_squash_after_amend(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::SquashThenAmend => {
+                    execute_squash_then_amend(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::SquashRebasedBranch => {
+                    execute_squash_rebased_branch(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::SquashWithOverwrites => {
+                    execute_squash_with_overwrites(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::SquashMultiFile => {
+                    let sec_idx = rng.random_range(0..secondary_files.len());
+                    let mut main_ref = &mut file_state;
+                    let mut sec_ref = &mut secondary_files[sec_idx];
+                    execute_squash_multi_file(
+                        &repo,
+                        &mut [&mut main_ref, &mut sec_ref],
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                    if !secondary_files[sec_idx].lines.is_empty() {
+                        registry.verify_blame(
+                            &repo,
+                            &secondary_files[sec_idx].filename,
+                            &secondary_files[sec_idx].lines,
+                            &operation_log,
+                            config.seed,
+                        );
+                    }
+                }
+                CombinedOp::SquashResetRecommit => {
+                    execute_squash_reset_recommit(
+                        &repo,
+                        &mut file_state,
+                        &mut registry,
+                        config.max_lines_per_edit,
+                        &mut rng,
+                        &mut operation_log,
+                    );
+                    verify_main_file(&repo, &registry, &file_state, &operation_log, &config);
+                }
+                CombinedOp::SquashNonlinearBranch => {
+                    execute_squash_nonlinear_branch(
                         &repo,
                         &mut file_state,
                         &mut registry,

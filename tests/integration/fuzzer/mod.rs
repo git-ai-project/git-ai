@@ -350,6 +350,50 @@ fn fuzz_combined_random() {
 }
 
 // =============================================================================
+// Squash-heavy tests (55% combined ratio — targets squash attribution holes)
+// =============================================================================
+
+#[test]
+fn fuzz_squash_0() {
+    run_fuzzer(FuzzerConfig::squash_heavy(0, 40));
+}
+
+#[test]
+fn fuzz_squash_1() {
+    run_fuzzer(FuzzerConfig::squash_heavy(1, 40));
+}
+
+#[test]
+fn fuzz_squash_2() {
+    run_fuzzer(FuzzerConfig::squash_heavy(2, 40));
+}
+
+#[test]
+fn fuzz_squash_42() {
+    run_fuzzer(FuzzerConfig::squash_heavy(42, 40));
+}
+
+#[test]
+fn fuzz_squash_99() {
+    run_fuzzer(FuzzerConfig::squash_heavy(99, 40));
+}
+
+#[test]
+fn fuzz_squash_1337() {
+    run_fuzzer(FuzzerConfig::squash_heavy(1337, 40));
+}
+
+#[test]
+fn fuzz_squash_random() {
+    let seed: u64 = rand::random_range(0..u64::MAX);
+    eprintln!(
+        "[fuzzer] SQUASH RANDOM SEED: {} — use this to reproduce failures",
+        seed
+    );
+    run_fuzzer(FuzzerConfig::squash_heavy(seed, 60));
+}
+
+// =============================================================================
 // Marathon tests (150+ ops, maximum pathological coverage)
 // =============================================================================
 

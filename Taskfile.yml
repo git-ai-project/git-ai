@@ -118,6 +118,14 @@ tasks:
           GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_destructive_
 
+  test:fuzz:squash:
+    desc: Run squash-heavy fuzzer tests (targets attribution holes post-squash)
+    cmds:
+      - task: test:base
+        vars:
+          GIT_AI_TEST_GIT_MODE: daemon
+          TEST_FILTER: fuzz_squash_
+
   test:fuzz:combined:
     desc: Run combined ops fuzzer tests (cherry-pick, branch merge, squash combos)
     cmds:

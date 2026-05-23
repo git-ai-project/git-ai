@@ -116,6 +116,14 @@ pub enum CombinedOp {
     OverwriteAndRollback,
     CherryPickChain,
     InterleavedAmendNew,
+    SquashMixedAttribution,
+    SquashAfterAmend,
+    SquashThenAmend,
+    SquashRebasedBranch,
+    SquashWithOverwrites,
+    SquashMultiFile,
+    SquashResetRecommit,
+    SquashNonlinearBranch,
 }
 
 impl EditStrategy {
@@ -237,7 +245,7 @@ pub fn gen_stress_op(rng: &mut impl Rng) -> StressOp {
 
 /// Generate a random combined operation.
 pub fn gen_combined_op(rng: &mut impl Rng) -> CombinedOp {
-    match rng.random_range(0..32u32) {
+    match rng.random_range(0..40u32) {
         0 => CombinedOp::CherryPickConflict,
         1 => CombinedOp::RapidBranchMerge,
         2 => CombinedOp::RebaseCherryPickCombo,
@@ -269,6 +277,14 @@ pub fn gen_combined_op(rng: &mut impl Rng) -> CombinedOp {
         28 => CombinedOp::MultiStash,
         29 => CombinedOp::OverwriteAndRollback,
         30 => CombinedOp::CherryPickChain,
-        _ => CombinedOp::InterleavedAmendNew,
+        31 => CombinedOp::InterleavedAmendNew,
+        32 => CombinedOp::SquashMixedAttribution,
+        33 => CombinedOp::SquashAfterAmend,
+        34 => CombinedOp::SquashThenAmend,
+        35 => CombinedOp::SquashRebasedBranch,
+        36 => CombinedOp::SquashWithOverwrites,
+        37 => CombinedOp::SquashMultiFile,
+        38 => CombinedOp::SquashResetRecommit,
+        _ => CombinedOp::SquashNonlinearBranch,
     }
 }

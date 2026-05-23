@@ -4594,6 +4594,623 @@ pub fn execute_interleaved_amend_new(
     operation_log.push("interleaved-amend-new: done".to_string());
 }
 
+/// Pathological squash: create a branch with many commits where each commit
+/// has DIFFERENT attribution types (AI, human, mixed), with edits at different
+/// positions (prepend, append, insert, replace). Then squash merge.
+/// The squashed result should have ALL attributions from ALL source commits
+/// preserved without any holes.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_squash_mixed_attribution(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    let commit_count = rng.random_range(4..=8);
+    operation_log.push(format!(
+        "squash-mixed-attribution: {} commits with mixed AI/human",
+        commit_count
+    ));
+
+    let main_branch = repo.current_branch();
+    let branch_name = format!("squash-mixed-{}", rng.random_range(0..10000u32));
+    let pre_squash_lines = file_state.lines.clone();
+
+    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+    // Each commit deliberately alternates attribution and strategy
+    for i in 0..commit_count {
+        let attr = match i % 3 {
+            0 => Attribution::Ai,
+            1 => Attribution::KnownHuman,
+            _ => gen_attribution(rng),
+        };
+        let strategy = if file_state.lines.is_empty() {
+            EditStrategy::Append
+        } else {
+            match i % 4 {
+                0 => EditStrategy::Append,
+                1 => EditStrategy::Prepend,
+                2 => EditStrategy::InsertRandom,
+                _ => EditStrategy::Append,
+            }
+        };
+        let params = EditParams {
+            attribution: attr,
+            strategy,
+            line_count: gen_line_count(rng, max_lines.min(4)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("squash-mixed commit {} ({:?})", i, attr))
+            .unwrap();
+    }
+
+    let final_lines = file_state.lines.clone();
+
+    // Switch back and squash merge
+    repo.git(&["checkout", &main_branch]).unwrap();
+    file_state.lines = pre_squash_lines;
+
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
+    file_state.lines = final_lines;
+    repo.git(&["commit", "-m", "squash-mixed: squashed all"])
+        .unwrap();
+
+    repo.git(&["branch", "-D", &branch_name]).unwrap();
+    operation_log.push("squash-mixed-attribution: done".to_string());
+}
+
+/// Squash with amends on the source branch: create a branch where some commits
+/// are amended BEFORE the squash. This means the authorship notes on the source
+/// branch have already been rewritten, and the squash must pick up the amended versions.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_squash_after_amend(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("squash-after-amend: starting".to_string());
+
+    let main_branch = repo.current_branch();
+    let branch_name = format!("squash-amend-{}", rng.random_range(0..10000u32));
+    let pre_squash_lines = file_state.lines.clone();
+
+    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+    // Commit 1: AI
+    let ai_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(4)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &ai_params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-amend: commit 1 (AI)").unwrap();
+
+    // Amend commit 1 with MORE AI content
+    let amend_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &amend_params,
+        rng,
+        operation_log,
+    );
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&["commit", "--amend", "-m", "squash-amend: commit 1 amended"])
+        .unwrap();
+
+    // Commit 2: Human
+    let human_params = EditParams {
+        attribution: Attribution::KnownHuman,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(4)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &human_params,
+        rng,
+        operation_log,
+    );
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-amend: commit 2 (human)").unwrap();
+
+    // Commit 3: Mixed (AI then human in same commit)
+    let mixed_ai = EditParams {
+        attribution: Attribution::Ai,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(2)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &mixed_ai, rng, operation_log);
+    let mixed_human = EditParams {
+        attribution: Attribution::KnownHuman,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(2)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &mixed_human, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-amend: commit 3 (mixed)").unwrap();
+
+    // Amend commit 3 with more content
+    let final_amend = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(2)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &final_amend, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&["commit", "--amend", "-m", "squash-amend: commit 3 amended"])
+        .unwrap();
+
+    let final_lines = file_state.lines.clone();
+
+    // Switch back and squash
+    repo.git(&["checkout", &main_branch]).unwrap();
+    file_state.lines = pre_squash_lines;
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
+    file_state.lines = final_lines;
+    repo.git(&["commit", "-m", "squash-amend: squashed"])
+        .unwrap();
+
+    repo.git(&["branch", "-D", &branch_name]).unwrap();
+    operation_log.push("squash-after-amend: done".to_string());
+}
+
+/// Squash merge then immediately amend the squash commit: this is the most
+/// common pattern that causes "holes" - the squash creates an authorship note,
+/// then the amend rewrites it, potentially losing source attribution.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_squash_then_amend(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("squash-then-amend: starting".to_string());
+
+    let main_branch = repo.current_branch();
+    let branch_name = format!("squash-then-amend-{}", rng.random_range(0..10000u32));
+    let pre_squash_lines = file_state.lines.clone();
+
+    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+    // Make several commits with different attributions
+    let commit_count = rng.random_range(3..=5);
+    for i in 0..commit_count {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("squash-then-amend: branch {}", i))
+            .unwrap();
+    }
+
+    let branch_lines = file_state.lines.clone();
+
+    // Squash merge
+    repo.git(&["checkout", &main_branch]).unwrap();
+    file_state.lines = pre_squash_lines;
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
+    file_state.lines = branch_lines;
+    repo.git(&["commit", "-m", "squash-then-amend: squashed"])
+        .unwrap();
+
+    // NOW AMEND with more content — this is where holes appear
+    let amend_params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &amend_params,
+        rng,
+        operation_log,
+    );
+    repo.git(&["add", "-A"]).unwrap();
+    repo.git(&[
+        "commit",
+        "--amend",
+        "-m",
+        "squash-then-amend: amended after squash",
+    ])
+    .unwrap();
+
+    repo.git(&["branch", "-D", &branch_name]).unwrap();
+    operation_log.push("squash-then-amend: done".to_string());
+}
+
+/// Squash merge from a branch that itself was rebased: the source branch
+/// commits have already been through a rebase (authorship notes rewritten),
+/// and now we squash merge them. Double rewrite.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_squash_rebased_branch(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("squash-rebased-branch: starting".to_string());
+
+    let main_branch = repo.current_branch();
+    let branch_name = format!("squash-rebased-{}", rng.random_range(0..10000u32));
+
+    // Create feature branch
+    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+    // Make commits on feature
+    let commit_count = rng.random_range(3..=5);
+    for i in 0..commit_count {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("squash-rebased: feature {}", i))
+            .unwrap();
+    }
+
+    // Go back to main, make a non-conflicting commit to create divergence
+    repo.git(&["checkout", &main_branch]).unwrap();
+    let diverge_file = format!("diverge_squash_{}.txt", rng.random_range(0..10000u32));
+    fs::write(repo.path().join(&diverge_file), "divergence content\n").unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-rebased: main divergence").unwrap();
+
+    // Rebase the feature branch onto main (rewrites all feature commits)
+    repo.git(&["checkout", &branch_name]).unwrap();
+    let rebase_result = repo.git(&["rebase", &main_branch]);
+    if rebase_result.is_err() {
+        repo.git(&["rebase", "--abort"]).ok();
+        repo.git(&["checkout", &main_branch]).unwrap();
+        file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+        repo.git(&["branch", "-D", &branch_name]).ok();
+        operation_log.push("squash-rebased-branch: rebase failed, aborted".to_string());
+        return;
+    }
+
+    let final_lines = file_state.lines.clone();
+
+    // Now squash merge the rebased branch back to main
+    repo.git(&["checkout", &main_branch]).unwrap();
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    let merge_result = repo.git(&["merge", "--squash", &branch_name]);
+    if merge_result.is_err() {
+        repo.git(&["reset", "--hard"]).ok();
+        file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+        repo.git(&["branch", "-D", &branch_name]).ok();
+        operation_log.push("squash-rebased-branch: merge failed".to_string());
+        return;
+    }
+
+    file_state.lines = final_lines;
+    repo.git(&["commit", "-m", "squash-rebased: squash merge after rebase"])
+        .unwrap();
+
+    repo.git(&["branch", "-D", &branch_name]).unwrap();
+    operation_log.push("squash-rebased-branch: done".to_string());
+}
+
+/// Squash merge with overwrites: the branch has commits where later commits
+/// OVERWRITE lines from earlier commits. The squash should only reflect the
+/// final state's attributions, not the intermediate ones that were overwritten.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_squash_with_overwrites(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("squash-with-overwrites: starting".to_string());
+
+    let main_branch = repo.current_branch();
+    let branch_name = format!("squash-overwrite-{}", rng.random_range(0..10000u32));
+    let pre_squash_lines = file_state.lines.clone();
+
+    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+    // Commit 1: add AI lines
+    let ai_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(6)).max(4),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &ai_params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-overwrite: AI lines").unwrap();
+
+    // Commit 2: OVERWRITE some of those AI lines with human lines
+    let overwrite_params = EditParams {
+        attribution: Attribution::KnownHuman,
+        strategy: EditStrategy::ReplaceRandom,
+        line_count: gen_line_count(rng, (file_state.lines.len() / 2).max(1)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &overwrite_params,
+        rng,
+        operation_log,
+    );
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-overwrite: human overwrites AI")
+        .unwrap();
+
+    // Commit 3: add more mixed content
+    let mixed_params = EditParams {
+        attribution: gen_attribution(rng),
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &mixed_params,
+        rng,
+        operation_log,
+    );
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-overwrite: more content").unwrap();
+
+    let final_lines = file_state.lines.clone();
+
+    // Squash merge
+    repo.git(&["checkout", &main_branch]).unwrap();
+    file_state.lines = pre_squash_lines;
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
+    file_state.lines = final_lines;
+    repo.git(&["commit", "-m", "squash-overwrite: squashed"])
+        .unwrap();
+
+    repo.git(&["branch", "-D", &branch_name]).unwrap();
+    operation_log.push("squash-with-overwrites: done".to_string());
+}
+
+/// Squash merge multiple files: the branch modifies multiple files with different
+/// attributions, then squash merges. Tests that per-file attribution is correct
+/// in the squashed commit.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_squash_multi_file(
+    repo: &TestRepo,
+    file_states: &mut [&mut FileState],
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push(format!("squash-multi-file: {} files", file_states.len()));
+
+    let main_branch = repo.current_branch();
+    let branch_name = format!("squash-multi-{}", rng.random_range(0..10000u32));
+
+    // Save pre-squash state
+    let pre_states: Vec<Vec<char>> = file_states.iter().map(|fs| fs.lines.clone()).collect();
+
+    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+    // Make commits touching different files
+    for (i, fs) in file_states.iter_mut().enumerate() {
+        let params = EditParams {
+            attribution: if i % 2 == 0 {
+                Attribution::Ai
+            } else {
+                Attribution::KnownHuman
+            },
+            strategy: if fs.lines.is_empty() {
+                EditStrategy::Append
+            } else {
+                EditStrategy::random_non_destructive(rng)
+            },
+            line_count: gen_line_count(rng, max_lines.min(4)),
+        };
+        execute_edit_and_checkpoint(repo, fs, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("squash-multi-file: file {} edit", i))
+            .unwrap();
+    }
+
+    let final_states: Vec<Vec<char>> = file_states.iter().map(|fs| fs.lines.clone()).collect();
+
+    // Squash merge
+    repo.git(&["checkout", &main_branch]).unwrap();
+    for (i, fs) in file_states.iter_mut().enumerate() {
+        fs.lines = pre_states[i].clone();
+    }
+
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
+    for (i, fs) in file_states.iter_mut().enumerate() {
+        fs.lines = final_states[i].clone();
+    }
+    repo.git(&["commit", "-m", "squash-multi-file: squashed"])
+        .unwrap();
+
+    repo.git(&["branch", "-D", &branch_name]).unwrap();
+    operation_log.push("squash-multi-file: done".to_string());
+}
+
+/// Squash merge then soft reset and re-squash: squash a branch, then undo
+/// the squash commit via soft reset, then squash AGAIN (or just recommit).
+/// This double-squash pattern can cause attribution duplication or loss.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_squash_reset_recommit(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("squash-reset-recommit: starting".to_string());
+
+    let main_branch = repo.current_branch();
+    let branch_name = format!("squash-reset-{}", rng.random_range(0..10000u32));
+    let pre_squash_lines = file_state.lines.clone();
+
+    repo.git(&["checkout", "-b", &branch_name]).unwrap();
+
+    // Make commits
+    let commit_count = rng.random_range(2..=4);
+    for i in 0..commit_count {
+        let params = EditParams {
+            attribution: gen_attribution(rng),
+            strategy: EditStrategy::Append,
+            line_count: gen_line_count(rng, max_lines.min(3)),
+        };
+        execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
+        repo.git(&["add", "-A"]).unwrap();
+        repo.commit(&format!("squash-reset: branch {}", i)).unwrap();
+    }
+
+    let final_lines = file_state.lines.clone();
+
+    // First squash
+    repo.git(&["checkout", &main_branch]).unwrap();
+    file_state.lines = pre_squash_lines.clone();
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
+    file_state.lines = final_lines.clone();
+    repo.git(&["commit", "-m", "squash-reset: first squash"])
+        .unwrap();
+
+    // Soft reset (undo the squash commit but keep changes staged)
+    repo.git(&["reset", "--soft", "HEAD~1"]).unwrap();
+
+    // Recommit with a different message (same content)
+    repo.commit("squash-reset: recommitted after soft reset")
+        .unwrap();
+
+    repo.git(&["branch", "-D", &branch_name]).unwrap();
+    operation_log.push("squash-reset-recommit: done".to_string());
+}
+
+/// Squash merge of a branch that has merge commits: the source branch
+/// merged another branch into it (creating a non-linear history),
+/// then we squash the whole thing. Maximum complexity for note resolution.
+#[allow(clippy::too_many_arguments)]
+pub fn execute_squash_nonlinear_branch(
+    repo: &TestRepo,
+    file_state: &mut FileState,
+    registry: &mut CharRegistry,
+    max_lines: usize,
+    rng: &mut impl Rng,
+    operation_log: &mut Vec<String>,
+) {
+    operation_log.push("squash-nonlinear: starting".to_string());
+
+    let main_branch = repo.current_branch();
+    let feature_branch = format!("squash-nl-feat-{}", rng.random_range(0..10000u32));
+    let sub_branch = format!("squash-nl-sub-{}", rng.random_range(0..10000u32));
+    let pre_squash_lines = file_state.lines.clone();
+
+    // Create feature branch
+    repo.git(&["checkout", "-b", &feature_branch]).unwrap();
+
+    // Commit on feature
+    let feat_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &feat_params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-nl: feature commit 1").unwrap();
+
+    // Create sub-branch from feature
+    repo.git(&["checkout", "-b", &sub_branch]).unwrap();
+    let sub_params = EditParams {
+        attribution: Attribution::KnownHuman,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(3)),
+    };
+    execute_edit_and_checkpoint(repo, file_state, registry, &sub_params, rng, operation_log);
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-nl: sub-branch commit").unwrap();
+
+    // Back to feature, make another commit
+    repo.git(&["checkout", &feature_branch]).unwrap();
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+    let feat2_params = EditParams {
+        attribution: Attribution::Ai,
+        strategy: EditStrategy::Append,
+        line_count: gen_line_count(rng, max_lines.min(2)),
+    };
+    execute_edit_and_checkpoint(
+        repo,
+        file_state,
+        registry,
+        &feat2_params,
+        rng,
+        operation_log,
+    );
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-nl: feature commit 2").unwrap();
+
+    // Merge sub-branch into feature (creates merge commit)
+    let merge_result = repo.git(&["merge", &sub_branch, "--no-edit"]);
+    if merge_result.is_err() {
+        repo.git(&["merge", "--abort"]).ok();
+        repo.git(&["checkout", &main_branch]).unwrap();
+        file_state.lines = pre_squash_lines;
+        repo.git(&["branch", "-D", &feature_branch]).ok();
+        repo.git(&["branch", "-D", &sub_branch]).ok();
+        operation_log.push("squash-nonlinear: merge failed, aborted".to_string());
+        return;
+    }
+    file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+
+    let final_lines = file_state.lines.clone();
+
+    // Now squash merge the entire non-linear feature branch into main
+    repo.git(&["checkout", &main_branch]).unwrap();
+    file_state.lines = pre_squash_lines;
+
+    let squash_result = repo.git(&["merge", "--squash", &feature_branch]);
+    if squash_result.is_err() {
+        repo.git(&["reset", "--hard"]).ok();
+        file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
+        repo.git(&["branch", "-D", &feature_branch]).ok();
+        repo.git(&["branch", "-D", &sub_branch]).ok();
+        operation_log.push("squash-nonlinear: squash failed".to_string());
+        return;
+    }
+
+    file_state.lines = final_lines;
+    repo.git(&["commit", "-m", "squash-nl: squashed nonlinear branch"])
+        .unwrap();
+
+    repo.git(&["branch", "-D", &feature_branch]).ok();
+    repo.git(&["branch", "-D", &sub_branch]).ok();
+    operation_log.push("squash-nonlinear: done".to_string());
+}
+
 /// Reconstruct the char-per-line model from actual file content on disk.
 pub fn reconstruct_lines_from_content(content: &str) -> Vec<char> {
     content
