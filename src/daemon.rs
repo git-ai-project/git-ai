@@ -1223,14 +1223,10 @@ fn resolve_stash_target_oid_for_terminal_payload(
         {
             return Ok(Some(oid));
         }
-        return resolve_stash_target_oid_for_worktree(worktree, Some("refs/stash"))
-            .ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "failed to resolve stash push target oid from terminal repo state (worktree={})",
-                    worktree.display()
-                ))
-            })
-            .map(Some);
+        return Ok(resolve_stash_target_oid_for_worktree(
+            worktree,
+            Some("refs/stash"),
+        ));
     }
 
     if !stash_requires_target_resolution(&parsed.command_args) {
