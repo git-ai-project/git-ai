@@ -375,7 +375,12 @@ fn restore_stash_attributions_with_shift(
 
 /// Save a pending stash snapshot when the stash SHA can't be resolved at push time.
 /// Keyed by the HEAD SHA (which is the stash's parent commit).
-pub fn save_pending_stash(repo: &Repository, head_sha: &str) -> Result<(), GitAiError> {
+/// Also cleans the working log so subsequent commits don't consume stashed attributions.
+pub fn save_pending_stash(
+    repo: &Repository,
+    head_sha: &str,
+    pathspecs: Vec<String>,
+) -> Result<(), GitAiError> {
     if !repo.storage.has_working_log(head_sha) {
         return Ok(());
     }
@@ -389,6 +394,8 @@ pub fn save_pending_stash(repo: &Repository, head_sha: &str) -> Result<(), GitAi
     fs::create_dir_all(&dir)?;
     let pending_dir = dir.join(format!("pending_{}_worklog", head_sha));
     copy_dir_recursive(&src_dir, &pending_dir)?;
+
+    clean_working_log_for_stash(repo, head_sha, &pathspecs)?;
 
     Ok(())
 }
