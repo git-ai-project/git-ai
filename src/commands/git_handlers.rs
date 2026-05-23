@@ -255,10 +255,7 @@ fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
 /// the daemon-produced authorship note and display stats inline when available.
 /// Mirrors the same skip/display rules as plain wrapper mode in post_commit.rs.
 fn maybe_show_async_post_commit_stats(parsed: &ParsedGitInvocation, repo: &Repository) {
-    use crate::authorship::ignore::effective_ignore_patterns;
-    use crate::authorship::stats::{stats_for_commit_stats, write_stats_to_terminal};
     use crate::git::cli_parser::is_dry_run;
-    use crate::git::notes_api::read_note as show_authorship_note;
     use std::io::IsTerminal;
 
     // Respect the same suppression flags as the synchronous wrapper path.
@@ -298,24 +295,25 @@ fn maybe_show_async_post_commit_stats(parsed: &ParsedGitInvocation, repo: &Repos
         std::time::Duration::from_millis(500)
     };
 
-    // Poll for the authorship note the daemon should be producing.
     let poll_interval = std::time::Duration::from_millis(25);
-    let start = std::time::Instant::now();
-    let note_found = loop {
-        if show_authorship_note(repo, &commit_sha).is_some() {
-            break true;
+    let note = match crate::commands::await_stats::wait_for_authorship_note(
+        repo,
+        &commit_sha,
+        timeout,
+        poll_interval,
+    ) {
+        Ok(Some(note)) => note,
+        Ok(None) => {
+            eprintln!(
+                "[git-ai] still processing commit {}... run `git ai stats` to see stats.",
+                &commit_sha[..std::cmp::min(8, commit_sha.len())]
+            );
+            return;
         }
-        if start.elapsed() >= timeout {
-            break false;
-        }
-        std::thread::sleep(poll_interval);
+        Err(_) => return,
     };
 
-    if !note_found {
-        eprintln!(
-            "[git-ai] still processing commit {}... run `git ai stats` to see stats.",
-            &commit_sha[..std::cmp::min(8, commit_sha.len())]
-        );
+    if crate::commands::await_stats::validate_authorship_note(&note).is_err() {
         return;
     }
 
@@ -333,7 +331,7 @@ fn maybe_show_async_post_commit_stats(parsed: &ParsedGitInvocation, repo: &Repos
     }
 
     // Run the same cost estimation the sync path uses.
-    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+    let ignore_patterns = crate::authorship::ignore::effective_ignore_patterns(repo, &[], &[]);
     if let Ok(estimate) = crate::authorship::post_commit::estimate_stats_cost_for_head(
         repo,
         &commit_sha,
@@ -347,10 +345,7 @@ fn maybe_show_async_post_commit_stats(parsed: &ParsedGitInvocation, repo: &Repos
         return;
     }
 
-    // Compute and display the full stats.
-    if let Ok(stats) = stats_for_commit_stats(repo, &commit_sha, &ignore_patterns) {
-        write_stats_to_terminal(&stats, true);
-    }
+    let _ = crate::commands::await_stats::render_stats_for_commit(repo, &commit_sha, false, true);
 }
 
 fn head_state_to_repo_context(
