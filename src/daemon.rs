@@ -5571,7 +5571,16 @@ impl ActorDaemonCoordinator {
                                 let resolved = resolve_stash_sha(cmd, stash_ref.as_deref(), &repo);
                                 if let Some(stash_sha) = resolved {
                                     if let Some(family) = family {
-                                        let target_head = head.clone().unwrap_or_default();
+                                        let target_head = if matches!(kind, crate::daemon::domain::StashOpKind::Branch) {
+                                            // stash branch moves HEAD to the stash's parent commit
+                                            repo.find_commit(stash_sha.clone())
+                                                .ok()
+                                                .and_then(|c| c.parent(0).ok())
+                                                .map(|p| p.id().to_string())
+                                                .unwrap_or_else(|| head.clone().unwrap_or_default())
+                                        } else {
+                                            head.clone().unwrap_or_default()
+                                        };
                                         if !target_head.is_empty() {
                                             let _ = self.record_recent_replay_prerequisite(
                                                 family,
