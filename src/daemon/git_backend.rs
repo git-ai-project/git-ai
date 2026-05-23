@@ -2,9 +2,9 @@ use crate::daemon::domain::{FamilyKey, RefChange, RepoContext};
 use crate::error::GitAiError;
 use crate::git::cli_parser::parse_git_cli_args;
 use crate::git::find_repository_in_path;
+use crate::git::gix_backend::GixBackend;
 use crate::git::repo_state::common_dir_for_worktree;
 use crate::git::repository::discover_repository_in_path_no_git_exec;
-use crate::git::repository::exec_git_allow_nonzero;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -297,27 +297,30 @@ impl GitBackend for SystemGitBackend {
     }
 
     fn repo_context(&self, worktree: &Path) -> Result<RepoContext, GitAiError> {
-        let head = rev_parse_head(worktree).ok();
-        let symbolic = run_git_allow_nonzero(
-            [
-                "-C",
-                &worktree.to_string_lossy(),
-                "symbolic-ref",
-                "--quiet",
-                "--short",
-                "HEAD",
-            ]
-            .as_slice(),
-        )?;
-        let (branch, detached) = if symbolic.status.success() {
-            let value = String::from_utf8_lossy(&symbolic.stdout).trim().to_string();
-            if value.is_empty() {
-                (None, true)
+        // Try gix first (no subprocess) — discover .git dir for this worktree
+        let git_dir = worktree.join(".git");
+        let gix_dir = if git_dir.is_dir() {
+            git_dir
+        } else if git_dir.is_file() {
+            // Linked worktree: .git file contains "gitdir: <path>"
+            if let Ok(content) = std::fs::read_to_string(&git_dir) {
+                if let Some(dir) = content.trim().strip_prefix("gitdir: ") {
+                    PathBuf::from(dir)
+                } else {
+                    git_dir
+                }
             } else {
-                (Some(value), false)
+                git_dir
             }
         } else {
-            (None, true)
+            git_dir
+        };
+
+        let gix = GixBackend::new(&gix_dir);
+        let head = gix.head_commit_oid().ok();
+        let (branch, detached) = match gix.head_branch_short_name() {
+            Ok(Some(name)) if !name.is_empty() => (Some(name), false),
+            _ => (None, true),
         };
 
         Ok(RepoContext {
@@ -451,43 +454,6 @@ impl GitBackend for SystemGitBackend {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
         resolve_target(target, cwd_hint)
-    }
-}
-
-fn rev_parse_head(worktree: &Path) -> Result<String, GitAiError> {
-    run_git_str_allow_nonzero(
-        [
-            "-C",
-            &worktree.to_string_lossy(),
-            "rev-parse",
-            "--verify",
-            "HEAD",
-        ]
-        .as_slice(),
-    )
-}
-
-fn run_git_allow_nonzero(args: &[&str]) -> Result<std::process::Output, GitAiError> {
-    let args_owned = args
-        .iter()
-        .map(|arg| (*arg).to_string())
-        .collect::<Vec<_>>();
-    exec_git_allow_nonzero(&args_owned)
-}
-
-fn run_git_str_allow_nonzero(args: &[&str]) -> Result<String, GitAiError> {
-    let output = run_git_allow_nonzero(args)?;
-    if !output.status.success() {
-        return Err(git_error_for(args, &output));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn git_error_for(args: &[&str], output: &std::process::Output) -> GitAiError {
-    GitAiError::GitCliError {
-        code: output.status.code(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        args: args.iter().map(|s| s.to_string()).collect(),
     }
 }
 

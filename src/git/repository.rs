@@ -288,9 +288,15 @@ impl<'a> Object<'a> {
 
     // Recursively peel an object until a commit is found.
     pub fn peel_to_commit(&self) -> Result<Commit<'a>, GitAiError> {
+        if let Some(commit_oid) = self.repo.gix.try_peel_to_commit(&self.oid) {
+            return Ok(Commit {
+                repo: self.repo,
+                oid: commit_oid,
+            });
+        }
+
         let mut args = self.repo.global_args_for_exec();
         args.push("rev-parse".to_string());
-        // args.push("-q".to_string());
         args.push("--verify".to_string());
         args.push(format!("{}^{}", self.oid, "{commit}"));
         let output = exec_git(&args)?;
@@ -833,9 +839,19 @@ impl<'a> Reference<'a> {
     // Peel a reference to a commit This method recursively peels the reference until it reaches a commit.
     #[allow(dead_code)]
     pub fn peel_to_commit(&self) -> Result<Commit<'a>, GitAiError> {
+        if let Some(oid) = self
+            .repo
+            .gix
+            .try_rev_parse(&format!("{}^{{commit}}", self.ref_name))
+        {
+            return Ok(Commit {
+                repo: self.repo,
+                oid,
+            });
+        }
+
         let mut args = self.repo.global_args_for_exec();
         args.push("rev-parse".to_string());
-        // args.push("-q".to_string());
         args.push("--verify".to_string());
         args.push(format!("{}^{}", self.ref_name, "{commit}"));
         let output = exec_git(&args)?;
@@ -979,7 +995,7 @@ pub struct Repository {
     is_bare: bool,
     /// Cached git author identity resolved via `git var GIT_COMMITTER_IDENT`.
     cached_author_identity: std::sync::OnceLock<GitAuthorIdentity>,
-    gix: GixBackend,
+    pub(crate) gix: GixBackend,
 }
 
 impl Repository {
@@ -1373,6 +1389,10 @@ impl Repository {
 
     // Find a merge base between two commits
     pub fn merge_base(&self, one: String, two: String) -> Result<String, GitAiError> {
+        if let Some(base) = self.gix.try_merge_base(&one, &two) {
+            return Ok(base);
+        }
+
         let mut args = self.global_args_for_exec();
         args.push("merge-base".to_string());
         args.push(one.to_string());
@@ -1422,12 +1442,17 @@ impl Repository {
     }
 
     pub fn upstream_remote(&self) -> Result<Option<String>, GitAiError> {
-        // Get current branch name using exec_git
-        let mut args = self.global_args_for_exec();
-        args.push("branch".to_string());
-        args.push("--show-current".to_string());
-        let output = exec_git(&args)?;
-        let branch = String::from_utf8(output.stdout)?.trim().to_string();
+        // Try gix for branch name first
+        let branch = match self.gix.head_branch_short_name() {
+            Ok(Some(name)) => name,
+            _ => {
+                let mut args = self.global_args_for_exec();
+                args.push("branch".to_string());
+                args.push("--show-current".to_string());
+                let output = exec_git(&args)?;
+                String::from_utf8(output.stdout)?.trim().to_string()
+            }
+        };
         if branch.is_empty() {
             return Ok(None);
         }
@@ -1544,6 +1569,10 @@ impl Repository {
         file_path: &str,
         commit_hash: &str,
     ) -> Result<Vec<u8>, GitAiError> {
+        if let Some(data) = self.gix.try_read_file_at_commit(commit_hash, file_path) {
+            return Ok(data);
+        }
+
         let mut args = self.global_args_for_exec();
         args.push("show".to_string());
         args.push(format!("{}:{}", commit_hash, file_path));

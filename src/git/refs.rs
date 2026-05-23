@@ -178,17 +178,22 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
         return Ok(());
     }
 
-    let mut args = repo.global_args_for_exec();
-    args.push("rev-parse".to_string());
-    args.push("--verify".to_string());
-    args.push("refs/notes/ai".to_string());
-    let existing_notes_tip = match exec_git(&args) {
-        Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
-        Err(GitAiError::GitCliError {
-            code: Some(128), ..
-        })
-        | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
-        Err(e) => return Err(e),
+    let existing_notes_tip = match repo.gix.try_rev_parse("refs/notes/ai") {
+        Some(oid) => Some(oid),
+        None => {
+            let mut args = repo.global_args_for_exec();
+            args.push("rev-parse".to_string());
+            args.push("--verify".to_string());
+            args.push("refs/notes/ai".to_string());
+            match exec_git(&args) {
+                Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
+                Err(GitAiError::GitCliError {
+                    code: Some(128), ..
+                })
+                | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
+                Err(e) => return Err(e),
+            }
+        }
     };
 
     let mut deduped_entries: Vec<(String, String)> = Vec::new();
@@ -254,17 +259,22 @@ pub fn notes_add_blob_batch(
         return Ok(());
     }
 
-    let mut args = repo.global_args_for_exec();
-    args.push("rev-parse".to_string());
-    args.push("--verify".to_string());
-    args.push("refs/notes/ai".to_string());
-    let existing_notes_tip = match exec_git(&args) {
-        Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
-        Err(GitAiError::GitCliError {
-            code: Some(128), ..
-        })
-        | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
-        Err(e) => return Err(e),
+    let existing_notes_tip = match repo.gix.try_rev_parse("refs/notes/ai") {
+        Some(oid) => Some(oid),
+        None => {
+            let mut args = repo.global_args_for_exec();
+            args.push("rev-parse".to_string());
+            args.push("--verify".to_string());
+            args.push("refs/notes/ai".to_string());
+            match exec_git(&args) {
+                Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
+                Err(GitAiError::GitCliError {
+                    code: Some(128), ..
+                })
+                | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
+                Err(e) => return Err(e),
+            }
+        }
     };
 
     let mut deduped_entries: Vec<(String, String)> = Vec::new();
@@ -432,6 +442,14 @@ pub fn get_commits_with_notes_from_list(
 
 // Show an authorship note and return its JSON content if found, or None if it doesn't exist.
 pub fn show_authorship_note(repo: &Repository, commit_sha: &str) -> Option<String> {
+    // Try gix first (no subprocess)
+    if let Ok(data) = repo.gix.read_note("refs/notes/ai", commit_sha) {
+        return String::from_utf8(data)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+    }
+
     let mut args = repo.global_args_for_exec();
     args.push("notes".to_string());
     args.push("--ref=ai".to_string());
@@ -543,6 +561,10 @@ pub fn tracking_ref_for_remote(remote_name: &str) -> String {
 
 /// Check if a ref exists in the repository
 pub fn ref_exists(repo: &Repository, ref_name: &str) -> bool {
+    if let Ok(exists) = repo.gix.ref_exists(ref_name) {
+        return exists;
+    }
+
     let mut args = repo.global_args_for_exec();
     args.push("show-ref".to_string());
     args.push("--verify".to_string());
@@ -672,6 +694,10 @@ fn list_all_notes(repo: &Repository, notes_ref: &str) -> Result<Vec<(String, Str
 
 /// Parse a revision to its SHA
 fn rev_parse(repo: &Repository, rev: &str) -> Result<String, GitAiError> {
+    if let Some(oid) = repo.gix.try_rev_parse(rev) {
+        return Ok(oid);
+    }
+
     let mut args = repo.global_args_for_exec();
     args.extend_from_slice(&["rev-parse".to_string(), rev.to_string()]);
     let output = exec_git(&args)?;
