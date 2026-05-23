@@ -53,7 +53,6 @@ mod droid;
 mod e2big_post_filter;
 mod e2e_user_scenarios;
 mod event_timestamp_extraction;
-mod fast_reader;
 mod fetch_notes;
 mod firebender;
 mod formatting_non_substantial_ai_attribution;

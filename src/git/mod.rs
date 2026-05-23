@@ -1,7 +1,6 @@
 pub mod cli_parser;
 pub mod command_classification;
 pub mod diff_tree_to_tree;
-pub mod fast_reader;
 pub mod gix_backend;
 pub mod notes_api;
 pub mod refs;
