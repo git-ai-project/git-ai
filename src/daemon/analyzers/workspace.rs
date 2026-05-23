@@ -3,7 +3,6 @@ use crate::daemon::domain::{
     AnalysisResult, CommandClass, Confidence, NormalizedCommand, SemanticEvent, StashOpKind,
 };
 use crate::error::GitAiError;
-use crate::git::cli_parser::stash_target_spec;
 
 #[derive(Default)]
 pub struct WorkspaceAnalyzer;
@@ -23,7 +22,6 @@ impl CommandAnalyzer for WorkspaceAnalyzer {
                 let stash_args = stash_command_args(cmd);
                 events.push(SemanticEvent::StashOperation {
                     kind: infer_stash_kind(&stash_args),
-                    stash_ref: stash_target_spec(&stash_args).map(ToString::to_string),
                     head: current_head_for_workspace_command(cmd, state.refs),
                 });
             }

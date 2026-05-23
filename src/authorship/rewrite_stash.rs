@@ -7,7 +7,7 @@ use crate::authorship::attribution_tracker::LineAttribution;
 use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
 use crate::error::GitAiError;
 use crate::git::repo_storage::InitialAttributions;
-use crate::git::repository::{Repository, exec_git_allow_nonzero};
+use crate::git::repository::Repository;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StashMetadata {
@@ -382,55 +382,6 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
             fs::copy(&src_path, &dst_path)?;
         }
     }
-    Ok(())
-}
-
-pub fn gc_stash_metadata(repo: &Repository) -> Result<(), GitAiError> {
-    let dir = stashes_dir(repo);
-    if !dir.exists() {
-        return Ok(());
-    }
-
-    let mut args = repo.global_args_for_exec();
-    args.extend([
-        "reflog".to_string(),
-        "show".to_string(),
-        "--format=%H".to_string(),
-        "refs/stash".to_string(),
-    ]);
-
-    let live_shas: std::collections::HashSet<String> = exec_git_allow_nonzero(&args)
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(|l| l.trim().to_string())
-                .filter(|l| !l.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let entries = match fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
-    };
-
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy().to_string();
-        if let Some(sha) = name_str.strip_suffix(".json")
-            && !sha.ends_with("_attrs")
-            && !live_shas.contains(sha)
-        {
-            let _ = fs::remove_file(entry.path());
-            let attr_path = dir.join(format!("{}_attrs.json", sha));
-            let _ = fs::remove_file(&attr_path);
-            let worklog_dir = dir.join(format!("{}_worklog", sha));
-            let _ = fs::remove_dir_all(&worklog_dir);
-        }
-    }
-
     Ok(())
 }
 
