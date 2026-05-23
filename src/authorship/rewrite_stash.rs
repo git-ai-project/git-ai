@@ -98,7 +98,7 @@ pub fn handle_stash_pop_or_apply(
     let metadata_path = dir.join(format!("{}.json", stash_sha));
 
     if !metadata_path.exists() {
-        return Ok(());
+        return try_restore_pending_stash(repo, stash_sha, is_pop);
     }
 
     let content = fs::read_to_string(&metadata_path)?;
@@ -369,6 +369,98 @@ fn restore_stash_attributions_with_shift(
 
     let working_log = repo.storage.working_log_for_base_commit(current_head)?;
     working_log.write_initial(initial)?;
+
+    Ok(())
+}
+
+/// Save a pending stash snapshot when the stash SHA can't be resolved at push time.
+/// Keyed by the HEAD SHA (which is the stash's parent commit).
+pub fn save_pending_stash(repo: &Repository, head_sha: &str) -> Result<(), GitAiError> {
+    if !repo.storage.has_working_log(head_sha) {
+        return Ok(());
+    }
+
+    let src_dir = repo.storage.working_logs.join(head_sha);
+    if !src_dir.exists() {
+        return Ok(());
+    }
+
+    let dir = stashes_dir(repo);
+    fs::create_dir_all(&dir)?;
+    let pending_dir = dir.join(format!("pending_{}_worklog", head_sha));
+    copy_dir_recursive(&src_dir, &pending_dir)?;
+
+    Ok(())
+}
+
+/// Try to restore attributions from a pending stash snapshot.
+/// Called when `handle_stash_pop_or_apply` finds no metadata for the stash SHA.
+fn try_restore_pending_stash(
+    repo: &Repository,
+    stash_sha: &str,
+    is_pop: bool,
+) -> Result<(), GitAiError> {
+    // Find the stash's parent commit (= the HEAD at stash push time)
+    let mut args = repo.global_args_for_exec();
+    args.extend(["rev-parse".to_string(), format!("{}^", stash_sha)]);
+    let parent_sha = exec_git_allow_nonzero(&args)
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let Some(parent_sha) = parent_sha else {
+        return Ok(());
+    };
+
+    let dir = stashes_dir(repo);
+    let pending_dir = dir.join(format!("pending_{}_worklog", parent_sha));
+    if !pending_dir.exists() {
+        return Ok(());
+    }
+
+    let current_head = {
+        let mut args = repo.global_args_for_exec();
+        args.extend(["rev-parse".to_string(), "HEAD".to_string()]);
+        exec_git_allow_nonzero(&args)
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    };
+
+    if current_head.is_empty() {
+        return Ok(());
+    }
+
+    // Restore the pending worklog to the current HEAD's working log
+    let dst_dir = repo.storage.working_logs.join(&current_head);
+    fs::create_dir_all(&dst_dir)?;
+
+    if let Ok(entries) = fs::read_dir(&pending_dir) {
+        for entry in entries.flatten() {
+            let src_path = entry.path();
+            let file_name = entry.file_name();
+            let dst_path = dst_dir.join(&file_name);
+
+            if file_name == "checkpoints.jsonl" {
+                if let Ok(stash_content) = fs::read_to_string(&src_path) {
+                    use std::io::Write;
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&dst_path)?;
+                    f.write_all(stash_content.as_bytes())?;
+                }
+            } else if !dst_path.exists() {
+                let _ = fs::copy(&src_path, &dst_path);
+            }
+        }
+    }
+
+    if is_pop {
+        let _ = fs::remove_dir_all(&pending_dir);
+    }
 
     Ok(())
 }

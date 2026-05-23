@@ -5579,6 +5579,12 @@ impl ActorDaemonCoordinator {
                                                 &repo, stash_sha, head_sha, pathspecs,
                                             );
                                     }
+                                } else if let Some(head_sha) = head.as_deref()
+                                    && !head_sha.is_empty()
+                                {
+                                    let _ = crate::authorship::rewrite_stash::save_pending_stash(
+                                        &repo, head_sha,
+                                    );
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Pop => {
