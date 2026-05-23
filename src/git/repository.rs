@@ -13,7 +13,7 @@ use crate::git::sync_authorship::push_authorship_notes;
 use crate::utils::is_interactive_terminal;
 use unicode_normalization::UnicodeNormalization;
 
-use gix_index::entry::Stage;
+use gix::index::entry::Stage;
 use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
@@ -1632,7 +1632,7 @@ impl Repository {
         let mut staged_blobs = HashMap::new();
         let object_hash = repository_object_hash_kind_for_path_no_git_exec(self.path())?;
         let index_path = self.path().join("index");
-        let index = gix_index::File::at(index_path, object_hash, true, Default::default())
+        let index = gix::index::File::at(index_path, object_hash, true, Default::default())
             .map_err(|err| GitAiError::GixError(err.to_string()))?;
 
         for entry in index.entries() {
@@ -2287,12 +2287,12 @@ pub fn config_get_str_for_path_no_git_exec(
 
 fn repository_object_hash_kind_for_path_no_git_exec(
     path: &Path,
-) -> Result<gix_index::hash::Kind, GitAiError> {
+) -> Result<gix::index::hash::Kind, GitAiError> {
     match config_get_str_for_path_no_git_exec(path, "extensions.objectformat")?
         .as_deref()
         .map(str::trim)
     {
-        None | Some("") | Some("sha1") => Ok(gix_index::hash::Kind::Sha1),
+        None | Some("") | Some("sha1") => Ok(gix::index::hash::Kind::Sha1),
         Some("sha256") => Err(GitAiError::Generic(
             "SHA-256 repositories are not supported while reading the git index".to_string(),
         )),
