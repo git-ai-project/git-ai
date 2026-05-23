@@ -545,35 +545,26 @@ impl<'a> Commit<'a> {
     }
 
     pub fn parent(&self, i: usize) -> Result<Commit<'a>, GitAiError> {
-        let mut args = self.repo.global_args_for_exec();
-        args.push("rev-parse".to_string());
-        // args.push("-q".to_string());
-        args.push("--verify".to_string());
-        // libgit2 uses 0-based indexing; Git's rev syntax uses 1-based parent selectors.
-        args.push(format!("{}^{}", self.oid, i + 1));
-        let output = exec_git(&args)?;
+        let parent_oids = self.repo.gix.commit_parent_ids(&self.oid)?;
+        let oid = parent_oids.get(i).ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "Commit {} does not have parent at index {}",
+                self.oid, i
+            ))
+        })?;
         Ok(Commit {
             repo: self.repo,
-            oid: String::from_utf8(output.stdout)?.trim().to_string(),
+            oid: oid.clone(),
         })
     }
 
     // Return an iterator over the parents of this commit.
     pub fn parents(&self) -> Parents<'a> {
-        // Use `git show -s --format=%P <oid>` to get whitespace-separated parent OIDs
-        let mut args = self.repo.global_args_for_exec();
-        args.push("show".to_string());
-        args.push("-s".to_string());
-        args.push("--format=%P".to_string());
-        args.push(self.oid.clone());
-
-        let parent_oids: Vec<String> = match exec_git(&args) {
-            Ok(output) => {
-                let stdout = String::from_utf8(output.stdout).unwrap_or_default();
-                stdout.split_whitespace().map(|s| s.to_string()).collect()
-            }
-            Err(_) => Vec::new(),
-        };
+        let parent_oids = self
+            .repo
+            .gix
+            .commit_parent_ids(&self.oid)
+            .unwrap_or_default();
 
         Parents {
             repo: self.repo,
@@ -591,29 +582,15 @@ impl<'a> Commit<'a> {
 
     // Get the short "summary" of the git commit message. The returned message is the summary of the commit, comprising the first paragraph of the message with whitespace trimmed and squashed. None may be returned if an error occurs or if the summary is not valid utf-8.
     pub fn summary(&self) -> Result<String, GitAiError> {
-        let mut args = self.repo.global_args_for_exec();
-        args.push("show".to_string());
-        args.push("-s".to_string());
-        args.push("--no-notes".to_string());
-        args.push("--encoding=UTF-8".to_string());
-        args.push("--format=%s".to_string());
-        args.push(self.oid.clone());
-        let output = exec_git(&args)?;
-        Ok(String::from_utf8(output.stdout)?.trim().to_string())
+        let (summary, _body) = self.repo.gix.commit_message(&self.oid)?;
+        Ok(summary)
     }
 
     // Get the body of the git commit message (everything after the first paragraph).
     // Returns an empty string if there is no body.
     pub fn body(&self) -> Result<String, GitAiError> {
-        let mut args = self.repo.global_args_for_exec();
-        args.push("show".to_string());
-        args.push("-s".to_string());
-        args.push("--no-notes".to_string());
-        args.push("--encoding=UTF-8".to_string());
-        args.push("--format=%b".to_string());
-        args.push(self.oid.clone());
-        let output = exec_git(&args)?;
-        Ok(String::from_utf8(output.stdout)?.trim().to_string())
+        let (_summary, body) = self.repo.gix.commit_message(&self.oid)?;
+        Ok(body.unwrap_or_default())
     }
 
     /// Find the first parent that exists on the specified refname
@@ -821,12 +798,19 @@ impl<'a> Reference<'a> {
     }
 
     pub fn shorthand(&self) -> Result<String, GitAiError> {
-        let mut args = self.repo.global_args_for_exec();
-        args.push("rev-parse".to_string());
-        args.push("--abbrev-ref".to_string());
-        args.push(self.ref_name.clone());
-        let output = exec_git(&args)?;
-        Ok(String::from_utf8(output.stdout)?.trim().to_string())
+        if let Some(short) = self.ref_name.strip_prefix("refs/heads/") {
+            return Ok(short.to_string());
+        }
+        if let Some(short) = self.ref_name.strip_prefix("refs/tags/") {
+            return Ok(short.to_string());
+        }
+        if let Some(short) = self.ref_name.strip_prefix("refs/remotes/") {
+            return Ok(short.to_string());
+        }
+        if let Some(short) = self.ref_name.strip_prefix("refs/") {
+            return Ok(short.to_string());
+        }
+        Ok(self.ref_name.clone())
     }
 
     pub fn target(&self) -> Result<String, GitAiError> {
@@ -1403,9 +1387,12 @@ impl Repository {
 
     // Find a single object, as specified by a revision string.
     pub fn revparse_single(&self, spec: &str) -> Result<Object<'_>, GitAiError> {
+        if let Some(oid) = self.gix.try_rev_parse(spec) {
+            return Ok(Object { repo: self, oid });
+        }
+
         let mut args = self.global_args_for_exec();
         args.push("rev-parse".to_string());
-        // args.push("-q".to_string());
         args.push("--verify".to_string());
         args.push(spec.to_string());
         let output = exec_git(&args)?;
