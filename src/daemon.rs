@@ -5571,7 +5571,13 @@ impl ActorDaemonCoordinator {
                                         .ok()
                                         .and_then(|c| c.parent(0).ok())
                                         .map(|p| p.id().to_string())
-                                        .or_else(|| head.clone());
+                                        .or_else(|| head.clone())
+                                        .or_else(|| {
+                                            read_head_state_for_worktree(std::path::Path::new(
+                                                &worktree,
+                                            ))
+                                            .and_then(|s| s.head)
+                                        });
                                     if let Some(head_sha) = resolved_head.as_deref() {
                                         let pathspecs = Self::stash_pathspecs_from_command(cmd);
                                         let _ =
@@ -5579,14 +5585,24 @@ impl ActorDaemonCoordinator {
                                                 &repo, stash_sha, head_sha, pathspecs,
                                             );
                                     }
-                                } else if matches!(kind, crate::daemon::domain::StashOpKind::Push)
-                                    && let Some(head_sha) = head.as_deref()
-                                    && !head_sha.is_empty()
-                                {
-                                    let pathspecs = Self::stash_pathspecs_from_command(cmd);
-                                    let _ = crate::authorship::rewrite_stash::save_pending_stash(
-                                        &repo, head_sha, pathspecs,
-                                    );
+                                } else if matches!(kind, crate::daemon::domain::StashOpKind::Push) {
+                                    let effective_head = head
+                                        .as_deref()
+                                        .filter(|h| !h.is_empty())
+                                        .map(String::from)
+                                        .or_else(|| {
+                                            read_head_state_for_worktree(std::path::Path::new(
+                                                &worktree,
+                                            ))
+                                            .and_then(|s| s.head)
+                                        });
+                                    if let Some(ref head_sha) = effective_head {
+                                        let pathspecs = Self::stash_pathspecs_from_command(cmd);
+                                        let _ =
+                                            crate::authorship::rewrite_stash::save_pending_stash(
+                                                &repo, head_sha, pathspecs,
+                                            );
+                                    }
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Pop => {

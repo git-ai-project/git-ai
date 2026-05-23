@@ -97,6 +97,14 @@ pub fn handle_stash_pop_or_apply(
     let dir = stashes_dir(repo);
     let metadata_path = dir.join(format!("{}.json", stash_sha));
 
+    tracing::debug!(
+        %stash_sha,
+        %is_pop,
+        metadata_exists = metadata_path.exists(),
+        stashes_dir = %dir.display(),
+        "handle_stash_pop_or_apply"
+    );
+
     if !metadata_path.exists() {
         return try_restore_pending_stash(repo, stash_sha, is_pop);
     }
@@ -382,17 +390,32 @@ pub fn save_pending_stash(
     pathspecs: Vec<String>,
 ) -> Result<(), GitAiError> {
     if !repo.storage.has_working_log(head_sha) {
+        tracing::debug!(
+            %head_sha,
+            working_logs_dir = %repo.storage.working_logs.display(),
+            "save_pending_stash: no working log for head_sha"
+        );
         return Ok(());
     }
 
     let src_dir = repo.storage.working_logs.join(head_sha);
     if !src_dir.exists() {
+        tracing::debug!(
+            %head_sha,
+            src_dir = %src_dir.display(),
+            "save_pending_stash: src_dir does not exist"
+        );
         return Ok(());
     }
 
     let dir = stashes_dir(repo);
     fs::create_dir_all(&dir)?;
     let pending_dir = dir.join(format!("pending_{}_worklog", head_sha));
+    tracing::debug!(
+        %head_sha,
+        pending_dir = %pending_dir.display(),
+        "save_pending_stash: saving"
+    );
     copy_dir_recursive(&src_dir, &pending_dir)?;
 
     clean_working_log_for_stash(repo, head_sha, &pathspecs)?;
@@ -400,8 +423,6 @@ pub fn save_pending_stash(
     Ok(())
 }
 
-/// Try to restore attributions from a pending stash snapshot.
-/// Called when `handle_stash_pop_or_apply` finds no metadata for the stash SHA.
 fn try_restore_pending_stash(
     repo: &Repository,
     stash_sha: &str,
@@ -417,11 +438,22 @@ fn try_restore_pending_stash(
         .filter(|s| !s.is_empty());
 
     let Some(parent_sha) = parent_sha else {
+        tracing::debug!(
+            %stash_sha,
+            "try_restore_pending_stash: could not resolve parent"
+        );
         return Ok(());
     };
 
     let dir = stashes_dir(repo);
     let pending_dir = dir.join(format!("pending_{}_worklog", parent_sha));
+    tracing::debug!(
+        %stash_sha,
+        %parent_sha,
+        pending_dir_exists = pending_dir.exists(),
+        pending_dir = %pending_dir.display(),
+        "try_restore_pending_stash: looking for pending dir"
+    );
     if !pending_dir.exists() {
         return Ok(());
     }
