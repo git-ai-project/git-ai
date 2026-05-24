@@ -267,9 +267,13 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
     );
     if let Some(acceptance_pct) =
         (stats.commits.ai_lines * 100).checked_div(stats.checkpoints.ai_lines_added)
-        && acceptance_pct <= 100
     {
-        println!("    Acceptance rate   {:>5}%", acceptance_pct);
+        if acceptance_pct <= 100 {
+            println!("    Acceptance rate   {:>5}%", acceptance_pct);
+        } else {
+            // >100% means checkpoint data is incomplete (pre-backfill events).
+            println!("    Acceptance rate     {GRAY}>100% (incomplete checkpoint data){RESET}");
+        }
     }
     // Track which tools have already had their acceptance rate shown so we
     // don't repeat the same tool-level rate on every model variant line.
@@ -283,7 +287,13 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
                 .acceptance_by_tool
                 .iter()
                 .find(|(t, _)| t == tool_name)
-                .map(|(_, pct)| format!("  {GRAY}({pct}% accept){RESET}"))
+                .map(|(_, pct)| {
+                    if *pct <= 100 {
+                        format!("  {GRAY}({pct}% accept){RESET}")
+                    } else {
+                        format!("  {GRAY}(>100% accept — incomplete checkpoint data){RESET}")
+                    }
+                })
                 .unwrap_or_default()
         } else {
             String::new()
