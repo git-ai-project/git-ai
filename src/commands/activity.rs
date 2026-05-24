@@ -95,7 +95,11 @@ pub fn handle_activity(args: &[String]) {
         .unwrap_or_default();
 
     // When filtering by repo, bail out early if nothing matched.
+    // Include human_lines/diff_added_lines so human-only periods aren't
+    // falsely reported as empty (commits.total only counts AI-involved commits).
     let no_data = stats.commits.total == 0
+        && stats.commits.human_lines == 0
+        && stats.commits.diff_added_lines == 0
         && stats.sessions.total == 0
         && stats.tokens.input + stats.tokens.output + stats.tokens.cache_read + stats.tokens.cache_creation == 0;
     if no_data {
