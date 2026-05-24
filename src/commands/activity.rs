@@ -1,13 +1,16 @@
 //! `git-ai usage` — local statistics from persisted metric events.
 
-use crate::metrics::local_stats::{BucketGranularity, LocalActivityStats, compute_activity};
-use crate::repo_url::resolve_repo_url_from_path;
+use crate::metrics::local_stats::{
+    BucketGranularity, LocalActivityStats, RepoActivitySummary, compute_activity,
+    compute_repo_summaries,
+};
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn handle_activity(args: &[String]) {
     let mut json = false;
     let mut period = "30d".to_string();
+    let mut repo_filter: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -15,6 +18,16 @@ pub fn handle_activity(args: &[String]) {
             "--json" => json = true,
             "--period" if i + 1 < args.len() => {
                 period = args[i + 1].clone();
+                i += 1;
+            }
+            "--repo" if i + 1 < args.len() => {
+                // Normalize: strip protocol prefix so both "https://github.com/org/repo"
+                // and "github.com/org/repo" resolve to the same substring match.
+                let raw = args[i + 1].as_str();
+                let normalized = raw
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://");
+                repo_filter = Some(normalized.to_string());
                 i += 1;
             }
             "--help" | "-h" => {
@@ -66,19 +79,20 @@ pub fn handle_activity(args: &[String]) {
         }
     };
 
-    // Auto-detect which repo we're in (if any).  When Some, stats are scoped
-    // to that repo; the header shows the repo name.  When None (outside any
-    // repo), stats are global and the Summary tab shows a per-repo table.
-    let current_dir = std::env::current_dir().ok();
-    let current_repo = current_dir.as_deref().and_then(resolve_repo_url_from_path);
-
-    let stats = match compute_activity(since_ts, period_label, granularity, current_repo.as_deref())
-    {
+    let stats = match compute_activity(since_ts, period_label, granularity, repo_filter.as_deref()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {}", e);
             std::process::exit(1);
         }
+    };
+
+    // Show per-repo breakdown only in global view; when filtered to a single
+    // repo it would be a single-row table that adds nothing.
+    let repos = if repo_filter.is_none() {
+        compute_repo_summaries(since_ts, granularity).unwrap_or_default()
+    } else {
+        vec![]
     };
 
     if json {
@@ -90,7 +104,7 @@ pub fn handle_activity(args: &[String]) {
             }
         }
     } else {
-        print_terminal(&stats);
+        print_terminal(&stats, &repos, repo_filter.as_deref());
     }
 }
 
@@ -109,6 +123,7 @@ fn print_help() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --period <1d|3d|7d|30d|60d|all>   Time window (default: 30d)");
+    eprintln!("  --repo <url|substring>            Filter to a repository (substring match, https:// optional)");
     eprintln!("  --json                            Output as JSON");
     eprintln!("  --help                            Show this help");
     eprintln!();
@@ -116,16 +131,26 @@ fn print_help() {
     eprintln!("Events accumulate over time and are never deleted from local storage.");
 }
 
-fn print_terminal(stats: &LocalActivityStats) {
+fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], repo_filter: Option<&str>) {
     const GRAY: &str = "\x1b[90m";
     const BOLD: &str = "\x1b[1m";
     const RESET: &str = "\x1b[0m";
     const BAR_WIDTH: u32 = 20;
 
-    println!(
-        "{BOLD}git-ai usage{RESET} {GRAY}— {}{RESET}",
-        stats.period_label
-    );
+    if let Some(repo) = repo_filter {
+        let display = repo
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        println!(
+            "{BOLD}git-ai usage{RESET} {GRAY}— {}  ·  {}{RESET}",
+            display, stats.period_label
+        );
+    } else {
+        println!(
+            "{BOLD}git-ai usage{RESET} {GRAY}— {}{RESET}",
+            stats.period_label
+        );
+    }
 
     // --- Top bar: AI vs Human split ---
     println!();
@@ -138,6 +163,45 @@ fn print_terminal(stats: &LocalActivityStats) {
             ai_pct,
             human_pct,
         );
+    }
+
+    // --- Per-repo breakdown ---
+    if !repos.is_empty() {
+        println!();
+        println!("  {BOLD}Repositories{RESET}");
+        let max_lines = repos.iter().map(|r| r.ai_lines).max().unwrap_or(1).max(1);
+        for r in repos {
+            let repo_display = r
+                .repo_url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://");
+            let repo_display = if repo_display.is_empty() {
+                "unknown"
+            } else {
+                repo_display
+            };
+            let filled = (r.ai_lines * 16 / max_lines).min(16);
+            let empty = 16 - filled;
+            let bar_str = format!(
+                "{}{}",
+                "█".repeat(filled as usize),
+                "░".repeat(empty as usize)
+            );
+            let cost_str = if r.estimated_cost_usd > 0.0 {
+                format!("  {GRAY}~${:.2}{RESET}", r.estimated_cost_usd)
+            } else {
+                String::new()
+            };
+            println!(
+                "    {}  {GRAY}{}{RESET}  {GRAY}{} lines · {} commits · {} sessions{}{RESET}",
+                bar_str,
+                repo_display,
+                format_num(r.ai_lines),
+                r.commits,
+                r.sessions,
+                cost_str,
+            );
+        }
     }
 
     // --- AI section ---

@@ -349,7 +349,7 @@ impl MetricsDatabase {
             } else {
                 let mut stmt = self.conn.prepare(
                     "SELECT event_id, ts, repo_url, event_json FROM local_events \
-                 WHERE ts >= ?1 AND repo_url = ?2 \
+                 WHERE ts >= ?1 AND repo_url LIKE '%' || ?2 || '%' \
                  ORDER BY ts ASC",
                 )?;
                 let rows = stmt.query_map(params![since_ts as i64, repo_url], |row| {
