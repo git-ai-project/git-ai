@@ -1,4 +1,3 @@
-pub mod usage;
 pub mod blame;
 pub mod checkpoint_agent;
 pub mod ci_handlers;
@@ -24,4 +23,5 @@ pub mod show_prompt;
 pub mod squash_authorship;
 pub mod status;
 pub mod upgrade;
+pub mod usage;
 pub mod whoami;

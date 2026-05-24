@@ -357,12 +357,11 @@ fn flush_metrics(events: &[MetricEvent]) {
         store_metrics_in_db(chunk);
     }
 
-    if !local_tuples.is_empty() {
-        if let Ok(db) = MetricsDatabase::global()
-            && let Ok(mut db_lock) = db.lock()
-        {
-            let _ = db_lock.insert_local_events(&local_tuples);
-        }
+    if !local_tuples.is_empty()
+        && let Ok(db) = MetricsDatabase::global()
+        && let Ok(mut db_lock) = db.lock()
+    {
+        let _ = db_lock.insert_local_events(&local_tuples);
     }
 }
 
