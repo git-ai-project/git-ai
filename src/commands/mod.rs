@@ -1,4 +1,4 @@
-pub mod activity;
+pub mod usage;
 pub mod blame;
 pub mod checkpoint_agent;
 pub mod ci_handlers;
