@@ -151,23 +151,36 @@ pub fn post_commit_with_final_state(
 
     // Derive committed_hunks from the diff, filtered by pathspecs.
     // Use NFC normalization for matching since git may output NFD paths on macOS.
-    let committed_hunks_from_diff: HashMap<String, Vec<crate::authorship::authorship_log::LineRange>> = {
+    let committed_hunks_from_diff: HashMap<
+        String,
+        Vec<crate::authorship::authorship_log::LineRange>,
+    > = {
         let mut result: HashMap<String, Vec<u32>> = HashMap::new();
         for hunk in &diff_hunks {
             if !hunk.added_lines.is_empty() {
-                result.entry(hunk.file_path.clone()).or_default().extend(&hunk.added_lines);
+                result
+                    .entry(hunk.file_path.clone())
+                    .or_default()
+                    .extend(&hunk.added_lines);
             }
         }
         for lines in result.values_mut() {
             lines.sort_unstable();
             lines.dedup();
         }
-        let mut filtered: HashMap<String, Vec<crate::authorship::authorship_log::LineRange>> = result
-            .into_iter()
-            .map(|(path, lines)| (path, crate::authorship::authorship_log::LineRange::compress_lines(&lines)))
-            .collect();
+        let mut filtered: HashMap<String, Vec<crate::authorship::authorship_log::LineRange>> =
+            result
+                .into_iter()
+                .map(|(path, lines)| {
+                    (
+                        path,
+                        crate::authorship::authorship_log::LineRange::compress_lines(&lines),
+                    )
+                })
+                .collect();
         if !pathspecs.is_empty() {
-            let nfc_pathspecs: HashSet<String> = pathspecs.iter().map(|s| s.nfc().collect()).collect();
+            let nfc_pathspecs: HashSet<String> =
+                pathspecs.iter().map(|s| s.nfc().collect()).collect();
             filtered.retain(|path, _| {
                 let nfc_path: String = path.nfc().collect();
                 pathspecs.contains(path) || nfc_pathspecs.contains(&nfc_path)
@@ -203,7 +216,10 @@ pub fn post_commit_with_final_state(
             let mut result: HashMap<String, Vec<u32>> = HashMap::new();
             for hunk in &diff_hunks {
                 if !hunk.added_lines.is_empty() {
-                    result.entry(hunk.file_path.clone()).or_default().extend(&hunk.added_lines);
+                    result
+                        .entry(hunk.file_path.clone())
+                        .or_default()
+                        .extend(&hunk.added_lines);
                 }
             }
             for lines in result.values_mut() {
@@ -212,7 +228,12 @@ pub fn post_commit_with_final_state(
             }
             result
                 .into_iter()
-                .map(|(path, lines)| (path, crate::authorship::authorship_log::LineRange::compress_lines(&lines)))
+                .map(|(path, lines)| {
+                    (
+                        path,
+                        crate::authorship::authorship_log::LineRange::compress_lines(&lines),
+                    )
+                })
                 .collect()
         };
         crate::authorship::background_agent::fill_unattributed_lines(

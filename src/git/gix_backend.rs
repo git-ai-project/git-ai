@@ -471,7 +471,8 @@ impl GixBackend {
                 };
                 if entry.mode.is_tree() {
                     stack.push((full_path, entry.oid.into()));
-                } else if entry.mode.is_blob() || entry.mode.is_executable() || entry.mode.is_link() {
+                } else if entry.mode.is_blob() || entry.mode.is_executable() || entry.mode.is_link()
+                {
                     paths.push(full_path);
                 }
             }

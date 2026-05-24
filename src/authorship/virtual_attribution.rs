@@ -1503,7 +1503,7 @@ fn collect_unstaged_hunks_from_snapshot(
     Ok((unstaged_hunks, pure_insertion_hunks))
 }
 
-fn split_lines_preserving_terminators(s: &str) -> Vec<&str> {
+pub fn split_lines_preserving_terminators(s: &str) -> Vec<&str> {
     let mut lines = Vec::new();
     let mut start = 0;
 

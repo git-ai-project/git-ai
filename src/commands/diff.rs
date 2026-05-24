@@ -480,6 +480,230 @@ pub fn get_diff_with_line_numbers(
     parse_diff_hunks(&diff_text)
 }
 
+#[allow(dead_code)]
+pub fn get_diff_hunks_native_or_fallback(
+    repo: &Repository,
+    from: &str,
+    to: &str,
+) -> Result<Vec<DiffHunk>, GitAiError> {
+    if let Some(hunks) = try_native_diff_hunks(repo, from, to) {
+        return Ok(hunks);
+    }
+
+    let diff_text = get_diff_text(repo, from, to, true)?;
+    parse_diff_hunks(&diff_text)
+}
+
+/// Attempt to compute DiffHunks natively using gix tree-diff + imara-diff.
+/// Returns None if the diff cannot be computed natively (e.g., rename scenarios
+/// or modified files where diff algorithm differences affect attribution).
+fn try_native_diff_hunks(repo: &Repository, from: &str, to: &str) -> Option<Vec<DiffHunk>> {
+    use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
+    use crate::authorship::virtual_attribution::split_lines_preserving_terminators;
+    use crate::git::diff_tree_to_tree::DiffStatus;
+
+    let from_tree = repo.gix.try_read_commit_tree_oid(from)?;
+    let to_tree = repo.gix.try_read_commit_tree_oid(to)?;
+
+    let deltas = repo.gix.diff_tree_deltas(&from_tree, &to_tree).ok()?;
+
+    // Only use native path when ALL changes are pure additions or pure deletions
+    // of entire files. Modified files require the subprocess path because git's
+    // diff algorithm with --find-renames=1% produces different (and more correct
+    // for attribution) hunk boundaries than imara-diff's Myers.
+    let has_modifications = deltas.iter().any(|d| d.status() == DiffStatus::Modified);
+    if has_modifications {
+        return None;
+    }
+
+    // Check for potential renames: if we see both deletions and additions,
+    // fall back to subprocess which has rename detection.
+    let has_deletions = deltas.iter().any(|d| d.status() == DiffStatus::Deleted);
+    let has_additions = deltas.iter().any(|d| d.status() == DiffStatus::Added);
+    if has_deletions && has_additions {
+        return None;
+    }
+
+    let mut hunks = Vec::new();
+
+    for delta in &deltas {
+        let status = delta.status();
+        let file_path = delta
+            .new_file()
+            .path()
+            .or_else(|| delta.old_file().path())
+            .unwrap_or(std::path::Path::new(""))
+            .to_string_lossy()
+            .to_string();
+
+        match status {
+            DiffStatus::Added => {
+                let blob_oid = delta.new_file().id();
+                let content = repo.gix.try_read_blob(blob_oid)?;
+                let text = String::from_utf8_lossy(&content);
+                let lines: Vec<&str> = text.lines().collect();
+                if lines.is_empty() {
+                    continue;
+                }
+                let added_lines: Vec<u32> = (1..=lines.len() as u32).collect();
+                let added_contents: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+                hunks.push(DiffHunk {
+                    file_path: file_path.clone(),
+                    old_file_path: None,
+                    old_start: 0,
+                    old_count: 0,
+                    new_start: 1,
+                    new_count: lines.len() as u32,
+                    deleted_lines: Vec::new(),
+                    added_lines,
+                    deleted_contents: Vec::new(),
+                    added_contents,
+                });
+            }
+            DiffStatus::Deleted => {
+                let blob_oid = delta.old_file().id();
+                let content = repo.gix.try_read_blob(blob_oid)?;
+                let text = String::from_utf8_lossy(&content);
+                let lines: Vec<&str> = text.lines().collect();
+                if lines.is_empty() {
+                    continue;
+                }
+                let deleted_lines: Vec<u32> = (1..=lines.len() as u32).collect();
+                let deleted_contents: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+                hunks.push(DiffHunk {
+                    file_path: file_path.clone(),
+                    old_file_path: Some(file_path.clone()),
+                    old_start: 1,
+                    old_count: lines.len() as u32,
+                    new_start: 0,
+                    new_count: 0,
+                    deleted_lines,
+                    added_lines: Vec::new(),
+                    deleted_contents,
+                    added_contents: Vec::new(),
+                });
+            }
+            DiffStatus::Modified => {
+                let old_oid = delta.old_file().id();
+                let new_oid = delta.new_file().id();
+                let old_content = repo.gix.try_read_blob(old_oid)?;
+                let new_content = repo.gix.try_read_blob(new_oid)?;
+
+                let old_text = String::from_utf8_lossy(&old_content);
+                let new_text = String::from_utf8_lossy(&new_content);
+                let old_lines = split_lines_preserving_terminators(&old_text);
+                let new_lines = split_lines_preserving_terminators(&new_text);
+
+                let ops = capture_diff_slices(&old_lines, &new_lines);
+
+                for op in ops {
+                    match op {
+                        DiffOp::Delete {
+                            old_index,
+                            old_len,
+                            new_index,
+                        } => {
+                            let old_start = old_index as u32 + 1;
+                            let deleted_lines: Vec<u32> =
+                                (old_start..old_start + old_len as u32).collect();
+                            let deleted_contents: Vec<String> = old_lines
+                                [old_index..old_index + old_len]
+                                .iter()
+                                .map(|l| {
+                                    l.trim_end_matches('\n').trim_end_matches('\r').to_string()
+                                })
+                                .collect();
+                            hunks.push(DiffHunk {
+                                file_path: file_path.clone(),
+                                old_file_path: Some(file_path.clone()),
+                                old_start,
+                                old_count: old_len as u32,
+                                new_start: new_index as u32 + 1,
+                                new_count: 0,
+                                deleted_lines,
+                                added_lines: Vec::new(),
+                                deleted_contents,
+                                added_contents: Vec::new(),
+                            });
+                        }
+                        DiffOp::Insert {
+                            old_index,
+                            new_index,
+                            new_len,
+                        } => {
+                            let new_start = new_index as u32 + 1;
+                            let added_lines: Vec<u32> =
+                                (new_start..new_start + new_len as u32).collect();
+                            let added_contents: Vec<String> = new_lines
+                                [new_index..new_index + new_len]
+                                .iter()
+                                .map(|l| {
+                                    l.trim_end_matches('\n').trim_end_matches('\r').to_string()
+                                })
+                                .collect();
+                            hunks.push(DiffHunk {
+                                file_path: file_path.clone(),
+                                old_file_path: Some(file_path.clone()),
+                                old_start: old_index as u32 + 1,
+                                old_count: 0,
+                                new_start,
+                                new_count: new_len as u32,
+                                deleted_lines: Vec::new(),
+                                added_lines,
+                                deleted_contents: Vec::new(),
+                                added_contents,
+                            });
+                        }
+                        DiffOp::Replace {
+                            old_index,
+                            old_len,
+                            new_index,
+                            new_len,
+                        } => {
+                            let old_start = old_index as u32 + 1;
+                            let new_start = new_index as u32 + 1;
+                            let deleted_lines: Vec<u32> =
+                                (old_start..old_start + old_len as u32).collect();
+                            let added_lines: Vec<u32> =
+                                (new_start..new_start + new_len as u32).collect();
+                            let deleted_contents: Vec<String> = old_lines
+                                [old_index..old_index + old_len]
+                                .iter()
+                                .map(|l| {
+                                    l.trim_end_matches('\n').trim_end_matches('\r').to_string()
+                                })
+                                .collect();
+                            let added_contents: Vec<String> = new_lines
+                                [new_index..new_index + new_len]
+                                .iter()
+                                .map(|l| {
+                                    l.trim_end_matches('\n').trim_end_matches('\r').to_string()
+                                })
+                                .collect();
+                            hunks.push(DiffHunk {
+                                file_path: file_path.clone(),
+                                old_file_path: Some(file_path.clone()),
+                                old_start,
+                                old_count: old_len as u32,
+                                new_start,
+                                new_count: new_len as u32,
+                                deleted_lines,
+                                added_lines,
+                                deleted_contents,
+                                added_contents,
+                            });
+                        }
+                        DiffOp::Equal { .. } => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(hunks)
+}
+
 fn get_diff_text(
     repo: &Repository,
     from: &str,
