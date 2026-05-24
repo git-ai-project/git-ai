@@ -286,10 +286,16 @@ impl MetricsDatabase {
         Ok(count as usize)
     }
 
-    /// Insert events into the local_events table (persistent, never deleted).
+    /// How long local_events rows are retained (30 days in seconds).
+    const LOCAL_EVENTS_RETENTION_SECS: u64 = 30 * 24 * 3600;
+    /// Minimum interval between prune passes (24 hours in seconds).
+    const LOCAL_EVENTS_PRUNE_INTERVAL_SECS: u64 = 24 * 3600;
+
+    /// Insert events into the local_events table.
     ///
     /// Each tuple is (event_id, ts, repo_url, event_json). Call this with events
     /// filtered to only the interesting event types before inserting.
+    /// Opportunistically prunes rows older than 30 days at most once per day.
     pub fn insert_local_events(
         &mut self,
         events: &[(u16, u32, Option<String>, String)],
@@ -316,6 +322,44 @@ impl MetricsDatabase {
         }
 
         tx.commit()?;
+        self.prune_local_events_if_due()?;
+        Ok(())
+    }
+
+    /// Delete local_events rows older than `LOCAL_EVENTS_RETENTION_SECS`, but
+    /// only if the last prune was more than `LOCAL_EVENTS_PRUNE_INTERVAL_SECS` ago.
+    fn prune_local_events_if_due(&mut self) -> Result<(), GitAiError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let last_prune: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'local_events_last_prune_ts'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .and_then(|v: String| v.parse().ok());
+
+        if let Some(last) = last_prune {
+            if now.saturating_sub(last as u64) < Self::LOCAL_EVENTS_PRUNE_INTERVAL_SECS {
+                return Ok(());
+            }
+        }
+
+        let cutoff = now.saturating_sub(Self::LOCAL_EVENTS_RETENTION_SECS);
+        self.conn.execute(
+            "DELETE FROM local_events WHERE ts < ?1",
+            params![cutoff as i64],
+        )?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO schema_metadata (key, value) VALUES ('local_events_last_prune_ts', ?1)",
+            params![now.to_string()],
+        )?;
+
         Ok(())
     }
 
