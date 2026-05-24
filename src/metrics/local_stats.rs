@@ -1309,6 +1309,9 @@ pub fn compute_repo_summaries(
     let mut summaries: Vec<RepoActivitySummary> = repo_urls
         .iter()
         // When a filter is active, only include URLs that contain the substring.
+        // `repo_filter` is the raw user input (https:// already stripped, no LIKE
+        // escaping applied), so `.contains()` is the correct literal-match
+        // counterpart to the LIKE '%…%' ESCAPE '\' used in get_local_events.
         .filter(|url| repo_filter.map_or(true, |f| url.contains(f)))
         .filter_map(|url| {
             let stats = compute_activity(
