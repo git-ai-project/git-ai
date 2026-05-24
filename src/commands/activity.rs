@@ -232,8 +232,8 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
                 bar_str,
                 repo_display,
                 format_num(r.ai_lines),
-                r.commits,
-                r.sessions,
+                format_num(r.commits),
+                format_num(r.sessions),
                 cost_str,
             );
         }
