@@ -198,13 +198,18 @@ pub fn execute_amend_chain(
         execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
 
         repo.git(&["add", "-A"]).unwrap();
-        repo.git(&[
-            "commit",
-            "--amend",
-            "-m",
-            &format!("amend chain step {}", i),
-        ])
-        .unwrap();
+        if repo
+            .git(&[
+                "commit",
+                "--amend",
+                "-m",
+                &format!("amend chain step {}", i),
+            ])
+            .is_err()
+        {
+            operation_log.push(format!("amend-chain: step {} amend failed, stopping", i));
+            return;
+        }
 
         operation_log.push(format!("amend-chain: step {} complete", i));
     }
@@ -813,10 +818,8 @@ pub fn execute_stash_pop_cycle(
     file_state.lines = expected;
 
     // Verify disk matches model
-    let actual_content = fs::read_to_string(repo.path().join(&file_state.filename)).unwrap();
-    let actual_lines = reconstruct_lines_from_content(&actual_content);
+    let actual_lines = read_file_state_from_disk(repo, &file_state.filename);
     if file_state.lines != actual_lines {
-        // Model diverged - trust disk
         operation_log.push(format!(
             "stash-pop: model diverged from disk (model={} disk={}), trusting disk",
             file_state.lines.len(),
@@ -2713,7 +2716,7 @@ pub fn execute_cherry_pick_conflict(
     let cp_result = repo.git_og(&["cherry-pick", &feature_sha]);
     if cp_result.is_err() {
         // Conflict - abort
-        repo.git_og(&["cherry-pick", "--abort"]).unwrap();
+        repo.git_og(&["cherry-pick", "--abort"]).ok();
         operation_log.push("cherry-pick-conflict: conflict, aborted".to_string());
     } else {
         operation_log.push("cherry-pick-conflict: clean apply".to_string());

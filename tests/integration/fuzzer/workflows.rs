@@ -407,6 +407,9 @@ pub fn execute_workflow_fixup_autosquash(
     ]);
 
     if rebase_result.is_err() {
+        // Abort the failed rebase before retrying with a different base
+        repo.git_og(&["rebase", "--abort"]).ok();
+
         // Fallback: try with the base sha directly
         let rebase_result2 = repo.git_og(&[
             "-c",
