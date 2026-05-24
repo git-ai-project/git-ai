@@ -1102,9 +1102,14 @@ pub fn compute_session_list(
                         .to_string();
                     let get = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
                     let msgs = session_messages.entry(sid).or_default();
-                    let (_, acc) = msgs
+                    let (stored_model, acc) = msgs
                         .entry(id.to_string())
-                        .or_insert_with(|| (model, TokenAccum::default()));
+                        .or_insert_with(|| (model.clone(), TokenAccum::default()));
+                    // Upgrade placeholder model name if a real one arrives later
+                    // (same pattern as aggregate_session_tokens).
+                    if stored_model == "unknown" && model != "unknown" {
+                        *stored_model = model;
+                    }
                     acc.input = acc.input.max(get("input_tokens"));
                     acc.output = acc.output.max(get("output_tokens"));
                     acc.cache_read = acc.cache_read.max(get("cache_read_input_tokens"));
