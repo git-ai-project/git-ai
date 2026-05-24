@@ -2,7 +2,7 @@
 
 use crate::error::GitAiError;
 use crate::metrics::attrs::attr_pos;
-use crate::metrics::db::MetricsDatabase;
+use crate::metrics::db::{LocalEventRecord, MetricsDatabase};
 use crate::metrics::events::{checkpoint_pos, committed_pos, session_event_pos};
 use crate::metrics::pos_encoded::{
     sparse_get_string, sparse_get_u32, sparse_get_vec_string, sparse_get_vec_u32,
@@ -133,6 +133,27 @@ pub enum BucketGranularity {
     Monthly,
 }
 
+/// Acquire the global DB lock and fetch all local events for the given window.
+fn fetch_local_events(
+    since_ts: u32,
+    repo_filter: Option<&str>,
+) -> Result<Vec<LocalEventRecord>, GitAiError> {
+    let db = MetricsDatabase::global()?;
+    let db_lock = db
+        .lock()
+        .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+    db_lock.get_local_events(since_ts, repo_filter)
+}
+
+/// Acquire the global DB lock and return all distinct repo URLs since `since_ts`.
+fn fetch_distinct_repo_urls(since_ts: u32) -> Result<Vec<String>, GitAiError> {
+    let db = MetricsDatabase::global()?;
+    let db_lock = db
+        .lock()
+        .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+    db_lock.get_distinct_repo_urls(since_ts)
+}
+
 /// Aggregate local_events since `since_ts` (Unix seconds) into activity stats.
 ///
 /// When `repo_filter` is `Some(url)`, only events from that repository are
@@ -143,13 +164,7 @@ pub fn compute_activity(
     granularity: BucketGranularity,
     repo_filter: Option<&str>,
 ) -> Result<LocalActivityStats, GitAiError> {
-    let records = {
-        let db = MetricsDatabase::global()?;
-        let db_lock = db
-            .lock()
-            .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
-        db_lock.get_local_events(since_ts, repo_filter)?
-    };
+    let records = fetch_local_events(since_ts, repo_filter)?;
 
     let mut total_commits = 0u32;
     let mut total_ai_lines = 0u32;
@@ -1006,13 +1021,7 @@ pub fn compute_session_list(
     since_ts: u32,
     repo_filter: Option<&str>,
 ) -> Result<Vec<SessionRecord>, GitAiError> {
-    let events = {
-        let db = MetricsDatabase::global()?;
-        let db_lock = db
-            .lock()
-            .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
-        db_lock.get_local_events(since_ts, repo_filter)?
-    };
+    let events = fetch_local_events(since_ts, repo_filter)?;
 
     let mut session_first_ts: HashMap<String, u32> = HashMap::new();
     let mut session_last_ts: HashMap<String, u32> = HashMap::new();
@@ -1307,13 +1316,7 @@ pub fn compute_repo_summaries(
     granularity: BucketGranularity,
     repo_filter: Option<&str>,
 ) -> Result<Vec<RepoActivitySummary>, GitAiError> {
-    let repo_urls = {
-        let db = MetricsDatabase::global()?;
-        let db_lock = db
-            .lock()
-            .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
-        db_lock.get_distinct_repo_urls(since_ts)?
-    };
+    let repo_urls = fetch_distinct_repo_urls(since_ts)?;
 
     let mut summaries: Vec<RepoActivitySummary> = repo_urls
         .iter()
