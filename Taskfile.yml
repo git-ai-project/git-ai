@@ -55,7 +55,7 @@ tasks:
   test:base:
     internal: true
     cmds:
-      - cargo test {{.CARGO_TEST_ARGS}} {{.TEST_FILTER}} -- --test-threads {{.TEST_THREADS}} {{.TEST_BINARY_ARGS}}
+      - cargo test {{.CARGO_TEST_ARGS}} {{.TEST_FILTER}} -- --test-threads {{.TEST_THREADS}} {{.TEST_BINARY_ARGS}} {{.SUBTASK_BINARY_ARGS}}
     env:
       GIT_AI_TEST_GIT_MODE: "{{.GIT_AI_TEST_GIT_MODE}}"
       GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: "{{.TEST_THREADS}}"
@@ -100,7 +100,7 @@ tasks:
         vars:
           GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_
-          NO_CAPTURE: "true"
+          SUBTASK_BINARY_ARGS: "--nocapture"
 
   test:fuzz:partial:
     desc: Run partial staging fuzzer tests
@@ -149,7 +149,7 @@ tasks:
         vars:
           GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_marathon_
-          EXTRA_TEST_BINARY_ARGS: "--ignored"
+          SUBTASK_BINARY_ARGS: "--ignored"
 
   lint:
     desc: Run cargo check and clippy with warnings as errors
