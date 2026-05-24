@@ -205,13 +205,7 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
         for r in repos {
             let repo_display = strip_protocol(&r.repo_url);
             let repo_display = if repo_display.is_empty() { "unknown" } else { repo_display };
-            let filled = (r.ai_lines * 16 / max_lines).min(16);
-            let empty = 16 - filled;
-            let bar_str = format!(
-                "{}{}",
-                "█".repeat(filled as usize),
-                "░".repeat(empty as usize)
-            );
+            let bar_str = ratio_bar(r.ai_lines, max_lines, 16);
             let cost_str = if r.estimated_cost_usd > 0.0 {
                 format!("  {GRAY}~${:.2}{RESET}", r.estimated_cost_usd)
             } else {
@@ -378,13 +372,7 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
             .unwrap_or(1)
             .max(1);
         for bucket in &stats.buckets {
-            let filled = (bucket.ai_lines * BAR_WIDTH / max_ai).min(BAR_WIDTH);
-            let empty = BAR_WIDTH - filled;
-            let bar_str = format!(
-                "{}{}",
-                "█".repeat(filled as usize),
-                "░".repeat(empty as usize)
-            );
+            let bar_str = ratio_bar(bucket.ai_lines, max_ai, BAR_WIDTH);
             if bucket.ai_lines > 0 {
                 // Coverage for this bucket: attributed / total diff additions.
                 let coverage = (bucket.attributed_lines * 100)
@@ -485,14 +473,15 @@ fn strip_protocol(url: &str) -> &str {
         .trim_start_matches("http://")
 }
 
-fn bar(pct: u32, width: u32) -> String {
-    let filled = (pct * width / 100).min(width);
+/// Render a block bar where `value` out of `max` determines the fill ratio.
+fn ratio_bar(value: u32, max: u32, width: u32) -> String {
+    let filled = if max > 0 { (value * width / max).min(width) } else { 0 };
     let empty = width - filled;
-    format!(
-        "{}{}",
-        "█".repeat(filled as usize),
-        "░".repeat(empty as usize)
-    )
+    format!("{}{}", "█".repeat(filled as usize), "░".repeat(empty as usize))
+}
+
+fn bar(pct: u32, width: u32) -> String {
+    ratio_bar(pct, 100, width)
 }
 
 fn format_num(n: u32) -> String {
