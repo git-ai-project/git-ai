@@ -461,10 +461,10 @@ fn estimate_stats_cost_from_hunks(
     let mut deleted_lines = 0usize;
 
     for hunk in hunks {
+        deleted_lines += hunk.old_count as usize;
         if should_ignore_file_with_matcher(&hunk.file_path, &ignore_matcher) {
             continue;
         }
-        deleted_lines += hunk.old_count as usize;
         if hunk.new_count > 0 {
             files_with_additions.insert(&hunk.file_path);
             added_lines += hunk.new_count as usize;
