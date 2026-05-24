@@ -149,15 +149,6 @@ fn fetch_local_events(
     db_lock.get_local_events(since_ts, repo_filter)
 }
 
-/// Acquire the global DB lock and return all distinct repo URLs since `since_ts`.
-fn fetch_distinct_repo_urls(since_ts: u32) -> Result<Vec<String>, GitAiError> {
-    let db = MetricsDatabase::global()?;
-    let db_lock = db
-        .lock()
-        .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
-    db_lock.get_distinct_repo_urls(since_ts)
-}
-
 /// Aggregate local_events since `since_ts` (Unix seconds) into activity stats.
 ///
 /// When `repo_filter` is `Some(url)`, only events from that repository are
@@ -169,6 +160,20 @@ pub fn compute_activity(
     repo_filter: Option<&str>,
 ) -> Result<LocalActivityStats, GitAiError> {
     let records = fetch_local_events(since_ts, repo_filter)?;
+    let refs: Vec<&LocalEventRecord> = records.iter().collect();
+    compute_activity_from_records(&refs, since_ts, period_label, granularity)
+}
+
+/// Aggregate a pre-fetched slice of `LocalEventRecord`s into activity stats.
+///
+/// Separated from `compute_activity` so callers that already hold all events
+/// (e.g. `compute_repo_summaries`) can avoid re-fetching from the DB per repo.
+fn compute_activity_from_records(
+    records: &[&LocalEventRecord],
+    since_ts: u32,
+    period_label: String,
+    granularity: BucketGranularity,
+) -> Result<LocalActivityStats, GitAiError> {
 
     let mut total_commits = 0u32;
     let mut total_ai_lines = 0u32;
@@ -211,7 +216,7 @@ pub fn compute_activity(
     let mut session_last_ts: HashMap<String, u32> = HashMap::new();
     let mut commit_timestamps: Vec<u32> = Vec::new();
 
-    for record in &records {
+    for record in records {
         let event: MetricEvent = match serde_json::from_str(&record.event_json) {
             Ok(e) => e,
             Err(_) => continue,
@@ -1325,33 +1330,32 @@ pub struct RepoActivitySummary {
 
 /// Compute a per-repository breakdown for the given time window.
 ///
-/// Queries the DB for distinct repo_urls and computes lightweight stats for
-/// each one.  Sorted by `ai_lines` descending.
+/// Fetches all matching events in a single DB query, groups them in memory by
+/// `repo_url`, and aggregates each group — O(n) instead of O(n × repos).
+/// Sorted by `ai_lines` descending.
 pub fn compute_repo_summaries(
     since_ts: u32,
     granularity: BucketGranularity,
     repo_filter: Option<&str>,
 ) -> Result<Vec<RepoActivitySummary>, GitAiError> {
-    let repo_urls = fetch_distinct_repo_urls(since_ts)?;
+    // One fetch: apply the user's substring filter in SQL so we don't pull
+    // irrelevant repos, then group the results in memory.
+    let all_records = fetch_local_events(since_ts, repo_filter)?;
 
-    let mut summaries: Vec<RepoActivitySummary> = repo_urls
-        .iter()
-        // When a filter is active, only include URLs that contain the substring.
-        // `repo_filter` is the raw user input (https:// already stripped, no LIKE
-        // escaping applied), so `.contains()` is the correct literal-match
-        // counterpart to the LIKE '%…%' ESCAPE '\' used in get_local_events.
-        .filter(|url| repo_filter.map_or(true, |f| url.contains(f)))
-        .filter_map(|url| {
-            let stats = compute_activity(
-                since_ts,
-                String::new(), // period_label not used here
-                granularity,
-                Some(url.as_str()),
-            )
-            .ok()?;
+    // Group records by repo_url. None -> events with no repo attached.
+    let mut by_repo: HashMap<Option<String>, Vec<&LocalEventRecord>> = HashMap::new();
+    for record in &all_records {
+        by_repo.entry(record.repo_url.clone()).or_default().push(record);
+    }
 
+    let mut summaries: Vec<RepoActivitySummary> = by_repo
+        .into_iter()
+        .filter_map(|(url, records)| {
+            let stats =
+                compute_activity_from_records(&records, since_ts, String::new(), granularity)
+                    .ok()?;
             Some(RepoActivitySummary {
-                repo_url: url.clone(),
+                repo_url: url.unwrap_or_default(),
                 ai_lines: stats.commits.ai_lines,
                 commits: stats.commits.total,
                 sessions: stats.sessions.total,
