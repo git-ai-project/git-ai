@@ -351,14 +351,16 @@ impl MetricsDatabase {
         }
 
         let cutoff = now.saturating_sub(Self::LOCAL_EVENTS_RETENTION_SECS);
-        self.conn.execute(
-            "DELETE FROM local_events WHERE ts < ?1",
-            params![cutoff as i64],
-        )?;
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "INSERT OR REPLACE INTO schema_metadata (key, value) VALUES ('local_events_last_prune_ts', ?1)",
             params![now.to_string()],
         )?;
+        tx.execute(
+            "DELETE FROM local_events WHERE ts < ?1",
+            params![cutoff as i64],
+        )?;
+        tx.commit()?;
 
         Ok(())
     }
