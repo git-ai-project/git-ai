@@ -2991,7 +2991,10 @@ fn processed_rebase_new_heads(repository: &Repository) -> Result<HashSet<String>
 /// Check whether `ancestor` is an ancestor of `descendant`.
 fn is_ancestor_commit(repository: &Repository, ancestor: &str, descendant: &str) -> bool {
     if let Some(base) = repository.gix.try_merge_base(ancestor, descendant) {
-        return base == ancestor;
+        let canonical_ancestor = repository.gix.try_rev_parse(ancestor).unwrap_or_default();
+        if !canonical_ancestor.is_empty() {
+            return base == canonical_ancestor;
+        }
     }
     let mut args = repository.global_args_for_exec();
     args.push("merge-base".to_string());
@@ -3370,7 +3373,10 @@ fn repo_is_ancestor(
     descendant: &str,
 ) -> bool {
     if let Some(base) = repository.gix.try_merge_base(ancestor, descendant) {
-        return base == ancestor;
+        let canonical_ancestor = repository.gix.try_rev_parse(ancestor).unwrap_or_default();
+        if !canonical_ancestor.is_empty() {
+            return base == canonical_ancestor;
+        }
     }
     let mut args = repository.global_args_for_exec();
     args.push("merge-base".to_string());

@@ -2132,6 +2132,7 @@ struct DiscoveredRepositoryPaths {
     workdir: PathBuf,
     git_dir: PathBuf,
     git_common_dir: PathBuf,
+    is_bare: bool,
 }
 
 fn discover_repository_paths_no_git_exec(
@@ -2165,6 +2166,7 @@ fn discover_repository_paths_no_git_exec(
                 workdir: workdir.to_path_buf(),
                 git_dir: start,
                 git_common_dir,
+                is_bare: false,
             });
         }
 
@@ -2192,6 +2194,7 @@ fn discover_repository_paths_no_git_exec(
                 workdir: workdir.to_path_buf(),
                 git_dir,
                 git_common_dir,
+                is_bare: false,
             });
         }
     }
@@ -2214,6 +2217,7 @@ fn discover_repository_paths_no_git_exec(
             workdir: worktree_root,
             git_dir,
             git_common_dir,
+            is_bare: false,
         });
     }
 
@@ -2228,6 +2232,7 @@ fn discover_repository_paths_no_git_exec(
                 workdir: workdir.to_path_buf(),
                 git_dir: dir.to_path_buf(),
                 git_common_dir: dir.to_path_buf(),
+                is_bare: true,
             });
         }
         current = dir.parent();
@@ -2370,6 +2375,7 @@ fn repository_from_discovered_paths(
     workdir: &Path,
     git_dir: &Path,
     git_common_dir: &Path,
+    is_bare: bool,
 ) -> Result<Repository, GitAiError> {
     if !git_dir.is_dir() {
         return Err(GitAiError::Generic(format!(
@@ -2419,7 +2425,7 @@ fn repository_from_discovered_paths(
         pre_update_ref_affects_checked_out_branch: None,
         workdir: workdir.to_path_buf(),
         canonical_workdir,
-        is_bare: false,
+        is_bare,
         cached_author_identity: std::sync::OnceLock::new(),
     })
 }
@@ -2431,6 +2437,7 @@ pub fn discover_repository_in_path_no_git_exec(path: &Path) -> Result<Repository
         &paths.workdir,
         &paths.git_dir,
         &paths.git_common_dir,
+        paths.is_bare,
     )
 }
 

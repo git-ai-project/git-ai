@@ -158,7 +158,10 @@ fn walk_first_parent_commits(
 
 fn is_ancestor(repository: &Repository, ancestor: &str, descendant: &str) -> bool {
     if let Some(base) = repository.gix.try_merge_base(ancestor, descendant) {
-        return base == ancestor;
+        let canonical_ancestor = repository.gix.try_rev_parse(ancestor).unwrap_or_default();
+        if !canonical_ancestor.is_empty() {
+            return base == canonical_ancestor;
+        }
     }
     let mut args = repository.global_args_for_exec();
     args.push("merge-base".to_string());
