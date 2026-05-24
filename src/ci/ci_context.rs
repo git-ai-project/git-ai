@@ -78,7 +78,7 @@ impl CiContext {
                 head_ref: _,
                 head_sha,
                 base_ref,
-                base_sha: _,
+                base_sha,
             } => {
                 println!("Working repository is in {}", self.repo.path().display());
 
@@ -156,7 +156,7 @@ impl CiContext {
                     RewriteEvent::NonFastForward {
                         old_tip: head_sha.to_string(),
                         new_tip: merge_commit_sha.to_string(),
-                        onto: None,
+                        onto: Some(base_sha.to_string()),
                     },
                 )?;
                 println!("Rewrote authorship.");
