@@ -87,13 +87,12 @@ pub fn handle_activity(args: &[String]) {
         }
     };
 
-    // Show per-repo breakdown only in global view; when filtered to a single
-    // repo it would be a single-row table that adds nothing.
-    let repos = if repo_filter.is_none() {
-        compute_repo_summaries(since_ts, granularity).unwrap_or_default()
-    } else {
-        vec![]
-    };
+    // Compute per-repo breakdown. When a filter is active this still runs so
+    // we can surface how many repos matched (and who they are). The breakdown
+    // is only rendered when more than one repo is present — a single-row table
+    // adds nothing.
+    let repos = compute_repo_summaries(since_ts, granularity, repo_filter.as_deref())
+        .unwrap_or_default();
 
     // When filtering by repo, bail out early if nothing matched.
     let no_data = stats.commits.total == 0
@@ -158,10 +157,24 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
         let display = repo
             .trim_start_matches("https://")
             .trim_start_matches("http://");
-        println!(
-            "{BOLD}git-ai usage{RESET} {GRAY}— {}  ·  {}{RESET}",
-            display, stats.period_label
-        );
+        if repos.len() > 1 {
+            println!(
+                "{BOLD}git-ai usage{RESET} {GRAY}— {} repos matching '{}'  ·  {}{RESET}",
+                repos.len(),
+                display,
+                stats.period_label
+            );
+        } else {
+            // Single match: show the full matched URL, not just the search term.
+            let matched = repos
+                .first()
+                .map(|r| r.repo_url.trim_start_matches("https://").trim_start_matches("http://"))
+                .unwrap_or(display);
+            println!(
+                "{BOLD}git-ai usage{RESET} {GRAY}— {}  ·  {}{RESET}",
+                matched, stats.period_label
+            );
+        }
     } else {
         println!(
             "{BOLD}git-ai usage{RESET} {GRAY}— {}{RESET}",
@@ -183,7 +196,8 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
     }
 
     // --- Per-repo breakdown ---
-    if !repos.is_empty() {
+    // Only shown when there are multiple repos — a single-row table adds nothing.
+    if repos.len() > 1 {
         println!();
         println!("  {BOLD}Repositories{RESET}");
         let max_lines = repos.iter().map(|r| r.ai_lines).max().unwrap_or(1).max(1);

@@ -1279,6 +1279,7 @@ pub struct RepoActivitySummary {
 pub fn compute_repo_summaries(
     since_ts: u32,
     granularity: BucketGranularity,
+    repo_filter: Option<&str>,
 ) -> Result<Vec<RepoActivitySummary>, GitAiError> {
     let repo_urls = {
         let db = MetricsDatabase::global()?;
@@ -1290,6 +1291,8 @@ pub fn compute_repo_summaries(
 
     let mut summaries: Vec<RepoActivitySummary> = repo_urls
         .iter()
+        // When a filter is active, only include URLs that contain the substring.
+        .filter(|url| repo_filter.map_or(true, |f| url.contains(f)))
         .filter_map(|url| {
             let stats = compute_activity(
                 since_ts,
