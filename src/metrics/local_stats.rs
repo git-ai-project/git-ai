@@ -1342,10 +1342,13 @@ pub fn compute_repo_summaries(
     // irrelevant repos, then group the results in memory.
     let all_records = fetch_local_events(since_ts, repo_filter)?;
 
-    // Group records by repo_url. None -> events with no repo attached.
-    let mut by_repo: HashMap<Option<String>, Vec<&LocalEventRecord>> = HashMap::new();
+    // Group records by repo_url, skipping events with no repo (NULL) — these
+    // predate the repo_url column and have no meaningful identity to display.
+    let mut by_repo: HashMap<String, Vec<&LocalEventRecord>> = HashMap::new();
     for record in &all_records {
-        by_repo.entry(record.repo_url.clone()).or_default().push(record);
+        if let Some(ref url) = record.repo_url {
+            by_repo.entry(url.clone()).or_default().push(record);
+        }
     }
 
     let mut summaries: Vec<RepoActivitySummary> = by_repo
@@ -1355,7 +1358,7 @@ pub fn compute_repo_summaries(
                 compute_activity_from_records(&records, since_ts, String::new(), granularity)
                     .ok()?;
             Some(RepoActivitySummary {
-                repo_url: url.unwrap_or_default(),
+                repo_url: url,
                 ai_lines: stats.commits.ai_lines,
                 commits: stats.commits.total,
                 sessions: stats.sessions.total,
