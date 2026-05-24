@@ -318,8 +318,12 @@ fn flush_telemetry_batch(batch: TelemetryBuffer) {
 }
 
 fn flush_metrics(events: &[MetricEvent]) {
-    // Persist interesting events to local_events before attempting upload.
-    store_local_events(events);
+    // Event types useful for local activity stats (git-ai usage).
+    const INTERESTING: &[u16] = &[
+        1, // Committed
+        4, // Checkpoint
+        5, // SessionEvent
+    ];
 
     let context = ApiContext::new(None);
     let api_base_url = context.base_url.clone();
@@ -331,7 +335,18 @@ fn flush_metrics(events: &[MetricEvent]) {
     let mut upload_failed = false;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
+    // local_event tuples collected across all chunks, inserted once at the end.
+    let mut local_tuples: Vec<(u16, u32, Option<String>, String)> = Vec::new();
+
     for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
+        // Collect interesting events from this chunk in the same pass as upload.
+        for e in chunk.iter().filter(|e| INTERESTING.contains(&e.event_id)) {
+            if let Ok(json) = serde_json::to_string(e) {
+                let repo_url = sparse_get_string(&e.attrs, attr_pos::REPO_URL).flatten();
+                local_tuples.push((e.event_id, e.timestamp, repo_url, json));
+            }
+        }
+
         if should_upload && !upload_failed && std::time::Instant::now() < deadline {
             let batch = MetricsBatch::new(chunk.to_vec());
             if client.upload_metrics(&batch).is_ok() {
@@ -340,6 +355,14 @@ fn flush_metrics(events: &[MetricEvent]) {
             upload_failed = true;
         }
         store_metrics_in_db(chunk);
+    }
+
+    if !local_tuples.is_empty() {
+        if let Ok(db) = MetricsDatabase::global()
+            && let Ok(mut db_lock) = db.lock()
+        {
+            let _ = db_lock.insert_local_events(&local_tuples);
+        }
     }
 }
 
@@ -361,36 +384,6 @@ fn store_metrics_in_db(events: &[MetricEvent]) {
         && let Ok(mut db_lock) = db.lock()
     {
         let _ = db_lock.insert_events(&event_jsons);
-    }
-}
-
-fn store_local_events(events: &[MetricEvent]) {
-    // Only persist event types that are useful for local activity stats.
-    const INTERESTING: &[u16] = &[
-        1, // Committed
-        4, // Checkpoint
-        5, // SessionEvent
-    ];
-
-    let tuples: Vec<(u16, u32, Option<String>, String)> = events
-        .iter()
-        .filter(|e| INTERESTING.contains(&e.event_id))
-        .filter_map(|e| {
-            let repo_url = sparse_get_string(&e.attrs, attr_pos::REPO_URL).flatten();
-            serde_json::to_string(e)
-                .ok()
-                .map(|json| (e.event_id, e.timestamp, repo_url, json))
-        })
-        .collect();
-
-    if tuples.is_empty() {
-        return;
-    }
-
-    if let Ok(db) = MetricsDatabase::global()
-        && let Ok(mut db_lock) = db.lock()
-    {
-        let _ = db_lock.insert_local_events(&tuples);
     }
 }
 
