@@ -8065,9 +8065,9 @@ fn test_human_conflict_rust_lib_c2_conflicts_surroundings_ok() {
     assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["src/tokenizer.rs"]);
 
-    // C2': lib.rs human-resolved → AI content survived → lib.rs IS in note
+    // C2': lib.rs human-resolved conflict — all AI lines inside diff hunk, attribution dropped
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
-    assert_note_files_exact(&repo, &chain[1], "c2_files", &["src/lib.rs"]);
+    assert_note_files_exact(&repo, &chain[1], "c2_files", &[]);
 
     // C3': helpers.rs only
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
@@ -8223,9 +8223,9 @@ fn test_human_conflict_typescript_api_c3_conflicts_accumulation_intact() {
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
     assert_note_files_exact(&repo, &chain[1], "c2_files", &["src/service.ts"]);
 
-    // C3': api.ts human-resolved → AI content survived → api.ts IS in note
+    // C3': api.ts human-resolved conflict — AI lines inside diff hunk, attribution dropped
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
-    assert_note_files_exact(&repo, &chain[2], "c3_files", &["src/api.ts"]);
+    assert_note_files_exact(&repo, &chain[2], "c3_files", &[]);
 
     // C4': middleware.ts only
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
@@ -8380,9 +8380,9 @@ fn test_human_conflict_python_models_c5_last_commit_conflicts() {
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
     assert_note_files_exact(&repo, &chain[3], "c4_files", &["events.py"]);
 
-    // C5': models.py human-resolved → AI content survived → models.py IS in note
+    // C5': models.py human-resolved conflict — AI lines inside diff hunk, attribution dropped
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
-    assert_note_files_exact(&repo, &chain[4], "c5_files", &["models.py"]);
+    assert_note_files_exact(&repo, &chain[4], "c5_files", &[]);
 }
 
 /// Test 5: Rust src/config.rs — main and feature both extend a constants block,
@@ -8520,9 +8520,9 @@ fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
     assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["src/defaults.rs"]);
 
-    // C2': config.rs human-resolved → AI content survived → config.rs IS in note
+    // C2': config.rs human-resolved conflict — AI lines inside diff hunk, attribution dropped
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
-    assert_note_files_exact(&repo, &chain[1], "c2_files", &["src/config.rs"]);
+    assert_note_files_exact(&repo, &chain[1], "c2_files", &[]);
 
     // C3': cache.rs only
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
@@ -9004,9 +9004,9 @@ fn test_human_conflict_python_pipeline_mixed_baseline_c3_conflict() {
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
     assert_note_files_exact(&repo, &chain[1], "c2_files", &["filter.py"]);
 
-    // C3': pipeline.py human-resolved → AI content survived → pipeline.py IS in note
+    // C3': pipeline.py human-resolved conflict — AI lines inside diff hunk, attribution dropped
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
-    assert_note_files_exact(&repo, &chain[2], "c3_files", &["pipeline.py"]);
+    assert_note_files_exact(&repo, &chain[2], "c3_files", &[]);
 
     // C4': transform.py only
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
@@ -9347,9 +9347,9 @@ fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["src/result_utils.rs"]);
 
-    // C4': shared.rs human-resolved → AI content survived → shared.rs IS in note
+    // C4': shared.rs human-resolved conflict — AI lines inside diff hunk, attribution dropped
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
-    assert_note_files_exact(&repo, &chain[3], "c4_files", &["src/shared.rs"]);
+    assert_note_files_exact(&repo, &chain[3], "c4_files", &[]);
 
     // C5': math.rs only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");

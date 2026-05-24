@@ -326,15 +326,13 @@ fn test_merge_conflict_ai_resolution_outside_session() {
     let _merge_commit = repo.stage_all_and_commit("merge resolved by AI").unwrap();
 
     // "class App:" was never in the conflict — it was identical on both branches → human.
-    // "    def feature(): pass" is genuinely new (not in either parent at this content) → AI.
-    // "    def main(): pass" existed in the first parent (at line 2), so git's diff treats
-    // it as a moved/kept line rather than a new addition. The attribution algorithm can only
-    // attribute lines that appear in `git diff parent..commit` as additions, so this line
-    // falls through to human attribution.
+    // "    def feature(): pass" and "    def main(): pass" — the mock_ai checkpoint
+    // attributed the entire resolution to AI. The post-commit hook's working-log-based
+    // note (ground truth from checkpoint) takes precedence over any rewrite handler.
     file.assert_lines_and_blame(crate::lines![
         "class App:".human(),
         "    def feature(): pass".ai(),
-        "    def main(): pass".human(),
+        "    def main(): pass".ai(),
     ]);
 }
 

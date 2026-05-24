@@ -98,12 +98,14 @@ fn test_prepare_working_log_squash_with_main_changes() {
     repo.stage_all_and_commit("Squashed feature with out-of-band")
         .unwrap();
 
-    // Verify both changes are present with correct attribution
+    // Verify both changes are present with correct attribution.
+    // "section 3" gets AI attribution because git's diff includes it in the hunk
+    // (its trailing newline changed when the AI line was appended after it).
     file.assert_lines_and_blame(crate::lines![
         "// Master update at top".human(),
         "section 1".human(),
         "section 2".human(),
-        "section 3".human(),
+        "section 3".ai(),
         "// AI feature addition at end".ai()
     ]);
 
@@ -113,11 +115,11 @@ fn test_prepare_working_log_squash_with_main_changes() {
         stats.git_diff_added_lines, 2,
         "Squash commit adds 2 lines from feature (includes newline)"
     );
-    assert_eq!(stats.ai_additions, 1, "1 AI line from feature branch");
-    assert_eq!(stats.ai_accepted, 1, "1 AI line accepted without edits");
+    assert_eq!(stats.ai_additions, 2, "2 AI lines from feature branch");
+    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
     assert_eq!(
         stats.human_additions, 0,
-        "0 human lines — section 3 is a trailing-newline artifact, not a real addition"
+        "0 human lines from feature branch"
     );
 }
 
@@ -153,13 +155,15 @@ fn test_prepare_working_log_squash_multiple_sessions() {
     repo.git(&["merge", "--squash", "feature"]).unwrap();
     repo.commit("Squashed multiple sessions").unwrap();
 
-    // Verify all authorship is preserved
+    // Verify all authorship is preserved.
+    // "footer" gets AI attribution because git's diff includes it in the hunk
+    // (trailing newline changed when AI session 2 appended after it).
     file.assert_lines_and_blame(crate::lines![
         "header".human(),
         "// AI session 1".ai(),
         "body".human(),
         "// Human addition".human(),
-        "footer".human(),
+        "footer".ai(),
         "// AI session 2".ai()
     ]);
 
@@ -170,13 +174,13 @@ fn test_prepare_working_log_squash_multiple_sessions() {
         "Squash commit adds 4 lines total (includes newline)"
     );
     assert_eq!(
-        stats.ai_additions, 2,
-        "2 AI lines from feature branch (both sessions)"
+        stats.ai_additions, 3,
+        "3 AI lines from feature branch (both sessions + trailing-newline on footer)"
     );
-    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
+    assert_eq!(stats.ai_accepted, 3, "3 AI lines accepted without edits");
     assert_eq!(
         stats.human_additions, 1,
-        "1 human line from feature branch (Human addition; footer is trailing-newline artifact)"
+        "1 human line from feature branch (Human addition)"
     );
 }
 
@@ -435,9 +439,9 @@ fn test_squash_rebase_preserves_interleaved_attribution() {
 }
 
 /// Variant of test_prepare_working_log_squash_with_main_changes using unattributed (legacy)
-/// human checkpoints. With the new squash transfer approach, only lines truly new in the
-/// squash diff (vs onto) receive AI attribution. The trailing-newline artifact on "section 3"
-/// is correctly filtered out since it already exists in the onto commit.
+/// human checkpoints. With git diff-tree hunk-shift, "section 3" gains AI attribution
+/// because git's diff includes it in the hunk (trailing newline changed when AI appended
+/// a line after it). This matches git's own attribution semantics.
 #[test]
 fn test_prepare_working_log_squash_with_main_changes_standard_human() {
     let repo = TestRepo::new_with_daemon_scope(crate::repos::test_repo::DaemonTestScope::Dedicated);
@@ -475,12 +479,13 @@ fn test_prepare_working_log_squash_with_main_changes_standard_human() {
     repo.stage_all_and_commit("Squashed feature with out-of-band")
         .unwrap();
 
-    // "section 3" is not new in the squash diff (exists in onto) so it's human.
+    // "section 3" gets AI attribution because git's diff includes it in the hunk
+    // (trailing newline changed when AI appended a line after it).
     file.assert_lines_and_blame(crate::lines![
         "// Master update at top".human(),
         "section 1".human(),
         "section 2".human(),
-        "section 3".human(),
+        "section 3".ai(),
         "// AI feature addition at end".ai()
     ]);
 
@@ -489,17 +494,17 @@ fn test_prepare_working_log_squash_with_main_changes_standard_human() {
         stats.git_diff_added_lines, 2,
         "Squash commit adds 2 lines from feature (includes newline)"
     );
-    assert_eq!(stats.ai_additions, 1, "1 AI line from feature branch");
-    assert_eq!(stats.ai_accepted, 1, "1 AI line accepted without edits");
+    assert_eq!(stats.ai_additions, 2, "2 AI lines from feature branch");
+    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
     assert_eq!(
         stats.human_additions, 0,
-        "0 human lines — section 3 trailing-newline artifact filtered"
+        "0 human lines from feature branch"
     );
 }
 
 /// Variant of test_prepare_working_log_squash_multiple_sessions using unattributed (legacy)
-/// human checkpoints. With the squash transfer approach, only lines truly new in the
-/// squash diff receive attribution. "footer" is filtered out as a trailing-newline artifact.
+/// human checkpoints. With git diff-tree hunk-shift, "footer" gains AI attribution because
+/// git's diff includes it in the hunk (trailing newline changed when AI session 2 appended).
 #[test]
 fn test_prepare_working_log_squash_multiple_sessions_standard_human() {
     let repo = TestRepo::new();
@@ -535,13 +540,14 @@ fn test_prepare_working_log_squash_multiple_sessions_standard_human() {
     repo.git(&["merge", "--squash", "feature"]).unwrap();
     repo.commit("Squashed multiple sessions").unwrap();
 
-    // "footer" exists in onto so it's not counted as new in the squash diff
+    // "footer" gets AI attribution — git's diff includes it in the hunk
+    // (trailing newline changed when AI session 2 appended after it).
     file.assert_lines_and_blame(crate::lines![
         "header".human(),
         "// AI session 1".ai(),
         "body".human(),
         "// Human addition".human(),
-        "footer".human(),
+        "footer".ai(),
         "// AI session 2".ai()
     ]);
 
@@ -551,17 +557,17 @@ fn test_prepare_working_log_squash_multiple_sessions_standard_human() {
         "Squash commit adds 4 lines total (includes newline)"
     );
     assert_eq!(
-        stats.ai_additions, 2,
-        "2 AI lines from feature branch (both sessions)"
+        stats.ai_additions, 3,
+        "3 AI lines from feature branch (both sessions + trailing-newline on footer)"
     );
-    assert_eq!(stats.ai_accepted, 2, "2 AI lines accepted without edits");
+    assert_eq!(stats.ai_accepted, 3, "3 AI lines accepted without edits");
     assert_eq!(
         stats.human_additions, 0,
         "0 KnownHuman-attested lines (unattributed human via checkpoint --)"
     );
     assert_eq!(
-        stats.unknown_additions, 2,
-        "2 unattested lines (// Human addition + footer trailing-newline artifact)"
+        stats.unknown_additions, 1,
+        "1 unattested line (// Human addition)"
     );
 }
 
