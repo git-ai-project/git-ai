@@ -645,26 +645,36 @@ fn ts_to_local(ts: u32) -> DateTime<Local> {
         .unwrap_or_else(Local::now)
 }
 
+/// Produce the display label for a bucket whose "anchor" date (Monday for
+/// weekly, 1st for monthly, the day itself for daily) is `date`.
+fn bucket_label(date: NaiveDate, granularity: BucketGranularity) -> String {
+    match granularity {
+        BucketGranularity::Daily => date.format("%b %d").to_string(),
+        BucketGranularity::Weekly => {
+            let sunday = date + chrono::Duration::days(6);
+            format!("{} – {}", date.format("%b %d"), sunday.format("%b %d"))
+        }
+        BucketGranularity::Monthly => date.format("%b %Y").to_string(),
+    }
+}
+
 fn bucket_key(dt: &DateTime<Local>, granularity: BucketGranularity) -> (String, i64) {
     match granularity {
         BucketGranularity::Daily => {
-            let label = dt.format("%b %d").to_string();
-            let order = dt.date_naive().num_days_from_ce() as i64;
-            (label, order)
+            let date = dt.date_naive();
+            let order = date.num_days_from_ce() as i64;
+            (bucket_label(date, granularity), order)
         }
         BucketGranularity::Weekly => {
             // ISO week: key on Monday of the week.
             let weekday = dt.weekday().num_days_from_monday() as i64;
             let monday = dt.date_naive() - chrono::Duration::days(weekday);
-            let sunday = monday + chrono::Duration::days(6);
-            let label = format!("{} – {}", monday.format("%b %d"), sunday.format("%b %d"));
             let order = monday.num_days_from_ce() as i64;
-            (label, order)
+            (bucket_label(monday, granularity), order)
         }
         BucketGranularity::Monthly => {
-            let label = dt.format("%b %Y").to_string();
             let order = dt.year() as i64 * 12 + dt.month0() as i64;
-            (label, order)
+            (bucket_label(dt.date_naive(), granularity), order)
         }
     }
 }
@@ -704,8 +714,7 @@ fn fill_buckets(
             let today = now.date_naive();
             while day <= today {
                 let order = day.num_days_from_ce() as i64;
-                let label = day.format("%b %d").to_string();
-                result.push(make(label, data_map.remove(&order).unwrap_or_default()));
+                result.push(make(bucket_label(day, granularity), data_map.remove(&order).unwrap_or_default()));
                 day = day.succ_opt().unwrap_or(today);
             }
         }
@@ -715,9 +724,7 @@ fn fill_buckets(
             let today = now.date_naive();
             while monday <= today {
                 let order = monday.num_days_from_ce() as i64;
-                let sunday = monday + chrono::Duration::days(6);
-                let label = format!("{} – {}", monday.format("%b %d"), sunday.format("%b %d"));
-                result.push(make(label, data_map.remove(&order).unwrap_or_default()));
+                result.push(make(bucket_label(monday, granularity), data_map.remove(&order).unwrap_or_default()));
                 monday = monday
                     .checked_add_signed(chrono::Duration::weeks(1))
                     .unwrap_or(today);
@@ -733,7 +740,7 @@ fn fill_buckets(
                 let Some(date) = NaiveDate::from_ymd_opt(year, month, 1) else {
                     break;
                 };
-                let label = date.format("%b %Y").to_string();
+                let label = bucket_label(date, granularity);
                 result.push(make(label, data_map.remove(&order).unwrap_or_default()));
                 if year == now_year && month == now_month {
                     break;
