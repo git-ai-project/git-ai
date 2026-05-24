@@ -254,7 +254,7 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
         );
     }
     println!(
-        "    Commits           {:>6}",
+        "    Commits (AI)      {:>6}",
         format_num(stats.commits.total)
     );
     println!(

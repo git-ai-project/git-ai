@@ -84,6 +84,8 @@ pub struct BucketStats {
 
 #[derive(Debug, Serialize)]
 pub struct CommitSummary {
+    /// Commits that include at least one AI-attributed line. Human-only commits
+    /// are not counted here; use the diff/human stats for full commit coverage.
     pub total: u32,
     pub ai_lines: u32,
     pub human_lines: u32,
@@ -768,7 +770,8 @@ fn aggregate_committed(
         diff_added,
     };
 
-    // Only count the commit and accumulate AI lines when AI was involved.
+    // Only count the commit toward the AI-commits total when AI was involved.
+    // Human-only commits still contribute to human_lines and diff_added above.
     if total_ai == 0 {
         return contribution;
     }
