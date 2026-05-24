@@ -1,8 +1,7 @@
 //! `git-ai usage` — local statistics from persisted metric events.
 
 use crate::metrics::local_stats::{
-    BucketGranularity, LocalActivityStats, RepoActivitySummary, compute_activity,
-    compute_repo_summaries,
+    BucketGranularity, LocalActivityStats, RepoActivitySummary, compute_all,
 };
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -61,28 +60,21 @@ pub fn handle_usage(args: &[String]) {
             BucketGranularity::Weekly,
         ),
         other => {
-            eprintln!(
-                "Unknown period '{}'. Use 1d, 3d, 7d, or 30d.",
-                other
-            );
+            eprintln!("Unknown period '{}'. Use 1d, 3d, 7d, or 30d.", other);
             std::process::exit(1);
         }
     };
 
-    let stats = match compute_activity(since_ts, period_label, granularity, repo_filter.as_deref()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // Compute per-repo breakdown. When a filter is active this still runs so
-    // we can surface how many repos matched (and who they are). The breakdown
-    // is only rendered when more than one repo is present — a single-row table
-    // adds nothing.
-    let repos = compute_repo_summaries(since_ts, granularity, repo_filter.as_deref())
-        .unwrap_or_default();
+    // Fetch events once and derive both views from the same snapshot so the
+    // per-repo breakdown totals are always consistent with the headline stats.
+    let (stats, repos) =
+        match compute_all(since_ts, period_label, granularity, repo_filter.as_deref()) {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        };
 
     // When filtering by repo, bail out early if nothing matched.
     // Include human_lines/diff_added_lines so human-only periods aren't
@@ -94,7 +86,11 @@ pub fn handle_usage(args: &[String]) {
         && stats.sessions.total == 0
         && stats.checkpoints.ai_lines_added == 0
         && stats.checkpoints.human_lines_added == 0
-        && stats.tokens.input + stats.tokens.output + stats.tokens.cache_read + stats.tokens.cache_creation == 0;
+        && stats.tokens.input
+            + stats.tokens.output
+            + stats.tokens.cache_read
+            + stats.tokens.cache_creation
+            == 0;
     if no_data {
         if let Some(ref filter) = repo_filter {
             eprintln!(
@@ -103,7 +99,10 @@ pub fn handle_usage(args: &[String]) {
             );
             eprintln!("Try --period 30d or a different substring.");
         } else {
-            eprintln!("No activity data found for the {} window.", stats.period_label);
+            eprintln!(
+                "No activity data found for the {} window.",
+                stats.period_label
+            );
         }
         std::process::exit(1);
     }
@@ -126,8 +125,7 @@ fn days_ago(days: u64) -> u32 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    now.saturating_sub(days * 24 * 3600)
-        .min(u32::MAX as u64) as u32
+    now.saturating_sub(days * 24 * 3600).min(u32::MAX as u64) as u32
 }
 
 fn print_help() {
@@ -137,7 +135,9 @@ fn print_help() {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --period <1d|3d|7d|30d>           Time window (default: 30d)");
-    eprintln!("  --repo <url|substring>            Filter to a repository (substring match, https:// optional)");
+    eprintln!(
+        "  --repo <url|substring>            Filter to a repository (substring match, https:// optional)"
+    );
     eprintln!("  --json                            Output as JSON");
     eprintln!("  --help                            Show this help");
     eprintln!();
@@ -145,7 +145,11 @@ fn print_help() {
     eprintln!("Events older than 30 days are pruned automatically.");
 }
 
-fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], repo_filter: Option<&str>) {
+fn print_terminal(
+    stats: &LocalActivityStats,
+    repos: &[RepoActivitySummary],
+    repo_filter: Option<&str>,
+) {
     const GRAY: &str = "\x1b[90m";
     const BOLD: &str = "\x1b[1m";
     const RESET: &str = "\x1b[0m";
@@ -181,7 +185,10 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
     // --- Top bar: AI vs Human split ---
     println!();
     let total_lines = stats.commits.ai_lines + stats.commits.human_lines;
-    if let Some(ai_pct) = (stats.commits.ai_lines * 100).checked_div(total_lines) {
+    if let Some(ai_pct) = (stats.commits.ai_lines as u64 * 100)
+        .checked_div(total_lines as u64)
+        .map(|p| p as u32)
+    {
         let human_pct = 100 - ai_pct;
         println!(
             "  {}  {BOLD}AI{RESET} {:>3}% · {BOLD}Human{RESET} {:>3}%",
@@ -221,7 +228,11 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
             let sessions_col = format!("{:>width$}", session_strs[i], width = max_sessions_w);
             // Pad singular labels to match the width of the plural so columns stay aligned.
             let commit_label = if r.commits == 1 { "commit " } else { "commits" };
-            let session_label = if r.sessions == 1 { "session " } else { "sessions" };
+            let session_label = if r.sessions == 1 {
+                "session "
+            } else {
+                "sessions"
+            };
             let cost_str = if r.estimated_cost_usd > 0.0 {
                 format!("  {GRAY}{}{RESET}", format_cost(r.estimated_cost_usd))
             } else {
@@ -286,8 +297,9 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
         } else {
             println!("    Acceptance rate   {GRAY}{min_r}–{max_r}%{RESET}");
         }
-    } else if let Some(acceptance_pct) =
-        (stats.commits.ai_lines * 100).checked_div(stats.checkpoints.ai_lines_added)
+    } else if let Some(acceptance_pct) = (stats.commits.ai_lines as u64 * 100)
+        .checked_div(stats.checkpoints.ai_lines_added as u64)
+        .map(|p| p as u32)
     {
         if acceptance_pct <= 100 {
             println!("    Acceptance rate   {:>5}%", acceptance_pct);
@@ -300,7 +312,13 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
     // don't repeat the same tool-level rate on every model variant line.
     let mut shown_accept: HashSet<&str> = HashSet::new();
     // Pre-compute column widths for aligned tool breakdown.
-    let max_tool_w = stats.commits.by_tool.iter().map(|(t, _)| t.len()).max().unwrap_or(0);
+    let max_tool_w = stats
+        .commits
+        .by_tool
+        .iter()
+        .map(|(t, _)| t.len())
+        .max()
+        .unwrap_or(0);
     let max_tool_count_w = stats
         .commits
         .by_tool
@@ -409,7 +427,11 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
         let max_cost_w = t
             .by_model
             .iter()
-            .map(|m| m.estimated_cost_usd.map(|c| format_cost(c).len()).unwrap_or(0))
+            .map(|m| {
+                m.estimated_cost_usd
+                    .map(|c| format_cost(c).len())
+                    .unwrap_or(0)
+            })
             .max()
             .unwrap_or(0);
         for m in &t.by_model {
@@ -449,8 +471,8 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
             let bar_str = ratio_bar(bucket.ai_lines, max_ai, BAR_WIDTH);
             if bucket.ai_lines > 0 {
                 // Coverage for this bucket: attributed / total diff additions.
-                let coverage = (bucket.attributed_lines * 100)
-                    .checked_div(bucket.diff_added_lines)
+                let coverage = (bucket.attributed_lines as u64 * 100)
+                    .checked_div(bucket.diff_added_lines as u64)
                     .map(|pct| format!(" · {}% attributed", pct))
                     .unwrap_or_default();
                 println!(
@@ -528,7 +550,7 @@ fn spark_char(value: u32, max: u32) -> &'static str {
     if value == 0 {
         return "·";
     }
-    let pct = value * 8 / max;
+    let pct = (value as u64 * 8 / max as u64) as u32;
     match pct {
         0 => "▁",
         1 => "▂",
@@ -549,9 +571,17 @@ fn strip_protocol(url: &str) -> &str {
 
 /// Render a block bar where `value` out of `max` determines the fill ratio.
 fn ratio_bar(value: u32, max: u32, width: u32) -> String {
-    let filled = if max > 0 { (value * width / max).min(width) } else { 0 };
+    let filled = if max > 0 {
+        (value * width / max).min(width)
+    } else {
+        0
+    };
     let empty = width - filled;
-    format!("{}{}", "█".repeat(filled as usize), "░".repeat(empty as usize))
+    format!(
+        "{}{}",
+        "█".repeat(filled as usize),
+        "░".repeat(empty as usize)
+    )
 }
 
 fn bar(pct: u32, width: u32) -> String {

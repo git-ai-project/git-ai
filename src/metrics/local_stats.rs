@@ -174,7 +174,6 @@ fn compute_activity_from_records(
     period_label: String,
     granularity: BucketGranularity,
 ) -> Result<LocalActivityStats, GitAiError> {
-
     let mut total_commits = 0u32;
     let mut total_ai_lines = 0u32;
     let mut total_human_lines = 0u32;
@@ -312,15 +311,20 @@ fn compute_activity_from_records(
     }
 
     // Per-tool acceptance rate: committed AI lines / checkpoint AI lines.
-    // Values >100 indicate incomplete checkpoint data; we keep them so the
-    // caller can surface a meaningful signal rather than silently hiding it.
+    // Values >100 indicate incomplete checkpoint data (e.g. checkpoint events
+    // aged out of the window while committed events remain). u32::MAX is the
+    // sentinel for "no checkpoint events at all" — same display path as >100.
     let mut acceptance_by_tool: Vec<(String, u32)> = committed_ai_by_plain_tool
         .iter()
-        .filter_map(|(tool, &committed)| {
-            let checkpoint = *checkpoint_ai_by_tool.get(tool)?;
-            let pct = (committed as u64 * 100)
-                .checked_div(checkpoint as u64)? as u32;
-            Some((tool.clone(), pct))
+        .map(|(tool, &committed)| {
+            let pct = match checkpoint_ai_by_tool.get(tool).copied() {
+                Some(checkpoint) if checkpoint > 0 => (committed as u64 * 100)
+                    .checked_div(checkpoint as u64)
+                    .map(|p| p as u32)
+                    .unwrap_or(u32::MAX),
+                _ => u32::MAX,
+            };
+            (tool.clone(), pct)
         })
         .collect();
     acceptance_by_tool.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -720,7 +724,10 @@ fn fill_buckets(
             let today = now.date_naive();
             while day <= today {
                 let order = day.num_days_from_ce() as i64;
-                result.push(make(bucket_label(day, granularity), data_map.remove(&order).unwrap_or_default()));
+                result.push(make(
+                    bucket_label(day, granularity),
+                    data_map.remove(&order).unwrap_or_default(),
+                ));
                 day = day.succ_opt().unwrap_or(today);
             }
         }
@@ -730,7 +737,10 @@ fn fill_buckets(
             let today = now.date_naive();
             while monday <= today {
                 let order = monday.num_days_from_ce() as i64;
-                result.push(make(bucket_label(monday, granularity), data_map.remove(&order).unwrap_or_default()));
+                result.push(make(
+                    bucket_label(monday, granularity),
+                    data_map.remove(&order).unwrap_or_default(),
+                ));
                 monday = monday
                     .checked_add_signed(chrono::Duration::weeks(1))
                     .unwrap_or(today);
@@ -959,9 +969,15 @@ fn aggregate_session_tokens(
 
     let get = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
 
-    let (stored_model, acc, _ts, stored_sid) = message_usage
-        .entry(id.to_string())
-        .or_insert_with(|| (model.clone(), TokenAccum::default(), record_ts, session_id.clone()));
+    let (stored_model, acc, _ts, stored_sid) =
+        message_usage.entry(id.to_string()).or_insert_with(|| {
+            (
+                model.clone(),
+                TokenAccum::default(),
+                record_ts,
+                session_id.clone(),
+            )
+        });
     // If the entry was created with an "unknown" placeholder model (e.g. from a
     // streaming partial that arrived before the final event), upgrade it now.
     if stored_model == "unknown" && model != "unknown" {
@@ -1030,24 +1046,16 @@ pub struct RepoActivitySummary {
     pub estimated_cost_usd: f64,
 }
 
-/// Compute a per-repository breakdown for the given time window.
-///
-/// Fetches all matching events in a single DB query, groups them in memory by
-/// `repo_url`, and aggregates each group — O(n) instead of O(n × repos).
-/// Sorted by `ai_lines` descending.
-pub fn compute_repo_summaries(
+/// Aggregate a pre-fetched slice of events into a per-repository breakdown.
+fn repo_summaries_from_records(
+    all_records: &[LocalEventRecord],
     since_ts: u32,
     granularity: BucketGranularity,
-    repo_filter: Option<&str>,
 ) -> Result<Vec<RepoActivitySummary>, GitAiError> {
-    // One fetch: apply the user's substring filter in SQL so we don't pull
-    // irrelevant repos, then group the results in memory.
-    let all_records = fetch_local_events(since_ts, repo_filter)?;
-
     // Group records by repo_url, skipping events with no repo (NULL) — these
     // predate the repo_url column and have no meaningful identity to display.
     let mut by_repo: HashMap<String, Vec<&LocalEventRecord>> = HashMap::new();
-    for record in &all_records {
+    for record in all_records {
         if let Some(ref url) = record.repo_url {
             by_repo.entry(url.clone()).or_default().push(record);
         }
@@ -1071,4 +1079,33 @@ pub fn compute_repo_summaries(
 
     summaries.sort_by_key(|s| std::cmp::Reverse(s.ai_lines));
     Ok(summaries)
+}
+
+/// Fetch events once and compute overall activity stats and the per-repo
+/// breakdown from the same snapshot, ensuring the two views are consistent.
+pub fn compute_all(
+    since_ts: u32,
+    period_label: String,
+    granularity: BucketGranularity,
+    repo_filter: Option<&str>,
+) -> Result<(LocalActivityStats, Vec<RepoActivitySummary>), GitAiError> {
+    let records = fetch_local_events(since_ts, repo_filter)?;
+    let refs: Vec<&LocalEventRecord> = records.iter().collect();
+    let stats = compute_activity_from_records(&refs, since_ts, period_label, granularity)?;
+    let repos = repo_summaries_from_records(&records, since_ts, granularity)?;
+    Ok((stats, repos))
+}
+
+/// Compute a per-repository breakdown for the given time window.
+///
+/// Fetches all matching events in a single DB query, groups them in memory by
+/// `repo_url`, and aggregates each group — O(n) instead of O(n × repos).
+/// Sorted by `ai_lines` descending.
+pub fn compute_repo_summaries(
+    since_ts: u32,
+    granularity: BucketGranularity,
+    repo_filter: Option<&str>,
+) -> Result<Vec<RepoActivitySummary>, GitAiError> {
+    let all_records = fetch_local_events(since_ts, repo_filter)?;
+    repo_summaries_from_records(&all_records, since_ts, granularity)
 }

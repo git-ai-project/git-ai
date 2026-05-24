@@ -344,10 +344,10 @@ impl MetricsDatabase {
             .optional()?
             .and_then(|v: String| v.parse().ok());
 
-        if let Some(last) = last_prune {
-            if now.saturating_sub(last as u64) < Self::LOCAL_EVENTS_PRUNE_INTERVAL_SECS {
-                return Ok(());
-            }
+        if let Some(last) = last_prune
+            && now.saturating_sub(last as u64) < Self::LOCAL_EVENTS_PRUNE_INTERVAL_SECS
+        {
+            return Ok(());
         }
 
         let cutoff = now.saturating_sub(Self::LOCAL_EVENTS_RETENTION_SECS);
@@ -398,7 +398,10 @@ impl MetricsDatabase {
                 // Escape LIKE special characters so a user-supplied substring
                 // like "my_org/my%repo" matches literally, not as wildcards.
                 // We use '\' as the escape character.
-                let escaped = repo_url.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+                let escaped = repo_url
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_");
                 let pattern = format!("%{}%", escaped);
                 let mut stmt = self.conn.prepare(
                     "SELECT event_id, ts, repo_url, event_json FROM local_events \
