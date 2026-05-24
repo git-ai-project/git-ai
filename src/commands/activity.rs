@@ -201,23 +201,45 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
     if repos.len() > 1 {
         println!();
         println!("  {BOLD}Repositories{RESET}");
-        let max_lines = repos.iter().map(|r| r.ai_lines).max().unwrap_or(1).max(1);
-        for r in repos {
-            let repo_display = strip_protocol(&r.repo_url);
-            let repo_display = if repo_display.is_empty() { "unknown" } else { repo_display };
-            let bar_str = ratio_bar(r.ai_lines, max_lines, 16);
+
+        // Pre-compute display strings for column alignment.
+        let names: Vec<&str> = repos
+            .iter()
+            .map(|r| {
+                let d = strip_protocol(&r.repo_url);
+                if d.is_empty() { "unknown" } else { d }
+            })
+            .collect();
+        let lines_strs: Vec<String> = repos.iter().map(|r| format_num(r.ai_lines)).collect();
+        let commit_strs: Vec<String> = repos.iter().map(|r| format_num(r.commits)).collect();
+        let session_strs: Vec<String> = repos.iter().map(|r| format_num(r.sessions)).collect();
+
+        let max_name_w = names.iter().map(|n| n.len()).max().unwrap_or(0);
+        let max_lines_w = lines_strs.iter().map(|s| s.len()).max().unwrap_or(0);
+        let max_commits_w = commit_strs.iter().map(|s| s.len()).max().unwrap_or(0);
+        let max_sessions_w = session_strs.iter().map(|s| s.len()).max().unwrap_or(0);
+
+        for (i, r) in repos.iter().enumerate() {
+            let name_col = format!("{:<width$}", names[i], width = max_name_w);
+            let lines_col = format!("{:>width$}", lines_strs[i], width = max_lines_w);
+            let commits_col = format!("{:>width$}", commit_strs[i], width = max_commits_w);
+            let sessions_col = format!("{:>width$}", session_strs[i], width = max_sessions_w);
+            // Pad singular labels to match the width of the plural so columns stay aligned.
+            let commit_label = if r.commits == 1 { "commit " } else { "commits" };
+            let session_label = if r.sessions == 1 { "session " } else { "sessions" };
             let cost_str = if r.estimated_cost_usd > 0.0 {
-                format!("  {GRAY}~${:.2}{RESET}", r.estimated_cost_usd)
+                format!("  {GRAY}{}{RESET}", format_cost(r.estimated_cost_usd))
             } else {
                 String::new()
             };
             println!(
-                "    {}  {GRAY}{}{RESET}  {GRAY}{} lines · {} commits · {} sessions{}{RESET}",
-                bar_str,
-                repo_display,
-                format_num(r.ai_lines),
-                format_num(r.commits),
-                format_num(r.sessions),
+                "    {GRAY}{}  {} lines  {} {}  {} {}{}{RESET}",
+                name_col,
+                lines_col,
+                commits_col,
+                commit_label,
+                sessions_col,
+                session_label,
                 cost_str,
             );
         }
@@ -253,7 +275,23 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
         "    Edits             {:>6}",
         format_num(stats.checkpoints.ai_lines_added)
     );
-    if let Some(acceptance_pct) =
+    // Show acceptance rate: range when multiple tools have valid data, single value otherwise.
+    let valid_tool_rates: Vec<u32> = stats
+        .commits
+        .acceptance_by_tool
+        .iter()
+        .filter(|(_, pct)| *pct <= 100)
+        .map(|(_, pct)| *pct)
+        .collect();
+    if valid_tool_rates.len() >= 2 {
+        let min_r = *valid_tool_rates.iter().min().unwrap();
+        let max_r = *valid_tool_rates.iter().max().unwrap();
+        if min_r == max_r {
+            println!("    Acceptance rate   {:>5}%", min_r);
+        } else {
+            println!("    Acceptance rate   {GRAY}{min_r}–{max_r}%{RESET}");
+        }
+    } else if let Some(acceptance_pct) =
         (stats.commits.ai_lines * 100).checked_div(stats.checkpoints.ai_lines_added)
     {
         if acceptance_pct <= 100 {
@@ -287,7 +325,7 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
             String::new()
         };
         println!(
-            "    {GRAY}{}: {}{RESET}{}",
+            "    {GRAY}{}: {} lines{RESET}{}",
             tool,
             format_num(*count),
             accept_str
@@ -321,12 +359,13 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
         if t.estimated_cost_usd > 0.0 {
             println!(
                 "    {BOLD}Est. cost{RESET}         {:>12}",
-                format!("~${:.2}", t.estimated_cost_usd)
+                format_cost(t.estimated_cost_usd)
             );
         }
         if let Some(wow) = &t.wow_spend {
+            // When last week had no spend, "new this week" is redundant — skip the label.
             let change_str = match (wow.new_this_week, wow.change_pct) {
-                (true, _) => "↑ new this week".to_string(),
+                (true, _) => String::new(),
                 (_, Some(change_pct)) if change_pct > 0.0 => {
                     format!("↑ {:.0}% vs last week", change_pct)
                 }
@@ -335,15 +374,28 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
                 }
                 _ => "no change vs last week".to_string(),
             };
+            // Avoid printing "$-0.00" when last week rounds to zero.
+            let last_week_str = if wow.last_week_usd.abs() < 0.005 {
+                "$0".to_string()
+            } else {
+                format_cost(wow.last_week_usd)
+            };
+            let trail = if change_str.is_empty() {
+                String::new()
+            } else {
+                format!("  {change_str}")
+            };
             println!(
-                "    {GRAY}This week ~${:.2} · Last week ~${:.2}  {}{RESET}",
-                wow.this_week_usd, wow.last_week_usd, change_str,
+                "    {GRAY}This week {} · Last week {}{}{RESET}",
+                format_cost(wow.this_week_usd),
+                last_week_str,
+                trail,
             );
         }
         for m in &t.by_model {
             let cost = m
                 .estimated_cost_usd
-                .map(|c| format!("  ~${:.2}", c))
+                .map(|c| format!("  {}", format_cost(c)))
                 .unwrap_or_default();
             let cache = m
                 .cache_hit_ratio
@@ -482,6 +534,16 @@ fn ratio_bar(value: u32, max: u32, width: u32) -> String {
 
 fn bar(pct: u32, width: u32) -> String {
     ratio_bar(pct, 100, width)
+}
+
+/// Format a USD cost estimate. Rounds to whole dollars for amounts >= $10
+/// (estimates don't warrant cent-level precision at that scale); shows cents otherwise.
+fn format_cost(usd: f64) -> String {
+    if usd >= 10.0 {
+        format!("~${:.0}", usd)
+    } else {
+        format!("~${:.2}", usd)
+    }
 }
 
 fn format_num(n: u32) -> String {
