@@ -461,7 +461,7 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
     println!();
     if repo_filter.is_none() {
         println!("  {GRAY}Tip: use --repo <name> to filter by repository{RESET}");
-        println!("");
+        println!();
         println!(
             "  {GRAY}Local data only · See full history and team insights at https://usegitai.com/dashboard{RESET}"
         );
