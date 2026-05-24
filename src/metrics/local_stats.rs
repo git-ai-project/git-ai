@@ -1,4 +1,4 @@
-//! In-memory aggregation of local_events for `git-ai activity`.
+//! In-memory aggregation of local_events for `git-ai usage`.
 
 /// How long after a session's last message a subsequent commit is attributed
 /// to that session for yield and ai_lines_committed calculations.
