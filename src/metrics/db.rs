@@ -27,7 +27,7 @@ const MIGRATIONS: &[&str] = &[
         last_sent_ts INTEGER NOT NULL
     );
     "#,
-    // Migration 2 -> 3: Persistent local event history for `git-ai activity`
+    // Migration 2 -> 3: Persistent local event history for `git-ai usage`
     r#"
     CREATE TABLE IF NOT EXISTS local_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
