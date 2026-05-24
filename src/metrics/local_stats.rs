@@ -318,7 +318,8 @@ fn compute_activity_from_records(
         .iter()
         .filter_map(|(tool, &committed)| {
             let checkpoint = *checkpoint_ai_by_tool.get(tool)?;
-            let pct = (committed * 100).checked_div(checkpoint)?;
+            let pct = (committed as u64 * 100)
+                .checked_div(checkpoint as u64)? as u32;
             Some((tool.clone(), pct))
         })
         .collect();
