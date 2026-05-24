@@ -480,10 +480,13 @@ fn build_token_summary(
     let mut last_week_msgs: Vec<(String, TokenAccum)> = Vec::new();
 
     // Fold per-message (deduped, max) usage into per-model totals.
+    // Key by shorten_model() so date-snapshot variants (e.g. claude-sonnet-4-6-20250101
+    // and claude-sonnet-4-6-20250201) are folded into a single display row.
     let mut model_tokens: HashMap<String, TokenAccum> = HashMap::new();
     let mut model_session_ids: HashMap<String, HashSet<String>> = HashMap::new();
     for (_id, (model, acc, ts, sid)) in message_usage {
-        let entry = model_tokens.entry(model.clone()).or_default();
+        let short = shorten_model(&model);
+        let entry = model_tokens.entry(short.clone()).or_default();
         entry.input += acc.input;
         entry.output += acc.output;
         entry.cache_read += acc.cache_read;
@@ -491,15 +494,15 @@ fn build_token_summary(
 
         if !sid.is_empty() {
             model_session_ids
-                .entry(model.clone())
+                .entry(short.clone())
                 .or_default()
                 .insert(sid);
         }
 
         if ts >= this_week_start {
-            this_week_msgs.push((model, acc));
+            this_week_msgs.push((short, acc));
         } else if ts >= last_week_start {
-            last_week_msgs.push((model, acc));
+            last_week_msgs.push((short, acc));
         }
     }
 
@@ -512,25 +515,26 @@ fn build_token_summary(
 
     for (sid, acc) in codex_sessions {
         let model = acc.model.clone().unwrap_or_else(|| "codex".to_string());
+        let short = shorten_model(&model);
         let mapped = TokenAccum {
             input: acc.input_tokens.saturating_sub(acc.cached_input_tokens),
             output: acc.output_tokens,
             cache_read: acc.cached_input_tokens,
             cache_creation: 0,
         };
-        let entry = model_tokens.entry(model.clone()).or_default();
+        let entry = model_tokens.entry(short.clone()).or_default();
         entry.input += mapped.input;
         entry.output += mapped.output;
         entry.cache_read += mapped.cache_read;
         model_session_ids
-            .entry(model.clone())
+            .entry(short.clone())
             .or_default()
             .insert(sid);
 
         if acc.last_usage_ts >= this_week_start {
-            this_week_codex.push((model, mapped));
+            this_week_codex.push((short, mapped));
         } else if acc.last_usage_ts >= last_week_start {
-            last_week_codex.push((model, mapped));
+            last_week_codex.push((short, mapped));
         }
     }
 
