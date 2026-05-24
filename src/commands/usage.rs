@@ -7,7 +7,7 @@ use crate::metrics::local_stats::{
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn handle_activity(args: &[String]) {
+pub fn handle_usage(args: &[String]) {
     let mut json = false;
     let mut period = "30d".to_string();
     let mut repo_filter: Option<String> = None;

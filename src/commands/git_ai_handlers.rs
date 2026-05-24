@@ -110,7 +110,7 @@ pub fn handle_git_ai(args: &[String]) {
             handle_stats(&args[1..]);
         }
         "usage" => {
-            commands::activity::handle_activity(&args[1..]);
+            commands::usage::handle_usage(&args[1..]);
         }
         "status" => {
             commands::status::handle_status(&args[1..]);
