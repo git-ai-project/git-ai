@@ -340,7 +340,7 @@ fn print_help() {
     eprintln!("  stats [commit]     Show AI authorship statistics for a commit");
     eprintln!("    --json                 Output in JSON format");
     eprintln!("  usage              Show local AI usage statistics");
-    eprintln!("    --period <7d|30d|all>  Time window (default: 30d)");
+    eprintln!("    --period <1d|3d|7d|30d>  Time window (default: 30d)");
     eprintln!("    --json                 Output in JSON format");
     eprintln!("  status             Show uncommitted AI authorship status (debug)");
     eprintln!("    --json                 Output in JSON format");
