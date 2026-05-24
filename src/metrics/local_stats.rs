@@ -93,9 +93,9 @@ pub struct CommitSummary {
     pub diff_added_lines: u32,
     /// Per-tool AI line counts (tool · model label), sorted descending.
     pub by_tool: Vec<(String, u32)>,
-    /// Per-tool acceptance rate: committed AI lines / checkpoint AI lines (0–100).
-    /// Only includes tools where both sides have data and the rate is ≤ 100%.
-    /// Sorted by tool name.
+    /// Per-tool acceptance rate: committed AI lines / checkpoint AI lines, as a
+    /// percentage. Values >100 indicate incomplete checkpoint data (e.g. events
+    /// recorded before the repo_url backfill). Sorted by tool name.
     pub acceptance_by_tool: Vec<(String, u32)>,
 }
 
@@ -286,16 +286,14 @@ pub fn compute_activity(
     }
 
     // Per-tool acceptance rate: committed AI lines / checkpoint AI lines.
+    // Values >100 indicate incomplete checkpoint data; we keep them so the
+    // caller can surface a meaningful signal rather than silently hiding it.
     let mut acceptance_by_tool: Vec<(String, u32)> = committed_ai_by_plain_tool
         .iter()
         .filter_map(|(tool, &committed)| {
             let checkpoint = *checkpoint_ai_by_tool.get(tool)?;
             let pct = (committed * 100).checked_div(checkpoint)?;
-            if pct <= 100 {
-                Some((tool.clone(), pct))
-            } else {
-                None
-            }
+            Some((tool.clone(), pct))
         })
         .collect();
     acceptance_by_tool.sort_by(|(a, _), (b, _)| a.cmp(b));
