@@ -398,7 +398,7 @@ impl MetricsDatabase {
         let mut urls: Vec<String> = rows.collect::<Result<Vec<_>, _>>()?;
 
         let has_null: bool = self.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM local_events WHERE ts >= ?1 AND repo_url IS NULL AND event_id = 1)",
+            "SELECT EXISTS(SELECT 1 FROM local_events WHERE ts >= ?1 AND repo_url IS NULL)",
             params![since_ts as i64],
             |row| row.get(0),
         )?;
