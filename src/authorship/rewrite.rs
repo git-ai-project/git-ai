@@ -389,9 +389,9 @@ fn compact_line_ranges(
     }
     let mut lines: Vec<u32> = ranges
         .iter()
-        .map(|r| match r {
-            LineRange::Single(l) => *l,
-            LineRange::Range(s, _) => *s,
+        .flat_map(|r| match r {
+            LineRange::Single(l) => vec![*l],
+            LineRange::Range(s, e) => (*s..=*e).collect(),
         })
         .collect();
     lines.sort_unstable();
