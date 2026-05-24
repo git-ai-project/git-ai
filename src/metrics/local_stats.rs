@@ -1,5 +1,9 @@
 //! In-memory aggregation of local_events for `git-ai activity`.
 
+/// How long after a session's last message a subsequent commit is attributed
+/// to that session for yield and ai_lines_committed calculations.
+const YIELD_WINDOW_SECS: u32 = 4 * 3600;
+
 use crate::error::GitAiError;
 use crate::metrics::attrs::attr_pos;
 use crate::metrics::db::{LocalEventRecord, MetricsDatabase};
@@ -287,7 +291,7 @@ pub fn compute_activity(
     // so a commit in repo-A can incorrectly "claim" a nearby session that was
     // working in repo-B. Fixing this properly requires storing the repo path
     // on both session and committed events (a future schema change).
-    const YIELD_WINDOW_SECS: u32 = 4 * 3600;
+
     commit_timestamps.sort_unstable();
     let mut yield_shipped = 0u32;
     let mut yield_abandoned = 0u32;
@@ -1134,7 +1138,7 @@ pub fn compute_session_list(
     }
 
     commit_data.sort_unstable_by_key(|&(ts, _, _)| ts);
-    const YIELD_WINDOW_SECS: u32 = 4 * 3600;
+
 
     let mut out: Vec<SessionRecord> = session_first_ts
         .iter()
