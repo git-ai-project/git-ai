@@ -347,12 +347,17 @@ impl MetricsDatabase {
                 })?;
                 rows.collect::<Result<Vec<_>, _>>()?
             } else {
+                // Escape LIKE special characters so a user-supplied substring
+                // like "my_org/my%repo" matches literally, not as wildcards.
+                // We use '\' as the escape character.
+                let escaped = repo_url.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+                let pattern = format!("%{}%", escaped);
                 let mut stmt = self.conn.prepare(
                     "SELECT event_id, ts, repo_url, event_json FROM local_events \
-                 WHERE ts >= ?1 AND repo_url LIKE '%' || ?2 || '%' \
+                 WHERE ts >= ?1 AND repo_url LIKE ?2 ESCAPE '\\' \
                  ORDER BY ts ASC",
                 )?;
-                let rows = stmt.query_map(params![since_ts as i64, repo_url], |row| {
+                let rows = stmt.query_map(params![since_ts as i64, pattern], |row| {
                     Ok(LocalEventRecord {
                         event_id: row.get::<_, i64>(0)? as u16,
                         ts: row.get::<_, i64>(1)? as u32,
