@@ -611,7 +611,7 @@ fn build_token_summary(
             .map(|s| s.len() as u32)
             .unwrap_or(0);
         by_model.push(TokenModelStat {
-            model: shorten_model(&model),
+            model, // already shortened at insertion into model_tokens
             sessions,
             input: acc.input,
             output: acc.output,
