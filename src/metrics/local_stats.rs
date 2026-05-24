@@ -911,13 +911,17 @@ fn aggregate_session_tokens(
 
     let get = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
 
-    let (stored_model, acc, _ts, _sid) = message_usage
+    let (stored_model, acc, _ts, stored_sid) = message_usage
         .entry(id.to_string())
-        .or_insert_with(|| (model.clone(), TokenAccum::default(), record_ts, session_id));
+        .or_insert_with(|| (model.clone(), TokenAccum::default(), record_ts, session_id.clone()));
     // If the entry was created with an "unknown" placeholder model (e.g. from a
     // streaming partial that arrived before the final event), upgrade it now.
     if stored_model == "unknown" && model != "unknown" {
         *stored_model = model;
+    }
+    // Similarly, upgrade an empty session_id once a real one is available.
+    if stored_sid.is_empty() && !session_id.is_empty() {
+        *stored_sid = session_id;
     }
     // Field-wise max: input/cache are fixed per message; output grows while
     // streaming, so the final (largest) value is authoritative.
