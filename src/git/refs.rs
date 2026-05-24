@@ -118,6 +118,21 @@ fn batch_read_blob_contents(
         return Ok(HashMap::new());
     }
 
+    // Try gix first (no subprocess)
+    let pairs: Vec<(&str, &str)> = blob_oids
+        .iter()
+        .map(|oid| (oid.as_str(), oid.as_str()))
+        .collect();
+    if let Ok(results) = repo.gix.read_blobs_by_oids(&pairs) {
+        let map: HashMap<String, String> = results
+            .into_iter()
+            .filter_map(|(oid, data)| String::from_utf8(data).ok().map(|s| (oid, s)))
+            .collect();
+        if map.len() == blob_oids.len() {
+            return Ok(map);
+        }
+    }
+
     let mut args = repo.global_args_for_exec();
     args.push("cat-file".to_string());
     args.push("--batch".to_string());

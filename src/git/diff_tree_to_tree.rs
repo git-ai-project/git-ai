@@ -122,13 +122,9 @@ impl Repository {
         _opts: Option<()>,
         pathspecs: Option<&HashSet<String>>,
     ) -> Result<Diff, GitAiError> {
-        // Get the empty tree OID if we need it
+        const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
         let empty_tree_oid = if old_tree.is_none() || new_tree.is_none() {
-            let mut args = self.global_args_for_exec();
-            args.push("rev-parse".to_string());
-            args.push("--empty-tree".to_string());
-            let output = exec_git_with_profile(&args, InternalGitProfile::General)?;
-            Some(String::from_utf8(output.stdout)?.trim().to_string())
+            Some(EMPTY_TREE_HASH.to_string())
         } else {
             None
         };

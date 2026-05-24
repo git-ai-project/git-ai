@@ -333,25 +333,29 @@ impl<'a> CommitRange<'a> {
         let inferred_refname = match refname {
             Some(name) => name,
             None => {
-                // Try to find refs pointing to resolved end_oid
-                let mut args = repo.global_args_for_exec();
-                args.push("for-each-ref".to_string());
-                args.push("--points-at".to_string());
-                args.push(resolved_end.clone());
-                args.push("--format=%(refname)".to_string());
+                // Try gix first, then fall back to git CLI
+                let refs = repo
+                    .gix
+                    .refs_pointing_at(&resolved_end)
+                    .unwrap_or_else(|_| {
+                        let mut args = repo.global_args_for_exec();
+                        args.push("for-each-ref".to_string());
+                        args.push("--points-at".to_string());
+                        args.push(resolved_end.clone());
+                        args.push("--format=%(refname)".to_string());
 
-                let refs = match exec_git(&args) {
-                    Ok(output) => {
-                        let stdout = String::from_utf8(output.stdout).unwrap_or_default();
-                        let refs: Vec<String> = stdout
-                            .lines()
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        refs
-                    }
-                    Err(_) => Vec::new(),
-                };
+                        match exec_git(&args) {
+                            Ok(output) => {
+                                let stdout = String::from_utf8(output.stdout).unwrap_or_default();
+                                stdout
+                                    .lines()
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty())
+                                    .collect()
+                            }
+                            Err(_) => Vec::new(),
+                        }
+                    });
 
                 // If exactly one ref found, use it
                 if refs.len() == 1 {
@@ -1769,6 +1773,20 @@ impl Repository {
         to_ref: &str,
         pathspecs: Option<&HashSet<String>>,
     ) -> Result<HashMap<String, Vec<u32>>, GitAiError> {
+        if let Some(paths) = pathspecs
+            && paths.is_empty()
+        {
+            return Ok(HashMap::new());
+        }
+
+        // Try gix native diff (no subprocess), then post-filter by pathspecs
+        if let Some((mut result, _deleted)) = self.gix.try_diff_added_lines(from_ref, to_ref) {
+            if let Some(paths) = pathspecs {
+                result.retain(|path, _| paths.contains(path));
+            }
+            return Ok(result);
+        }
+
         let mut args = self.global_args_for_exec();
         args.push("diff".to_string());
         args.push("-U0".to_string()); // Zero context lines
@@ -1820,6 +1838,11 @@ impl Repository {
         from_ref: &str,
         to_ref: &str,
     ) -> Result<(HashMap<String, Vec<u32>>, usize), GitAiError> {
+        // Try gix native diff first (no subprocess)
+        if let Some(result) = self.gix.try_diff_added_lines(from_ref, to_ref) {
+            return Ok(result);
+        }
+
         let mut args = self.global_args_for_exec();
         args.push("diff".to_string());
         args.push("-U0".to_string());

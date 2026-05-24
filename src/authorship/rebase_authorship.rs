@@ -948,7 +948,7 @@ fn overlay_attribution(
 }
 
 /// Batch read file contents at a specific commit for multiple file paths.
-/// Uses a single `git cat-file --batch` call for efficiency.
+/// Uses gix for direct ODB reads (no subprocess).
 fn batch_read_file_contents_at_commit(
     repo: &Repository,
     commit_sha: &str,
@@ -958,64 +958,17 @@ fn batch_read_file_contents_at_commit(
         return Ok(HashMap::new());
     }
 
-    // Build pathspecs like "commit:path" for batch cat-file
-    let mut args = repo.global_args_for_exec();
-    args.push("cat-file".to_string());
-    args.push("--batch".to_string());
-
-    let stdin_data: String = file_paths
-        .iter()
-        .map(|path| format!("{}:{}", commit_sha, path))
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-
-    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
-    let data = &output.stdout;
-
     let mut results = HashMap::new();
-    let mut pos = 0usize;
-    let mut path_idx = 0usize;
-
-    while pos < data.len() && path_idx < file_paths.len() {
-        let header_end = match data[pos..].iter().position(|&b| b == b'\n') {
-            Some(idx) => pos + idx,
-            None => break,
-        };
-
-        let header = std::str::from_utf8(&data[pos..header_end]).unwrap_or("");
-        let parts: Vec<&str> = header.split_whitespace().collect();
-
-        if parts.len() >= 2 && parts[1] == "missing" {
-            // File doesn't exist at this commit
-            results.insert(file_paths[path_idx].clone(), String::new());
-            pos = header_end + 1;
-            path_idx += 1;
-            continue;
+    for path in file_paths {
+        match repo.gix.read_file_at_commit(commit_sha, path) {
+            Ok(data) => {
+                results.insert(path.clone(), String::from_utf8_lossy(&data).to_string());
+            }
+            Err(_) => {
+                results.insert(path.clone(), String::new());
+            }
         }
-
-        if parts.len() < 3 {
-            pos = header_end + 1;
-            path_idx += 1;
-            continue;
-        }
-
-        let size: usize = parts[2].parse().unwrap_or(0);
-        let content_start = header_end + 1;
-        let content_end = content_start + size;
-
-        if content_end <= data.len() {
-            let content = String::from_utf8_lossy(&data[content_start..content_end]).to_string();
-            results.insert(file_paths[path_idx].clone(), content);
-        }
-
-        pos = content_end;
-        if pos < data.len() && data[pos] == b'\n' {
-            pos += 1;
-        }
-        path_idx += 1;
     }
-
     Ok(results)
 }
 
@@ -2291,20 +2244,27 @@ pub(crate) fn committed_file_snapshot_between_commits(
     let to_commit = repo.find_commit(to_commit.to_string())?;
     let to_tree = to_commit.tree()?;
     if matches!(from_commit, None | Some("initial")) {
-        let mut args = repo.global_args_for_exec();
-        args.push("ls-tree".to_string());
-        args.push("-r".to_string());
-        args.push("-z".to_string());
-        args.push("--name-only".to_string());
-        args.push(to_tree.id());
+        let tracked_paths = repo
+            .gix
+            .ls_tree_recursive(&to_tree.id())
+            .unwrap_or_else(|_| {
+                let mut args = repo.global_args_for_exec();
+                args.push("ls-tree".to_string());
+                args.push("-r".to_string());
+                args.push("-z".to_string());
+                args.push("--name-only".to_string());
+                args.push(to_tree.id());
 
-        let output = exec_git(&args)?;
-        let tracked_paths = output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|bytes| !bytes.is_empty())
-            .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
-            .collect::<Vec<_>>();
+                match exec_git(&args) {
+                    Ok(output) => output
+                        .stdout
+                        .split(|byte| *byte == 0)
+                        .filter(|bytes| !bytes.is_empty())
+                        .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
+                        .collect::<Vec<_>>(),
+                    Err(_) => Vec::new(),
+                }
+            });
         return get_committed_files_content(repo, &to_commit.id(), &tracked_paths);
     }
 
@@ -2335,6 +2295,21 @@ fn batch_read_blob_contents(
 ) -> Result<HashMap<String, String>, GitAiError> {
     if blob_oids.is_empty() {
         return Ok(HashMap::new());
+    }
+
+    // Try gix first (no subprocess)
+    let pairs: Vec<(&str, &str)> = blob_oids
+        .iter()
+        .map(|oid| (oid.as_str(), oid.as_str()))
+        .collect();
+    if let Ok(results) = repo.gix.read_blobs_by_oids(&pairs) {
+        let map: HashMap<String, String> = results
+            .into_iter()
+            .filter_map(|(oid, data)| String::from_utf8(data).ok().map(|s| (oid, s)))
+            .collect();
+        if map.len() == blob_oids.len() {
+            return Ok(map);
+        }
     }
 
     let mut args = repo.global_args_for_exec();

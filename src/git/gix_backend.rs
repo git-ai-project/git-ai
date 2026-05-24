@@ -444,6 +444,69 @@ impl GixBackend {
         Ok(result)
     }
 
+    /// List all file paths in a tree recursively (equivalent to `git ls-tree -r --name-only`).
+    pub fn ls_tree_recursive(&self, tree_oid_hex: &str) -> Result<Vec<String>, GitAiError> {
+        use gix::objs::TreeRefIter;
+
+        let repo = self.get_repo()?;
+        let tree_oid = Self::parse_oid(tree_oid_hex)?;
+
+        let mut paths = Vec::new();
+        let mut stack: Vec<(String, ObjectId)> = vec![(String::new(), tree_oid)];
+
+        while let Some((prefix, oid)) = stack.pop() {
+            let obj = repo
+                .find_object(oid)
+                .map_err(|e| GitAiError::GixError(format!("find tree '{}': {}", oid, e)))?;
+            let data = obj.detach();
+            let iter = TreeRefIter::from_bytes(&data.data);
+            for entry in iter {
+                let entry =
+                    entry.map_err(|e| GitAiError::GixError(format!("parse tree entry: {}", e)))?;
+                let name = entry.filename.to_string();
+                let full_path = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{}", prefix, name)
+                };
+                if entry.mode.is_tree() {
+                    stack.push((full_path, entry.oid.into()));
+                } else if entry.mode.is_blob() || entry.mode.is_executable() {
+                    paths.push(full_path);
+                }
+            }
+        }
+        paths.sort();
+        Ok(paths)
+    }
+
+    /// Find refs pointing at a given commit OID.
+    pub fn refs_pointing_at(&self, oid_hex: &str) -> Result<Vec<String>, GitAiError> {
+        let repo = self.get_repo()?;
+        let target_oid = Self::parse_oid(oid_hex)?;
+        let mut refs = Vec::new();
+        let platform = repo
+            .references()
+            .map_err(|e| GitAiError::GixError(format!("iterate refs: {}", e)))?;
+        for reference in platform
+            .all()
+            .map_err(|e| GitAiError::GixError(format!("list refs: {}", e)))?
+        {
+            let reference = match reference {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let peeled = match reference.clone().into_fully_peeled_id() {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+            if peeled.as_ref() == target_oid.as_ref() {
+                refs.push(reference.name().as_bstr().to_string());
+            }
+        }
+        Ok(refs)
+    }
+
     /// Check if a ref exists in the repository.
     pub fn ref_exists(&self, refname: &str) -> Result<bool, GitAiError> {
         let repo = self.get_repo()?;
@@ -630,6 +693,122 @@ impl GixBackend {
         let from_tree = self.read_commit_tree_oid(from_commit)?;
         let to_tree = self.read_commit_tree_oid(to_commit)?;
         self.diff_tree_changed_files(&from_tree, &to_tree)
+    }
+
+    /// Compute added line numbers per file between two commits using native
+    /// gix blob reads + imara-diff. This avoids spawning `git diff` subprocess.
+    ///
+    /// Does NOT perform rename detection. For commits involving renames, the
+    /// caller should fall back to the git CLI path.
+    ///
+    /// Returns (added_lines_by_file, total_deleted_lines).
+    pub fn diff_added_lines(
+        &self,
+        from_commit: &str,
+        to_commit: &str,
+    ) -> Result<(std::collections::HashMap<String, Vec<u32>>, usize), GitAiError> {
+        use gix::objs::TreeRefIter;
+        use imara_diff::{Algorithm, Diff, InternedInput};
+        use std::collections::HashMap;
+
+        let repo = self.get_repo()?;
+
+        let from_tree_oid_str = self.read_commit_tree_oid(from_commit)?;
+        let to_tree_oid_str = self.read_commit_tree_oid(to_commit)?;
+        let from_tree_oid = Self::parse_oid(&from_tree_oid_str)?;
+        let to_tree_oid = Self::parse_oid(&to_tree_oid_str)?;
+
+        let from_obj = repo.find_object(from_tree_oid).map_err(|e| {
+            GitAiError::GixError(format!("find tree '{}': {}", from_tree_oid_str, e))
+        })?;
+        let to_obj = repo
+            .find_object(to_tree_oid)
+            .map_err(|e| GitAiError::GixError(format!("find tree '{}': {}", to_tree_oid_str, e)))?;
+
+        let from_data = from_obj.detach();
+        let to_data = to_obj.detach();
+        let from_iter = TreeRefIter::from_bytes(&from_data.data);
+        let to_iter = TreeRefIter::from_bytes(&to_data.data);
+
+        let mut recorder = gix::diff::tree::Recorder::default();
+        let mut state = gix::diff::tree::State::default();
+        (gix::diff::tree)(from_iter, to_iter, &mut state, &repo.objects, &mut recorder)
+            .map_err(|e| GitAiError::GixError(format!("diff-tree: {}", e)))?;
+
+        let mut result: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut total_deleted: usize = 0;
+
+        for change in recorder.records {
+            match change {
+                gix::diff::tree::recorder::Change::Addition { path, oid, .. } => {
+                    let blob = repo
+                        .find_object(oid)
+                        .map_err(|e| GitAiError::GixError(format!("read blob: {}", e)))?;
+                    let content = String::from_utf8_lossy(&blob.data);
+                    let line_count = content.lines().count() as u32;
+                    if line_count > 0 {
+                        let lines: Vec<u32> = (1..=line_count).collect();
+                        result.insert(path.to_string(), lines);
+                    }
+                }
+                gix::diff::tree::recorder::Change::Deletion { oid, .. } => {
+                    let blob = repo
+                        .find_object(oid)
+                        .map_err(|e| GitAiError::GixError(format!("read blob: {}", e)))?;
+                    let content = String::from_utf8_lossy(&blob.data);
+                    total_deleted += content.lines().count();
+                }
+                gix::diff::tree::recorder::Change::Modification {
+                    path,
+                    previous_oid,
+                    oid,
+                    ..
+                } => {
+                    let old_blob = repo
+                        .find_object(previous_oid)
+                        .map_err(|e| GitAiError::GixError(format!("read old blob: {}", e)))?;
+                    let new_blob = repo
+                        .find_object(oid)
+                        .map_err(|e| GitAiError::GixError(format!("read new blob: {}", e)))?;
+
+                    let old_content = String::from_utf8_lossy(&old_blob.data);
+                    let new_content = String::from_utf8_lossy(&new_blob.data);
+
+                    let input = InternedInput::new(old_content.as_ref(), new_content.as_ref());
+                    let mut diff = Diff::compute(Algorithm::Myers, &input);
+                    diff.postprocess_lines(&input);
+
+                    let mut added_lines: Vec<u32> = Vec::new();
+                    for hunk in diff.hunks() {
+                        let old_count = (hunk.before.end - hunk.before.start) as usize;
+                        let new_start = hunk.after.start + 1; // 1-indexed
+                        let new_count = hunk.after.end - hunk.after.start;
+                        total_deleted += old_count;
+                        if new_count > 0 {
+                            for line_no in new_start..new_start + new_count {
+                                added_lines.push(line_no);
+                            }
+                        }
+                    }
+                    if !added_lines.is_empty() {
+                        added_lines.sort_unstable();
+                        added_lines.dedup();
+                        result.insert(path.to_string(), added_lines);
+                    }
+                }
+            }
+        }
+
+        Ok((result, total_deleted))
+    }
+
+    /// Try native diff_added_lines, returning None on failure.
+    pub fn try_diff_added_lines(
+        &self,
+        from_commit: &str,
+        to_commit: &str,
+    ) -> Option<(std::collections::HashMap<String, Vec<u32>>, usize)> {
+        self.diff_added_lines(from_commit, to_commit).ok()
     }
 
     pub fn try_rev_list(&self, tip: &str, base: &str) -> Option<Vec<String>> {
