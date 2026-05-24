@@ -60,15 +60,9 @@ pub fn handle_activity(args: &[String]) {
             "last 30 days".to_string(),
             BucketGranularity::Weekly,
         ),
-        "60d" => (
-            days_ago(60),
-            "last 60 days".to_string(),
-            BucketGranularity::Weekly,
-        ),
-        "all" => (0u32, "all time".to_string(), BucketGranularity::Monthly),
         other => {
             eprintln!(
-                "Unknown period '{}'. Use 1d, 3d, 7d, 30d, 60d, or all.",
+                "Unknown period '{}'. Use 1d, 3d, 7d, or 30d.",
                 other
             );
             std::process::exit(1);
@@ -107,7 +101,7 @@ pub fn handle_activity(args: &[String]) {
                 "No data found for '{}' in the {} window.",
                 filter, stats.period_label
             );
-            eprintln!("Try a broader period (--period all) or a different substring.");
+            eprintln!("Try --period 30d or a different substring.");
         } else {
             eprintln!("No activity data found for the {} window.", stats.period_label);
         }
@@ -142,13 +136,13 @@ fn print_help() {
     eprintln!("Usage: git-ai usage [options]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --period <1d|3d|7d|30d|60d|all>   Time window (default: 30d)");
+    eprintln!("  --period <1d|3d|7d|30d>           Time window (default: 30d)");
     eprintln!("  --repo <url|substring>            Filter to a repository (substring match, https:// optional)");
     eprintln!("  --json                            Output as JSON");
     eprintln!("  --help                            Show this help");
     eprintln!();
     eprintln!("Statistics are sourced from locally recorded metric events.");
-    eprintln!("Events accumulate over time and are never deleted from local storage.");
+    eprintln!("Events older than 30 days are pruned automatically.");
 }
 
 fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], repo_filter: Option<&str>) {
