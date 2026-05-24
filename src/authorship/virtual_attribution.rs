@@ -1534,6 +1534,7 @@ impl VirtualAttributions {
         commit_sha: &str,
         pathspecs: Option<&HashSet<String>>,
         final_state_snapshot: Option<&HashMap<String, String>>,
+        committed_hunks_override: Option<HashMap<String, Vec<LineRange>>>,
     ) -> Result<
         (
             crate::authorship::authorship_log_serialization::AuthorshipLog,
@@ -1568,7 +1569,11 @@ impl VirtualAttributions {
         let mut initial_sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
 
         // Get committed hunks (in commit coordinates) and unstaged hunks (in working directory coordinates)
-        let committed_hunks = collect_committed_hunks(repo, parent_sha, commit_sha, pathspecs)?;
+        let committed_hunks = if let Some(override_hunks) = committed_hunks_override {
+            override_hunks
+        } else {
+            collect_committed_hunks(repo, parent_sha, commit_sha, pathspecs)?
+        };
         let (mut unstaged_hunks, pure_insertion_hunks) =
             if let Some(snapshot) = final_state_snapshot {
                 collect_unstaged_hunks_from_snapshot(repo, commit_sha, pathspecs, snapshot)?

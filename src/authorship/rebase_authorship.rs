@@ -2977,6 +2977,7 @@ pub fn rewrite_authorship_after_commit_amend_with_snapshot(
             amended_commit,
             Some(&pathspecs_set),
             final_state_override,
+            None,
         )?;
 
     // Update base commit SHA

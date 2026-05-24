@@ -11,6 +11,7 @@ use crate::git::notes_api::write_note as notes_add;
 use crate::git::repository::Repository;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
+use unicode_normalization::UnicodeNormalization;
 
 /// Skip expensive post-commit stats when this threshold is exceeded.
 /// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
@@ -129,6 +130,52 @@ pub fn post_commit_with_final_state(
         pathspecs.insert(file_path.clone());
     }
 
+    // Run the parent..commit diff ONCE upfront. This single subprocess call provides:
+    // 1. committed_hunks for authorship attribution
+    // 2. stats/cost estimation
+    // 3. background agent fill_unattributed_lines
+    let is_merge_commit = repo
+        .gix
+        .commit_parent_ids(&commit_sha)
+        .map(|ids| ids.len() > 1)
+        .unwrap_or(false);
+
+    let diff_base = if parent_sha == "initial" {
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    } else {
+        &parent_sha
+    };
+
+    let diff_hunks =
+        crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &commit_sha)?;
+
+    // Derive committed_hunks from the diff, filtered by pathspecs.
+    // Use NFC normalization for matching since git may output NFD paths on macOS.
+    let committed_hunks_from_diff: HashMap<String, Vec<crate::authorship::authorship_log::LineRange>> = {
+        let mut result: HashMap<String, Vec<u32>> = HashMap::new();
+        for hunk in &diff_hunks {
+            if !hunk.added_lines.is_empty() {
+                result.entry(hunk.file_path.clone()).or_default().extend(&hunk.added_lines);
+            }
+        }
+        for lines in result.values_mut() {
+            lines.sort_unstable();
+            lines.dedup();
+        }
+        let mut filtered: HashMap<String, Vec<crate::authorship::authorship_log::LineRange>> = result
+            .into_iter()
+            .map(|(path, lines)| (path, crate::authorship::authorship_log::LineRange::compress_lines(&lines)))
+            .collect();
+        if !pathspecs.is_empty() {
+            let nfc_pathspecs: HashSet<String> = pathspecs.iter().map(|s| s.nfc().collect()).collect();
+            filtered.retain(|path, _| {
+                let nfc_path: String = path.nfc().collect();
+                pathspecs.contains(path) || nfc_pathspecs.contains(&nfc_path)
+            });
+        }
+        filtered
+    };
+
     let (mut authorship_log, initial_attributions) = working_va
         .to_authorship_log_and_initial_working_log(
             repo,
@@ -136,6 +183,7 @@ pub fn post_commit_with_final_state(
             &commit_sha,
             Some(&pathspecs),
             final_state_override,
+            Some(committed_hunks_from_diff),
         )?;
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
@@ -148,31 +196,30 @@ pub fn post_commit_with_final_state(
         crate::authorship::background_agent::BackgroundAgent::None
             | crate::authorship::background_agent::BackgroundAgent::WithHooks { .. }
     ) {
-        let diff_base = if parent_sha == "initial" {
-            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-        } else {
-            &parent_sha
-        };
-        if let Ok(added_lines) = repo.diff_added_lines(diff_base, &commit_sha, None) {
-            let committed_hunks: HashMap<
-                String,
-                Vec<crate::authorship::authorship_log::LineRange>,
-            > = added_lines
+        let all_committed_hunks: HashMap<
+            String,
+            Vec<crate::authorship::authorship_log::LineRange>,
+        > = {
+            let mut result: HashMap<String, Vec<u32>> = HashMap::new();
+            for hunk in &diff_hunks {
+                if !hunk.added_lines.is_empty() {
+                    result.entry(hunk.file_path.clone()).or_default().extend(&hunk.added_lines);
+                }
+            }
+            for lines in result.values_mut() {
+                lines.sort_unstable();
+                lines.dedup();
+            }
+            result
                 .into_iter()
-                .filter(|(_, lines)| !lines.is_empty())
-                .map(|(path, lines)| {
-                    (
-                        path,
-                        crate::authorship::authorship_log::LineRange::compress_lines(&lines),
-                    )
-                })
-                .collect();
-            crate::authorship::background_agent::fill_unattributed_lines(
-                &mut authorship_log,
-                &committed_hunks,
-                &human_author,
-            );
-        }
+                .map(|(path, lines)| (path, crate::authorship::authorship_log::LineRange::compress_lines(&lines)))
+                .collect()
+        };
+        crate::authorship::background_agent::fill_unattributed_lines(
+            &mut authorship_log,
+            &all_committed_hunks,
+            &human_author,
+        );
     }
 
     // Long-lived daemon processes should read a fresh config snapshot.
@@ -197,28 +244,12 @@ pub fn post_commit_with_final_state(
 
     notes_add(repo, &commit_sha, &authorship_note_str)?;
 
-    // Compute stats once (needed for both metrics and terminal output), unless preflight
-    // estimate predicts this would be too expensive for the commit hook path.
-    // Runs a single diff subprocess and derives the cost estimate from the same hunks,
-    // avoiding a redundant subprocess call.
+    // Compute stats from the same diff hunks (no extra subprocess).
     let mut stats: Option<crate::authorship::stats::CommitStats> = None;
-    let is_merge_commit = repo
-        .find_commit(commit_sha.clone())
-        .map(|commit| commit.parent_count().unwrap_or(0) > 1)
-        .unwrap_or(false);
     let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
     let skip_reason: Option<StatsSkipReason> = if is_merge_commit {
         Some(StatsSkipReason::MergeCommit)
     } else {
-        let diff_base = if parent_sha == "initial" {
-            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-        } else {
-            &parent_sha
-        };
-
-        let diff_hunks =
-            crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &commit_sha)?;
-
         let estimate = estimate_stats_cost_from_hunks(&diff_hunks, &ignore_patterns);
         if should_skip_expensive_post_commit_stats(&estimate) {
             tracing::debug!(
