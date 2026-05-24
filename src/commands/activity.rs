@@ -95,6 +95,23 @@ pub fn handle_activity(args: &[String]) {
         vec![]
     };
 
+    // When filtering by repo, bail out early if nothing matched.
+    let no_data = stats.commits.total == 0
+        && stats.sessions.total == 0
+        && stats.tokens.input + stats.tokens.output + stats.tokens.cache_read + stats.tokens.cache_creation == 0;
+    if no_data {
+        if let Some(ref filter) = repo_filter {
+            eprintln!(
+                "No data found for '{}' in the {} window.",
+                filter, stats.period_label
+            );
+            eprintln!("Try a broader period (--period all) or a different substring.");
+        } else {
+            eprintln!("No activity data found for the {} window.", stats.period_label);
+        }
+        std::process::exit(1);
+    }
+
     if json {
         match serde_json::to_string_pretty(&stats) {
             Ok(s) => println!("{}", s),
