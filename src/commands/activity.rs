@@ -304,6 +304,15 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
     // Track which tools have already had their acceptance rate shown so we
     // don't repeat the same tool-level rate on every model variant line.
     let mut shown_accept: HashSet<&str> = HashSet::new();
+    // Pre-compute column widths for aligned tool breakdown.
+    let max_tool_w = stats.commits.by_tool.iter().map(|(t, _)| t.len()).max().unwrap_or(0);
+    let max_tool_count_w = stats
+        .commits
+        .by_tool
+        .iter()
+        .map(|(_, c)| format_num(*c).len())
+        .max()
+        .unwrap_or(0);
     for (tool, count) in &stats.commits.by_tool {
         let tool_name = tool.split(" · ").next().unwrap_or(tool.as_str());
         let accept_str = if shown_accept.insert(tool_name) {
@@ -325,10 +334,12 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
             String::new()
         };
         println!(
-            "    {GRAY}{}: {} lines{RESET}{}",
+            "    {GRAY}{:<tool_w$}  {:>count_w$} lines{RESET}{}",
             tool,
             format_num(*count),
-            accept_str
+            accept_str,
+            tool_w = max_tool_w,
+            count_w = max_tool_count_w,
         );
     }
 
@@ -392,22 +403,38 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
                 trail,
             );
         }
+        // Pre-compute column widths for aligned model breakdown.
+        let max_model_w = t.by_model.iter().map(|m| m.model.len()).max().unwrap_or(0);
+        let max_tokens_w = t
+            .by_model
+            .iter()
+            .map(|m| format_num_u64(m.input + m.output + m.cache_read + m.cache_creation).len())
+            .max()
+            .unwrap_or(0);
+        let max_cost_w = t
+            .by_model
+            .iter()
+            .map(|m| m.estimated_cost_usd.map(|c| format_cost(c).len()).unwrap_or(0))
+            .max()
+            .unwrap_or(0);
         for m in &t.by_model {
-            let cost = m
+            let total = m.input + m.output + m.cache_read + m.cache_creation;
+            let cost_str = m
                 .estimated_cost_usd
-                .map(|c| format!("  {}", format_cost(c)))
-                .unwrap_or_default();
+                .map(|c| format!("{:>width$}", format_cost(c), width = max_cost_w))
+                .unwrap_or_else(|| " ".repeat(max_cost_w));
             let cache = m
                 .cache_hit_ratio
                 .map(|r| format!("  cache {:.0}% hit", r * 100.0))
                 .unwrap_or_default();
-            let total = m.input + m.output + m.cache_read + m.cache_creation;
             println!(
-                "    {GRAY}{}: {} tokens{}{}{RESET}",
+                "    {GRAY}{:<model_w$}  {:>tokens_w$} tokens  {}{}{RESET}",
                 m.model,
                 format_num_u64(total),
-                cost,
+                cost_str,
                 cache,
+                model_w = max_model_w,
+                tokens_w = max_tokens_w,
             );
         }
     }
