@@ -504,4 +504,147 @@ impl GixBackend {
     pub fn try_peel_to_commit(&self, oid_hex: &str) -> Option<String> {
         self.peel_to_commit(oid_hex).ok()
     }
+
+    /// Walk commits from `tip` back to (but not including) `base`.
+    /// Returns commits in newest-first order (like `git rev-list base..tip`).
+    pub fn rev_list(&self, tip: &str, base: &str) -> Result<Vec<String>, GitAiError> {
+        let repo = self.get_repo()?;
+        let bstr_tip: &BStr = tip.into();
+        let bstr_base: &BStr = base.into();
+        let tip_id = repo
+            .rev_parse_single(bstr_tip)
+            .map_err(|e| GitAiError::GixError(format!("rev-parse tip '{}': {}", tip, e)))?;
+        let base_id = repo
+            .rev_parse_single(bstr_base)
+            .map_err(|e| GitAiError::GixError(format!("rev-parse base '{}': {}", base, e)))?;
+
+        let walk = repo
+            .rev_walk([tip_id])
+            .sorting(gix::revision::walk::Sorting::BreadthFirst)
+            .selected(move |oid| oid != base_id.as_ref())
+            .map_err(|e| GitAiError::GixError(format!("rev_walk '{}..{}': {}", base, tip, e)))?;
+
+        let mut commits = Vec::new();
+        for info in walk {
+            let info = info.map_err(|e| GitAiError::GixError(format!("rev_walk iter: {}", e)))?;
+            commits.push(info.id.to_string());
+        }
+        Ok(commits)
+    }
+
+    /// Walk commits from `tip` back to (but not including) `base`, first-parent only.
+    /// Returns commits in newest-first order with a maximum count.
+    pub fn rev_list_first_parent(
+        &self,
+        tip: &str,
+        base: &str,
+        max_count: usize,
+    ) -> Result<Vec<String>, GitAiError> {
+        let repo = self.get_repo()?;
+        let bstr_tip: &BStr = tip.into();
+        let bstr_base: &BStr = base.into();
+        let tip_id = repo
+            .rev_parse_single(bstr_tip)
+            .map_err(|e| GitAiError::GixError(format!("rev-parse tip '{}': {}", tip, e)))?;
+        let base_id = repo
+            .rev_parse_single(bstr_base)
+            .map_err(|e| GitAiError::GixError(format!("rev-parse base '{}': {}", base, e)))?;
+
+        let walk = repo
+            .rev_walk([tip_id])
+            .sorting(gix::revision::walk::Sorting::BreadthFirst)
+            .first_parent_only()
+            .selected(move |oid| oid != base_id.as_ref())
+            .map_err(|e| {
+                GitAiError::GixError(format!("rev_walk first-parent '{}..{}': {}", base, tip, e))
+            })?;
+
+        let mut commits = Vec::new();
+        for info in walk {
+            let info = info.map_err(|e| GitAiError::GixError(format!("rev_walk iter: {}", e)))?;
+            commits.push(info.id.to_string());
+            if commits.len() >= max_count {
+                break;
+            }
+        }
+        Ok(commits)
+    }
+
+    /// Check if `ancestor` is an ancestor of `descendant`.
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, GitAiError> {
+        let base = self.merge_base(ancestor, descendant)?;
+        let canonical = self.rev_parse(ancestor)?;
+        Ok(base == canonical)
+    }
+
+    /// Get list of changed file paths between two trees (equivalent to
+    /// `git diff-tree --name-only -r tree1 tree2`).
+    pub fn diff_tree_changed_files(
+        &self,
+        from_tree_oid: &str,
+        to_tree_oid: &str,
+    ) -> Result<Vec<String>, GitAiError> {
+        use gix::objs::TreeRefIter;
+
+        let repo = self.get_repo()?;
+        let from_oid = Self::parse_oid(from_tree_oid)?;
+        let to_oid = Self::parse_oid(to_tree_oid)?;
+
+        let from_obj = repo
+            .find_object(from_oid)
+            .map_err(|e| GitAiError::GixError(format!("find tree '{}': {}", from_tree_oid, e)))?;
+        let to_obj = repo
+            .find_object(to_oid)
+            .map_err(|e| GitAiError::GixError(format!("find tree '{}': {}", to_tree_oid, e)))?;
+
+        let from_data = from_obj.detach();
+        let to_data = to_obj.detach();
+        let from_iter = TreeRefIter::from_bytes(&from_data.data);
+        let to_iter = TreeRefIter::from_bytes(&to_data.data);
+
+        let mut recorder = gix::diff::tree::Recorder::default();
+        let mut state = gix::diff::tree::State::default();
+        (gix::diff::tree)(from_iter, to_iter, &mut state, &repo.objects, &mut recorder)
+            .map_err(|e| GitAiError::GixError(format!("diff-tree: {}", e)))?;
+
+        let mut files: Vec<String> = recorder
+            .records
+            .into_iter()
+            .map(|change| match change {
+                gix::diff::tree::recorder::Change::Addition { path, .. }
+                | gix::diff::tree::recorder::Change::Deletion { path, .. }
+                | gix::diff::tree::recorder::Change::Modification { path, .. } => path.to_string(),
+            })
+            .collect();
+        files.sort();
+        files.dedup();
+        Ok(files)
+    }
+
+    /// Get changed files between two commits by comparing their trees.
+    pub fn diff_commits_changed_files(
+        &self,
+        from_commit: &str,
+        to_commit: &str,
+    ) -> Result<Vec<String>, GitAiError> {
+        let from_tree = self.read_commit_tree_oid(from_commit)?;
+        let to_tree = self.read_commit_tree_oid(to_commit)?;
+        self.diff_tree_changed_files(&from_tree, &to_tree)
+    }
+
+    pub fn try_rev_list(&self, tip: &str, base: &str) -> Option<Vec<String>> {
+        self.rev_list(tip, base).ok()
+    }
+
+    pub fn try_is_ancestor(&self, ancestor: &str, descendant: &str) -> Option<bool> {
+        self.is_ancestor(ancestor, descendant).ok()
+    }
+
+    pub fn try_diff_commits_changed_files(
+        &self,
+        from_commit: &str,
+        to_commit: &str,
+    ) -> Option<Vec<String>> {
+        self.diff_commits_changed_files(from_commit, to_commit).ok()
+    }
 }

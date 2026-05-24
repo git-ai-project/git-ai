@@ -382,58 +382,72 @@ impl<'a> CommitRange<'a> {
         const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
         // Check that both commits exist
-        // Skip validation for empty tree hash - it's a special git object that may not exist in the repo
         if self.start_oid != EMPTY_TREE_HASH {
             self.repo.find_commit(self.start_oid.clone())?;
         }
         self.repo.find_commit(self.end_oid.clone())?;
 
-        // Check that both commits exist on the refname
-        // Use git merge-base --is-ancestor <commit> <refname>
-        // Skip merge-base check for empty tree hash since it's not part of commit history
+        // Check ancestry using gix first, fallback to CLI
         if self.start_oid != EMPTY_TREE_HASH {
-            let mut args = self.repo.global_args_for_exec();
-            args.push("merge-base".to_string());
-            args.push("--is-ancestor".to_string());
-            args.push(self.start_oid.clone());
-            args.push(self.refname.clone());
-
-            exec_git(&args).map_err(|_| {
-                GitAiError::Generic(format!(
+            let is_anc = self
+                .repo
+                .gix
+                .try_is_ancestor(&self.start_oid, &self.refname)
+                .unwrap_or_else(|| {
+                    let mut args = self.repo.global_args_for_exec();
+                    args.push("merge-base".to_string());
+                    args.push("--is-ancestor".to_string());
+                    args.push(self.start_oid.clone());
+                    args.push(self.refname.clone());
+                    exec_git(&args).is_ok()
+                });
+            if !is_anc {
+                return Err(GitAiError::Generic(format!(
                     "Commit {} is not reachable from refname {}",
                     self.start_oid, self.refname
-                ))
-            })?;
+                )));
+            }
         }
 
-        let mut args = self.repo.global_args_for_exec();
-        args.push("merge-base".to_string());
-        args.push("--is-ancestor".to_string());
-        args.push(self.end_oid.clone());
-        args.push(self.refname.clone());
-
-        exec_git(&args).map_err(|_| {
-            GitAiError::Generic(format!(
+        let is_anc = self
+            .repo
+            .gix
+            .try_is_ancestor(&self.end_oid, &self.refname)
+            .unwrap_or_else(|| {
+                let mut args = self.repo.global_args_for_exec();
+                args.push("merge-base".to_string());
+                args.push("--is-ancestor".to_string());
+                args.push(self.end_oid.clone());
+                args.push(self.refname.clone());
+                exec_git(&args).is_ok()
+            });
+        if !is_anc {
+            return Err(GitAiError::Generic(format!(
                 "Commit {} is not reachable from refname {}",
                 self.end_oid, self.refname
-            ))
-        })?;
+            )));
+        }
 
-        // Check that start is an ancestor of end (direct path between them)
-        // Skip for empty tree hash - it's not part of the commit DAG
+        // Check that start is an ancestor of end
         if self.start_oid != EMPTY_TREE_HASH {
-            let mut args = self.repo.global_args_for_exec();
-            args.push("merge-base".to_string());
-            args.push("--is-ancestor".to_string());
-            args.push(self.start_oid.clone());
-            args.push(self.end_oid.clone());
-
-            exec_git(&args).map_err(|_| {
-                GitAiError::Generic(format!(
+            let is_anc = self
+                .repo
+                .gix
+                .try_is_ancestor(&self.start_oid, &self.end_oid)
+                .unwrap_or_else(|| {
+                    let mut args = self.repo.global_args_for_exec();
+                    args.push("merge-base".to_string());
+                    args.push("--is-ancestor".to_string());
+                    args.push(self.start_oid.clone());
+                    args.push(self.end_oid.clone());
+                    exec_git(&args).is_ok()
+                });
+            if !is_anc {
+                return Err(GitAiError::Generic(format!(
                     "Commit {} is not an ancestor of {}",
                     self.start_oid, self.end_oid
-                ))
-            })?;
+                )));
+            }
         }
 
         Ok(())
@@ -473,8 +487,16 @@ impl<'a> IntoIterator for CommitRange<'a> {
             };
         }
 
-        // Use git rev-list to get all commits between start and end
-        // Format: start_oid..end_oid means commits reachable from end_oid but not from start_oid
+        // Try gix rev_list first (no subprocess)
+        if let Some(commits) = self.repo.gix.try_rev_list(&self.end_oid, &self.start_oid) {
+            return CommitRangeIterator {
+                repo: self.repo,
+                commit_oids: commits,
+                index: 0,
+            };
+        }
+
+        // Fallback to git rev-list subprocess
         let mut args = self.repo.global_args_for_exec();
         args.push("rev-list".to_string());
         args.push(format!("{}..{}", self.start_oid, self.end_oid));
@@ -488,7 +510,7 @@ impl<'a> IntoIterator for CommitRange<'a> {
                     .filter(|s| !s.is_empty())
                     .collect()
             }
-            Err(_) => Vec::new(), // If they don't share lineage or error occurs, return empty
+            Err(_) => Vec::new(),
         };
 
         CommitRangeIterator {
@@ -612,55 +634,34 @@ impl<'a> Commit<'a> {
     /// The first parent commit that is reachable from the specified refname
     pub fn parent_on_refname(&self, refname: &str) -> Result<Commit<'a>, GitAiError> {
         // Normalize the refname to fully qualified form
-        let fq_refname = {
-            let mut rp_args = self.repo.global_args_for_exec();
-            rp_args.push("rev-parse".to_string());
-            rp_args.push("--verify".to_string());
-            rp_args.push("--symbolic-full-name".to_string());
-            rp_args.push(refname.to_string());
-
-            match exec_git(&rp_args) {
-                Ok(output) => {
-                    let s = String::from_utf8(output.stdout).unwrap_or_default();
-                    let s = s.trim();
-                    if s.is_empty() {
-                        if refname.starts_with("refs/") {
-                            refname.to_string()
-                        } else {
-                            format!("refs/heads/{}", refname)
-                        }
-                    } else {
-                        s.to_string()
-                    }
-                }
-                Err(_) => {
-                    if refname.starts_with("refs/") {
-                        refname.to_string()
-                    } else {
-                        format!("refs/heads/{}", refname)
-                    }
-                }
-            }
+        let fq_refname = if refname.starts_with("refs/") {
+            refname.to_string()
+        } else {
+            format!("refs/heads/{}", refname)
         };
 
         // Iterate through parents and find the first one that's on the refname
         for parent in self.parents() {
             let parent_sha = parent.id();
 
-            // Check if this parent is an ancestor of the refname
-            // git merge-base --is-ancestor <parent> <refname>
-            let mut args = self.repo.global_args_for_exec();
-            args.push("merge-base".to_string());
-            args.push("--is-ancestor".to_string());
-            args.push(parent_sha.clone());
-            args.push(fq_refname.clone());
+            let is_anc = self
+                .repo
+                .gix
+                .try_is_ancestor(&parent_sha, &fq_refname)
+                .unwrap_or_else(|| {
+                    let mut args = self.repo.global_args_for_exec();
+                    args.push("merge-base".to_string());
+                    args.push("--is-ancestor".to_string());
+                    args.push(parent_sha.clone());
+                    args.push(fq_refname.clone());
+                    exec_git(&args).is_ok()
+                });
 
-            if exec_git(&args).is_ok() {
+            if is_anc {
                 return Ok(parent);
             }
         }
 
-        // If no parent is on the refname, return an error
         Err(GitAiError::Generic(format!(
             "No parent of commit {} is reachable from refname {}",
             self.oid, refname
@@ -1684,28 +1685,46 @@ impl Repository {
         commit_sha: &str,
         pathspecs: Option<&HashSet<String>>,
     ) -> Result<HashSet<String>, GitAiError> {
+        const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+        // Try gix tree-diff first (no subprocess)
+        let parent_ids = self.gix.commit_parent_ids(commit_sha).unwrap_or_default();
+        let from_commit = if parent_ids.is_empty() {
+            EMPTY_TREE.to_string()
+        } else {
+            parent_ids[0].clone()
+        };
+
+        if let Some(changed) = self
+            .gix
+            .try_diff_commits_changed_files(&from_commit, commit_sha)
+        {
+            let mut files: HashSet<String> = changed.into_iter().collect();
+            if let Some(paths) = pathspecs {
+                if paths.is_empty() {
+                    return Ok(HashSet::new());
+                }
+                files.retain(|path| paths.contains(path));
+            }
+            return Ok(files);
+        }
+
+        // Fallback to git diff-tree subprocess
         let mut args = self.global_args_for_exec();
         args.push("diff-tree".to_string());
         args.push("--no-commit-id".to_string());
         args.push("--name-only".to_string());
         args.push("-r".to_string());
-        args.push("-z".to_string()); // NUL-separated output for proper UTF-8 handling
+        args.push("-z".to_string());
 
-        // Find the commit to check if it has a parent
         let commit = self.find_commit(commit_sha.to_string())?;
-
-        // For initial commits (no parent), compare against the empty tree
         if commit.parent_count()? == 0 {
-            let empty_tree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-            args.push(empty_tree.to_string());
+            args.push(EMPTY_TREE.to_string());
         }
 
         args.push(commit_sha.to_string());
 
-        // Add pathspecs if provided (only as CLI args when under threshold)
         let needs_post_filter = if let Some(paths) = pathspecs {
-            // for case where pathspec filter provided BUT not pathspecs.
-            // otherwise it would default to full repo
             if paths.is_empty() {
                 return Ok(HashSet::new());
             }
@@ -1724,7 +1743,6 @@ impl Repository {
 
         let output = exec_git(&args)?;
 
-        // With -z, output is NUL-separated. The output may contain a trailing NUL.
         let mut files: HashSet<String> = output
             .stdout
             .split(|&b| b == 0)
@@ -1823,18 +1841,21 @@ impl Repository {
         from_ref: &str,
         to_ref: &str,
     ) -> Result<Vec<String>, GitAiError> {
+        // Try gix tree-diff first (no subprocess, no rename tracking needed for name-only)
+        if let Some(files) = self.gix.try_diff_commits_changed_files(from_ref, to_ref) {
+            return Ok(files);
+        }
+
         let mut args = self.global_args_for_exec();
         args.push("diff".to_string());
         args.push("--name-only".to_string());
-        args.push("-z".to_string()); // NUL-separated output for proper UTF-8 handling
-        // Use permissive rename detection to properly handle renames
+        args.push("-z".to_string());
         args.push("--find-renames=1%".to_string());
         args.push(from_ref.to_string());
         args.push(to_ref.to_string());
 
         let output = exec_git_with_profile(&args, InternalGitProfile::RawDiffParse)?;
 
-        // With -z, output is NUL-separated. The output may contain a trailing NUL.
         let files: Vec<String> = output
             .stdout
             .split(|&b| b == 0)

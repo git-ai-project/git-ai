@@ -137,6 +137,11 @@ fn walk_first_parent_commits(
         return Ok(Vec::new());
     }
 
+    // Try gix first-parent walk (no subprocess)
+    if let Ok(commits) = repository.gix.rev_list_first_parent(head, base, max_count) {
+        return Ok(commits);
+    }
+
     let mut args = repository.global_args_for_exec();
     args.push("rev-list".to_string());
     args.push("--first-parent".to_string());
