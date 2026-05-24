@@ -561,6 +561,11 @@ fn build_token_summary(
     let mut by_model: Vec<TokenModelStat> = Vec::new();
 
     for (model, acc) in model_tokens {
+        // Skip placeholder/synthetic entries that carried no real token counts.
+        if acc.input == 0 && acc.output == 0 && acc.cache_read == 0 && acc.cache_creation == 0 {
+            continue;
+        }
+
         summary.input += acc.input;
         summary.output += acc.output;
         summary.cache_read += acc.cache_read;
