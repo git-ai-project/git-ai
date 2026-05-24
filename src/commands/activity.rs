@@ -132,7 +132,8 @@ fn days_ago(days: u64) -> u32 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    now.saturating_sub(days * 24 * 3600) as u32
+    now.saturating_sub(days * 24 * 3600)
+        .min(u32::MAX as u64) as u32
 }
 
 fn print_help() {
