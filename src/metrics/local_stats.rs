@@ -697,7 +697,9 @@ fn fill_buckets(
             let now_month = now.month();
             loop {
                 let order = year as i64 * 12 + (month - 1) as i64;
-                let date = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+                let Some(date) = NaiveDate::from_ymd_opt(year, month, 1) else {
+                    break;
+                };
                 let label = date.format("%b %Y").to_string();
                 result.push(make(label, data_map.remove(&order).unwrap_or_default()));
                 if year == now_year && month == now_month {
