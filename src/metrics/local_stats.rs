@@ -397,6 +397,21 @@ struct CodexSessionAccum {
     output_tokens: u64,
 }
 
+impl CodexSessionAccum {
+    /// Map codex token fields onto the shared `TokenAccum` schema.
+    ///
+    /// Codex `input_tokens` *includes* cached tokens, so non-cached input is
+    /// the difference. Codex has no cache-creation concept.
+    fn to_token_accum(&self) -> TokenAccum {
+        TokenAccum {
+            input: self.input_tokens.saturating_sub(self.cached_input_tokens),
+            output: self.output_tokens,
+            cache_read: self.cached_input_tokens,
+            cache_creation: 0,
+        }
+    }
+}
+
 /// Per-million-token pricing for a model (USD).
 struct ModelPricing {
     input: f64,
@@ -535,12 +550,7 @@ fn build_token_summary(
     for (sid, acc) in codex_sessions {
         let model = acc.model.clone().unwrap_or_else(|| "codex".to_string());
         let short = shorten_model(&model);
-        let mapped = TokenAccum {
-            input: acc.input_tokens.saturating_sub(acc.cached_input_tokens),
-            output: acc.output_tokens,
-            cache_read: acc.cached_input_tokens,
-            cache_creation: 0,
-        };
+        let mapped = acc.to_token_accum();
         let entry = model_tokens.entry(short.clone()).or_default();
         entry.input += mapped.input;
         entry.output += mapped.output;
@@ -1180,12 +1190,7 @@ pub fn compute_session_list(
 
             let (model, total_tokens, estimated_cost_usd) = if tool == "codex" {
                 if let Some(acc) = codex_sessions.get(sid) {
-                    let mapped = TokenAccum {
-                        input: acc.input_tokens.saturating_sub(acc.cached_input_tokens),
-                        output: acc.output_tokens,
-                        cache_read: acc.cached_input_tokens,
-                        cache_creation: 0,
-                    };
+                    let mapped = acc.to_token_accum();
                     let total =
                         mapped.input + mapped.output + mapped.cache_read + mapped.cache_creation;
                     let cost = acc
