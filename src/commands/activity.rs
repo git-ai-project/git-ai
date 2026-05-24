@@ -23,11 +23,7 @@ pub fn handle_activity(args: &[String]) {
             "--repo" if i + 1 < args.len() => {
                 // Normalize: strip protocol prefix so both "https://github.com/org/repo"
                 // and "github.com/org/repo" resolve to the same substring match.
-                let raw = args[i + 1].as_str();
-                let normalized = raw
-                    .trim_start_matches("https://")
-                    .trim_start_matches("http://");
-                repo_filter = Some(normalized.to_string());
+                repo_filter = Some(strip_protocol(args[i + 1].as_str()).to_string());
                 i += 1;
             }
             "--help" | "-h" => {
@@ -161,9 +157,7 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
     const BAR_WIDTH: u32 = 20;
 
     if let Some(repo) = repo_filter {
-        let display = repo
-            .trim_start_matches("https://")
-            .trim_start_matches("http://");
+        let display = strip_protocol(repo);
         if repos.len() > 1 {
             println!(
                 "{BOLD}git-ai usage{RESET} {GRAY}— {} repos matching '{}'  ·  {}{RESET}",
@@ -175,7 +169,7 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
             // Single match: show the full matched URL, not just the search term.
             let matched = repos
                 .first()
-                .map(|r| r.repo_url.trim_start_matches("https://").trim_start_matches("http://"))
+                .map(|r| strip_protocol(&r.repo_url))
                 .unwrap_or(display);
             println!(
                 "{BOLD}git-ai usage{RESET} {GRAY}— {}  ·  {}{RESET}",
@@ -209,15 +203,8 @@ fn print_terminal(stats: &LocalActivityStats, repos: &[RepoActivitySummary], rep
         println!("  {BOLD}Repositories{RESET}");
         let max_lines = repos.iter().map(|r| r.ai_lines).max().unwrap_or(1).max(1);
         for r in repos {
-            let repo_display = r
-                .repo_url
-                .trim_start_matches("https://")
-                .trim_start_matches("http://");
-            let repo_display = if repo_display.is_empty() {
-                "unknown"
-            } else {
-                repo_display
-            };
+            let repo_display = strip_protocol(&r.repo_url);
+            let repo_display = if repo_display.is_empty() { "unknown" } else { repo_display };
             let filled = (r.ai_lines * 16 / max_lines).min(16);
             let empty = 16 - filled;
             let bar_str = format!(
@@ -495,6 +482,12 @@ fn spark_char(value: u32, max: u32) -> &'static str {
         6 => "▇",
         _ => "█",
     }
+}
+
+/// Strip `https://` or `http://` from a URL for display purposes.
+fn strip_protocol(url: &str) -> &str {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
 }
 
 fn bar(pct: u32, width: u32) -> String {
