@@ -906,9 +906,14 @@ fn aggregate_session_tokens(
 
     let get = |key: &str| usage.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
 
-    let (_, acc, _ts, _sid) = message_usage
+    let (stored_model, acc, _ts, _sid) = message_usage
         .entry(id.to_string())
-        .or_insert_with(|| (model, TokenAccum::default(), record_ts, session_id));
+        .or_insert_with(|| (model.clone(), TokenAccum::default(), record_ts, session_id));
+    // If the entry was created with an "unknown" placeholder model (e.g. from a
+    // streaming partial that arrived before the final event), upgrade it now.
+    if stored_model == "unknown" && model != "unknown" {
+        *stored_model = model;
+    }
     // Field-wise max: input/cache are fixed per message; output grows while
     // streaming, so the final (largest) value is authoritative.
     acc.input = acc.input.max(get("input_tokens"));
