@@ -12,6 +12,7 @@ mod firebender;
 mod gemini;
 mod github_copilot;
 mod human;
+mod junie;
 mod known_human;
 mod mock_ai;
 mod mock_known_human;
@@ -162,6 +163,7 @@ pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
         "droid" => Ok(Box::new(droid::DroidPreset)),
         "opencode" => Ok(Box::new(opencode::OpenCodePreset)),
         "pi" => Ok(Box::new(pi::PiPreset)),
+        "junie" => Ok(Box::new(junie::JuniePreset)),
         "human" => Ok(Box::new(human::HumanPreset)),
         "mock_ai" => Ok(Box::new(mock_ai::MockAiPreset)),
         "known_human" => Ok(Box::new(known_human::KnownHumanPreset)),
