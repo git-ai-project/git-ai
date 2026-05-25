@@ -599,6 +599,12 @@ impl VirtualAttributions {
         let working_log = repo.storage.working_log_for_base_commit(&base_commit)?;
         let initial_attributions = working_log.read_initial_attributions();
         let checkpoints = working_log.read_all_checkpoints().unwrap_or_default();
+        if checkpoints.is_empty() && initial_attributions.files.is_empty() {
+            tracing::warn!(
+                "from_working_log_snapshot: no checkpoints and no INITIAL for base_commit={}",
+                base_commit,
+            );
+        }
 
         let mut attributions: HashMap<String, (Vec<Attribution>, Vec<LineAttribution>)> =
             HashMap::new();

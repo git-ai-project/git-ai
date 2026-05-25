@@ -17,16 +17,17 @@ impl AgentPreset for MockAiPreset {
                 .unwrap_or(0)
         );
 
-        let (file_paths, cwd) = if hook_input.is_empty() {
+        let (file_paths, cwd, dirty_files) = if hook_input.is_empty() {
             (
                 vec![],
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                None,
             )
         } else {
             let data: serde_json::Value = serde_json::from_str(hook_input)
                 .map_err(|e| GitAiError::PresetError(format!("Invalid JSON: {}", e)))?;
 
-            let paths = data
+            let paths: Vec<PathBuf> = data
                 .get("file_paths")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -42,7 +43,9 @@ impl AgentPreset for MockAiPreset {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            (paths, cwd)
+            let dirty_files = super::parse::dirty_files_from_value(&data, cwd.to_str().unwrap_or("."));
+
+            (paths, cwd, dirty_files)
         };
 
         let context = PresetContext {
@@ -60,7 +63,7 @@ impl AgentPreset for MockAiPreset {
         Ok(vec![ParsedHookEvent::PostFileEdit(PostFileEdit {
             context,
             file_paths,
-            dirty_files: None,
+            dirty_files,
             transcript_source: None,
             tool_use_id: None,
         })])

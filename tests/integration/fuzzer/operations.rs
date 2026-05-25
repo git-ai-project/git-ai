@@ -90,7 +90,28 @@ impl FileState {
 
     /// Write the file to disk. Each line is the char repeated deterministically.
     pub fn write_to_disk(&self, repo: &TestRepo) {
+        use std::io::Write;
         let path = repo.path().join(&self.filename);
+        let content = self.to_content_string();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        // Use explicit open+write+sync to ensure data visibility to subprocesses
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap_or_else(|e| panic!("Failed to open file '{}': {}", self.filename, e));
+        file.write_all(content.as_bytes())
+            .unwrap_or_else(|e| panic!("Failed to write file '{}': {}", self.filename, e));
+        file.sync_all()
+            .unwrap_or_else(|e| panic!("Failed to sync file '{}': {}", self.filename, e));
+        drop(file);
+    }
+
+    /// Convert lines to the content string (without writing to disk).
+    pub fn to_content_string(&self) -> String {
         let mut content = String::new();
         for &ch in &self.lines {
             let repeat_count = (ch as usize % 16) + 5;
@@ -99,12 +120,7 @@ impl FileState {
             }
             content.push('\n');
         }
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).ok();
-        }
-        fs::write(&path, &content).unwrap_or_else(|e| {
-            panic!("Failed to write file '{}': {}", self.filename, e);
-        });
+        content
     }
 }
 
@@ -139,22 +155,42 @@ pub fn execute_edit_and_checkpoint(
     match attribution {
         Attribution::Ai => {
             // AI: pre-edit "human" to snapshot current state, then write, then "mock_ai"
-            repo.git_ai(&["checkpoint", "human", &filename]).ok();
+            // Pass dirty_files for pre-edit too, to avoid filesystem race under concurrency
+            checkpoint_with_dirty_files(repo, file_state, "human");
             file_state.apply_edit(*strategy, ch, *line_count, rng);
             file_state.write_to_disk(repo);
-            repo.git_ai(&["checkpoint", "mock_ai", &filename]).unwrap();
+            checkpoint_with_dirty_files(repo, file_state, "mock_ai");
         }
         Attribution::KnownHuman => {
             // Known human: pre-edit "human" to snapshot, then write, then "mock_known_human"
-            repo.git_ai(&["checkpoint", "human", &filename]).ok();
+            checkpoint_with_dirty_files(repo, file_state, "human");
             file_state.apply_edit(*strategy, ch, *line_count, rng);
             file_state.write_to_disk(repo);
-            repo.git_ai(&["checkpoint", "mock_known_human", &filename])
-                .unwrap();
+            checkpoint_with_dirty_files(repo, file_state, "mock_known_human");
         }
     }
 
     ch
+}
+
+/// Fire a checkpoint with dirty_files to avoid filesystem race conditions.
+/// This passes the file content via stdin hook-input so the CLI doesn't need to
+/// re-read the file from disk (which can see stale content under concurrency).
+pub fn checkpoint_with_dirty_files(repo: &TestRepo, file_state: &FileState, checkpoint_type: &str) {
+    let content = file_state.to_content_string();
+    let abs_path = repo.path().join(&file_state.filename);
+    let hook_input = serde_json::json!({
+        "file_paths": [abs_path.to_string_lossy()],
+        "cwd": repo.path().to_string_lossy(),
+        "dirty_files": {
+            abs_path.to_string_lossy().as_ref(): content,
+        }
+    });
+    repo.git_ai_with_stdin(
+        &["checkpoint", checkpoint_type, "--hook-input", "stdin"],
+        hook_input.to_string().as_bytes(),
+    )
+    .ok();
 }
 
 /// Stage all and commit.
@@ -732,7 +768,13 @@ pub fn execute_checkout_discard(
     ));
 
     // Discard all working tree changes for this file
-    repo.git(&["checkout", "--", &file_state.filename]).unwrap();
+    if repo
+        .git(&["checkout", "--", &file_state.filename])
+        .is_err()
+    {
+        operation_log.push("checkout-discard: checkout failed (unmerged?), skipping".to_string());
+        return;
+    }
 
     // Re-read file state from disk (reverts to last committed version)
     let path = repo.path().join(&file_state.filename);
@@ -777,6 +819,7 @@ pub fn execute_stash_pop_cycle(
 
     // Stash the changes
     repo.git(&["stash", "push", "-m", "fuzzer stash"]).unwrap();
+    repo.sync_daemon_force();
     file_state.lines = pre_stash_lines.clone();
 
     operation_log.push(format!(
@@ -803,13 +846,16 @@ pub fn execute_stash_pop_cycle(
     // Pop the stash - this should merge the stashed appended lines
     let pop_result = repo.git(&["stash", "pop"]);
     if pop_result.is_err() {
-        // Stash pop can fail with conflicts; in that case, abort and skip
-        repo.git(&["checkout", "--", "."]).ok();
+        // Stash pop can fail with conflicts; fully reset to HEAD (checkout only resets
+        // working tree to index, which may retain non-conflicting stash changes)
+        repo.git(&["reset", "--hard", "HEAD"]).unwrap();
         repo.git(&["stash", "drop"]).ok();
         operation_log.push("stash-pop: conflict on pop, dropped stash".to_string());
         // File state remains as post_commit_lines
         return;
     }
+    // Sync daemon to ensure stash attributions are restored before any commit
+    repo.sync_daemon_force();
 
     // After successful pop: prepended lines + original lines + stashed appended lines
     let stashed_appended: Vec<char> = stashed_lines[pre_stash_lines.len()..].to_vec();
@@ -1509,6 +1555,7 @@ pub fn execute_stash_pathspec(
         operation_log.push("stash-pathspec: stash push failed, skipping".to_string());
         return;
     }
+    repo.sync_daemon_force();
 
     // File B should be reverted, file A still dirty
     file_state_b.lines = pre_stash_b;
@@ -1524,6 +1571,7 @@ pub fn execute_stash_pathspec(
         operation_log.push("stash-pathspec: pop failed, dropped".to_string());
         return;
     }
+    repo.sync_daemon_force();
 
     // Re-read file B from disk
     let path_b = repo.path().join(&file_state_b.filename);
@@ -1823,7 +1871,10 @@ pub fn execute_orphaned_checkpoints(
     }
 
     // Now THROW IT ALL AWAY with hard reset
-    repo.git(&["checkout", "--", "."]).unwrap();
+    // If there are unmerged paths (from a prior conflicted operation), resolve first
+    if repo.git(&["checkout", "--", "."]).is_err() {
+        repo.git(&["reset", "--hard", "HEAD"]).unwrap();
+    }
 
     // Re-read from disk
     let path = repo.path().join(&file_state.filename);
@@ -1941,7 +1992,9 @@ pub fn execute_thrash(
         match rng.random_range(0..3u32) {
             0 => {
                 // Discard and reset
-                repo.git(&["checkout", "--", "."]).unwrap();
+                if repo.git(&["checkout", "--", "."]).is_err() {
+                    repo.git(&["reset", "--hard", "HEAD"]).unwrap();
+                }
                 let path = repo.path().join(&file_state.filename);
                 if path.exists() {
                     let content = fs::read_to_string(&path).unwrap();
@@ -2449,6 +2502,7 @@ pub fn execute_stash_during_work(
         }
         return;
     }
+    repo.sync_daemon_force();
 
     // Re-read file state from disk (stash reverts to committed state)
     let path = repo.path().join(&file_state.filename);
@@ -2477,11 +2531,12 @@ pub fn execute_stash_during_work(
     // Pop stash
     let pop_result = repo.git(&["stash", "pop"]);
     if pop_result.is_err() {
-        // Conflict: drop the stash
-        repo.git(&["checkout", "--", "."]).ok();
+        // Conflict: fully reset to HEAD (checkout only resets working tree to index,
+        // which may still contain non-conflicting stash changes)
+        repo.git(&["reset", "--hard", "HEAD"]).unwrap();
         repo.git(&["stash", "drop"]).ok();
         operation_log.push("stash-during-work: pop conflict, dropped stash".to_string());
-        // Re-read from disk
+        // Re-read from disk (now matches HEAD = interim commit)
         let path = repo.path().join(&file_state.filename);
         if path.exists() {
             let content = fs::read_to_string(&path).unwrap();
@@ -2489,6 +2544,7 @@ pub fn execute_stash_during_work(
         }
         return;
     }
+    repo.sync_daemon_force();
 
     // After pop: re-read from disk to get merged state
     let path = repo.path().join(&file_state.filename);
@@ -3926,8 +3982,7 @@ pub fn execute_noop_overwrite(
     } else {
         "mock_known_human"
     };
-    repo.git_ai(&["checkpoint", checkpoint_type, &file_state.filename])
-        .ok();
+    checkpoint_with_dirty_files(repo, file_state, checkpoint_type);
 
     // Now make a REAL edit
     let params = EditParams {
@@ -4026,8 +4081,7 @@ pub fn execute_amend_shrink(
     } else {
         "mock_known_human"
     };
-    repo.git_ai(&["checkpoint", checkpoint_type, &file_state.filename])
-        .ok();
+    checkpoint_with_dirty_files(repo, file_state, checkpoint_type);
 
     // Amend (may fail if it would create an empty commit)
     repo.git(&["add", "-A"]).unwrap();
@@ -4137,8 +4191,7 @@ pub fn execute_untracked_interleave(
     file_state.write_to_disk(repo);
 
     // Now fire a "human" checkpoint (untracked/legacy) to capture the untracked state
-    repo.git_ai(&["checkpoint", "human", &file_state.filename])
-        .ok();
+    checkpoint_with_dirty_files(repo, file_state, "human");
 
     // Make REAL checkpointed edits
     let params = EditParams {
@@ -4433,6 +4486,7 @@ pub fn execute_multi_stash(
         // Stash it
         let result = repo.git(&["stash", "push", "-m", &format!("multi-stash entry {}", i)]);
         if result.is_ok() {
+            repo.sync_daemon_force();
             stashed += 1;
             // After stash, re-read file (reverts to committed state)
             file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
@@ -4443,8 +4497,10 @@ pub fn execute_multi_stash(
     for _ in 0..stashed {
         let pop_result = repo.git(&["stash", "pop"]);
         if pop_result.is_err() {
-            repo.git(&["checkout", "--", "."]).ok();
+            repo.git(&["reset", "--hard", "HEAD"]).ok();
             repo.git(&["stash", "drop"]).ok();
+        } else {
+            repo.sync_daemon_force();
         }
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
     }

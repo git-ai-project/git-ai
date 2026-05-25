@@ -7,7 +7,8 @@ use crate::repos::test_repo::TestRepo;
 
 use super::generators::{EditStrategy, gen_attribution, gen_line_count};
 use super::operations::{
-    EditParams, FileState, execute_edit_and_checkpoint, read_file_state_from_disk,
+    EditParams, FileState, checkpoint_with_dirty_files, execute_edit_and_checkpoint,
+    read_file_state_from_disk,
     reconstruct_lines_from_content,
 };
 use super::oracle::{Attribution, CharRegistry};
@@ -281,6 +282,7 @@ pub fn execute_workflow_stash_sandwich(
     // Stash the changes
     repo.git(&["stash", "push", "-m", "sandwich stash"])
         .unwrap();
+    repo.sync_daemon_force();
     file_state.lines = pre_stash_lines.clone();
 
     operation_log.push(format!(
@@ -306,11 +308,12 @@ pub fn execute_workflow_stash_sandwich(
     // Pop the stash
     let pop_result = repo.git(&["stash", "pop"]);
     if pop_result.is_err() {
-        repo.git(&["checkout", "--", "."]).ok();
+        repo.git(&["reset", "--hard", "HEAD"]).ok();
         repo.git(&["stash", "drop"]).ok();
         operation_log.push("workflow-stash-sandwich: conflict on pop, dropped".to_string());
         return;
     }
+    repo.sync_daemon_force();
 
     // After pop: prepended lines + original + stashed appended lines
     let stashed_appended: Vec<char> = stashed_lines[pre_stash_lines.len()..].to_vec();
@@ -960,10 +963,8 @@ pub fn execute_restore_from_commit(
     file_state.lines = commit_a_lines;
 
     // Checkpoint the restored content (treat as human action since restore is a human operation)
-    repo.git_ai(&["checkpoint", "human", &file_state.filename])
-        .ok();
-    repo.git_ai(&["checkpoint", "mock_known_human", &file_state.filename])
-        .ok();
+    checkpoint_with_dirty_files(repo, file_state, "human");
+    checkpoint_with_dirty_files(repo, file_state, "mock_known_human");
 
     // Commit the restored file
     repo.git(&["add", "-A"]).unwrap();
@@ -1359,7 +1360,6 @@ pub fn execute_interleaved_line_attribution(
     if replace_start < replace_end {
         // Allocate a human char
         let human_ch = registry.allocate(Attribution::KnownHuman);
-        let filename = file_state.filename.clone();
 
         operation_log.push(format!(
             "interleaved-line-attribution: human replacing lines {}..{} (ch='{}')",
@@ -1367,7 +1367,7 @@ pub fn execute_interleaved_line_attribution(
         ));
 
         // Pre-checkpoint (snapshot current state)
-        repo.git_ai(&["checkpoint", "human", &filename]).ok();
+        checkpoint_with_dirty_files(repo, file_state, "human");
 
         // Replace the subset of lines with human char
         for i in replace_start..replace_end {
@@ -1376,8 +1376,7 @@ pub fn execute_interleaved_line_attribution(
         file_state.write_to_disk(repo);
 
         // Post-checkpoint as known human
-        repo.git_ai(&["checkpoint", "mock_known_human", &filename])
-            .unwrap();
+        checkpoint_with_dirty_files(repo, file_state, "mock_known_human");
     }
 
     // Commit

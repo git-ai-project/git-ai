@@ -1126,16 +1126,38 @@ pub fn rewrite_authorship_after_rebase_v2(
     );
 
     // Filter out commits that already have authorship logs (these are commits from the target branch).
+    // However, always reprocess a new commit if its paired original has AI attestation data
+    // that might be missing from the new commit's note (daemon per-commit handler may have
+    // written a note with only human attestations, missing AI data from the original).
     let force_process_existing_notes = original_commits.len() > new_commits.len();
+    let all_commit_pairs_for_filter =
+        pair_commits_for_rewrite(repo, original_commits, new_commits);
     let commits_to_process: Vec<String> = new_commits
         .iter()
         .filter(|commit| {
-            let has_log = !force_process_existing_notes
-                && note_cache.new_commits_with_notes.contains(commit.as_str());
-            if has_log {
-                tracing::debug!("Skipping commit {} (already has authorship log)", commit);
+            if force_process_existing_notes {
+                return true;
             }
-            !has_log
+            if !note_cache.new_commits_with_notes.contains(commit.as_str()) {
+                return true;
+            }
+            // The new commit has a note. Check if the paired original also has a note
+            // with AI data — if so, reprocess to ensure AI attestations are carried over.
+            if let Some((orig, _)) = all_commit_pairs_for_filter
+                .iter()
+                .find(|(_, new)| new == *commit)
+            {
+                if note_cache.original_note_contents.contains_key(orig) {
+                    tracing::debug!(
+                        "Reprocessing commit {} (has note but original {} has AI data)",
+                        commit,
+                        orig
+                    );
+                    return true;
+                }
+            }
+            tracing::debug!("Skipping commit {} (already has authorship log)", commit);
+            false
         })
         .cloned()
         .collect();

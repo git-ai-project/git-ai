@@ -178,19 +178,6 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
         return Ok(());
     }
 
-    let mut args = repo.global_args_for_exec();
-    args.push("rev-parse".to_string());
-    args.push("--verify".to_string());
-    args.push("refs/notes/ai".to_string());
-    let existing_notes_tip = match exec_git(&args) {
-        Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
-        Err(GitAiError::GitCliError {
-            code: Some(128), ..
-        })
-        | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
-        Err(e) => return Err(e),
-    };
-
     let mut deduped_entries: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
     for (commit_sha, note_content) in entries.iter().rev() {
@@ -200,46 +187,90 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
     }
     deduped_entries.reverse();
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
-        .as_secs();
+    const MAX_RETRIES: u32 = 5;
+    for attempt in 0..=MAX_RETRIES {
+        let mut args = repo.global_args_for_exec();
+        args.push("rev-parse".to_string());
+        args.push("--verify".to_string());
+        args.push("refs/notes/ai".to_string());
+        let existing_notes_tip = match exec_git(&args) {
+            Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
+            Err(GitAiError::GitCliError {
+                code: Some(128), ..
+            })
+            | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
+            Err(e) => return Err(e),
+        };
 
-    let mut script = Vec::<u8>::new();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
+            .as_secs();
 
-    for (idx, (_commit_sha, note_content)) in deduped_entries.iter().enumerate() {
-        script.extend_from_slice(b"blob\n");
-        script.extend_from_slice(format!("mark :{}\n", idx + 1).as_bytes());
-        script.extend_from_slice(format!("data {}\n", note_content.len()).as_bytes());
-        script.extend_from_slice(note_content.as_bytes());
-        script.extend_from_slice(b"\n");
-    }
+        let mut script = Vec::<u8>::new();
 
-    script.extend_from_slice(b"commit refs/notes/ai\n");
-    script.extend_from_slice(format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes());
-    script.extend_from_slice(b"data 0\n");
-    if let Some(existing_tip) = existing_notes_tip {
-        script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
-    }
-
-    for (idx, (commit_sha, _note_content)) in deduped_entries.iter().enumerate() {
-        let fanout_path = notes_path_for_object(commit_sha);
-        let flat_path = commit_sha.clone();
-        if flat_path != fanout_path {
-            script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+        for (idx, (_commit_sha, note_content)) in deduped_entries.iter().enumerate() {
+            script.extend_from_slice(b"blob\n");
+            script.extend_from_slice(format!("mark :{}\n", idx + 1).as_bytes());
+            script.extend_from_slice(format!("data {}\n", note_content.len()).as_bytes());
+            script.extend_from_slice(note_content.as_bytes());
+            script.extend_from_slice(b"\n");
         }
-        script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
-        script.extend_from_slice(format!("M 100644 :{} {}\n", idx + 1, fanout_path).as_bytes());
+
+        script.extend_from_slice(b"commit refs/notes/ai\n");
+        script.extend_from_slice(
+            format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes(),
+        );
+        script.extend_from_slice(b"data 0\n");
+        if let Some(ref existing_tip) = existing_notes_tip {
+            script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
+        }
+
+        for (idx, (commit_sha, _note_content)) in deduped_entries.iter().enumerate() {
+            let fanout_path = notes_path_for_object(commit_sha);
+            let flat_path = commit_sha.clone();
+            if flat_path != fanout_path {
+                script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+            }
+            script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
+            script.extend_from_slice(format!("M 100644 :{} {}\n", idx + 1, fanout_path).as_bytes());
+        }
+        script.extend_from_slice(b"\n");
+
+        let mut fast_import_args = repo.global_args_for_exec();
+        fast_import_args.push("fast-import".to_string());
+        fast_import_args.push("--quiet".to_string());
+        match exec_git_stdin(&fast_import_args, &script) {
+            Ok(_) => {
+                crate::authorship::git_ai_hooks::post_notes_updated(repo, &deduped_entries);
+                return Ok(());
+            }
+            Err(GitAiError::GitCliError {
+                code: Some(1),
+                ref stderr,
+                ..
+            }) if stderr.contains("Not updating refs/notes/ai") => {
+                if attempt < MAX_RETRIES {
+                    tracing::warn!(
+                        attempt,
+                        "notes_add_batch: fast-import ref update rejected (stale tip), retrying"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10 * (attempt as u64 + 1)));
+                    continue;
+                }
+                tracing::error!(
+                    "notes_add_batch: fast-import ref update rejected after {} retries",
+                    MAX_RETRIES
+                );
+                return Err(GitAiError::Generic(
+                    "notes_add_batch: refs/notes/ai ref update rejected after max retries"
+                        .to_string(),
+                ));
+            }
+            Err(e) => return Err(e),
+        }
     }
-    script.extend_from_slice(b"\n");
-
-    let mut fast_import_args = repo.global_args_for_exec();
-    fast_import_args.push("fast-import".to_string());
-    fast_import_args.push("--quiet".to_string());
-    exec_git_stdin(&fast_import_args, &script)?;
-    crate::authorship::git_ai_hooks::post_notes_updated(repo, &deduped_entries);
-
-    Ok(())
+    unreachable!()
 }
 
 /// Batch-attach existing note blobs to commits without rewriting blob contents.
@@ -254,19 +285,6 @@ pub fn notes_add_blob_batch(
         return Ok(());
     }
 
-    let mut args = repo.global_args_for_exec();
-    args.push("rev-parse".to_string());
-    args.push("--verify".to_string());
-    args.push("refs/notes/ai".to_string());
-    let existing_notes_tip = match exec_git(&args) {
-        Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
-        Err(GitAiError::GitCliError {
-            code: Some(128), ..
-        })
-        | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
-        Err(e) => return Err(e),
-    };
-
     let mut deduped_entries: Vec<(String, String)> = Vec::new();
     let mut seen = HashSet::new();
     for (commit_sha, blob_oid) in entries.iter().rev() {
@@ -276,34 +294,79 @@ pub fn notes_add_blob_batch(
     }
     deduped_entries.reverse();
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
-        .as_secs();
+    const MAX_RETRIES: u32 = 5;
+    for attempt in 0..=MAX_RETRIES {
+        let mut args = repo.global_args_for_exec();
+        args.push("rev-parse".to_string());
+        args.push("--verify".to_string());
+        args.push("refs/notes/ai".to_string());
+        let existing_notes_tip = match exec_git(&args) {
+            Ok(output) => Some(String::from_utf8(output.stdout)?.trim().to_string()),
+            Err(GitAiError::GitCliError {
+                code: Some(128), ..
+            })
+            | Err(GitAiError::GitCliError { code: Some(1), .. }) => None,
+            Err(e) => return Err(e),
+        };
 
-    let mut script = Vec::<u8>::new();
-    script.extend_from_slice(b"commit refs/notes/ai\n");
-    script.extend_from_slice(format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes());
-    script.extend_from_slice(b"data 0\n");
-    if let Some(existing_tip) = existing_notes_tip {
-        script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
-    }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
+            .as_secs();
 
-    for (commit_sha, blob_oid) in &deduped_entries {
-        let fanout_path = notes_path_for_object(commit_sha);
-        let flat_path = commit_sha.clone();
-        if flat_path != fanout_path {
-            script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+        let mut script = Vec::<u8>::new();
+        script.extend_from_slice(b"commit refs/notes/ai\n");
+        script.extend_from_slice(
+            format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes(),
+        );
+        script.extend_from_slice(b"data 0\n");
+        if let Some(ref existing_tip) = existing_notes_tip {
+            script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
         }
-        script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
-        script.extend_from_slice(format!("M 100644 {} {}\n", blob_oid, fanout_path).as_bytes());
-    }
-    script.extend_from_slice(b"\n");
 
-    let mut fast_import_args = repo.global_args_for_exec();
-    fast_import_args.push("fast-import".to_string());
-    fast_import_args.push("--quiet".to_string());
-    exec_git_stdin(&fast_import_args, &script)?;
+        for (commit_sha, blob_oid) in &deduped_entries {
+            let fanout_path = notes_path_for_object(commit_sha);
+            let flat_path = commit_sha.clone();
+            if flat_path != fanout_path {
+                script.extend_from_slice(format!("D {}\n", flat_path).as_bytes());
+            }
+            script.extend_from_slice(format!("D {}\n", fanout_path).as_bytes());
+            script
+                .extend_from_slice(format!("M 100644 {} {}\n", blob_oid, fanout_path).as_bytes());
+        }
+        script.extend_from_slice(b"\n");
+
+        let mut fast_import_args = repo.global_args_for_exec();
+        fast_import_args.push("fast-import".to_string());
+        fast_import_args.push("--quiet".to_string());
+        match exec_git_stdin(&fast_import_args, &script) {
+            Ok(_) => {
+                // Fall through to post-hook processing below
+                break;
+            }
+            Err(GitAiError::GitCliError {
+                code: Some(1),
+                ref stderr,
+                ..
+            }) if stderr.contains("Not updating refs/notes/ai") => {
+                if attempt < MAX_RETRIES {
+                    tracing::warn!(
+                        attempt,
+                        "notes_add_blob_batch: fast-import ref update rejected (stale tip), retrying"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        10 * (attempt as u64 + 1),
+                    ));
+                    continue;
+                }
+                return Err(GitAiError::Generic(
+                    "notes_add_blob_batch: refs/notes/ai ref update rejected after max retries"
+                        .to_string(),
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+    }
 
     let has_post_notes_updated_hooks = crate::config::Config::get()
         .git_ai_hook_commands("post_notes_updated")
