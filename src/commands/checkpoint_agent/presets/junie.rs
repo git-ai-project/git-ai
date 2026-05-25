@@ -12,6 +12,25 @@ impl JuniePreset {
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
+    fn status_path(raw_file: &str, repo_root: &Path) -> Option<PathBuf> {
+        let raw_file = raw_file.trim();
+        if raw_file.is_empty() {
+            return None;
+        }
+
+        let raw_path = raw_file
+            .split_once(" -> ")
+            .map(|(_, destination)| destination)
+            .unwrap_or(raw_file);
+        let unescaped = crate::utils::unescape_git_path(raw_path);
+        let path = Path::new(&unescaped);
+        if path.is_absolute() {
+            Some(path.to_path_buf())
+        } else {
+            Some(repo_root.join(path))
+        }
+    }
+
     fn dirty_file_paths(cwd: &Path) -> Vec<PathBuf> {
         let repo_root = crate::git::repository::discover_repository_in_path_no_git_exec(cwd)
             .ok()
@@ -34,21 +53,7 @@ impl JuniePreset {
                 if line.len() < 4 {
                     return None;
                 }
-                let raw_file = line[3..].trim();
-                if raw_file.is_empty() {
-                    return None;
-                }
-                let unescaped = crate::utils::unescape_git_path(raw_file);
-                let file = unescaped
-                    .find(" -> ")
-                    .map(|arrow| &unescaped[arrow + 4..])
-                    .unwrap_or(unescaped.as_str());
-                let path = Path::new(file);
-                if path.is_absolute() {
-                    Some(path.to_path_buf())
-                } else {
-                    Some(repo_root.join(path))
-                }
+                Self::status_path(&line[3..], &repo_root)
             })
             .collect()
     }
@@ -123,5 +128,14 @@ mod tests {
             err.to_string()
                 .contains("Unsupported Junie hook_event_name")
         );
+    }
+
+    #[test]
+    fn test_junie_status_path_splits_rename_before_unescape() {
+        let repo_root = Path::new("/repo");
+        let path = JuniePreset::status_path("\"old name.txt\" -> \"new name.txt\"", repo_root)
+            .expect("rename destination should parse");
+
+        assert_eq!(path, repo_root.join("new name.txt"));
     }
 }

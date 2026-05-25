@@ -84,3 +84,43 @@ fn test_junie_session_start_checkpoints_dirty_files_as_human_baseline() {
         "Junie SessionStart should baseline current dirty files"
     );
 }
+
+#[test]
+fn test_junie_session_start_checkpoints_quoted_rename_destination() {
+    let repo = TestRepo::new();
+    fs::write(repo.path().join("old name.txt"), "base\n").expect("write base file");
+    repo.stage_all_and_commit("initial commit")
+        .expect("initial commit should succeed");
+    repo.git(&["mv", "old name.txt", "new name.txt"])
+        .expect("rename should succeed");
+
+    let hook_input = json!({
+        "hook_event_name": "SessionStart",
+        "source": "resume"
+    })
+    .to_string();
+
+    repo.git_ai_with_stdin(
+        &["checkpoint", "junie", "--hook-input", "stdin"],
+        hook_input.as_bytes(),
+    )
+    .expect("Junie checkpoint should succeed");
+
+    let checkpoints = repo
+        .current_working_logs()
+        .read_all_checkpoints()
+        .expect("checkpoints should be readable");
+    let latest = checkpoints.last().expect("Junie checkpoint should exist");
+    assert_eq!(latest.kind, CheckpointKind::Human);
+    assert!(
+        latest
+            .entries
+            .iter()
+            .any(|entry| entry.file == "new name.txt"),
+        "Junie SessionStart should baseline renamed destination paths"
+    );
+    assert!(
+        latest.entries.iter().all(|entry| !entry.file.contains('"')),
+        "Junie rename paths should not include stray quote characters"
+    );
+}
