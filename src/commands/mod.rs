@@ -1,6 +1,7 @@
 pub mod blame;
 pub mod blame_analysis;
 pub mod checkpoint_agent;
+pub mod ci_handlers;
 pub mod config;
 pub mod daemon;
 pub mod debug;

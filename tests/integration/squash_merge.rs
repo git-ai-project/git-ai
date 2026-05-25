@@ -412,13 +412,10 @@ fn test_squash_rebase_preserves_interleaved_attribution() {
 
     let stats = repo.stats().unwrap();
 
-    // All AI lines should be attributed. The count may include a trailing-newline
-    // artifact from the initial `# module` line gaining a newline.
-    assert!(
-        stats.ai_additions >= 10,
-        "At least 10 lines should be AI-attributed after squash, got ai={} human={}",
-        stats.ai_additions,
-        stats.human_additions
+    assert_eq!(
+        stats.ai_additions, 10,
+        "All 10 lines should be AI-attributed after squash, got ai={} human={}",
+        stats.ai_additions, stats.human_additions
     );
     assert_eq!(stats.human_additions, 0, "No human lines expected");
 

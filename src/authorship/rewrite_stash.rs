@@ -194,7 +194,16 @@ fn restore_stash_attributions(
                         .open(&dst_path)?;
                     f.write_all(stash_content.as_bytes())?;
                 }
-            } else if !dst_path.exists() {
+            } else if dst_path.exists() {
+                if let Ok(stash_content) = fs::read_to_string(&src_path) {
+                    use std::io::Write;
+                    let mut f = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&dst_path)?;
+                    f.write_all(stash_content.as_bytes())?;
+                }
+            } else {
                 let _ = fs::copy(&src_path, &dst_path);
             }
         }
