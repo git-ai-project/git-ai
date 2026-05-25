@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::hunk_shift::{DiffHunk, parse_hunk_header};
 use crate::error::GitAiError;
+use crate::git::notes_api;
 use crate::git::repository::{Repository, exec_git, exec_git_allow_nonzero, exec_git_stdin};
 
 #[derive(Debug)]
@@ -90,9 +91,10 @@ fn handle_squash_merge(
 ) -> Result<(), GitAiError> {
     use crate::authorship::hunk_shift::apply_hunk_shifts_to_file_attestation;
 
-    // Don't overwrite existing notes that have real attestations (e.g. from post-commit hook)
-    if let Some(existing_raw) = read_authorship_note(repo, squash_commit)?
-        && let Ok(existing_log) = AuthorshipLog::deserialize_from_string(&existing_raw)
+    // Check if target already has non-empty attestations (e.g. from post-commit hook)
+    let target_notes = notes_api::read_notes_batch(repo, &[squash_commit.to_string()])?;
+    if let Some(existing_raw) = target_notes.get(squash_commit)
+        && let Ok(existing_log) = AuthorshipLog::deserialize_from_string(existing_raw)
         && !existing_log.attestations.is_empty()
     {
         return Ok(());
@@ -108,20 +110,23 @@ fn handle_squash_merge(
 
     crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &sources);
 
+    // Batch-read all source notes in O(1) git calls
+    let source_notes_map = notes_api::read_notes_batch(repo, &sources)?;
+
     // Collect which source commits have parseable notes and need intermediate diffs
     struct SourceNote {
         log: AuthorshipLog,
-        diff_idx: Option<usize>, // index into diff_pairs (None = tip, no shift needed)
+        diff_idx: Option<usize>,
     }
 
     let mut source_notes: Vec<SourceNote> = Vec::new();
     let mut diff_pairs: Vec<(String, String)> = Vec::new();
 
     for src_sha in &sources {
-        let Some(raw) = read_authorship_note(repo, src_sha)? else {
+        let Some(raw) = source_notes_map.get(src_sha) else {
             continue;
         };
-        let Ok(log) = AuthorshipLog::deserialize_from_string(&raw) else {
+        let Ok(log) = AuthorshipLog::deserialize_from_string(raw) else {
             continue;
         };
 
@@ -211,7 +216,7 @@ fn handle_squash_merge(
     let serialized = final_log.serialize_to_string().map_err(|e| {
         GitAiError::Generic(format!("failed to serialize squash authorship log: {}", e))
     })?;
-    write_authorship_note(repo, squash_commit, &serialized)?;
+    notes_api::write_notes_batch(repo, &[(squash_commit.to_string(), serialized)])?;
     Ok(())
 }
 
@@ -223,26 +228,32 @@ pub fn shift_authorship_notes(
 
     tracing::debug!("shift_authorship_notes: {} mappings", mappings.len());
 
-    // First pass: determine which mappings need a diff (have parseable source notes,
-    // no existing target notes with attestations). Collect their logs and diff pairs.
+    if mappings.is_empty() {
+        return Ok(());
+    }
+
+    // Batch-read all notes for source and target commits in O(1) git calls
+    let all_shas: Vec<String> = mappings
+        .iter()
+        .flat_map(|(src, dst)| [src.clone(), dst.clone()])
+        .collect();
+    let notes_map = notes_api::read_notes_batch(repo, &all_shas)?;
+
+    // Determine which mappings need processing
     struct PendingShift {
         new_sha: String,
         log: AuthorshipLog,
         diff_pair_idx: usize,
     }
-    // Mappings that just need verbatim copy (unparseable notes)
-    struct VerbatimCopy {
-        new_sha: String,
-        raw: String,
-    }
 
     let mut pending: Vec<PendingShift> = Vec::new();
-    let mut verbatim: Vec<VerbatimCopy> = Vec::new();
+    let mut verbatim_writes: Vec<(String, String)> = Vec::new();
     let mut diff_pairs: Vec<(String, String)> = Vec::new();
 
     for (source_sha, new_sha) in mappings {
-        if let Some(existing_raw) = read_authorship_note(repo, new_sha)? {
-            if let Ok(existing_log) = AuthorshipLog::deserialize_from_string(&existing_raw) {
+        // Skip if target already has non-empty attestations
+        if let Some(existing_raw) = notes_map.get(new_sha) {
+            if let Ok(existing_log) = AuthorshipLog::deserialize_from_string(existing_raw) {
                 if !existing_log.attestations.is_empty() {
                     continue;
                 }
@@ -250,15 +261,13 @@ pub fn shift_authorship_notes(
                 continue;
             }
         }
-        let Some(raw_note) = read_authorship_note(repo, source_sha)? else {
+
+        let Some(raw_note) = notes_map.get(source_sha) else {
             continue;
         };
 
-        let Ok(log) = AuthorshipLog::deserialize_from_string(&raw_note) else {
-            verbatim.push(VerbatimCopy {
-                new_sha: new_sha.clone(),
-                raw: raw_note,
-            });
+        let Ok(log) = AuthorshipLog::deserialize_from_string(raw_note) else {
+            verbatim_writes.push((new_sha.clone(), raw_note.clone()));
             continue;
         };
 
@@ -271,19 +280,20 @@ pub fn shift_authorship_notes(
         });
     }
 
-    // Write verbatim copies
-    for v in &verbatim {
-        write_authorship_note(repo, &v.new_sha, &v.raw)?;
-    }
-
-    if pending.is_empty() {
+    if pending.is_empty() && verbatim_writes.is_empty() {
         return Ok(());
     }
 
     // Single batched diff-tree call for all pairs
-    let diff_results = compute_diff_trees_batch(repo, &diff_pairs)?;
+    let diff_results = if !diff_pairs.is_empty() {
+        compute_diff_trees_batch(repo, &diff_pairs)?
+    } else {
+        Vec::new()
+    };
 
-    // Apply shifts using the batched results
+    // Apply shifts and collect all writes
+    let mut all_writes = verbatim_writes;
+
     for shift in pending {
         let diff_result = &diff_results[shift.diff_pair_idx];
         let mut log = shift.log;
@@ -312,8 +322,11 @@ pub fn shift_authorship_notes(
         let serialized = log.serialize_to_string().map_err(|e| {
             GitAiError::Generic(format!("failed to serialize shifted authorship log: {}", e))
         })?;
-        write_authorship_note(repo, &shift.new_sha, &serialized)?;
+        all_writes.push((shift.new_sha, serialized));
     }
+
+    // Single batched write for all notes
+    notes_api::write_notes_batch(repo, &all_writes)?;
 
     Ok(())
 }
@@ -627,12 +640,17 @@ fn derive_merge_commit_mappings(
     let old_merges = list_merge_commits(repo, base, old_tip)?;
     let new_merges = list_merge_commits(repo, base, new_tip)?;
 
+    if old_merges.is_empty() || new_merges.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Batch-check which old merges have notes
+    let commits_with_notes = notes_api::commits_with_notes(repo, &old_merges)?;
+
     let mut merge_mappings: Vec<(String, String)> = Vec::new();
 
     for old_merge in &old_merges {
-        // Only map merges that have authorship notes
-        let has_note = read_authorship_note(repo, old_merge)?.is_some();
-        if !has_note {
+        if !commits_with_notes.contains(old_merge) {
             continue;
         }
 
@@ -641,9 +659,7 @@ fn derive_merge_commit_mappings(
             continue;
         }
 
-        // For each new merge, check if its parents are the mapped equivalents of old_merge's parents
         for new_merge in &new_merges {
-            // Skip if already used in a mapping
             if merge_mappings.iter().any(|(_, n)| n == new_merge) {
                 continue;
             }
@@ -654,15 +670,12 @@ fn derive_merge_commit_mappings(
             }
 
             let all_match = old_parents.iter().zip(new_parents.iter()).all(|(op, np)| {
-                // Check in existing_mappings
                 if existing_mappings.iter().any(|(o, n)| o == op && n == np) {
                     return true;
                 }
-                // Check in already-matched merge_mappings
                 if merge_mappings.iter().any(|(o, n)| o == op && n == np) {
                     return true;
                 }
-                // Unmapped parent that stayed the same (e.g., shared ancestor)
                 op == np
             });
 
@@ -1019,39 +1032,6 @@ fn extract_b_path(diff_header: &str) -> Option<String> {
     let marker = " b/";
     let pos = diff_header.rfind(marker)?;
     Some(diff_header[pos + marker.len()..].to_string())
-}
-
-fn read_authorship_note(repo: &Repository, sha: &str) -> Result<Option<String>, GitAiError> {
-    let mut args = repo.global_args_for_exec();
-    args.extend([
-        "notes".to_string(),
-        "--ref=ai".to_string(),
-        "show".to_string(),
-        sha.to_string(),
-    ]);
-
-    let output = exec_git_allow_nonzero(&args)?;
-    if output.status.success() {
-        Ok(Some(String::from_utf8_lossy(&output.stdout).to_string()))
-    } else {
-        Ok(None)
-    }
-}
-
-fn write_authorship_note(repo: &Repository, sha: &str, content: &str) -> Result<(), GitAiError> {
-    let mut args = repo.global_args_for_exec();
-    args.extend([
-        "notes".to_string(),
-        "--ref=ai".to_string(),
-        "add".to_string(),
-        "-f".to_string(),
-        "-m".to_string(),
-        content.to_string(),
-        sha.to_string(),
-    ]);
-
-    exec_git(&args)?;
-    Ok(())
 }
 
 #[cfg(test)]

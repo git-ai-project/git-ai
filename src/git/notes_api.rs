@@ -38,6 +38,68 @@ pub fn write_notes_batch(
     }
 }
 
+// --- Batch Reads ---
+
+/// Read note contents for multiple commits in O(1) git process calls.
+/// Returns a map of commit_sha → note_content for commits that have notes.
+pub fn read_notes_batch(
+    repo: &Repository,
+    commit_shas: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    if commit_shas.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    match Config::get().notes_backend_kind() {
+        NotesBackendKind::Http => {
+            let cached = http_read_notes(commit_shas);
+            if cached.len() == commit_shas.len() {
+                return Ok(cached);
+            }
+            // Fall through to git for any misses
+            let missing: Vec<String> = commit_shas
+                .iter()
+                .filter(|sha| !cached.contains_key(sha.as_str()))
+                .cloned()
+                .collect();
+            let from_git = read_notes_batch_git(repo, &missing)?;
+            Ok(cached.into_iter().chain(from_git).collect())
+        }
+        NotesBackendKind::GitNotes => read_notes_batch_git(repo, commit_shas),
+    }
+}
+
+fn read_notes_batch_git(
+    repo: &Repository,
+    commit_shas: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    if commit_shas.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Step 1: Get blob OIDs for all commits (one cat-file --batch-check)
+    let blob_oid_map = crate::git::refs::note_blob_oids_for_commits(repo, commit_shas)?;
+    if blob_oid_map.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Step 2: Read all blob contents (one cat-file --batch)
+    let unique_oids: Vec<String> = blob_oid_map.values().cloned().collect();
+    let blob_contents = crate::git::authorship_traversal::batch_read_blobs_with_oids(
+        &repo.global_args_for_exec(),
+        &unique_oids,
+    )?;
+
+    // Step 3: Map commit_sha → content
+    let mut result = HashMap::new();
+    for (commit_sha, blob_oid) in &blob_oid_map {
+        if let Some(content) = blob_contents.get(blob_oid) {
+            result.insert(commit_sha.clone(), content.clone());
+        }
+    }
+    Ok(result)
+}
+
 // --- Reads ---
 
 pub fn read_note(repo: &Repository, commit_sha: &str) -> Option<String> {
