@@ -518,20 +518,19 @@ pub fn resolve_linear_head_commit_chain_for_worktree(
     }
 
     match matches.len() {
-        1 => Ok(matches.remove(0)),
         0 => Err(GitAiError::Generic(format!(
             "failed to reconstruct HEAD reflog chain for worktree {} new={} expected_count={}",
             worktree.display(),
             new_head,
             expected_count
         ))),
-        count => Err(GitAiError::Generic(format!(
-            "ambiguous HEAD reflog chain for worktree {} new={} expected_count={} candidates={}",
-            worktree.display(),
-            new_head,
-            expected_count,
-            count
-        ))),
+        _ => {
+            // When multiple valid chains exist (ambiguous reflog), pick the most
+            // recent one. Since we iterate chronologically (oldest first), the last
+            // match corresponds to the most recent reflog entries and is the one the
+            // daemon should process.
+            Ok(matches.pop().unwrap())
+        }
     }
 }
 
@@ -759,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_linear_head_commit_chain_for_worktree_errors_when_chain_is_ambiguous() {
+    fn resolve_linear_head_commit_chain_for_worktree_picks_most_recent_when_ambiguous() {
         let temp = tempfile::tempdir().unwrap();
         let worktree = temp.path();
         let git_dir = worktree.join(".git");
@@ -782,9 +781,11 @@ mod tests {
             ),
         );
 
-        let err =
-            resolve_linear_head_commit_chain_for_worktree(worktree, second, 2, None).unwrap_err();
-        assert!(err.to_string().contains("ambiguous HEAD reflog chain"));
+        // When ambiguous, picks the most recent chain (last match in chronological reflog)
+        let (resolved_original, commits) =
+            resolve_linear_head_commit_chain_for_worktree(worktree, second, 2, None).unwrap();
+        assert_eq!(resolved_original, original);
+        assert_eq!(commits, vec![first, second]);
     }
 
     #[test]
