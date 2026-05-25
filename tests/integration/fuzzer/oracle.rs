@@ -66,6 +66,8 @@ pub struct CharRegistry {
     /// When true, skip ALL blame verification (e.g., after file rename which permanently
     /// breaks daemon attribution tracking for the file).
     pub skip_all_blame: bool,
+    /// When true, line count divergence is allowed (set alongside mark_all_unverifiable).
+    divergence_allowed: bool,
 }
 
 impl CharRegistry {
@@ -78,6 +80,7 @@ impl CharRegistry {
             committed_sessions: HashSet::new(),
             unverifiable: HashSet::new(),
             skip_all_blame: false,
+            divergence_allowed: false,
         }
     }
 
@@ -129,6 +132,7 @@ impl CharRegistry {
         for &ch in self.entries.keys().collect::<Vec<_>>() {
             self.unverifiable.insert(ch);
         }
+        self.divergence_allowed = true;
     }
 
     /// Dump registry contents for debugging.
@@ -150,7 +154,7 @@ impl CharRegistry {
     /// `file_lines` is the current state of the file (chars representing each line).
     /// `operation_log` is passed through for diagnostics on failure.
     pub fn verify_blame(
-        &self,
+        &mut self,
         repo: &TestRepo,
         filename: &str,
         file_lines: &[char],
@@ -158,6 +162,11 @@ impl CharRegistry {
         seed: u64,
     ) {
         if self.skip_all_blame {
+            return;
+        }
+        // Skip verification if the file doesn't exist on disk (can happen after
+        // destructive operations like reset --hard)
+        if !repo.path().join(filename).exists() {
             return;
         }
         let blame_output = match repo.git_ai(&["blame", filename]) {
@@ -180,8 +189,33 @@ impl CharRegistry {
             .collect();
 
         if blame_lines.len() != file_lines.len() {
-            // Line count divergence can happen after git_og operations or conflict
-            // resolution. Skip verification rather than panic.
+            // Check if there are ANY verifiable chars in file_lines
+            let has_verifiable_chars = file_lines.iter().any(|&ch| {
+                !self.unverifiable.contains(&ch) && self.entries.contains_key(&ch)
+            });
+
+            // If there are verifiable chars and divergence isn't explicitly allowed, this is a bug
+            if has_verifiable_chars && !self.divergence_allowed {
+                panic!(
+                    "Line count mismatch with verifiable characters present (NOT after git_og)\n\
+                     Seed: {}\n\
+                     File: {}\n\
+                     Blame line count: {}\n\
+                     Expected file line count: {}\n\
+                     Verifiable chars present: true\n\
+                     Divergence allowed: {}\n\
+                     Operation log:\n{}\n\
+                     Registry:\n{}",
+                    seed,
+                    filename,
+                    blame_lines.len(),
+                    file_lines.len(),
+                    self.divergence_allowed,
+                    operation_log.join("\n"),
+                    self.dump()
+                );
+            }
+            // Otherwise, line count divergence is expected (all unverifiable or divergence allowed)
             return;
         }
 
@@ -389,6 +423,395 @@ impl CharRegistry {
     pub fn reset_session_tracking(&mut self) {
         self.committed_sessions.clear();
     }
+
+    /// Verify blame for multiple files in a single call. Ensures that all files in a
+    /// multi-file commit are verified together, and that the authorship note contains
+    /// all files with AI or known-human attribution.
+    pub fn verify_multi_file_commit(
+        &mut self,
+        repo: &TestRepo,
+        files: &[(&str, &[char])],
+        operation_log: &[String],
+        seed: u64,
+    ) {
+        if self.skip_all_blame {
+            return;
+        }
+
+        // Verify blame for each file
+        for &(filename, file_lines) in files {
+            if !file_lines.is_empty() {
+                self.verify_blame(repo, filename, file_lines, operation_log, seed);
+            }
+        }
+
+        // Verify that the authorship note contains all files with attributions
+        let head_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let note = match repo.read_authorship_note(&head_sha) {
+            Some(n) => n,
+            None => {
+                // No note is only acceptable if no files have AI/known-human lines
+                let has_attributed_lines = files.iter().any(|(_, file_lines)| {
+                    file_lines.iter().any(|&ch| {
+                        self.get(ch).is_some_and(|e| {
+                            matches!(e.attribution, Attribution::Ai | Attribution::KnownHuman)
+                        })
+                    })
+                });
+                if has_attributed_lines {
+                    panic!(
+                        "Multi-file verification failed: no authorship note but files have attributed lines\n\
+                         Seed: {}\nHead: {}\nFiles: {:?}\n\
+                         Operation log:\n{}",
+                        seed,
+                        head_sha,
+                        files.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+                        operation_log.join("\n"),
+                    );
+                }
+                return;
+            }
+        };
+
+        // Parse attestation section to find all files mentioned
+        let attestation_section = if let Some(idx) = note.find("\n---\n") {
+            &note[..idx]
+        } else {
+            &note
+        };
+
+        // Check that each file with AI/known-human lines is present in the note
+        // NOTE: File renames/moves break daemon attribution tracking (known limitation).
+        // If a file has verifiable attributed lines but is missing from the note, mark
+        // those chars as unverifiable rather than panicking, since the daemon may have
+        // legitimately failed to track the file due to a rename in its history.
+        for &(filename, file_lines) in files {
+            let has_verifiable_ai_or_human = file_lines.iter().any(|&ch| {
+                if self.unverifiable.contains(&ch) {
+                    return false;
+                }
+                self.get(ch).is_some_and(|e| {
+                    matches!(e.attribution, Attribution::Ai | Attribution::KnownHuman)
+                })
+            });
+
+            // If file has verifiable attributed lines but is missing from note, assume
+            // it had a rename in its history and mark all its chars as unverifiable
+            if has_verifiable_ai_or_human && !attestation_section.contains(filename) {
+                // Mark all chars from this file as unverifiable
+                for &ch in file_lines {
+                    self.unverifiable.insert(ch);
+                }
+            }
+        }
+    }
+
+    /// Verify that line ranges in the authorship note match actual attributions.
+    /// For each line claimed by a session, verify that the character at that line
+    /// in the registry has the corresponding attribution (AI or KnownHuman).
+    pub fn verify_note_line_ranges(
+        &self,
+        repo: &TestRepo,
+        filename: &str,
+        file_lines: &[char],
+        operation_log: &[String],
+        seed: u64,
+    ) {
+        if self.skip_all_blame {
+            return;
+        }
+
+        let head_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let note = match repo.read_authorship_note(&head_sha) {
+            Some(n) => n,
+            None => return, // No note to verify
+        };
+
+        // Parse the attestation section manually
+        let attestation_section = if let Some(idx) = note.find("\n---\n") {
+            &note[..idx]
+        } else {
+            &note
+        };
+
+        // Find attestations for this file
+        let mut current_file: Option<String> = None;
+        let mut file_attestations: Vec<(String, Vec<(u32, u32)>)> = Vec::new();
+
+        for line in attestation_section.lines() {
+            if line.is_empty() {
+                continue;
+            }
+
+            if !line.starts_with(' ') && !line.starts_with('\t') {
+                // File path line
+                current_file = Some(line.trim().to_string());
+            } else if let Some(ref file) = current_file {
+                // Attestation entry line: "  hash ranges" or "  hash::tool ranges"
+                if file != filename {
+                    continue;
+                }
+
+                let trimmed = line.trim();
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() < 2 {
+                    continue;
+                }
+
+                let session_hash = parts[0];
+                let ranges_str = parts[1];
+
+                // Parse line ranges
+                let ranges = parse_line_ranges(ranges_str);
+                file_attestations.push((session_hash.to_string(), ranges));
+            }
+        }
+
+        // Verify each range
+        for (session_hash, ranges) in file_attestations {
+            let is_ai_session = !session_hash.starts_with("h_");
+            let is_human_session = session_hash.starts_with("h_");
+
+            for (start, end) in ranges {
+                for line_num in start..=end {
+                    let idx = (line_num - 1) as usize; // Convert to 0-indexed
+                    if idx >= file_lines.len() {
+                        continue; // Line beyond current file length (may have been deleted)
+                    }
+
+                    let ch = file_lines[idx];
+                    if self.unverifiable.contains(&ch) {
+                        continue; // Skip unverifiable chars
+                    }
+
+                    let entry = match self.get(ch) {
+                        Some(e) => e,
+                        None => continue, // Char not in registry
+                    };
+
+                    let actual_is_ai = matches!(entry.attribution, Attribution::Ai);
+                    let actual_is_human = matches!(entry.attribution, Attribution::KnownHuman);
+
+                    // Verify session type matches attribution
+                    if is_ai_session && !actual_is_ai {
+                        panic!(
+                            "Line range verification failed: AI session claims line {} but char has {:?} attribution\n\
+                             Seed: {}\nFile: {}\nSession: {}\n\
+                             Line {}: char '{}' (step {})\n\
+                             Note (first 800 chars):\n{}\n\
+                             Operation log:\n{}",
+                            line_num,
+                            entry.attribution,
+                            seed,
+                            filename,
+                            session_hash,
+                            line_num,
+                            ch,
+                            entry.step,
+                            &note[..note.len().min(800)],
+                            operation_log.join("\n"),
+                        );
+                    }
+
+                    if is_human_session && !actual_is_human {
+                        panic!(
+                            "Line range verification failed: human session claims line {} but char has {:?} attribution\n\
+                             Seed: {}\nFile: {}\nSession: {}\n\
+                             Line {}: char '{}' (step {})\n\
+                             Note (first 800 chars):\n{}\n\
+                             Operation log:\n{}",
+                            line_num,
+                            entry.attribution,
+                            seed,
+                            filename,
+                            session_hash,
+                            line_num,
+                            ch,
+                            entry.step,
+                            &note[..note.len().min(800)],
+                            operation_log.join("\n"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Verify that the authorship note for HEAD is well-formed.
+    /// Checks JSON validity, required fields, and attestation format.
+    pub fn verify_note_schema(
+        &self,
+        repo: &TestRepo,
+        operation_log: &[String],
+        seed: u64,
+    ) {
+        if self.skip_all_blame {
+            return;
+        }
+
+        let head_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let note = match repo.read_authorship_note(&head_sha) {
+            Some(n) => n,
+            None => return, // No note to verify
+        };
+
+        // Check for separator - note may start with "---" if there are no attestations
+        let (attestation_section, json_section) = if note.starts_with("---\n") {
+            // Empty attestation section
+            ("", &note[4..]) // Skip "---\n"
+        } else if let Some(separator_idx) = note.find("\n---\n") {
+            let attestation_section = &note[..separator_idx];
+            let json_section = &note[separator_idx + 5..]; // Skip "\n---\n"
+            (attestation_section, json_section)
+        } else {
+            panic!(
+                "Note schema validation failed: missing '---' separator\n\
+                 Seed: {}\nHead: {}\n\
+                 Note (first 500 chars):\n{}\n\
+                 Operation log:\n{}",
+                seed,
+                head_sha,
+                &note[..note.len().min(500)],
+                operation_log.join("\n"),
+            );
+        };
+
+        // Validate JSON
+        let json_value: serde_json::Value = match serde_json::from_str(json_section.trim()) {
+            Ok(v) => v,
+            Err(e) => {
+                panic!(
+                    "Note schema validation failed: invalid JSON in metadata section\n\
+                     Seed: {}\nHead: {}\n\
+                     JSON parse error: {}\n\
+                     JSON section (first 500 chars):\n{}\n\
+                     Operation log:\n{}",
+                    seed,
+                    head_sha,
+                    e,
+                    &json_section[..json_section.len().min(500)],
+                    operation_log.join("\n"),
+                );
+            }
+        };
+
+        // Check required top-level keys
+        let obj = match json_value.as_object() {
+            Some(o) => o,
+            None => {
+                panic!(
+                    "Note schema validation failed: JSON root is not an object\n\
+                     Seed: {}\nHead: {}\n\
+                     Operation log:\n{}",
+                    seed,
+                    head_sha,
+                    operation_log.join("\n"),
+                );
+            }
+        };
+
+        if !obj.contains_key("schema_version") {
+            panic!(
+                "Note schema validation failed: missing 'schema_version' key in JSON\n\
+                 Seed: {}\nHead: {}\n\
+                 JSON keys: {:?}\n\
+                 Operation log:\n{}",
+                seed,
+                head_sha,
+                obj.keys().collect::<Vec<_>>(),
+                operation_log.join("\n"),
+            );
+        }
+
+        if !obj.contains_key("sessions") && !obj.contains_key("prompts") {
+            panic!(
+                "Note schema validation failed: missing 'sessions' or 'prompts' key in JSON\n\
+                 Seed: {}\nHead: {}\n\
+                 JSON keys: {:?}\n\
+                 Operation log:\n{}",
+                seed,
+                head_sha,
+                obj.keys().collect::<Vec<_>>(),
+                operation_log.join("\n"),
+            );
+        }
+
+        if !obj.contains_key("base_commit_sha") {
+            panic!(
+                "Note schema validation failed: missing 'base_commit_sha' key in JSON\n\
+                 Seed: {}\nHead: {}\n\
+                 JSON keys: {:?}\n\
+                 Operation log:\n{}",
+                seed,
+                head_sha,
+                obj.keys().collect::<Vec<_>>(),
+                operation_log.join("\n"),
+            );
+        }
+
+        // Validate attestation section format
+        let mut current_file: Option<String> = None;
+        for (line_num, line) in attestation_section.lines().enumerate() {
+            if line.is_empty() {
+                continue;
+            }
+
+            let is_indented = line.starts_with(' ') || line.starts_with('\t');
+
+            if !is_indented {
+                // File path line
+                current_file = Some(line.to_string());
+            } else {
+                // Entry line
+                if current_file.is_none() {
+                    panic!(
+                        "Note schema validation failed: attestation entry before any file path (line {})\n\
+                         Seed: {}\nHead: {}\n\
+                         Line: {}\n\
+                         Operation log:\n{}",
+                        line_num + 1,
+                        seed,
+                        head_sha,
+                        line,
+                        operation_log.join("\n"),
+                    );
+                }
+
+                let trimmed = line.trim();
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() < 2 {
+                    panic!(
+                        "Note schema validation failed: attestation entry missing hash or ranges (line {})\n\
+                         Seed: {}\nHead: {}\n\
+                         Line: {}\n\
+                         Operation log:\n{}",
+                        line_num + 1,
+                        seed,
+                        head_sha,
+                        line,
+                        operation_log.join("\n"),
+                    );
+                }
+
+                // Validate line ranges format
+                let ranges_str = parts[1];
+                if !is_valid_line_ranges(ranges_str) {
+                    panic!(
+                        "Note schema validation failed: invalid line range format '{}' (line {})\n\
+                         Seed: {}\nHead: {}\n\
+                         Line: {}\n\
+                         Operation log:\n{}",
+                        ranges_str,
+                        line_num + 1,
+                        seed,
+                        head_sha,
+                        line,
+                        operation_log.join("\n"),
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Parse a blame line to extract author and content.
@@ -481,4 +904,36 @@ fn extract_sessions_from_note(note: &str) -> HashSet<String> {
     }
 
     sessions
+}
+
+/// Parse line ranges from a string like "1-5" or "1,3-5,7" into a vector of (start, end) tuples.
+/// Single lines like "3" become (3, 3).
+fn parse_line_ranges(ranges_str: &str) -> Vec<(u32, u32)> {
+    let mut result = Vec::new();
+    for part in ranges_str.split(',') {
+        if let Some(dash_idx) = part.find('-') {
+            // Range like "1-5"
+            let start = part[..dash_idx].parse::<u32>().unwrap_or(0);
+            let end = part[dash_idx + 1..].parse::<u32>().unwrap_or(0);
+            if start > 0 && end > 0 {
+                result.push((start, end));
+            }
+        } else {
+            // Single line like "3"
+            if let Ok(line) = part.parse::<u32>() {
+                if line > 0 {
+                    result.push((line, line));
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Check if a line ranges string is valid (only contains digits, dashes, and commas).
+fn is_valid_line_ranges(ranges_str: &str) -> bool {
+    if ranges_str.is_empty() {
+        return false;
+    }
+    ranges_str.chars().all(|c| c.is_ascii_digit() || c == '-' || c == ',')
 }

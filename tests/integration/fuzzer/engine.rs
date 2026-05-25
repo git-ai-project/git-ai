@@ -644,24 +644,31 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         &mut rng,
                         &mut operation_log,
                     );
-                    registry.verify_blame(
-                        &repo,
-                        &file_state.filename,
-                        &result.committed_lines,
-                        &operation_log,
-                        config.seed,
-                    );
+                    // Don't verify blame immediately after partial stage if there are unstaged lines,
+                    // because git-ai blame shows working tree state (committed + unstaged), not just
+                    // committed state. We'll verify after committing the remaining lines.
+                    if result.unstaged_lines.is_empty() {
+                        // All lines were staged, safe to verify against committed_lines
+                        registry.verify_blame(
+                            &repo,
+                            &file_state.filename,
+                            &result.committed_lines,
+                            &operation_log,
+                            config.seed,
+                        );
+                    }
                     if !result.unstaged_lines.is_empty() {
                         repo.git(&["add", "-A"]).unwrap();
                         repo.commit("partial-stage: commit remaining").unwrap();
-                        verify_main_file(
-                            &repo,
-                            &mut registry,
-                            &file_state,
-                            &operation_log,
-                            &config,
-                        );
                     }
+                    // Now verify against the full working tree
+                    verify_main_file(
+                        &repo,
+                        &mut registry,
+                        &file_state,
+                        &operation_log,
+                        &config,
+                    );
                 }
                 PartialStageOp::SelectiveFileCommit => {
                     let sec_idx = rng.random_range(0..secondary_files.len());
@@ -1763,6 +1770,18 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     );
                 }
             }
+
+            // Multi-file verification: verify all files together
+            let mut all_files: Vec<(&str, &[char])> = vec![(
+                file_state.filename.as_str(),
+                file_state.lines.as_slice(),
+            )];
+            for sec_file in &secondary_files {
+                if !sec_file.lines.is_empty() {
+                    all_files.push((sec_file.filename.as_str(), sec_file.lines.as_slice()));
+                }
+            }
+            registry.verify_multi_file_commit(&repo, &all_files, &operation_log, config.seed);
         }
 
         completed_ops += 1;
@@ -1793,6 +1812,18 @@ fn verify_main_file(
     config: &FuzzerConfig,
 ) {
     registry.verify_blame(
+        repo,
+        &file_state.filename,
+        &file_state.lines,
+        operation_log,
+        config.seed,
+    );
+
+    // Verify note schema
+    registry.verify_note_schema(repo, operation_log, config.seed);
+
+    // Verify line ranges in the note match actual attributions
+    registry.verify_note_line_ranges(
         repo,
         &file_state.filename,
         &file_state.lines,
