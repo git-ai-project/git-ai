@@ -18,5 +18,6 @@ pub use repository::{
     from_bare_repository, group_files_by_repository,
 };
 pub mod repo_storage;
+pub mod rewrite_log;
 pub mod status;
 pub mod sync_authorship;

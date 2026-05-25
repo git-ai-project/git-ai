@@ -748,6 +748,10 @@ pub fn migrate_working_log_if_needed(
             .unwrap_or_default()
     };
 
+    if current_head.is_empty() {
+        return Ok(());
+    }
+
     for (source, new_sha) in mappings {
         let old_dir = working_logs_dir.join(source);
         if !old_dir.exists() {
