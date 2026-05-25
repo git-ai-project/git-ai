@@ -208,6 +208,8 @@ impl TranscriptWorker {
 
         tracing::info!(discovered = sessions.len(), "sweep completed");
 
+        let mut enqueued_this_sweep: HashSet<(PathBuf, String)> = HashSet::new();
+
         for session in sessions {
             let agent = crate::transcripts::agent::get_agent(&session.tool);
             let streams = agent.as_ref().map(|a| a.streams()).unwrap_or_default();
@@ -252,10 +254,13 @@ impl TranscriptWorker {
                 }
 
                 let dedup_key = (stream_path.clone(), stream.stream_type.to_string());
-                if self.in_flight.contains(&dedup_key) {
+                if self.in_flight.contains(&dedup_key)
+                    || enqueued_this_sweep.contains(&dedup_key)
+                {
                     continue;
                 }
 
+                enqueued_this_sweep.insert(dedup_key);
                 self.priority_queue.push(ProcessingTask {
                     priority: Priority::Low,
                     session_id: session.session_id.clone(),
