@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::hunk_shift::{DiffHunk, parse_hunk_header};
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, exec_git, exec_git_allow_nonzero};
+use crate::git::repository::{Repository, exec_git, exec_git_allow_nonzero, exec_git_stdin};
 
 #[derive(Debug)]
 pub enum RewriteEvent {
@@ -108,28 +108,53 @@ fn handle_squash_merge(
 
     crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &sources);
 
-    // Merge all source notes into a single cumulative log.
-    // Each source commit's note has line numbers relative to THAT commit's tree,
-    // but only the tip (source_head) matters for the final shift — its tree represents
-    // the final state of the old branch. We shift ALL notes using diff-tree from
-    // source_head to squash_commit (O(1) git call).
-    //
-    // For intermediate commits: their line numbers reference an older tree state.
-    // We first shift each intermediate note to source_head's coordinate space via
-    // diff-tree, then merge everything, then shift once to squash_commit.
-    let mut merged_log: Option<AuthorshipLog> = None;
+    // Collect which source commits have parseable notes and need intermediate diffs
+    struct SourceNote {
+        log: AuthorshipLog,
+        diff_idx: Option<usize>, // index into diff_pairs (None = tip, no shift needed)
+    }
+
+    let mut source_notes: Vec<SourceNote> = Vec::new();
+    let mut diff_pairs: Vec<(String, String)> = Vec::new();
 
     for src_sha in &sources {
         let Some(raw) = read_authorship_note(repo, src_sha)? else {
             continue;
         };
-        let Ok(mut log) = AuthorshipLog::deserialize_from_string(&raw) else {
+        let Ok(log) = AuthorshipLog::deserialize_from_string(&raw) else {
             continue;
         };
 
-        // Shift intermediate commits' attributions to source_head's coordinate space
-        if src_sha != source_head {
-            let diff_to_tip = compute_diff_tree(repo, src_sha, source_head)?;
+        let diff_idx = if src_sha.as_str() != source_head {
+            let idx = diff_pairs.len();
+            diff_pairs.push((src_sha.clone(), source_head.to_string()));
+            Some(idx)
+        } else {
+            None
+        };
+
+        source_notes.push(SourceNote { log, diff_idx });
+    }
+
+    if source_notes.is_empty() {
+        return Ok(());
+    }
+
+    // Add the final source_head→squash_commit pair
+    let final_diff_idx = diff_pairs.len();
+    diff_pairs.push((source_head.to_string(), squash_commit.to_string()));
+
+    // Single batched diff-tree call for ALL intermediate shifts + final shift
+    let diff_results = compute_diff_trees_batch(repo, &diff_pairs)?;
+
+    // Phase 1: Shift intermediate notes to source_head's coordinate space and merge
+    let mut merged_log: Option<AuthorshipLog> = None;
+
+    for note in source_notes {
+        let mut log = note.log;
+
+        if let Some(idx) = note.diff_idx {
+            let diff_to_tip = &diff_results[idx];
             for (old_path, new_path) in &diff_to_tip.renames {
                 for attestation in &mut log.attestations {
                     if attestation.file_path == *old_path {
@@ -159,9 +184,8 @@ fn handle_squash_merge(
         return Ok(());
     };
 
-    // Single diff-tree from source_head to squash_commit: O(1) git call.
-    // Lines inside hunks get dropped (modified during squash), everything else shifts.
-    let diff_result = compute_diff_tree(repo, source_head, squash_commit)?;
+    // Phase 2: Shift merged log from source_head to squash_commit
+    let diff_result = &diff_results[final_diff_idx];
 
     for (old_path, new_path) in &diff_result.renames {
         for attestation in &mut final_log.attestations {
@@ -199,10 +223,24 @@ pub fn shift_authorship_notes(
 
     tracing::debug!("shift_authorship_notes: {} mappings", mappings.len());
 
+    // First pass: determine which mappings need a diff (have parseable source notes,
+    // no existing target notes with attestations). Collect their logs and diff pairs.
+    struct PendingShift {
+        new_sha: String,
+        log: AuthorshipLog,
+        diff_pair_idx: usize,
+    }
+    // Mappings that just need verbatim copy (unparseable notes)
+    struct VerbatimCopy {
+        new_sha: String,
+        raw: String,
+    }
+
+    let mut pending: Vec<PendingShift> = Vec::new();
+    let mut verbatim: Vec<VerbatimCopy> = Vec::new();
+    let mut diff_pairs: Vec<(String, String)> = Vec::new();
+
     for (source_sha, new_sha) in mappings {
-        // Don't overwrite existing notes on the target commit that have real attestations.
-        // Empty notes (no attestations) may come from post-commit on squash merges
-        // and should be overwritable by the transfer.
         if let Some(existing_raw) = read_authorship_note(repo, new_sha)? {
             if let Ok(existing_log) = AuthorshipLog::deserialize_from_string(&existing_raw) {
                 if !existing_log.attestations.is_empty() {
@@ -216,16 +254,40 @@ pub fn shift_authorship_notes(
             continue;
         };
 
-        let Ok(mut log) = AuthorshipLog::deserialize_from_string(&raw_note) else {
-            // Can't parse — copy verbatim to preserve the note
-            write_authorship_note(repo, new_sha, &raw_note)?;
+        let Ok(log) = AuthorshipLog::deserialize_from_string(&raw_note) else {
+            verbatim.push(VerbatimCopy {
+                new_sha: new_sha.clone(),
+                raw: raw_note,
+            });
             continue;
         };
 
-        // Single git diff-tree call: gets hunks + renames for all files at once
-        let diff_result = compute_diff_tree(repo, source_sha, new_sha)?;
+        let diff_pair_idx = diff_pairs.len();
+        diff_pairs.push((source_sha.clone(), new_sha.clone()));
+        pending.push(PendingShift {
+            new_sha: new_sha.clone(),
+            log,
+            diff_pair_idx,
+        });
+    }
 
-        // Apply file renames
+    // Write verbatim copies
+    for v in &verbatim {
+        write_authorship_note(repo, &v.new_sha, &v.raw)?;
+    }
+
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    // Single batched diff-tree call for all pairs
+    let diff_results = compute_diff_trees_batch(repo, &diff_pairs)?;
+
+    // Apply shifts using the batched results
+    for shift in pending {
+        let diff_result = &diff_results[shift.diff_pair_idx];
+        let mut log = shift.log;
+
         for (old_path, new_path) in &diff_result.renames {
             for attestation in &mut log.attestations {
                 if attestation.file_path == *old_path {
@@ -234,27 +296,23 @@ pub fn shift_authorship_notes(
             }
         }
 
-        // Apply hunk shifts per file — lines inside hunks get dropped,
-        // lines outside hunks shift by accumulated offset
         if !diff_result.hunks_by_file.is_empty() {
             log.attestations = log
                 .attestations
                 .iter()
-                .filter_map(|fa| {
-                    match diff_result.hunks_by_file.get(&fa.file_path) {
-                        Some(hunks) => apply_hunk_shifts_to_file_attestation(fa, hunks),
-                        None => Some(fa.clone()), // No hunks for this file — unchanged
-                    }
+                .filter_map(|fa| match diff_result.hunks_by_file.get(&fa.file_path) {
+                    Some(hunks) => apply_hunk_shifts_to_file_attestation(fa, hunks),
+                    None => Some(fa.clone()),
                 })
                 .collect();
         }
 
-        log.metadata.base_commit_sha = new_sha.clone();
+        log.metadata.base_commit_sha = shift.new_sha.clone();
 
         let serialized = log.serialize_to_string().map_err(|e| {
             GitAiError::Generic(format!("failed to serialize shifted authorship log: {}", e))
         })?;
-        write_authorship_note(repo, new_sha, &serialized)?;
+        write_authorship_note(repo, &shift.new_sha, &serialized)?;
     }
 
     Ok(())
@@ -791,20 +849,137 @@ fn compute_diff_tree(
     source_sha: &str,
     new_sha: &str,
 ) -> Result<DiffTreeResult, GitAiError> {
+    let results = compute_diff_trees_batch(repo, &[(source_sha.to_string(), new_sha.to_string())])?;
+    Ok(results.into_iter().next().unwrap_or(DiffTreeResult {
+        hunks_by_file: HashMap::new(),
+        renames: Vec::new(),
+    }))
+}
+
+/// Batch-compute diff-trees for multiple commit pairs in a single git process.
+/// Resolves commits to tree SHAs, then pipes all pairs into `git diff-tree --stdin`.
+fn compute_diff_trees_batch(
+    repo: &Repository,
+    pairs: &[(String, String)],
+) -> Result<Vec<DiffTreeResult>, GitAiError> {
+    if pairs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Collect unique commit SHAs and resolve them all to tree SHAs in one rev-parse call
+    let mut unique_shas: Vec<String> = Vec::new();
+    for (src, dst) in pairs {
+        if !unique_shas.contains(src) {
+            unique_shas.push(src.clone());
+        }
+        if !unique_shas.contains(dst) {
+            unique_shas.push(dst.clone());
+        }
+    }
+
+    let mut rev_parse_args = repo.global_args_for_exec();
+    rev_parse_args.push("rev-parse".to_string());
+    for sha in &unique_shas {
+        rev_parse_args.push(format!("{}^{{tree}}", sha));
+    }
+    let rev_output = exec_git(&rev_parse_args)?;
+    let rev_stdout = String::from_utf8_lossy(&rev_output.stdout);
+    let tree_shas: Vec<&str> = rev_stdout.lines().collect();
+
+    if tree_shas.len() != unique_shas.len() {
+        return Err(GitAiError::Generic(format!(
+            "rev-parse returned {} trees for {} commits",
+            tree_shas.len(),
+            unique_shas.len()
+        )));
+    }
+
+    // Build commit→tree lookup
+    let sha_to_tree: HashMap<&str, &str> = unique_shas
+        .iter()
+        .zip(tree_shas.iter())
+        .map(|(commit, tree)| (commit.as_str(), *tree))
+        .collect();
+
+    // Build stdin: one "tree1 tree2\n" line per pair
+    let mut stdin_data = String::new();
+    let mut tree_pair_keys: Vec<(&str, &str)> = Vec::with_capacity(pairs.len());
+    for (src, dst) in pairs {
+        let src_tree = sha_to_tree[src.as_str()];
+        let dst_tree = sha_to_tree[dst.as_str()];
+        stdin_data.push_str(src_tree);
+        stdin_data.push(' ');
+        stdin_data.push_str(dst_tree);
+        stdin_data.push('\n');
+        tree_pair_keys.push((src_tree, dst_tree));
+    }
+
+    // Single git diff-tree --stdin call
     let mut args = repo.global_args_for_exec();
     args.extend([
         "diff-tree".to_string(),
+        "--stdin".to_string(),
         "-p".to_string(),
         "-U0".to_string(),
         "-M".to_string(),
         "--no-color".to_string(),
-        source_sha.to_string(),
-        new_sha.to_string(),
+        "-r".to_string(),
     ]);
 
-    let output = exec_git_allow_nonzero(&args)?;
+    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_diff_tree_output(&stdout))
+
+    // Parse output: each pair's result starts with a "tree1 tree2\n" separator line
+    parse_batched_diff_tree_output(&stdout, &tree_pair_keys)
+}
+
+/// Parse the output of `git diff-tree --stdin` which produces multiple results
+/// separated by "tree1 tree2" header lines.
+fn parse_batched_diff_tree_output(
+    output: &str,
+    tree_pair_keys: &[(&str, &str)],
+) -> Result<Vec<DiffTreeResult>, GitAiError> {
+    let mut results: Vec<DiffTreeResult> = Vec::with_capacity(tree_pair_keys.len());
+    let mut current_chunk = String::new();
+    let mut seen_first_header = false;
+
+    for line in output.lines() {
+        // Separator lines are exactly "tree_sha1 tree_sha2" (two 40-char hex SHAs separated by space)
+        if is_tree_pair_separator(line) {
+            if seen_first_header {
+                results.push(parse_diff_tree_output(&current_chunk));
+                current_chunk.clear();
+            }
+            seen_first_header = true;
+        } else if seen_first_header {
+            current_chunk.push_str(line);
+            current_chunk.push('\n');
+        }
+    }
+
+    // Push final chunk
+    if seen_first_header {
+        results.push(parse_diff_tree_output(&current_chunk));
+    }
+
+    // If git produced fewer results than pairs, pad with empty results
+    // (happens when trees are identical — no separator line emitted)
+    while results.len() < tree_pair_keys.len() {
+        results.push(DiffTreeResult {
+            hunks_by_file: HashMap::new(),
+            renames: Vec::new(),
+        });
+    }
+
+    Ok(results)
+}
+
+fn is_tree_pair_separator(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() == 81
+        && bytes[40] == b' '
+        && line[..40].bytes().all(|b| b.is_ascii_hexdigit())
+        && line[41..].bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn parse_diff_tree_output(output: &str) -> DiffTreeResult {
@@ -1093,5 +1268,136 @@ Binary files a/image.png and b/image.png differ
     fn test_parse_range_diff_output_empty() {
         let mappings = parse_range_diff_output("");
         assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn test_is_tree_pair_separator_valid() {
+        let line =
+            "1778ed95466977076f4e5908e6500789be732d2e 471b7bbf5998ffa15a81b17ee9f6854a357a2a6a";
+        assert!(is_tree_pair_separator(line));
+    }
+
+    #[test]
+    fn test_is_tree_pair_separator_invalid() {
+        assert!(!is_tree_pair_separator("diff --git a/foo b/foo"));
+        assert!(!is_tree_pair_separator("@@ -1,2 +1,3 @@"));
+        assert!(!is_tree_pair_separator(""));
+        assert!(!is_tree_pair_separator("short"));
+        // Missing space
+        assert!(!is_tree_pair_separator(
+            "1778ed95466977076f4e5908e6500789be732d2e471b7bbf5998ffa15a81b17ee9f6854a357a2a6a"
+        ));
+    }
+
+    #[test]
+    fn test_parse_batched_diff_tree_output_single_pair() {
+        let output = "\
+1778ed95466977076f4e5908e6500789be732d2e 471b7bbf5998ffa15a81b17ee9f6854a357a2a6a
+diff --git a/f.txt b/f.txt
+index a29bdeb..c0d0fb4 100644
+--- a/f.txt
++++ b/f.txt
+@@ -1,0 +2 @@ line1
++line2
+";
+        let keys = [(
+            "1778ed95466977076f4e5908e6500789be732d2e",
+            "471b7bbf5998ffa15a81b17ee9f6854a357a2a6a",
+        )];
+        let results = parse_batched_diff_tree_output(output, &keys).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].hunks_by_file.len(), 1);
+        assert_eq!(results[0].hunks_by_file["f.txt"][0].new_count, 1);
+    }
+
+    #[test]
+    fn test_parse_batched_diff_tree_output_multiple_pairs() {
+        let output = "\
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+diff --git a/f.txt b/f.txt
+index a29bdeb..c0d0fb4 100644
+--- a/f.txt
++++ b/f.txt
+@@ -1,0 +2 @@ line1
++line2
+cccccccccccccccccccccccccccccccccccccccc dddddddddddddddddddddddddddddddddddddddd
+diff --git a/g.txt b/g.txt
+index eee..fff 100644
+--- a/g.txt
++++ b/g.txt
+@@ -5,2 +5,3 @@
++new line
+";
+        let keys = [
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+            (
+                "cccccccccccccccccccccccccccccccccccccccc",
+                "dddddddddddddddddddddddddddddddddddddddd",
+            ),
+        ];
+        let results = parse_batched_diff_tree_output(output, &keys).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].hunks_by_file.len(), 1);
+        assert!(results[0].hunks_by_file.contains_key("f.txt"));
+        assert_eq!(results[1].hunks_by_file.len(), 1);
+        assert!(results[1].hunks_by_file.contains_key("g.txt"));
+    }
+
+    #[test]
+    fn test_parse_batched_diff_tree_output_identical_trees() {
+        let output = "\
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+";
+        let keys = [(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )];
+        let results = parse_batched_diff_tree_output(output, &keys).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].hunks_by_file.is_empty());
+        assert!(results[0].renames.is_empty());
+    }
+
+    #[test]
+    fn test_parse_batched_diff_tree_output_mixed_identical_and_changed() {
+        let output = "\
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+diff --git a/f.txt b/f.txt
+@@ -1,0 +2 @@
++x
+cccccccccccccccccccccccccccccccccccccccc cccccccccccccccccccccccccccccccccccccccc
+dddddddddddddddddddddddddddddddddddddddd eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+diff --git a/g.txt b/g.txt
+@@ -3,1 +3,2 @@
++y
+";
+        let keys = [
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ),
+            (
+                "cccccccccccccccccccccccccccccccccccccccc",
+                "cccccccccccccccccccccccccccccccccccccccc",
+            ),
+            (
+                "dddddddddddddddddddddddddddddddddddddddd",
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            ),
+        ];
+        let results = parse_batched_diff_tree_output(output, &keys).unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].hunks_by_file.len(), 1);
+        assert!(results[1].hunks_by_file.is_empty());
+        assert_eq!(results[2].hunks_by_file.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_batched_diff_tree_output_empty() {
+        let results = parse_batched_diff_tree_output("", &[]).unwrap();
+        assert!(results.is_empty());
     }
 }
