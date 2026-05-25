@@ -244,6 +244,12 @@ impl CharRegistry {
             let expected_ai = matches!(entry.attribution, Attribution::Ai);
 
             if expected_ai != is_ai_author {
+                let commit_sha = blame_line.split_whitespace().next().unwrap_or("unknown");
+                let note_content = repo
+                    .read_authorship_note(commit_sha)
+                    .unwrap_or_else(|| "<NO NOTE>".to_string());
+                let diag_path = repo.path().join(".git/ai/working_logs/EMPTY_PATHSPECS_DIAG.txt");
+                let diag_content = std::fs::read_to_string(&diag_path).unwrap_or_default();
                 panic!(
                     "Attribution mismatch on line {} of '{}'\n\
                      Seed: {}\n\
@@ -251,6 +257,8 @@ impl CharRegistry {
                      Expected: {} (should {}be AI author)\n\
                      Actual author: '{}' (is_ai={})\n\
                      Blame line: {}\n\
+                     Commit {} authorship note:\n{}\n\
+                     Diagnostics:\n{}\n\
                      Full blame output:\n{}\n\
                      Operation log:\n{}\n\
                      Registry:\n{}",
@@ -264,6 +272,9 @@ impl CharRegistry {
                     author,
                     is_ai_author,
                     blame_line,
+                    commit_sha,
+                    note_content,
+                    if diag_content.is_empty() { "<no diag file>" } else { &diag_content },
                     blame_output,
                     operation_log.join("\n"),
                     self.dump()

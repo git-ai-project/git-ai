@@ -728,6 +728,15 @@ fn sync_pre_commit_checkpoint(
     }
 
     let working_log = repo.storage.working_log_for_base_commit(base_commit)?;
+    // If the working log was already archived (old-{sha} exists with checkpoint data),
+    // this commit was already processed by a prior event. Don't create a synthetic
+    // replay that would produce an empty working log and cause the note to be overwritten.
+    let archived_dir = working_log.dir.parent().map(|p| p.join(format!("old-{}", base_commit)));
+    if let Some(ref archived) = archived_dir {
+        if archived.join("checkpoints.jsonl").exists() {
+            return Ok(());
+        }
+    }
     let initial = working_log.read_initial_attributions();
 
     let dirty_files: HashMap<String, String> = if let Some(snapshot) = carryover_snapshot {
@@ -4400,11 +4409,35 @@ impl ActorDaemonCoordinator {
                     }
                 }
             }
+            // Checkpoints blocked behind a PendingRoot must still be processed
+            // eagerly: they update the working log that the pending command will
+            // read when it completes.  Extract them while preserving command order.
+            if state.entries.len() > 1 {
+                let blocked_checkpoint_keys: Vec<FamilySequencerOrder> = state
+                    .entries
+                    .iter()
+                    .filter(|(_, entry)| matches!(entry, FamilySequencerEntry::Checkpoint { .. }))
+                    .map(|(order, _)| *order)
+                    .collect();
+                for key in blocked_checkpoint_keys {
+                    if let Some(entry) = state.entries.remove(&key) {
+                        ready.push((key.ordinal, entry));
+                        progressed = true;
+                    }
+                }
+            }
         }
 
         if ready.is_empty() {
             return Ok(());
         }
+
+        // Ensure checkpoints (which write to the working log) are always
+        // processed before commands (which read from the working log).
+        ready.sort_by_key(|(_, entry)| match entry {
+            FamilySequencerEntry::Checkpoint { .. } => 0u8,
+            _ => 1u8,
+        });
 
         let _ = self.begin_family_effect(family);
         for (order, ready_entry) in ready {
@@ -5809,6 +5842,8 @@ impl ActorDaemonCoordinator {
             TracePayloadApplyOutcome::None | TracePayloadApplyOutcome::QueuedFamily => {}
             TracePayloadApplyOutcome::Applied(mut applied) => {
                 if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
+                    let exec_lock = self.side_effect_exec_lock(&family)?;
+                    let _guard = exec_lock.lock().await;
                     self.begin_family_effect(&family)?;
                     if applied.command.wrapper_invocation_id.is_some() {
                         self.apply_wrapper_state_overlay(&mut applied.command).await;

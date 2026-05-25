@@ -129,6 +129,17 @@ pub fn post_commit_with_final_state(
         pathspecs.insert(file_path.clone());
     }
 
+    // When pathspecs is empty but we have a final_state_override (rewrite path),
+    // use the override's file keys as pathspecs. The override contains the committed
+    // file snapshot — those are the files that need attribution processing.
+    if pathspecs.is_empty() {
+        if let Some(snapshot) = final_state_override {
+            for file_path in snapshot.keys() {
+                pathspecs.insert(file_path.clone());
+            }
+        }
+    }
+
     let (mut authorship_log, initial_attributions) = working_va
         .to_authorship_log_and_initial_working_log(
             repo,
@@ -188,6 +199,28 @@ pub fn post_commit_with_final_state(
         }
         for sr in authorship_log.metadata.sessions.values_mut() {
             sr.custom_attributes = Some(custom_attrs.clone());
+        }
+    }
+
+    // Guard against double-processing: under concurrent load, a commit event may be
+    // processed twice. The first processing reads the working log, generates a correct
+    // note, and archives the working log to old-{sha}. The second processing finds the
+    // working log empty (or recreated without checkpoint data) and would overwrite the
+    // correct note with an empty one. Prevent this by never overwriting an existing note
+    // that has more attestation data than our newly-generated one.
+    if let Ok(existing) = crate::git::notes_api::read_authorship_v3(repo, &commit_sha) {
+        let existing_entry_count: usize = existing
+            .attestations
+            .iter()
+            .flat_map(|fa| &fa.entries)
+            .count();
+        let new_entry_count: usize = authorship_log
+            .attestations
+            .iter()
+            .flat_map(|fa| &fa.entries)
+            .count();
+        if existing_entry_count > 0 && new_entry_count == 0 {
+            return Ok((commit_sha, existing));
         }
     }
 

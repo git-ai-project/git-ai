@@ -7,10 +7,11 @@ pub struct MockKnownHumanPreset;
 
 impl AgentPreset for MockKnownHumanPreset {
     fn parse(&self, hook_input: &str, trace_id: &str) -> Result<Vec<ParsedHookEvent>, GitAiError> {
-        let (file_paths, cwd) = if hook_input.is_empty() {
+        let (file_paths, cwd, dirty_files) = if hook_input.is_empty() {
             (
                 vec![],
                 std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                None,
             )
         } else {
             let data: serde_json::Value = serde_json::from_str(hook_input)
@@ -32,14 +33,16 @@ impl AgentPreset for MockKnownHumanPreset {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-            (paths, cwd)
+            let dirty_files = super::parse::dirty_files_from_value(&data, cwd.to_str().unwrap_or("."));
+
+            (paths, cwd, dirty_files)
         };
 
         Ok(vec![ParsedHookEvent::KnownHumanEdit(KnownHumanEdit {
             trace_id: trace_id.to_string(),
             cwd,
             file_paths,
-            dirty_files: None,
+            dirty_files,
             editor_metadata: HashMap::new(),
         })])
     }
