@@ -291,8 +291,8 @@ pub fn shift_authorship_notes(
         Vec::new()
     };
 
-    // Apply shifts and collect all writes
-    let mut all_writes = verbatim_writes;
+    // Apply shifts and merge logs that share a target commit
+    let mut merged_by_target: HashMap<String, AuthorshipLog> = HashMap::new();
 
     for shift in pending {
         let diff_result = &diff_results[shift.diff_pair_idx];
@@ -319,10 +319,20 @@ pub fn shift_authorship_notes(
 
         log.metadata.base_commit_sha = shift.new_sha.clone();
 
+        match merged_by_target.get_mut(&shift.new_sha) {
+            Some(existing) => merge_authorship_logs(existing, &log),
+            None => {
+                merged_by_target.insert(shift.new_sha, log);
+            }
+        }
+    }
+
+    let mut all_writes = verbatim_writes;
+    for (sha, log) in merged_by_target {
         let serialized = log.serialize_to_string().map_err(|e| {
             GitAiError::Generic(format!("failed to serialize shifted authorship log: {}", e))
         })?;
-        all_writes.push((shift.new_sha, serialized));
+        all_writes.push((sha, serialized));
     }
 
     // Single batched write for all notes
@@ -772,8 +782,11 @@ pub fn migrate_working_log_if_needed(
                     let _ = std::fs::rename(&old_dir, &new_dir);
                 }
                 Ok(dr) => {
-                    let _ = migrate_working_log_with_shifts(&old_dir, &new_dir, &dr);
-                    let _ = std::fs::remove_dir_all(&old_dir);
+                    if migrate_working_log_with_shifts(&old_dir, &new_dir, &dr).is_ok() {
+                        let _ = std::fs::remove_dir_all(&old_dir);
+                    } else {
+                        let _ = std::fs::rename(&old_dir, &new_dir);
+                    }
                 }
                 Err(_) => {
                     // diff-tree failed — simple rename as fallback

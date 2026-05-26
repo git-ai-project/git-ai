@@ -185,7 +185,9 @@ fn restore_stash_attributions(
             let file_name = entry.file_name();
             let dst_path = dst_dir.join(&file_name);
 
-            if file_name == "checkpoints.jsonl" {
+            if src_path.is_dir() {
+                let _ = copy_dir_recursive(&src_path, &dst_path);
+            } else if file_name == "checkpoints.jsonl" {
                 if let Ok(stash_content) = fs::read_to_string(&src_path) {
                     use std::io::Write;
                     let mut f = std::fs::OpenOptions::new()
@@ -194,15 +196,8 @@ fn restore_stash_attributions(
                         .open(&dst_path)?;
                     f.write_all(stash_content.as_bytes())?;
                 }
-            } else if dst_path.exists() {
-                if let Ok(stash_content) = fs::read_to_string(&src_path) {
-                    use std::io::Write;
-                    let mut f = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&dst_path)?;
-                    f.write_all(stash_content.as_bytes())?;
-                }
+            } else if file_name == "INITIAL" && dst_path.exists() {
+                merge_initial_files(&src_path, &dst_path)?;
             } else {
                 let _ = fs::copy(&src_path, &dst_path);
             }
@@ -377,6 +372,48 @@ fn restore_stash_attributions_with_shift(
     let working_log = repo.storage.working_log_for_base_commit(current_head)?;
     working_log.write_initial(initial)?;
 
+    Ok(())
+}
+
+fn merge_initial_files(
+    src_path: &std::path::Path,
+    dst_path: &std::path::Path,
+) -> Result<(), GitAiError> {
+    use crate::git::repo_storage::InitialAttributions;
+
+    let src_content = fs::read_to_string(src_path)?;
+    let dst_content = fs::read_to_string(dst_path)?;
+
+    let src_initial: InitialAttributions = match serde_json::from_str(&src_content) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let mut dst_initial: InitialAttributions = match serde_json::from_str(&dst_content) {
+        Ok(v) => v,
+        Err(_) => {
+            fs::copy(src_path, dst_path)?;
+            return Ok(());
+        }
+    };
+
+    for (path, attrs) in src_initial.files {
+        dst_initial.files.entry(path).or_insert(attrs);
+    }
+    for (path, blob) in src_initial.file_blobs {
+        dst_initial.file_blobs.entry(path).or_insert(blob);
+    }
+    for (key, record) in src_initial.prompts {
+        dst_initial.prompts.entry(key).or_insert(record);
+    }
+    for (key, record) in src_initial.humans {
+        dst_initial.humans.entry(key).or_insert(record);
+    }
+    for (key, record) in src_initial.sessions {
+        dst_initial.sessions.entry(key).or_insert(record);
+    }
+
+    let merged = serde_json::to_string(&dst_initial)?;
+    fs::write(dst_path, merged)?;
     Ok(())
 }
 
