@@ -257,7 +257,7 @@ impl KiloAgent {
                 .flatten();
 
             sessions.push(DiscoveredSession {
-                session_id: format!("kilo-{}", session_id),
+                session_id: session_id.clone(),
                 tool: "kilo".to_string(),
                 transcript_path: db_path.to_path_buf(),
                 transcript_format: crate::transcripts::sweep::TranscriptFormat::KiloCodeSqlite,
