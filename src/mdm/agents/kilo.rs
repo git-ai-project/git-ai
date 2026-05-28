@@ -225,7 +225,7 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
 
-        let old_content = "// Old plugin version";
+        let old_content = "// OldPlugin version";
         fs::write(&plugin_path, old_content).unwrap();
 
         let content_before = fs::read_to_string(&plugin_path).unwrap();
