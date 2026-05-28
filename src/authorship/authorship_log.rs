@@ -388,19 +388,6 @@ mod tests {
         );
     }
 
-    // --- PromptRecord::Ord transitivity test ---
-
-    #[test]
-    fn test_prompt_record_ord_transitivity() {
-        let a = create_prompt_record(1, 0, 0); // 1 message
-        let b = create_prompt_record(2, 0, 0); // 2 messages
-        let c = create_prompt_record(3, 0, 0); // 3 messages
-
-        assert!(a < b, "a should be less than b");
-        assert!(b < c, "b should be less than c");
-        assert!(a < c, "transitivity: a should be less than c");
-    }
-
     // --- recalculate_acceptance_rates tests ---
 
     fn make_stats(ai_additions: u32, ai_accepted: u32) -> ContributorStats {

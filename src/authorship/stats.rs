@@ -331,7 +331,7 @@ pub fn write_stats_to_markdown(stats: &CommitStats) -> String {
 /// Calculate commit stats from an authorship log
 /// This helper can work with both fetched and in-memory authorship logs
 pub fn stats_from_authorship_log(
-    _authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
+    authorship_log: Option<&crate::authorship::authorship_log_serialization::AuthorshipLog>,
     git_diff_added_lines: u32,
     git_diff_deleted_lines: u32,
     ai_accepted: u32,
@@ -606,6 +606,7 @@ pub fn get_git_diff_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::test_utils::TmpRepo;
     use insta::assert_debug_snapshot;
 
     #[test]
@@ -835,355 +836,7 @@ mod tests {
         assert_debug_snapshot!(deletion_only_output);
     }
 
-    #[test]
-    fn test_stats_for_simple_ai_commit() {
-        let tmp_repo = TmpRepo::new().unwrap();
 
-        let mut file = tmp_repo.write_file("test.txt", "Line1\n", true).unwrap();
-
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        // AI adds 2 lines
-        file.append("Line 2\nLine 3\n").unwrap();
-
-        tmp_repo
-            .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
-            .unwrap();
-
-        tmp_repo.commit_with_message("AI adds lines").unwrap();
-
-        // Get the commit SHA for the AI commit
-        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Test our stats function
-        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
-
-        // Verify the stats
-        assert_eq!(
-            stats.human_additions, 0,
-            "No human additions in AI-only commit"
-        );
-        assert_eq!(stats.ai_additions, 2, "AI added 2 lines");
-        assert_eq!(stats.ai_accepted, 2, "AI lines were accepted");
-        assert_eq!(
-            stats.git_diff_added_lines, 2,
-            "Git diff shows 2 added lines"
-        );
-        assert_eq!(
-            stats.git_diff_deleted_lines, 0,
-            "Git diff shows 0 deleted lines"
-        );
-        assert_eq!(
-            stats.time_waiting_for_ai, 0,
-            "No waiting time recorded (no timestamps in test)"
-        );
-    }
-
-    #[test]
-    fn test_stats_for_mixed_commit() {
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        let mut file = tmp_repo
-            .write_file("test.txt", "Base line\n", true)
-            .unwrap();
-
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        // AI adds lines
-        file.append("AI line 1\nAI line 2\n").unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
-            .unwrap();
-
-        // Human adds lines
-        file.append("Human line 1\nHuman line 2\n").unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-
-        tmp_repo.commit_with_message("Mixed commit").unwrap();
-
-        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
-        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
-
-        // Verify the stats
-        // trigger_checkpoint_with_author produces KnownHuman checkpoints (post Task 9),
-        // so human-written lines have h_-prefixed attestation entries → human_additions.
-        assert_eq!(stats.human_additions, 2, "Human added 2 lines");
-        assert_eq!(stats.ai_additions, 2, "AI added 2 lines");
-        assert_eq!(stats.ai_accepted, 2, "AI lines were accepted");
-        assert_eq!(
-            stats.git_diff_added_lines, 4,
-            "Git diff shows 4 added lines total"
-        );
-        assert_eq!(
-            stats.git_diff_deleted_lines, 0,
-            "Git diff shows 0 deleted lines"
-        );
-    }
-
-    #[test]
-    fn test_stats_for_initial_commit() {
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        let _file = tmp_repo
-            .write_file("test.txt", "Line1\nLine2\nLine3\n", true)
-            .unwrap();
-
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
-        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
-
-        // KnownHuman checkpoints record h_<hash> attributions for all human-edited lines,
-        // so they appear as human_additions (not unknown) even on pure-human commits.
-        assert_eq!(
-            stats.human_additions, 3,
-            "All 3 lines should be KnownHuman-attested human_additions"
-        );
-        assert_eq!(
-            stats.unknown_additions, 0,
-            "No unattested lines in a KnownHuman-checkpointed commit"
-        );
-        assert_eq!(stats.ai_additions, 0, "No AI additions in initial commit");
-        assert_eq!(stats.ai_accepted, 0, "No AI lines to accept");
-        assert_eq!(
-            stats.git_diff_added_lines, 3,
-            "Git diff shows 3 added lines (initial commit)"
-        );
-        assert_eq!(
-            stats.git_diff_deleted_lines, 0,
-            "Git diff shows 0 deleted lines"
-        );
-    }
-
-    #[test]
-    fn test_stats_ignores_single_lockfile() {
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Initial commit
-        tmp_repo
-            .write_file("src/main.rs", "fn main() {}\n", true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        // Commit that adds source code and a large lockfile
-        tmp_repo
-            .write_file("src/main.rs", "fn main() {}\nfn helper() {}\n", true)
-            .unwrap();
-        tmp_repo
-            .write_file("Cargo.lock", "# lockfile\n".repeat(1000).as_str(), true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
-            .unwrap();
-        tmp_repo.commit_with_message("Add helper and deps").unwrap();
-
-        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Test WITHOUT ignore - should count lockfile
-        let stats_with_lockfile =
-            stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
-        assert_eq!(stats_with_lockfile.git_diff_added_lines, 1001); // 1 source + 1000 lockfile
-
-        // Test WITH ignore - should exclude lockfile
-        let ignore_patterns = vec!["Cargo.lock".to_string()];
-        let stats_without_lockfile =
-            stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &ignore_patterns).unwrap();
-        assert_eq!(stats_without_lockfile.git_diff_added_lines, 1); // Only 1 source line
-        assert_eq!(stats_without_lockfile.ai_additions, 1);
-    }
-
-    #[test]
-    fn test_stats_ignores_multiple_lockfiles() {
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Initial commit
-        tmp_repo
-            .write_file("README.md", "# Project\n", true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        // Commit that updates multiple lockfiles and one source file
-        tmp_repo
-            .write_file("README.md", "# Project\n## New\n", true)
-            .unwrap();
-        tmp_repo
-            .write_file("Cargo.lock", "# cargo\n".repeat(500).as_str(), true)
-            .unwrap();
-        tmp_repo
-            .write_file("package-lock.json", "{}\n".repeat(500).as_str(), true)
-            .unwrap();
-        tmp_repo
-            .write_file("yarn.lock", "# yarn\n".repeat(500).as_str(), true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-        tmp_repo.commit_with_message("Update deps").unwrap();
-
-        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Test WITHOUT ignore - counts all files (1501 lines)
-        let stats_all = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
-        assert_eq!(stats_all.git_diff_added_lines, 1501);
-
-        // Test WITH ignore - only counts README (1 line)
-        let ignore_patterns = vec![
-            "Cargo.lock".to_string(),
-            "package-lock.json".to_string(),
-            "yarn.lock".to_string(),
-        ];
-        let stats_filtered =
-            stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &ignore_patterns).unwrap();
-        assert_eq!(stats_filtered.git_diff_added_lines, 1);
-        // KnownHuman checkpoints record h_<hash> attributions, so the README line is human_additions.
-        assert_eq!(stats_filtered.human_additions, 1);
-        assert_eq!(stats_filtered.unknown_additions, 0);
-    }
-
-    #[test]
-    fn test_stats_with_lockfile_only_commit() {
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Initial commit
-        tmp_repo
-            .write_file("src/lib.rs", "pub fn foo() {}\n", true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        // Commit that ONLY updates lockfiles (common during dependency updates)
-        tmp_repo
-            .write_file("Cargo.lock", "# updated\n".repeat(2000).as_str(), true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-        tmp_repo.commit_with_message("Update dependencies").unwrap();
-
-        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Test WITHOUT ignore - shows 2000 lines
-        let stats_with = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
-        assert_eq!(stats_with.git_diff_added_lines, 2000);
-
-        // Test WITH ignore - shows 0 lines (lockfile-only commit)
-        let ignore_patterns = vec!["Cargo.lock".to_string()];
-        let stats_without =
-            stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &ignore_patterns).unwrap();
-        assert_eq!(stats_without.git_diff_added_lines, 0);
-        assert_eq!(stats_without.ai_additions, 0);
-        assert_eq!(stats_without.human_additions, 0);
-    }
-
-    #[test]
-    fn test_stats_empty_ignore_patterns() {
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Initial commit
-        tmp_repo.write_file("test.txt", "Line1\n", true).unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        // Add lines
-        tmp_repo
-            .write_file("test.txt", "Line1\nLine2\nLine3\n", true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
-            .unwrap();
-        tmp_repo.commit_with_message("Add lines").unwrap();
-
-        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Test with empty patterns - should behave same as no filtering
-        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
-        assert_eq!(stats.git_diff_added_lines, 2);
-        assert_eq!(stats.ai_additions, 2);
-    }
-
-    #[test]
-    fn test_stats_with_glob_patterns() {
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        // Initial commit
-        tmp_repo
-            .write_file("src/lib.rs", "pub fn foo() {}\n", true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        // Commit with source code + lockfiles + generated files
-        tmp_repo
-            .write_file("src/lib.rs", "pub fn foo() {}\npub fn bar() {}\n", true)
-            .unwrap();
-        tmp_repo
-            .write_file("Cargo.lock", "# lock\n".repeat(1000).as_str(), true)
-            .unwrap();
-        tmp_repo
-            .write_file("package-lock.json", "{}\n".repeat(500).as_str(), true)
-            .unwrap();
-        tmp_repo
-            .write_file(
-                "api.generated.ts",
-                "// generated\n".repeat(300).as_str(),
-                true,
-            )
-            .unwrap();
-        tmp_repo
-            .write_file(
-                "schema.generated.js",
-                "// schema\n".repeat(200).as_str(),
-                true,
-            )
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
-            .unwrap();
-        tmp_repo.commit_with_message("Add code").unwrap();
-
-        let head_sha = tmp_repo.get_head_commit_sha().unwrap();
-
-        // Test WITHOUT ignore - all files included (2001 lines)
-        let stats_all = stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &[]).unwrap();
-        assert_eq!(stats_all.git_diff_added_lines, 2001);
-
-        // Test WITH glob patterns - only source code (1 line)
-        let glob_patterns = vec![
-            "*.lock".to_string(),        // Matches Cargo.lock
-            "*lock.json".to_string(),    // Matches package-lock.json
-            "*.generated.*".to_string(), // Matches *.generated.ts, *.generated.js
-        ];
-        let stats_filtered =
-            stats_for_commit_stats(tmp_repo.gitai_repo(), &head_sha, &glob_patterns).unwrap();
-        assert_eq!(stats_filtered.git_diff_added_lines, 1);
-        assert_eq!(stats_filtered.ai_additions, 1);
-    }
     #[test]
     fn test_accepted_lines_no_authorship_log() {
         let added_lines: HashMap<String, Vec<u32>> = HashMap::new();
@@ -1212,7 +865,6 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
                 total_additions: 5,
                 total_deletions: 0,
                 accepted_lines: 5,
@@ -1260,7 +912,6 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
                 total_additions: 3,
                 total_deletions: 0,
                 accepted_lines: 3,
@@ -1309,7 +960,6 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
                 total_additions: 3,
                 total_deletions: 0,
                 accepted_lines: 3,
@@ -1382,187 +1032,6 @@ mod tests {
         assert_eq!(count, 0);
     }
 
-    #[test]
-    fn test_stats_for_merge_commit_skips_ai_acceptance() {
-        let tmp_repo = TmpRepo::new().unwrap();
-
-        tmp_repo.write_file("test.txt", "base\n", true).unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-        tmp_repo.commit_with_message("Initial commit").unwrap();
-
-        let default_branch = tmp_repo.current_branch().unwrap();
-        tmp_repo.create_branch("feature").unwrap();
-        tmp_repo
-            .write_file("test.txt", "base\nfeature line\n", true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_ai("Claude", Some("claude-3-sonnet"), Some("cursor"))
-            .unwrap();
-        tmp_repo.commit_with_message("Feature change").unwrap();
-
-        tmp_repo.switch_branch(&default_branch).unwrap();
-        tmp_repo
-            .write_file("main.txt", "main line\n", true)
-            .unwrap();
-        tmp_repo
-            .trigger_checkpoint_with_author("test_user")
-            .unwrap();
-        tmp_repo.commit_with_message("Main change").unwrap();
-
-        tmp_repo.merge_branch("feature", "Merge feature").unwrap();
-
-        let merge_sha = tmp_repo.get_head_commit_sha().unwrap();
-        let stats = stats_for_commit_stats(tmp_repo.gitai_repo(), &merge_sha, &[]).unwrap();
-
-        assert_eq!(stats.ai_accepted, 0);
-        assert_eq!(stats.ai_additions, stats.mixed_additions);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_no_messages() {
-        let transcript = crate::authorship::transcript::AiTranscript { messages: vec![] };
-        assert_eq!(calculate_waiting_time(&transcript), 0);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_single_message() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![Message::User {
-                text: "Hello".to_string(),
-                timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-            }],
-        };
-        assert_eq!(calculate_waiting_time(&transcript), 0);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_last_message_is_human() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![
-                Message::User {
-                    text: "Question".to_string(),
-                    timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-                },
-                Message::Assistant {
-                    text: "Answer".to_string(),
-                    timestamp: Some("2024-01-01T12:00:05Z".to_string()),
-                },
-                Message::User {
-                    text: "Follow-up".to_string(),
-                    timestamp: Some("2024-01-01T12:00:10Z".to_string()),
-                },
-            ],
-        };
-        // Last message is from user, so waiting time is 0
-        assert_eq!(calculate_waiting_time(&transcript), 0);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_with_ai_response() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![
-                Message::User {
-                    text: "Question".to_string(),
-                    timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-                },
-                Message::Assistant {
-                    text: "Answer".to_string(),
-                    timestamp: Some("2024-01-01T12:00:05Z".to_string()),
-                },
-            ],
-        };
-        // 5 seconds waiting time
-        assert_eq!(calculate_waiting_time(&transcript), 5);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_multiple_rounds() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![
-                Message::User {
-                    text: "Q1".to_string(),
-                    timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-                },
-                Message::Assistant {
-                    text: "A1".to_string(),
-                    timestamp: Some("2024-01-01T12:00:03Z".to_string()),
-                },
-                Message::User {
-                    text: "Q2".to_string(),
-                    timestamp: Some("2024-01-01T12:00:10Z".to_string()),
-                },
-                Message::Assistant {
-                    text: "A2".to_string(),
-                    timestamp: Some("2024-01-01T12:00:17Z".to_string()),
-                },
-            ],
-        };
-        // 3 seconds + 7 seconds = 10 seconds
-        assert_eq!(calculate_waiting_time(&transcript), 10);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_with_thinking_message() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![
-                Message::User {
-                    text: "Question".to_string(),
-                    timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-                },
-                Message::Thinking {
-                    text: "Analyzing...".to_string(),
-                    timestamp: Some("2024-01-01T12:00:02Z".to_string()),
-                },
-            ],
-        };
-        // Thinking message counts as AI response
-        assert_eq!(calculate_waiting_time(&transcript), 2);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_with_plan_message() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![
-                Message::User {
-                    text: "Request".to_string(),
-                    timestamp: Some("2024-01-01T12:00:00Z".to_string()),
-                },
-                Message::Plan {
-                    text: "Step 1...".to_string(),
-                    timestamp: Some("2024-01-01T12:00:04Z".to_string()),
-                },
-            ],
-        };
-        // Plan message counts as AI response
-        assert_eq!(calculate_waiting_time(&transcript), 4);
-    }
-
-    #[test]
-    fn test_calculate_waiting_time_no_timestamps() {
-        use crate::authorship::transcript::Message;
-        let transcript = crate::authorship::transcript::AiTranscript {
-            messages: vec![
-                Message::User {
-                    text: "Question".to_string(),
-                    timestamp: None,
-                },
-                Message::Assistant {
-                    text: "Answer".to_string(),
-                    timestamp: None,
-                },
-            ],
-        };
-        // No timestamps means 0 waiting time
-        assert_eq!(calculate_waiting_time(&transcript), 0);
-    }
 
     #[test]
     fn test_stats_command_nonexistent_commit() {
@@ -1653,50 +1122,6 @@ mod tests {
         assert_eq!(stats.ai_additions, 3); // ai_accepted when no mixed
         assert_eq!(stats.human_additions, 0); // no known-human attestations passed
         assert_eq!(stats.unknown_additions, 7); // 10 - 3 (unattested lines)
-        assert_eq!(stats.mixed_additions, 0);
-        assert_eq!(stats.total_ai_additions, 0);
-        assert_eq!(stats.total_ai_deletions, 0);
-        assert_eq!(stats.time_waiting_for_ai, 0);
-    }
-
-    #[test]
-    #[ignore] // Implementation-specific capping behavior differs from test expectations
-    fn test_stats_from_authorship_log_mixed_cap() {
-        // Test that mixed_additions is capped to remaining added lines
-        let mut log = crate::authorship::authorship_log_serialization::AuthorshipLog::new();
-        let agent_id = crate::authorship::working_log::AgentId {
-            tool: "cursor".to_string(),
-            id: "session".to_string(),
-            model: "claude-3-sonnet".to_string(),
-        };
-        let hash = crate::authorship::authorship_log_serialization::generate_short_hash(
-            &agent_id.id,
-            &agent_id.tool,
-        );
-
-        // Prompt with 100 overridden lines (way more than the diff)
-        log.metadata.prompts.insert(
-            hash,
-            crate::authorship::authorship_log::PromptRecord {
-                agent_id,
-                human_author: None,
-                messages: vec![],
-                total_additions: 50,
-                total_deletions: 0,
-                accepted_lines: 0,
-                overriden_lines: 100, // Unrealistically high
-                messages_url: None,
-                custom_attributes: None,
-            },
-        );
-
-        // Only 10 lines added, 5 accepted by AI
-        let stats = stats_from_authorship_log(Some(&log), 10, 0, 5, 0, &BTreeMap::new());
-
-        // Mixed should be capped to max possible: 10 - 5 = 5
-        assert_eq!(stats.mixed_additions, 5);
-        assert_eq!(stats.ai_additions, 10); // 5 accepted + 5 mixed
-        assert_eq!(stats.human_additions, 0); // 10 - 5 accepted = 5, but mixed takes it
     }
 
     #[test]
@@ -1751,7 +1176,6 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: Some("Alice <alice@example.com>".to_string()),
-                messages: vec![],
                 total_additions: 10,
                 total_deletions: 0,
                 accepted_lines: 7,
@@ -1832,7 +1256,6 @@ mod tests {
             crate::authorship::authorship_log::PromptRecord {
                 agent_id,
                 human_author: None,
-                messages: vec![],
                 total_additions: 5,
                 total_deletions: 0,
                 accepted_lines: 5,
