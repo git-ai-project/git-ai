@@ -1,64 +1,27 @@
-tests/integration/fuzzer/oracle.rs
-  s_af2d349a5e032c::t_96c76d5a36f60d 247-250,260,275-276
-  s_af2d349a5e032c::t_1301a2f8236de3 251-252,261,277
-  s_af2d349a5e032c::t_ff5e18a451f199 167-171
-src/daemon.rs
-  s_af2d349a5e032c::t_10765b0cbb1109 4435-4436,4437-4441
-  s_af2d349a5e032c::t_50e5a1319aced1 4412-4428
-  s_af2d349a5e032c::t_c04fec022877ae 5845-5846
-src/authorship/post_commit.rs
-  s_af2d349a5e032c::t_dcfb065f5fb248 132-134,136-139
-  s_af2d349a5e032c::t_a36b1e31975f71 140
-  s_af2d349a5e032c::t_cb41870dded230 205-223
-  s_af2d349a5e032c::t_80e077b06e6461 224-226
-  s_af2d349a5e032c::t_21ef29af811bc4 135,141-142
-tests/integration/fuzzer/operations.rs
-  s_af2d349a5e032c::t_a8f654ff9f2cab 1558
-  s_af2d349a5e032c::t_1c5b0f46536c78 771-777
-  s_af2d349a5e032c::t_db8e58a5e1f363 1574
-  s_af2d349a5e032c::t_637c32c66b1260 2505
-  s_af2d349a5e032c::t_dd82385be2b82f 2547
-  s_af2d349a5e032c::t_75efee1718b76e 93,99-110
-  s_af2d349a5e032c::t_9d394522d6fbbd 857-858
-  s_af2d349a5e032c::t_eb6e15ba48f6af 4084
-  s_af2d349a5e032c::t_c0ff0a58a4e98b 4489
-  s_af2d349a5e032c::t_1366451bbd6bd7 1995-1997
-  s_af2d349a5e032c::t_52a8c8ec2ec963 822
-  s_af2d349a5e032c::t_229c2dd83fd1fd 176-195
-  s_af2d349a5e032c::t_96b858d507e1bb 3985
-  s_af2d349a5e032c::t_be66912c8cc528 4502-4503
-  s_af2d349a5e032c::t_a83480b5cf9850 849-851
-  s_af2d349a5e032c::t_8324072db509d6 95-98,111-114,123
-  s_af2d349a5e032c::t_f142d0fd5c8f95 2534-2536,2539
-  s_af2d349a5e032c::t_68e9c11cd02bb6 4194
-  s_af2d349a5e032c::t_46d1008767e31a 1874-1877
-  s_af2d349a5e032c::t_ebf052715ec5ae 158-159,162,166,169
-  s_af2d349a5e032c::t_9952bd5686198f 4500
-src/commands/checkpoint_agent/presets/mock_known_human.rs
-  s_af2d349a5e032c::t_f6c208f6835cba 10,14,36-38,45
-src/authorship/virtual_attribution.rs
-  s_af2d349a5e032c::t_524d080cf60058 602-607
-tests/integration/fuzzer/workflows.rs
-  s_af2d349a5e032c::t_88a9b5c10aed99 316
-  s_af2d349a5e032c::t_dfb13c603c0940 311
-  s_af2d349a5e032c::t_714ebcc2776854 10-11
-  s_af2d349a5e032c::t_654b7652e8ef34 966-967
-  s_af2d349a5e032c::t_e9607a1760ada4 1370,1379
-  s_af2d349a5e032c::t_2507aa4df72301 285
-src/daemon/checkpoint.rs
-  s_af2d349a5e032c::t_a2b08867aed530 334
-src/git/refs.rs
-  s_af2d349a5e032c::t_21a7c424aab20d 190-203,205-208,210,212-218,220-226,229-238,240-273
-  s_af2d349a5e032c::t_76867362e9213e 297-310,312-324,327-369
 src/commands/checkpoint_agent/presets/mock_ai.rs
-  s_af2d349a5e032c::t_b5ef76d7cdf2b2 20,24,46-48,66
-  s_af2d349a5e032c::t_fe760dfb76468d 30
+  s_af2d349a5e032c::t_9f5b995731d6e2 20,24,30,46-48,66
+tests/integration/fuzzer/oracle.rs
+  s_af2d349a5e032c::t_9f5b995731d6e2 247-252,260-261,275-277
+tests/integration/fuzzer/workflows.rs
+  s_af2d349a5e032c::t_9f5b995731d6e2 10-11,285,311,316,966-967,1370,1379
+tests/integration/fuzzer/operations.rs
+  s_af2d349a5e032c::t_9f5b995731d6e2 93,95-114,123,158-159,162,166,169,176-195,771-777,822,849-851,857-858,1558,1574,1874-1877,1995-1997,2505,2534-2536,2539,2547,3985,4084,4194,4489,4500,4502-4503
+src/daemon/checkpoint.rs
+  s_af2d349a5e032c::t_9f5b995731d6e2 334
+src/authorship/virtual_attribution.rs
+  s_af2d349a5e032c::t_9f5b995731d6e2 602-607
+src/git/refs.rs
+  s_af2d349a5e032c::t_9f5b995731d6e2 190-203,205-208,210,212-218,220-226,229-238,240-273,297-310,312-324,327-368
 src/authorship/rebase_authorship.rs
-  s_af2d349a5e032c::t_4f9a7be4d16c23 1129-1131,1133-1134,1138-1139,1141-1160
+  s_af2d349a5e032c::t_9f5b995731d6e2 1129-1131,1133-1134,1138-1139,1141-1160
+src/authorship/post_commit.rs
+  s_af2d349a5e032c::t_9f5b995731d6e2 132-142,205-223
+src/commands/checkpoint_agent/presets/mock_known_human.rs
+  s_af2d349a5e032c::t_9f5b995731d6e2 10,14,36-38,45
 ---
 {
   "schema_version": "authorship/3.0.0",
-  "git_ai_version": "development:1.5.1",
+  "git_ai_version": "development:1.5.3",
   "base_commit_sha": "c88e523391cd701ef3f54f4583f84a4a5cd14d00",
   "prompts": {},
   "sessions": {
@@ -68,7 +31,7 @@ src/authorship/rebase_authorship.rs
         "id": "ac381f5d-82d0-459b-b1f2-f85792a62a07",
         "model": "claude-opus-4-6"
       },
-      "human_author": null
+      "human_author": "Sasha Varlamov <sasha@sashavarlamov.com>"
     }
   }
 }
