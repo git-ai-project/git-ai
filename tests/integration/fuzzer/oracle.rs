@@ -60,14 +60,9 @@ pub struct CharRegistry {
     /// Sessions that have been committed to HEAD and must be retained through rewrites.
     /// Cleared on hard reset / destructive ops that legitimately drop commits.
     committed_sessions: HashSet<String>,
-    /// Characters whose attribution became unverifiable (e.g., after git_og rebase/merge
-    /// that doesn't transfer authorship notes). verify_blame skips these.
-    unverifiable: HashSet<char>,
     /// When true, skip ALL blame verification (e.g., after file rename which permanently
     /// breaks daemon attribution tracking for the file).
     pub skip_all_blame: bool,
-    /// When true, line count divergence is allowed (set alongside mark_all_unverifiable).
-    divergence_allowed: bool,
 }
 
 impl CharRegistry {
@@ -78,9 +73,7 @@ impl CharRegistry {
             next: 0,
             entries: HashMap::new(),
             committed_sessions: HashSet::new(),
-            unverifiable: HashSet::new(),
             skip_all_blame: false,
-            divergence_allowed: false,
         }
     }
 
@@ -117,25 +110,7 @@ impl CharRegistry {
         self.entries.get(&ch)
     }
 
-    /// Mark specific characters as unverifiable (their attribution can't be checked
-    /// because the commit that introduced them went through git_og without authorship notes).
-    #[allow(dead_code)]
-    pub fn mark_unverifiable(&mut self, chars: &[char]) {
-        for &ch in chars {
-            self.unverifiable.insert(ch);
-        }
-    }
-
-    /// Mark all currently-allocated characters as unverifiable.
-    /// Used after operations like git_og rebase/merge that invalidate all prior attributions.
-    pub fn mark_all_unverifiable(&mut self) {
-        for &ch in self.entries.keys().collect::<Vec<_>>() {
-            self.unverifiable.insert(ch);
-        }
-        self.divergence_allowed = true;
-    }
-
-    /// Dump registry contents for debugging.
+/// Dump registry contents for debugging.
     pub fn dump(&self) -> String {
         let mut entries: Vec<_> = self.entries.values().collect();
         entries.sort_by_key(|e| e.step);
@@ -189,33 +164,24 @@ impl CharRegistry {
             .collect();
 
         if blame_lines.len() != file_lines.len() {
-            // Check if there are ANY verifiable chars in file_lines
-            let has_verifiable_chars = file_lines.iter().any(|&ch| {
-                !self.unverifiable.contains(&ch) && self.entries.contains_key(&ch)
-            });
-
-            // If there are verifiable chars and divergence isn't explicitly allowed, this is a bug
-            if has_verifiable_chars && !self.divergence_allowed {
+            let has_registered_chars = file_lines.iter().any(|&ch| self.entries.contains_key(&ch));
+            if has_registered_chars {
                 panic!(
-                    "Line count mismatch with verifiable characters present (NOT after git_og)\n\
+                    "Line count mismatch\n\
                      Seed: {}\n\
                      File: {}\n\
                      Blame line count: {}\n\
                      Expected file line count: {}\n\
-                     Verifiable chars present: true\n\
-                     Divergence allowed: {}\n\
                      Operation log:\n{}\n\
                      Registry:\n{}",
                     seed,
                     filename,
                     blame_lines.len(),
                     file_lines.len(),
-                    self.divergence_allowed,
                     operation_log.join("\n"),
                     self.dump()
                 );
             }
-            // Otherwise, line count divergence is expected (all unverifiable or divergence allowed)
             return;
         }
 
@@ -224,19 +190,13 @@ impl CharRegistry {
         {
             let line_num = i + 1;
 
-            // Skip lines whose attribution is unverifiable (e.g., after git_og rebase/merge)
-            if self.unverifiable.contains(&expected_char) {
-                continue;
-            }
-
             let (author, _content) = parse_blame_line(blame_line);
             let is_ai_author = is_ai_author_name(&author);
 
             let entry = match self.get(expected_char) {
                 Some(e) => e,
                 None => {
-                    // Character not in registry (e.g., conflict markers from unresolved
-                    // merge, or content from git_og operations). Skip verification.
+                    // Character not in registry (e.g., conflict markers from unresolved merge)
                     continue;
                 }
             };
@@ -491,28 +451,19 @@ impl CharRegistry {
             &note
         };
 
-        // Check that each file with AI/known-human lines is present in the note
-        // NOTE: File renames/moves break daemon attribution tracking (known limitation).
-        // If a file has verifiable attributed lines but is missing from the note, mark
-        // those chars as unverifiable rather than panicking, since the daemon may have
-        // legitimately failed to track the file due to a rename in its history.
         for &(filename, file_lines) in files {
-            let has_verifiable_ai_or_human = file_lines.iter().any(|&ch| {
-                if self.unverifiable.contains(&ch) {
-                    return false;
-                }
+            let has_attributed = file_lines.iter().any(|&ch| {
                 self.get(ch).is_some_and(|e| {
                     matches!(e.attribution, Attribution::Ai | Attribution::KnownHuman)
                 })
             });
 
-            // If file has verifiable attributed lines but is missing from note, assume
-            // it had a rename in its history and mark all its chars as unverifiable
-            if has_verifiable_ai_or_human && !attestation_section.contains(filename) {
-                // Mark all chars from this file as unverifiable
-                for &ch in file_lines {
-                    self.unverifiable.insert(ch);
-                }
+            if has_attributed && !attestation_section.contains(filename) {
+                panic!(
+                    "File '{}' has attributed lines but is missing from authorship note\n\
+                     Note:\n{}",
+                    filename, note
+                );
             }
         }
     }
@@ -591,10 +542,6 @@ impl CharRegistry {
                     }
 
                     let ch = file_lines[idx];
-                    if self.unverifiable.contains(&ch) {
-                        continue; // Skip unverifiable chars
-                    }
-
                     let entry = match self.get(ch) {
                         Some(e) => e,
                         None => continue, // Char not in registry

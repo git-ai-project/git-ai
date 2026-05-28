@@ -220,11 +220,11 @@ pub fn execute_workflow_branch_lifecycle(
     repo.commit("lifecycle: advance main").unwrap();
     let main_new_lines = file_state.lines.clone();
 
-    // Switch back to feature, rebase onto main (use git_og to avoid daemon rebase errors)
+    // Switch back to feature, rebase onto main
     repo.git(&["checkout", &branch_name]).unwrap();
-    let rebase_result = repo.git_og(&["rebase", &main_branch]);
+    let rebase_result = repo.git(&["rebase", &main_branch]);
     if rebase_result.is_err() {
-        repo.git_og(&["rebase", "--abort"]).ok();
+        repo.git(&["rebase", "--abort"]).ok();
         repo.git(&["checkout", &main_branch]).unwrap();
         repo.git(&["branch", "-D", &branch_name]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
@@ -238,11 +238,11 @@ pub fn execute_workflow_branch_lifecycle(
     expected_lines.extend(feature_appended);
     file_state.lines = expected_lines;
 
-    // Switch to main, merge feature (fast-forward via git_og to avoid daemon merge tracking)
+    // Switch to main, merge feature
     repo.git(&["checkout", &main_branch]).unwrap();
-    repo.git_og(&["merge", &branch_name]).unwrap();
+    repo.git(&["merge", &branch_name]).unwrap();
 
-    // Re-read from disk (skip verify_blame - rebase via git_og has no authorship notes)
+    // Re-read from disk
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Cleanup
@@ -400,8 +400,8 @@ pub fn execute_workflow_fixup_autosquash(
     // Count total commits since base (1 main + fixup_count fixups)
     let total_commits = 1 + fixup_count;
 
-    // Real autosquash rebase (use git_og to avoid daemon rebase reconstruction issues)
-    let rebase_result = repo.git_og(&[
+    // Real autosquash rebase
+    let rebase_result = repo.git(&[
         "-c",
         "sequence.editor=true",
         "rebase",
@@ -411,10 +411,10 @@ pub fn execute_workflow_fixup_autosquash(
 
     if rebase_result.is_err() {
         // Abort the failed rebase before retrying with a different base
-        repo.git_og(&["rebase", "--abort"]).ok();
+        repo.git(&["rebase", "--abort"]).ok();
 
         // Fallback: try with the base sha directly
-        let rebase_result2 = repo.git_og(&[
+        let rebase_result2 = repo.git(&[
             "-c",
             "sequence.editor=true",
             "rebase",
@@ -422,13 +422,13 @@ pub fn execute_workflow_fixup_autosquash(
             &base_sha,
         ]);
         if rebase_result2.is_err() {
-            repo.git_og(&["rebase", "--abort"]).ok();
+            repo.git(&["rebase", "--abort"]).ok();
             operation_log.push("workflow-fixup-autosquash: rebase failed, aborted".to_string());
             return;
         }
     }
 
-    // Re-read from disk (rebase via git_og has no authorship notes)
+    // Re-read from disk
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     operation_log.push("workflow-fixup-autosquash: done".to_string());
@@ -467,10 +467,10 @@ pub fn execute_cherry_pick_no_commit(
     repo.git(&["checkout", &main_branch]).unwrap();
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
-    // Cherry-pick with --no-commit (use git_og to avoid daemon reconstruction issues)
-    let cp_result = repo.git_og(&["cherry-pick", "--no-commit", &feature_sha]);
+    // Cherry-pick with --no-commit
+    let cp_result = repo.git(&["cherry-pick", "--no-commit", &feature_sha]);
     if cp_result.is_err() {
-        repo.git_og(&["cherry-pick", "--abort"]).ok();
+        repo.git(&["cherry-pick", "--abort"]).ok();
         repo.git(&["branch", "-D", &branch_name]).ok();
         operation_log.push("cherry-pick-no-commit: conflict, aborted".to_string());
         return;
@@ -555,11 +555,11 @@ pub fn execute_cherry_pick_range(
     repo.git(&["add", "-A"]).unwrap();
     repo.commit("cprange: divergence on main").unwrap();
 
-    // Cherry-pick the range (use git_og to avoid daemon reconstruction issues)
+    // Cherry-pick the range
     let range_spec = format!("{}^..{}", first_sha, last_sha);
-    let cp_result = repo.git_og(&["cherry-pick", &range_spec]);
+    let cp_result = repo.git(&["cherry-pick", &range_spec]);
     if cp_result.is_err() {
-        repo.git_og(&["cherry-pick", "--abort"]).ok();
+        repo.git(&["cherry-pick", "--abort"]).ok();
         repo.git(&["branch", "-D", &branch_name]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
         operation_log.push("cherry-pick-range: conflict, aborted".to_string());
@@ -620,10 +620,10 @@ pub fn execute_rebase_onto(
         repo.commit(&format!("onto-b: commit {}", i)).unwrap();
     }
 
-    // Rebase --onto main A B (use git_og to avoid daemon rebase reconstruction issues)
-    let rebase_result = repo.git_og(&["rebase", "--onto", &main_branch, &branch_a, &branch_b]);
+    // Rebase --onto main A B
+    let rebase_result = repo.git(&["rebase", "--onto", &main_branch, &branch_a, &branch_b]);
     if rebase_result.is_err() {
-        repo.git_og(&["rebase", "--abort"]).ok();
+        repo.git(&["rebase", "--abort"]).ok();
         repo.git(&["checkout", &main_branch]).unwrap();
         repo.git(&["branch", "-D", &branch_a]).ok();
         repo.git(&["branch", "-D", &branch_b]).ok();
@@ -633,11 +633,11 @@ pub fn execute_rebase_onto(
     }
 
     // We're now on branch_b which has been rebased onto main
-    // Move main to point here (git_og for merge since it's tied to the rebase)
+    // Move main to point here
     repo.git(&["checkout", &main_branch]).unwrap();
-    repo.git_og(&["merge", &branch_b]).unwrap();
+    repo.git(&["merge", &branch_b]).unwrap();
 
-    // Re-read state from disk (no verify_blame - git_og ops have no authorship notes)
+    // Re-read state from disk
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Cleanup
@@ -775,11 +775,11 @@ pub fn execute_merge_squash_direct(
     repo.git(&["add", "-A"]).unwrap();
     repo.commit("msquash: advance main").unwrap();
 
-    // Merge --squash branch (use git_og to avoid daemon merge issues)
-    let squash_result = repo.git_og(&["merge", "--squash", &branch_name]);
+    // Merge --squash branch
+    let squash_result = repo.git(&["merge", "--squash", &branch_name]);
     if squash_result.is_err() {
         // Conflict - abort
-        repo.git_og(&["reset", "--hard", "HEAD"]).unwrap();
+        repo.git(&["reset", "--hard", "HEAD"]).unwrap();
         repo.git(&["branch", "-D", &branch_name]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
         operation_log.push("merge-squash-direct: conflict, aborted".to_string());
@@ -792,7 +792,7 @@ pub fn execute_merge_squash_direct(
     // Commit the squash (goes through proxy for normal attribution tracking)
     repo.commit("msquash: squash merge commit").unwrap();
 
-    // No verify_blame here - the merge via git_og means attribution for merged lines
+    // Verify attribution after squash merge
     // won't be tracked. File state is updated for the engine's next verification.
 
     // Cleanup
@@ -862,9 +862,9 @@ pub fn execute_rebase_conflict_continue(
     repo.git(&["add", "-A"]).unwrap();
     repo.commit("rebase-conflict: main edit").unwrap();
 
-    // Switch to branch and try rebase (use git_og to avoid daemon rebase issues)
+    // Switch to branch and try rebase
     repo.git(&["checkout", &branch_name]).unwrap();
-    let rebase_result = repo.git_og(&["rebase", &main_branch]);
+    let rebase_result = repo.git(&["rebase", &main_branch]);
 
     if rebase_result.is_err() {
         // Conflict! Resolve by taking "theirs" (main's version)
@@ -873,13 +873,13 @@ pub fn execute_rebase_conflict_continue(
 
         if conflicted.contains("<<<<<<<") {
             // Resolve by accepting theirs (checkout --theirs)
-            repo.git_og(&["checkout", "--theirs", "--", &file_state.filename])
+            repo.git(&["checkout", "--theirs", "--", &file_state.filename])
                 .unwrap();
-            repo.git_og(&["add", &file_state.filename]).unwrap();
+            repo.git(&["add", &file_state.filename]).unwrap();
 
-            let continue_result = repo.git_og(&["rebase", "--continue"]);
+            let continue_result = repo.git(&["rebase", "--continue"]);
             if continue_result.is_err() {
-                repo.git_og(&["rebase", "--abort"]).ok();
+                repo.git(&["rebase", "--abort"]).ok();
                 repo.git(&["checkout", &main_branch]).unwrap();
                 repo.git(&["branch", "-D", &branch_name]).ok();
                 file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
@@ -888,7 +888,7 @@ pub fn execute_rebase_conflict_continue(
                 return;
             }
         } else {
-            repo.git_og(&["rebase", "--abort"]).ok();
+            repo.git(&["rebase", "--abort"]).ok();
             repo.git(&["checkout", &main_branch]).unwrap();
             repo.git(&["branch", "-D", &branch_name]).ok();
             file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
@@ -897,11 +897,11 @@ pub fn execute_rebase_conflict_continue(
         }
     }
 
-    // Merge back to main (git_og since the rebase was done via git_og)
+    // Merge back to main
     repo.git(&["checkout", &main_branch]).unwrap();
-    repo.git_og(&["merge", &branch_name]).ok();
+    repo.git(&["merge", &branch_name]).ok();
 
-    // Re-read state from disk (no verify_blame - git_og ops have no authorship notes)
+    // Re-read state from disk
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Cleanup
@@ -1007,10 +1007,10 @@ pub fn execute_workflow_revert_cherrypick(
     repo.commit("revert-cp: original commit").unwrap();
     let original_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
-    // Revert it (use git_og to avoid daemon reconstruction issues)
-    let revert_result = repo.git_og(&["revert", "--no-edit", &original_sha]);
+    // Revert it
+    let revert_result = repo.git(&["revert", "--no-edit", &original_sha]);
     if revert_result.is_err() {
-        repo.git_og(&["revert", "--abort"]).ok();
+        repo.git(&["revert", "--abort"]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
         operation_log.push("workflow-revert-cherrypick: revert conflict, aborted".to_string());
         return;
@@ -1019,16 +1019,16 @@ pub fn execute_workflow_revert_cherrypick(
     // File should be back to pre-original state
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
-    // Cherry-pick the ORIGINAL commit back (use git_og)
-    let cp_result = repo.git_og(&["cherry-pick", &original_sha]);
+    // Cherry-pick the ORIGINAL commit back
+    let cp_result = repo.git(&["cherry-pick", &original_sha]);
     if cp_result.is_err() {
-        repo.git_og(&["cherry-pick", "--abort"]).ok();
+        repo.git(&["cherry-pick", "--abort"]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
         operation_log.push("workflow-revert-cherrypick: cherry-pick conflict, aborted".to_string());
         return;
     }
 
-    // Re-read from disk (no verify_blame - git_og ops have no authorship notes)
+    // Re-read from disk
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     operation_log.push("workflow-revert-cherrypick: done".to_string());
@@ -1097,21 +1097,21 @@ pub fn execute_workflow_multi_branch_merge(
             .unwrap();
     }
 
-    // Back to main, merge A (use git_og to avoid daemon panic on merge tracking)
+    // Back to main, merge A
     repo.git(&["checkout", &main_branch]).unwrap();
-    let merge_a_result = repo.git_og(&["merge", &branch_a, "--no-edit"]);
+    let merge_a_result = repo.git(&["merge", &branch_a, "--no-edit"]);
     if merge_a_result.is_err() {
-        repo.git_og(&["merge", "--abort"]).ok();
+        repo.git(&["merge", "--abort"]).ok();
         repo.git(&["branch", "-D", &branch_a]).ok();
         repo.git(&["branch", "-D", &branch_b]).ok();
         operation_log.push("workflow-multi-branch-merge: merge A failed".to_string());
         return;
     }
 
-    // Merge B (use git_og to avoid daemon panic on merge tracking)
-    let merge_b_result = repo.git_og(&["merge", &branch_b, "--no-edit"]);
+    // Merge B
+    let merge_b_result = repo.git(&["merge", &branch_b, "--no-edit"]);
     if merge_b_result.is_err() {
-        repo.git_og(&["merge", "--abort"]).ok();
+        repo.git(&["merge", "--abort"]).ok();
         repo.git(&["branch", "-D", &branch_a]).ok();
         repo.git(&["branch", "-D", &branch_b]).ok();
         operation_log.push("workflow-multi-branch-merge: merge B failed".to_string());

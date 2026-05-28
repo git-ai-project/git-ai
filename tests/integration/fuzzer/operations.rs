@@ -309,7 +309,7 @@ pub fn execute_ff_merge(
 
     // Switch back to main and fast-forward merge
     repo.git(&["checkout", &main_branch]).unwrap();
-    repo.git_og(&["merge", &branch_name]).unwrap();
+    repo.git(&["merge", &branch_name]).unwrap();
 
     // Verify the merged file's attribution
     registry.verify_blame(
@@ -388,7 +388,7 @@ pub fn execute_rebase_same_file(
 
     // Rebase feature onto main
     repo.git(&["checkout", &branch_name]).unwrap();
-    repo.git_og(&["rebase", &main_branch]).unwrap();
+    repo.git(&["rebase", &main_branch]).unwrap();
 
     // After rebase: main's prepended lines + original content + feature's appended lines
     let feature_appended: Vec<char> = feature_lines[pre_rebase_len..].to_vec();
@@ -398,7 +398,7 @@ pub fn execute_rebase_same_file(
 
     // Merge back to main (fast-forward)
     repo.git(&["checkout", &main_branch]).unwrap();
-    repo.git_og(&["merge", &branch_name]).unwrap();
+    repo.git(&["merge", &branch_name]).unwrap();
 
     // Cleanup
     repo.git(&["branch", "-d", &branch_name]).unwrap();
@@ -459,7 +459,7 @@ pub fn execute_squash_same_file(
     file_state.lines = pre_squash_lines;
 
     // Squash merge
-    repo.git_og(&["merge", "--squash", &branch_name]).unwrap();
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
     file_state.lines = final_lines;
 
     repo.git(&["commit", "-m", "squash merged"]).unwrap();
@@ -924,7 +924,7 @@ pub fn execute_branch_switch_dirty(
         repo.git(&["add", "-A"]).unwrap();
         repo.commit("forced commit on temp branch").unwrap();
         repo.git(&["checkout", &main_branch]).unwrap();
-        repo.git_og(&["merge", &temp_branch]).unwrap();
+        repo.git(&["merge", &temp_branch]).unwrap();
         repo.git(&["branch", "-d", &temp_branch]).unwrap();
         operation_log.push("branch-switch-dirty: had to commit on temp (conflicts)".to_string());
         return;
@@ -1658,10 +1658,10 @@ pub fn execute_multi_commit_rebase(
 
     // Rebase feature onto main
     repo.git(&["checkout", &branch_name]).unwrap();
-    let rebase_result = repo.git_og(&["rebase", &main_branch]);
+    let rebase_result = repo.git(&["rebase", &main_branch]);
     if rebase_result.is_err() {
         // Abort on conflict
-        repo.git_og(&["rebase", "--abort"]).ok();
+        repo.git(&["rebase", "--abort"]).ok();
         repo.git(&["checkout", &main_branch]).unwrap();
         repo.git(&["branch", "-D", &branch_name]).unwrap();
         operation_log.push("multi-commit-rebase: aborted due to conflict".to_string());
@@ -1676,7 +1676,7 @@ pub fn execute_multi_commit_rebase(
 
     // Merge back to main (fast-forward)
     repo.git(&["checkout", &main_branch]).unwrap();
-    repo.git_og(&["merge", &branch_name]).unwrap();
+    repo.git(&["merge", &branch_name]).unwrap();
     repo.git(&["branch", "-d", &branch_name]).unwrap();
 
     // Verify disk
@@ -1801,7 +1801,7 @@ pub fn execute_squash_partial_stage(
     file_state.lines = pre_squash_lines.clone();
 
     // Squash merge (puts changes in index)
-    repo.git_og(&["merge", "--squash", &branch_name]).unwrap();
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
 
     if new_line_count >= 2 {
         // Partially unstage: reset the file, write only partial content, re-add
@@ -2094,9 +2094,9 @@ pub fn execute_rebase_then_amend(
 
     // Rebase feature onto main
     repo.git(&["checkout", &branch_name]).unwrap();
-    let rebase_result = repo.git_og(&["rebase", &main_branch]);
+    let rebase_result = repo.git(&["rebase", &main_branch]);
     if rebase_result.is_err() {
-        repo.git_og(&["rebase", "--abort"]).ok();
+        repo.git(&["rebase", "--abort"]).ok();
         repo.git(&["checkout", &main_branch]).unwrap();
         repo.git(&["branch", "-D", &branch_name]).unwrap();
         operation_log.push("rebase-then-amend: aborted (conflict)".to_string());
@@ -2132,7 +2132,7 @@ pub fn execute_rebase_then_amend(
 
     // Merge back to main
     repo.git(&["checkout", &main_branch]).unwrap();
-    repo.git_og(&["merge", &branch_name]).unwrap();
+    repo.git(&["merge", &branch_name]).unwrap();
     repo.git(&["branch", "-d", &branch_name]).unwrap();
 
     // Re-sync from disk
@@ -2260,13 +2260,13 @@ pub fn execute_two_branch_merge(
 
     // Back to main, merge A (fast-forward)
     repo.git(&["checkout", &main_branch]).unwrap();
-    repo.git_og(&["merge", &branch_a]).unwrap();
+    repo.git(&["merge", &branch_a]).unwrap();
 
     // Now merge B (creates a real merge commit since main advanced)
-    let merge_result = repo.git_og(&["merge", &branch_b, "-m", "merge branch B"]);
+    let merge_result = repo.git(&["merge", &branch_b, "-m", "merge branch B"]);
     if merge_result.is_err() {
         // Conflict: abort
-        repo.git_og(&["merge", "--abort"]).ok();
+        repo.git(&["merge", "--abort"]).ok();
         repo.git(&["branch", "-D", &branch_a]).ok();
         repo.git(&["branch", "-D", &branch_b]).ok();
         operation_log.push("two-branch-merge: conflict, aborted".to_string());
@@ -2769,10 +2769,10 @@ pub fn execute_cherry_pick_conflict(
     repo.commit("cherry-pick-conflict: main commit").unwrap();
 
     // Try cherry-pick
-    let cp_result = repo.git_og(&["cherry-pick", &feature_sha]);
+    let cp_result = repo.git(&["cherry-pick", &feature_sha]);
     if cp_result.is_err() {
         // Conflict - abort
-        repo.git_og(&["cherry-pick", "--abort"]).ok();
+        repo.git(&["cherry-pick", "--abort"]).ok();
         operation_log.push("cherry-pick-conflict: conflict, aborted".to_string());
     } else {
         operation_log.push("cherry-pick-conflict: clean apply".to_string());
@@ -2827,10 +2827,10 @@ pub fn execute_rapid_branch_merge(
 
         // Merge back immediately
         repo.git(&["checkout", &base_branch]).unwrap();
-        let merge_result = repo.git_og(&["merge", &branch_name, "--no-edit"]);
+        let merge_result = repo.git(&["merge", &branch_name, "--no-edit"]);
         if merge_result.is_err() {
             // Conflict - just abort and move on
-            repo.git_og(&["merge", "--abort"]).ok();
+            repo.git(&["merge", "--abort"]).ok();
             operation_log.push(format!("rapid-branch-merge: branch {} conflict", i));
         }
 
@@ -2890,9 +2890,9 @@ pub fn execute_rebase_cherry_pick_combo(
     repo.commit("rebase-cp: base divergence commit").unwrap();
 
     // Try cherry-pick of first branch commit
-    let cp_result = repo.git_og(&["cherry-pick", &branch_shas[0]]);
+    let cp_result = repo.git(&["cherry-pick", &branch_shas[0]]);
     if cp_result.is_err() {
-        repo.git_og(&["cherry-pick", "--abort"]).ok();
+        repo.git(&["cherry-pick", "--abort"]).ok();
         operation_log.push("rebase-cherry-pick-combo: cherry-pick failed, skipping".to_string());
     } else {
         operation_log.push("rebase-cherry-pick-combo: cherry-pick succeeded".to_string());
@@ -3459,10 +3459,10 @@ pub fn execute_revert_then_redo(
     let sha_to_revert = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
 
     // Revert it
-    let revert_result = repo.git_og(&["revert", "--no-edit", &sha_to_revert]);
+    let revert_result = repo.git(&["revert", "--no-edit", &sha_to_revert]);
     if revert_result.is_err() {
         // Conflict during revert - abort
-        repo.git_og(&["revert", "--abort"]).ok();
+        repo.git(&["revert", "--abort"]).ok();
         operation_log.push("revert-then-redo: revert conflict, aborted".to_string());
         return;
     }
@@ -3733,14 +3733,14 @@ pub fn execute_merge_conflict_resolve(
     repo.commit("merge-conflict-resolve: main edit").unwrap();
 
     // Attempt merge
-    let merge_result = repo.git_og(&["merge", &branch_name, "--no-edit"]);
+    let merge_result = repo.git(&["merge", &branch_name, "--no-edit"]);
     if merge_result.is_err() {
         // Conflict: resolve by taking ours
         repo.git(&["checkout", "--ours", &file_state.filename]).ok();
         repo.git(&["add", &file_state.filename]).ok();
         let commit_result = repo.git(&["commit", "--no-edit"]);
         if commit_result.is_err() {
-            repo.git_og(&["merge", "--abort"]).ok();
+            repo.git(&["merge", "--abort"]).ok();
             operation_log.push("merge-conflict-resolve: abort after conflict".to_string());
         } else {
             operation_log.push("merge-conflict-resolve: resolved with --ours".to_string());
@@ -4147,9 +4147,9 @@ pub fn execute_deep_rebase_chain(
     repo.git(&["checkout", &branch_name]).unwrap();
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
-    let rebase_result = repo.git_og(&["rebase", "-"]);
+    let rebase_result = repo.git(&["rebase", "-"]);
     if rebase_result.is_err() {
-        repo.git_og(&["rebase", "--abort"]).ok();
+        repo.git(&["rebase", "--abort"]).ok();
         operation_log.push("deep-rebase-chain: rebase failed, aborted".to_string());
         repo.git(&["checkout", "-"]).unwrap();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
@@ -4159,7 +4159,7 @@ pub fn execute_deep_rebase_chain(
 
     // Fast-forward merge the rebased branch
     repo.git(&["checkout", "-"]).unwrap();
-    repo.git_og(&["merge", "--ff-only", &branch_name]).unwrap();
+    repo.git(&["merge", "--ff-only", &branch_name]).unwrap();
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Clean up
@@ -4314,9 +4314,9 @@ pub fn execute_three_way_merge(
     repo.git(&["checkout", &base_branch]).unwrap();
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
-    let merge_a = repo.git_og(&["merge", &branch_a, "--no-edit"]);
+    let merge_a = repo.git(&["merge", &branch_a, "--no-edit"]);
     if merge_a.is_err() {
-        repo.git_og(&["merge", "--abort"]).ok();
+        repo.git(&["merge", "--abort"]).ok();
         repo.git(&["branch", "-D", &branch_a]).ok();
         repo.git(&["branch", "-D", &branch_b]).ok();
         operation_log.push("three-way-merge: merge A failed, aborted".to_string());
@@ -4325,9 +4325,9 @@ pub fn execute_three_way_merge(
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
     // Merge B
-    let merge_b = repo.git_og(&["merge", &branch_b, "--no-edit"]);
+    let merge_b = repo.git(&["merge", &branch_b, "--no-edit"]);
     if merge_b.is_err() {
-        repo.git_og(&["merge", "--abort"]).ok();
+        repo.git(&["merge", "--abort"]).ok();
         operation_log.push("three-way-merge: merge B failed, aborted".to_string());
     } else {
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
@@ -4609,9 +4609,9 @@ pub fn execute_cherry_pick_chain(
 
     // Cherry-pick each commit one by one
     for (i, sha) in shas.iter().enumerate() {
-        let cp_result = repo.git_og(&["cherry-pick", sha]);
+        let cp_result = repo.git(&["cherry-pick", sha]);
         if cp_result.is_err() {
-            repo.git_og(&["cherry-pick", "--abort"]).ok();
+            repo.git(&["cherry-pick", "--abort"]).ok();
             operation_log.push(format!("cherry-pick-chain: pick {} failed", i));
             break;
         }
@@ -4745,7 +4745,7 @@ pub fn execute_squash_mixed_attribution(
     repo.git(&["checkout", &main_branch]).unwrap();
     file_state.lines = pre_squash_lines;
 
-    repo.git_og(&["merge", "--squash", &branch_name]).unwrap();
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
     file_state.lines = final_lines;
     repo.git(&["commit", "-m", "squash-mixed: squashed all"])
         .unwrap();
@@ -4864,7 +4864,7 @@ pub fn execute_squash_after_amend(
     // Switch back and squash
     repo.git(&["checkout", &main_branch]).unwrap();
     file_state.lines = pre_squash_lines;
-    repo.git_og(&["merge", "--squash", &branch_name]).unwrap();
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
     file_state.lines = final_lines;
     repo.git(&["commit", "-m", "squash-amend: squashed"])
         .unwrap();
@@ -4912,7 +4912,7 @@ pub fn execute_squash_then_amend(
     // Squash merge
     repo.git(&["checkout", &main_branch]).unwrap();
     file_state.lines = pre_squash_lines;
-    repo.git_og(&["merge", "--squash", &branch_name]).unwrap();
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
     file_state.lines = branch_lines;
     repo.git(&["commit", "-m", "squash-then-amend: squashed"])
         .unwrap();
@@ -4987,9 +4987,9 @@ pub fn execute_squash_rebased_branch(
 
     // Rebase the feature branch onto main (rewrites all feature commits)
     repo.git(&["checkout", &branch_name]).unwrap();
-    let rebase_result = repo.git_og(&["rebase", &main_branch]);
+    let rebase_result = repo.git(&["rebase", &main_branch]);
     if rebase_result.is_err() {
-        repo.git_og(&["rebase", "--abort"]).ok();
+        repo.git(&["rebase", "--abort"]).ok();
         repo.git(&["checkout", &main_branch]).unwrap();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
         repo.git(&["branch", "-D", &branch_name]).ok();
@@ -5003,7 +5003,7 @@ pub fn execute_squash_rebased_branch(
     repo.git(&["checkout", &main_branch]).unwrap();
     file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
 
-    let merge_result = repo.git_og(&["merge", "--squash", &branch_name]);
+    let merge_result = repo.git(&["merge", "--squash", &branch_name]);
     if merge_result.is_err() {
         repo.git(&["reset", "--hard"]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);
@@ -5090,7 +5090,7 @@ pub fn execute_squash_with_overwrites(
     // Squash merge
     repo.git(&["checkout", &main_branch]).unwrap();
     file_state.lines = pre_squash_lines;
-    repo.git_og(&["merge", "--squash", &branch_name]).unwrap();
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
     file_state.lines = final_lines;
     repo.git(&["commit", "-m", "squash-overwrite: squashed"])
         .unwrap();
@@ -5150,7 +5150,7 @@ pub fn execute_squash_multi_file(
         fs.lines = pre_states[i].clone();
     }
 
-    repo.git_og(&["merge", "--squash", &branch_name]).unwrap();
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
     for (i, fs) in file_states.iter_mut().enumerate() {
         fs.lines = final_states[i].clone();
     }
@@ -5199,7 +5199,7 @@ pub fn execute_squash_reset_recommit(
     // First squash
     repo.git(&["checkout", &main_branch]).unwrap();
     file_state.lines = pre_squash_lines.clone();
-    repo.git_og(&["merge", "--squash", &branch_name]).unwrap();
+    repo.git(&["merge", "--squash", &branch_name]).unwrap();
     file_state.lines = final_lines.clone();
     repo.git(&["commit", "-m", "squash-reset: first squash"])
         .unwrap();
@@ -5278,9 +5278,9 @@ pub fn execute_squash_nonlinear_branch(
     repo.commit("squash-nl: feature commit 2").unwrap();
 
     // Merge sub-branch into feature (creates merge commit)
-    let merge_result = repo.git_og(&["merge", &sub_branch, "--no-edit"]);
+    let merge_result = repo.git(&["merge", &sub_branch, "--no-edit"]);
     if merge_result.is_err() {
-        repo.git_og(&["merge", "--abort"]).ok();
+        repo.git(&["merge", "--abort"]).ok();
         repo.git(&["checkout", &main_branch]).unwrap();
         file_state.lines = pre_squash_lines;
         repo.git(&["branch", "-D", &feature_branch]).ok();
@@ -5296,7 +5296,7 @@ pub fn execute_squash_nonlinear_branch(
     repo.git(&["checkout", &main_branch]).unwrap();
     file_state.lines = pre_squash_lines;
 
-    let squash_result = repo.git_og(&["merge", "--squash", &feature_branch]);
+    let squash_result = repo.git(&["merge", "--squash", &feature_branch]);
     if squash_result.is_err() {
         repo.git(&["reset", "--hard"]).ok();
         file_state.lines = read_file_state_from_disk(repo, &file_state.filename);

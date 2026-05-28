@@ -274,7 +274,6 @@ impl FuzzerConfig {
             max_lines_per_edit: 6,
             multi_file_enabled: true,
             allow_destructive: true,
-            // Disabled: git_og operations break session continuity
             verify_sessions: false,
         }
     }
