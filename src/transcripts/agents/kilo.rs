@@ -91,6 +91,8 @@ impl KiloAgent {
                 "session_id".into(),
                 serde_json::Value::String(row_session_id),
             );
+            map.insert("time_created".into(), serde_json::json!(_time_created));
+            map.insert("time_updated".into(), serde_json::json!(time_updated));
             map.insert("data".into(), parsed_data);
 
             messages.push((id, time_updated, serde_json::Value::Object(map)));
@@ -147,6 +149,11 @@ impl KiloAgent {
 
             if let Ok(parsed_data) = serde_json::from_str::<serde_json::Value>(&data) {
                 let mut map = serde_json::Map::with_capacity(6);
+                map.insert("id".into(), serde_json::json!(_id));
+                map.insert("message_id".into(), serde_json::json!(message_id));
+                map.insert("session_id".into(), serde_json::json!(_row_session_id));
+                map.insert("time_created".into(), serde_json::json!(_time_created));
+                map.insert("time_updated".into(), serde_json::json!(_time_updated));
                 map.insert("data".into(), parsed_data);
                 parts_by_message
                     .entry(message_id)
