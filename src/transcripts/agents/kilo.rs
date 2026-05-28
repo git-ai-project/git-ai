@@ -1,4 +1,3 @@
-use crate::authorship::authorship_log_serialization::generate_session_id;
 use crate::transcripts::agent::Agent;
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
@@ -265,7 +264,7 @@ impl KiloAgent {
                 .flatten();
 
             sessions.push(DiscoveredSession {
-                session_id: generate_session_id(&session_id, "kilo"),
+                session_id: crate::authorship::authorship_log_serialization::generate_session_id(&session_id, "kilo"),
                 tool: "kilo".to_string(),
                 transcript_path: db_path.to_path_buf(),
                 transcript_format: crate::transcripts::sweep::TranscriptFormat::KiloCodeSqlite,
