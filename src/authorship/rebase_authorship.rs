@@ -4972,14 +4972,26 @@ fn build_contributors_from_merged_log(
     let commit_author_name = get_commit_author_name(repo, representative_sha);
     let normalized_commit_email = normalize_email(&commit_author_email, noreply_normalizer);
 
-    // Sum git diff added lines across all source commits for manual line calculation.
-    // Skip merge commits — their diff against first parent includes the entire
-    // merged branch, which would massively inflate manual_additions.
-    let git_diff_added_lines: u32 = source_commits
-        .iter()
-        .filter(|sha| !is_merge_commit(repo, sha))
-        .map(|sha| get_commit_diff_added_lines(repo, sha))
-        .sum();
+    // Prefer the final squash/rebase commit diff when available: merged_log
+    // attestations are expressed in final-file line numbers, not source-commit
+    // line numbers. Fall back to source commits for metadata-only logs.
+    let merged_commit_sha = merged_log.metadata.base_commit_sha.as_str();
+    let use_merged_commit_diff =
+        !merged_commit_sha.is_empty() && !is_merge_commit(repo, merged_commit_sha);
+    let git_diff_added_lines: u32 = if use_merged_commit_diff {
+        get_commit_diff_added_lines(repo, merged_commit_sha)
+    } else {
+        source_commits
+            .iter()
+            .filter(|sha| !is_merge_commit(repo, sha))
+            .map(|sha| get_commit_diff_added_lines(repo, sha))
+            .sum()
+    };
+    let per_file_added_lines = if use_merged_commit_diff {
+        get_per_file_added_lines_for_commit(repo, merged_commit_sha)
+    } else {
+        get_per_file_added_lines_for_commits(repo, source_commits)
+    };
 
     let mut total_ai_accepted: u32 = 0;
     let mut total_mixed: u32 = 0;
@@ -5019,7 +5031,6 @@ fn build_contributors_from_merged_log(
     // --- Era B (sessions-format) path ---
     // Sessions have no pre-computed accepted_lines; derive counts from attestations.
     if !merged_log.metadata.sessions.is_empty() {
-        let per_file_added_lines = get_per_file_added_lines_for_commits(repo, source_commits);
         let session_lines = accepted_lines_by_session(merged_log, &per_file_added_lines);
         for (session_key, accepted) in &session_lines {
             if filter_to_source && !source_session_ids.contains(session_key) {
@@ -5052,10 +5063,20 @@ fn build_contributors_from_merged_log(
         }
     }
 
-    // Manual lines = raw git total - ai_accepted - mixed
+    let total_known_human = add_known_human_contributors(
+        &mut contributors,
+        merged_log,
+        &accepted_lines_by_human(merged_log, &per_file_added_lines),
+        &commit_author_email,
+        noreply_normalizer,
+        name_to_email,
+    );
+
+    // Manual fallback = raw git total - ai_accepted - mixed - known-human.
     let manual_for_commit = git_diff_added_lines
         .saturating_sub(total_ai_accepted)
-        .saturating_sub(total_mixed);
+        .saturating_sub(total_mixed)
+        .saturating_sub(total_known_human);
 
     if manual_for_commit > 0 {
         let c = contributors.entry(normalized_commit_email).or_default();
@@ -5152,6 +5173,8 @@ fn build_contributors(
 
                 let mut total_ai_accepted: u32 = 0;
                 let mut total_mixed: u32 = 0;
+                let per_file_added_lines =
+                    get_per_file_added_lines_for_commits(repo, std::slice::from_ref(sha));
 
                 for prompt in note.metadata.prompts.values() {
                     let dev_email = resolve_contributor_email(
@@ -5182,17 +5205,29 @@ fn build_contributors(
                     total_mixed += prompt.overriden_lines;
                 }
 
-                // Manual lines = raw git total - ai_accepted - mixed
+                let total_known_human = add_known_human_contributors(
+                    &mut contributors,
+                    &note,
+                    &accepted_lines_by_human(&note, &per_file_added_lines),
+                    &commit_author_email,
+                    &noreply_normalizer,
+                    &name_to_email,
+                );
+
+                // Manual fallback = raw git total - ai_accepted - mixed - known-human.
                 let manual_for_commit = git_diff_added_lines
                     .saturating_sub(total_ai_accepted)
-                    .saturating_sub(total_mixed);
+                    .saturating_sub(total_mixed)
+                    .saturating_sub(total_known_human);
 
-                let c = contributors.entry(normalized_commit_email).or_default();
-                if c.name.is_empty() {
-                    c.name = commit_author_name;
+                if manual_for_commit > 0 {
+                    let c = contributors.entry(normalized_commit_email).or_default();
+                    if c.name.is_empty() {
+                        c.name = commit_author_name;
+                    }
+                    c.manual_additions += manual_for_commit;
+                    c.human_additions += manual_for_commit;
                 }
-                c.manual_additions += manual_for_commit;
-                c.human_additions += manual_for_commit;
 
                 continue;
             }
@@ -5241,7 +5276,18 @@ fn build_contributors(
                     total_ai_accepted = total_ai_accepted.saturating_add(*accepted);
                 }
 
-                let manual_for_commit = git_diff_added_lines.saturating_sub(total_ai_accepted);
+                let total_known_human = add_known_human_contributors(
+                    &mut contributors,
+                    &note,
+                    &accepted_lines_by_human(&note, &per_file_added_lines),
+                    &commit_author_email,
+                    &noreply_normalizer,
+                    &name_to_email,
+                );
+
+                let manual_for_commit = git_diff_added_lines
+                    .saturating_sub(total_ai_accepted)
+                    .saturating_sub(total_known_human);
                 if manual_for_commit > 0 {
                     let c = contributors.entry(normalized_commit_email).or_default();
                     if c.name.is_empty() {
@@ -5429,6 +5475,19 @@ fn extract_github_username(email: &str) -> Option<String> {
     }
 }
 
+fn add_author_identity_to_email_map(author: &str, name_to_email: &mut HashMap<String, String>) {
+    if let Some(start) = author.find('<')
+        && let Some(end) = author.find('>')
+        && start < end
+    {
+        let email = author[start + 1..end].to_string();
+        let name = author[..start].trim().to_lowercase();
+        if !name.is_empty() {
+            name_to_email.insert(name, email);
+        }
+    }
+}
+
 /// Build email normalization maps by scanning notes and commit metadata across source commits.
 ///
 /// Returns `(noreply_normalizer, name_to_email)`:
@@ -5452,17 +5511,17 @@ fn build_email_normalizer(
                 }
             }
             for prompt in note.metadata.prompts.values() {
-                if let Some(ref author) = prompt.human_author
-                    && let Some(start) = author.find('<')
-                    && let Some(end) = author.find('>')
-                    && start < end
-                {
-                    let email = author[start + 1..end].to_string();
-                    let name = author[..start].trim().to_lowercase();
-                    if !name.is_empty() {
-                        name_to_email.insert(name, email);
-                    }
+                if let Some(ref author) = prompt.human_author {
+                    add_author_identity_to_email_map(author, &mut name_to_email);
                 }
+            }
+            for session in note.metadata.sessions.values() {
+                if let Some(ref author) = session.human_author {
+                    add_author_identity_to_email_map(author, &mut name_to_email);
+                }
+            }
+            for human in note.metadata.humans.values() {
+                add_author_identity_to_email_map(&human.author, &mut name_to_email);
             }
         }
 
@@ -5487,6 +5546,70 @@ fn build_email_normalizer(
     (noreply_normalizer, name_to_email)
 }
 
+fn added_lines_from_commit_diff(repo: &Repository, commit_sha: &str) -> HashMap<String, Vec<u32>> {
+    let parent_ref = {
+        let mut args = repo.global_args_for_exec();
+        args.extend_from_slice(&["rev-parse".to_string(), format!("{}^", commit_sha)]);
+        exec_git(&args)
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string())
+    };
+    let mut args = repo.global_args_for_exec();
+    args.extend_from_slice(&[
+        "diff".to_string(),
+        "-U0".to_string(),
+        "--no-color".to_string(),
+        parent_ref,
+        commit_sha.to_string(),
+    ]);
+    let output = match exec_git(&args) {
+        Ok(o) => String::from_utf8(o.stdout).unwrap_or_default(),
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut per_file: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut current_file: Option<String> = None;
+    for line in output.lines() {
+        if let Some(path) = line.strip_prefix("+++ b/") {
+            current_file = Some(path.to_string());
+        } else if line.starts_with("@@")
+            && let (Some(file), Some(hunk)) = (current_file.as_ref(), parse_hunk_header(line))
+            && hunk.new_count > 0
+        {
+            let lines = per_file.entry(file.clone()).or_default();
+            for n in 0..hunk.new_count {
+                lines.push(hunk.new_start + n);
+            }
+        }
+    }
+
+    per_file
+}
+
+fn merge_added_lines(into: &mut HashMap<String, Vec<u32>>, from: HashMap<String, Vec<u32>>) {
+    for (file, mut lines) in from {
+        into.entry(file).or_default().append(&mut lines);
+    }
+}
+
+fn dedupe_added_lines(per_file: &mut HashMap<String, Vec<u32>>) {
+    for lines in per_file.values_mut() {
+        lines.sort_unstable();
+        lines.dedup();
+    }
+}
+
+fn get_per_file_added_lines_for_commit(
+    repo: &Repository,
+    commit_sha: &str,
+) -> HashMap<String, Vec<u32>> {
+    let mut per_file = added_lines_from_commit_diff(repo, commit_sha);
+    dedupe_added_lines(&mut per_file);
+    per_file
+}
+
 /// Build a per-file map of added line numbers by summing diffs across source commits.
 /// Skips merge commits; their diff vs first parent would inflate line counts.
 fn get_per_file_added_lines_for_commits(
@@ -5499,47 +5622,10 @@ fn get_per_file_added_lines_for_commits(
         if is_merge_commit(repo, sha) {
             continue;
         }
-        let parent_ref = {
-            let mut args = repo.global_args_for_exec();
-            args.extend_from_slice(&["rev-parse".to_string(), format!("{}^", sha)]);
-            exec_git(&args)
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|| "4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string())
-        };
-        let mut args = repo.global_args_for_exec();
-        args.extend_from_slice(&[
-            "diff".to_string(),
-            "-U0".to_string(),
-            "--no-color".to_string(),
-            parent_ref,
-            sha.to_string(),
-        ]);
-        let output = match exec_git(&args) {
-            Ok(o) => String::from_utf8(o.stdout).unwrap_or_default(),
-            Err(_) => continue,
-        };
-        let mut current_file: Option<String> = None;
-        for line in output.lines() {
-            if let Some(path) = line.strip_prefix("+++ b/") {
-                current_file = Some(path.to_string());
-            } else if line.starts_with("@@")
-                && let (Some(file), Some(hunk)) = (current_file.as_ref(), parse_hunk_header(line))
-                && hunk.new_count > 0
-            {
-                let lines = per_file.entry(file.clone()).or_default();
-                for n in 0..hunk.new_count {
-                    lines.push(hunk.new_start + n);
-                }
-            }
-        }
+        merge_added_lines(&mut per_file, added_lines_from_commit_diff(repo, sha));
     }
 
-    for lines in per_file.values_mut() {
-        lines.sort_unstable();
-        lines.dedup();
-    }
+    dedupe_added_lines(&mut per_file);
     per_file
 }
 
@@ -5582,6 +5668,70 @@ fn accepted_lines_by_session(
     per_session
 }
 
+/// Sum lines attested to known humans, intersected with per-file added lines.
+/// Returns: BTreeMap<human_key, manual_line_count>.
+fn accepted_lines_by_human(
+    log: &AuthorshipLog,
+    per_file_added_lines: &HashMap<String, Vec<u32>>,
+) -> BTreeMap<String, u32> {
+    use crate::authorship::stats::line_range_overlap_len;
+    let mut per_human: BTreeMap<String, u32> = BTreeMap::new();
+
+    for file_attestation in &log.attestations {
+        let added_lines = match per_file_added_lines.get(&file_attestation.file_path) {
+            Some(lines) => lines.as_slice(),
+            None => continue,
+        };
+        for entry in &file_attestation.entries {
+            if !entry.hash.starts_with("h_") {
+                continue;
+            }
+            let accepted: u32 = entry
+                .line_ranges
+                .iter()
+                .map(|r| line_range_overlap_len(r, added_lines))
+                .sum();
+            if accepted > 0 {
+                *per_human.entry(entry.hash.clone()).or_insert(0) += accepted;
+            }
+        }
+    }
+
+    per_human
+}
+
+fn add_known_human_contributors(
+    contributors: &mut HashMap<String, ContributorStats>,
+    log: &AuthorshipLog,
+    human_lines: &BTreeMap<String, u32>,
+    commit_author_email: &str,
+    noreply_normalizer: &HashMap<String, String>,
+    name_to_email: &HashMap<String, String>,
+) -> u32 {
+    let mut total_known_human = 0u32;
+
+    for (human_key, manual_lines) in human_lines {
+        let Some(human_record) = log.metadata.humans.get(human_key) else {
+            continue;
+        };
+        let human_author = Some(human_record.author.clone());
+        let dev_email =
+            resolve_contributor_email(&human_author, commit_author_email, name_to_email);
+        let dev_email = normalize_email(&dev_email, noreply_normalizer);
+        let dev_name = parse_name_from_human_author(&human_author);
+
+        let c = contributors.entry(dev_email).or_default();
+        if !dev_name.is_empty() && dev_name != "unknown" {
+            c.name = dev_name;
+        }
+        c.manual_additions = c.manual_additions.saturating_add(*manual_lines);
+        c.human_additions = c.human_additions.saturating_add(*manual_lines);
+        total_known_human = total_known_human.saturating_add(*manual_lines);
+    }
+
+    total_known_human
+}
+
 /// Normalize an email using the noreply lookup map.
 fn normalize_email(email: &str, normalizer: &HashMap<String, String>) -> String {
     normalizer
@@ -5593,9 +5743,10 @@ fn normalize_email(email: &str, normalizer: &HashMap<String, String>) -> String 
 #[cfg(test)]
 mod tests {
     use super::{
-        accepted_lines_by_session, collect_changed_file_contents_from_diff,
-        extract_github_username, get_pathspecs_from_commits, load_rebase_note_cache,
-        normalize_email, parse_cat_file_batch_output_with_oids, parse_name_from_human_author,
+        accepted_lines_by_human, accepted_lines_by_session,
+        collect_changed_file_contents_from_diff, extract_github_username,
+        get_pathspecs_from_commits, load_rebase_note_cache, normalize_email,
+        parse_cat_file_batch_output_with_oids, parse_name_from_human_author,
         resolve_contributor_email, rewrite_authorship_after_cherry_pick,
         transform_attributions_to_final_state, try_fast_path_rebase_note_remap_cached,
         walk_commits_to_base,
@@ -8127,6 +8278,30 @@ mod tests {
             !result.contains_key("promptXYZ"),
             "prompt hashes must not appear in session result"
         );
+    }
+
+    #[test]
+    fn test_known_human_lines_from_attestations() {
+        use crate::authorship::authorship_log::LineRange;
+        use crate::authorship::authorship_log_serialization::{
+            AttestationEntry, AuthorshipLog, AuthorshipMetadata, FileAttestation,
+        };
+
+        let mut file_att = FileAttestation::new("src/manual.rs".to_string());
+        file_att.add_entry(AttestationEntry::new(
+            "h_alice".to_string(),
+            vec![LineRange::Range(2, 4)],
+        ));
+        let log = AuthorshipLog {
+            attestations: vec![file_att],
+            metadata: AuthorshipMetadata::new(),
+        };
+
+        let mut per_file = HashMap::new();
+        per_file.insert("src/manual.rs".to_string(), vec![1u32, 2, 4, 8]);
+
+        let result = accepted_lines_by_human(&log, &per_file);
+        assert_eq!(result.get("h_alice").copied().unwrap_or(0), 2);
     }
 
     #[test]
