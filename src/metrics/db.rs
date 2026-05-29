@@ -211,7 +211,13 @@ impl MetricsDatabase {
 
         let migration_sql = MIGRATIONS[from_version];
         let tx = self.conn.transaction()?;
-        tx.execute_batch(migration_sql)?;
+        match tx.execute_batch(migration_sql) {
+            Ok(()) => {}
+            Err(e) if e.to_string().contains("duplicate column name") => {
+                // Another process already applied this ALTER TABLE concurrently.
+            }
+            Err(e) => return Err(e.into()),
+        }
         tx.commit()?;
 
         Ok(())
