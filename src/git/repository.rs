@@ -2428,7 +2428,7 @@ fn has_intervening_git_dir(file_path: &Path, workdir: &Path) -> bool {
             break;
         }
         let potential_git = workdir.join(parent).join(".git");
-        if potential_git.is_dir() && potential_git.join("HEAD").is_file() {
+        if potential_git.is_dir() && is_valid_git_dir(&potential_git) {
             // A valid .git directory (with HEAD) indicates a separate independent repo.
             // Empty .git directories (e.g. from docker-compose volume mounts) are skipped.
             return true;
