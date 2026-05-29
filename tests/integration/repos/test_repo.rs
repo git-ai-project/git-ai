@@ -894,7 +894,7 @@ fn parse_checkpoint_request_count(stdout: &str) -> u64 {
 fn git_ai_command_requires_daemon_sync(args: &[&str]) -> bool {
     matches!(
         git_ai_primary_command(args),
-        Some("blame" | "continue" | "diff" | "prompts" | "search" | "stats")
+        Some("blame" | "checkpoint" | "continue" | "diff" | "prompts" | "search" | "stats")
     )
 }
 
