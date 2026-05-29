@@ -194,6 +194,7 @@ fn execute_resolved_checkpoint(
     let mut working_log = repo
         .storage
         .working_log_for_base_commit(&resolved.base_commit)?;
+
     if !resolved.dirty_files.is_empty() {
         working_log.set_dirty_files(Some(resolved.dirty_files.clone()));
     }
@@ -622,7 +623,6 @@ fn get_checkpoint_entry_for_file(
 
     let is_from_checkpoint = from_checkpoint.is_some();
     let (previous_content, prev_attributions) = if let Some((content, attrs)) = from_checkpoint {
-        // File exists in a previous checkpoint - use that
         (content, attrs)
     } else {
         // File doesn't exist in any previous checkpoint - need to initialize from git + INITIAL
@@ -649,8 +649,24 @@ fn get_checkpoint_entry_for_file(
         let mut prev_line_attributions = initial_attrs_for_file.clone();
         let mut blamed_lines: HashSet<u32> = HashSet::new();
 
-        // Default all previous-content lines to "human" (no cross-commit blame)
-        let prev_total_lines = previous_content.lines().count() as u32;
+        // Default all previous-content lines to "human" (no cross-commit blame).
+        // When INITIAL has a snapshot that DIFFERS from current content, use its
+        // line count (that's what the diff will compare against). When the snapshot
+        // matches current content (no edits after INITIAL), use the HEAD content
+        // line count so the AI fallback can fire for uncovered lines.
+        let effective_prev_content = if !initial_attrs_for_file.is_empty() {
+            let snapshot = initial_snapshot_content
+                .as_deref()
+                .unwrap_or(&previous_content);
+            if content_eq_normalized(snapshot, &current_content) {
+                &previous_content
+            } else {
+                snapshot
+            }
+        } else {
+            &previous_content
+        };
+        let prev_total_lines = effective_prev_content.lines().count() as u32;
         for line_num in 1..=prev_total_lines {
             blamed_lines.insert(line_num);
         }
@@ -744,6 +760,7 @@ fn get_checkpoint_entry_for_file(
         content: &current_content,
         ts,
     })?;
+
     tracing::debug!(
         "[BENCHMARK] Processing file {} took {:?}",
         file_path,

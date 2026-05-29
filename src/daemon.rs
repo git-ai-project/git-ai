@@ -3731,6 +3731,36 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
+    /// Waits until all trace payloads enqueued up to now have been processed
+    /// by the ingest worker. This is a causal drain fence: it guarantees that
+    /// any trace2 event already in the ingest queue (e.g., from a `git reset`
+    /// that exited before this function was called) has been fully processed
+    /// before returning.
+    ///
+    /// Used by checkpoint entry to ensure ordering: a checkpoint must not be
+    /// processed until all causally-prior git operations have been ingested.
+    async fn wait_for_trace_ingest_processed_through(&self) {
+        // Read the current high-water mark. Any payload enqueued before this
+        // point has a seq <= this value. We need to wait until the ingest
+        // worker has processed through at least this seq.
+        let target_seq = self.next_trace_ingest_seq.load(Ordering::Acquire) as u64;
+        if target_seq == 0 {
+            return;
+        }
+        // The target is (next - 1) because next_trace_ingest_seq is pre-incremented
+        // by fetch_add before use, so the last *assigned* seq is (current_value - 1).
+        // But since we loaded AFTER the fetch_add that assigned the seq, we need to
+        // check processed_seq >= target_seq - 1 (the last allocated seq).
+        let target = target_seq.saturating_sub(1);
+        loop {
+            let processed = self.processed_trace_ingest_seq.load(Ordering::Acquire) as u64;
+            if processed >= target {
+                return;
+            }
+            self.trace_ingest_progress_notify.notified().await;
+        }
+    }
+
     /// Prepares `payload` for ingestion and returns whether it should be
     /// enqueued.
     ///
@@ -4337,6 +4367,12 @@ impl ActorDaemonCoordinator {
         request: CheckpointRequest,
         respond_to: Option<oneshot::Sender<Result<u64, GitAiError>>>,
     ) -> Result<(), GitAiError> {
+        // Causal drain fence: ensure all trace2 events already in the ingest
+        // queue have been processed before we insert this checkpoint. Without
+        // this, a checkpoint can race ahead of a git reset/rebase trace2 event
+        // and compute its diff against stale working-log state.
+        self.wait_for_trace_ingest_processed_through().await;
+
         let exec_lock = self.side_effect_exec_lock(family)?;
         let _guard = exec_lock.lock().await;
 
@@ -5254,6 +5290,7 @@ impl ActorDaemonCoordinator {
                     crate::daemon::domain::SemanticEvent::CommitAmended { .. }
                         | crate::daemon::domain::SemanticEvent::CommitCreated { .. }
                         | crate::daemon::domain::SemanticEvent::CherryPickComplete { .. }
+                        | crate::daemon::domain::SemanticEvent::Reset { .. }
                 )
             }) || matches!(
                 cmd.primary_command.as_deref(),
@@ -5508,6 +5545,7 @@ impl ActorDaemonCoordinator {
                             let author = repo.git_author_identity().formatted_or_unknown();
                             let base_opt = base.clone().filter(|b| !b.is_empty() && b != "initial");
                             let parent_sha = base_opt.as_deref().unwrap_or("initial");
+
                             let _ = sync_pre_commit_checkpoint(
                                 &repo,
                                 parent_sha,

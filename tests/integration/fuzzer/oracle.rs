@@ -110,7 +110,7 @@ impl CharRegistry {
         self.entries.get(&ch)
     }
 
-/// Dump registry contents for debugging.
+    /// Dump registry contents for debugging.
     pub fn dump(&self) -> String {
         let mut entries: Vec<_> = self.entries.values().collect();
         entries.sort_by_key(|e| e.step);
@@ -208,7 +208,9 @@ impl CharRegistry {
                 let note_content = repo
                     .read_authorship_note(commit_sha)
                     .unwrap_or_else(|| "<NO NOTE>".to_string());
-                let diag_path = repo.path().join(".git/ai/working_logs/EMPTY_PATHSPECS_DIAG.txt");
+                let diag_path = repo
+                    .path()
+                    .join(".git/ai/working_logs/EMPTY_PATHSPECS_DIAG.txt");
                 let diag_content = std::fs::read_to_string(&diag_path).unwrap_or_default();
                 panic!(
                     "Attribution mismatch on line {} of '{}'\n\
@@ -234,7 +236,11 @@ impl CharRegistry {
                     blame_line,
                     commit_sha,
                     note_content,
-                    if diag_content.is_empty() { "<no diag file>" } else { &diag_content },
+                    if diag_content.is_empty() {
+                        "<no diag file>"
+                    } else {
+                        &diag_content
+                    },
                     blame_output,
                     operation_log.join("\n"),
                     self.dump()
@@ -464,7 +470,10 @@ impl CharRegistry {
                      Seed: {}\n\
                      Note:\n{}\n\
                      Operation log:\n{}",
-                    filename, seed, note, operation_log.join("\n")
+                    filename,
+                    seed,
+                    note,
+                    operation_log.join("\n")
                 );
             }
         }
@@ -599,12 +608,7 @@ impl CharRegistry {
 
     /// Verify that the authorship note for HEAD is well-formed.
     /// Checks JSON validity, required fields, and attestation format.
-    pub fn verify_note_schema(
-        &self,
-        repo: &TestRepo,
-        operation_log: &[String],
-        seed: u64,
-    ) {
+    pub fn verify_note_schema(&self, repo: &TestRepo, operation_log: &[String], seed: u64) {
         if self.skip_all_blame {
             return;
         }
@@ -616,9 +620,9 @@ impl CharRegistry {
         };
 
         // Check for separator - note may start with "---" if there are no attestations
-        let (attestation_section, json_section) = if note.starts_with("---\n") {
+        let (attestation_section, json_section) = if let Some(stripped) = note.strip_prefix("---\n") {
             // Empty attestation section
-            ("", &note[4..]) // Skip "---\n"
+            ("", stripped)
         } else if let Some(separator_idx) = note.find("\n---\n") {
             let attestation_section = &note[..separator_idx];
             let json_section = &note[separator_idx + 5..]; // Skip "\n---\n"
@@ -880,10 +884,10 @@ fn parse_line_ranges(ranges_str: &str) -> Vec<(u32, u32)> {
             }
         } else {
             // Single line like "3"
-            if let Ok(line) = part.parse::<u32>() {
-                if line > 0 {
-                    result.push((line, line));
-                }
+            if let Ok(line) = part.parse::<u32>()
+                && line > 0
+            {
+                result.push((line, line));
             }
         }
     }
@@ -895,5 +899,7 @@ fn is_valid_line_ranges(ranges_str: &str) -> bool {
     if ranges_str.is_empty() {
         return false;
     }
-    ranges_str.chars().all(|c| c.is_ascii_digit() || c == '-' || c == ',')
+    ranges_str
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '-' || c == ',')
 }

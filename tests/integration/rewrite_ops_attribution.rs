@@ -62,11 +62,7 @@ fn test_multifile_commit_secondary_file_missing_from_note() {
     ]);
 
     let mut sec_file = repo.filename("secondary.txt");
-    sec_file.assert_committed_lines(crate::lines![
-        "CCC".ai(),
-        "CCC".ai(),
-        "DDD".ai(),
-    ]);
+    sec_file.assert_committed_lines(crate::lines!["CCC".ai(), "CCC".ai(), "DDD".ai(),]);
 }
 
 /// Simpler multi-file case: both files edited and committed in one shot.
@@ -85,7 +81,8 @@ fn test_multifile_commit_both_files_attributed() {
     fs::write(&main_path, "base\nnew-main\n").unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
     fs::write(&sec_path, "new-other\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "other.txt"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "other.txt"])
+        .unwrap();
 
     repo.git(&["add", "-A"]).unwrap();
     repo.commit("multi-file commit").unwrap();
@@ -123,10 +120,18 @@ fn test_cherry_pick_abort_main_commit_note_accuracy() {
     let file_path = repo.path().join("main.txt");
 
     // Step 1: Initial commit (simulates delete-recreate result)
-    fs::write(&file_path, "HHHH\nHHHH\nHHHH\nHHHH\nIIII\nJJJJ\nJJJJ\nJJJJ\n").unwrap();
+    fs::write(
+        &file_path,
+        "HHHH\nHHHH\nHHHH\nHHHH\nIIII\nJJJJ\nJJJJ\nJJJJ\n",
+    )
+    .unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
     // Checkpoint the human line separately
-    fs::write(&file_path, "HHHH\nHHHH\nHHHH\nHHHH\nIIII\nJJJJ\nJJJJ\nJJJJ\n").unwrap();
+    fs::write(
+        &file_path,
+        "HHHH\nHHHH\nHHHH\nHHHH\nIIII\nJJJJ\nJJJJ\nJJJJ\n",
+    )
+    .unwrap();
     repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
         .unwrap();
     repo.stage_all_and_commit("delete-recreate commit").unwrap();
@@ -155,7 +160,8 @@ fn test_cherry_pick_abort_main_commit_note_accuracy() {
 
     // Step 5: cherry-pick-conflict
     // Create feature branch from HEAD~1 (the delete-recreate state)
-    repo.git(&["checkout", "-b", "cp-feature", "HEAD~1"]).unwrap();
+    repo.git(&["checkout", "-b", "cp-feature", "HEAD~1"])
+        .unwrap();
     // Feature: prepend human lines
     fs::write(
         &file_path,
@@ -314,7 +320,11 @@ fn test_reset_reedit_squash_no_attribution_gaps() {
     repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
         .unwrap();
 
-    fs::write(&file_path, "human-top\naaa\nbbb\nccc\nai-bot\nai-bot\nai-bot\n").unwrap();
+    fs::write(
+        &file_path,
+        "human-top\naaa\nbbb\nccc\nai-bot\nai-bot\nai-bot\n",
+    )
+    .unwrap();
     repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
 
     repo.git(&["add", "-A"]).unwrap();
@@ -401,10 +411,7 @@ fn test_hard_reset_then_ai_checkpoint_loses_attribution() {
     repo.commit("after hard reset").unwrap();
 
     let mut file = repo.filename("main.txt");
-    file.assert_committed_lines(crate::lines![
-        "new-ai-1".ai(),
-        "new-ai-2".ai(),
-    ]);
+    file.assert_committed_lines(crate::lines!["new-ai-1".ai(), "new-ai-2".ai(),]);
 }
 
 // =============================================================================
@@ -437,16 +444,79 @@ fn test_hard_reset_race_condition_no_delay() {
 
     repo.git(&["reset", "--hard", "HEAD~1"]).unwrap();
 
+    // Debug: check current HEAD and working log state
+    let head_after_reset = repo.git(&["rev-parse", "HEAD"]).unwrap();
+    eprintln!("HEAD after reset: {}", head_after_reset.trim());
+    let file_content_after_reset = fs::read_to_string(&file_path).unwrap();
+    eprintln!("File content after reset: {:?}", file_content_after_reset);
+
     fs::write(&file_path, "new-1\nnew-2\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    let cp_out = repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    eprintln!("Checkpoint output: {:?}", cp_out);
+
+    // Dump the actual working log checkpoint file and INITIAL
+    let head_sha = repo.git(&["rev-parse", "HEAD"]).unwrap();
+    let wl_dir = repo
+        .path()
+        .join(".git/ai/working_logs")
+        .join(head_sha.trim());
+    let cp_file = wl_dir.join("checkpoints.jsonl");
+    if cp_file.exists() {
+        let cp_content = fs::read_to_string(&cp_file).unwrap();
+        eprintln!("=== CHECKPOINTS.JSONL ===\n{}\n=== END ===", cp_content);
+    } else {
+        eprintln!("checkpoints.jsonl does NOT exist at {:?}", cp_file);
+    }
+    // Check INITIAL file (actual name is "INITIAL", not "initial.json")
+    let initial_file = wl_dir.join("INITIAL");
+    if initial_file.exists() {
+        let initial_content = fs::read_to_string(&initial_file).unwrap();
+        eprintln!("=== INITIAL FILE ===\n{}\n=== END ===", initial_content);
+    } else {
+        eprintln!("INITIAL file does NOT exist at {:?}", initial_file);
+    }
+    // List all working log dirs
+    let wl_parent = repo.path().join(".git/ai/working_logs");
+    if wl_parent.exists() {
+        let entries: Vec<_> = fs::read_dir(&wl_parent)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        eprintln!("Working log dirs: {:?}", entries);
+    }
+
     repo.git(&["add", "-A"]).unwrap();
     repo.commit("after reset").unwrap();
 
+    // Debug: dump authorship note
+    let head = repo.git(&["rev-parse", "HEAD"]).unwrap();
+    let note = repo.git(&["notes", "--ref=ai", "show", head.trim()]);
+    eprintln!("=== AUTHORSHIP NOTE ===\n{:?}\n=== END ===", note);
+
     let mut file = repo.filename("main.txt");
-    file.assert_committed_lines(crate::lines![
-        "new-1".ai(),
-        "new-2".ai(),
-    ]);
+    file.assert_committed_lines(crate::lines!["new-1".ai(), "new-2".ai(),]);
+}
+
+/// Simpler test: does overwriting all content work without a reset?
+#[test]
+fn test_overwrite_all_content_ai() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    fs::write(&file_path, "new-1\nnew-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("second").unwrap();
+
+    let head = repo.git(&["rev-parse", "HEAD"]).unwrap();
+    let note = repo.git(&["notes", "--ref=ai", "show", head.trim()]);
+    eprintln!("=== OVERWRITE NOTE ===\n{:?}\n=== END ===", note);
+
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines!["new-1".ai(), "new-2".ai(),]);
 }
 
 /// Same test but with 200ms delay after reset — passes because daemon has time
@@ -474,10 +544,7 @@ fn test_hard_reset_race_condition_with_delay() {
     repo.commit("after reset").unwrap();
 
     let mut file = repo.filename("main.txt");
-    file.assert_committed_lines(crate::lines![
-        "new-1".ai(),
-        "new-2".ai(),
-    ]);
+    file.assert_committed_lines(crate::lines!["new-1".ai(), "new-2".ai(),]);
 }
 
 /// Same as above but with --mixed reset to see if bug is --hard specific.
@@ -507,10 +574,7 @@ fn test_mixed_reset_then_ai_checkpoint() {
     repo.commit("after mixed reset").unwrap();
 
     let mut file = repo.filename("main.txt");
-    file.assert_committed_lines(crate::lines![
-        "new-ai-1".ai(),
-        "new-ai-2".ai(),
-    ]);
+    file.assert_committed_lines(crate::lines!["new-ai-1".ai(), "new-ai-2".ai(),]);
 }
 
 /// Hard reset then mixed AI and human checkpoints — both must be correctly attributed.
@@ -576,12 +640,545 @@ fn test_amend_preserves_existing_attribution() {
     repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
         .unwrap();
     repo.git(&["add", "-A"]).unwrap();
-    repo.git(&["commit", "--amend", "-m", "second amended"]).unwrap();
+    repo.git(&["commit", "--amend", "-m", "second amended"])
+        .unwrap();
 
     let mut file = repo.filename("main.txt");
     file.assert_committed_lines(crate::lines![
         "first".ai(),
         "second-ai".ai(),
         "third-human".human(),
+    ]);
+}
+
+// =============================================================================
+// Category D: Overbroad AI session range (human lines inside AI range)
+//
+// Reproduction of fuzz_combined_0:
+// When AI and KnownHuman checkpoints both fire before a single commit,
+// the resulting note's AI session range covers ALL lines (1-N) instead of
+// only the lines from the AI checkpoint. The KnownHuman checkpoint's lines
+// are swallowed into the AI range.
+// =============================================================================
+
+/// AI checkpoint then KnownHuman checkpoint, single commit.
+/// The note must NOT lump human lines into the AI session range.
+///
+/// Models fuzz_combined_0: note says `s_xxx 1-5` but lines 2-5 are KnownHuman.
+#[test]
+fn test_overbroad_ai_range_swallows_human_lines() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    // Initial commit
+    fs::write(&file_path, "init\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // AI writes some lines
+    fs::write(&file_path, "ai-line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+
+    // Human appends more lines AFTER the AI checkpoint
+    fs::write(&file_path, "ai-line\nhuman-1\nhuman-2\nhuman-3\nhuman-4\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("mixed").unwrap();
+
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines![
+        "ai-line".ai(),
+        "human-1".human(),
+        "human-2".human(),
+        "human-3".human(),
+        "human-4".human(),
+    ]);
+}
+
+/// Inverse order: KnownHuman first, then AI prepends. Both must be tracked.
+#[test]
+fn test_overbroad_human_first_then_ai_prepend() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    // Initial commit
+    fs::write(&file_path, "init\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Human writes 4 lines
+    fs::write(&file_path, "human-a\nhuman-b\nhuman-c\nhuman-d\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+
+    // AI prepends 1 line
+    fs::write(&file_path, "ai-top\nhuman-a\nhuman-b\nhuman-c\nhuman-d\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("prepend ai").unwrap();
+
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines![
+        "ai-top".ai(),
+        "human-a".human(),
+        "human-b".human(),
+        "human-c".human(),
+        "human-d".human(),
+    ]);
+}
+
+/// AI OverwriteAll then Human Append — models the overwrite-and-rollback pattern.
+/// The AI checkpoint covers ALL content initially, then human appends. The note
+/// must NOT claim human-appended lines as AI.
+///
+/// Critical: uses OverwriteAll (deletes all existing content) which is a more
+/// aggressive pattern than simple append/prepend.
+#[test]
+fn test_overbroad_overwrite_all_then_human_append() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    // Initial commit with some content
+    fs::write(&file_path, "old-1\nold-2\nold-3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // AI overwrites ALL content (OverwriteAll pattern)
+    fs::write(&file_path, "ai-new-1\nai-new-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+
+    // Human appends after AI overwrite
+    fs::write(&file_path, "ai-new-1\nai-new-2\nhuman-1\nhuman-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("overwrite then append").unwrap();
+
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines![
+        "ai-new-1".ai(),
+        "ai-new-2".ai(),
+        "human-1".human(),
+        "human-2".human(),
+    ]);
+}
+
+/// Hard reset THEN overwrite+human pattern — simple variant.
+#[test]
+fn test_overbroad_after_hard_reset_overwrite_human() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    // Initial commit
+    fs::write(&file_path, "line-1\nline-2\nline-3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Second commit (something to reset from)
+    fs::write(&file_path, "line-1\nline-2\nline-3\nextra\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("second").unwrap();
+
+    // Hard reset back
+    repo.git(&["reset", "--hard", "HEAD~1"]).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // AI OverwriteAll
+    fs::write(&file_path, "Y-ai\nY-ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+
+    // Human Append
+    fs::write(&file_path, "Y-ai\nY-ai\nZ-human\nZ-human\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("overwrite-and-rollback").unwrap();
+
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines![
+        "Y-ai".ai(),
+        "Y-ai".ai(),
+        "Z-human".human(),
+        "Z-human".human(),
+    ]);
+}
+
+/// Exact fuzz_combined_0 pattern: many rapid checkpoints (storm), commit, hard
+/// reset back, then AI overwrite + human append. The checkpoint storm creates
+/// many working log entries that the hard reset must invalidate.
+#[test]
+fn test_overbroad_checkpoint_storm_then_reset_then_overwrite_human() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    // Initial commit
+    fs::write(&file_path, "aaa\nbbb\nccc\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Checkpoint storm: many rapid edits, then commit
+    fs::write(&file_path, "storm-1\nstorm-2\naaa\nbbb\nccc\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    fs::write(&file_path, "storm-1\nstorm-2\nstorm-3\naaa\nbbb\nccc\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    fs::write(
+        &file_path,
+        "storm-1\nstorm-2\nstorm-3\nstorm-4\naaa\nbbb\nccc\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    fs::write(
+        &file_path,
+        "storm-1\nstorm-2\nstorm-3\nstorm-4\nstorm-5\naaa\nbbb\nccc\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("storm commit").unwrap();
+
+    // Hard reset back to initial (kills the storm commit)
+    repo.git(&["reset", "--hard", "HEAD~1"]).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // AI OverwriteAll
+    fs::write(&file_path, "Y-1\nY-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+
+    // Human Append
+    fs::write(&file_path, "Y-1\nY-2\nZ-1\nZ-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("post-reset overwrite").unwrap();
+
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines![
+        "Y-1".ai(),
+        "Y-2".ai(),
+        "Z-1".human(),
+        "Z-2".human(),
+    ]);
+}
+
+/// Like above but adds a cherry-pick conflict + abort after the overwrite,
+/// matching the exact tail of fuzz_combined_0.
+#[test]
+fn test_overbroad_storm_reset_overwrite_then_cherry_pick_abort() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    // Initial commit
+    fs::write(&file_path, "aaa\nbbb\nccc\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Storm + commit
+    fs::write(&file_path, "s1\ns2\ns3\naaa\nbbb\nccc\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("storm").unwrap();
+
+    // Hard reset
+    repo.git(&["reset", "--hard", "HEAD~1"]).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // OverwriteAll (AI) + Append (Human) + commit
+    fs::write(&file_path, "Y-1\nY-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    fs::write(&file_path, "Y-1\nY-2\nZ-1\nZ-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("overwrite-and-rollback").unwrap();
+
+    // Feature branch from initial, prepend human lines
+    repo.git(&["checkout", "-b", "cp-feature", "HEAD~1"])
+        .unwrap();
+    fs::write(&file_path, "human-a\nhuman-b\naaa\nbbb\nccc\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature: prepend human").unwrap();
+    let feature_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Back to main, prepend AI
+    repo.git(&["checkout", "-"]).unwrap();
+    fs::write(&file_path, "b-ai\nY-1\nY-2\nZ-1\nZ-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("main: prepend ai").unwrap();
+
+    // Cherry-pick → conflict → abort
+    let cp_result = repo.git(&["cherry-pick", &feature_sha]);
+    if cp_result.is_err() {
+        repo.git(&["cherry-pick", "--abort"]).ok();
+    }
+
+    // After abort: main state = b-ai, Y-1, Y-2, Z-1, Z-2
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines![
+        "b-ai".ai(),
+        "Y-1".ai(),
+        "Y-2".ai(),
+        "Z-1".human(),
+        "Z-2".human(),
+    ]);
+}
+
+// =============================================================================
+// Category E: File rename not tracked in authorship note
+//
+// Reproduction of fuzz_seed_3:
+// After `git mv old.txt new.txt`, the authorship note for the commit still
+// references the old filename. Blame on the new file finds no matching note
+// entry, so all lines default to human.
+// =============================================================================
+
+/// Simple rename: AI-attributed file is renamed, note must reference new name.
+#[test]
+fn test_rename_file_note_tracks_new_name() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("original.txt");
+
+    // Initial commit with AI content
+    fs::write(&file_path, "ai-1\nai-2\nai-3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "original.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    let mut file = repo.filename("original.txt");
+    file.assert_committed_lines(crate::lines!["ai-1".ai(), "ai-2".ai(), "ai-3".ai(),]);
+
+    // Rename the file
+    repo.git(&["mv", "original.txt", "renamed.txt"]).unwrap();
+    repo.commit("rename file").unwrap();
+
+    // Attribution should follow the rename
+    let mut renamed = repo.filename("renamed.txt");
+    renamed.assert_committed_lines(crate::lines!["ai-1".ai(), "ai-2".ai(), "ai-3".ai(),]);
+}
+
+/// Rename + edit in same commit: new content should be attributed to the new name.
+#[test]
+fn test_rename_and_edit_same_commit() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("original.txt");
+
+    // Initial commit with AI content
+    fs::write(&file_path, "ai-1\nai-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "original.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Rename and add new AI content
+    repo.git(&["mv", "original.txt", "renamed.txt"]).unwrap();
+    let renamed_path = repo.path().join("renamed.txt");
+    fs::write(&renamed_path, "ai-1\nai-2\nnew-ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "renamed.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("rename and edit").unwrap();
+
+    let mut renamed = repo.filename("renamed.txt");
+    renamed.assert_committed_lines(crate::lines!["ai-1".ai(), "ai-2".ai(), "new-ai".ai(),]);
+}
+
+// =============================================================================
+// Category F: Secondary file missing from multi-file commit note
+//
+// Reproduction of fuzz_seed_4 and fuzz_checkpoint_heavy_0:
+// A commit touches multiple files, all with AI checkpoints, but the resulting
+// authorship note only contains entries for some files (typically fuzz_main.txt),
+// dropping others entirely.
+// =============================================================================
+
+/// Two files checkpointed, committed together — both must appear in note.
+#[test]
+fn test_multi_file_both_in_note() {
+    let repo = TestRepo::new();
+    let file_a = repo.path().join("file_a.txt");
+    let file_b = repo.path().join("file_b.txt");
+
+    // Initial commit
+    fs::write(&file_a, "a-init\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "file_a.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Edit both files with AI checkpoints
+    fs::write(&file_a, "a-init\na-new\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "file_a.txt"])
+        .unwrap();
+    fs::write(&file_b, "b-new-1\nb-new-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "file_b.txt"])
+        .unwrap();
+
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("multi-file").unwrap();
+
+    let mut fa = repo.filename("file_a.txt");
+    fa.assert_committed_lines(crate::lines!["a-init".ai(), "a-new".ai(),]);
+
+    let mut fb = repo.filename("file_b.txt");
+    fb.assert_committed_lines(crate::lines!["b-new-1".ai(), "b-new-2".ai(),]);
+}
+
+/// Three files: main + two secondaries. All have checkpoints. All must be in note.
+/// Models fuzz_checkpoint_heavy_0 exactly.
+#[test]
+fn test_three_files_secondary_dropped_from_note() {
+    let repo = TestRepo::new();
+    let main_path = repo.path().join("main.txt");
+    let sec2_path = repo.path().join("secondary_2.txt");
+    let sec3_path = repo.path().join("secondary_3.txt");
+
+    // Initial commit on main
+    fs::write(&main_path, "main-init\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Multiple edits and checkpoints on all files
+    fs::write(&main_path, "main-init\nmain-ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+
+    fs::write(&sec2_path, "sec2-line1\nsec2-line2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "secondary_2.txt"])
+        .unwrap();
+
+    fs::write(&sec3_path, "sec3-line1\nsec3-line2\nsec3-line3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "secondary_3.txt"])
+        .unwrap();
+
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("all three files").unwrap();
+
+    let mut main = repo.filename("main.txt");
+    main.assert_committed_lines(crate::lines!["main-init".ai(), "main-ai".ai(),]);
+
+    let mut sec2 = repo.filename("secondary_2.txt");
+    sec2.assert_committed_lines(crate::lines!["sec2-line1".ai(), "sec2-line2".ai(),]);
+
+    let mut sec3 = repo.filename("secondary_3.txt");
+    sec3.assert_committed_lines(crate::lines![
+        "sec3-line1".ai(),
+        "sec3-line2".ai(),
+        "sec3-line3".ai(),
+    ]);
+}
+
+/// Secondary file checkpointed BEFORE an intervening commit on another file.
+/// The checkpoint's base_commit is now stale. On final commit, secondary is
+/// dropped from the note because the working log base doesn't match HEAD.
+///
+/// This is the exact pattern from fuzz_checkpoint_heavy_0:
+/// 1. Edit main + secondary, checkpoint both
+/// 2. Commit ONLY main (selective-file-commit)
+/// 3. More edits/checkpoints on main, more commits
+/// 4. Commit everything — secondary's stale checkpoint is lost
+#[test]
+fn test_secondary_file_stale_checkpoint_across_commits() {
+    let repo = TestRepo::new();
+    let main_path = repo.path().join("main.txt");
+    let sec_path = repo.path().join("secondary.txt");
+
+    // Initial commit
+    fs::write(&main_path, "main\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Checkpoint BOTH files
+    fs::write(&main_path, "main\nmain-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    fs::write(&sec_path, "sec-1\nsec-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "secondary.txt"])
+        .unwrap();
+
+    // Commit ONLY main — secondary stays dirty with stale checkpoint
+    repo.git(&["add", "main.txt"]).unwrap();
+    repo.commit("main only").unwrap();
+
+    // More work on main (advances HEAD further from secondary's checkpoint base)
+    fs::write(&main_path, "main\nmain-2\nmain-3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "main.txt"]).unwrap();
+    repo.commit("advance main again").unwrap();
+
+    // Now commit everything — secondary's checkpoint was based on initial commit
+    fs::write(&sec_path, "sec-1\nsec-2\nsec-3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "secondary.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("include secondary").unwrap();
+
+    let mut sec = repo.filename("secondary.txt");
+    sec.assert_committed_lines(crate::lines!["sec-1".ai(), "sec-2".ai(), "sec-3".ai(),]);
+}
+
+// =============================================================================
+// Category G: Incomplete note ranges after squash/rebase
+//
+// Reproduction of fuzz_destructive_0:
+// After squash merge, the resulting note's line ranges have gaps — some AI
+// lines fall outside any attestation range and default to human.
+// =============================================================================
+
+/// Squash merge with multiple AI commits: all AI lines must be covered.
+#[test]
+fn test_squash_merge_incomplete_ranges() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    // Initial commit
+    fs::write(&file_path, "base\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    let main_branch = repo.current_branch();
+
+    // Feature branch with multiple AI commits that build on each other
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+
+    fs::write(&file_path, "base\nfeat-1\nfeat-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feat commit 1").unwrap();
+
+    fs::write(&file_path, "base\nfeat-1\nfeat-2\nfeat-3\nfeat-4\nfeat-5\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feat commit 2").unwrap();
+
+    // Insert human lines in the middle
+    fs::write(
+        &file_path,
+        "base\nfeat-1\nhuman-mid\nfeat-2\nfeat-3\nfeat-4\nfeat-5\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feat commit 3 (human insert)").unwrap();
+
+    // Squash merge into main
+    repo.git(&["checkout", &main_branch]).unwrap();
+    repo.git(&["merge", "--squash", "feature"]).unwrap();
+    repo.commit("squash merge").unwrap();
+
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines![
+        "base".ai(),
+        "feat-1".ai(),
+        "human-mid".human(),
+        "feat-2".ai(),
+        "feat-3".ai(),
+        "feat-4".ai(),
+        "feat-5".ai(),
     ]);
 }

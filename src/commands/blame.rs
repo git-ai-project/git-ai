@@ -54,6 +54,9 @@ pub struct BlameHunk {
     pub committer_tz: String,
     /// Whether this is a boundary commit
     pub is_boundary: bool,
+    /// The filename at the blamed commit (may differ from current if file was renamed)
+    #[serde(default)]
+    pub orig_filename: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -737,6 +740,7 @@ impl Repository {
             committer_time: i64,
             committer_tz: String,
             boundary: bool,
+            filename: Option<String>,
         }
 
         let mut hunks: Vec<BlameHunk> = Vec::new();
@@ -806,6 +810,10 @@ impl Repository {
                 cur_meta.boundary = true;
                 continue;
             }
+            if let Some(rest) = line.strip_prefix("filename ") {
+                cur_meta.filename = Some(crate::utils::unescape_git_path(rest));
+                continue;
+            }
 
             // Header line: either 4 fields (new hunk) or 3 fields (continuation)
             let mut parts = line.split_whitespace();
@@ -839,6 +847,7 @@ impl Repository {
                         orig_start
                     };
 
+                    let orig_filename = cur_meta.filename.take().filter(|f| f != file_path);
                     hunks.push(BlameHunk {
                         range: (start, end),
                         orig_range: (orig_start, orig_end),
@@ -854,6 +863,7 @@ impl Repository {
                         committer_time: cur_meta.committer_time,
                         committer_tz: cur_meta.committer_tz.clone(),
                         is_boundary: cur_meta.boundary,
+                        orig_filename,
                     });
                 }
 
@@ -897,6 +907,7 @@ impl Repository {
                 orig_start
             };
 
+            let orig_filename = cur_meta.filename.take().filter(|f| f != file_path);
             hunks.push(BlameHunk {
                 range: (start, end),
                 orig_range: (orig_start, orig_end),
@@ -912,6 +923,7 @@ impl Repository {
                 committer_time: cur_meta.committer_time,
                 committer_tz: cur_meta.committer_tz.clone(),
                 is_boundary: cur_meta.boundary,
+                orig_filename,
             });
         }
 
@@ -1095,6 +1107,8 @@ fn overlay_ai_authorship(
 
             // Check each line in this hunk for AI authorship using compact schema
             // IMPORTANT: Use the original line numbers from the commit, not the current line numbers
+            // Use the original filename from git blame (handles renames)
+            let lookup_path = hunk.orig_filename.as_deref().unwrap_or(file_path);
             let num_lines = hunk.range.1 - hunk.range.0 + 1;
             for i in 0..num_lines {
                 let current_line_num = hunk.range.0 + i;
@@ -1102,7 +1116,7 @@ fn overlay_ai_authorship(
 
                 if let Some((author, prompt_hash, prompt)) = authorship_log.get_line_attribution(
                     repo,
-                    file_path,
+                    lookup_path,
                     orig_line_num,
                     &mut foreign_prompts_cache,
                 ) {

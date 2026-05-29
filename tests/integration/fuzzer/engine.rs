@@ -9,7 +9,7 @@ use super::generators::{
     WorkflowOp,
 };
 use super::operations::{
-    EditParams, FileState, execute_alternating_amend, execute_alternating_amend_storm, git,
+    EditParams, FileState, execute_alternating_amend, execute_alternating_amend_storm,
     execute_amend_attribution_flip, execute_amend_chain, execute_amend_reset_cycle,
     execute_amend_shrink, execute_amend_with_deletion, execute_branch_switch_dirty,
     execute_checkout_discard, execute_checkpoint_nonexistent, execute_checkpoint_storm,
@@ -36,7 +36,7 @@ use super::operations::{
     execute_squash_rebased_branch, execute_squash_reset_recommit, execute_squash_same_file,
     execute_squash_then_amend, execute_squash_with_overwrites, execute_stash_during_work,
     execute_stash_pathspec, execute_stash_pop_cycle, execute_thrash, execute_three_way_merge,
-    execute_two_branch_merge, execute_untracked_interleave, execute_whitespace_noise,
+    execute_two_branch_merge, execute_untracked_interleave, execute_whitespace_noise, git,
     read_file_state_from_disk,
 };
 use super::oracle::CharRegistry;
@@ -655,13 +655,7 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                         repo.commit("partial-stage: commit remaining").unwrap();
                     }
                     // Now verify against the full working tree
-                    verify_main_file(
-                        &repo,
-                        &mut registry,
-                        &file_state,
-                        &operation_log,
-                        &config,
-                    );
+                    verify_main_file(&repo, &mut registry, &file_state, &operation_log, &config);
                 }
                 PartialStageOp::SelectiveFileCommit => {
                     let sec_idx = rng.random_range(0..secondary_files.len());
@@ -1736,10 +1730,8 @@ pub fn run_fuzzer(config: FuzzerConfig) {
             }
 
             // Multi-file verification: verify all files together
-            let mut all_files: Vec<(&str, &[char])> = vec![(
-                file_state.filename.as_str(),
-                file_state.lines.as_slice(),
-            )];
+            let mut all_files: Vec<(&str, &[char])> =
+                vec![(file_state.filename.as_str(), file_state.lines.as_slice())];
             for sec_file in &secondary_files {
                 if !sec_file.lines.is_empty() {
                     all_files.push((sec_file.filename.as_str(), sec_file.lines.as_slice()));
@@ -1811,7 +1803,10 @@ fn verify_main_file_with_retention(
         config.seed,
     );
     if config.verify_sessions {
-        let head_sha = git(&repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let head_sha = git(repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
         if let Some(note) = repo.read_authorship_note(&head_sha)
             && note.contains(&file_state.filename)
         {

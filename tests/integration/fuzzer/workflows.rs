@@ -8,8 +8,7 @@ use crate::repos::test_repo::TestRepo;
 use super::generators::{EditStrategy, gen_attribution, gen_line_count};
 use super::operations::{
     EditParams, FileState, checkpoint_with_dirty_files, execute_edit_and_checkpoint, git,
-    read_file_state_from_disk,
-    reconstruct_lines_from_content,
+    read_file_state_from_disk, reconstruct_lines_from_content,
 };
 use super::oracle::{Attribution, CharRegistry};
 
@@ -47,7 +46,10 @@ pub fn execute_plumbing_commit_tree(
     git(repo, &["add", "-A"]).unwrap();
 
     // Get the current HEAD sha for parent
-    let parent_sha = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let parent_sha = git(repo, &["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
     // Write the tree object from the index
     let tree_sha = git(repo, &["write-tree"]).unwrap().trim().to_string();
@@ -121,7 +123,10 @@ pub fn execute_plumbing_rapid_update_ref(
         git(repo, &["add", "-A"]).unwrap();
 
         // Plumbing commit
-        let parent_sha = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let parent_sha = git(repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
         let tree_sha = git(repo, &["write-tree"]).unwrap().trim().to_string();
         let commit_sha = repo
             .git(&[
@@ -280,8 +285,7 @@ pub fn execute_workflow_stash_sandwich(
     let stashed_lines = file_state.lines.clone();
 
     // Stash the changes
-    git(repo, &["stash", "push", "-m", "sandwich stash"])
-        .unwrap();
+    git(repo, &["stash", "push", "-m", "sandwich stash"]).unwrap();
     repo.sync_daemon_force();
     file_state.lines = pre_stash_lines.clone();
 
@@ -367,7 +371,10 @@ pub fn execute_workflow_fixup_autosquash(
     operation_log.push("workflow-fixup-autosquash: starting".to_string());
 
     // Remember HEAD before we start
-    let base_sha = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let base_sha = git(repo, &["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
     // Main commit: "feat: main work"
     let main_params = EditParams {
@@ -401,26 +408,32 @@ pub fn execute_workflow_fixup_autosquash(
     let total_commits = 1 + fixup_count;
 
     // Real autosquash rebase
-    let rebase_result = git(repo, &[
-        "-c",
-        "sequence.editor=true",
-        "rebase",
-        "--autosquash",
-        &format!("HEAD~{}", total_commits),
-    ]);
+    let rebase_result = git(
+        repo,
+        &[
+            "-c",
+            "sequence.editor=true",
+            "rebase",
+            "--autosquash",
+            &format!("HEAD~{}", total_commits),
+        ],
+    );
 
     if rebase_result.is_err() {
         // Abort the failed rebase before retrying with a different base
         git(repo, &["rebase", "--abort"]).ok();
 
         // Fallback: try with the base sha directly
-        let rebase_result2 = git(repo, &[
-            "-c",
-            "sequence.editor=true",
-            "rebase",
-            "--autosquash",
-            &base_sha,
-        ]);
+        let rebase_result2 = git(
+            repo,
+            &[
+                "-c",
+                "sequence.editor=true",
+                "rebase",
+                "--autosquash",
+                &base_sha,
+            ],
+        );
         if rebase_result2.is_err() {
             git(repo, &["rebase", "--abort"]).ok();
             operation_log.push("workflow-fixup-autosquash: rebase failed, aborted".to_string());
@@ -461,7 +474,10 @@ pub fn execute_cherry_pick_no_commit(
     execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
     git(repo, &["add", "-A"]).unwrap();
     repo.commit("cpnc: feature commit").unwrap();
-    let feature_sha = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let feature_sha = git(repo, &["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
     // Switch back to main (file reverts)
     git(repo, &["checkout", &main_branch]).unwrap();
@@ -535,7 +551,12 @@ pub fn execute_cherry_pick_range(
         execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
         git(repo, &["add", "-A"]).unwrap();
         repo.commit(&format!("cprange: commit {}", i)).unwrap();
-        shas.push(git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string());
+        shas.push(
+            git(repo, &["rev-parse", "HEAD"])
+                .unwrap()
+                .trim()
+                .to_string(),
+        );
     }
 
     let first_sha = &shas[0];
@@ -621,7 +642,10 @@ pub fn execute_rebase_onto(
     }
 
     // Rebase --onto main A B
-    let rebase_result = git(repo, &["rebase", "--onto", &main_branch, &branch_a, &branch_b]);
+    let rebase_result = git(
+        repo,
+        &["rebase", "--onto", &main_branch, &branch_a, &branch_b],
+    );
     if rebase_result.is_err() {
         git(repo, &["rebase", "--abort"]).ok();
         git(repo, &["checkout", &main_branch]).unwrap();
@@ -873,8 +897,7 @@ pub fn execute_rebase_conflict_continue(
 
         if conflicted.contains("<<<<<<<") {
             // Resolve by accepting theirs (checkout --theirs)
-            git(repo, &["checkout", "--theirs", "--", &file_state.filename])
-                .unwrap();
+            git(repo, &["checkout", "--theirs", "--", &file_state.filename]).unwrap();
             git(repo, &["add", &file_state.filename]).unwrap();
 
             let continue_result = git(repo, &["rebase", "--continue"]);
@@ -937,7 +960,10 @@ pub fn execute_restore_from_commit(
     execute_edit_and_checkpoint(repo, file_state, registry, &a_params, rng, operation_log);
     git(repo, &["add", "-A"]).unwrap();
     repo.commit("restore-from-commit: commit A").unwrap();
-    let commit_a_sha = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let commit_a_sha = git(repo, &["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
     let commit_a_lines = file_state.lines.clone();
 
     // Make commit B with different content (overwrite or append)
@@ -951,12 +977,15 @@ pub fn execute_restore_from_commit(
     repo.commit("restore-from-commit: commit B").unwrap();
 
     // Restore file from commit A
-    git(repo, &[
-        "restore",
-        &format!("--source={}", commit_a_sha),
-        "--",
-        &file_state.filename,
-    ])
+    git(
+        repo,
+        &[
+            "restore",
+            &format!("--source={}", commit_a_sha),
+            "--",
+            &file_state.filename,
+        ],
+    )
     .unwrap();
 
     // Update model to match restored state
@@ -1005,7 +1034,10 @@ pub fn execute_workflow_revert_cherrypick(
     execute_edit_and_checkpoint(repo, file_state, registry, &params, rng, operation_log);
     git(repo, &["add", "-A"]).unwrap();
     repo.commit("revert-cp: original commit").unwrap();
-    let original_sha = git(repo, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let original_sha = git(repo, &["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
 
     // Revert it
     let revert_result = git(repo, &["revert", "--no-edit", &original_sha]);

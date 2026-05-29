@@ -3,7 +3,6 @@ use crate::authorship::authorship_log::{HumanRecord, LineRange, PromptRecord, Se
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::error::GitAiError;
 use crate::git::notes_api::read_authorship_v3;
-use crate::git::repo_storage::InitialAttributions;
 use crate::git::repository::Repository;
 use std::collections::HashMap;
 
@@ -48,17 +47,14 @@ pub fn reconstruct_working_log_after_backward_reset(
         return Ok(());
     }
 
-    // Read current file contents from working directory for blob snapshots.
-    // Only include files that differ from new_tip (the reset target).
-    // If a file matches new_tip exactly (e.g., reset --hard), there's no
-    // uncommitted AI content to track.
-    let workdir = repo.workdir()?;
+    // Use the content from old_tip (the commit being reset FROM) as the blob snapshot.
+    // After a mixed/soft reset, the working tree originally had old_tip's content.
+    // We cannot read the working directory here because by the time the daemon processes
+    // the reset event, the user may have already modified files further.
     let mut file_blobs: HashMap<String, String> = HashMap::new();
     for file_path in file_attributions.keys() {
-        let abs_path = workdir.join(file_path);
-        if abs_path.exists()
-            && let Ok(content) = std::fs::read_to_string(&abs_path)
-        {
+        let content = file_content_at_commit(repo, old_tip, file_path);
+        if !content.is_empty() {
             let target_content = file_content_at_commit(repo, new_tip, file_path);
             if content != target_content {
                 file_blobs.insert(file_path.clone(), content);
@@ -79,14 +75,13 @@ pub fn reconstruct_working_log_after_backward_reset(
     let working_log = repo.storage.working_log_for_base_commit(new_tip)?;
     working_log.reset_working_log()?;
 
-    let initial = InitialAttributions {
-        files: file_attributions,
+    working_log.write_initial_attributions_with_contents(
+        file_attributions,
         prompts,
-        file_blobs,
         humans,
+        file_blobs,
         sessions,
-    };
-    working_log.write_initial(initial)?;
+    )?;
 
     // Delete old working log if it exists
     let _ = repo.storage.delete_working_log_for_base_commit(old_tip);
