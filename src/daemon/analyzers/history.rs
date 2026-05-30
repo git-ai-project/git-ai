@@ -41,7 +41,12 @@ impl CommandAnalyzer for HistoryAnalyzer {
                         old_head = pre_head;
                     }
                     if amend {
-                        events.push(SemanticEvent::CommitAmended { old_head, new_head });
+                        let pre_head =
+                            non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()));
+                        let is_stale = pre_head.as_deref().is_some_and(|ph| ph == new_head);
+                        if !is_stale {
+                            events.push(SemanticEvent::CommitAmended { old_head, new_head });
+                        }
                     } else {
                         events.push(SemanticEvent::CommitCreated {
                             base: sanitize_base(Some(old_head), &new_head),
@@ -501,6 +506,17 @@ fn parse_update_ref_heads(
         [ref_name, new_oid] => (ref_name.clone(), new_oid.clone(), None),
         [ref_name, new_oid, old_oid] => (ref_name.clone(), new_oid.clone(), Some(old_oid.clone())),
         _ => return None,
+    };
+
+    let ref_name = if ref_name == "HEAD" {
+        let branch = cmd.pre_repo.as_ref().and_then(|r| r.branch.as_ref())?;
+        if branch.starts_with("refs/heads/") {
+            branch.clone()
+        } else {
+            format!("refs/heads/{}", branch)
+        }
+    } else {
+        ref_name
     };
 
     if !ref_name.starts_with("refs/heads/") {

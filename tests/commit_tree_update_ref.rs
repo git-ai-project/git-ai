@@ -514,3 +514,41 @@ fn test_graphite_style_multi_commit_single_update_ref() {
     // Verify attribution on file_b (single-commit, straightforward)
     file_b.assert_lines_and_blame(lines!["b1 ai".ai(), "b2 ai".ai()]);
 }
+
+#[test]
+fn test_update_ref_head_with_new_content_then_amend_preserves_attribution() {
+    use std::fs;
+
+    let repo = TestRepo::new();
+    setup_initial_commit(&repo);
+
+    let file_path = repo.path().join("feature.txt");
+
+    // Write AI content and checkpoint
+    fs::write(&file_path, "ai line 1\nai line 2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "feature.txt"])
+        .unwrap();
+
+    // Stage
+    repo.git(&["add", "-A"]).unwrap();
+
+    // Plumbing: write-tree, commit-tree, update-ref HEAD
+    let parent_sha = head_sha(&repo);
+    let tree_sha = repo.git(&["write-tree"]).unwrap().trim().to_string();
+    let commit_sha = repo
+        .git(&[
+            "commit-tree",
+            &tree_sha,
+            "-p",
+            &parent_sha,
+            "-m",
+            "plumbing commit",
+        ])
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git(&["update-ref", "HEAD", &commit_sha]).unwrap();
+
+    let mut feature_file = repo.filename("feature.txt");
+    feature_file.assert_lines_and_blame(lines!["ai line 1".ai(), "ai line 2".ai()]);
+}

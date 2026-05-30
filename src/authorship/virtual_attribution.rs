@@ -1346,6 +1346,38 @@ fn collect_committed_hunks(
     Ok(committed_hunks)
 }
 
+/// Detect file renames between parent and commit. Returns a map of old_path → new_path.
+fn detect_renames_in_commit(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+) -> Result<HashMap<String, String>, GitAiError> {
+    use crate::git::repository::exec_git_allow_nonzero;
+
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "diff-tree".to_string(),
+        "-r".to_string(),
+        "-M".to_string(),
+        "--diff-filter=R".to_string(),
+        parent_sha.to_string(),
+        commit_sha.to_string(),
+    ]);
+    let output = exec_git_allow_nonzero(&args)?;
+    let mut renames = HashMap::new();
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            // Format: :old_mode new_mode old_hash new_hash Rxx\told_path\tnew_path
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() == 3 {
+                renames.insert(parts[1].to_string(), parts[2].to_string());
+            }
+        }
+    }
+    Ok(renames)
+}
+
 /// Helper function to collect unstaged line ranges (lines in working directory but not in commit)
 /// Returns (unstaged_hunks, pure_insertion_hunks)
 /// pure_insertion_hunks contains lines that were purely inserted (old_count=0), not modifications
@@ -1566,13 +1598,37 @@ impl VirtualAttributions {
         let mut initial_humans: BTreeMap<String, HumanRecord> = BTreeMap::new();
         let mut initial_sessions: BTreeMap<String, SessionRecord> = BTreeMap::new();
 
+        // Detect renames so we can look up committed hunks by new path when
+        // the working log references the old path.
+        let rename_map = if parent_sha != "initial" {
+            detect_renames_in_commit(repo, parent_sha, commit_sha).unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+
+        // Extend pathspecs with renamed-to paths so diff_added_lines doesn't filter them out.
+        let extended_pathspecs;
+        let effective_pathspecs = if !rename_map.is_empty() && pathspecs.is_some() {
+            let mut ps = pathspecs.unwrap().clone();
+            for (old_path, new_path) in &rename_map {
+                if ps.contains(old_path) {
+                    ps.insert(new_path.clone());
+                }
+            }
+            extended_pathspecs = ps;
+            Some(&extended_pathspecs)
+        } else {
+            pathspecs
+        };
+
         // Get committed hunks (in commit coordinates) and unstaged hunks (in working directory coordinates)
-        let committed_hunks = collect_committed_hunks(repo, parent_sha, commit_sha, pathspecs)?;
+        let committed_hunks =
+            collect_committed_hunks(repo, parent_sha, commit_sha, effective_pathspecs)?;
         let (mut unstaged_hunks, pure_insertion_hunks) =
             if let Some(snapshot) = final_state_snapshot {
-                collect_unstaged_hunks_from_snapshot(repo, commit_sha, pathspecs, snapshot)?
+                collect_unstaged_hunks_from_snapshot(repo, commit_sha, effective_pathspecs, snapshot)?
             } else {
-                collect_unstaged_hunks(repo, commit_sha, pathspecs)?
+                collect_unstaged_hunks(repo, commit_sha, effective_pathspecs)?
             };
 
         // IMPORTANT: If a line appears in both committed_hunks and unstaged_hunks, it means:
@@ -1636,7 +1692,10 @@ impl VirtualAttributions {
 
             // Get unstaged lines for this file (in working directory coordinates).
             let mut unstaged_lines: Vec<u32> = Vec::new();
-            if let Some(unstaged_ranges) = unstaged_hunks.get(&nfc_file_path) {
+            let unstaged_lookup = unstaged_hunks
+                .get(&nfc_file_path)
+                .or_else(|| rename_map.get(&nfc_file_path).and_then(|np| unstaged_hunks.get(np)));
+            if let Some(unstaged_ranges) = unstaged_lookup {
                 for range in unstaged_ranges {
                     unstaged_lines.extend(range.expand());
                 }
@@ -1650,7 +1709,10 @@ impl VirtualAttributions {
             let mut uncommitted_lines_map: StdHashMap<String, Vec<u32>> = StdHashMap::new();
 
             // Get the committed hunks for this file (if any) - these are in commit coordinates.
-            let file_committed_hunks = committed_hunks.get(&nfc_file_path);
+            // If the file was renamed, committed_hunks is keyed by the new path.
+            let file_committed_hunks = committed_hunks
+                .get(&nfc_file_path)
+                .or_else(|| rename_map.get(&nfc_file_path).and_then(|np| committed_hunks.get(np)));
 
             for line_attr in line_attrs {
                 // Check each line individually
@@ -1806,7 +1868,10 @@ impl VirtualAttributions {
                             author_id, ranges,
                         );
 
-                    let file_attestation = authorship_log.get_or_create_file(&nfc_file_path);
+                    let attestation_path = rename_map
+                        .get(&nfc_file_path)
+                        .unwrap_or(&nfc_file_path);
+                    let file_attestation = authorship_log.get_or_create_file(attestation_path);
                     file_attestation.add_entry(entry);
                 }
             }
@@ -1879,7 +1944,8 @@ impl VirtualAttributions {
                     });
                 }
 
-                initial_files.insert(file_path.clone(), uncommitted_line_attrs);
+                let initial_path = rename_map.get(file_path).unwrap_or(file_path);
+                initial_files.insert(initial_path.clone(), uncommitted_line_attrs);
             }
         }
 

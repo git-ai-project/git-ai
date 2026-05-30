@@ -5844,6 +5844,18 @@ impl ActorDaemonCoordinator {
                                         || reference == branch
                                 });
                             if affects_checked_out_branch {
+                                if repo.storage.has_working_log(old) {
+                                    let author = repo.git_author_identity().formatted_or_unknown();
+                                    let _ =
+                                        crate::authorship::post_commit::post_commit_with_final_state(
+                                            &repo,
+                                            Some(old.to_string()),
+                                            new.to_string(),
+                                            author,
+                                            true,
+                                            None,
+                                        );
+                                }
                                 let _ = repo.storage.rename_working_log(old, new);
                             }
                         } else {
