@@ -444,54 +444,11 @@ fn test_hard_reset_race_condition_no_delay() {
 
     repo.git(&["reset", "--hard", "HEAD~1"]).unwrap();
 
-    // Debug: check current HEAD and working log state
-    let head_after_reset = repo.git(&["rev-parse", "HEAD"]).unwrap();
-    eprintln!("HEAD after reset: {}", head_after_reset.trim());
-    let file_content_after_reset = fs::read_to_string(&file_path).unwrap();
-    eprintln!("File content after reset: {:?}", file_content_after_reset);
-
     fs::write(&file_path, "new-1\nnew-2\n").unwrap();
-    let cp_out = repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
-    eprintln!("Checkpoint output: {:?}", cp_out);
-
-    // Dump the actual working log checkpoint file and INITIAL
-    let head_sha = repo.git(&["rev-parse", "HEAD"]).unwrap();
-    let wl_dir = repo
-        .path()
-        .join(".git/ai/working_logs")
-        .join(head_sha.trim());
-    let cp_file = wl_dir.join("checkpoints.jsonl");
-    if cp_file.exists() {
-        let cp_content = fs::read_to_string(&cp_file).unwrap();
-        eprintln!("=== CHECKPOINTS.JSONL ===\n{}\n=== END ===", cp_content);
-    } else {
-        eprintln!("checkpoints.jsonl does NOT exist at {:?}", cp_file);
-    }
-    // Check INITIAL file (actual name is "INITIAL", not "initial.json")
-    let initial_file = wl_dir.join("INITIAL");
-    if initial_file.exists() {
-        let initial_content = fs::read_to_string(&initial_file).unwrap();
-        eprintln!("=== INITIAL FILE ===\n{}\n=== END ===", initial_content);
-    } else {
-        eprintln!("INITIAL file does NOT exist at {:?}", initial_file);
-    }
-    // List all working log dirs
-    let wl_parent = repo.path().join(".git/ai/working_logs");
-    if wl_parent.exists() {
-        let entries: Vec<_> = fs::read_dir(&wl_parent)
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        eprintln!("Working log dirs: {:?}", entries);
-    }
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
 
     repo.git(&["add", "-A"]).unwrap();
     repo.commit("after reset").unwrap();
-
-    // Debug: dump authorship note
-    let head = repo.git(&["rev-parse", "HEAD"]).unwrap();
-    let note = repo.git(&["notes", "--ref=ai", "show", head.trim()]);
-    eprintln!("=== AUTHORSHIP NOTE ===\n{:?}\n=== END ===", note);
 
     let mut file = repo.filename("main.txt");
     file.assert_committed_lines(crate::lines!["new-1".ai(), "new-2".ai(),]);
@@ -510,10 +467,6 @@ fn test_overwrite_all_content_ai() {
     repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
     repo.git(&["add", "-A"]).unwrap();
     repo.commit("second").unwrap();
-
-    let head = repo.git(&["rev-parse", "HEAD"]).unwrap();
-    let note = repo.git(&["notes", "--ref=ai", "show", head.trim()]);
-    eprintln!("=== OVERWRITE NOTE ===\n{:?}\n=== END ===", note);
 
     let mut file = repo.filename("main.txt");
     file.assert_committed_lines(crate::lines!["new-1".ai(), "new-2".ai(),]);
@@ -1180,5 +1133,313 @@ fn test_squash_merge_incomplete_ranges() {
         "feat-3".ai(),
         "feat-4".ai(),
         "feat-5".ai(),
+    ]);
+}
+
+// =============================================================================
+// Category F: Multi-squash attribution preservation
+// =============================================================================
+
+/// After reset --soft HEAD~N + commit (manual squash), AI lines added in
+/// intermediate commits must survive. This models the fuzzer's multi-squash
+/// pattern: multiple commits with mixed operations including deletions that
+/// cause the authorship note's line coverage to be incomplete — some lines
+/// only appear in intermediate commits' notes, not the final one.
+#[test]
+fn test_multi_squash_preserves_intermediate_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    // Base commit
+    fs::write(&file_path, "base\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    let base = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Commit 1: DeleteAndInsert — delete line 1, insert 2 human lines at top
+    fs::write(&file_path, "HH1\nHH2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-1: delete-insert human").unwrap();
+
+    // Commit 2: append AI line
+    fs::write(&file_path, "HH1\nHH2\nAI-appended\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-2: append AI").unwrap();
+
+    // Commit 3: replace line 1 with different human content
+    fs::write(&file_path, "HH-replaced\nHH2\nAI-appended\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-3: replace human").unwrap();
+
+    // Commit 4: prepend 2 AI lines
+    fs::write(
+        &file_path,
+        "AI-pre1\nAI-pre2\nHH-replaced\nHH2\nAI-appended\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("squash-4: prepend AI").unwrap();
+
+    // Squash all 4 into one
+    repo.git(&["reset", "--soft", &base]).unwrap();
+    repo.commit("squashed").unwrap();
+
+    // Verify attribution
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines![
+        "AI-pre1".ai(),
+        "AI-pre2".ai(),
+        "HH-replaced".human(),
+        "HH2".human(),
+        "AI-appended".ai(),
+    ]);
+}
+
+/// After squash, a file that was only created in an intermediate commit must
+/// still appear in the authorship note with correct attribution.
+#[test]
+fn test_multi_squash_preserves_secondary_file() {
+    let repo = TestRepo::new();
+    let main_path = repo.path().join("main.txt");
+    let sec_path = repo.path().join("secondary.txt");
+
+    // Initial commit
+    fs::write(&main_path, "main\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    let base = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Commit 1: edit main
+    fs::write(&main_path, "main\nmain-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("edit main").unwrap();
+
+    // Commit 2: create secondary file with mixed attribution
+    fs::write(&sec_path, "sec-ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "secondary.txt"])
+        .unwrap();
+    fs::write(&sec_path, "sec-ai\nsec-human\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "secondary.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("add secondary").unwrap();
+
+    // Commit 3: edit main again
+    fs::write(&main_path, "main\nmain-2\nmain-3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("edit main again").unwrap();
+
+    // Squash all into one
+    repo.git(&["reset", "--soft", &base]).unwrap();
+    repo.commit("squashed").unwrap();
+
+    // Both files must be in the note with correct attribution
+    let mut main_file = repo.filename("main.txt");
+    main_file.assert_committed_lines(crate::lines!["main".ai(), "main-2".ai(), "main-3".ai(),]);
+
+    let mut sec_file = repo.filename("secondary.txt");
+    sec_file.assert_committed_lines(crate::lines!["sec-ai".ai(), "sec-human".human(),]);
+}
+
+// =============================================================================
+// Category G: Cherry-pick over-attribution
+// =============================================================================
+
+/// After cherry-pick, lines from the target branch must NOT be re-attributed
+/// by the source commit's note. This models the fuzzer scenario: feature has
+/// AI content, main has human content at a different position. Cherry-pick
+/// applies cleanly but the note transfer must not claim main's lines as AI.
+///
+/// The setup ensures a clean cherry-pick: feature adds lines at the END of
+/// the file, while main added lines at the BEGINNING. Git applies without conflict.
+#[test]
+fn test_cherry_pick_does_not_overattribute_target_lines() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    // Initial commit: single shared line
+    fs::write(&file_path, "shared\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Main: prepend human lines (non-conflicting position)
+    fs::write(&file_path, "human-1\nhuman-2\nshared\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("main: prepend human").unwrap();
+
+    // Feature branch from initial: append AI lines (non-conflicting position)
+    repo.git(&["checkout", "-b", "feature", "HEAD~1"]).unwrap();
+    fs::write(&file_path, "shared\nai-1\nai-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature: append AI").unwrap();
+    let feature_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Back to main, cherry-pick feature
+    repo.git(&["checkout", "-"]).unwrap();
+    repo.git(&["cherry-pick", &feature_sha]).unwrap();
+
+    // Result: human-1, human-2, shared, ai-1, ai-2
+    // human lines must remain human, AI lines must be AI
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines![
+        "human-1".human(),
+        "human-2".human(),
+        "shared".unattributed_human(),
+        "ai-1".ai(),
+        "ai-2".ai(),
+    ]);
+}
+
+// =============================================================================
+// Category H: Selective staging attribution carryover
+// =============================================================================
+
+/// When committing only one of multiple checkpointed files, the dirty file's
+/// attribution must survive to the next commit via INITIAL carryover.
+#[test]
+fn test_selective_commit_preserves_dirty_file_attribution() {
+    let repo = TestRepo::new();
+    let main_path = repo.path().join("main.txt");
+    let sec_path = repo.path().join("secondary.txt");
+
+    // Initial commit
+    fs::write(&main_path, "main-init\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Edit BOTH files with attribution
+    fs::write(&main_path, "main-init\nmain-ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+
+    fs::write(&sec_path, "sec-ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "secondary.txt"])
+        .unwrap();
+
+    // Commit ONLY main, leave secondary dirty
+    repo.git(&["add", "main.txt"]).unwrap();
+    repo.commit("main only").unwrap();
+
+    // Now commit secondary
+    repo.git(&["add", "secondary.txt"]).unwrap();
+    repo.commit("secondary").unwrap();
+
+    // Secondary must retain its AI attribution
+    let mut sec_file = repo.filename("secondary.txt");
+    sec_file.assert_committed_lines(crate::lines!["sec-ai".ai(),]);
+}
+
+// =============================================================================
+// Category E: Cherry-pick --no-commit loses attribution
+//
+// When cherry-pick is invoked with --no-commit, HEAD doesn't change so the
+// daemon doesn't emit a CherryPickComplete event. The cherry-picked content
+// gets staged but has no working log entries, so the subsequent commit loses
+// attribution for those lines.
+// =============================================================================
+
+#[test]
+fn test_cherry_pick_no_commit_preserves_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    // Initial commit with base content
+    fs::write(&file_path, "base\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    // Feature branch: add AI lines
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    fs::write(&file_path, "base\nai-line-1\nai-line-2\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature: AI lines").unwrap();
+    let feature_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // Back to main
+    repo.git(&["checkout", "main"]).unwrap();
+
+    // Cherry-pick with --no-commit (stages content without creating commit)
+    repo.git(&["cherry-pick", "--no-commit", &feature_sha])
+        .unwrap();
+
+    // Ensure daemon has processed the cherry-pick event (writes INITIAL)
+    repo.sync_daemon_force();
+
+    // Now commit (attribution should be preserved from source commit's note)
+    repo.commit("cherry-picked content").unwrap();
+
+    // Verify AI lines retain attribution
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines![
+        "base".human(),
+        "ai-line-1".ai(),
+        "ai-line-2".ai(),
+    ]);
+}
+
+/// Rebase with conflict resolved via `checkout --theirs` should preserve attribution.
+/// In rebase context, `--theirs` means the branch being rebased (feature branch).
+#[test]
+fn test_rebase_conflict_theirs_preserves_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    // Initial commit
+    fs::write(&file_path, "line-1\nline-2\nline-3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    let main_branch = repo.current_branch();
+
+    // Feature branch: AI prepend
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    fs::write(&file_path, "ai-prepend\nline-1\nline-2\nline-3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("feature: AI prepend").unwrap();
+
+    // Main: conflicting prepend
+    repo.git(&["checkout", &main_branch]).unwrap();
+    fs::write(&file_path, "main-prepend\nline-1\nline-2\nline-3\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "main.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+    repo.commit("main: human prepend").unwrap();
+
+    // Rebase feature onto main (will conflict)
+    repo.git(&["checkout", "feature"]).unwrap();
+    let _ = repo.git(&["rebase", &main_branch]); // expect conflict
+
+    // Resolve by taking theirs (feature branch's version in rebase context)
+    repo.git(&["checkout", "--theirs", "--", "main.txt"])
+        .unwrap();
+    repo.git(&["add", "main.txt"]).unwrap();
+
+    // Set GIT_EDITOR to avoid interactive editor during rebase --continue
+    let result = repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None);
+    assert!(result.is_ok(), "rebase --continue failed: {:?}", result);
+
+    // After rebase --continue, the rebased commit should retain AI attribution
+    // In rebase context, --theirs = feature branch version = ai-prepend + original lines
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines![
+        "ai-prepend".ai(),
+        "line-1".human(),
+        "line-2".human(),
+        "line-3".human(),
     ]);
 }

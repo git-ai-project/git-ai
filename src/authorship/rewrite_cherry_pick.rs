@@ -2,7 +2,12 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use crate::authorship::attribution_tracker::LineAttribution;
+use crate::authorship::authorship_log::{HumanRecord, LineRange, PromptRecord, SessionRecord};
+use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::config;
+use crate::error::GitAiError;
+use crate::git::notes_api::read_authorship_v3;
 use crate::git::repository::{Repository, exec_git_allow_nonzero};
 
 pub struct PendingCherryPick {
@@ -194,6 +199,111 @@ pub fn new_commits_since(repo: &Repository, pre_command_head: &str) -> Vec<Strin
 
 fn is_full_sha(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Handle `cherry-pick --no-commit` by reading the source commit's authorship note
+/// and writing it as INITIAL in the current HEAD's working log. This ensures that
+/// when the user eventually commits, the cherry-picked lines retain their attribution.
+pub fn handle_cherry_pick_no_commit(
+    repo: &Repository,
+    sources: &[String],
+    head: &str,
+) -> Result<(), GitAiError> {
+    if sources.is_empty() || head.is_empty() {
+        return Ok(());
+    }
+
+    let mut all_file_attributions: HashMap<String, Vec<LineAttribution>> = HashMap::new();
+    let mut all_prompts: HashMap<String, PromptRecord> = HashMap::new();
+    let mut all_sessions: std::collections::BTreeMap<String, SessionRecord> =
+        std::collections::BTreeMap::new();
+    let mut all_humans: std::collections::BTreeMap<String, HumanRecord> =
+        std::collections::BTreeMap::new();
+
+    let mut source_logs: Vec<AuthorshipLog> = Vec::new();
+    for source_sha in sources {
+        if let Ok(log) = read_authorship_v3(repo, source_sha)
+            && !log.attestations.is_empty()
+        {
+            source_logs.push(log);
+        }
+    }
+
+    if source_logs.is_empty() {
+        return Ok(());
+    }
+
+    // For cherry-pick --no-commit, the staged content IS the source commit's content.
+    // Line numbers from the source note correspond directly to the staged file content.
+    for log in &source_logs {
+        for fa in &log.attestations {
+            let mut raw_attrs: Vec<LineAttribution> = Vec::new();
+            for entry in &fa.entries {
+                for range in &entry.line_ranges {
+                    let (start, end) = match range {
+                        LineRange::Single(l) => (*l, *l),
+                        LineRange::Range(s, e) => (*s, *e),
+                    };
+                    raw_attrs.push(LineAttribution::new(start, end, entry.hash.clone(), None));
+                }
+            }
+
+            let existing = all_file_attributions
+                .entry(fa.file_path.clone())
+                .or_default();
+            existing.extend(raw_attrs);
+        }
+
+        for (key, record) in &log.metadata.prompts {
+            all_prompts
+                .entry(key.clone())
+                .or_insert_with(|| record.clone());
+        }
+        for (key, record) in &log.metadata.sessions {
+            all_sessions
+                .entry(key.clone())
+                .or_insert_with(|| record.clone());
+        }
+        for (key, record) in &log.metadata.humans {
+            all_humans
+                .entry(key.clone())
+                .or_insert_with(|| record.clone());
+        }
+    }
+
+    if all_file_attributions.is_empty() {
+        return Ok(());
+    }
+
+    let mut file_blobs: HashMap<String, String> = HashMap::new();
+    for file_path in all_file_attributions.keys() {
+        let content = read_staged_file_content(repo, file_path);
+        if !content.is_empty() {
+            file_blobs.insert(file_path.clone(), content);
+        }
+    }
+
+    let working_log = repo.storage.working_log_for_base_commit(head)?;
+    working_log.write_initial_attributions_with_contents(
+        all_file_attributions,
+        all_prompts,
+        all_humans,
+        file_blobs,
+        all_sessions,
+    )?;
+
+    Ok(())
+}
+
+/// Read file content from the git index (staged state).
+fn read_staged_file_content(repo: &Repository, file_path: &str) -> String {
+    let mut args = repo.global_args_for_exec();
+    args.extend(["show".to_string(), format!(":{}", file_path)]);
+    exec_git_allow_nonzero(&args)
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

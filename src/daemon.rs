@@ -868,7 +868,17 @@ fn process_conflict_resolution_working_logs(repo: &Repository, new_tip: &str, on
         }
 
         // There's a working log at this parent — conflict resolution happened here.
-        // Run post_commit to generate the authorship note from the working log.
+        // Save the existing shifted note so we can restore it if the working log
+        // produces a worse result (fewer attestation entries).
+        let existing_note_raw = crate::git::notes_api::read_note(repo, commit_sha);
+        let existing_entry_count = existing_note_raw
+            .as_ref()
+            .and_then(|raw| {
+                crate::authorship::authorship_log_serialization::AuthorshipLog::deserialize_from_string(raw).ok()
+            })
+            .map(|log| log.attestations.iter().map(|a| a.entries.len()).sum::<usize>())
+            .unwrap_or(0);
+
         let author = repo.git_author_identity().formatted_or_unknown();
         let _ = crate::authorship::post_commit::post_commit_with_final_state(
             repo,
@@ -878,6 +888,18 @@ fn process_conflict_resolution_working_logs(repo: &Repository, new_tip: &str, on
             true,
             None,
         );
+
+        // If the working log produced a worse note, restore the shifted one
+        if existing_entry_count > 0
+            && let Ok(new_log) = crate::git::notes_api::read_authorship_v3(repo, commit_sha)
+        {
+            let new_count: usize = new_log.attestations.iter().map(|a| a.entries.len()).sum();
+            if new_count < existing_entry_count
+                && let Some(raw) = existing_note_raw
+            {
+                let _ = crate::git::notes_api::write_note(repo, commit_sha, &raw);
+            }
+        }
     }
 }
 
@@ -5508,6 +5530,25 @@ impl ActorDaemonCoordinator {
                             }
                         }
                     }
+                    crate::daemon::domain::SemanticEvent::CherryPickNoCommit {
+                        source_refs,
+                        head,
+                    } => {
+                        if !head.is_empty() {
+                            let repo = find_repository_in_path(&worktree)?;
+                            let sources =
+                                crate::authorship::rewrite_cherry_pick::expand_cherry_pick_sources(
+                                    &repo,
+                                    source_refs,
+                                );
+                            if !sources.is_empty() {
+                                let _ =
+                                    crate::authorship::rewrite_cherry_pick::handle_cherry_pick_no_commit(
+                                        &repo, &sources, head,
+                                    );
+                            }
+                        }
+                    }
                     crate::daemon::domain::SemanticEvent::StashOperation { kind, head } => {
                         let repo = find_repository_in_path(&worktree)?;
                         match kind {
@@ -5580,7 +5621,10 @@ impl ActorDaemonCoordinator {
                         }
                     }
                     crate::daemon::domain::SemanticEvent::CommitCreated { base, new_head } => {
-                        if !new_head.is_empty() {
+                        if is_completing_rebase || is_pull_rebase {
+                            // During rebase, note transfer is handled by non-FF detection.
+                            // Skip post-commit note generation to avoid overwriting shifted notes.
+                        } else if !new_head.is_empty() {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.git_author_identity().formatted_or_unknown();
                             let base_opt = base.clone().filter(|b| !b.is_empty() && b != "initial");

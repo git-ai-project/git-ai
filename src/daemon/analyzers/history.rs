@@ -102,6 +102,20 @@ impl CommandAnalyzer for HistoryAnalyzer {
                             .and_then(|repo| repo.head.clone())
                             .unwrap_or_default(),
                     });
+                } else if args.iter().any(|arg| arg == "--no-commit" || arg == "-n") {
+                    let source_refs: Vec<String> = args
+                        .iter()
+                        .filter(|arg| !arg.starts_with('-') && !arg.is_empty())
+                        .cloned()
+                        .collect();
+                    events.push(SemanticEvent::CherryPickNoCommit {
+                        source_refs,
+                        head: cmd
+                            .post_repo
+                            .as_ref()
+                            .and_then(|repo| repo.head.clone())
+                            .unwrap_or_default(),
+                    });
                 } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
                     events.push(SemanticEvent::CherryPickComplete {
                         original_head: old_head,

@@ -44,10 +44,6 @@ pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<()
             let result = derive_mappings_from_range_diff(repo, old_tip, new_tip, onto.as_deref())?;
             match result {
                 RangeDiffResult::Squash { base } => {
-                    // Squash detected internally — delegate to squash handler.
-                    // Always use the computed base (merge_base of old_tip and new_tip)
-                    // which correctly captures all source commits, rather than the
-                    // daemon's onto_hint which may point to an intermediate commit.
                     handle_squash_merge(repo, old_tip, new_tip, &base)
                 }
                 RangeDiffResult::Mappings(mappings) => {
@@ -888,7 +884,7 @@ fn compute_diff_tree(
 
 /// Batch-compute diff-trees for multiple commit pairs in a single git process.
 /// Resolves commits to tree SHAs, then pipes all pairs into `git diff-tree --stdin`.
-fn compute_diff_trees_batch(
+pub(crate) fn compute_diff_trees_batch(
     repo: &Repository,
     pairs: &[(String, String)],
 ) -> Result<Vec<DiffTreeResult>, GitAiError> {

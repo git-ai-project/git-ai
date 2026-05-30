@@ -1,6 +1,8 @@
 use crate::authorship::attribution_tracker::LineAttribution;
 use crate::authorship::authorship_log::{HumanRecord, LineRange, PromptRecord, SessionRecord};
 use crate::authorship::authorship_log_serialization::AuthorshipLog;
+use crate::authorship::hunk_shift::{DiffHunk, apply_hunk_shifts_to_line_attributions};
+use crate::authorship::rewrite::compute_diff_trees_batch;
 use crate::error::GitAiError;
 use crate::git::notes_api::read_authorship_v3;
 use crate::git::repository::Repository;
@@ -22,7 +24,44 @@ pub fn reconstruct_working_log_after_backward_reset(
         return Ok(());
     }
 
-    // Collect authorship from all un-done commits
+    // Read authorship notes for all un-done commits
+    let mut commit_logs: Vec<(String, AuthorshipLog)> = Vec::new();
+    for commit_sha in &commits {
+        let Ok(log) = read_authorship_v3(repo, commit_sha) else {
+            continue;
+        };
+        commit_logs.push((commit_sha.clone(), log));
+    }
+
+    if commit_logs.is_empty() {
+        return Ok(());
+    }
+
+    // Compute diffs from each intermediate commit to old_tip so we can shift
+    // line numbers into old_tip's coordinate space. Commits that ARE old_tip
+    // need no shift.
+    let diff_pairs: Vec<(String, String)> = commit_logs
+        .iter()
+        .filter(|(sha, _)| sha != old_tip)
+        .map(|(sha, _)| (sha.clone(), old_tip.to_string()))
+        .collect();
+
+    let diff_results = if !diff_pairs.is_empty() {
+        compute_diff_trees_batch(repo, &diff_pairs)?
+    } else {
+        Vec::new()
+    };
+
+    // Build a lookup from commit SHA to its diff result index
+    let diff_idx_by_sha: HashMap<&str, usize> = diff_pairs
+        .iter()
+        .enumerate()
+        .map(|(idx, (sha, _))| (sha.as_str(), idx))
+        .collect();
+
+    // Collect attributions from all commits, shifting intermediate ones to old_tip's
+    // coordinate space. Process in chronological order (oldest first) so that later
+    // commits' attributions override earlier ones for overlapping lines.
     let mut file_attributions: HashMap<String, Vec<LineAttribution>> = HashMap::new();
     let mut prompts: HashMap<String, PromptRecord> = HashMap::new();
     let mut sessions: std::collections::BTreeMap<String, SessionRecord> =
@@ -30,12 +69,14 @@ pub fn reconstruct_working_log_after_backward_reset(
     let mut humans: std::collections::BTreeMap<String, HumanRecord> =
         std::collections::BTreeMap::new();
 
-    for commit_sha in &commits {
-        let Ok(log) = read_authorship_v3(repo, commit_sha) else {
-            continue;
-        };
-        extract_attributions_from_log(
-            &log,
+    for (commit_sha, log) in &commit_logs {
+        let hunks_by_file: Option<&HashMap<String, Vec<DiffHunk>>> = diff_idx_by_sha
+            .get(commit_sha.as_str())
+            .map(|&idx| &diff_results[idx].hunks_by_file);
+
+        extract_attributions_from_log_shifted(
+            log,
+            hunks_by_file,
             &mut file_attributions,
             &mut prompts,
             &mut sessions,
@@ -89,23 +130,71 @@ pub fn reconstruct_working_log_after_backward_reset(
     Ok(())
 }
 
-fn extract_attributions_from_log(
+fn extract_attributions_from_log_shifted(
     log: &AuthorshipLog,
+    hunks_by_file: Option<&HashMap<String, Vec<DiffHunk>>>,
     file_attributions: &mut HashMap<String, Vec<LineAttribution>>,
     prompts: &mut HashMap<String, PromptRecord>,
     sessions: &mut std::collections::BTreeMap<String, SessionRecord>,
     humans: &mut std::collections::BTreeMap<String, HumanRecord>,
 ) {
     for fa in &log.attestations {
-        let attrs = file_attributions.entry(fa.file_path.clone()).or_default();
+        let mut raw_attrs: Vec<LineAttribution> = Vec::new();
         for entry in &fa.entries {
             for range in &entry.line_ranges {
                 let (start, end) = match range {
                     LineRange::Single(l) => (*l, *l),
                     LineRange::Range(s, e) => (*s, *e),
                 };
-                attrs.push(LineAttribution::new(start, end, entry.hash.clone(), None));
+                raw_attrs.push(LineAttribution::new(start, end, entry.hash.clone(), None));
             }
+        }
+
+        // Shift line numbers to old_tip's coordinate space if we have hunks for this file
+        let shifted = if let Some(all_hunks) = hunks_by_file
+            && let Some(file_hunks) = all_hunks.get(&fa.file_path)
+            && !file_hunks.is_empty()
+        {
+            apply_hunk_shifts_to_line_attributions(&raw_attrs, file_hunks)
+        } else {
+            raw_attrs
+        };
+
+        // Merge into accumulated attributions. Later commits override earlier ones
+        // for overlapping line ranges.
+        let existing = file_attributions.entry(fa.file_path.clone()).or_default();
+        for new_attr in shifted {
+            // Remove any existing attributions that are fully covered by this new one
+            existing.retain(|old| {
+                !(old.start_line >= new_attr.start_line && old.end_line <= new_attr.end_line)
+            });
+            // For partial overlaps, trim existing attributions
+            let mut trimmed: Vec<LineAttribution> = Vec::new();
+            existing.retain(|old| {
+                if old.start_line < new_attr.start_line && old.end_line >= new_attr.start_line {
+                    // Overlap at the end of old — trim old to end before new
+                    trimmed.push(LineAttribution::new(
+                        old.start_line,
+                        new_attr.start_line - 1,
+                        old.author_id.clone(),
+                        old.overrode.clone(),
+                    ));
+                    return false;
+                }
+                if old.end_line > new_attr.end_line && old.start_line <= new_attr.end_line {
+                    // Overlap at the start of old — trim old to start after new
+                    trimmed.push(LineAttribution::new(
+                        new_attr.end_line + 1,
+                        old.end_line,
+                        old.author_id.clone(),
+                        old.overrode.clone(),
+                    ));
+                    return false;
+                }
+                true
+            });
+            existing.extend(trimmed);
+            existing.push(new_attr);
         }
     }
 
