@@ -230,6 +230,10 @@ if ($Repo -eq '__REPO_PLACEHOLDER__') {
 # When set to __VERSION_PLACEHOLDER__, defaults to "latest"
 $PinnedVersion = '__VERSION_PLACEHOLDER__'
 
+# Base URL placeholder - replaced by internal/S3 release builds.
+# When set, binaries are downloaded from "$BaseUrl/$binaryName(.exe)" instead of GitHub Releases.
+$BaseUrl = '__BASE_URL_PLACEHOLDER__'
+
 # Embedded checksums - replaced during release builds with actual SHA256 checksums
 # Format: "hash  filename|hash  filename|..." (pipe-separated)
 # When set to __CHECKSUMS_PLACEHOLDER__, checksum verification is skipped
@@ -409,6 +413,13 @@ $binaryName = "git-ai-$os-$arch"
 # Priority: 1. Local binary override, 2. Pinned version (for release builds), 3. Environment variable, 4. "latest"
 if (-not [string]::IsNullOrWhiteSpace($env:GIT_AI_LOCAL_BINARY)) {
     $releaseTag = 'local'
+} elseif ($BaseUrl -ne '__BASE_URL_PLACEHOLDER__' -and -not [string]::IsNullOrWhiteSpace($BaseUrl)) {
+    $releaseTag = $PinnedVersion
+    if ($releaseTag -eq '__VERSION_PLACEHOLDER__') {
+        $releaseTag = 'custom'
+    }
+    $downloadUrlExe = "$($BaseUrl.TrimEnd('/'))/$binaryName.exe"
+    $downloadUrlNoExt = "$($BaseUrl.TrimEnd('/'))/$binaryName"
 } elseif ($PinnedVersion -ne '__VERSION_PLACEHOLDER__') {
     # Version-pinned install script from a release
     $releaseTag = $PinnedVersion

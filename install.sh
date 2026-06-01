@@ -59,6 +59,10 @@ fi
 # When set to __VERSION_PLACEHOLDER__, defaults to "latest"
 PINNED_VERSION="__VERSION_PLACEHOLDER__"
 
+# Base URL placeholder - replaced by internal/S3 release builds.
+# When set, binaries are downloaded from "${BASE_URL}/${BINARY_NAME}" instead of GitHub Releases.
+BASE_URL="__BASE_URL_PLACEHOLDER__"
+
 # Embedded checksums - replaced during release builds with actual SHA256 checksums
 # Format: "hash  filename|hash  filename|..." (pipe-separated)
 # When set to __CHECKSUMS_PLACEHOLDER__, checksum verification is skipped
@@ -259,6 +263,12 @@ BINARY_NAME="git-ai-${OS}-${ARCH}"
 if [ -n "${GIT_AI_LOCAL_BINARY:-}" ]; then
     RELEASE_TAG="local"
     DOWNLOAD_URL=""
+elif [ "$BASE_URL" != "__BASE_URL_PLACEHOLDER__" ] && [ -n "$BASE_URL" ]; then
+    RELEASE_TAG="$PINNED_VERSION"
+    if [ "$RELEASE_TAG" = "__VERSION_PLACEHOLDER__" ]; then
+        RELEASE_TAG="custom"
+    fi
+    DOWNLOAD_URL="${BASE_URL%/}/${BINARY_NAME}"
 elif [ "$PINNED_VERSION" != "__VERSION_PLACEHOLDER__" ]; then
     # Version-pinned install script from a release
     RELEASE_TAG="$PINNED_VERSION"
