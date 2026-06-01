@@ -1,0 +1,7 @@
+{
+  "role": "user",
+  "message": "{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Write a hello world function in Python.\"}]}",
+  "id": "msg001",
+  "references": [],
+  "extra": "{\"requestId\":\"req-001\",\"modelId\":\"glm-5.0-turbo\",\"sourceContentBlocks\":[{\"type\":\"text\",\"text\":\"Write a hello world function in Python.\"}],\"traceId\":\"trace-001\"}"
+}

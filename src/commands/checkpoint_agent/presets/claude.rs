@@ -29,6 +29,22 @@ impl ClaudePreset {
                 .map(|p| p.contains(".cursor"))
                 .unwrap_or(false)
     }
+
+    fn is_codebuddy_hook_payload(data: &serde_json::Value) -> bool {
+        if data.get("client").and_then(|v| v.as_str()) == Some("CodeBuddyIDE") {
+            return true;
+        }
+        // Path-segment match (not raw substring) so legitimate Claude paths
+        // that merely contain the string "codebuddyextension" elsewhere don't
+        // get falsely rejected. CodeBuddy CN's real layout has the segment
+        // exactly: e.g. ".../CodeBuddyExtension/Data/...".
+        parse::optional_str(data, "transcript_path")
+            .map(|p| {
+                let normalized = p.replace('\\', "/").to_lowercase();
+                normalized.contains("/codebuddyextension/")
+            })
+            .unwrap_or(false)
+    }
 }
 
 impl AgentPreset for ClaudePreset {
@@ -45,6 +61,12 @@ impl AgentPreset for ClaudePreset {
         if Self::is_cursor_hook_payload(&data) {
             return Err(GitAiError::PresetError(
                 "Skipping Cursor hook payload in Claude preset; use cursor hooks.".to_string(),
+            ));
+        }
+        if Self::is_codebuddy_hook_payload(&data) {
+            return Err(GitAiError::PresetError(
+                "Skipping CodeBuddy hook payload in Claude preset; use codebuddy hooks."
+                    .to_string(),
             ));
         }
 
@@ -264,5 +286,68 @@ mod tests {
         })
         .to_string();
         assert!(ClaudePreset.parse(&input, "t_test123456789a").is_err());
+    }
+
+    #[test]
+    fn test_claude_skips_codebuddy_payload_by_client() {
+        let input = json!({
+            "transcript_path": "/home/user/.claude/projects/abc.jsonl",
+            "cwd": "/",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/main.rs"},
+            "client": "CodeBuddyIDE"
+        })
+        .to_string();
+        let result = ClaudePreset.parse(&input, "t_test123456789a");
+        assert!(result.is_err());
+        match result {
+            Err(GitAiError::PresetError(msg)) => {
+                assert!(
+                    msg.to_lowercase().contains("codebuddy"),
+                    "expected CodeBuddy hint in error: {}",
+                    msg
+                );
+            }
+            _ => panic!("Expected PresetError"),
+        }
+    }
+
+    #[test]
+    fn test_claude_skips_codebuddy_payload_by_transcript_path() {
+        let input = json!({
+            "transcript_path": "/Users/u/Library/Application Support/CodeBuddyExtension/Data/x/CodeBuddyIDE/y/history/z/sess/index.json",
+            "cwd": "/",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "src/main.rs"}
+        })
+        .to_string();
+        assert!(ClaudePreset.parse(&input, "t_test123456789a").is_err());
+    }
+
+    #[test]
+    fn test_claude_does_not_falsely_reject_paths_containing_codebuddyextension_substring() {
+        // Regression: an earlier substring-based guard would falsely reject
+        // legitimate Claude paths that happened to contain the string
+        // "codebuddyextension" anywhere (e.g. a project named like the upstream
+        // tool). The guard must require the exact `/codebuddyextension/`
+        // path segment.
+        let input = json!({
+            "transcript_path": "/Users/u/work/codebuddyextension-port/.claude/projects/abc.jsonl",
+            "cwd": "/Users/u/work/codebuddyextension-port",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "src/main.rs"}
+        })
+        .to_string();
+        // Should parse cleanly as a Claude payload.
+        let events = ClaudePreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.context.agent_id.tool, "claude");
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
     }
 }
