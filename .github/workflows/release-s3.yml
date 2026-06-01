@@ -52,14 +52,6 @@ jobs:
             artifact_name: git-ai-linux-arm64
             use_docker: true
             docker_image: ubuntu:22.04
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact_name: git-ai-windows-x64
-            use_docker: false
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            artifact_name: git-ai-windows-arm64
-            use_docker: false
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact_name: git-ai-macos-arm64
@@ -107,24 +99,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.target }}-
 
-      - name: Build release binary (non-Docker, non-Windows-ARM64)
-        if: matrix.use_docker == false && matrix.os != 'windows-11-arm'
+      - name: Build release binary (non-Docker)
+        if: matrix.use_docker == false
         run: cargo build --release --target ${{ matrix.target }}
         env:
           CARGO_INCREMENTAL: 0
           SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
           POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
           OSS_BUILD: "1"
-
-      - name: Build release binary (Windows ARM64 with LLVM strip)
-        if: matrix.os == 'windows-11-arm'
-        run: cargo build --release --target ${{ matrix.target }}
-        env:
-          CARGO_INCREMENTAL: 0
-          SENTRY_OSS: ${{ secrets.SENTRY_OSS }}
-          POSTHOG_API_KEY: ${{ secrets.POSTHOG_API_KEY }}
-          OSS_BUILD: "1"
-          RUSTFLAGS: "-C strip=symbols"
 
       - name: Verify binary architecture (Linux)
         if: contains(matrix.os, 'ubuntu')
@@ -138,15 +120,6 @@ jobs:
             exit 1
           fi
 
-      - name: Verify binary architecture (Windows)
-        if: contains(matrix.os, 'windows')
-        shell: bash
-        run: file target/${{ matrix.target }}/release/git-ai.exe
-
-      - name: Strip binary (Windows x64)
-        if: matrix.os == 'windows-latest'
-        run: strip target/${{ matrix.target }}/release/git-ai.exe
-
       - name: Strip binary (macOS)
         if: matrix.os == 'macos-latest'
         run: strip target/${{ matrix.target }}/release/git-ai
@@ -154,24 +127,10 @@ jobs:
       - name: Create release directory
         run: mkdir -p release
 
-      - name: Copy binary to release directory (Windows)
-        if: contains(matrix.os, 'windows')
-        run: cp target/${{ matrix.target }}/release/git-ai.exe release/${{ matrix.artifact_name }}.exe
-
-      - name: Copy binary to release directory (non-Windows)
-        if: ${{ !contains(matrix.os, 'windows') }}
+      - name: Copy binary to release directory
         run: cp target/${{ matrix.target }}/release/git-ai release/${{ matrix.artifact_name }}
 
-      - name: Upload artifact (Windows)
-        if: contains(matrix.os, 'windows')
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: release/${{ matrix.artifact_name }}.exe
-          retention-days: 30
-
-      - name: Upload artifact (non-Windows)
-        if: ${{ !contains(matrix.os, 'windows') }}
+      - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.artifact_name }}

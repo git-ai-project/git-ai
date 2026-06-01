@@ -1,215 +1,289 @@
-# Git-AI S3 本地打包发布流程
+# Git-AI S3 发布流程
 
-本文档说明如何在本地构建 Git-AI release 二进制，生成带校验和的安装脚本，并上传到公司 S3 下载源。
-
-## 背景
-
-官方发布流程通过 GitHub Actions 构建多平台二进制，并上传到 GitHub Release。内部测试或临时灰度版本可以不上传 GitHub，而是在本地构建后上传到公司 S3，再通过 S3/CloudFront URL 安装。
-
-当前项目已新增本地发布脚本：
-
-```bash
-scripts/release-s3-local.sh
-```
-
-并且安装脚本已支持 S3 下载源：
-
-- `install.sh`
-- `install.ps1`
-
-## 产物结构
-
-本地脚本会生成类似下面的目录：
+本文档说明当前推荐的内部发布方式：
 
 ```text
-release/s3-v1.4.9-rebasefix-20260601/
-  git-ai-macos-arm64
-  SHA256SUMS
-  install.sh
-  install.ps1
+GitHub Actions 构建所有平台 release artifact
+-> 本地下载 artifact
+-> 本地使用 s3cmd 上传到公司内网 S3
+-> 用户通过固定频道 URL 安装
 ```
 
-上传到 S3 后建议路径为：
+不再推荐在本机手动 Docker 构建各个平台。构建所有官方平台应交给 GitHub Actions matrix，上传内网 S3 则放在本机执行，因为 GitHub 官方 runner 通常无法访问公司内网 S3。
+
+## 目标
+
+当前内部 S3 release 平台包括 Linux 和 macOS：
 
 ```text
-s3://your-bucket/git-ai/releases/v1.4.9-rebasefix-20260601/
-  git-ai-macos-arm64
-  SHA256SUMS
-  install.sh
-  install.ps1
+git-ai-linux-x64
+git-ai-linux-arm64
+git-ai-macos-x64
+git-ai-macos-arm64
 ```
 
-如果通过 CloudFront 或其他 HTTPS 域名暴露，则安装 URL 为：
+最终上传到公司 S3 的结构：
 
 ```text
-https://your-download-domain/git-ai/releases/v1.4.9-rebasefix-20260601/install.sh
+s3://ep-zadig-prod/frontend/packages/tools/git-ai/
+  v1.4.9-rebasefix-20260601/
+    git-ai-linux-x64
+    git-ai-linux-arm64
+    git-ai-macos-x64
+    git-ai-macos-arm64
+    SHA256SUMS
+    install.sh
+    install.ps1
+
+  channels/
+    rebasefix/
+      git-ai-linux-x64
+      git-ai-linux-arm64
+      git-ai-macos-x64
+      git-ai-macos-arm64
+      SHA256SUMS
+      install.sh
+      install.ps1
 ```
 
-## 前置条件
-
-本地需要安装：
-
-```bash
-cargo
-aws
-```
-
-`cargo` 通常来自 Rust toolchain。脚本会自动尝试加载：
-
-```bash
-~/.cargo/env
-```
-
-AWS CLI 需要提前配置好凭证，例如：
-
-```bash
-aws configure
-```
-
-或者使用指定 profile：
-
-```bash
-export AWS_PROFILE=your-profile
-```
-
-如果使用公司内部 S3 配置，也可以使用 `s3cmd`：
-
-```bash
-uv tool run s3cmd -c ~/.s3cfg-prod ls s3://ep-zadig-prod/
-```
-
-不要把 `~/.s3cfg-prod` 提交到 Git 仓库。该文件包含 access key 和 secret key，只应保存在本机或公司密钥管理系统中。
-
-## 先做 dry run
-
-第一次建议先执行 dry run。dry run 会构建并生成 release 目录，但不会上传到 S3。
-
-```bash
-RELEASE_TAG=v1.4.9-rebasefix-20260601 \
-S3_BUCKET=your-bucket \
-S3_PREFIX=git-ai/releases \
-PUBLIC_BASE_URL=https://your-download-domain/git-ai/releases \
-AWS_REGION=ap-southeast-1 \
-DRY_RUN=1 \
-scripts/release-s3-local.sh
-```
-
-使用公司内部 S3 地址时，可以这样 dry run：
-
-```bash
-RELEASE_TAG=v1.4.9-rebasefix-20260601 \
-S3_BUCKET=ep-zadig-prod \
-S3_PREFIX=frontend/packages/tools/git-ai \
-PUBLIC_BASE_URL=https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai \
-UPLOAD_TOOL=s3cmd \
-S3CMD_CONFIG=~/.s3cfg-prod \
-CHANNEL=rebasefix \
-DRY_RUN=1 \
-scripts/release-s3-local.sh
-```
-
-生成成功后检查目录：
-
-```bash
-ls -la release/s3-v1.4.9-rebasefix-20260601
-cat release/s3-v1.4.9-rebasefix-20260601/SHA256SUMS
-```
-
-确认 `install.sh` 里已经注入 S3/CloudFront URL：
-
-```bash
-rg 'PINNED_VERSION|BASE_URL|EMBEDDED_CHECKSUMS' release/s3-v1.4.9-rebasefix-20260601/install.sh
-```
-
-## 正式上传
-
-确认 dry run 没问题后执行：
-
-```bash
-RELEASE_TAG=v1.4.9-rebasefix-20260601 \
-S3_BUCKET=your-bucket \
-S3_PREFIX=git-ai/releases \
-PUBLIC_BASE_URL=https://your-download-domain/git-ai/releases \
-AWS_REGION=ap-southeast-1 \
-scripts/release-s3-local.sh
-```
-
-使用公司内部 S3 地址时：
-
-```bash
-RELEASE_TAG=v1.4.9-rebasefix-20260601 \
-S3_BUCKET=ep-zadig-prod \
-S3_PREFIX=frontend/packages/tools/git-ai \
-PUBLIC_BASE_URL=https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai \
-UPLOAD_TOOL=s3cmd \
-S3CMD_CONFIG=~/.s3cfg-prod \
-CHANNEL=rebasefix \
-scripts/release-s3-local.sh
-```
-
-如果需要指定 AWS profile：
-
-```bash
-AWS_PROFILE=your-profile \
-RELEASE_TAG=v1.4.9-rebasefix-20260601 \
-S3_BUCKET=your-bucket \
-S3_PREFIX=git-ai/releases \
-PUBLIC_BASE_URL=https://your-download-domain/git-ai/releases \
-AWS_REGION=ap-southeast-1 \
-scripts/release-s3-local.sh
-```
-
-脚本会上传到：
-
-```text
-s3://your-bucket/git-ai/releases/v1.4.9-rebasefix-20260601/
-```
-
-公司内部 S3 示例会上传到：
-
-```text
-s3://ep-zadig-prod/frontend/packages/tools/git-ai/v1.4.9-rebasefix-20260601/
-```
-
-如果设置了 `CHANNEL=rebasefix`，还会额外上传一份可变频道目录：
-
-```text
-s3://ep-zadig-prod/frontend/packages/tools/git-ai/channels/rebasefix/
-```
-
-上传完成后会打印安装命令：
-
-```bash
-curl -fsSL https://your-download-domain/git-ai/releases/v1.4.9-rebasefix-20260601/install.sh | bash
-```
-
-Windows 安装命令：
-
-```powershell
-irm https://your-download-domain/git-ai/releases/v1.4.9-rebasefix-20260601/install.ps1 | iex
-```
-
-公司内部 S3 示例对应安装命令：
-
-```bash
-curl -fsSL https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai/v1.4.9-rebasefix-20260601/install.sh | bash
-```
-
-如果使用频道安装，用户安装命令可以保持不变：
+用户固定安装命令：
 
 ```bash
 curl -fsSL https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai/channels/rebasefix/install.sh | bash
 ```
 
-## 安装验证
+以后发布新版本，只需要更新频道目录，用户安装命令不变。
 
-在测试机器执行：
+## 前置条件
+
+本地需要：
 
 ```bash
-curl -fsSL https://your-download-domain/git-ai/releases/v1.4.9-rebasefix-20260601/install.sh | bash
+gh
+uv
 ```
 
-安装完成后验证：
+确认 GitHub CLI 已登录：
+
+```bash
+gh auth status
+```
+
+确认公司 S3 配置存在：
+
+```bash
+ls -l ~/.s3cfg-prod
+```
+
+`~/.s3cfg-prod` 包含 access key 和 secret key，只能保存在本机或公司密钥系统中，不要提交到 Git。
+
+确认 S3 可访问：
+
+```bash
+uv tool run s3cmd -c ~/.s3cfg-prod ls s3://ep-zadig-prod/frontend/packages/tools/git-ai/
+```
+
+## 1. 准备 GitHub Actions 构建分支
+
+S3 发布 workflow 文件是：
+
+```text
+.github/workflows/release-s3.yml
+```
+
+GitHub 有一个限制：新的 `workflow_dispatch` 文件必须先存在于 fork 的默认分支，才能手动触发。因此推荐在 fork 内部合并一次发布流程 PR：
+
+```text
+congziqi77/git-ai:codex/s3-release-packaging -> congziqi77/git-ai:main
+```
+
+注意，这只影响 fork：
+
+```text
+congziqi77/git-ai
+```
+
+不会影响官方源仓库：
+
+```text
+git-ai-project/git-ai
+```
+
+也不要把 PR 开到官方源仓库。
+
+## 2. 触发 GitHub Actions dry run 构建
+
+在 fork 仓库执行：
+
+```bash
+gh workflow run "S3 Release Build" \
+  --repo congziqi77/git-ai \
+  --ref codex/s3-release-packaging \
+  -f release_tag=v1.4.9-rebasefix-20260601 \
+  -f s3_bucket=ep-zadig-prod \
+  -f s3_prefix=frontend/packages/tools/git-ai \
+  -f public_base_url=https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai \
+  -f aws_region=us-east-1 \
+  -f dry_run=true
+```
+
+`dry_run=true` 表示只构建 artifact，不上传 S3。
+
+查看最新 run：
+
+```bash
+gh run list \
+  --repo congziqi77/git-ai \
+  --workflow "S3 Release Build" \
+  --limit 5
+```
+
+查看某个 run 的状态：
+
+```bash
+gh run view <run-id> --repo congziqi77/git-ai
+```
+
+等待所有 build job 完成。成功后会有 Linux/macOS artifact，以及最终聚合 artifact：
+
+```text
+git-ai-linux-x64
+git-ai-linux-arm64
+git-ai-macos-x64
+git-ai-macos-arm64
+git-ai-s3-release-v1.4.9-rebasefix-20260601
+```
+
+## 3. 下载 GitHub Actions artifact
+
+推荐下载最终聚合 artifact：
+
+```bash
+cd /Users/congziqi/Documents/goWork/git-ai
+rm -rf build/github-artifacts build/git-ai-all
+mkdir -p build/github-artifacts build/git-ai-all
+
+gh run download <run-id> \
+  --repo congziqi77/git-ai \
+  --name git-ai-s3-release-v1.4.9-rebasefix-20260601 \
+  --dir build/github-artifacts
+```
+
+如果最终聚合 artifact 还没有生成，也可以下载所有 artifact：
+
+```bash
+gh run download <run-id> \
+  --repo congziqi77/git-ai \
+  --dir build/github-artifacts
+```
+
+然后汇总二进制到 `build/git-ai-all`：
+
+```bash
+find build/github-artifacts -type f -name 'git-ai-*' -maxdepth 3 -exec cp {} build/git-ai-all/ \;
+```
+
+确认文件齐全：
+
+```bash
+ls -lh build/git-ai-all
+```
+
+必须看到：
+
+```text
+git-ai-linux-x64
+git-ai-linux-arm64
+git-ai-macos-x64
+git-ai-macos-arm64
+```
+
+## 4. 本地 dry run 打包
+
+下载齐 Linux/macOS 4 个平台 binary 后，先本地 dry run：
+
+```bash
+RELEASE_TAG=v1.4.9-rebasefix-20260601 \
+S3_BUCKET=ep-zadig-prod \
+S3_PREFIX=frontend/packages/tools/git-ai \
+PUBLIC_BASE_URL=https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai \
+UPLOAD_TOOL=s3cmd \
+S3CMD_CONFIG=~/.s3cfg-prod \
+CHANNEL=rebasefix \
+PACKAGE_DIR=build/git-ai-all \
+REQUIRE_ALL_PLATFORMS=1 \
+DRY_RUN=1 \
+scripts/release-s3-local.sh
+```
+
+这一步会生成：
+
+```text
+release/s3-v1.4.9-rebasefix-20260601/
+release/channel-rebasefix/
+```
+
+并生成：
+
+```text
+SHA256SUMS
+install.sh
+install.ps1
+```
+
+检查生成的安装脚本：
+
+```bash
+rg 'PINNED_VERSION|BASE_URL|EMBEDDED_CHECKSUMS' release/s3-v1.4.9-rebasefix-20260601/install.sh
+rg 'PINNED_VERSION|BASE_URL|EMBEDDED_CHECKSUMS' release/channel-rebasefix/install.sh
+```
+
+## 5. 上传到公司 S3
+
+确认 dry run 没问题后，执行正式上传：
+
+```bash
+RELEASE_TAG=v1.4.9-rebasefix-20260601 \
+S3_BUCKET=ep-zadig-prod \
+S3_PREFIX=frontend/packages/tools/git-ai \
+PUBLIC_BASE_URL=https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai \
+UPLOAD_TOOL=s3cmd \
+S3CMD_CONFIG=~/.s3cfg-prod \
+CHANNEL=rebasefix \
+PACKAGE_DIR=build/git-ai-all \
+REQUIRE_ALL_PLATFORMS=1 \
+scripts/release-s3-local.sh
+```
+
+脚本会上传两份：
+
+```text
+s3://ep-zadig-prod/frontend/packages/tools/git-ai/v1.4.9-rebasefix-20260601/
+s3://ep-zadig-prod/frontend/packages/tools/git-ai/channels/rebasefix/
+```
+
+确认 S3 文件：
+
+```bash
+uv tool run s3cmd -c ~/.s3cfg-prod ls s3://ep-zadig-prod/frontend/packages/tools/git-ai/v1.4.9-rebasefix-20260601/
+uv tool run s3cmd -c ~/.s3cfg-prod ls s3://ep-zadig-prod/frontend/packages/tools/git-ai/channels/rebasefix/
+```
+
+## 6. 下载和安装验证
+
+先验证安装脚本可访问：
+
+```bash
+curl -fsSL https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai/channels/rebasefix/install.sh | head
+```
+
+测试机器安装：
+
+```bash
+curl -fsSL https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai/channels/rebasefix/install.sh | bash
+```
+
+安装后验证：
 
 ```bash
 git-ai --version
@@ -225,308 +299,75 @@ ls -l ~/.git-ai/bin/git ~/.git-ai/bin/git-ai ~/.git-ai/bin/git-og
 ~/.git-ai/bin/git-og -> 系统原始 git
 ```
 
-如果当前 shell 还没有加载新的 PATH，可以执行：
+如果当前 shell 没有加载新的 PATH，可以执行：
 
 ```bash
 source ~/.zshrc
 ```
 
-或打开一个新的终端窗口。
+或者打开一个新的终端。
 
 ## 常用参数
 
-`RELEASE_TAG`：必填。内部发布版本号，例如：
+`RELEASE_TAG`：内部发布版本号，例如：
 
 ```text
 v1.4.9-rebasefix-20260601
 ```
 
-`S3_BUCKET`：必填。S3 bucket 名称。
-
-`PUBLIC_BASE_URL`：必填。用户下载时访问的 HTTPS URL，不包含 `RELEASE_TAG`。
-
-例如：
+`S3_BUCKET`：公司 bucket：
 
 ```text
-https://your-download-domain/git-ai/releases
+ep-zadig-prod
 ```
 
-`S3_PREFIX`：可选。S3 bucket 内部路径前缀，默认：
-
-```text
-git-ai/releases
-```
-
-公司内部 S3 示例：
+`S3_PREFIX`：公司路径：
 
 ```text
 frontend/packages/tools/git-ai
 ```
 
-`CHANNEL`：可选。可变发布频道名称，例如：
+`PUBLIC_BASE_URL`：用户下载 URL 前缀：
+
+```text
+https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai
+```
+
+`CHANNEL`：可变频道名，例如：
 
 ```text
 rebasefix
 ```
 
-设置后，脚本除上传固定版本目录外，还会同步更新：
+`PACKAGE_DIR`：从 GitHub artifact 汇总出来的二进制目录：
 
 ```text
-channels/rebasefix/
+build/git-ai-all
 ```
 
-这样用户可以一直使用固定安装命令：
-
-```bash
-curl -fsSL https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai/channels/rebasefix/install.sh | bash
-```
-
-`UPLOAD_TOOL`：可选。上传工具，默认：
-
-```text
-aws
-```
-
-如果使用 `s3cmd`：
-
-```text
-s3cmd
-```
-
-`S3CMD_CONFIG`：可选。`s3cmd` 配置文件路径。公司内部 S3 示例：
-
-```text
-~/.s3cfg-prod
-```
-
-`AWS_REGION`：可选。传给 AWS CLI 的 region。
-
-`AWS_PROFILE`：可选。使用指定 AWS profile。
-
-`DRY_RUN=1`：可选。只构建本地 release 包，不上传。
-
-`RELEASE_DIR`：可选。自定义本地产物目录。
-
-`SKIP_BUILD=1`：可选。跳过 `cargo build`，直接使用已有的 `target/release/git-ai`。
-
-`PACKAGE_DIR`：可选。使用一个已经包含预构建多平台 binary 的目录作为输入，不在当前机器重新构建。
-
-`REQUIRE_ALL_PLATFORMS=1`：可选。配合 `PACKAGE_DIR` 使用，强制要求目录里存在所有官方平台 binary。
-
-## 平台限制
-
-本地脚本默认只构建当前机器平台的二进制。
-
-例如：
-
-- Apple Silicon Mac：生成 `git-ai-macos-arm64`
-- Intel Mac：生成 `git-ai-macos-x64`
-- Linux x64：生成 `git-ai-linux-x64`
-
-如果需要完整多平台产物：
-
-```text
-git-ai-linux-x64
-git-ai-linux-arm64
-git-ai-macos-x64
-git-ai-macos-arm64
-git-ai-windows-x64.exe
-git-ai-windows-arm64.exe
-```
-
-建议使用新增的 GitHub Actions S3 workflow：
-
-```text
-.github/workflows/release-s3.yml
-```
-
-或者分别在对应平台机器上执行本地脚本。
-
-## 多平台本地聚合发布
-
-如果不使用 GitHub Actions，又希望发布所有平台版本，可以采用“各平台分别构建和验证，最后在一台机器聚合上传”的方式。
-
-### 1. 各平台分别构建
-
-在 Apple Silicon Mac 上构建：
-
-```bash
-cargo build --release --bin git-ai
-mkdir -p build/git-ai-all
-cp target/release/git-ai build/git-ai-all/git-ai-macos-arm64
-```
-
-在 Intel Mac 上构建：
-
-```bash
-cargo build --release --bin git-ai
-mkdir -p build/git-ai-all
-cp target/release/git-ai build/git-ai-all/git-ai-macos-x64
-```
-
-在 Linux x64 上构建：
-
-```bash
-cargo build --release --bin git-ai
-mkdir -p build/git-ai-all
-cp target/release/git-ai build/git-ai-all/git-ai-linux-x64
-```
-
-在 Linux ARM64 上构建：
-
-```bash
-cargo build --release --bin git-ai
-mkdir -p build/git-ai-all
-cp target/release/git-ai build/git-ai-all/git-ai-linux-arm64
-```
-
-在 Windows x64 上构建：
-
-```powershell
-cargo build --release --bin git-ai
-mkdir build\git-ai-all
-copy target\release\git-ai.exe build\git-ai-all\git-ai-windows-x64.exe
-```
-
-在 Windows ARM64 上构建：
-
-```powershell
-cargo build --release --bin git-ai
-mkdir build\git-ai-all
-copy target\release\git-ai.exe build\git-ai-all\git-ai-windows-arm64.exe
-```
-
-### 2. 每个平台做 smoke test
-
-在对应机器上执行：
-
-```bash
-./build/git-ai-all/git-ai-macos-arm64 --version
-```
-
-或 Linux：
-
-```bash
-./build/git-ai-all/git-ai-linux-x64 --version
-```
-
-Windows：
-
-```powershell
-.\build\git-ai-all\git-ai-windows-x64.exe --version
-```
-
-如果需要更严格验证，可以在对应机器上使用该 binary 做一次本地安装测试：
-
-```bash
-GIT_AI_LOCAL_BINARY="$PWD/build/git-ai-all/git-ai-macos-arm64" ./install.sh
-git-ai --version
-```
-
-Windows：
-
-```powershell
-$env:GIT_AI_LOCAL_BINARY = "$PWD\build\git-ai-all\git-ai-windows-x64.exe"
-.\install.ps1
-git-ai --version
-```
-
-只有在对应机器上执行过 smoke test，才能确认该平台版本实际可运行。单台 Mac 无法验证 Windows/Linux binary 的运行时可用性。
-
-### 3. 汇总到同一个目录
-
-把各平台产物复制到同一台发布机器上的同一个目录，例如：
-
-```text
-build/git-ai-all/
-  git-ai-linux-x64
-  git-ai-linux-arm64
-  git-ai-macos-x64
-  git-ai-macos-arm64
-  git-ai-windows-x64.exe
-  git-ai-windows-arm64.exe
-```
-
-### 4. dry run 聚合发布
-
-```bash
-RELEASE_TAG=v1.4.9-rebasefix-20260601 \
-S3_BUCKET=ep-zadig-prod \
-S3_PREFIX=frontend/packages/tools/git-ai \
-PUBLIC_BASE_URL=https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai \
-UPLOAD_TOOL=s3cmd \
-S3CMD_CONFIG=~/.s3cfg-prod \
-CHANNEL=rebasefix \
-PACKAGE_DIR=build/git-ai-all \
-REQUIRE_ALL_PLATFORMS=1 \
-DRY_RUN=1 \
-scripts/release-s3-local.sh
-```
-
-### 5. 正式上传所有平台版本
-
-```bash
-RELEASE_TAG=v1.4.9-rebasefix-20260601 \
-S3_BUCKET=ep-zadig-prod \
-S3_PREFIX=frontend/packages/tools/git-ai \
-PUBLIC_BASE_URL=https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai \
-UPLOAD_TOOL=s3cmd \
-S3CMD_CONFIG=~/.s3cfg-prod \
-CHANNEL=rebasefix \
-PACKAGE_DIR=build/git-ai-all \
-REQUIRE_ALL_PLATFORMS=1 \
-scripts/release-s3-local.sh
-```
-
-这个命令会生成包含所有平台 checksum 的安装脚本，并上传：
-
-```text
-s3://ep-zadig-prod/frontend/packages/tools/git-ai/v1.4.9-rebasefix-20260601/
-s3://ep-zadig-prod/frontend/packages/tools/git-ai/channels/rebasefix/
-```
-
-用户仍然使用固定频道安装命令：
-
-```bash
-curl -fsSL https://s3.it.lixiangoa.com/ep-zadig-prod/frontend/packages/tools/git-ai/channels/rebasefix/install.sh | bash
-```
-
-## 版本号说明
-
-`git-ai --version` 的显示值来自项目版本配置，不一定等于内部 S3 路径中的 `RELEASE_TAG`。
-
-因此，内部测试版本建议通过 S3 路径区分，例如：
-
-```text
-v1.4.9-rebasefix-20260601
-```
-
-如果希望 `git-ai --version` 也显示内部版本，需要额外修改项目版本号或版本生成逻辑。
+`REQUIRE_ALL_PLATFORMS=1`：强制要求 Linux/macOS 4 个平台 binary 都存在。正式发布建议始终开启。
 
 ## 故障排查
 
-如果提示找不到 `cargo`：
+如果 `gh workflow run` 提示找不到 workflow，说明 `.github/workflows/release-s3.yml` 还没有进入 fork 默认分支。先把 S3 发布流程 PR 合并到 fork 的 `main`。
 
-```bash
-source ~/.cargo/env
+如果某些 GitHub Actions job 长时间 queued，通常是对应 runner 不可用或排队中，尤其是：
+
+```text
+ubuntu-22.04-arm
+macos-15-intel
 ```
 
-如果提示找不到 `aws`：
+如果下载后 `REQUIRE_ALL_PLATFORMS=1` 报缺文件，说明对应平台 artifact 没有成功生成或没有复制到 `build/git-ai-all`。
+
+如果上传失败，先确认 S3 配置：
 
 ```bash
-brew install awscli
+uv tool run s3cmd -c ~/.s3cfg-prod ls s3://ep-zadig-prod/frontend/packages/tools/git-ai/
 ```
 
-如果上传失败，先确认当前身份：
+如果安装时 checksum 失败，说明 S3 上的二进制和 `install.sh` 内嵌 checksum 不匹配。重新下载 artifact，重新执行本地 dry run 和正式上传。
 
-```bash
-aws sts get-caller-identity
-```
+## 安全提醒
 
-确认 S3 权限：
-
-```bash
-aws s3 ls s3://your-bucket/git-ai/releases/
-```
-
-如果安装时 checksum 失败，说明 S3 上的二进制和 `install.sh` 内嵌 checksum 不匹配。重新执行发布脚本并上传完整目录即可。
+不要把 `~/.s3cfg-prod` 内容提交到 Git，也不要贴到 issue、PR、日志或聊天里。该文件包含明文 access key 和 secret key。

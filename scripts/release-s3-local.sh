@@ -27,7 +27,7 @@ Optional environment variables:
   RELEASE_DIR       Output directory. Default: release/s3-$RELEASE_TAG
   PACKAGE_DIR       Directory containing prebuilt git-ai-* binaries to publish.
   REQUIRE_ALL_PLATFORMS
-                    If 1 with PACKAGE_DIR, require all official platform binaries. Default: 0
+                    If 1 with PACKAGE_DIR, require all Linux and macOS platform binaries. Default: 0
   SKIP_BUILD        If 1, skip cargo build and package an existing target/release/git-ai.
 EOF
 }
@@ -93,8 +93,6 @@ required_platform_binaries=(
     git-ai-linux-arm64
     git-ai-macos-x64
     git-ai-macos-arm64
-    git-ai-windows-x64.exe
-    git-ai-windows-arm64.exe
 )
 
 write_binary_checksums() {
