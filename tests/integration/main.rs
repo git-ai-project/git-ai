@@ -99,6 +99,7 @@ mod rebase;
 mod rebase_attribution_remaining;
 mod rebase_authorship_unit;
 mod rebase_benchmark;
+mod rebase_empty_mapping;
 mod rebase_hooks_unit;
 mod rebase_merge_commit_note_leak;
 mod rebase_note_integrity;
