@@ -61,11 +61,13 @@ pub fn handle_git_ai(args: &[String]) {
         match init_daemon_telemetry_handle() {
             DaemonTelemetryInitResult::Connected | DaemonTelemetryInitResult::Skipped => {}
             DaemonTelemetryInitResult::Failed(err) => {
-                // Hard error for git-ai commands: the background service must be reachable.
                 eprintln!(
                     "error: failed to connect to git-ai background service: {}",
                     err
                 );
+                if args[0].as_str() == "checkpoint" {
+                    std::process::exit(0);
+                }
                 std::process::exit(1);
             }
         }

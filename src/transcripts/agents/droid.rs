@@ -122,7 +122,7 @@ impl Agent for DroidAgent {
         session_id: &str,
     ) -> Result<TranscriptBatch, TranscriptError> {
         use std::fs::File;
-        use std::io::{BufRead, BufReader, Seek, SeekFrom};
+        use std::io::{BufReader, Seek, SeekFrom};
 
         // Downcast watermark to HybridWatermark
         let hybrid_watermark = watermark
@@ -176,24 +176,19 @@ impl Agent for DroidAgent {
         // Read lines from watermark position
         let mut line = String::new();
         loop {
-            line.clear();
-            let bytes_read =
-                reader
-                    .read_line(&mut line)
-                    .map_err(|e| TranscriptError::Transient {
-                        message: format!("I/O error reading line: {}", e),
-                        retry_after: std::time::Duration::from_secs(5),
-                    })?;
-
-            if bytes_read == 0 {
-                // EOF
-                break;
+            match crate::transcripts::types::read_jsonl_line(&mut reader, &mut line).map_err(
+                |e| TranscriptError::Transient {
+                    message: format!("I/O error reading line: {}", e),
+                    retry_after: std::time::Duration::from_secs(5),
+                },
+            )? {
+                crate::transcripts::types::JsonlLineState::Eof => break,
+                crate::transcripts::types::JsonlLineState::Partial => break,
+                crate::transcripts::types::JsonlLineState::Complete(bytes_read) => {
+                    line_number += 1;
+                    current_offset += bytes_read as u64;
+                }
             }
-
-            line_number += 1;
-
-            // Update offset before processing (so we skip this line on next read even if parsing fails)
-            current_offset += bytes_read as u64;
 
             // Skip empty lines
             if line.trim().is_empty() {

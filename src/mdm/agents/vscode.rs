@@ -5,7 +5,8 @@ use crate::mdm::hook_installer::{
 use crate::mdm::utils::{
     MIN_CODE_VERSION, get_editor_version, home_dir, install_vsc_editor_extension,
     is_github_codespaces, is_vsc_editor_extension_installed, parse_version, resolve_editor_cli,
-    settings_paths_for_products, should_process_settings_target, version_meets_requirement,
+    settings_paths_for_products, should_process_settings_target, update_vscode_chat_hook_settings,
+    version_meets_requirement,
 };
 use std::path::PathBuf;
 
@@ -180,79 +181,38 @@ impl HookInstaller for VSCodeInstaller {
             });
         }
 
-        // Configure git.path
-        {
-            use crate::mdm::utils::{
-                git_shim_path_string, update_git_path_setting, update_vscode_chat_hook_settings,
-            };
+        for settings_path in Self::settings_targets() {
+            if !should_process_settings_target(&settings_path) {
+                continue;
+            }
 
-            let git_path = git_shim_path_string();
-            for settings_path in Self::settings_targets() {
-                if !should_process_settings_target(&settings_path) {
-                    continue;
+            match update_vscode_chat_hook_settings(&settings_path, dry_run) {
+                Ok(Some(diff)) => {
+                    results.push(InstallResult {
+                        changed: true,
+                        diff: Some(diff),
+                        message: format!(
+                            "VS Code: chat hook settings updated in {}",
+                            settings_path.display()
+                        ),
+                    });
                 }
-
-                match update_git_path_setting(&settings_path, &git_path, dry_run) {
-                    Ok(Some(diff)) => {
-                        results.push(InstallResult {
-                            changed: true,
-                            diff: Some(diff),
-                            message: format!(
-                                "VS Code: git.path updated in {}",
-                                settings_path.display()
-                            ),
-                        });
-                    }
-                    Ok(None) => {
-                        results.push(InstallResult {
-                            changed: false,
-                            diff: None,
-                            message: format!(
-                                "VS Code: git.path already configured in {}",
-                                settings_path.display()
-                            ),
-                        });
-                    }
-                    Err(e) => {
-                        results.push(InstallResult {
-                            changed: false,
-                            diff: None,
-                            message: format!("VS Code: Failed to configure git.path: {}", e),
-                        });
-                    }
+                Ok(None) => {
+                    results.push(InstallResult {
+                        changed: false,
+                        diff: None,
+                        message: format!(
+                            "VS Code: chat hook settings already configured in {}",
+                            settings_path.display()
+                        ),
+                    });
                 }
-
-                match update_vscode_chat_hook_settings(&settings_path, dry_run) {
-                    Ok(Some(diff)) => {
-                        results.push(InstallResult {
-                            changed: true,
-                            diff: Some(diff),
-                            message: format!(
-                                "VS Code: chat hook settings updated in {}",
-                                settings_path.display()
-                            ),
-                        });
-                    }
-                    Ok(None) => {
-                        results.push(InstallResult {
-                            changed: false,
-                            diff: None,
-                            message: format!(
-                                "VS Code: chat hook settings already configured in {}",
-                                settings_path.display()
-                            ),
-                        });
-                    }
-                    Err(e) => {
-                        results.push(InstallResult {
-                            changed: false,
-                            diff: None,
-                            message: format!(
-                                "VS Code: Failed to configure chat hook settings: {}",
-                                e
-                            ),
-                        });
-                    }
+                Err(e) => {
+                    results.push(InstallResult {
+                        changed: false,
+                        diff: None,
+                        message: format!("VS Code: Failed to configure chat hook settings: {}", e),
+                    });
                 }
             }
         }

@@ -55,7 +55,7 @@ The divider `---` MUST appear on its own line with no leading or trailing whites
 
 ### 1.2.3 Attestation Section
 
-The attestation section maps files to the AI sessions that authored specific lines.
+The attestation section maps files to the sessions (AI or known human) that authored specific lines.
 
 #### File Path Lines
 
@@ -72,19 +72,21 @@ src/main.rs
 ```
 
 - File paths SHOULD NOT contain the quote character (`"`)
-- Files with no AI Attributions MUST NOT be included in the Attestation Section
+- Files with no attestations (neither AI nor known human) MUST NOT be included in the Attestation Section
 
 
 
 #### Attestation Entry Lines
 
 Each attestation entry MUST be indented with exactly two spaces and contain:
-1. A **hash** pointing to a prompt in the Metadata Section (16 hexadecimal characters)
+1. An **attestation key** identifying the author (see Section 1.2.3.1 for key formats)
 2. A single space
 3. A **line range specification**
 
 ```
   d9978a8723e02b52 1-4,9-10,12,14,16
+  s_c9883b05a2487d::t_9f8e7d6c5b4a32 1-10
+  h_31dce776f88375 25-30
 ```
 
 #### Line Range Specification
@@ -107,7 +109,7 @@ Line ranges:
 - SHOULD be sorted by their start position
 - SHOULD use ranges for consecutive lines (e.g., `1-5` instead of `1,2,3,4,5`)
 
-#### Attestation Section Example
+#### Attestation Section Example (Legacy Format)
 
 ```
 tests/simple_additions.rs
@@ -119,20 +121,80 @@ src/authorship/attribution_tracker.rs
   866dabf162e96bcb 6,257,358,376-377,521
 ```
 
+#### Attestation Section Example (Sessions + Known Human)
+
+```
+src/main.rs
+  s_c9883b05a2487d::t_9f8e7d6c5b4a32 1-10,15-20
+  s_c9883b05a2487d::t_a1b2c3d4e5f678 25-30
+  h_31dce776f88375 35-40
+src/lib.rs
+  s_e7f2a90b31cc48::t_deadbeef012345 1-50
+```
+
 The above example can be read as:
 
-In `tests/simple_additions.rs`, 3 prompts `d9978a8723e02b52`, `e5be5f8723e02b52`, and `967bda75801c3ee8`, generated the lines above
+In `src/main.rs`, one AI session (`s_c9883b05a2487d`) made two separate edits (two trace IDs), and a known human (`h_31dce776f88375`) wrote lines 35-40. Lines not covered by any key (e.g. 11-14, 21-24, 31-34) are "untracked" -- git-ai has no data on their provenance.
 
-#### Session Hash Semantics
+#### 1.2.3.1 Attestation Key Formats
 
-Each session hash in the attestation section MUST correspond to a key in the `prompts` object of the metadata section. Session hashes:
+There are three attestation key formats. Parsers MUST route each key to the correct metadata map based on its prefix:
+
+| Key prefix | Lookup map | Format | Description |
+|---|---|---|---|
+| `s_` | `metadata.sessions` | `s_<14hex>::t_<14hex>` | AI session with per-checkpoint trace |
+| `h_` | `metadata.humans` | `h_<14hex>` | Known human author |
+| _(no prefix)_ | `metadata.prompts` | `<16hex>` | Legacy AI session (pre-v1.4.0) |
+
+##### Session Keys (`s_` prefix)
+
+Session attestation keys use a composite `session_id::trace_id` format:
+
+- `s_` + 14 hex chars = **session ID** (deterministic, same for all checkpoints from one agent session)
+- `::` = separator
+- `t_` + 14 hex chars = **trace ID** (random, unique per checkpoint call)
+
+**Session ID generation:** `"s_" + SHA256("<tool>:<conversation_id>")[0..14]`
+
+**Trace ID generation:** `"t_" + 14 random hex chars`
+
+To resolve an `s_`-prefixed key to its metadata: split on `::`, take the first part (the session ID), and look it up in `metadata.sessions`.
+
+Session keys:
+- MUST use the `s_` prefix
+- MUST contain the `::` separator between session ID and trace ID
+- MUST use the `t_` prefix for the trace ID portion
+- MUST remain stable for the same AI session across checkpoints (the session ID portion)
+- MUST generate a unique trace ID per checkpoint call
+
+##### Human Keys (`h_` prefix)
+
+Human attestation keys identify lines written by a known human author (as observed by an IDE extension):
+
+**Human hash generation:** `"h_" + SHA256("<author_identity>")[0..14]`
+
+Where `<author_identity>` is the git committer string (e.g. `"Alice Smith <alice@example.com>"`).
+
+Human keys:
+- MUST use the `h_` prefix
+- MUST be deterministic for the same author identity
+- MUST correspond to an entry in `metadata.humans`
+
+##### Legacy Keys (no prefix)
+
+Legacy attestation keys are bare 16-character hex strings used by versions prior to v1.4.0:
+
+**Legacy hash generation:** `SHA256("<tool>:<conversation_id>")[0..16]`
+
+Legacy keys:
 - MUST be hexadecimal characters only
-- MUST be generated using SHA-256 of `{tool}:{conversation_id}`, taking the first 16 hex characters. Ie `cursor-${coversation_id}` or `claude-code-${coversation_id}` or `amp-${thread_id}`
-- SHOULD remain stable for the same AI session across commits
+- MUST be 16 characters in length
+- MUST correspond to a key in `metadata.prompts`
+- Implementations SHOULD accept 7-character hashes for backward compatibility with versions prior to v1.0
 
-**Hash Length:**
-- New implementations MUST generate 16-character hashes
-- Implementations SHOULD accept 7-character hashes for backward compatibility with earlier versions
+##### Mixed-Format Notes
+
+A single note MAY contain all three key formats simultaneously. This occurs during the transition from legacy to session format, or when both AI and known-human edits are present in the same commit.
 
 ---
 
@@ -146,66 +208,130 @@ The metadata section MUST be a valid JSON object containing the following fields
 |-------|------|-------------|
 | `schema_version` | string | MUST be `"authorship/3.0.0"` |
 | `base_commit_sha` | string | The commit SHA this authorship log was computed against |
-| `prompts` | object | Map of session hashes to prompt records |
+| `prompts` | object | Map of legacy session hashes to prompt records |
 
 #### Optional Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `git_ai_version` | string | Version of the git-ai tool that generated this log |
+| `sessions` | object | Map of session IDs (`s_<14hex>`) to session records |
+| `humans` | object | Map of human hashes (`h_<14hex>`) to human records |
 
-#### Prompt Record Object
+**Parsing notes:**
+- `"sessions"` MAY be absent on older notes. Implementations MUST treat it as an empty map when missing.
+- `"humans"` MAY be absent on older notes. Implementations MUST treat it as an empty map when missing.
 
-Each entry in the `prompts` object MUST contain:
+---
+
+#### Session Record Object
+
+Each entry in the `sessions` object represents a lightweight AI agent session. Session records are keyed by their session ID (`s_<14hex>`).
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `agent_id` | object | REQUIRED | Identifies the AI agent (see Agent ID Object) |
+| `human_author` | string | OPTIONAL | The human who directed the AI session (e.g., `"alice@example.com"`) |
+| `custom_attributes` | object | OPTIONAL | User-defined key-value string pairs from configuration |
+
+Session records:
+- MUST NOT contain `messages`, `messages_url`, or stats fields (`total_additions`, etc.)
+- MUST contain `agent_id`
+- MAY contain `custom_attributes` (omitted from JSON when null/empty)
+
+---
+
+#### Human Record Object
+
+Each entry in the `humans` object identifies a known human author whose edits were observed by an IDE extension. Human records are keyed by their human hash (`h_<14hex>`).
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `author` | string | REQUIRED | Git committer identity: `"Name <email>"` |
+
+Known human attribution represents lines that were explicitly observed being typed by a human in an IDE with the git-ai extension installed. This is distinct from "untracked" lines (which have no attestation entry at all and whose provenance is unknown).
+
+---
+
+#### Prompt Record Object (Legacy)
+
+Each entry in the `prompts` object represents an AI session in the legacy format (pre-v1.4.0). Prompt records are keyed by their legacy hash (16 hex chars).
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `agent_id` | object | REQUIRED | Identifies the AI agent |
 | `human_author` | string | OPTIONAL | The human who prompted the AI (e.g., `"Name <email>"`) |
-| `messages` | array | REQUIRED | The conversation transcript |
+| `messages_url` | string | OPTIONAL | URL pointer to externally-stored conversation transcript |
 | `total_additions` | integer | REQUIRED | Total lines added by this session |
 | `total_deletions` | integer | REQUIRED | Total lines deleted by this session |
 | `accepted_lines` | integer | REQUIRED | Lines accepted in the final commit |
-| `overridden_lines` | integer | REQUIRED | Lines that were later modified by human |
+| `overriden_lines` | integer | REQUIRED | Lines that were later modified by human (see E-001) |
+| `custom_attributes` | object | OPTIONAL | User-defined key-value string pairs from configuration |
+
+**Deprecated:** The `messages` array field was removed as of v1.3.4 and MUST NOT appear in new notes.
+
+---
 
 #### Agent ID Object
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `tool` | string | The AI tool/IDE (e.g., `"cursor"`, `"claude"`, `"copilot"`) |
-| `id` | string | Unique session identifier (typically a UUID) |
-| `model` | string | The AI model used (e.g., `"claude-4.5-opus-high-thinking"`) |
-
-#### Message Object
-
-Each message in the `messages` array MUST contain:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `type` | string | One of: `"user"`, `"assistant"`, `"tool_use"` |
-| `text` | string | The message content (for `user` and `assistant` types) |
-| `timestamp` | string | ISO 8601 timestamp (OPTIONAL) |
-| `name` | string | Tool name (for `tool_use` type only) |
-| `input` | object | Tool input parameters (for `tool_use` type only) |
-
-#### Message Array Requirements
-
-The `messages` array:
-- MUST contain all human prompts (`type: "user"`)
-- MUST contain all assistant responses (`type: "assistant"`)
-- MUST contain all tool calls made by the assistant (`type: "tool_use"`)
-- MUST NOT contain tool responses (the results returned from tool executions)
-
-Tool responses are excluded because they often contain large amounts of file content, command output, or other verbose data that would bloat the authorship log without adding meaningful attribution context.
+| `tool` | string | The AI tool/IDE (e.g., `"cursor"`, `"claude"`, `"windsurf"`, `"copilot"`, `"gemini"`, `"codex"`, `"amp"`, `"droid"`, `"pi"`, `"opencode"`) |
+| `id` | string | Unique session/conversation identifier in the tool's domain |
+| `model` | string | The AI model used (e.g., `"claude-sonnet-4-5-20250514"`, `"gpt-4"`) |
 
 ---
 
-### 1.2.5 Complete Example
+### 1.2.5 Complete Example (Sessions Format)
+
+```
+src/main.rs
+  s_c9883b05a2487d::t_9f8e7d6c5b4a32 1-10,15-20
+  s_c9883b05a2487d::t_a1b2c3d4e5f678 25,30-35
+  h_31dce776f88375 42-50
+src/lib.rs
+  s_e7f2a90b31cc48::t_deadbeef012345 1-50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.5",
+  "base_commit_sha": "7734793b756b3921c88db5375a8c156e9532447b",
+  "prompts": {},
+  "humans": {
+    "h_31dce776f88375": {
+      "author": "Developer <dev@example.com>"
+    }
+  },
+  "sessions": {
+    "s_c9883b05a2487d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "6ef2299e-a67f-432b-aa80-3d2fb4d28999",
+        "model": "claude-sonnet-4-5-20250514"
+      },
+      "human_author": "dev@example.com"
+    },
+    "s_e7f2a90b31cc48": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "conv_abc123def456",
+        "model": "claude-sonnet-4-5-20250514"
+      },
+      "human_author": "dev@example.com",
+      "custom_attributes": {
+        "team": "backend"
+      }
+    }
+  }
+}
+```
+
+### 1.2.6 Complete Example (Legacy Format)
 
 ```
 src/main.rs
   abcd1234abcd1234 1-10,15-20
-  efgh5678efgh5678 25,30-35
+  ef0b5678ef0b5678 25,30-35
 src/lib.rs
   abcd1234abcd1234 1-50
 ---
@@ -221,41 +347,69 @@ src/lib.rs
         "model": "claude-4.5-opus"
       },
       "human_author": "Developer <dev@example.com>",
-      "messages": [
-        {
-          "type": "user",
-          "text": "Add error handling to the main function",
-          "timestamp": "2025-12-05T01:22:13.211Z"
-        },
-        {
-          "type": "assistant",
-          "text": "I'll add comprehensive error handling...",
-          "timestamp": "2025-12-05T01:22:38.724Z"
-        }
-      ],
       "total_additions": 25,
       "total_deletions": 5,
       "accepted_lines": 20,
       "overriden_lines": 0
     },
-    "efgh5678efgh5678": {
+    "ef0b5678ef0b5678": {
       "agent_id": {
         "tool": "cursor",
         "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
         "model": "claude-3-sonnet"
       },
       "human_author": "Developer <dev@example.com>",
-      "messages": [
-        {
-          "type": "user",
-          "text": "Add logging",
-          "timestamp": "2025-12-05T02:00:00.000Z"
-        }
-      ],
       "total_additions": 6,
       "total_deletions": 0,
       "accepted_lines": 6,
       "overriden_lines": 0
+    }
+  }
+}
+```
+
+### 1.2.7 Complete Example (Mixed Format)
+
+A single note MAY contain legacy prompts, sessions, and human records simultaneously:
+
+```
+src/main.rs
+  s_c9883b05a2487d::t_9f8e7d6c5b4a32 1-10
+  h_31dce776f88375 15-20
+src/lib.rs
+  abcd1234abcd1234 1-50
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.5",
+  "base_commit_sha": "7734793b756b3921c88db5375a8c156e9532447b",
+  "prompts": {
+    "abcd1234abcd1234": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "old_session_id",
+        "model": "gpt-4"
+      },
+      "human_author": "Developer <dev@example.com>",
+      "total_additions": 50,
+      "total_deletions": 0,
+      "accepted_lines": 50,
+      "overriden_lines": 0
+    }
+  },
+  "humans": {
+    "h_31dce776f88375": {
+      "author": "Developer <dev@example.com>"
+    }
+  },
+  "sessions": {
+    "s_c9883b05a2487d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "conv_abc123",
+        "model": "claude-sonnet-4-5-20250514"
+      },
+      "human_author": "dev@example.com"
     }
   }
 }
@@ -729,8 +883,32 @@ When amend is used during a rebase or other operation:
 
 - Implementations of 3.0.0 or later SHOULD NOT attempt to process earlier versions
 - Implementations > 3.0.0 MUST process earlier versions, provided they are valid and match the schema they advertise
+- The schema version remains `authorship/3.0.0` for all changes described in this document. The addition of `sessions`, `humans`, and the new attestation key formats are non-breaking extensions.
+
+### 3.1 Transition Guidance
+
+During the transition from legacy format to sessions format:
+
+- Notes produced by git-ai >= v1.4.0 will use `sessions` and `s_`/`h_` keys for new checkpoints
+- Notes produced by git-ai < v1.4.0 will only contain `prompts` with bare hex keys
+- History-rewriting operations (rebase, cherry-pick, reset, merge, stash) correctly carry forward both legacy and session-format attestations
+- Parsers MUST handle all three key formats by checking the prefix (see Section 1.2.3.1)
+
+### 3.2 Stable API Surface
+
+The following are part of the stable, public API and will not change without a major version bump:
+
+- The `s_` prefix for session IDs
+- The `t_` prefix for trace IDs
+- The `h_` prefix for human hashes
+- The `::` separator between session ID and trace ID
+- The overall note structure (attestation lines + `---` + JSON metadata)
+
+The length of IDs (currently 14 hex chars for each component, 16 total with prefix) is subject to change in future versions.
 
 ### Errata
 
-E-001: The field name overriden_lines was introduced as a typographical error in v3.0.0 and shipped in the reference git-ai implementation, where it became canonical. In v4.x, this field WILL be renamed to overridden_lines.
+E-001: The field name `overriden_lines` was introduced as a typographical error in v3.0.0 and shipped in the reference git-ai implementation, where it became canonical. In v4.x, this field WILL be renamed to `overridden_lines`.
+
+E-002: The `messages` array field in prompt records was deprecated in v1.3.4 and removed. It MUST NOT appear in new notes. The optional `messages_url` field remains available in `prompts` for linking to externally-stored transcripts. Session records do not carry `messages_url` as session IDs map directly to agent conversation data.
 

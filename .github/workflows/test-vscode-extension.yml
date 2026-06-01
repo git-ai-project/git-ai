@@ -1,5 +1,8 @@
 name: VS Code Extension Tests
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main, master]
@@ -18,23 +21,23 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: '20'
-          cache: 'yarn'
-          cache-dependency-path: agent-support/vscode/yarn.lock
+          cache: 'npm'
+          cache-dependency-path: agent-support/vscode/package-lock.json
 
       - name: Install dependencies
-        run: yarn install --frozen-lockfile
+        run: npm ci
 
       - name: Compile (type check)
-        run: yarn compile
+        run: npm run compile
 
       - name: Run lint
-        run: yarn lint
+        run: npm run lint
 
       - name: Install Xvfb
         run: sudo apt-get update && sudo apt-get install -y xvfb
@@ -43,5 +46,5 @@ jobs:
         run: |
           Xvfb :99 -screen 0 1920x1080x24 > /dev/null 2>&1 &
           sleep 2
-          DISPLAY=:99 yarn test
+          DISPLAY=:99 npm test
 

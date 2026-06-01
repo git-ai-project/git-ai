@@ -384,48 +384,6 @@ impl HookInstaller for CursorInstaller {
             });
         }
 
-        // Configure git.path
-        {
-            use crate::mdm::utils::{git_shim_path_string, update_git_path_setting};
-
-            let git_path = git_shim_path_string();
-            for settings_path in Self::settings_targets() {
-                if !should_process_settings_target(&settings_path) {
-                    continue;
-                }
-
-                match update_git_path_setting(&settings_path, &git_path, dry_run) {
-                    Ok(Some(diff)) => {
-                        results.push(InstallResult {
-                            changed: true,
-                            diff: Some(diff),
-                            message: format!(
-                                "Cursor: git.path updated in {}",
-                                settings_path.display()
-                            ),
-                        });
-                    }
-                    Ok(None) => {
-                        results.push(InstallResult {
-                            changed: false,
-                            diff: None,
-                            message: format!(
-                                "Cursor: git.path already configured in {}",
-                                settings_path.display()
-                            ),
-                        });
-                    }
-                    Err(e) => {
-                        results.push(InstallResult {
-                            changed: false,
-                            diff: None,
-                            message: format!("Cursor: Failed to configure git.path: {}", e),
-                        });
-                    }
-                }
-            }
-        }
-
         Ok(results)
     }
 }

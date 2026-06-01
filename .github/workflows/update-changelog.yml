@@ -53,14 +53,14 @@ jobs:
           fi
 
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 20
 
@@ -84,7 +84,7 @@ jobs:
           RELEASE_TAG: ${{ steps.config.outputs.release_tag }}
           RELEASE_BODY: ${{ github.event_name == 'workflow_dispatch' && steps.release-body.outputs.body || github.event.release.body }}
         run: |
-          npx @nyaomaru/changelog-bot@latest \
+          npx @nyaomaru/changelog-bot@0.1.16 \
             --release-tag "$RELEASE_TAG" \
             --release-name "$RELEASE_TAG" \
             --release-body "$RELEASE_BODY" \

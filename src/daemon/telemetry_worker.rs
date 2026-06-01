@@ -203,11 +203,18 @@ pub fn set_daemon_internal_telemetry(handle: DaemonTelemetryWorkerHandle) {
     let _ = DAEMON_INTERNAL_TELEMETRY.set(handle);
 }
 
-/// Submit telemetry from within the daemon process (sync, best-effort).
+/// Submit telemetry from within the daemon process.
 /// Returns true if the handle was available and envelopes were submitted.
 pub fn submit_daemon_internal_telemetry(envelopes: Vec<TelemetryEnvelope>) -> bool {
     if let Some(handle) = DAEMON_INTERNAL_TELEMETRY.get() {
-        handle.submit_telemetry_sync(envelopes);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let handle = handle.clone();
+            runtime.spawn(async move {
+                handle.submit_telemetry(envelopes).await;
+            });
+        } else {
+            handle.submit_telemetry_sync(envelopes);
+        }
         true
     } else {
         false

@@ -345,7 +345,7 @@ impl EventValues for AgentUsageValues {
 /// Value positions for "install_hooks" event.
 /// One event per tool attempted during install-hooks.
 pub mod install_hooks_pos {
-    pub const TOOL_ID: usize = 0; // String - tool id (e.g., "cursor", "fork")
+    pub const TOOL_ID: usize = 0; // String - tool id (e.g., "cursor", "vscode")
     pub const STATUS: usize = 1; // String - "not_found", "installed", "already_installed", "failed"
     pub const MESSAGE: usize = 2; // Option<String> - error message or warnings
 }
@@ -887,7 +887,7 @@ mod tests {
     #[test]
     fn test_install_hooks_values_with_null_message() {
         let values = InstallHooksValues::new()
-            .tool_id("fork".to_string())
+            .tool_id("vscode".to_string())
             .status("not_found".to_string())
             .message_null();
 

@@ -5,7 +5,7 @@ use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::{TranscriptBatch, TranscriptError};
 use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::path::Path;
 use std::time::Duration;
 
@@ -96,21 +96,19 @@ impl Agent for PiAgent {
 
         let mut line = String::new();
         loop {
-            line.clear();
-            let bytes_read =
-                reader
-                    .read_line(&mut line)
-                    .map_err(|e| TranscriptError::Transient {
-                        message: format!("I/O error reading line: {}", e),
-                        retry_after: Duration::from_secs(5),
-                    })?;
-
-            if bytes_read == 0 {
-                break;
+            match crate::transcripts::types::read_jsonl_line(&mut reader, &mut line).map_err(
+                |e| TranscriptError::Transient {
+                    message: format!("I/O error reading line: {}", e),
+                    retry_after: Duration::from_secs(5),
+                },
+            )? {
+                crate::transcripts::types::JsonlLineState::Eof => break,
+                crate::transcripts::types::JsonlLineState::Partial => break,
+                crate::transcripts::types::JsonlLineState::Complete(bytes_read) => {
+                    line_number += 1;
+                    current_offset += bytes_read as u64;
+                }
             }
-
-            line_number += 1;
-            current_offset += bytes_read as u64;
 
             if line.trim().is_empty() {
                 continue;

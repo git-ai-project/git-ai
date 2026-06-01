@@ -1,6 +1,36 @@
 //! Core types for transcript processing.
 
+use std::io::BufRead;
 use std::time::Duration;
+
+/// Result of reading a single line from a JSONL reader.
+pub enum JsonlLineState {
+    /// End of file reached.
+    Eof,
+    /// Incomplete line (no trailing newline) — writer still appending.
+    Partial,
+    /// Complete line ready for processing. Contains bytes read.
+    Complete(usize),
+}
+
+/// Read a line from a BufReader, detecting partial writes from concurrent writers.
+///
+/// Returns `Eof` if no more data, `Partial` if the line lacks a trailing newline,
+/// or `Complete(bytes)` on success.
+pub fn read_jsonl_line(
+    reader: &mut impl BufRead,
+    line: &mut String,
+) -> std::io::Result<JsonlLineState> {
+    line.clear();
+    let bytes_read = reader.read_line(line)?;
+    if bytes_read == 0 {
+        return Ok(JsonlLineState::Eof);
+    }
+    if !line.ends_with('\n') {
+        return Ok(JsonlLineState::Partial);
+    }
+    Ok(JsonlLineState::Complete(bytes_read))
+}
 
 /// Errors that can occur during transcript processing.
 #[derive(Debug, Clone)]
@@ -107,5 +137,62 @@ mod tests {
             }
             _ => panic!("Expected Transient variant"),
         }
+    }
+
+    #[test]
+    fn test_read_jsonl_line_eof() {
+        let data = b"";
+        let mut reader = std::io::BufReader::new(&data[..]);
+        let mut line = String::new();
+        let result = read_jsonl_line(&mut reader, &mut line).unwrap();
+        assert!(matches!(result, JsonlLineState::Eof));
+    }
+
+    #[test]
+    fn test_read_jsonl_line_complete() {
+        let data = b"{\"id\":1}\n";
+        let mut reader = std::io::BufReader::new(&data[..]);
+        let mut line = String::new();
+        let result = read_jsonl_line(&mut reader, &mut line).unwrap();
+        assert!(matches!(result, JsonlLineState::Complete(9)));
+        assert_eq!(line, "{\"id\":1}\n");
+    }
+
+    #[test]
+    fn test_read_jsonl_line_partial() {
+        let data = b"{\"id\":1}";
+        let mut reader = std::io::BufReader::new(&data[..]);
+        let mut line = String::new();
+        let result = read_jsonl_line(&mut reader, &mut line).unwrap();
+        assert!(matches!(result, JsonlLineState::Partial));
+    }
+
+    #[test]
+    fn test_read_jsonl_line_multiple_lines() {
+        let data = b"{\"a\":1}\n{\"b\":2}\n";
+        let mut reader = std::io::BufReader::new(&data[..]);
+        let mut line = String::new();
+
+        let r1 = read_jsonl_line(&mut reader, &mut line).unwrap();
+        assert!(matches!(r1, JsonlLineState::Complete(8)));
+
+        let r2 = read_jsonl_line(&mut reader, &mut line).unwrap();
+        assert!(matches!(r2, JsonlLineState::Complete(8)));
+
+        let r3 = read_jsonl_line(&mut reader, &mut line).unwrap();
+        assert!(matches!(r3, JsonlLineState::Eof));
+    }
+
+    #[test]
+    fn test_read_jsonl_line_complete_then_partial() {
+        let data = b"{\"a\":1}\n{\"b\":2}";
+        let mut reader = std::io::BufReader::new(&data[..]);
+        let mut line = String::new();
+
+        let r1 = read_jsonl_line(&mut reader, &mut line).unwrap();
+        assert!(matches!(r1, JsonlLineState::Complete(8)));
+
+        let r2 = read_jsonl_line(&mut reader, &mut line).unwrap();
+        assert!(matches!(r2, JsonlLineState::Partial));
     }
 }

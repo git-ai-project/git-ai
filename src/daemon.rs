@@ -81,6 +81,7 @@ pub mod telemetry_handle;
 pub mod telemetry_worker;
 pub mod test_sync;
 pub mod trace_normalizer;
+pub mod transcript_redaction;
 pub mod transcript_worker;
 
 pub use control_api::{
@@ -3529,6 +3530,35 @@ fn remove_pid_metadata(config: &DaemonConfig) -> Result<(), GitAiError> {
     }
     Ok(())
 }
+
+/// Remove daemon artifacts that may be inaccessible due to ownership mismatch
+/// (e.g. left by a prior root invocation). Called only from `run_daemon()` at
+/// startup — never from probe functions — so it cannot break flock visibility
+/// for read-only lock checks.
+#[cfg(unix)]
+pub(crate) fn remove_stale_daemon_files(config: &DaemonConfig) {
+    let pid_path = pid_metadata_path(config);
+    for path in [
+        config.lock_path.as_path(),
+        config.control_socket_path.as_path(),
+        config.trace_socket_path.as_path(),
+        pid_path.as_path(),
+    ] {
+        let dominated_by_wrong_owner = match std::fs::metadata(path) {
+            Ok(meta) => {
+                use std::os::unix::fs::MetadataExt;
+                meta.uid() != unsafe { libc::getuid() }
+            }
+            Err(_) => false,
+        };
+        if dominated_by_wrong_owner {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn remove_stale_daemon_files(_config: &DaemonConfig) {}
 
 #[cfg(not(windows))]
 fn daemon_is_test_mode() -> bool {
@@ -7485,6 +7515,7 @@ impl ActorDaemonCoordinator {
                         .map(|aid| aid.tool.clone())
                         .unwrap_or_else(|| "unknown".to_string());
                     let trace_id = request.trace_id.clone();
+                    let tool_use_id = request.metadata.get("tool_use_id").cloned();
 
                     let repo_work_dir = request.files.first().map(|f| f.repo_work_dir.clone());
 
@@ -7504,6 +7535,7 @@ impl ActorDaemonCoordinator {
                         session_id,
                         tool,
                         trace_id,
+                        tool_use_id,
                         transcript_source.path.clone(),
                         repo_work_dir,
                     );
@@ -8488,6 +8520,7 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
     sanitize_git_env_for_daemon();
     disable_trace2_for_daemon_process();
     config.ensure_parent_dirs()?;
+    remove_stale_daemon_files(&config);
     let _lock = DaemonLock::acquire(&config.lock_path)?;
     let _active_guard = DaemonProcessActiveGuard::enter();
     write_pid_metadata(&config)?;

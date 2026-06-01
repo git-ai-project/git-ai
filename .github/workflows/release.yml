@@ -1,9 +1,7 @@
 name: Release Build
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 on:
   workflow_dispatch:
@@ -32,12 +30,12 @@ jobs:
             target: x86_64-unknown-linux-musl
             artifact_name: git-ai-linux-x64
             use_docker: true
-            docker_image: ubuntu:22.04
+            docker_image: ubuntu:22.04@sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-musl
             artifact_name: git-ai-linux-arm64
             use_docker: true
-            docker_image: ubuntu:22.04
+            docker_image: ubuntu:22.04@sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact_name: git-ai-windows-x64
@@ -76,7 +74,7 @@ jobs:
             bash -c "
               apt-get update && \
               apt-get install -y curl build-essential pkg-config musl-tools && \
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --target ${{ matrix.target }} && \
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0 --target ${{ matrix.target }} && \
               . \$HOME/.cargo/env && \
               cargo build --release --target ${{ matrix.target }} && \
               strip target/${{ matrix.target }}/release/git-ai
@@ -84,14 +82,14 @@ jobs:
 
       - name: Install Rust toolchain (non-Docker)
         if: matrix.use_docker == false
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
-          toolchain: stable
+          toolchain: "1.93.0"
           targets: ${{ matrix.target }}
 
       - name: Cache dependencies (non-Docker)
         if: matrix.use_docker == false
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -198,13 +196,13 @@ jobs:
           echo "version=v$VERSION" >> $GITHUB_OUTPUT
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
-          toolchain: stable
+          toolchain: "1.93.0"
           targets: x86_64-apple-darwin
 
       - name: Cache dependencies
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
@@ -251,16 +249,23 @@ jobs:
     needs: [build, build-macos-intel]
     runs-on: ubuntu-latest
     if: success() && inputs.dry_run != true
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Determine release metadata
         id: release-meta
         shell: bash
+        env:
+          BASE_VERSION: ${{ needs.build.outputs.version }}
+          IS_PRODUCTION: ${{ inputs.release_production }}
         run: |
           set -euo pipefail
-          BASE_VERSION="${{ needs.build.outputs.version }}"
           SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
-          if [[ "${{ inputs.release_production }}" == 'true' ]]; then
+          if [[ "$IS_PRODUCTION" == 'true' ]]; then
             RELEASE_TAG="$BASE_VERSION"
             CHANNEL="latest"
             PRERELEASE="false"
@@ -363,7 +368,7 @@ jobs:
             release/SHA256SUMS
 
       - name: Create Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v2
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
           tag_name: ${{ steps.release-meta.outputs.tag_name }}
           name: ${{ steps.release-meta.outputs.release_name }}
@@ -439,7 +444,7 @@ jobs:
 
       - name: Install Rust toolchain
         if: inputs.release_production == true
-        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # master
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
           toolchain: stable
 

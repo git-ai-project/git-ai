@@ -7,6 +7,7 @@
 use crate::authorship::authorship_log_serialization::{generate_session_id, generate_trace_id};
 use crate::config;
 use crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle;
+use crate::daemon::transcript_redaction::redact_json_secrets;
 use crate::metrics::{EventAttributes, MetricEvent, PosEncoded, SessionEventValues};
 use crate::transcripts::db::TranscriptsDatabase;
 use crate::transcripts::types::TranscriptError;
@@ -51,6 +52,7 @@ pub(super) struct ProcessingTask {
     pub(super) session_id: String,
     pub(super) tool: String,
     pub(super) trace_id: Option<String>,
+    pub(super) tool_use_id: Option<String>,
     pub(super) canonical_path: PathBuf,
     pub(super) repo_work_dir: Option<PathBuf>,
     pub(super) retry_count: u32,
@@ -88,6 +90,7 @@ impl TranscriptWorkerHandle {
         session_id: String,
         tool: String,
         trace_id: String,
+        tool_use_id: Option<String>,
         transcript_path: PathBuf,
         repo_work_dir: Option<PathBuf>,
     ) {
@@ -95,6 +98,7 @@ impl TranscriptWorkerHandle {
             session_id,
             tool,
             trace_id,
+            tool_use_id,
             transcript_path,
             repo_work_dir,
         };
@@ -107,6 +111,7 @@ struct CheckpointNotification {
     session_id: String,
     tool: String,
     trace_id: String,
+    tool_use_id: Option<String>,
     transcript_path: PathBuf,
     repo_work_dir: Option<PathBuf>,
 }
@@ -210,6 +215,7 @@ impl TranscriptWorker {
                 session_id: session.session_id,
                 tool: session.tool,
                 trace_id: None,
+                tool_use_id: None,
                 canonical_path: session.canonical_path,
                 repo_work_dir: None,
                 retry_count: 0,
@@ -232,6 +238,7 @@ impl TranscriptWorker {
                 session_id: notification.session_id.clone(),
                 tool: notification.tool.clone(),
                 trace_id: Some(notification.trace_id.clone()),
+                tool_use_id: notification.tool_use_id.clone(),
                 canonical_path,
                 repo_work_dir: notification.repo_work_dir.clone(),
                 retry_count: 0,
@@ -312,6 +319,7 @@ impl TranscriptWorker {
                 session_id,
                 tool: "claude".to_string(),
                 trace_id: Some(notification.trace_id.clone()),
+                tool_use_id: None,
                 canonical_path: canonical,
                 repo_work_dir: notification.repo_work_dir.clone(),
                 retry_count: 0,
@@ -516,8 +524,9 @@ impl TranscriptWorker {
                                 .as_secs() as u32
                         }),
                     };
-                    let trace_id = task.trace_id.clone().unwrap_or_else(generate_trace_id);
+                    let trace_id = generate_trace_id();
                     let attrs_sparse = base_attrs.clone().trace_id(trace_id).to_sparse();
+                    let raw_event = redact_json_secrets(raw_event);
                     MetricEvent::from_values_with_timestamp(
                         SessionEventValues::with_ids(raw_event, eid, pid, tid),
                         attrs_sparse,
@@ -823,6 +832,7 @@ mod subagent_sweep_tests {
             session_id: "internal-sess-abc".to_string(),
             tool: "claude".to_string(),
             trace_id: "trace-1".to_string(),
+            tool_use_id: None,
             transcript_path: main_transcript.clone(),
             repo_work_dir: Some(tmp.path().to_path_buf()),
         };
@@ -861,6 +871,7 @@ mod subagent_sweep_tests {
             session_id: "internal-sess-xyz".to_string(),
             tool: "claude".to_string(),
             trace_id: "trace-2".to_string(),
+            tool_use_id: None,
             transcript_path: main_transcript,
             repo_work_dir: None,
         };
@@ -889,6 +900,7 @@ mod subagent_sweep_tests {
             session_id: "internal-sess-abc".to_string(),
             tool: "copilot".to_string(),
             trace_id: "trace-3".to_string(),
+            tool_use_id: None,
             transcript_path: main_transcript,
             repo_work_dir: None,
         };
@@ -929,6 +941,7 @@ mod subagent_sweep_tests {
             session_id: "internal-sess-dup".to_string(),
             tool: "claude".to_string(),
             trace_id: "trace-4".to_string(),
+            tool_use_id: None,
             transcript_path: main_transcript,
             repo_work_dir: None,
         };

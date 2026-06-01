@@ -209,20 +209,19 @@ export const GitAiPlugin: Plugin = async (ctx) => {
 
   return {
     "tool.execute.before": async (input, output) => {
-      const toolInput = output.args
-      const toolCwd = extractToolCwd((input as { cwd?: unknown }).cwd ?? (input as { workdir?: unknown }).workdir, output.args)
+      try {
+        const toolInput = output.args
+        const toolCwd = extractToolCwd((input as { cwd?: unknown }).cwd ?? (input as { workdir?: unknown }).workdir, output.args)
 
-      if (isEditTool(input.tool)) {
-        // File-edit tools: extract file paths for rich repo resolution
-        const filePaths = extractFilePaths(toolInput, toolCwd)
-        const repoDir = await resolveRepoDir(filePaths, toolCwd)
-        if (!repoDir) {
-          return
-        }
+        if (isEditTool(input.tool)) {
+          const filePaths = extractFilePaths(toolInput, toolCwd)
+          const repoDir = await resolveRepoDir(filePaths, toolCwd)
+          if (!repoDir) {
+            return
+          }
 
-        pendingCalls.set(input.callID, { repoDir, sessionID: input.sessionID, toolInput })
+          pendingCalls.set(input.callID, { repoDir, sessionID: input.sessionID, toolInput })
 
-        try {
           const hookInput = JSON.stringify({
             hook_event_name: "PreToolUse",
             session_id: input.sessionID,
@@ -232,20 +231,15 @@ export const GitAiPlugin: Plugin = async (ctx) => {
             tool_input: toolInput,
           })
           await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
-        } catch (error) {
-          console.error("[git-ai] Failed to create human checkpoint:", String(error))
-        }
 
-      } else if (isBashTool(input.tool)) {
-        // Bash tool: no file paths in input; resolve repo from workdir or cwd
-        const repoDir = await resolveRepoDir([], toolCwd)
-        if (!repoDir) {
-          return
-        }
+        } else if (isBashTool(input.tool)) {
+          const repoDir = await resolveRepoDir([], toolCwd)
+          if (!repoDir) {
+            return
+          }
 
-        pendingCalls.set(input.callID, { repoDir, sessionID: input.sessionID, toolInput })
+          pendingCalls.set(input.callID, { repoDir, sessionID: input.sessionID, toolInput })
 
-        try {
           const hookInput = JSON.stringify({
             hook_event_name: "PreToolUse",
             session_id: input.sessionID,
@@ -255,27 +249,27 @@ export const GitAiPlugin: Plugin = async (ctx) => {
             tool_input: toolInput,
           })
           await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
-        } catch (error) {
-          console.error("[git-ai] Failed to create human checkpoint:", String(error))
         }
+      } catch {
+        // Checkpoint failures are non-critical — never propagate to the host
       }
     },
 
     "tool.execute.after": async (input, _output) => {
-      if (!isEditTool(input.tool) && !isBashTool(input.tool)) {
-        return
-      }
-
-      const callInfo = pendingCalls.get(input.callID)
-      pendingCalls.delete(input.callID)
-
-      if (!callInfo) {
-        return
-      }
-
-      const { repoDir, sessionID, toolInput } = callInfo
-
       try {
+        if (!isEditTool(input.tool) && !isBashTool(input.tool)) {
+          return
+        }
+
+        const callInfo = pendingCalls.get(input.callID)
+        pendingCalls.delete(input.callID)
+
+        if (!callInfo) {
+          return
+        }
+
+        const { repoDir, sessionID, toolInput } = callInfo
+
         const hookInput = JSON.stringify({
           hook_event_name: "PostToolUse",
           session_id: sessionID,
@@ -285,8 +279,8 @@ export const GitAiPlugin: Plugin = async (ctx) => {
           tool_input: toolInput,
         })
         await $`echo ${hookInput} | ${GIT_AI_BIN} checkpoint opencode --hook-input stdin`.quiet()
-      } catch (error) {
-        console.error("[git-ai] Failed to create AI checkpoint:", String(error))
+      } catch {
+        // Checkpoint failures are non-critical — never propagate to the host
       }
     },
   }

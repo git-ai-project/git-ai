@@ -173,57 +173,6 @@ detect_all_shells() {
     printf '%b' "$shells" | sed '/^$/d'
 }
 
-detect_std_git() {
-    local git_path=""
-
-    # Prefer the actual executable path, ignoring aliases and functions
-    if git_path=$(type -P git 2>/dev/null); then
-        :
-    else
-        git_path=$(command -v git 2>/dev/null || true)
-    fi
-
-    # Last resort
-    if [ -z "$git_path" ]; then
-        git_path=$(which git 2>/dev/null || true)
-    fi
-
-	# Ensure we never return a path for git that contains git-ai (recursive)
-	if [ -n "$git_path" ] && [[ "$git_path" == *"git-ai"* ]]; then
-		git_path=""
-	fi
-
-    # If detection failed or was our own shim, try to recover from saved config
-    if [ -z "$git_path" ]; then
-        local cfg_json="$HOME/.git-ai/config.json"
-        if [ -f "$cfg_json" ]; then
-            # Extract git_path value without jq
-            local cfg_git_path
-            cfg_git_path=$(sed -n 's/.*"git_path"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' "$cfg_json" | head -n1 || true)
-            if [ -n "$cfg_git_path" ] && [[ "$cfg_git_path" != *"git-ai"* ]]; then
-                if "$cfg_git_path" --version >/dev/null 2>&1; then
-                    git_path="$cfg_git_path"
-                fi
-            fi
-        fi
-    fi
-
-    # Fail if we couldn't find a standard git
-    if [ -z "$git_path" ]; then
-        error "Could not detect a standard git binary on PATH. Please ensure you have Git installed and available on your PATH. If you believe this is a bug with the installer, please file an issue at https://github.com/git-ai-project/git-ai/issues."
-    fi
-
-    # Verify detected git is usable
-    if ! "$git_path" --version >/dev/null 2>&1; then
-        error "Detected git at $git_path is not usable (--version failed). Please ensure you have Git installed and available on your PATH. If you believe this is a bug with the installer, please file an issue at https://github.com/git-ai-project/git-ai/issues."
-    fi
-
-    echo "$git_path"
-}
-
-# Detect standard git path (needed early for install)
-STD_GIT_PATH=$(detect_std_git)
-
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
@@ -318,11 +267,6 @@ mv -f "$TMP_FILE" "${INSTALL_DIR}/git-ai"
 
 # Make executable
 chmod +x "${INSTALL_DIR}/git-ai"
-# Symlink git to git-ai
-ln -sf "${INSTALL_DIR}/git-ai" "${INSTALL_DIR}/git"
-
-# Symlink git-og to the detected standard git path
-ln -sf "$STD_GIT_PATH" "${INSTALL_DIR}/git-og"
 
 # Remove quarantine attribute on macOS
 if [ "$OS" = "macos" ]; then
@@ -357,24 +301,6 @@ if ! ${INSTALL_DIR}/git-ai install-hooks; then
     warn "Warning: Failed to set up IDE/agent hooks. Please try running 'git-ai install-hooks' manually."
 else
     success "Successfully set up IDE/agent hooks"
-fi
-
-# Write JSON config at ~/.git-ai/config.json (only if it doesn't exist)
-CONFIG_DIR="$HOME/.git-ai"
-CONFIG_JSON_PATH="$CONFIG_DIR/config.json"
-mkdir -p "$CONFIG_DIR"
-
-if [ ! -f "$CONFIG_JSON_PATH" ]; then
-    TMP_CFG="$CONFIG_JSON_PATH.tmp.$$"
-    cat >"$TMP_CFG" <<EOF
-{
-  "git_path": "${STD_GIT_PATH}",
-  "feature_flags": {
-    "async_mode": true
-  }
-}
-EOF
-    mv -f "$TMP_CFG" "$CONFIG_JSON_PATH"
 fi
 
 # Add to PATH in all detected shell configurations

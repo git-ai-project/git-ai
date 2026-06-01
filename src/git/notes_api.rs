@@ -520,6 +520,7 @@ mod tests {
     /// read helper returns the cached value. This tests the private http_* helpers
     /// directly so no config override is needed.
     #[test]
+    #[serial_test::serial(notes_db_env)]
     fn http_write_then_read_uses_cache() {
         use std::env;
 
@@ -558,6 +559,7 @@ mod tests {
 
     /// http_read_notes returns a HashMap of all cached entries for requested SHAs.
     #[test]
+    #[serial_test::serial(notes_db_env)]
     fn http_read_notes_returns_multiple() {
         use std::env;
 
@@ -636,6 +638,7 @@ mod tests {
     /// with `synced = 0` and `git notes --ref=ai show <sha>` returns nothing (note
     /// is NOT written into git refs).
     #[test]
+    #[serial_test::serial(notes_db_env)]
     fn integration_http_write_note_goes_to_db_not_git() {
         use crate::git::repository::exec_git;
         use crate::git::test_utils::TmpRepo;
@@ -694,6 +697,7 @@ mod tests {
     /// notes-db cache into `refs/notes/ai-display` so that `git log --notes=ai-display`
     /// can show them.
     #[test]
+    #[serial_test::serial(notes_db_env)]
     fn integration_materialize_notes_for_display() {
         use crate::git::repository::exec_git;
         use crate::git::test_utils::TmpRepo;

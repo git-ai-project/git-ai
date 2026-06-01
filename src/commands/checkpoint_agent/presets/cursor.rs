@@ -77,13 +77,8 @@ impl AgentPreset for CursorPreset {
             )));
         }
 
-        // Extract file_path from tool_input (file-edit tools only).
-        let file_path = data
-            .get("tool_input")
-            .and_then(|ti| ti.get("file_path"))
-            .and_then(|v| v.as_str())
-            .map(normalize_cursor_path)
-            .unwrap_or_default();
+        // Extract the edited path from Cursor file-edit tool input.
+        let file_path = cursor_file_path_from_tool_input(data.get("tool_input"));
 
         // Resolve cwd: match file_path to workspace root, or fall back to first root.
         // For Shell tools `file_path` is empty, so this returns workspace_roots[0].
@@ -180,6 +175,17 @@ fn normalize_cursor_path(path: &str) -> String {
 #[cfg(not(windows))]
 fn normalize_cursor_path(path: &str) -> String {
     path.to_string()
+}
+
+fn cursor_file_path_from_tool_input(tool_input: Option<&serde_json::Value>) -> String {
+    tool_input
+        .and_then(|ti| {
+            ["file_path", "path", "filePath"]
+                .iter()
+                .find_map(|key| ti.get(key).and_then(|v| v.as_str()))
+        })
+        .map(normalize_cursor_path)
+        .unwrap_or_default()
 }
 
 /// Find the workspace root that matches the given file path.
@@ -325,6 +331,53 @@ mod tests {
                 assert_eq!(
                     e.file_paths,
                     vec![PathBuf::from("/home/user/project/src/lib.rs")]
+                );
+            }
+            _ => panic!("Expected PreFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_cursor_file_edit_accepts_path_field() {
+        let input = json!({
+            "conversation_id": "conv-123",
+            "workspace_roots": ["/home/user/project"],
+            "hook_event_name": "preToolUse",
+            "tool_name": "StrReplace",
+            "tool_input": {"path": "/home/user/project/src/lib.rs"}
+        })
+        .to_string();
+        let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/lib.rs")]
+                );
+            }
+            _ => panic!("Expected PreFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_cursor_file_edit_prefers_file_path_over_path() {
+        let input = json!({
+            "conversation_id": "conv-123",
+            "workspace_roots": ["/home/user/project"],
+            "hook_event_name": "preToolUse",
+            "tool_name": "StrReplace",
+            "tool_input": {
+                "file_path": "src/from_file_path.rs",
+                "path": "src/from_path.rs"
+            }
+        })
+        .to_string();
+        let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/from_file_path.rs")]
                 );
             }
             _ => panic!("Expected PreFileEdit"),

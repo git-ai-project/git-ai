@@ -1,7 +1,7 @@
 use crate::daemon::daemon_log_file_path;
 use crate::daemon::{
     ControlRequest, DaemonConfig, local_socket_connects_with_timeout, read_daemon_pid,
-    send_control_request,
+    remove_stale_daemon_files, send_control_request,
 };
 use crate::utils::LockFile;
 #[cfg(windows)]
@@ -105,6 +105,8 @@ fn ensure_daemon_running_attached(timeout: Duration) -> Result<DaemonConfig, Str
     if daemon_is_up(&config) {
         return Ok(config);
     }
+
+    remove_stale_daemon_files(&config);
 
     if daemon_startup_is_blocked(&config) {
         return Err(format!(
@@ -299,6 +301,8 @@ fn start_daemon_detached_with_config(
     if daemon_is_up(&config) {
         return Ok(config);
     }
+
+    remove_stale_daemon_files(&config);
 
     if daemon_startup_is_blocked(&config) {
         return Err(format!(

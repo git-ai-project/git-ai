@@ -880,10 +880,14 @@ mod tests {
     // --- database_path ---
 
     #[test]
+    #[serial_test::serial(notes_db_env)]
     fn test_database_path_contains_expected_segments() {
         // Without the test env var set we expect the path to include .git-ai/internal/notes-db
         // (this test verifies the non-override branch at the schema level; in CI the HOME is
         // always set so dirs::home_dir() returns Some).
+        unsafe {
+            std::env::remove_var("GIT_AI_TEST_NOTES_DB_PATH");
+        }
         let path = NotesDatabase::database_path().unwrap();
         let path_str = path.to_string_lossy();
         assert!(

@@ -38,14 +38,14 @@ If `git-ai` is not installed or the file is not in a git repository, the plugin 
 
 Run type checking:
 ```bash
-yarn type-check
+npm run type-check
 ```
 
 ### Dependencies
 
 Install dependencies:
 ```bash
-yarn install
+npm install
 ```
 
 ## See Also

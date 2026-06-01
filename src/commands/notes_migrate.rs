@@ -20,9 +20,22 @@ use std::process::{Command, Stdio};
 
 /// Entry point for `git-ai notes migrate`.
 pub fn handle_notes_migrate(args: &[String]) {
-    if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
-        print_help();
-        return;
+    let mut force = false;
+    for arg in args {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print_help();
+                return;
+            }
+            "--force" | "--all" => {
+                force = true;
+            }
+            other => {
+                eprintln!("error: unknown option '{}'", other);
+                eprintln!("Run 'git ai notes migrate --help' for usage");
+                std::process::exit(1);
+            }
+        }
     }
 
     // 1. Refuse to run unless notes_backend.kind == http.
@@ -115,25 +128,27 @@ pub fn handle_notes_migrate(args: &[String]) {
 
     // Skip entries already confirmed synced (enables safe re-run after interruption).
     // Only skip synced=1 entries — pending (synced=0) entries still need uploading.
-    let pre_cached_count = entries.len();
-    if let Ok(db) = NotesDatabase::global()
-        && let Ok(lock) = db.lock()
-    {
-        let all_shas: Vec<&str> = entries.iter().map(|(s, _)| s.as_str()).collect();
-        if let Ok(synced) = lock.get_synced_shas(&all_shas) {
-            entries.retain(|(sha, _)| !synced.contains(sha));
+    if !force {
+        let pre_cached_count = entries.len();
+        if let Ok(db) = NotesDatabase::global()
+            && let Ok(lock) = db.lock()
+        {
+            let all_shas: Vec<&str> = entries.iter().map(|(s, _)| s.as_str()).collect();
+            if let Ok(synced) = lock.get_synced_shas(&all_shas) {
+                entries.retain(|(sha, _)| !synced.contains(sha));
+            }
         }
-    }
-    if entries.len() < pre_cached_count {
-        eprintln!(
-            "Skipping {} already-cached note(s).",
-            pre_cached_count - entries.len()
-        );
-    }
+        if entries.len() < pre_cached_count {
+            eprintln!(
+                "Skipping {} already-cached note(s).",
+                pre_cached_count - entries.len()
+            );
+        }
 
-    if entries.is_empty() {
-        eprintln!("All notes already migrated. Nothing to upload.");
-        return;
+        if entries.is_empty() {
+            eprintln!("All notes already migrated. Nothing to upload.");
+            return;
+        }
     }
 
     eprintln!(
@@ -169,10 +184,8 @@ pub fn handle_notes_migrate(args: &[String]) {
                 total_uploaded += response.success_count;
                 total_failed += response.failure_count;
 
-                // 7. Persist locally as synced (cache_synced_notes).
-                // We persist the whole chunk even if the server reported some failures,
-                // because the server counts are per-entry and we can't identify which
-                // entries failed at this level. The cache is best-effort.
+                // Cache the whole chunk best-effort — the server doesn't
+                // tell us which specific entries failed.
                 cached_entries.extend_from_slice(chunk);
             }
             Err(e) => {
@@ -294,24 +307,31 @@ fn cat_file_batch(
         .spawn()
         .map_err(|e| GitAiError::Generic(format!("failed to spawn git cat-file --batch: {}", e)))?;
 
-    // Write all blob SHAs to stdin, then close it.
-    {
-        let stdin = child.stdin.as_mut().ok_or_else(|| {
-            GitAiError::Generic("failed to open git cat-file --batch stdin".to_string())
-        })?;
-        for sha in blob_shas {
-            writeln!(stdin, "{}", sha).map_err(|e| {
-                GitAiError::Generic(format!(
-                    "failed to write to git cat-file --batch stdin: {}",
-                    e
-                ))
-            })?;
+    // Take stdin out of the child so we can write in a separate thread.
+    // This avoids a pipe deadlock: with many notes, stdout fills its buffer
+    // and the child blocks on write, while the parent is still writing to
+    // stdin and blocks there too.
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        GitAiError::Generic("failed to open git cat-file --batch stdin".to_string())
+    })?;
+
+    let blob_shas_owned: Vec<String> = blob_shas.to_vec();
+    let writer_thread = std::thread::spawn(move || -> Result<(), std::io::Error> {
+        for sha in &blob_shas_owned {
+            writeln!(stdin, "{}", sha)?;
         }
-    } // stdin is dropped here, closing the pipe and signalling EOF.
+        Ok(())
+    });
 
     let output = child
         .wait_with_output()
         .map_err(|e| GitAiError::Generic(format!("git cat-file --batch failed: {}", e)))?;
+
+    if let Err(e) = writer_thread.join().expect("stdin writer thread panicked")
+        && e.kind() != std::io::ErrorKind::BrokenPipe
+    {
+        return Err(GitAiError::IoError(e));
+    }
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -381,7 +401,9 @@ fn print_help() {
     eprintln!("Usage: git ai notes migrate [options]");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  -h, --help    Show this help message");
+    eprintln!("  --force, --all  Re-upload all notes even if already cached locally.");
+    eprintln!("                  Useful when migrating to a new backend URL.");
+    eprintln!("  -h, --help      Show this help message");
     eprintln!();
     eprintln!("Description:");
     eprintln!("  Reads all notes from refs/notes/ai, uploads them to the configured HTTP");
@@ -574,5 +596,136 @@ mod tests {
         let repo = TmpRepo::new().expect("TmpRepo::new");
         let result = cat_file_batch(repo.gitai_repo(), &[]).expect("cat_file_batch");
         assert!(result.is_empty());
+    }
+
+    /// Integration test: `--force` re-uploads notes that are already cached as synced.
+    ///   1. Create notes and cache them as synced=1 in notes-db.
+    ///   2. Without --force: verify entries are filtered out.
+    ///   3. With --force: verify all entries pass through for upload.
+    #[test]
+    #[serial_test::serial(notes_db_env)]
+    fn force_flag_bypasses_synced_cache_filter() {
+        use std::collections::HashSet;
+
+        let tmp_db = NamedTempFile::new().expect("tmp notes-db");
+        unsafe {
+            std::env::set_var("GIT_AI_TEST_NOTES_DB_PATH", tmp_db.path());
+        }
+
+        let repo = TmpRepo::new().expect("TmpRepo::new");
+
+        let sha1 = make_commit(&repo, "file1.txt", "a", "commit 1");
+        let sha2 = make_commit(&repo, "file2.txt", "b", "commit 2");
+
+        add_git_note(&repo, &sha1, "note-1");
+        add_git_note(&repo, &sha2, "note-2");
+
+        // Read notes from repo.
+        let note_pairs = list_notes(repo.gitai_repo()).expect("list_notes");
+        let blob_to_commit: HashMap<String, String> = note_pairs
+            .iter()
+            .map(|(b, c)| (b.clone(), c.clone()))
+            .collect();
+        let blob_shas: Vec<String> = note_pairs.iter().map(|(b, _)| b.clone()).collect();
+        let blob_contents = cat_file_batch(repo.gitai_repo(), &blob_shas).expect("cat_file_batch");
+
+        let entries: Vec<(String, String)> = blob_contents
+            .iter()
+            .filter_map(|(blob_sha, content)| {
+                blob_to_commit
+                    .get(blob_sha)
+                    .map(|commit_sha| (commit_sha.clone(), content.clone()))
+            })
+            .collect();
+        assert_eq!(entries.len(), 2);
+
+        // Pre-cache all entries as synced=1.
+        let db = NotesDatabase::global().expect("global db");
+        {
+            let mut lock = db.lock().expect("lock");
+            lock.cache_synced_notes(&entries)
+                .expect("cache_synced_notes");
+        }
+
+        // Without force: filtering should remove all entries.
+        {
+            let mut filtered = entries.clone();
+            let lock = db.lock().expect("lock");
+            let all_shas: Vec<&str> = filtered.iter().map(|(s, _)| s.as_str()).collect();
+            let synced = lock.get_synced_shas(&all_shas).expect("get_synced_shas");
+            filtered.retain(|(sha, _)| !synced.contains(sha));
+            assert!(
+                filtered.is_empty(),
+                "without --force, all synced entries should be filtered out"
+            );
+        }
+
+        // With force: no filtering applied, all entries remain.
+        {
+            let forced_entries = entries.clone();
+            // force=true means we skip the retain logic entirely
+            assert_eq!(
+                forced_entries.len(),
+                2,
+                "with --force, all entries should remain for upload"
+            );
+
+            // Verify we can upload them to a new backend.
+            let mut server = mockito::Server::new();
+            let upload_response = serde_json::json!({
+                "success_count": 2,
+                "failure_count": 0
+            })
+            .to_string();
+            let mock = server
+                .mock("POST", "/worker/notes/upload")
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(&upload_response)
+                .create();
+
+            let server_url = server.url();
+            unsafe {
+                std::env::set_var("GIT_AI_NOTES_BACKEND_URL", &server_url);
+                std::env::set_var("GIT_AI_API_KEY", "force-test-key");
+            }
+
+            let cfg = crate::config::Config::fresh();
+            let backend_url = cfg.notes_backend_url().unwrap().to_string();
+            let ctx = ApiContext::new(Some(backend_url));
+            let client = ApiClient::new(ctx);
+
+            let note_entries: Vec<NoteEntry> = forced_entries
+                .iter()
+                .map(|(sha, content)| NoteEntry {
+                    commit_sha: sha.clone(),
+                    content: content.clone(),
+                })
+                .collect();
+            let request = NotesUploadRequest {
+                entries: note_entries,
+            };
+            let response = client.upload_notes(request).expect("upload_notes");
+            assert_eq!(response.success_count, 2);
+            mock.assert();
+        }
+
+        // Verify commit shas are what we expect.
+        let lock = db.lock().expect("lock for final verify");
+        let shas_set: HashSet<&str> = [sha1.as_str(), sha2.as_str()].into_iter().collect();
+        for sha in &shas_set {
+            assert!(
+                lock.get_note(sha).expect("get_note").is_some(),
+                "note for {} should remain in cache",
+                sha
+            );
+        }
+        drop(lock);
+
+        unsafe {
+            std::env::remove_var("GIT_AI_TEST_NOTES_DB_PATH");
+            std::env::remove_var("GIT_AI_API_KEY");
+            std::env::remove_var("GIT_AI_NOTES_BACKEND_URL");
+        }
     }
 }

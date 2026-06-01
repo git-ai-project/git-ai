@@ -2,12 +2,10 @@ use crate::config;
 use crate::daemon::DaemonConfig;
 use crate::error::GitAiError;
 use crate::mdm::agents::get_all_installers;
-use crate::mdm::git_client_installer::GitClientInstallerParams;
-use crate::mdm::git_clients::get_all_git_client_installers;
 use crate::mdm::hook_installer::HookInstallerParams;
 use crate::mdm::skills_installer;
 use crate::mdm::spinner::{Spinner, print_diff};
-use crate::mdm::utils::{get_current_binary_path, git_shim_path};
+use crate::mdm::utils::get_current_binary_path;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -456,11 +454,6 @@ async fn async_run_install(
     // Track detailed results for metrics (tool_id, result)
     let mut detailed_results: Vec<(String, InstallResult)> = Vec::new();
 
-    // Ensure git symlinks for Fork compatibility
-    if let Err(e) = crate::mdm::ensure_git_symlinks() {
-        eprintln!("Warning: Failed to create git symlinks: {}", e);
-    }
-
     // === Coding Agents ===
     println!("\n\x1b[1mCoding Agents\x1b[0m");
 
@@ -632,81 +625,6 @@ async fn async_run_install(
         && result.changed
     {
         has_changes = true;
-    }
-
-    if !any_checked {
-        println!("No compatible coding agents detected. Nothing to install.");
-    }
-
-    // === Git Clients ===
-    let git_client_installers = get_all_git_client_installers();
-    if !git_client_installers.is_empty() {
-        println!("\n\x1b[1mGit Clients\x1b[0m");
-
-        let git_client_params = GitClientInstallerParams {
-            git_shim_path: git_shim_path(),
-        };
-
-        for installer in git_client_installers {
-            let name = installer.name();
-            let id = installer.id();
-
-            match installer.check_client(&git_client_params) {
-                Ok(check_result) => {
-                    if !check_result.client_installed {
-                        statuses.insert(id.to_string(), InstallStatus::NotFound);
-                        detailed_results.push((id.to_string(), InstallResult::not_found()));
-                        continue;
-                    }
-
-                    any_checked = true;
-
-                    let spinner = Spinner::new(&format!("{}: checking preferences", name));
-                    spinner.start();
-
-                    match installer.install_prefs(&git_client_params, dry_run) {
-                        Ok(Some(diff)) => {
-                            if dry_run {
-                                spinner.pending(&format!("{}: Pending updates", name));
-                            } else {
-                                spinner.success(&format!("{}: Preferences updated", name));
-                            }
-                            if verbose {
-                                println!();
-                                print_diff(&diff);
-                            }
-                            has_changes = true;
-                            statuses.insert(id.to_string(), InstallStatus::Installed);
-                            detailed_results.push((id.to_string(), InstallResult::installed()));
-                        }
-                        Ok(None) => {
-                            spinner.success(&format!("{}: Preferences already up to date", name));
-                            statuses.insert(id.to_string(), InstallStatus::AlreadyInstalled);
-                            detailed_results
-                                .push((id.to_string(), InstallResult::already_installed()));
-                        }
-                        Err(e) => {
-                            let error_msg = e.to_string();
-                            spinner.error(&format!("{}: Failed to update preferences", name));
-                            eprintln!("  Error: {}", error_msg);
-                            statuses.insert(id.to_string(), InstallStatus::NotFound);
-                            detailed_results
-                                .push((id.to_string(), InstallResult::failed(error_msg)));
-                        }
-                    }
-                }
-                Err(e) => {
-                    let error_msg = e.to_string();
-                    any_checked = true;
-                    let spinner = Spinner::new(&format!("{}: checking", name));
-                    spinner.start();
-                    spinner.error(&format!("{}: Check failed", name));
-                    eprintln!("  Error: {}", error_msg);
-                    statuses.insert(id.to_string(), InstallStatus::NotFound);
-                    detailed_results.push((id.to_string(), InstallResult::failed(error_msg)));
-                }
-            }
-        }
     }
 
     if !any_checked {
@@ -953,73 +871,6 @@ async fn async_run_uninstall(
             Err(e) => {
                 eprintln!("  Error checking {}: {}", name, e);
                 statuses.insert(id.to_string(), InstallStatus::NotFound);
-            }
-        }
-    }
-
-    // === Git Clients ===
-    let git_client_installers = get_all_git_client_installers();
-    if !git_client_installers.is_empty() {
-        println!("\n\x1b[1mGit Clients\x1b[0m");
-
-        let git_client_params = GitClientInstallerParams {
-            git_shim_path: git_shim_path(),
-        };
-
-        for installer in git_client_installers {
-            let name = installer.name();
-            let id = installer.id();
-
-            match installer.check_client(&git_client_params) {
-                Ok(check_result) => {
-                    if !check_result.client_installed {
-                        statuses.insert(id.to_string(), InstallStatus::NotFound);
-                        continue;
-                    }
-
-                    if !check_result.prefs_configured {
-                        statuses.insert(id.to_string(), InstallStatus::NotFound);
-                        continue;
-                    }
-
-                    any_checked = true;
-
-                    let spinner = Spinner::new(&format!("{}: removing preferences", name));
-                    spinner.start();
-
-                    match installer.uninstall_prefs(&git_client_params, dry_run) {
-                        Ok(Some(diff)) => {
-                            if dry_run {
-                                spinner.pending(&format!("{}: Pending removal", name));
-                            } else {
-                                spinner.success(&format!("{}: Preferences removed", name));
-                            }
-                            if verbose {
-                                println!();
-                                print_diff(&diff);
-                            }
-                            has_changes = true;
-                            statuses.insert(id.to_string(), InstallStatus::Installed);
-                        }
-                        Ok(None) => {
-                            spinner.success(&format!("{}: No preferences to remove", name));
-                            statuses.insert(id.to_string(), InstallStatus::AlreadyInstalled);
-                        }
-                        Err(e) => {
-                            spinner.error(&format!("{}: Failed to remove preferences", name));
-                            eprintln!("  Error: {}", e);
-                            statuses.insert(id.to_string(), InstallStatus::NotFound);
-                        }
-                    }
-                }
-                Err(e) => {
-                    any_checked = true;
-                    let spinner = Spinner::new(&format!("{}: checking", name));
-                    spinner.start();
-                    spinner.error(&format!("{}: Check failed", name));
-                    eprintln!("  Error: {}", e);
-                    statuses.insert(id.to_string(), InstallStatus::NotFound);
-                }
             }
         }
     }
