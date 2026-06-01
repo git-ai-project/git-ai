@@ -2283,52 +2283,6 @@ pub fn collect_changed_file_contents_from_diff(
     Ok((changed_files, file_contents))
 }
 
-#[allow(dead_code)]
-pub(crate) fn committed_file_snapshot_between_commits(
-    repo: &Repository,
-    from_commit: Option<&str>,
-    to_commit: &str,
-) -> Result<HashMap<String, String>, GitAiError> {
-    let to_commit = repo.find_commit(to_commit.to_string())?;
-    let to_tree = to_commit.tree()?;
-    if matches!(from_commit, None | Some("initial")) {
-        let mut args = repo.global_args_for_exec();
-        args.push("ls-tree".to_string());
-        args.push("-r".to_string());
-        args.push("-z".to_string());
-        args.push("--name-only".to_string());
-        args.push(to_tree.id());
-
-        let output = exec_git(&args)?;
-        let tracked_paths = output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|bytes| !bytes.is_empty())
-            .filter_map(|bytes| String::from_utf8(bytes.to_vec()).ok())
-            .collect::<Vec<_>>();
-        return get_committed_files_content(repo, &to_commit.id(), &tracked_paths);
-    }
-
-    let from_tree = repo.find_commit(from_commit.unwrap().to_string())?.tree()?;
-    let diff = repo.diff_tree_to_tree(Some(&from_tree), Some(&to_tree), None, None)?;
-    let tracked_paths = diff
-        .deltas()
-        .filter_map(|delta| delta.new_file().path().or(delta.old_file().path()))
-        .map(|path| path.to_string_lossy().to_string())
-        .collect::<HashSet<_>>();
-
-    if tracked_paths.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    let tracked_lookup = tracked_paths
-        .iter()
-        .map(|path| path.as_str())
-        .collect::<HashSet<_>>();
-    let (_changed_files, contents) =
-        collect_changed_file_contents_from_diff(repo, &diff, &tracked_lookup)?;
-    Ok(contents)
-}
 
 fn batch_read_blob_contents(
     repo: &Repository,

@@ -126,7 +126,6 @@ mod streams_e2e;
 mod subdirs;
 mod superuser_guard;
 mod sweep_e2e;
-mod sync_authorship_types;
 mod test_utils_unit;
 mod tls_native_certs;
 mod utf8_filenames;
