@@ -859,10 +859,6 @@ async fn get_checkpoint_entries(
         .and_then(|c| c.tree().ok())
         .map(|t| t.id().to_string());
 
-    // Parent note seeding is handled at post-commit time via
-    // inherit_parent_attribution_for_modified_files. Seeding at checkpoint level
-    // causes incorrect attribution when parent note line numbers don't align with
-    // the current file content (e.g., after rapid edits in a burst).
     let parent_note_attributions: HashMap<String, Vec<LineAttribution>> = HashMap::new();
 
     const MAX_CONCURRENT: usize = 30;
