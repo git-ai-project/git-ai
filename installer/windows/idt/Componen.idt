@@ -1,0 +1,4 @@
+Component	ComponentId	Directory_	Attributes	Condition	KeyPath
+s72	S38	s72	i2	S255	S72
+Component	Component
+GitAiComponent	{7B3D80EB-4920-4741-B0A9-42E4395D36D6}	GITAI_DIR	256		GitAiExe
