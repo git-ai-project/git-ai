@@ -172,10 +172,6 @@ pub fn handle_git_ai(args: &[String]) {
         "git-hooks" => {
             handle_git_hooks(&args[1..]);
         }
-        "squash-authorship" => {
-            eprintln!("git-ai: the 'squash-authorship' command has been removed.");
-            std::process::exit(1);
-        }
         "ci" => {
             commands::ci_handlers::handle_ci(&args[1..]);
         }
@@ -357,11 +353,6 @@ fn print_help() {
     eprintln!("  uninstall-hooks    Remove git-ai hooks from all detected tools");
     eprintln!("  ci                 Continuous integration utilities");
     eprintln!("    github                 GitHub CI helpers");
-    eprintln!("  squash-authorship  Generate authorship log for squashed commits");
-    eprintln!(
-        "    <base_branch> <new_sha> <old_sha>  Required: base branch, new commit SHA, old commit SHA"
-    );
-    eprintln!("    --dry-run             Show what would be done without making changes");
     eprintln!("  git-path           Print the path to the underlying git executable");
     eprintln!("  upgrade            Check for updates and install if available");
     eprintln!("    --force               Reinstall latest version even if already up to date");
