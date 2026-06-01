@@ -2,7 +2,6 @@ name: S3 Release Build
 
 permissions:
   contents: read
-  id-token: write
 
 on:
   workflow_dispatch:
@@ -11,29 +10,6 @@ on:
         description: 'Internal release tag, e.g. v1.4.9-rebasefix-20260601'
         required: true
         type: string
-      s3_bucket:
-        description: 'S3 bucket name for release artifacts'
-        required: true
-        type: string
-      s3_prefix:
-        description: 'S3 prefix before the release tag'
-        required: false
-        default: 'git-ai/releases'
-        type: string
-      public_base_url:
-        description: 'Public HTTPS base URL before the release tag, e.g. https://downloads.example.com/git-ai/releases'
-        required: true
-        type: string
-      aws_region:
-        description: 'AWS region'
-        required: false
-        default: 'us-east-1'
-        type: string
-      dry_run:
-        description: 'Build artifacts but do not upload to S3'
-        required: false
-        default: true
-        type: boolean
 
 jobs:
   build:
@@ -189,83 +165,3 @@ jobs:
           name: git-ai-macos-x64
           path: release/git-ai-macos-x64
           retention-days: 30
-
-  publish-s3:
-    name: Publish S3 Release
-    needs: [build, build-macos-intel]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code for install scripts
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7 # v8.0.1
-        with:
-          path: artifacts
-
-      - name: Create release directory
-        run: mkdir -p release
-
-      - name: Move artifacts to release directory
-        run: find artifacts -type f -name "git-ai-*" -exec cp {} release/ \;
-
-      - name: Create binary checksums
-        run: |
-          cd release
-          sha256sum git-ai-* > SHA256SUMS
-
-      - name: Generate S3 install scripts
-        run: |
-          set -euo pipefail
-          VERSION="${{ inputs.release_tag }}"
-          PUBLIC_BASE_URL="${{ inputs.public_base_url }}"
-          BASE_URL="${PUBLIC_BASE_URL%/}/${VERSION}"
-          CHECKSUMS=$(tr '\n' '|' < release/SHA256SUMS | sed 's/|$//')
-
-          awk -v version="$VERSION" -v base_url="$BASE_URL" -v checksums="$CHECKSUMS" '
-            /^PINNED_VERSION="__VERSION_PLACEHOLDER__"/ { sub(/__VERSION_PLACEHOLDER__/, version) }
-            /^BASE_URL="__BASE_URL_PLACEHOLDER__"/ { sub(/__BASE_URL_PLACEHOLDER__/, base_url) }
-            /^EMBEDDED_CHECKSUMS="__CHECKSUMS_PLACEHOLDER__"/ { sub(/__CHECKSUMS_PLACEHOLDER__/, checksums) }
-            { print }
-          ' install.sh > release/install.sh
-          chmod +x release/install.sh
-
-          awk -v version="$VERSION" -v base_url="$BASE_URL" -v checksums="$CHECKSUMS" '
-            /^[$]PinnedVersion = .__VERSION_PLACEHOLDER__/ { sub(/__VERSION_PLACEHOLDER__/, version) }
-            /^[$]BaseUrl = .__BASE_URL_PLACEHOLDER__/ { sub(/__BASE_URL_PLACEHOLDER__/, base_url) }
-            /^[$]EmbeddedChecksums = .__CHECKSUMS_PLACEHOLDER__/ { sub(/__CHECKSUMS_PLACEHOLDER__/, checksums) }
-            { print }
-          ' install.ps1 > release/install.ps1
-
-      - name: Add install scripts to checksums
-        run: |
-          cd release
-          sha256sum install.sh install.ps1 >> SHA256SUMS
-
-      - name: Upload generated release bundle as workflow artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: git-ai-s3-release-${{ inputs.release_tag }}
-          path: release/
-          retention-days: 30
-
-      - name: Configure AWS credentials
-        if: inputs.dry_run != true
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_S3_RELEASE_ROLE_ARN }}
-          aws-region: ${{ inputs.aws_region }}
-
-      - name: Upload release to S3
-        if: inputs.dry_run != true
-        run: |
-          set -euo pipefail
-          PREFIX="${{ inputs.s3_prefix }}"
-          PREFIX="${PREFIX#/}"
-          PREFIX="${PREFIX%/}"
-          DEST="s3://${{ inputs.s3_bucket }}/${PREFIX}/${{ inputs.release_tag }}/"
-          aws s3 sync release/ "$DEST" --delete
-          echo "Uploaded release to $DEST"
-          echo "Install with:"
-          echo "curl -fsSL ${{ inputs.public_base_url }}/${{ inputs.release_tag }}/install.sh | bash"
