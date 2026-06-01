@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 // Modern refspecs without force to enable proper merging
 pub const AI_AUTHORSHIP_REFNAME: &str = "ai";
 pub const AI_AUTHORSHIP_PUSH_REFSPEC: &str = "refs/notes/ai:refs/notes/ai";
+const NOTES_UPDATE_COMMIT_MESSAGE: &str = "chore: update git-ai authorship notes";
+const NOTES_MERGE_COMMIT_MESSAGE: &str = "chore: merge git-ai authorship notes";
 
 pub fn notes_add(
     repo: &Repository,
@@ -28,6 +30,63 @@ pub fn notes_path_for_object(oid: &str) -> String {
     } else {
         format!("{}/{}", &oid[..2], &oid[2..])
     }
+}
+
+fn sanitize_fast_import_name(value: Option<&String>) -> Option<String> {
+    value
+        .map(|s| {
+            s.chars()
+                .map(|ch| match ch {
+                    '\n' | '\r' | '<' | '>' => ' ',
+                    _ => ch,
+                })
+                .collect::<String>()
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn sanitize_fast_import_email(value: Option<&String>) -> Option<String> {
+    value
+        .map(|s| {
+            s.chars()
+                .filter(|ch| !matches!(ch, '\n' | '\r' | '<' | '>' | ' '))
+                .collect::<String>()
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn append_fast_import_commit_header(
+    script: &mut Vec<u8>,
+    repo: &Repository,
+    refname: &str,
+    message: &str,
+    timestamp_secs: u64,
+) -> Result<(), GitAiError> {
+    let identity = repo.git_author_identity();
+    let email = sanitize_fast_import_email(identity.email.as_ref()).ok_or_else(|| {
+        GitAiError::Generic(
+            "Cannot write git-ai notes without a valid git committer email".to_string(),
+        )
+    })?;
+    let name = sanitize_fast_import_name(identity.name.as_ref()).unwrap_or_else(|| {
+        email
+            .split('@')
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("git-ai")
+            .to_string()
+    });
+    let ident = format!("{} <{}> {} +0000", name, email, timestamp_secs);
+
+    script.extend_from_slice(format!("commit {}\n", refname).as_bytes());
+    script.extend_from_slice(format!("author {}\n", ident).as_bytes());
+    script.extend_from_slice(format!("committer {}\n", ident).as_bytes());
+    script.extend_from_slice(format!("data {}\n", message.len()).as_bytes());
+    script.extend_from_slice(message.as_bytes());
+    script.extend_from_slice(b"\n");
+    Ok(())
 }
 
 #[doc(hidden)]
@@ -215,9 +274,13 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
         script.extend_from_slice(b"\n");
     }
 
-    script.extend_from_slice(b"commit refs/notes/ai\n");
-    script.extend_from_slice(format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes());
-    script.extend_from_slice(b"data 0\n");
+    append_fast_import_commit_header(
+        &mut script,
+        repo,
+        "refs/notes/ai",
+        NOTES_UPDATE_COMMIT_MESSAGE,
+        now,
+    )?;
     if let Some(existing_tip) = existing_notes_tip {
         script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
     }
@@ -282,9 +345,13 @@ pub fn notes_add_blob_batch(
         .as_secs();
 
     let mut script = Vec::<u8>::new();
-    script.extend_from_slice(b"commit refs/notes/ai\n");
-    script.extend_from_slice(format!("committer git-ai <git-ai@local> {} +0000\n", now).as_bytes());
-    script.extend_from_slice(b"data 0\n");
+    append_fast_import_commit_header(
+        &mut script,
+        repo,
+        "refs/notes/ai",
+        NOTES_UPDATE_COMMIT_MESSAGE,
+        now,
+    )?;
     if let Some(existing_tip) = existing_notes_tip {
         script.extend_from_slice(format!("from {}\n", existing_tip).as_bytes());
     }
@@ -569,6 +636,148 @@ pub fn merge_notes_from_ref(repo: &Repository, source_ref: &str) -> Result<(), G
     Ok(())
 }
 
+pub fn normalize_notes_history_for_push(
+    repo: &Repository,
+    base_ref: Option<&str>,
+) -> Result<bool, GitAiError> {
+    let local_ref = "refs/notes/ai";
+    if !ref_exists(repo, local_ref) {
+        return Ok(false);
+    }
+
+    let base_ref = base_ref.filter(|base| ref_exists(repo, base));
+    if !notes_history_requires_normalization(repo, local_ref, base_ref)? {
+        return Ok(false);
+    }
+
+    let local_tree = rev_parse(repo, &format!("{}^{{tree}}", local_ref))?;
+    if let Some(base) = base_ref {
+        let base_tree = rev_parse(repo, &format!("{}^{{tree}}", base))?;
+        if local_tree == base_tree {
+            copy_ref(repo, base, local_ref)?;
+            return Ok(true);
+        }
+    }
+
+    let base_commit = base_ref.map(|base| rev_parse(repo, base)).transpose()?;
+    let mut notes_by_object = HashMap::new();
+    if let Some(base) = base_ref {
+        // If we use the remote tracking ref as the parent, the replacement tree
+        // must also contain any remote-only notes. Otherwise a failed pre-push
+        // merge followed by normalization could fast-forward the remote while
+        // deleting notes that only existed on the remote.
+        for (blob, object) in list_all_notes(repo, base)? {
+            notes_by_object.insert(object, blob);
+        }
+    }
+    for (blob, object) in list_all_notes(repo, local_ref)? {
+        notes_by_object.insert(object, blob);
+    }
+    let mut combined_notes: Vec<(String, String)> = notes_by_object
+        .into_iter()
+        .map(|(object, blob)| (blob, object))
+        .collect();
+    combined_notes.sort_by(|a, b| a.1.cmp(&b.1));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
+        .as_secs();
+
+    let temp_ref = format!("refs/notes/ai-normalize-tmp/{}", crate::uuid::generate_v4());
+    delete_ref_if_exists(repo, &temp_ref);
+
+    let mut stream = Vec::new();
+    append_fast_import_commit_header(
+        &mut stream,
+        repo,
+        &temp_ref,
+        NOTES_UPDATE_COMMIT_MESSAGE,
+        now,
+    )?;
+    if let Some(base_commit) = base_commit {
+        stream.extend_from_slice(format!("from {}\n", base_commit).as_bytes());
+    }
+    stream.extend_from_slice(b"deleteall\n");
+    for (blob, object) in combined_notes {
+        let path = notes_path_for_object(&object);
+        stream.extend_from_slice(format!("M 100644 {} {}\n", blob, path).as_bytes());
+    }
+    stream.extend_from_slice(b"\n");
+
+    let mut args = repo.global_args_for_exec();
+    args.push("fast-import".to_string());
+    args.push("--quiet".to_string());
+    exec_git_stdin(&args, &stream)?;
+    copy_ref(repo, &temp_ref, local_ref)?;
+    delete_ref_if_exists(repo, &temp_ref);
+    Ok(true)
+}
+
+fn delete_ref_if_exists(repo: &Repository, refname: &str) {
+    let mut args = repo.global_args_for_exec();
+    args.push("update-ref".to_string());
+    args.push("-d".to_string());
+    args.push(refname.to_string());
+    let _ = exec_git(&args);
+}
+
+fn notes_history_requires_normalization(
+    repo: &Repository,
+    local_ref: &str,
+    base_ref: Option<&str>,
+) -> Result<bool, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.push("log".to_string());
+    args.push("--format=%ae%x09%ce%x09%s".to_string());
+    args.push(local_ref.to_string());
+    if let Some(base) = base_ref {
+        args.push("--not".to_string());
+        args.push(base.to_string());
+    }
+
+    let output = exec_git(&args)?;
+    let stdout = String::from_utf8(output.stdout)?;
+    Ok(stdout.lines().any(|line| {
+        let mut parts = line.splitn(3, '\t');
+        let author_email = parts.next().unwrap_or_default();
+        let committer_email = parts.next().unwrap_or_default();
+        let subject = parts.next().unwrap_or_default();
+
+        !is_git_server_safe_notes_subject(subject)
+            || is_legacy_git_ai_email(author_email)
+            || is_legacy_git_ai_email(committer_email)
+    }))
+}
+
+fn is_git_server_safe_notes_subject(subject: &str) -> bool {
+    let subject = subject.trim();
+    if subject.starts_with("feat: #") || subject.starts_with("fix: #") {
+        return true;
+    }
+
+    [
+        "docs:",
+        "style:",
+        "refactor:",
+        "perf:",
+        "test:",
+        "chore:",
+        "build:",
+        "ci:",
+        "revert:",
+        "release:",
+    ]
+    .iter()
+    .any(|prefix| subject.starts_with(prefix) && subject.len() > prefix.len())
+}
+
+fn is_legacy_git_ai_email(email: &str) -> bool {
+    matches!(
+        email.trim(),
+        "git-ai@local" | "git-ai@noreply" | "git-ai@localhost"
+    )
+}
+
 /// Fallback merge when `git notes merge -s ours` fails (e.g., due to git assertion
 /// failures on corrupted/mixed-fanout notes trees). Implements the "ours" strategy
 /// using a single `git fast-import` invocation that:
@@ -605,10 +814,20 @@ pub fn fallback_merge_notes_ours(repo: &Repository, source_ref: &str) -> Result<
     //    Emit source (remote) notes first, then local notes. fast-import uses
     //    last-writer-wins for duplicate paths, so local notes take precedence —
     //    this implements the "ours" merge strategy.
-    let mut stream = String::new();
-    stream.push_str(&format!("commit {}\n", local_ref));
-    stream.push_str("committer git-ai <git-ai@noreply> 0 +0000\n");
-    stream.push_str("data 23\nMerge notes (fallback)\n");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| GitAiError::Generic(format!("System clock before epoch: {}", e)))?
+        .as_secs();
+
+    let mut stream = Vec::new();
+    append_fast_import_commit_header(
+        &mut stream,
+        repo,
+        &local_ref,
+        NOTES_MERGE_COMMIT_MESSAGE,
+        now,
+    )?;
+    let mut stream = String::from_utf8(stream)?;
     stream.push_str(&format!("from {}\n", local_commit));
     stream.push_str(&format!("merge {}\n", source_commit));
     // Start with a clean tree to avoid mixed-fanout issues

@@ -1,6 +1,6 @@
 use crate::git::refs::{
     AI_AUTHORSHIP_PUSH_REFSPEC, copy_ref, fallback_merge_notes_ours, merge_notes_from_ref,
-    ref_exists, tracking_ref_for_remote,
+    normalize_notes_history_for_push, ref_exists, tracking_ref_for_remote,
 };
 use crate::{
     error::GitAiError,
@@ -253,7 +253,13 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
             );
         }
 
-        fetch_and_merge_tracking_notes(repository, remote_name);
+        let tracking_ref = fetch_and_merge_tracking_notes(repository, remote_name);
+        let base_ref = tracking_ref
+            .as_deref()
+            .filter(|r| ref_exists(repository, r));
+        if let Err(e) = normalize_notes_history_for_push(repository, base_ref) {
+            tracing::debug!("notes history normalization before push failed: {}", e);
+        }
 
         // Push notes without force (requires fast-forward)
         let push_args = build_authorship_push_args(repository.global_args_for_exec(), remote_name);
@@ -280,7 +286,7 @@ pub fn push_authorship_notes(repository: &Repository, remote_name: &str) -> Resu
 }
 
 /// Fetch remote notes into a tracking ref and merge into local refs/notes/ai.
-fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) {
+fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) -> Option<String> {
     let tracking_ref = tracking_ref_for_remote(remote_name);
     let fetch_refspec = format!("+refs/notes/ai:{}", tracking_ref);
 
@@ -294,13 +300,13 @@ fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) {
 
     // Fetch is best-effort; if it fails (e.g., no remote notes yet), continue
     if exec_git(&fetch_args).is_err() {
-        return;
+        return None;
     }
 
     let local_notes_ref = "refs/notes/ai";
 
     if !ref_exists(repository, &tracking_ref) {
-        return;
+        return None;
     }
 
     if !ref_exists(repository, local_notes_ref) {
@@ -313,7 +319,7 @@ fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) {
         if let Err(e) = copy_ref(repository, &tracking_ref, local_notes_ref) {
             tracing::debug!("pre-push notes copy failed: {}", e);
         }
-        return;
+        return Some(tracking_ref);
     }
 
     // Both exist - merge them
@@ -331,6 +337,8 @@ fn fetch_and_merge_tracking_notes(repository: &Repository, remote_name: &str) {
             tracing::debug!("pre-push fallback merge also failed: {}", e2);
         }
     }
+
+    Some(tracking_ref)
 }
 
 fn is_non_fast_forward_error(error: &GitAiError) -> bool {

@@ -4,11 +4,13 @@ use git_ai::error::GitAiError;
 use git_ai::git::refs::{
     CommitAuthorship, commits_with_authorship_notes, copy_ref, get_commits_with_notes_from_list,
     get_reference_as_authorship_log_v3, get_reference_as_working_log, grep_ai_notes,
-    merge_notes_from_ref, note_blob_oids_for_commits, notes_add, notes_add_batch,
-    notes_add_blob_batch, ref_exists, show_authorship_note,
+    merge_notes_from_ref, normalize_notes_history_for_push, note_blob_oids_for_commits, notes_add,
+    notes_add_batch, notes_add_blob_batch, ref_exists, show_authorship_note,
 };
 use git_ai::git::repository::{exec_git, find_repository_in_path};
 use std::fs;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 // ---------------------------------------------------------------------------
 // Repo-based tests (TestRepo replaces TmpRepo)
@@ -28,6 +30,39 @@ fn head_sha(repo: &TestRepo) -> String {
         .expect("rev-parse HEAD")
         .trim()
         .to_string()
+}
+
+fn legacy_bad_notes_commit(repo: &TestRepo, notes_tree: &str, parent: Option<&str>) -> String {
+    let mut args = vec![
+        "-C".to_string(),
+        repo.path().to_str().unwrap().to_string(),
+        "commit-tree".to_string(),
+        notes_tree.to_string(),
+    ];
+    if let Some(parent) = parent {
+        args.push("-p".to_string());
+        args.push(parent.to_string());
+    }
+
+    let mut child = Command::new("git")
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "git-ai")
+        .env("GIT_AUTHOR_EMAIL", "git-ai@local")
+        .env("GIT_COMMITTER_NAME", "git-ai")
+        .env("GIT_COMMITTER_EMAIL", "git-ai@local")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn commit-tree");
+    child
+        .stdin
+        .as_mut()
+        .expect("commit-tree stdin")
+        .write_all(b"")
+        .expect("write empty message");
+    let output = child.wait_with_output().expect("wait commit-tree");
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
 #[test]
@@ -58,6 +93,193 @@ fn test_notes_add_and_show_authorship_note() {
     let non_existent_content =
         show_authorship_note(&gitai_repo, "0000000000000000000000000000000000000000");
     assert!(non_existent_content.is_none());
+}
+
+#[test]
+fn test_notes_add_uses_repo_identity_and_conventional_message() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("initial.txt"), "initial\n").unwrap();
+    repo.stage_all_and_commit("Initial commit")
+        .expect("Failed to create initial commit");
+    let commit_sha = head_sha(&repo);
+
+    notes_add(&gitai_repo, &commit_sha, "test authorship note")
+        .expect("Failed to add authorship note");
+
+    let metadata = repo
+        .git_og(&[
+            "log",
+            "--format=%an%n%ae%n%cn%n%ce%n%s",
+            "-1",
+            "refs/notes/ai",
+        ])
+        .expect("read notes commit metadata");
+    let lines: Vec<&str> = metadata.lines().collect();
+
+    assert_eq!(lines[0], "Test User");
+    assert_eq!(lines[1], "test@example.com");
+    assert_eq!(lines[2], "Test User");
+    assert_eq!(lines[3], "test@example.com");
+    assert_eq!(lines[4], "chore: update git-ai authorship notes");
+}
+
+#[test]
+fn test_normalize_notes_history_removes_legacy_bad_notes_commits() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("initial.txt"), "initial\n").unwrap();
+    repo.stage_all_and_commit("Initial commit")
+        .expect("Failed to create initial commit");
+    let commit_sha = head_sha(&repo);
+
+    notes_add(&gitai_repo, &commit_sha, "test authorship note")
+        .expect("Failed to add authorship note");
+
+    let notes_tree = repo
+        .git_og(&["rev-parse", "refs/notes/ai^{tree}"])
+        .expect("read notes tree")
+        .trim()
+        .to_string();
+    let legacy_bad_commit = legacy_bad_notes_commit(&repo, &notes_tree, None);
+    repo.git_og(&["update-ref", "refs/notes/ai", &legacy_bad_commit])
+        .expect("install legacy bad notes commit");
+
+    assert!(normalize_notes_history_for_push(&gitai_repo, None).expect("normalize notes history"));
+
+    let metadata = repo
+        .git_og(&[
+            "log",
+            "--format=%an%n%ae%n%cn%n%ce%n%s%n%P",
+            "-1",
+            "refs/notes/ai",
+        ])
+        .expect("read normalized notes commit metadata");
+    let lines: Vec<&str> = metadata.lines().collect();
+    assert_eq!(lines[0], "Test User");
+    assert_eq!(lines[1], "test@example.com");
+    assert_eq!(lines[2], "Test User");
+    assert_eq!(lines[3], "test@example.com");
+    assert_eq!(lines[4], "chore: update git-ai authorship notes");
+    assert_eq!(lines.get(5).copied().unwrap_or_default(), "");
+
+    let retrieved_content =
+        show_authorship_note(&gitai_repo, &commit_sha).expect("note survives normalization");
+    assert_eq!(retrieved_content, "test authorship note");
+}
+
+#[test]
+fn test_normalize_notes_history_preserves_remote_base_parent() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("a.txt"), "a\n").unwrap();
+    repo.stage_all_and_commit("Commit A").expect("commit A");
+    let commit_a = head_sha(&repo);
+    notes_add(&gitai_repo, &commit_a, "note A").expect("add note A");
+
+    let base_ref = "refs/notes/ai-remote/origin";
+    repo.git_og(&["update-ref", base_ref, "refs/notes/ai"])
+        .expect("copy base notes ref");
+    let base_commit = repo
+        .git_og(&["rev-parse", base_ref])
+        .expect("read base notes commit")
+        .trim()
+        .to_string();
+
+    fs::write(repo.path().join("b.txt"), "b\n").unwrap();
+    repo.stage_all_and_commit("Commit B").expect("commit B");
+    let commit_b = head_sha(&repo);
+    notes_add(&gitai_repo, &commit_b, "note B").expect("add note B");
+
+    let notes_tree = repo
+        .git_og(&["rev-parse", "refs/notes/ai^{tree}"])
+        .expect("read notes tree")
+        .trim()
+        .to_string();
+    let legacy_bad_commit = legacy_bad_notes_commit(&repo, &notes_tree, Some(&base_commit));
+    repo.git_og(&["update-ref", "refs/notes/ai", &legacy_bad_commit])
+        .expect("install legacy bad notes commit with remote base parent");
+
+    assert!(
+        normalize_notes_history_for_push(&gitai_repo, Some(base_ref))
+            .expect("normalize notes history")
+    );
+
+    let metadata = repo
+        .git_og(&["log", "--format=%s%n%P", "-1", "refs/notes/ai"])
+        .expect("read normalized notes commit metadata");
+    let lines: Vec<&str> = metadata.lines().collect();
+    assert_eq!(lines[0], "chore: update git-ai authorship notes");
+    assert_eq!(lines[1], base_commit);
+
+    assert_eq!(
+        show_authorship_note(&gitai_repo, &commit_a).expect("note A survives normalization"),
+        "note A"
+    );
+    assert_eq!(
+        show_authorship_note(&gitai_repo, &commit_b).expect("note B survives normalization"),
+        "note B"
+    );
+}
+
+#[test]
+fn test_normalize_notes_history_keeps_remote_only_notes_when_using_base_parent() {
+    let (repo, gitai_repo) = repo_with_handle();
+
+    fs::write(repo.path().join("remote.txt"), "remote\n").unwrap();
+    repo.stage_all_and_commit("Remote commit")
+        .expect("remote commit");
+    let remote_commit = head_sha(&repo);
+    notes_add(&gitai_repo, &remote_commit, "remote-only note").expect("add remote note");
+
+    let base_ref = "refs/notes/ai-remote/origin";
+    repo.git_og(&["update-ref", base_ref, "refs/notes/ai"])
+        .expect("copy remote notes ref");
+    let base_commit = repo
+        .git_og(&["rev-parse", base_ref])
+        .expect("read base notes commit")
+        .trim()
+        .to_string();
+
+    fs::write(repo.path().join("local.txt"), "local\n").unwrap();
+    repo.stage_all_and_commit("Local commit")
+        .expect("local commit");
+    let local_commit = head_sha(&repo);
+
+    // Simulate the hazardous state from a failed pre-push notes merge:
+    // the fetched tracking ref has a remote-only note, while local refs/notes/ai
+    // has legacy metadata and only the local note. Normalization must not create
+    // a fast-forward commit on top of the tracking ref that drops the remote note.
+    notes_add(&gitai_repo, &local_commit, "local note").expect("add local note");
+    let notes_tree = repo
+        .git_og(&["rev-parse", "refs/notes/ai^{tree}"])
+        .expect("read local notes tree")
+        .trim()
+        .to_string();
+    let legacy_bad_commit = legacy_bad_notes_commit(&repo, &notes_tree, None);
+    repo.git_og(&["update-ref", "refs/notes/ai", &legacy_bad_commit])
+        .expect("install local-only legacy notes commit");
+
+    assert!(
+        normalize_notes_history_for_push(&gitai_repo, Some(base_ref))
+            .expect("normalize notes history")
+    );
+
+    let metadata = repo
+        .git_og(&["log", "--format=%s%n%P", "-1", "refs/notes/ai"])
+        .expect("read normalized notes metadata");
+    let lines: Vec<&str> = metadata.lines().collect();
+    assert_eq!(lines[0], "chore: update git-ai authorship notes");
+    assert_eq!(lines[1], base_commit);
+
+    assert_eq!(
+        show_authorship_note(&gitai_repo, &remote_commit).expect("remote note survives"),
+        "remote-only note"
+    );
+    assert_eq!(
+        show_authorship_note(&gitai_repo, &local_commit).expect("local note survives"),
+        "local note"
+    );
 }
 
 #[test]
