@@ -1,0 +1,19 @@
+[codespell]
+# Ref: https://github.com/codespell-project/codespell#using-a-config-file
+# secrets.rs contains a hardcoded BIGRAMS table of 2-letter byte literals that look like typos.
+# tests/fixtures/*.jsonl contain captured agent transcripts with intentional typos and truncated text.
+skip = .git,.gitignore,.gitattributes,*.svg,*.lock,.codespellrc,*/secrets.rs,*/example-claude-code.jsonl,*/windsurf-session-simple.jsonl
+check-hidden = true
+# ignore-regex =
+# Domain-specific terms / abbreviations / identifier names that codespell flags as typos:
+#   caf       - "café" rendered via Latin-1/UTF-8 escape sequences in tests (e.g. b"caf\xe9")
+#   ratatui   - Rust TUI library (Cargo dependency)
+#   juxt      - JS functional helper name (juxtapose) used in test fixtures
+#   ser       - serde::ser module
+#   statics   - test variable holding a `src/static_files.rs` filename handle
+#   nam       - "Việt Nam" in test data for non-ASCII filenames
+#   vas       - "VirtualAttributions" abbreviation used throughout authorship code
+#   fo        - Windows tasklist /FO output-format flag
+#   ue        - test variable holding a `util_e.py` filename handle
+#   afile     - Vim autocmd built-in `<afile>` (current buffer file)
+ignore-words-list = caf,ratatui,juxt,ser,statics,nam,vas,fo,ue,afile

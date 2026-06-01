@@ -4,7 +4,7 @@
 # Install a git-ai debug build for local dev on the system so that all git commands will route through it.
 # Installs to the same location as real release builds, so it overrides system-wide. It also runs `git-ai install`
 # and restarts the daemon to ensure all latest code changes are fully installed and propagated system-wide.
-# Use this for trying out changes locally -- do not use any other approaches for runing git-ai locally. They will
+# Use this for trying out changes locally -- do not use any other approaches for running git-ai locally. They will
 # not work, interfere, and break things.
 task dev
 
@@ -50,7 +50,7 @@ A single binary serves two roles based on `argv[0]`:
 1. **Checkpoint**: An AI coding agent calls `git-ai checkpoint <agent>` with hook input (typically JSON via stdin) before AND after it edits a file. The corresponding agent preset (`src/commands/checkpoint_agent/agent_presets.rs`) extracts edited file paths, transcript, and model info. The checkpoint processor diffs the file against HEAD's version or the last-checkpointed value of that file and compute character-level attributions. The combination of pre and post file edit checkpoints is what allows us to know exactly what the AI changed (since we can compare the before and after). There are 3 main types of checkpoints in git-ai:
     * Plain or legacy `human`: only due to legacy, it's still called `human` as it used to mean "human" edited files, but since we migrated to an explicit Human checkpoint (now called `known_human`), this checkpoint represents 'untracked' changes. This is the checkpoint that AI agent presets invoke to take the before edit snapshots. Changes caught by these checkpoints do get explicit attestations in the final authorship notes (they are basically holes in the data) and stats recognize them as untracked. For testing, invoke by calling `git-ai checkpoint human` (for unscoped) or `git-ai checkpoint human /path/to/file` (for scoped).
     * Known human (`known_human`) checkpoints: this is the 'real' Human checkpoint. These are never called by the AI agent presets and are only invoked by our IDE/editor extensions that recognize when a change has actually been made by the human by typing, etc. For testing, invoke via `git-ai checkpoint mock_known_human` (for unscoped) or `git-ai checkpoint mock_known_human /path/to/file` (for scoped).
-    * AI checkpoint (`ai_agent`) checkpoints: this is the AI checkpoint that explicitly associates the captured changes with the particular AI agent and session. This is the checkpoint taht AI agent presets invoke to take the after edit snapshots. For testing, invoke via `git-ai checkpoint mock_ai` (for unscoped) or `git-ai checkpoint mock_ai /path/to/file` (for scoped).
+    * AI checkpoint (`ai_agent`) checkpoints: this is the AI checkpoint that explicitly associates the captured changes with the particular AI agent and session. This is the checkpoint that AI agent presets invoke to take the after edit snapshots. For testing, invoke via `git-ai checkpoint mock_ai` (for unscoped) or `git-ai checkpoint mock_ai /path/to/file` (for scoped).
 
 2. **Working log**: Checkpoint data is written to `.git/ai/working_logs/<base_commit>/` as JSON files. Each working log entry records per-file line attributions (which ranges are AI vs known human vs untracked (legacy human)) and session metadata.
 

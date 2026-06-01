@@ -44,7 +44,7 @@ pub struct LineAttribution {
     pub end_line: u32,
     /// Identifier for the author of this range
     pub author_id: String,
-    /// Author ID that was overwritten by this attribution (e.g., if Alice wrote this line originally, then Bob edited it, overwrote=Alice because her edit was writen over)
+    /// Author ID that was overwritten by this attribution (e.g., if Alice wrote this line originally, then Bob edited it, overwrote=Alice because her edit was written over)
     #[serde(default)]
     pub overrode: Option<String>,
 }

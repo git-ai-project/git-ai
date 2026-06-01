@@ -801,7 +801,7 @@ fn inverse_meta_no_command() {
         .map(String::from)
         .collect::<Vec<_>>();
     let parsed = parse_git_cli_args(&args);
-    // global=[], command="versino", command_args=[]
+    // global=[], command="version", command_args=[]
     assert_eq!(parsed.global_args, Vec::<String>::new());
     assert_eq!(parsed.command, Some("version".into()));
     assert_eq!(parsed.command_args, Vec::<String>::new());

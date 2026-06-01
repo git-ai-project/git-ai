@@ -117,4 +117,4 @@ During the transition period, a single note can contain both old-format and new-
 ## What may change in the future
 
 - We may add trace-level data to the `"humans"` attribution (ex: `h_a1b2c3d4e5f678::t_9f8e7d6c5b4a32`)
-- We are still prototyping ideas for how to track the provenance of deletions with minimal foramt changes. Due to it's complexity, this is unlikely to land soon and it is also likely to live in the JSON so as to avoid adding more data above the attestations `---` fold.
+- We are still prototyping ideas for how to track the provenance of deletions with minimal format changes. Due to it's complexity, this is unlikely to land soon and it is also likely to live in the JSON so as to avoid adding more data above the attestations `---` fold.
