@@ -224,6 +224,24 @@ pub fn shift_authorship_notes(
 
     tracing::debug!("shift_authorship_notes: {} mappings", mappings.len());
 
+    if let Ok(debug_path) = std::env::var("GIT_AI_DEBUG_FILE") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&debug_path)
+        {
+            for (src, dst) in mappings {
+                let _ = writeln!(
+                    f,
+                    "[shift_notes] {}→{}",
+                    &src[..8.min(src.len())],
+                    &dst[..8.min(dst.len())]
+                );
+            }
+        }
+    }
+
     if mappings.is_empty() {
         return Ok(());
     }

@@ -5058,6 +5058,33 @@ impl ActorDaemonCoordinator {
             None => return Ok(()),
         };
 
+        if let Ok(debug_path) = std::env::var("GIT_AI_DEBUG_FILE") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&debug_path)
+            {
+                let refs: Vec<String> = cmd
+                    .ref_changes
+                    .iter()
+                    .map(|rc| {
+                        format!(
+                            "{}:{}→{}",
+                            &rc.reference,
+                            &rc.old[..8.min(rc.old.len())],
+                            &rc.new[..8.min(rc.new.len())]
+                        )
+                    })
+                    .collect();
+                let _ = writeln!(
+                    f,
+                    "[non_ff_detect] cmd={:?} refs={:?}",
+                    cmd.primary_command, refs
+                );
+            }
+        }
+
         let repo = find_repository_in_path(&worktree.to_string_lossy())?;
 
         // For rebase --skip/--continue that completes successfully, the trace2 data only shows
@@ -5344,6 +5371,9 @@ impl ActorDaemonCoordinator {
         let skip_non_ff = if is_completing_rebase || is_pull_rebase {
             false
         } else if is_rebase_abort {
+            if let Some(worktree) = cmd.worktree.as_ref() {
+                self.clear_pending_rebase_original_head_for_worktree(worktree)?;
+            }
             true
         } else {
             events.iter().any(|event| {
@@ -5621,9 +5651,45 @@ impl ActorDaemonCoordinator {
                         }
                     }
                     crate::daemon::domain::SemanticEvent::CommitCreated { base, new_head } => {
+                        if let Ok(debug_path) = std::env::var("GIT_AI_DEBUG_FILE") {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&debug_path)
+                            {
+                                let _ = writeln!(
+                                    f,
+                                    "[CommitCreated] new_head={} base={:?} is_completing_rebase={} is_pull_rebase={} cmd={:?} args={:?}",
+                                    &new_head,
+                                    base.as_ref().map(|b| &b[..8.min(b.len())]),
+                                    is_completing_rebase,
+                                    is_pull_rebase,
+                                    cmd.primary_command,
+                                    &cmd.invoked_args[..cmd.invoked_args.len().min(5)]
+                                );
+                            }
+                        }
                         if is_completing_rebase || is_pull_rebase {
                             // During rebase, note transfer is handled by non-FF detection.
                             // Skip post-commit note generation to avoid overwriting shifted notes.
+                        } else if !new_head.is_empty()
+                            && cmd.primary_command.as_deref() == Some("revert")
+                        {
+                            // For git revert, reconstruct attribution for re-introduced lines.
+                            // The revert undoes a commit, re-adding lines that existed before.
+                            // Those lines' attribution comes from the state at the revert's parent
+                            // (which is the reverted commit itself — blaming the parent gives us
+                            // the original attribution for lines that existed before the reverted
+                            // commit's changes).
+                            let repo = find_repository_in_path(&worktree)?;
+                            if let Err(e) = crate::authorship::rewrite_revert::handle_revert_commit(
+                                &repo,
+                                new_head,
+                                base.as_deref(),
+                            ) {
+                                tracing::debug!(%e, "revert attribution transfer failed");
+                            }
                         } else if !new_head.is_empty() {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.git_author_identity().formatted_or_unknown();
@@ -5635,21 +5701,54 @@ impl ActorDaemonCoordinator {
                                 parent_sha,
                                 carryover_snapshot.as_ref(),
                             );
-                            if let Err(e) =
-                                crate::authorship::post_commit::post_commit_with_final_state(
-                                    &repo,
-                                    base_opt,
-                                    new_head.clone(),
-                                    author,
-                                    true,
-                                    carryover_snapshot.as_ref(),
-                                )
-                            {
-                                tracing::debug!(
-                                    %e,
-                                    %worktree,
-                                    "commit post-commit side effect failed"
-                                );
+                            match crate::authorship::post_commit::post_commit_with_final_state(
+                                &repo,
+                                base_opt.clone(),
+                                new_head.clone(),
+                                author,
+                                true,
+                                carryover_snapshot.as_ref(),
+                            ) {
+                                Ok(_) => {
+                                    if let Ok(debug_path) = std::env::var("GIT_AI_DEBUG_FILE") {
+                                        use std::io::Write;
+                                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                                            .create(true)
+                                            .append(true)
+                                            .open(&debug_path)
+                                        {
+                                            let _ = writeln!(
+                                                f,
+                                                "[CommitCreated] post_commit OK for {} base={:?}",
+                                                &new_head[..8.min(new_head.len())],
+                                                base_opt
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    if let Ok(debug_path) = std::env::var("GIT_AI_DEBUG_FILE") {
+                                        use std::io::Write;
+                                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                                            .create(true)
+                                            .append(true)
+                                            .open(&debug_path)
+                                        {
+                                            let _ = writeln!(
+                                                f,
+                                                "[CommitCreated] post_commit FAILED for {} base={:?}: {}",
+                                                &new_head[..8.min(new_head.len())],
+                                                base_opt,
+                                                e
+                                            );
+                                        }
+                                    }
+                                    tracing::debug!(
+                                        %e,
+                                        %worktree,
+                                        "commit post-commit side effect failed"
+                                    );
+                                }
                             }
                             // Squash merge: if this commit was created after merge --squash,
                             // transfer authorship notes from the source branch commits.
@@ -5739,6 +5838,22 @@ impl ActorDaemonCoordinator {
                         old_head,
                         new_head,
                     } => {
+                        if let Ok(debug_path) = std::env::var("GIT_AI_DEBUG_FILE") {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&debug_path)
+                            {
+                                let _ = writeln!(
+                                    f,
+                                    "[Reset] kind={:?} old_head={} new_head={}",
+                                    kind,
+                                    &old_head[..8.min(old_head.len())],
+                                    &new_head[..8.min(new_head.len())]
+                                );
+                            }
+                        }
                         if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
                             let repo = find_repository_in_path(&worktree)?;
                             match kind {

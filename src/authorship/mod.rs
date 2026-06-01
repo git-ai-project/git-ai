@@ -18,6 +18,7 @@ pub mod rebase_authorship;
 pub mod rewrite;
 pub mod rewrite_cherry_pick;
 pub mod rewrite_reset;
+pub mod rewrite_revert;
 pub mod rewrite_stash;
 pub mod secrets;
 pub mod stats;

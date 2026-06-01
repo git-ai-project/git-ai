@@ -112,9 +112,11 @@ pub fn reconstruct_working_log_after_backward_reset(
     // Only keep attributions for files that have uncommitted content
     file_attributions.retain(|path, _| file_blobs.contains_key(path));
 
-    // Write as initial working log for new_tip
+    // Write as INITIAL working log for new_tip.
+    // Do NOT call reset_working_log() here: checkpoints may have already been
+    // written between the time the reset happened and when the daemon processes
+    // this event. Clearing checkpoints.jsonl would lose that data.
     let working_log = repo.storage.working_log_for_base_commit(new_tip)?;
-    working_log.reset_working_log()?;
 
     working_log.write_initial_attributions_with_contents(
         file_attributions,

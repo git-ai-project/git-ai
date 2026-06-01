@@ -48,6 +48,7 @@ impl AnalyzerRegistry {
             "rebase",
             "cherry-pick",
             "merge",
+            "revert",
             "update-ref",
         ] {
             registry.register_command(command, history.clone());

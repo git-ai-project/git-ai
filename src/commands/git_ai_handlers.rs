@@ -538,10 +538,8 @@ fn handle_checkpoint(args: &[String]) {
         let control_request = ControlRequest::CheckpointRun {
             request: Box::new(request),
         };
-        let send_result = crate::daemon::send_control_request_fire_and_forget(
-            &config.control_socket_path,
-            &control_request,
-        );
+        let send_result =
+            crate::daemon::send_control_request(&config.control_socket_path, &control_request);
         if perf {
             eprintln!(
                 "[perf] checkpoint: ipc_send={:.1}ms",

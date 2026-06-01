@@ -25,7 +25,7 @@ impl CommandAnalyzer for HistoryAnalyzer {
 
         let mut events = Vec::new();
         match name {
-            "commit" => {
+            "commit" | "revert" => {
                 let amend = args.iter().any(|arg| arg == "--amend");
                 let post_head =
                     non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()));

@@ -1534,6 +1534,244 @@ fn collect_unstaged_hunks_from_snapshot(
     Ok((unstaged_hunks, pure_insertion_hunks))
 }
 
+/// Inherit attribution from the parent commit's note for files that were modified
+/// in this commit. Git blame can assign "shifted-but-unchanged" lines to this
+/// commit, so the note must cover them to avoid attribution gaps.
+fn inherit_parent_attribution_for_modified_files(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    committed_hunks: &HashMap<String, Vec<LineRange>>,
+    authorship_log: &mut crate::authorship::authorship_log_serialization::AuthorshipLog,
+) {
+    use crate::authorship::attribution_tracker::LineAttribution;
+    use crate::authorship::hunk_shift::apply_hunk_shifts_to_line_attributions;
+    use crate::authorship::rewrite::compute_diff_trees_batch;
+    use crate::commands::blame::GitAiBlameOptions;
+
+    let files_to_check: Vec<&str> = committed_hunks.keys().map(|f| f.as_str()).collect();
+    if files_to_check.is_empty() {
+        return;
+    }
+
+    // Compute diff from parent → commit to get line shifts
+    let diff_results =
+        match compute_diff_trees_batch(repo, &[(parent_sha.to_string(), commit_sha.to_string())]) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+    let hunks_by_file = match diff_results.first() {
+        Some(r) => &r.hunks_by_file,
+        None => return,
+    };
+
+    let options = GitAiBlameOptions {
+        newest_commit: Some(parent_sha.to_string()),
+        no_output: true,
+        ..Default::default()
+    };
+
+    for file_path in files_to_check {
+        // Collect already-attributed lines in this commit's note for this file
+        let already_attributed: std::collections::HashSet<u32> = authorship_log
+            .attestations
+            .iter()
+            .filter(|fa| fa.file_path == file_path)
+            .flat_map(|fa| fa.entries.iter())
+            .flat_map(|entry| entry.line_ranges.iter().flat_map(|r| r.expand()))
+            .collect();
+
+        // Get total lines for this file in the commit
+        let file_content =
+            crate::authorship::rewrite_reset::file_content_at_commit(repo, commit_sha, file_path);
+        if file_content.is_empty() {
+            continue;
+        }
+        let total_lines = file_content.lines().count() as u32;
+
+        // Only consider lines that are in committed_hunks for this file.
+        // These are lines that git blame will attribute to THIS commit.
+        // Context lines (not in committed_hunks) are attributed by git blame
+        // to older commits whose notes already cover them.
+        let committed_line_set: std::collections::HashSet<u32> = committed_hunks
+            .get(file_path)
+            .map(|ranges| ranges.iter().flat_map(|r| r.expand()).collect())
+            .unwrap_or_default();
+
+        // Find committed lines NOT yet attributed in this commit's note.
+        // committed_hunks come from git diff -U0 and represent exactly the lines
+        // that git blame will attribute to this commit. Any such line without an
+        // attestation needs inheritance from the parent.
+        //
+        // Filter out empty/whitespace-only lines: these are often trailing newline
+        // artifacts where git diff reports a "change" but the line has no meaningful
+        // content to inherit attribution for.
+        let commit_lines: Vec<&str> = file_content.lines().collect();
+        let missing_lines: Vec<u32> = (1..=total_lines)
+            .filter(|l| {
+                if !committed_line_set.contains(l) || already_attributed.contains(l) {
+                    return false;
+                }
+                let idx = (*l - 1) as usize;
+                commit_lines
+                    .get(idx)
+                    .map(|c| !c.trim().is_empty())
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if missing_lines.is_empty() {
+            continue;
+        }
+
+        // Run git-ai blame on parent to get per-line attribution
+        let (parent_line_authors, _prompts) = match repo.blame(file_path, &options) {
+            Ok(result) => result,
+            Err(_) => continue,
+        };
+
+        if parent_line_authors.is_empty() {
+            continue;
+        }
+
+        // Build per-line attributions from parent blame (each line → its author)
+        let parent_attrs: Vec<LineAttribution> = parent_line_authors
+            .iter()
+            .filter(|(_, author)| crate::authorship::rewrite_revert::is_ai_author(author))
+            .map(|(&line, author)| LineAttribution {
+                start_line: line,
+                end_line: line,
+                author_id: author.clone(),
+                overrode: None,
+            })
+            .collect();
+
+        if parent_attrs.is_empty() {
+            continue;
+        }
+
+        // Shift parent line numbers to commit coordinate space using diff hunks
+        let shifted = if let Some(file_hunks) = hunks_by_file.get(file_path)
+            && !file_hunks.is_empty()
+        {
+            apply_hunk_shifts_to_line_attributions(&parent_attrs, file_hunks)
+        } else {
+            parent_attrs
+        };
+
+        // Only inherit for missing lines (not already in the note)
+        let mut ai_lines_by_author: HashMap<String, Vec<u32>> = HashMap::new();
+        for attr in &shifted {
+            for line in attr.start_line..=attr.end_line {
+                if missing_lines.contains(&line) {
+                    ai_lines_by_author
+                        .entry(attr.author_id.clone())
+                        .or_default()
+                        .push(line);
+                }
+            }
+        }
+
+        // Content-based fallback: for missing lines not covered by diff-shift,
+        // match by exact line content between parent and commit. This handles
+        // cases where the diff algorithm treats unchanged lines as a rewrite.
+        let shifted_covers: std::collections::HashSet<u32> = shifted
+            .iter()
+            .flat_map(|a| a.start_line..=a.end_line)
+            .collect();
+        let still_missing: Vec<u32> = missing_lines
+            .iter()
+            .filter(|l| !shifted_covers.contains(l))
+            .copied()
+            .collect();
+
+        if !still_missing.is_empty() {
+            let parent_content = crate::authorship::rewrite_reset::file_content_at_commit(
+                repo, parent_sha, file_path,
+            );
+            if !parent_content.is_empty() {
+                let commit_lines: Vec<&str> = file_content.lines().collect();
+                let parent_lines: Vec<&str> = parent_content.lines().collect();
+
+                let mut parent_content_to_author: HashMap<&str, &str> = HashMap::new();
+                for (&line_num, author) in &parent_line_authors {
+                    if !crate::authorship::rewrite_revert::is_ai_author(author) {
+                        continue;
+                    }
+                    if let Some(content) = parent_lines.get((line_num - 1) as usize) {
+                        parent_content_to_author.insert(content, author.as_str());
+                    }
+                }
+
+                // Determine total committed line count for this file to detect
+                // single-line trailing-newline artifacts vs. real block changes.
+                let total_committed: usize = committed_hunks
+                    .get(file_path)
+                    .map(|ranges| ranges.iter().map(|r| r.expand().len()).sum())
+                    .unwrap_or(0);
+
+                for &line in &still_missing {
+                    if let Some(content) = commit_lines.get((line - 1) as usize) {
+                        // When the parent has the same content at the same position,
+                        // only allow content-based inheritance if this is part of a
+                        // larger block change (>= 3 lines). Single-line or two-line
+                        // committed_hunks with same-position content are usually
+                        // trailing-newline artifacts where git diff reports a "change"
+                        // but the content is effectively unchanged.
+                        let parent_same_at_pos = parent_lines
+                            .get((line - 1) as usize)
+                            .map(|p| p == content)
+                            .unwrap_or(false);
+                        if parent_same_at_pos && total_committed < 3 {
+                            continue;
+                        }
+                        if let Some(&author) = parent_content_to_author.get(content) {
+                            ai_lines_by_author
+                                .entry(author.to_string())
+                                .or_default()
+                                .push(line);
+                        }
+                    }
+                }
+            }
+        }
+
+        if ai_lines_by_author.is_empty() {
+            continue;
+        }
+
+        // Add inherited AI lines to the authorship log
+        for (tool_name, mut lines) in ai_lines_by_author {
+            lines.sort();
+            lines.dedup();
+            let session_id = format!("s_inherited_{}", tool_name.replace(' ', "_"));
+            let ranges = LineRange::compress_lines(&lines);
+            let file_attestation = authorship_log.get_or_create_file(file_path);
+            file_attestation.add_entry(
+                crate::authorship::authorship_log_serialization::AttestationEntry::new(
+                    session_id.clone(),
+                    ranges,
+                ),
+            );
+
+            // Ensure session metadata exists
+            authorship_log
+                .metadata
+                .sessions
+                .entry(session_id.clone())
+                .or_insert_with(|| crate::authorship::authorship_log::SessionRecord {
+                    agent_id: crate::authorship::working_log::AgentId {
+                        tool: tool_name,
+                        id: String::new(),
+                        model: "unknown".to_string(),
+                    },
+                    human_author: None,
+                    custom_attributes: None,
+                });
+        }
+    }
+}
+
 fn split_lines_preserving_terminators(s: &str) -> Vec<&str> {
     let mut lines = Vec::new();
     let mut start = 0;
@@ -1608,8 +1846,10 @@ impl VirtualAttributions {
 
         // Extend pathspecs with renamed-to paths so diff_added_lines doesn't filter them out.
         let extended_pathspecs;
-        let effective_pathspecs = if !rename_map.is_empty() && pathspecs.is_some() {
-            let mut ps = pathspecs.unwrap().clone();
+        let effective_pathspecs = if !rename_map.is_empty()
+            && let Some(ps_ref) = pathspecs
+        {
+            let mut ps = ps_ref.clone();
             for (old_path, new_path) in &rename_map {
                 if ps.contains(old_path) {
                     ps.insert(new_path.clone());
@@ -1624,12 +1864,13 @@ impl VirtualAttributions {
         // Get committed hunks (in commit coordinates) and unstaged hunks (in working directory coordinates)
         let committed_hunks =
             collect_committed_hunks(repo, parent_sha, commit_sha, effective_pathspecs)?;
-        let (mut unstaged_hunks, pure_insertion_hunks) =
-            if let Some(snapshot) = final_state_snapshot {
-                collect_unstaged_hunks_from_snapshot(repo, commit_sha, effective_pathspecs, snapshot)?
-            } else {
-                collect_unstaged_hunks(repo, commit_sha, effective_pathspecs)?
-            };
+        let (mut unstaged_hunks, pure_insertion_hunks) = if let Some(snapshot) =
+            final_state_snapshot
+        {
+            collect_unstaged_hunks_from_snapshot(repo, commit_sha, effective_pathspecs, snapshot)?
+        } else {
+            collect_unstaged_hunks(repo, commit_sha, effective_pathspecs)?
+        };
 
         // IMPORTANT: If a line appears in both committed_hunks and unstaged_hunks, it means:
         // - The line was committed in this commit (in commit coordinates)
@@ -1692,9 +1933,11 @@ impl VirtualAttributions {
 
             // Get unstaged lines for this file (in working directory coordinates).
             let mut unstaged_lines: Vec<u32> = Vec::new();
-            let unstaged_lookup = unstaged_hunks
-                .get(&nfc_file_path)
-                .or_else(|| rename_map.get(&nfc_file_path).and_then(|np| unstaged_hunks.get(np)));
+            let unstaged_lookup = unstaged_hunks.get(&nfc_file_path).or_else(|| {
+                rename_map
+                    .get(&nfc_file_path)
+                    .and_then(|np| unstaged_hunks.get(np))
+            });
             if let Some(unstaged_ranges) = unstaged_lookup {
                 for range in unstaged_ranges {
                     unstaged_lines.extend(range.expand());
@@ -1710,9 +1953,11 @@ impl VirtualAttributions {
 
             // Get the committed hunks for this file (if any) - these are in commit coordinates.
             // If the file was renamed, committed_hunks is keyed by the new path.
-            let file_committed_hunks = committed_hunks
-                .get(&nfc_file_path)
-                .or_else(|| rename_map.get(&nfc_file_path).and_then(|np| committed_hunks.get(np)));
+            let file_committed_hunks = committed_hunks.get(&nfc_file_path).or_else(|| {
+                rename_map
+                    .get(&nfc_file_path)
+                    .and_then(|np| committed_hunks.get(np))
+            });
 
             for line_attr in line_attrs {
                 // Check each line individually
@@ -1743,15 +1988,27 @@ impl VirtualAttributions {
                             false
                         };
 
+                        let is_renamed_file = rename_map.contains_key(&nfc_file_path);
+
                         if is_committed {
                             // Line was committed in this commit (use commit coordinates)
                             committed_lines_map
                                 .entry(line_attr.author_id.clone())
                                 .or_default()
                                 .push(commit_line_num);
+                        } else if is_renamed_file
+                            && line_attr.author_id != CheckpointKind::Human.to_str()
+                            && !line_attr.author_id.starts_with("h_")
+                        {
+                            // For renamed files, git blame attributes ALL lines to
+                            // this commit. Include AI lines in the note even if they're
+                            // not in committed_hunks — without this, they'd have no
+                            // attestation and blame would fall back to the git committer.
+                            committed_lines_map
+                                .entry(line_attr.author_id.clone())
+                                .or_default()
+                                .push(commit_line_num);
                         }
-                        // Note: Lines that are neither unstaged nor in committed_hunks are lines that
-                        // already existed in the parent commit. They are discarded (not added to uncommitted).
                     }
                 }
             }
@@ -1779,6 +2036,29 @@ impl VirtualAttributions {
 
                 let mut gap_fills: Vec<(String, u32)> = Vec::new();
 
+                // Read file content for content-based gap matching
+                let gap_file_content = self
+                    .file_contents
+                    .get(file_path)
+                    .or_else(|| self.file_contents.get(&nfc_file_path));
+                let gap_file_lines: Vec<&str> = gap_file_content
+                    .map(|c| c.lines().collect())
+                    .unwrap_or_default();
+
+                // Build content→author map from AI-attributed lines
+                let mut content_to_ai_author: StdHashMap<&str, &str> = StdHashMap::new();
+                if !gap_file_lines.is_empty() {
+                    for &(line_num, author) in &line_to_author {
+                        if !author.starts_with("h_")
+                            && author != CheckpointKind::Human.to_str()
+                            && let Some(&content) = gap_file_lines.get((line_num - 1) as usize)
+                            && !content.trim().is_empty()
+                        {
+                            content_to_ai_author.insert(content, author);
+                        }
+                    }
+                }
+
                 for hunk in hunks {
                     for line in hunk.expand() {
                         // Skip lines that already have attribution
@@ -1795,12 +2075,20 @@ impl VirtualAttributions {
                         // Find nearest attributed neighbor after this line
                         let next = line_to_author.iter().find(|(l, _)| *l > line);
 
-                        // Fill only if both neighbors exist and are the same AI author
+                        // Fill if both neighbors exist and are the same AI author
                         if let (Some((_, prev_author)), Some((_, next_author))) = (prev, next)
                             && prev_author == next_author
                             && !prev_author.starts_with("h_")
                         {
                             gap_fills.push((prev_author.to_string(), line));
+                        } else if let Some(&content) = gap_file_lines.get((line - 1) as usize) {
+                            // Content-based fallback: if the gap line has the same
+                            // content as an AI-attributed line in this file, it's
+                            // likely part of the same AI edit (imara_diff matched it
+                            // as Equal against old content by mistake).
+                            if let Some(&author) = content_to_ai_author.get(content) {
+                                gap_fills.push((author.to_string(), line));
+                            }
                         }
                     }
                 }
@@ -1868,9 +2156,7 @@ impl VirtualAttributions {
                             author_id, ranges,
                         );
 
-                    let attestation_path = rename_map
-                        .get(&nfc_file_path)
-                        .unwrap_or(&nfc_file_path);
+                    let attestation_path = rename_map.get(&nfc_file_path).unwrap_or(&nfc_file_path);
                     let file_attestation = authorship_log.get_or_create_file(attestation_path);
                     file_attestation.add_entry(entry);
                 }
@@ -1948,6 +2234,14 @@ impl VirtualAttributions {
                 initial_files.insert(initial_path.clone(), uncommitted_line_attrs);
             }
         }
+
+        inherit_parent_attribution_for_modified_files(
+            repo,
+            parent_sha,
+            commit_sha,
+            &committed_hunks,
+            &mut authorship_log,
+        );
 
         // Remove INITIAL-only prompts that have no committed lines in the
         // attestations.  Prompts originating from current-session checkpoints are
