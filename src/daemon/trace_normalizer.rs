@@ -860,8 +860,24 @@ impl<B: GitBackend> TraceNormalizer<B> {
             pending.worktree.as_deref(),
             pending.family_key.as_ref(),
         )?;
-        let (invoked_command, invoked_args) =
-            canonical_invocation(&pending.raw_argv, primary_command.as_deref());
+        let resolved_invocation = if let (Some(worktree), Some(_family)) =
+            (pending.worktree.as_deref(), pending.family_key.as_ref())
+        {
+            self.backend
+                .resolve_invocation(worktree, &pending.raw_argv)?
+        } else {
+            None
+        };
+        let (invoked_command, invoked_args) = match resolved_invocation {
+            Some(invocation)
+                if invocation.command.is_some()
+                    && (primary_command.is_none()
+                        || invocation.command.as_deref() == primary_command.as_deref()) =>
+            {
+                (invocation.command, invocation.command_args)
+            }
+            _ => canonical_invocation(&pending.raw_argv, primary_command.as_deref()),
+        };
         if primary_command.is_none() {
             primary_command = invoked_command.clone();
         }
@@ -1495,7 +1511,7 @@ fn select_primary_command(
 mod tests {
     use super::*;
     use crate::daemon::domain::RefChange;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
@@ -1582,20 +1598,48 @@ mod tests {
             worktree: &Path,
             argv: &[String],
         ) -> Result<Option<String>, GitAiError> {
+            Ok(self
+                .resolve_invocation(worktree, argv)?
+                .and_then(|invocation| invocation.command))
+        }
+
+        fn resolve_invocation(
+            &self,
+            worktree: &Path,
+            argv: &[String],
+        ) -> Result<Option<crate::git::cli_parser::ParsedGitInvocation>, GitAiError> {
             let raw = argv_primary_command(argv);
-            let Some(command) = raw else {
-                return Ok(None);
-            };
+            let tokens = trace_argv_invocation_tokens(argv);
+            let mut current = parse_git_cli_args(tokens);
             let worktree_key = normalize_path_key(worktree);
-            let resolved = self
-                .alias_by_worktree_command
-                .lock()
-                .unwrap()
-                .get(&worktree_key)
-                .and_then(|commands| commands.get(&command))
-                .cloned()
-                .unwrap_or(command);
-            Ok(Some(resolved))
+            let mut seen = HashSet::new();
+            loop {
+                let Some(command) = current.command.clone() else {
+                    return if raw.is_some() {
+                        Ok(Some(current))
+                    } else {
+                        Ok(None)
+                    };
+                };
+                if !seen.insert(command.clone()) {
+                    return Ok(None);
+                }
+                let alias_value = self
+                    .alias_by_worktree_command
+                    .lock()
+                    .unwrap()
+                    .get(&worktree_key)
+                    .and_then(|commands| commands.get(&command))
+                    .cloned();
+                let Some(alias_value) = alias_value else {
+                    return Ok(Some(current));
+                };
+                let mut expanded_args = Vec::new();
+                expanded_args.extend(current.global_args.iter().cloned());
+                expanded_args.extend(alias_value.split_whitespace().map(|s| s.to_string()));
+                expanded_args.extend(current.command_args.iter().cloned());
+                current = parse_git_cli_args(&expanded_args);
+            }
         }
 
         fn clone_target(&self, _argv: &[String], _cwd_hint: Option<&Path>) -> Option<PathBuf> {
@@ -1839,6 +1883,62 @@ mod tests {
 
         let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
         assert_eq!(cmd.primary_command.as_deref(), Some("commit"));
+    }
+
+    #[test]
+    fn alias_commit_amend_expands_invoked_args_for_history_analysis() {
+        let backend = Arc::new(MockBackend::default());
+        let temp = tempfile::tempdir().expect("create tempdir");
+        let worktree = temp.path().join("repo");
+        fs::create_dir_all(worktree.join(".git")).expect("create git dir");
+        let worktree_str = worktree.to_str().expect("utf8 worktree");
+        backend.set_family(worktree_str, "family");
+        backend.set_alias(worktree_str, "ca", "commit --amend");
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        let old_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let new_head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"alias-amend",
+            "ts":1,
+            "argv":["git","ca","-m","msg"],
+            "worktree":worktree,
+            "git_ai_family_reflog_start": {"HEAD": 10}
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"alias-amend",
+            "ts":2,
+            "code":0,
+            "git_ai_family_reflog_end": {"HEAD": 11},
+            "git_ai_family_reflog_changes": [{
+                "reference": "HEAD",
+                "old": old_head,
+                "new": new_head
+            }]
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+        assert_eq!(cmd.primary_command.as_deref(), Some("commit"));
+        assert_eq!(cmd.invoked_command.as_deref(), Some("commit"));
+        assert!(cmd.invoked_args.iter().any(|arg| arg == "--amend"));
+
+        let analyzer = crate::daemon::analyzers::history::HistoryAnalyzer;
+        let result = crate::daemon::analyzers::CommandAnalyzer::analyze(
+            &analyzer,
+            &cmd,
+            crate::daemon::analyzers::AnalysisView {
+                refs: &HashMap::new(),
+            },
+        )
+        .unwrap();
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            crate::daemon::domain::SemanticEvent::CommitAmended { old_head: old, new_head: new }
+                if old == old_head && new == new_head
+        )));
     }
 
     #[test]

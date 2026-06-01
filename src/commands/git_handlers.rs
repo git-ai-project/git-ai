@@ -61,7 +61,21 @@ pub fn handle_git(args: &[String]) {
         return;
     }
 
-    let parsed = parse_git_cli_args(args);
+    let raw_parsed = parse_git_cli_args(args);
+
+    // Preserve the built-in read-only fast path before attempting alias
+    // resolution. Aliases need a repository config lookup, but commands that are
+    // already known to be read-only should stay as cheap as they were before.
+    if is_read_only_invocation(&raw_parsed) {
+        let exit_status = proxy_to_git(args, false, None);
+        exit_with_status(exit_status);
+    }
+
+    let repository = find_repository(&raw_parsed.global_args).ok();
+    let parsed = repository
+        .as_ref()
+        .and_then(|repo| resolve_alias_invocation(&raw_parsed, repo))
+        .unwrap_or_else(|| raw_parsed.clone());
 
     // Read-only invocations don't need wrapper state (the daemon fast-paths
     // their trace events and never processes them through the normalizer).
@@ -72,14 +86,7 @@ pub fn handle_git(args: &[String]) {
     // so that subcommand-gated read-only calls like `git stash list` and
     // `git worktree list` are also suppressed — these account for thousands
     // of Zed IDE invocations per session.
-    let is_read_only = {
-        let subcommand = parsed.command_args.first().map(String::as_str);
-        parsed.command.as_deref().is_some_and(|cmd| {
-            crate::git::command_classification::is_definitely_read_only_invocation(cmd, subcommand)
-        })
-    };
-
-    if is_read_only {
+    if is_read_only_invocation(&parsed) {
         let exit_status = proxy_to_git(args, false, None);
         exit_with_status(exit_status);
     }
@@ -114,7 +121,6 @@ pub fn handle_git(args: &[String]) {
         exit_with_status(exit_status);
     }
 
-    let repository = find_repository(&parsed.global_args).ok();
     let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
 
     let pre_state = worktree
@@ -146,7 +152,13 @@ pub fn handle_git(args: &[String]) {
     exit_with_status(exit_status);
 }
 
-#[cfg(feature = "test-support")]
+fn is_read_only_invocation(parsed: &ParsedGitInvocation) -> bool {
+    let subcommand = parsed.command_args.first().map(String::as_str);
+    parsed.command.as_deref().is_some_and(|cmd| {
+        crate::git::command_classification::is_definitely_read_only_invocation(cmd, subcommand)
+    })
+}
+
 pub fn resolve_alias_invocation(
     parsed_args: &ParsedGitInvocation,
     repository: &Repository,
@@ -183,7 +195,6 @@ pub fn resolve_alias_invocation(
     }
 }
 
-#[cfg(feature = "test-support")]
 fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
     let trimmed = value.trim_start();
 

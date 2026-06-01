@@ -650,6 +650,34 @@ fn async_mode_post_commit_shows_stats_for_ai_commit() {
 }
 
 #[test]
+fn async_mode_post_commit_shows_stats_for_aliased_commit() {
+    let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
+    repo.git(&["config", "alias.ci", "commit"])
+        .expect("alias config should succeed");
+
+    let mut file = repo.filename("alias.txt");
+    file.set_contents(crate::lines!["Base"]);
+    repo.stage_all_and_commit("Base").unwrap();
+
+    file.insert_at(1, crate::lines!["AI line".ai()]);
+    repo.git(&["add", "-A"]).expect("add should succeed");
+
+    let output = repo
+        .git_with_env(
+            &["ci", "-m", "AI additions via alias"],
+            &[("GIT_AI_TEST_FORCE_TTY", "1")],
+            None,
+        )
+        .expect("aliased commit should succeed");
+
+    assert!(
+        output.contains("you") && output.contains("ai"),
+        "expected stats output for aliased async commit, got:\n{}",
+        output
+    );
+}
+
+#[test]
 fn async_mode_post_commit_quiet_flag_suppresses_stats() {
     let repo = TestRepo::new_with_mode(GitTestMode::WrapperDaemon);
 
