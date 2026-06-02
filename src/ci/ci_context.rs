@@ -18,7 +18,6 @@ pub enum CiEvent {
         head_ref: String,
         head_sha: String,
         base_ref: String,
-        #[allow(dead_code)]
         base_sha: String,
     },
 }
@@ -191,16 +190,14 @@ impl CiContext {
                     let mut new_commits =
                         self.get_rebased_commits(merge_commit_sha, original_commits.len());
 
-                    // #1473: On a linear base branch the first-parent walk above can
-                    // return pre-existing base-branch commits instead of rebased PR
-                    // commits, making the counts match and misclassifying a squash
-                    // merge as a rebase (which then writes the PR's notes onto
-                    // unrelated base commits). Restrict the candidates to commits that
-                    // were actually introduced on top of the pre-merge base tip, i.e.
-                    // those in `base_sha..merge_commit_sha`. A squash merge introduces
-                    // exactly one such commit, so it can no longer look like a rebase.
-                    // `base_sha` may be empty (e.g. GitLab MRs); in that case we leave
-                    // the legacy behavior untouched.
+                    // #1473: on a linear base branch the first-parent walk above can
+                    // return pre-existing base commits rather than rebased PR commits,
+                    // so a squash merge's count matches a rebase's and gets
+                    // misclassified (PR notes then land on unrelated commits). Restrict
+                    // to commits the merge actually introduced
+                    // (`base_sha..merge_commit_sha`; see gitrevisions(7)) — a squash
+                    // yields exactly one, so it can't look like a rebase. An empty
+                    // `base_sha` (currently the GitLab path) keeps the legacy behavior.
                     if !base_sha.is_empty() {
                         let introduced: std::collections::HashSet<String> =
                             CommitRange::new_infer_refname(
