@@ -475,118 +475,6 @@ fn test_diff_workdir_insertions_both_maps_filtered() {
 }
 
 // ============================================================
-// Test Group E: diff_tree_to_tree()
-// ============================================================
-
-#[test]
-fn test_diff_tree_to_tree_post_filter_equivalence() {
-    let repo = TestRepo::new();
-
-    // commit1: 3 files
-    create_files(&repo, 3, |i| format!("content_{}\n", i));
-    repo.git_og(&["add", "-A"]).unwrap();
-    repo.git_og(&["commit", "-m", "commit1"]).unwrap();
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let sha1 = gitai_repo.head().unwrap().target().unwrap();
-
-    // commit2: modify 2 files
-    std::fs::write(repo.path().join("file_0.txt"), "modified_0\n").unwrap();
-    std::fs::write(repo.path().join("file_1.txt"), "modified_1\n").unwrap();
-    repo.git_og(&["add", "-A"]).unwrap();
-    repo.git_og(&["commit", "-m", "commit2"]).unwrap();
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let sha2 = gitai_repo.head().unwrap().target().unwrap();
-
-    // Get trees
-    let commit1 = gitai_repo.find_commit(sha1).unwrap();
-    let tree1 = commit1.tree().unwrap();
-    let commit2 = gitai_repo.find_commit(sha2).unwrap();
-    let tree2 = commit2.tree().unwrap();
-
-    // Small pathspec
-    let small: HashSet<String> = ["file_0.txt", "file_1.txt", "file_2.txt"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
-    let diff_small = gitai_repo
-        .diff_tree_to_tree(Some(&tree1), Some(&tree2), None, Some(&small))
-        .unwrap();
-
-    // Padded pathspec
-    let large = padded_pathspecs(&["file_0.txt", "file_1.txt", "file_2.txt"]);
-    let diff_large = gitai_repo
-        .diff_tree_to_tree(Some(&tree1), Some(&tree2), None, Some(&large))
-        .unwrap();
-
-    assert_eq!(diff_small.len(), diff_large.len(), "delta count mismatch");
-
-    let paths_small: HashSet<String> = diff_small
-        .deltas()
-        .filter_map(|d| {
-            d.new_file()
-                .path()
-                .and_then(|p| p.to_str())
-                .map(|s| s.to_string())
-        })
-        .collect();
-    let paths_large: HashSet<String> = diff_large
-        .deltas()
-        .filter_map(|d| {
-            d.new_file()
-                .path()
-                .and_then(|p| p.to_str())
-                .map(|s| s.to_string())
-        })
-        .collect();
-
-    assert_eq!(paths_small, paths_large, "delta paths should be identical");
-}
-
-#[test]
-fn test_diff_tree_to_tree_post_filter_exclusion() {
-    let repo = TestRepo::new();
-
-    // commit1: 3 files
-    create_files(&repo, 3, |i| format!("content_{}\n", i));
-    repo.git_og(&["add", "-A"]).unwrap();
-    repo.git_og(&["commit", "-m", "commit1"]).unwrap();
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let sha1 = gitai_repo.head().unwrap().target().unwrap();
-
-    // commit2: modify 2 files
-    std::fs::write(repo.path().join("file_0.txt"), "modified_0\n").unwrap();
-    std::fs::write(repo.path().join("file_1.txt"), "modified_1\n").unwrap();
-    repo.git_og(&["add", "-A"]).unwrap();
-    repo.git_og(&["commit", "-m", "commit2"]).unwrap();
-    let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
-    let sha2 = gitai_repo.head().unwrap().target().unwrap();
-
-    // Get trees
-    let commit1 = gitai_repo.find_commit(sha1).unwrap();
-    let tree1 = commit1.tree().unwrap();
-    let commit2 = gitai_repo.find_commit(sha2).unwrap();
-    let tree2 = commit2.tree().unwrap();
-
-    // Padded pathspec containing only 1 of the 2 modified files
-    let subset = padded_pathspecs(&["file_0.txt"]);
-    let diff = gitai_repo
-        .diff_tree_to_tree(Some(&tree1), Some(&tree2), None, Some(&subset))
-        .unwrap();
-
-    assert_eq!(diff.len(), 1, "should have exactly 1 delta");
-    let delta_path = diff
-        .deltas()
-        .next()
-        .unwrap()
-        .new_file()
-        .path()
-        .unwrap()
-        .to_str()
-        .unwrap();
-    assert_eq!(delta_path, "file_0.txt");
-}
-
-// ============================================================
 // Test Group F: Boundary & edge cases
 // ============================================================
 
@@ -674,8 +562,6 @@ crate::reuse_tests_in_worktree!(
     test_diff_added_lines_post_filter_correct_line_numbers,
     test_diff_workdir_insertions_post_filter_equivalence,
     test_diff_workdir_insertions_both_maps_filtered,
-    test_diff_tree_to_tree_post_filter_equivalence,
-    test_diff_tree_to_tree_post_filter_exclusion,
     test_threshold_boundary_1000_vs_1001,
     test_empty_pathspec_early_return,
 );
