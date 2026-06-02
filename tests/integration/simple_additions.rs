@@ -1761,71 +1761,23 @@ fn test_ai_edits_file_with_spaces_in_filename() {
 /// attributions from the earlier checkpoint, so the commit is incorrectly tagged as AI.
 #[test]
 fn test_ai_generated_file_then_human_full_rewrite() {
-    use sha2::{Digest, Sha256};
-
     let repo = TestRepo::new();
     let file_path = repo.path().join("jokes-cli.ts");
 
-    // The final file content that will be committed (human-written).
+    let ai_content = "import * as readline from 'readline';\n\nconst jokes = [\n  \"Why don't scientists trust atoms?\",\n  \"An impasta!\"\n];";
+    repo.git_ai(&["checkpoint", "human", "jokes-cli.ts"])
+        .unwrap();
+    fs::write(&file_path, ai_content).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-cli.ts"])
+        .unwrap();
+
     let human_content = "console.log('hello world');\nconsole.log('goodbye');";
     fs::write(&file_path, human_content).unwrap();
-    repo.git(&["add", "-A"]).unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "jokes-cli.ts"])
+        .unwrap();
 
-    // Compute blob SHAs for checkpoint entries
-    let ai_content = "import * as readline from 'readline';\n\nconst jokes = [\n  \"Why don't scientists trust atoms?\",\n  \"An impasta!\"\n];";
-    let ai_sha = format!(
-        "{:x}",
-        Sha256::new_with_prefix(ai_content.as_bytes()).finalize()
-    );
-    let human_sha = format!(
-        "{:x}",
-        Sha256::new_with_prefix(human_content.as_bytes()).finalize()
-    );
-    let human_len = human_content.len();
-
-    // Directly write checkpoints.jsonl to replicate the exact real-world scenario:
-    // 1) AI checkpoint with line_attributions covering the whole file
-    // 2) Human checkpoint with empty line_attributions but non-empty byte-range attributions
-    //
-    // The author_id must match generate_short_hash(agent_id.id, agent_id.tool).
-    // For tool="mock_ai", id="test_session": SHA256("mock_ai:test_session")[..16]
-    let agent_author_id = "3bd30911a58cb074";
-    // Determine the git dir and base commit for checkpoint storage.
-    // In worktree mode .git is a gitlink file, so use rev-parse to resolve.
-    // `--git-dir` may return a relative path; resolve it against the repo root
-    // so that fs::create_dir_all works regardless of the process CWD.
-    let git_dir_raw = repo
-        .git(&["rev-parse", "--git-dir"])
-        .unwrap()
-        .trim()
-        .to_string();
-    let git_dir_path = if std::path::Path::new(&git_dir_raw).is_absolute() {
-        std::path::PathBuf::from(&git_dir_raw)
-    } else {
-        repo.path().join(&git_dir_raw)
-    };
-    let git_dir = git_dir_path.as_path();
-    let base_commit = repo
-        .git(&["rev-parse", "HEAD"])
-        .unwrap_or_else(|_| "initial".to_string())
-        .trim()
-        .to_string();
-    let checkpoints_dir = git_dir.join(format!("ai/working_logs/{}", base_commit));
-    fs::create_dir_all(&checkpoints_dir).unwrap();
-    let checkpoints_jsonl = format!(
-        r#"{{"kind":"AiAgent","diff":"fake_diff_sha","author":"Test User","entries":[{{"file":"jokes-cli.ts","blob_sha":"{ai_sha}","attributions":[],"line_attributions":[{{"start_line":1,"end_line":6,"author_id":"{agent_author_id}","overrode":null}}]}}],"timestamp":1000,"transcript":{{"messages":[]}},"agent_id":{{"tool":"mock_ai","id":"test_session","model":"test"}},"agent_metadata":null,"line_stats":{{"additions":6,"deletions":0,"additions_sloc":5,"deletions_sloc":0}},"api_version":"checkpoint/1.0.0","git_ai_version":"development:1.1.23"}}
-{{"kind":"Human","diff":"fake_diff_sha2","author":"Test User","entries":[{{"file":"jokes-cli.ts","blob_sha":"{human_sha}","attributions":[{{"start":0,"end":0,"author_id":"human","ts":2000}},{{"start":0,"end":{human_len},"author_id":"human","ts":2000}}],"line_attributions":[]}}],"timestamp":2000,"transcript":null,"agent_id":null,"agent_metadata":null,"line_stats":{{"additions":2,"deletions":6,"additions_sloc":2,"deletions_sloc":5}},"api_version":"checkpoint/1.0.0","git_ai_version":"development:1.1.23"}}"#
-    );
-    fs::write(
-        checkpoints_dir.join("checkpoints.jsonl"),
-        &checkpoints_jsonl,
-    )
-    .unwrap();
-
-    // Commit
     repo.stage_all_and_commit("human rewrite").unwrap();
 
-    // Assert everything is human-authored
     let mut file = repo.filename("jokes-cli.ts");
     file.assert_lines_and_blame(crate::lines![
         "console.log('hello world');".human(),

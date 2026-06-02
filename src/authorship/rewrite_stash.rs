@@ -6,7 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::authorship::attribution_tracker::LineAttribution;
 use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
 use crate::error::GitAiError;
-use crate::git::repo_storage::InitialAttributions;
 use crate::git::repository::Repository;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -361,16 +360,9 @@ fn restore_stash_attributions_with_shift(
         return Ok(());
     }
 
-    let initial = InitialAttributions {
-        files,
-        prompts,
-        file_blobs,
-        humans,
-        sessions,
-    };
-
     let working_log = repo.storage.working_log_for_base_commit(current_head)?;
-    working_log.write_initial(initial)?;
+    working_log
+        .write_initial_attributions_with_contents(files, prompts, humans, file_blobs, sessions)?;
 
     Ok(())
 }

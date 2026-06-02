@@ -715,99 +715,6 @@ fn matches_any_pathspec(file: &str, pathspecs: &[String]) -> bool {
     })
 }
 
-fn sync_pre_commit_checkpoint(
-    repo: &Repository,
-    base_commit: &str,
-    carryover_snapshot: Option<&HashMap<String, String>>,
-) -> Result<(), GitAiError> {
-    if base_commit.trim().is_empty() {
-        return Ok(());
-    }
-    if !repo.storage.has_working_log(base_commit) {
-        return Ok(());
-    }
-
-    let working_log = repo.storage.working_log_for_base_commit(base_commit)?;
-    let initial = working_log.read_initial_attributions();
-
-    let dirty_files: HashMap<String, String> = if let Some(snapshot) = carryover_snapshot {
-        snapshot.clone()
-    } else {
-        return Ok(());
-    };
-
-    let mut files_to_replay: Vec<String> = Vec::new();
-    let mut replay_dirty: HashMap<String, String> = HashMap::new();
-
-    for (file_path, target_content) in &dirty_files {
-        let current_tracked = working_log.effective_tracked_file_content(&initial, file_path)?;
-        let needs_replay = match current_tracked {
-            None => true,
-            Some(ref tracked) => tracked != target_content,
-        };
-        if needs_replay {
-            files_to_replay.push(file_path.clone());
-            replay_dirty.insert(file_path.clone(), target_content.clone());
-        }
-    }
-
-    if files_to_replay.is_empty() {
-        return Ok(());
-    }
-    files_to_replay.sort();
-
-    let repo_workdir = repo
-        .workdir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let repo_work_dir_path = std::path::PathBuf::from(&repo_workdir);
-
-    let checkpoint_files: Vec<crate::commands::checkpoint_agent::orchestrator::CheckpointFile> =
-        files_to_replay
-            .iter()
-            .map(
-                |path| crate::commands::checkpoint_agent::orchestrator::CheckpointFile {
-                    path: std::path::PathBuf::from(path),
-                    content: replay_dirty.get(path).cloned(),
-                    repo_work_dir: repo_work_dir_path.clone(),
-                    base_commit:
-                        crate::commands::checkpoint_agent::orchestrator::BaseCommit::Initial,
-                },
-            )
-            .collect();
-
-    let request = CheckpointRequest {
-        trace_id: crate::authorship::authorship_log_serialization::generate_trace_id(),
-        checkpoint_kind: CheckpointKind::Human,
-        agent_id: None,
-        files: checkpoint_files,
-        path_role: crate::daemon::checkpoint::PreparedPathRole::WillEdit,
-        transcript_source: None,
-        metadata: std::collections::HashMap::new(),
-    };
-
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-
-    let resolved = crate::daemon::checkpoint::ResolvedCheckpointExecution {
-        base_commit: base_commit.to_string(),
-        ts,
-        files: files_to_replay,
-        dirty_files: replay_dirty,
-    };
-
-    let author = repo.git_author_identity().formatted_or_unknown();
-    crate::daemon::checkpoint::execute_resolved_checkpoint_from_daemon(
-        repo,
-        &author,
-        CheckpointKind::Human,
-        request,
-        resolved,
-    )
-}
-
 fn tracked_working_log_files(
     repo: &Repository,
     base_commit: &str,
@@ -880,13 +787,12 @@ fn process_conflict_resolution_working_logs(repo: &Repository, new_tip: &str, on
             .unwrap_or(0);
 
         let author = repo.git_author_identity().formatted_or_unknown();
-        let _ = crate::authorship::post_commit::post_commit_with_final_state(
+        let _ = crate::authorship::post_commit::post_commit_from_working_log(
             repo,
             Some(parent_sha.to_string()),
             commit_sha.to_string(),
             author,
             true,
-            None,
         );
 
         // If the working log produced a worse note, restore the shifted one
@@ -900,38 +806,6 @@ fn process_conflict_resolution_working_logs(repo: &Repository, new_tip: &str, on
                 let _ = crate::git::notes_api::write_note(repo, commit_sha, &raw);
             }
         }
-    }
-}
-
-fn committed_file_snapshot_for_amend(
-    repo: &Repository,
-    old_head: &str,
-    new_head: &str,
-) -> Option<HashMap<String, String>> {
-    let mut files = repo
-        .list_commit_files(new_head, None)
-        .ok()
-        .unwrap_or_default();
-    if old_head != "initial"
-        && let Ok(parent_files) = repo.list_commit_files(old_head, None)
-    {
-        files.extend(parent_files);
-    }
-    if files.is_empty() {
-        return None;
-    }
-    let mut snapshot = HashMap::new();
-    for file_path in &files {
-        if let Ok(content) = repo.get_file_content(file_path, new_head)
-            && let Ok(text) = String::from_utf8(content)
-        {
-            snapshot.insert(file_path.clone(), text);
-        }
-    }
-    if snapshot.is_empty() {
-        None
-    } else {
-        Some(snapshot)
     }
 }
 
@@ -1014,11 +888,6 @@ fn stable_old_head_from_worktree_head_reflog(worktree: &Path, new_head: &str) ->
         .filter(|old_head| is_valid_oid(old_head) && !is_zero_oid(old_head))
 }
 
-fn commit_parent_head_for_capture(repo: &Repository, commit_sha: &str) -> Option<String> {
-    let commit = repo.find_commit(commit_sha.to_string()).ok()?;
-    commit.parent(0).ok().map(|parent| parent.id().to_string())
-}
-
 fn stable_carryover_heads_for_command(
     repo: &Repository,
     input: &CarryoverCaptureInput<'_>,
@@ -1041,32 +910,6 @@ fn stable_carryover_heads_for_command(
     };
 
     let resolved = match command {
-        "commit" => {
-            let new_head = ref_head_change
-                .as_ref()
-                .map(|(_, new_head)| new_head.clone())
-                .or_else(|| post_head.clone())
-                .ok_or_else(|| {
-                    GitAiError::Generic(format!(
-                        "commit missing stable post-head for carryover capture sid={}",
-                        input.root_sid
-                    ))
-                })?;
-            let old_head = ref_head_change
-                .as_ref()
-                .map(|(old_head, _)| old_head.clone())
-                .filter(|old_head| !is_zero_oid(old_head))
-                .or_else(|| stable_old_head_from_worktree_head_reflog(input.worktree, &new_head))
-                .or_else(|| {
-                    if parsed.has_command_flag("--amend") {
-                        None
-                    } else {
-                        commit_parent_head_for_capture(repo, &new_head)
-                    }
-                })
-                .unwrap_or_else(|| "initial".to_string());
-            Some((old_head, new_head))
-        }
         "rebase" | "pull" => ActorDaemonCoordinator::stable_rebase_heads_from_worktree(
             repo,
             input.worktree,
@@ -3510,20 +3353,15 @@ impl ActorDaemonCoordinator {
             return Ok(None);
         }
 
+        if command == "commit" {
+            return Ok(None);
+        }
+
         let repo = discover_repository_in_path_no_git_exec(input.worktree)?;
         let stable_heads = stable_carryover_heads_for_command(&repo, &input, &parsed)?;
 
         let mut file_paths = HashSet::new();
         match command {
-            "commit" => {
-                let (old_head, _) = stable_heads.clone().ok_or_else(|| {
-                    GitAiError::Generic(format!(
-                        "commit missing stable carryover heads sid={}",
-                        input.root_sid
-                    ))
-                })?;
-                file_paths.extend(tracked_working_log_files(&repo, &old_head)?);
-            }
             "rebase" | "pull" => {
                 if let Some((old_head, new_head)) = stable_heads.clone() {
                     if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
@@ -5694,20 +5532,13 @@ impl ActorDaemonCoordinator {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.git_author_identity().formatted_or_unknown();
                             let base_opt = base.clone().filter(|b| !b.is_empty() && b != "initial");
-                            let parent_sha = base_opt.as_deref().unwrap_or("initial");
 
-                            let _ = sync_pre_commit_checkpoint(
-                                &repo,
-                                parent_sha,
-                                carryover_snapshot.as_ref(),
-                            );
-                            match crate::authorship::post_commit::post_commit_with_final_state(
+                            match crate::authorship::post_commit::post_commit_from_working_log(
                                 &repo,
                                 base_opt.clone(),
                                 new_head.clone(),
                                 author,
                                 true,
-                                carryover_snapshot.as_ref(),
                             ) {
                                 Ok(_) => {
                                     if let Ok(debug_path) = std::env::var("GIT_AI_DEBUG_FILE") {
@@ -5780,51 +5611,9 @@ impl ActorDaemonCoordinator {
                         {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.git_author_identity().formatted_or_unknown();
-                            let committed_snapshot =
-                                committed_file_snapshot_for_amend(&repo, old_head, new_head);
-                            // Build effective snapshot: start with carryover (captures
-                            // working directory state including unstaged content), but
-                            // override per-file with committed content when the working
-                            // log's latest checkpoint blob matches the committed content.
-                            // This corrects for stale carryover snapshots that may have
-                            // been read after subsequent filesystem writes raced with
-                            // async daemon processing.
-                            let effective_snapshot =
-                                match (&carryover_snapshot, &committed_snapshot) {
-                                    (Some(carryover), Some(committed)) => {
-                                        let working_log =
-                                            repo.storage.working_log_for_base_commit(old_head).ok();
-                                        let mut merged = carryover.clone();
-                                        for (file, committed_content) in committed {
-                                            let latest_matches_committed = working_log
-                                                .as_ref()
-                                                .and_then(|wl| {
-                                                    wl.latest_checkpoint_file_content(file)
-                                                })
-                                                .is_some_and(|latest| latest == *committed_content);
-                                            if latest_matches_committed {
-                                                merged.insert(
-                                                    file.clone(),
-                                                    committed_content.clone(),
-                                                );
-                                            }
-                                        }
-                                        Some(merged)
-                                    }
-                                    (Some(c), None) => Some(c.clone()),
-                                    (None, Some(c)) => Some(c.clone()),
-                                    (None, None) => None,
-                                };
-                            let effective_snapshot = effective_snapshot.as_ref();
-                            if let Err(e) =
-                                crate::authorship::post_commit::post_commit_amend_with_final_state(
-                                    &repo,
-                                    old_head,
-                                    new_head,
-                                    author,
-                                    effective_snapshot,
-                                )
-                            {
+                            if let Err(e) = crate::authorship::post_commit::post_commit_amend(
+                                &repo, old_head, new_head, author,
+                            ) {
                                 tracing::debug!(
                                     %e,
                                     %worktree,
@@ -5962,13 +5751,12 @@ impl ActorDaemonCoordinator {
                                 if repo.storage.has_working_log(old) {
                                     let author = repo.git_author_identity().formatted_or_unknown();
                                     let _ =
-                                        crate::authorship::post_commit::post_commit_with_final_state(
+                                        crate::authorship::post_commit::post_commit_from_working_log(
                                             &repo,
                                             Some(old.to_string()),
                                             new.to_string(),
                                             author,
                                             true,
-                                            None,
                                         );
                                 }
                                 let _ = repo.storage.rename_working_log(old, new);

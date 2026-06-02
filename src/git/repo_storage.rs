@@ -529,6 +529,32 @@ impl PersistedWorkingLog {
         Ok(touched_files)
     }
 
+    pub fn observed_file_snapshot(&self) -> Result<HashMap<String, String>, GitAiError> {
+        let initial = self.read_initial_attributions();
+        let mut snapshot = HashMap::new();
+
+        for file_path in initial.files.keys() {
+            let content = self
+                .stored_initial_file_content_from(&initial, file_path)
+                .ok_or_else(|| {
+                    GitAiError::Generic(format!(
+                        "INITIAL missing persisted file snapshot for {}",
+                        file_path
+                    ))
+                })?;
+            snapshot.insert(file_path.clone(), content);
+        }
+
+        for checkpoint in self.read_all_checkpoints()? {
+            for entry in checkpoint.entries {
+                let content = self.get_file_version(&entry.blob_sha)?;
+                snapshot.insert(entry.file, content);
+            }
+        }
+
+        Ok(snapshot)
+    }
+
     #[allow(dead_code)]
     pub fn all_ai_touched_files(&self) -> Result<HashSet<String>, GitAiError> {
         let checkpoints = self.read_all_checkpoints()?;

@@ -11,6 +11,7 @@ use crate::git::notes_api::write_note as notes_add;
 use crate::git::repository::Repository;
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
+use std::path::Path;
 
 /// Skip expensive post-commit stats when this threshold is exceeded.
 /// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
@@ -63,23 +64,15 @@ pub fn post_commit(
     human_author: String,
     supress_output: bool,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
-    post_commit_with_final_state(
-        repo,
-        base_commit,
-        commit_sha,
-        human_author,
-        supress_output,
-        None,
-    )
+    post_commit_from_working_log(repo, base_commit, commit_sha, human_author, supress_output)
 }
 
-pub fn post_commit_with_final_state(
+pub fn post_commit_from_working_log(
     repo: &Repository,
     base_commit: Option<String>,
     commit_sha: String,
     human_author: String,
     supress_output: bool,
-    final_state_override: Option<&HashMap<String, String>>,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
     // Use base_commit parameter if provided, otherwise use "initial" for empty repos
     // This matches the convention in checkpoint.rs
@@ -91,23 +84,12 @@ pub fn post_commit_with_final_state(
 
     let parent_working_log = working_log.read_all_checkpoints()?;
 
-    // Create VirtualAttributions from working log (fast path - no blame)
-    // We don't need to run blame because we only care about the working log data
-    // that was accumulated since the parent commit
-    let working_va = if let Some(snapshot) = final_state_override {
-        VirtualAttributions::from_working_log_snapshot(
-            repo.clone(),
-            parent_sha.clone(),
-            Some(human_author.clone()),
-            snapshot,
-        )?
-    } else {
-        VirtualAttributions::from_just_working_log(
-            repo.clone(),
-            parent_sha.clone(),
-            Some(human_author.clone()),
-        )?
-    };
+    let observed_snapshot = working_log.observed_file_snapshot()?;
+    let working_va = VirtualAttributions::from_persisted_working_log(
+        repo.clone(),
+        parent_sha.clone(),
+        Some(human_author.clone()),
+    )?;
 
     // Build pathspecs from AI-relevant checkpoint entries only.
     // Human-only entries with no AI attribution do not affect authorship output and should not
@@ -129,13 +111,13 @@ pub fn post_commit_with_final_state(
         pathspecs.insert(file_path.clone());
     }
 
-    let (mut authorship_log, initial_attributions) = working_va
+    let (mut authorship_log, initial_attributions, initial_file_contents) = working_va
         .to_authorship_log_and_initial_working_log(
             repo,
             &parent_sha,
             &commit_sha,
             Some(&pathspecs),
-            final_state_override,
+            Some(&observed_snapshot),
         )?;
 
     authorship_log.metadata.base_commit_sha = commit_sha.clone();
@@ -280,8 +262,6 @@ pub fn post_commit_with_final_state(
     // Write INITIAL file for uncommitted AI attributions (if any)
     if !initial_attributions.files.is_empty() {
         let new_working_log = repo_storage.working_log_for_base_commit(&commit_sha)?;
-        let initial_file_contents =
-            working_va.snapshot_contents_for_files(initial_attributions.files.keys());
         new_working_log.write_initial_attributions_with_contents(
             initial_attributions.files,
             initial_attributions.prompts,
@@ -325,16 +305,38 @@ pub fn post_commit_with_final_state(
     Ok((commit_sha.to_string(), authorship_log))
 }
 
-/// Amend-specific post-commit that uses blame-based attribution to carry forward
-/// existing line attributions from the original commit.  Unlike `post_commit_with_final_state`
-/// (which only reads the working log), this merges blame-sourced attributions with
-/// checkpoint data so unchanged lines retain their AI/human provenance.
-pub fn post_commit_amend_with_final_state(
+fn commit_tree_snapshot_for_files(
+    repo: &Repository,
+    commit_sha: &str,
+    file_paths: &HashSet<String>,
+) -> Result<HashMap<String, String>, GitAiError> {
+    let commit = repo.find_commit(commit_sha.to_string())?;
+    let tree = commit.tree()?;
+    let mut snapshot = HashMap::new();
+
+    for file_path in file_paths {
+        let content = match tree.get_path(Path::new(file_path)) {
+            Ok(entry) => match repo.find_blob(entry.id()) {
+                Ok(blob) => {
+                    String::from_utf8_lossy(&blob.content().unwrap_or_default()).to_string()
+                }
+                Err(_) => String::new(),
+            },
+            Err(_) => String::new(),
+        };
+        snapshot.insert(file_path.clone(), content);
+    }
+
+    Ok(snapshot)
+}
+
+/// Amend-specific post-commit that merges blame-sourced attributions from the
+/// original commit with persisted working-log checkpoint data.
+pub fn post_commit_amend(
     repo: &Repository,
     original_commit: &str,
     amended_commit: &str,
     human_author: String,
-    final_state_override: Option<&HashMap<String, String>>,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
     let repo_storage = &repo.storage;
     let working_log = repo_storage.working_log_for_base_commit(original_commit)?;
@@ -349,6 +351,10 @@ pub fn post_commit_amend_with_final_state(
         pathspecs.insert(file_path.clone());
     }
     let pathspecs_vec: Vec<String> = pathspecs.iter().cloned().collect();
+    let observed_snapshot = working_log.observed_file_snapshot()?;
+    let mut final_state_snapshot =
+        commit_tree_snapshot_for_files(repo, amended_commit, &pathspecs)?;
+    final_state_snapshot.extend(observed_snapshot);
 
     // Check if original commit has existing authorship data
     let has_existing_data =
@@ -360,39 +366,21 @@ pub fn post_commit_amend_with_final_state(
             })
             .unwrap_or(false);
 
-    // Use blame-based VA which merges existing note attributions with working log
-    let working_va = if let Some(snapshot) = final_state_override {
-        smol::block_on(async {
-            VirtualAttributions::from_working_log_for_commit_snapshot(
-                repo.clone(),
-                original_commit.to_string(),
-                &pathspecs_vec,
-                if has_existing_data {
-                    None
-                } else {
-                    Some(human_author.clone())
-                },
-                None,
-                snapshot,
-            )
-            .await
-        })?
-    } else {
-        smol::block_on(async {
-            VirtualAttributions::from_working_log_for_commit(
-                repo.clone(),
-                original_commit.to_string(),
-                &pathspecs_vec,
-                if has_existing_data {
-                    None
-                } else {
-                    Some(human_author.clone())
-                },
-                None,
-            )
-            .await
-        })?
-    };
+    let working_va = smol::block_on(async {
+        VirtualAttributions::from_working_log_for_commit_snapshot(
+            repo.clone(),
+            original_commit.to_string(),
+            &pathspecs_vec,
+            if has_existing_data {
+                None
+            } else {
+                Some(human_author.clone())
+            },
+            None,
+            &final_state_snapshot,
+        )
+        .await
+    })?;
 
     // Resolve parent of the amended commit for diff base
     let amended_commit_obj = repo.find_commit(amended_commit.to_string())?;
@@ -405,13 +393,13 @@ pub fn post_commit_amend_with_final_state(
         "initial".to_string()
     };
 
-    let (mut authorship_log, initial_attributions) = working_va
+    let (mut authorship_log, initial_attributions, initial_file_contents) = working_va
         .to_authorship_log_and_initial_working_log(
             repo,
             &parent_sha,
             amended_commit,
             Some(&pathspecs),
-            final_state_override,
+            Some(&final_state_snapshot),
         )?;
 
     authorship_log.metadata.base_commit_sha = amended_commit.to_string();
@@ -501,8 +489,6 @@ pub fn post_commit_amend_with_final_state(
     // Write INITIAL file for uncommitted attributions
     if !initial_attributions.files.is_empty() {
         let new_working_log = repo_storage.working_log_for_base_commit(amended_commit)?;
-        let initial_file_contents =
-            working_va.snapshot_contents_for_files(initial_attributions.files.keys());
         new_working_log.write_initial_attributions_with_contents(
             initial_attributions.files,
             initial_attributions.prompts,
