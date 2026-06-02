@@ -9,7 +9,8 @@ use git_ai::git::find_repository_in_path;
 use git_ai::git::refs::show_authorship_note;
 use git_ai::git::repository::Repository as GitAiRepository;
 use repos::test_file::ExpectedLineExt;
-use repos::test_repo::TestRepo;
+use repos::test_repo::{TestRepo, real_git_executable};
+use std::process::Command;
 
 fn setup_initial_commit(repo: &TestRepo) {
     let mut readme = repo.filename("README.md");
@@ -28,6 +29,48 @@ fn head_sha(repo: &TestRepo) -> String {
         .expect("rev-parse HEAD should succeed")
         .trim()
         .to_string()
+}
+
+fn raw_traced_git(repo: &TestRepo, args: &[&str]) -> String {
+    let mut command = Command::new(real_git_executable());
+    command.arg("-C").arg(repo.path()).args(args);
+    command.env("HOME", repo.test_home_path());
+    command.env(
+        "GIT_CONFIG_GLOBAL",
+        repo.test_home_path().join(".gitconfig"),
+    );
+    command.env("XDG_CONFIG_HOME", repo.test_home_path().join(".config"));
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    command.env(
+        "GIT_TRACE2_EVENT",
+        git_ai::daemon::DaemonConfig::trace2_event_target_for_path(
+            &repo.daemon_trace_socket_path(),
+        ),
+    );
+    command.env(
+        "GIT_TRACE2_EVENT_NESTING",
+        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string()),
+    );
+
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run raw traced git {:?}: {}", args, error));
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "raw traced git {:?} failed\nstdout: {}\nstderr: {}",
+        args,
+        stdout,
+        stderr
+    );
+    if stdout.is_empty() {
+        stderr
+    } else if stderr.is_empty() {
+        stdout
+    } else {
+        format!("{}{}", stdout, stderr)
+    }
 }
 
 fn commit_tree_rewrite_current_branch(
@@ -123,6 +166,42 @@ fn graphite_style_restack_child_branch(
     .expect("git update-ref should succeed");
 
     new_head
+}
+
+#[test]
+fn test_soft_reset_amend_then_branch_move_preserves_squashed_child_attribution() {
+    let repo = TestRepo::new();
+    setup_initial_commit(&repo);
+
+    repo.git(&["checkout", "-b", "parent"])
+        .expect("checkout parent should succeed");
+    let mut parent_file = repo.filename("csf_parent.txt");
+    parent_file.set_contents(lines!["parent line 1", "parent line 2"]);
+    repo.stage_all_and_commit("parent")
+        .expect("parent commit should succeed");
+
+    repo.git(&["checkout", "-b", "child"])
+        .expect("checkout child should succeed");
+    let mut child_file = repo.filename("csf_child.txt");
+    child_file.set_contents(lines!["child ai 1".ai()]);
+    let child_one = repo
+        .stage_all_and_commit("child commit 1")
+        .expect("child commit 1 should succeed");
+
+    child_file.set_contents(lines!["child ai 1".ai(), "child ai 2".ai()]);
+    repo.stage_all_and_commit("child commit 2")
+        .expect("child commit 2 should succeed");
+
+    repo.sync_daemon();
+    let baseline = repo.daemon_total_completion_count();
+
+    raw_traced_git(&repo, &["reset", "--soft", &child_one.commit_sha]);
+    raw_traced_git(&repo, &["commit", "--amend", "-m", "squashed child"]);
+    raw_traced_git(&repo, &["switch", "-C", "parent", "HEAD"]);
+    repo.wait_for_daemon_total_completion_count(baseline, baseline + 3);
+
+    parent_file.assert_lines_and_blame(lines!["parent line 1".human(), "parent line 2".human(),]);
+    child_file.assert_lines_and_blame(lines!["child ai 1".ai(), "child ai 2".ai()]);
 }
 
 #[test]

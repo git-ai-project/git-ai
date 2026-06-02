@@ -29,34 +29,12 @@ impl CommandAnalyzer for HistoryAnalyzer {
                 let amend = args.iter().any(|arg| arg == "--amend");
                 let post_head =
                     non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()));
-                if let Some((mut old_head, new_head)) = head_change(cmd, state.refs) {
-                    if amend
-                        && (!is_valid_git_oid(&old_head) || is_zero_oid(&old_head))
-                        && let Some(pre_head) =
-                            non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
-                        && is_valid_git_oid(&pre_head)
-                        && !is_zero_oid(&pre_head)
-                        && pre_head != new_head
+                if amend {
+                    if let Some((old_head, new_head)) = amend_head_change(cmd, state.refs) {
+                        events.push(SemanticEvent::CommitAmended { old_head, new_head });
+                    } else if cmd.exit_code == 0
+                        && let Some(new_head) = post_head
                     {
-                        old_head = pre_head;
-                    }
-                    if amend {
-                        let pre_head =
-                            non_empty_opt(cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()));
-                        let is_stale = pre_head.as_deref().is_some_and(|ph| ph == new_head);
-                        if !is_stale {
-                            events.push(SemanticEvent::CommitAmended { old_head, new_head });
-                        }
-                    } else {
-                        events.push(SemanticEvent::CommitCreated {
-                            base: sanitize_base(Some(old_head), &new_head),
-                            new_head,
-                        });
-                    }
-                } else if cmd.exit_code == 0
-                    && let Some(new_head) = post_head
-                {
-                    if amend {
                         let old_head = commit_base_hint(cmd, state.refs, &new_head);
                         if let Some(old_head) = old_head {
                             events.push(SemanticEvent::CommitAmended { old_head, new_head });
@@ -66,10 +44,17 @@ impl CommandAnalyzer for HistoryAnalyzer {
                                 new_head,
                             });
                         }
-                    } else {
-                        let base = commit_base_hint(cmd, state.refs, &new_head);
-                        events.push(SemanticEvent::CommitCreated { base, new_head });
                     }
+                } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
+                    events.push(SemanticEvent::CommitCreated {
+                        base: sanitize_base(Some(old_head), &new_head),
+                        new_head,
+                    });
+                } else if cmd.exit_code == 0
+                    && let Some(new_head) = post_head
+                {
+                    let base = commit_base_hint(cmd, state.refs, &new_head);
+                    events.push(SemanticEvent::CommitCreated { base, new_head });
                 }
             }
             "reset" => {
@@ -205,6 +190,50 @@ fn is_zero_oid(oid: &str) -> bool {
 
 fn sanitize_base(base: Option<String>, new_head: &str) -> Option<String> {
     base.filter(|candidate| candidate != new_head && !is_zero_oid(candidate))
+}
+
+fn valid_non_zero_oid(value: &str) -> bool {
+    is_valid_git_oid(value) && !is_zero_oid(value)
+}
+
+fn valid_ref_transition(change: &crate::daemon::domain::RefChange) -> Option<(String, String)> {
+    let old = change.old.trim();
+    let new = change.new.trim();
+    if old == new || !valid_non_zero_oid(old) || !valid_non_zero_oid(new) {
+        return None;
+    }
+    Some((old.to_string(), new.to_string()))
+}
+
+fn first_ref_transition_for(cmd: &NormalizedCommand, reference: &str) -> Option<(String, String)> {
+    cmd.ref_changes
+        .iter()
+        .filter(|change| change.reference == reference)
+        .find_map(valid_ref_transition)
+}
+
+fn amend_head_change(
+    cmd: &NormalizedCommand,
+    refs: &std::collections::HashMap<String, String>,
+) -> Option<(String, String)> {
+    // Amend is defined by the HEAD transition made by `git commit --amend`.
+    // Prefer that exact transition over branch hints: asynchronous trace
+    // augmentation can observe later branch moves from tools like Graphite
+    // (`switch -C parent <amended>`), and those branch reflog entries are not
+    // part of the amend command.
+    if let Some(change) = first_ref_transition_for(cmd, "HEAD") {
+        return Some(change);
+    }
+
+    if let Some(branch_ref) = branch_ref_hint(cmd)
+        && let Some(change) = first_ref_transition_for(cmd, &branch_ref)
+    {
+        return Some(change);
+    }
+
+    let new_head = non_empty_opt(cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))?;
+    let old_head = commit_base_hint(cmd, refs, &new_head)?;
+    Some((old_head, new_head))
 }
 
 fn head_change(
@@ -666,6 +695,94 @@ mod tests {
             SemanticEvent::CommitAmended { old_head, new_head }
                 if old_head == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     && new_head == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        )));
+    }
+
+    #[test]
+    fn amend_prefers_head_transition_over_contaminated_branch_hint() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("commit", &["git", "commit", "--amend", "-m", "x"]);
+        cmd.pre_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("dddddddddddddddddddddddddddddddddddddddd".to_string()),
+            branch: Some("parent".to_string()),
+            detached: false,
+        });
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("dddddddddddddddddddddddddddddddddddddddd".to_string()),
+            branch: Some("parent".to_string()),
+            detached: false,
+        });
+        cmd.ref_changes = vec![
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                new: "dddddddddddddddddddddddddddddddddddddddd".to_string(),
+            },
+            RefChange {
+                reference: "refs/heads/child".to_string(),
+                old: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                new: "dddddddddddddddddddddddddddddddddddddddd".to_string(),
+            },
+            RefChange {
+                reference: "refs/heads/parent".to_string(),
+                old: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                new: "dddddddddddddddddddddddddddddddddddddddd".to_string(),
+            },
+        ];
+
+        let result = analyzer
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            SemanticEvent::CommitAmended { old_head, new_head }
+                if old_head == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    && new_head == "dddddddddddddddddddddddddddddddddddddddd"
+        )));
+    }
+
+    #[test]
+    fn amend_uses_first_head_transition_when_later_head_moves_are_captured() {
+        let analyzer = HistoryAnalyzer;
+        let mut cmd = command("commit", &["git", "commit", "--amend", "-m", "x"]);
+        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
+            head: Some("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string()),
+            branch: Some("feature".to_string()),
+            detached: false,
+        });
+        cmd.ref_changes = vec![
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                new: "dddddddddddddddddddddddddddddddddddddddd".to_string(),
+            },
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "dddddddddddddddddddddddddddddddddddddddd".to_string(),
+                new: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string(),
+            },
+        ];
+
+        let result = analyzer
+            .analyze(
+                &cmd,
+                AnalysisView {
+                    refs: &Default::default(),
+                },
+            )
+            .unwrap();
+
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            SemanticEvent::CommitAmended { old_head, new_head }
+                if old_head == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    && new_head == "dddddddddddddddddddddddddddddddddddddddd"
         )));
     }
 
