@@ -241,6 +241,9 @@ mod tests {
             .env("GIT_TRACE2", "0")
             .env("GIT_TRACE2_EVENT", "0")
             .current_dir(temp.path())
+            .env("HOME", temp.path())
+            .env("XDG_CONFIG_HOME", temp.path().join(".config"))
+            .env_remove("GIT_TRACE2_EVENT")
             .status()
             .expect("run git init");
         assert!(status.success(), "git init should succeed");
@@ -253,6 +256,9 @@ mod tests {
             .env("GIT_TRACE2", "0")
             .env("GIT_TRACE2_EVENT", "0")
             .current_dir(repo)
+            .env("HOME", repo)
+            .env("XDG_CONFIG_HOME", repo.join(".config"))
+            .env_remove("GIT_TRACE2_EVENT")
             .status()
             .expect("run git config");
         assert!(status.success(), "git config should succeed");
