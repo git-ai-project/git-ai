@@ -3852,7 +3852,7 @@ impl ActorDaemonCoordinator {
         // and plain commit/amend (CommitCreated/CommitAmended events handle those).
         // Do NOT skip for rebase — the CommitCreated events during rebase are intermediate
         // replayed commits; note transfer happens via non-FF detection on the final ref move.
-        // But DO skip for rebase --abort/--skip (those restore state, not rewrite).
+        // But DO skip for rebase --abort, which restores state instead of finishing a rewrite.
         let is_rebase = cmd.primary_command.as_deref() == Some("rebase");
         let is_rebase_abort = is_rebase && cmd.invoked_args.iter().any(|a| a == "--abort");
         let is_completing_rebase = is_rebase && !is_rebase_abort;

@@ -530,6 +530,11 @@ impl RefCursor {
         self.consume_entry(&first);
 
         let failed = cmd.exit_code != 0;
+        if failed {
+            cmd.ref_changes = changes;
+            return Ok(());
+        }
+
         let mut consumed_finish = rebase_reflog_action_is(&first.message, "finish");
         while !consumed_finish {
             let Some(next) = self.find_head_entry(
@@ -540,18 +545,10 @@ impl RefCursor {
             else {
                 break;
             };
-            if failed && rebase_reflog_action_starts_new_command(&next.message) {
-                break;
-            }
             new = next.new.clone();
             consumed_finish = rebase_reflog_action_is(&next.message, "finish");
             self.consume_entry(&next);
             changes.push(entry_to_ref_change(&next));
-        }
-
-        if failed {
-            cmd.ref_changes = changes;
-            return Ok(());
         }
 
         self.consume_common_refs_matching_transition(&old, &new, &mut changes)?;
@@ -1332,13 +1329,6 @@ fn rebase_reflog_action(message: &str) -> Option<&str> {
 
 fn rebase_reflog_action_is(message: &str, expected: &str) -> bool {
     rebase_reflog_action(message).is_some_and(|action| action == expected)
-}
-
-fn rebase_reflog_action_starts_new_command(message: &str) -> bool {
-    matches!(
-        rebase_reflog_action(message),
-        Some("start" | "continue" | "skip" | "abort" | "quit" | "finish")
-    )
 }
 
 fn read_reflog_entries(

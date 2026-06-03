@@ -1354,6 +1354,121 @@ fn daemon_failed_rebase_does_not_consume_later_continue_reflog_entry() {
 }
 
 #[test]
+fn daemon_failed_rebase_does_not_consume_later_skip_reflog_entry() {
+    let repo = TestRepo::new_dedicated_daemon();
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let worktree = repo_workdir_string(&repo);
+    let git_dir = repo.path().join(".git").to_string_lossy().to_string();
+
+    let mut file = repo.filename("file.txt");
+    file.set_contents(lines!["line 1".human()]);
+    repo.stage_all_and_commit("Initial")
+        .expect("initial commit should succeed");
+
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"])
+        .expect("checkout feature should succeed");
+    file.replace_at(0, "AI line 1".ai());
+    repo.stage_all_and_commit("AI changes")
+        .expect("conflicting AI commit should succeed");
+
+    let mut feature_file = repo.filename("feature.txt");
+    feature_file.set_contents(lines!["// AI feature".ai()]);
+    let feature_commit = repo
+        .stage_all_and_commit("Add feature")
+        .expect("feature commit should succeed");
+    assert!(
+        repo.read_authorship_note(&feature_commit.commit_sha)
+            .is_some(),
+        "feature commit should have a note before rebase"
+    );
+
+    repo.git(&["checkout", &default_branch])
+        .expect("checkout default branch should succeed");
+    file.replace_at(0, "MAIN line 1".human());
+    repo.stage_all_and_commit("Main changes")
+        .expect("main commit should succeed");
+
+    repo.git(&["checkout", "feature"])
+        .expect("checkout feature should succeed");
+    repo.sync_daemon();
+
+    let rebase_result = repo.git_og(&["rebase", &default_branch]);
+    assert!(
+        rebase_result.is_err(),
+        "raw rebase should fail due to conflict"
+    );
+    repo.git_og(&["rebase", "--skip"])
+        .expect("raw rebase --skip should succeed");
+    let rebased_feature_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .expect("rev-parse rebased feature should succeed")
+        .trim()
+        .to_string();
+    assert_ne!(
+        rebased_feature_sha, feature_commit.commit_sha,
+        "rebase --skip should rewrite the following feature commit"
+    );
+
+    let rebase_session = repos::test_repo::new_daemon_test_sync_session_id();
+    let skip_session = repos::test_repo::new_daemon_test_sync_session_id();
+    let rebase_session_arg = format!("git-ai.testSyncSession={rebase_session}");
+    let skip_session_arg = format!("git-ai.testSyncSession={skip_session}");
+
+    send_trace_frames(
+        &trace_socket,
+        &[
+            json!({
+                "event": "start",
+                "sid": "failed-rebase-before-skip",
+                "argv": ["git", "-c", rebase_session_arg, "-C", worktree, "rebase", default_branch],
+                "time_ns": 1_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "failed-rebase-before-skip",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 1_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "failed-rebase-before-skip",
+                "code": 1,
+                "time_ns": 1_100u64,
+            }),
+            json!({
+                "event": "start",
+                "sid": "rebase-skip",
+                "argv": ["git", "-c", skip_session_arg, "-C", worktree, "rebase", "--skip"],
+                "time_ns": 2_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "rebase-skip",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 2_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "rebase-skip",
+                "code": 0,
+                "time_ns": 2_100u64,
+            }),
+        ],
+    );
+    repo.sync_daemon_external_completion_sessions(&[rebase_session, skip_session]);
+
+    assert!(
+        repo.read_authorship_note(&rebased_feature_sha).is_some(),
+        "rebased feature commit should get the remapped note when failed rebase processing is delayed until after --skip"
+    );
+    feature_file.assert_committed_lines(lines!["// AI feature".ai()]);
+}
+
+#[test]
 #[serial]
 fn daemon_trace_ingest_treats_atexit_as_terminal_for_reflog_capture() {
     let repo =
