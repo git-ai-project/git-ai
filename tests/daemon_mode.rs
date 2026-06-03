@@ -1197,6 +1197,109 @@ fn daemon_pure_trace_socket_commit_after_ai_checkpoint_preserves_ai_replacement_
 }
 
 #[test]
+fn daemon_trace_current_dir_commands_reserve_order_from_def_repo() {
+    let repo = TestRepo::new_dedicated_daemon();
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let worktree = repo_workdir_string(&repo);
+    let git_dir = repo.path().join(".git").to_string_lossy().to_string();
+
+    fs::write(repo.path().join("base.txt"), "base\n").expect("failed to write base");
+    repo.git_og(&["add", "base.txt"])
+        .expect("base add should succeed");
+    repo.git_og(&["commit", "-m", "base"])
+        .expect("base commit should succeed");
+
+    fs::write(repo.path().join("a.txt"), "a ai\n").expect("failed to write a.txt");
+    repo.git_ai(&["checkpoint", "mock_ai", "a.txt"])
+        .expect("a checkpoint should succeed");
+    repo.git_og(&["add", "a.txt"])
+        .expect("a add should succeed");
+    repo.git_og(&["commit", "-m", "commit A"])
+        .expect("commit A should succeed");
+    let commit_a = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .expect("rev-parse A should succeed")
+        .trim()
+        .to_string();
+
+    fs::write(repo.path().join("b.txt"), "b ai\n").expect("failed to write b.txt");
+    repo.git_ai(&["checkpoint", "mock_ai", "b.txt"])
+        .expect("b checkpoint should succeed");
+    repo.git_og(&["add", "b.txt"])
+        .expect("b add should succeed");
+    repo.git_og(&["commit", "-m", "commit B"])
+        .expect("commit B should succeed");
+    let commit_b = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .expect("rev-parse B should succeed")
+        .trim()
+        .to_string();
+
+    let session_a = repos::test_repo::new_daemon_test_sync_session_id();
+    let session_b = repos::test_repo::new_daemon_test_sync_session_id();
+    let session_arg_a = format!("git-ai.testSyncSession={session_a}");
+    let session_arg_b = format!("git-ai.testSyncSession={session_b}");
+
+    send_trace_frames(
+        &trace_socket,
+        &[
+            json!({
+                "event": "start",
+                "sid": "current-dir-a",
+                "argv": ["git", "-c", session_arg_a, "commit", "-m", "commit A"],
+                "time_ns": 1_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "current-dir-a",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 1_001u64,
+            }),
+            json!({
+                "event": "start",
+                "sid": "current-dir-b",
+                "argv": ["git", "-c", session_arg_b, "commit", "-m", "commit B"],
+                "time_ns": 2_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "current-dir-b",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 2_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "current-dir-b",
+                "code": 0,
+                "time_ns": 2_100u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "current-dir-a",
+                "code": 0,
+                "time_ns": 1_100u64,
+            }),
+        ],
+    );
+    repo.sync_daemon_external_completion_sessions(&[session_a, session_b]);
+
+    assert!(
+        repo.read_authorship_note(&commit_a).is_some(),
+        "commit A should retain a note even when its trace exit is delivered after commit B"
+    );
+    assert!(
+        repo.read_authorship_note(&commit_b).is_some(),
+        "commit B should have a note"
+    );
+    let mut file_a = repo.filename("a.txt");
+    file_a.assert_committed_lines(lines!["a ai".ai()]);
+    let mut file_b = repo.filename("b.txt");
+    file_b.assert_committed_lines(lines!["b ai".ai()]);
+}
+
+#[test]
 #[serial]
 fn daemon_trace_ingest_treats_atexit_as_terminal_for_reflog_capture() {
     let repo =
