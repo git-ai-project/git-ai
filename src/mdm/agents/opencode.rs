@@ -212,7 +212,7 @@ mod tests {
     fn test_opencode_plugin_content_is_valid_typescript() {
         let content = OPENCODE_PLUGIN_CONTENT;
 
-        assert!(content.contains("import type { Plugin, PluginInput }"));
+        assert!(content.contains("import type { Plugin }"));
         assert!(content.contains("@opencode-ai/plugin"));
         assert!(content.contains("export const GitAiPlugin: Plugin"));
         assert!(content.contains("export default GitAiPlugin"));

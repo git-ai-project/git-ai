@@ -18,7 +18,6 @@ Build `git-ai` (`cargo build`) and then run the `git-ai install-hooks` or `cargo
 ## Requirements
 
 - [git-ai](https://github.com/git-ai-project/git-ai) must be installed through `git-ai install-hooks`; the plugin uses the absolute binary path injected at install time
-- `git` must be available in PATH for repository discovery
 - [OpenCode](https://opencode.ai) with plugin support
 
 ## How It Works
