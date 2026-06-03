@@ -1,7 +1,7 @@
-use crate::daemon::analyzers::command_args;
+use crate::daemon::analyzers::{command_args, normalized_args};
 use crate::daemon::domain::{Confidence, FamilyKey, FamilyState, NormalizedCommand, RefChange};
 use crate::error::GitAiError;
-use crate::git::cli_parser::summarize_rebase_args;
+use crate::git::cli_parser::{parse_git_cli_args, summarize_rebase_args};
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{git_dir_for_worktree, is_valid_git_oid};
 use std::collections::{HashMap, HashSet};
@@ -150,12 +150,7 @@ impl RefCursor {
                 }
             }
             "rebase" => self.consume_rebase_transition(cmd, state),
-            "pull" => self.consume_head_span_for_command(
-                cmd,
-                state,
-                &["pull", "merge", "rebase", "checkout:", "commit:"],
-                ExpectedTransition::from_state_and_working_logs(cmd, state),
-            ),
+            "pull" => self.consume_pull_transition(cmd, state),
             "branch" => self.enrich_branch(cmd, state),
             "stash" => self.enrich_stash(cmd, state),
             "update-ref" => self.enrich_update_ref(cmd, state),
@@ -497,6 +492,22 @@ impl RefCursor {
         dedup_ref_changes(&mut changes);
         cmd.ref_changes = changes;
         Ok(())
+    }
+
+    fn consume_pull_transition(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<(), GitAiError> {
+        let action = pull_reflog_action(cmd);
+        let prefixes = pull_reflog_message_prefixes(&action);
+        let prefix_refs = prefixes.iter().map(String::as_str).collect::<Vec<_>>();
+        self.consume_head_span_for_command(
+            cmd,
+            state,
+            &prefix_refs,
+            ExpectedTransition::from_state_and_working_logs(cmd, state),
+        )
     }
 
     fn consume_head_transition_for_command(
@@ -932,6 +943,40 @@ fn commit_subject(message: &str) -> Option<String> {
         .lines()
         .find(|line| !line.trim().is_empty())
         .map(|line| line.to_string())
+}
+
+fn pull_reflog_action(cmd: &NormalizedCommand) -> String {
+    let raw_args = normalized_args(&cmd.raw_argv);
+    let parsed = parse_git_cli_args(&raw_args);
+    let args = if parsed.command.as_deref() == Some("pull") {
+        parsed.command_args
+    } else {
+        command_args(cmd)
+    };
+    let args = pull_command_args(&args);
+    if args.is_empty() {
+        "pull".to_string()
+    } else {
+        std::iter::once("pull")
+            .chain(args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+fn pull_command_args(args: &[String]) -> &[String] {
+    if args.first().is_some_and(|arg| arg == "pull") {
+        &args[1..]
+    } else {
+        args
+    }
+}
+
+fn pull_reflog_message_prefixes(action: &str) -> Vec<String> {
+    if action == "pull" {
+        return vec!["pull:".to_string(), "pull (".to_string()];
+    }
+    vec![format!("{}:", action), format!("{} ", action)]
 }
 
 fn read_reflog_entries(

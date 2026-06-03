@@ -2773,6 +2773,138 @@ fn daemon_pure_trace_socket_pull_autostash_preserves_local_changes_and_tracks_co
 }
 
 #[test]
+fn daemon_delayed_pull_rebase_autostash_does_not_consume_later_commit() {
+    let (local, _upstream) = TestRepo::new_with_remote_with_mode_and_daemon_scope(
+        GitTestMode::Daemon,
+        DaemonTestScope::Dedicated,
+    );
+    let trace_socket = daemon_trace_socket_path(&local);
+    let worktree = repo_workdir_string(&local);
+    let git_dir = local.path().join(".git").to_string_lossy().to_string();
+
+    let mut readme = local.filename("README.md");
+    readme.set_contents(lines!["# Test Repo".human()]);
+    let initial = local
+        .stage_all_and_commit("initial commit")
+        .expect("initial commit should succeed");
+    readme.assert_committed_lines(lines!["# Test Repo".human()]);
+
+    local
+        .git(&["push", "-u", "origin", "HEAD"])
+        .expect("push initial commit should succeed");
+
+    let mut committed_ai = local.filename("ai_feature.txt");
+    committed_ai.set_contents(lines![
+        "AI generated feature line 1".ai(),
+        "AI generated feature line 2".ai(),
+    ]);
+    let local_ai = local
+        .stage_all_and_commit("add AI feature")
+        .expect("AI feature commit should succeed");
+    committed_ai.assert_committed_lines(lines![
+        "AI generated feature line 1".ai(),
+        "AI generated feature line 2".ai(),
+    ]);
+
+    let branch = local.current_branch();
+    local
+        .git(&["reset", "--hard", &initial.commit_sha])
+        .expect("reset to initial commit should succeed");
+
+    let mut upstream_file = local.filename("upstream_change.txt");
+    upstream_file.set_contents(lines!["upstream content".human()]);
+    local
+        .stage_all_and_commit("upstream divergent commit")
+        .expect("upstream commit should succeed");
+    upstream_file.assert_committed_lines(lines!["upstream content".human()]);
+
+    local
+        .git(&["push", "--force", "origin", &format!("HEAD:{}", branch)])
+        .expect("force push upstream commit should succeed");
+    local
+        .git(&["reset", "--hard", &local_ai.commit_sha])
+        .expect("reset back to local AI commit should succeed");
+
+    let mut uncommitted_ai = local.filename("uncommitted_ai.txt");
+    uncommitted_ai.set_contents(lines!["Uncommitted AI line".ai()]);
+    local
+        .git_ai(&["checkpoint", "mock_ai", "uncommitted_ai.txt"])
+        .expect("checkpoint should succeed");
+    local.sync_daemon();
+
+    local
+        .git_og(&["pull", "--rebase", "--autostash"])
+        .expect("raw pull --rebase --autostash should succeed");
+    local
+        .git_og(&["add", "-A"])
+        .expect("raw add should succeed");
+    local
+        .git_og(&["commit", "-m", "commit uncommitted AI work"])
+        .expect("raw commit should succeed");
+    let final_commit = local
+        .git_og(&["rev-parse", "HEAD"])
+        .expect("rev-parse final commit should succeed")
+        .trim()
+        .to_string();
+
+    let pull_session = repos::test_repo::new_daemon_test_sync_session_id();
+    let commit_session = repos::test_repo::new_daemon_test_sync_session_id();
+    let pull_session_arg = format!("git-ai.testSyncSession={pull_session}");
+    let commit_session_arg = format!("git-ai.testSyncSession={commit_session}");
+
+    send_trace_frames(
+        &trace_socket,
+        &[
+            json!({
+                "event": "start",
+                "sid": "delayed-pull-autostash",
+                "argv": ["git", "-c", pull_session_arg, "-C", worktree, "pull", "--rebase", "--autostash"],
+                "time_ns": 1_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "delayed-pull-autostash",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 1_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "delayed-pull-autostash",
+                "code": 0,
+                "time_ns": 1_100u64,
+            }),
+            json!({
+                "event": "start",
+                "sid": "delayed-commit-after-pull",
+                "argv": ["git", "-c", commit_session_arg, "-C", worktree, "commit", "-m", "commit uncommitted AI work"],
+                "time_ns": 2_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "delayed-commit-after-pull",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 2_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "delayed-commit-after-pull",
+                "code": 0,
+                "time_ns": 2_100u64,
+            }),
+        ],
+    );
+    local.sync_daemon_external_completion_sessions(&[pull_session, commit_session]);
+
+    assert!(
+        local.read_authorship_note(&final_commit).is_some(),
+        "delayed pull processing must not consume the following commit reflog entry"
+    );
+    uncommitted_ai.assert_committed_lines(lines!["Uncommitted AI line".ai()]);
+}
+
+#[test]
 #[serial]
 fn daemon_pure_trace_socket_high_throughput_ai_commit_burst_preserves_exact_blame() {
     let repo =
