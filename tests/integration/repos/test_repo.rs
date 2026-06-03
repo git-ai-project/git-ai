@@ -894,7 +894,7 @@ fn parse_checkpoint_request_count(stdout: &str) -> u64 {
 fn git_ai_command_requires_daemon_sync(args: &[&str]) -> bool {
     matches!(
         git_ai_primary_command(args),
-        Some("blame" | "checkpoint" | "continue" | "diff" | "prompts" | "search" | "stats")
+        Some("blame" | "continue" | "diff" | "prompts" | "search" | "stats")
     )
 }
 
@@ -2660,9 +2660,6 @@ impl TestRepo {
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         registry.raise_expected_checkpoint_count(family_key, *per_family_count);
                     }
-                    for family_key in families.keys() {
-                        self.sync_pending_daemon_sessions(family_key);
-                    }
                 }
             }
             let combined = if stdout.is_empty() {
@@ -2727,7 +2724,6 @@ impl TestRepo {
                 let count = parse_checkpoint_request_count(&stdout);
                 if count > 0 {
                     self.record_pending_checkpoint_completions(count);
-                    self.sync_daemon_force();
                 }
             }
             // Combine stdout and stderr since git-ai often writes to stderr
@@ -2807,7 +2803,6 @@ impl TestRepo {
                 let count = parse_checkpoint_request_count(&stdout);
                 if count > 0 {
                     self.record_pending_checkpoint_completions(count);
-                    self.sync_daemon_force();
                 }
             }
             // Combine stdout and stderr since git-ai often writes to stderr
