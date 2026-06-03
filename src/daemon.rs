@@ -809,35 +809,19 @@ fn process_conflict_resolution_working_logs(repo: &Repository, new_tip: &str, on
     }
 }
 
-fn system_time_to_unix_nanos(time: SystemTime) -> Option<u128> {
-    time.duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_nanos())
-}
-
 fn rfc3339_to_unix_nanos(value: &str) -> Option<u128> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .and_then(|timestamp| u128::try_from(timestamp.timestamp_nanos_opt()?).ok())
 }
 
-fn read_worktree_snapshot_for_files_at_or_before(
+fn read_worktree_snapshot_for_files(
     worktree: &Path,
     file_paths: &HashSet<String>,
-    max_modified_ns: u128,
 ) -> HashMap<String, String> {
     let mut snapshot = HashMap::new();
     for file_path in file_paths {
         let absolute = worktree.join(file_path);
-        let modified_after_cutoff = fs::metadata(&absolute)
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(system_time_to_unix_nanos)
-            .is_some_and(|modified_ns| modified_ns > max_modified_ns);
-        if modified_after_cutoff {
-            continue;
-        }
-
         let content = match fs::read(&absolute) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
             Err(_) => String::new(),
@@ -873,12 +857,6 @@ fn stable_head_change_from_ref_changes(
                 is_non_auxiliary_ref(&change.reference)
             })
         })
-}
-
-fn stable_new_head_from_ref_changes(
-    ref_changes: &[crate::daemon::domain::RefChange],
-) -> Option<String> {
-    stable_head_change_from_ref_changes(ref_changes).map(|(_, new_head)| new_head)
 }
 
 fn stable_old_head_from_worktree_head_reflog(worktree: &Path, new_head: &str) -> Option<String> {
@@ -936,26 +914,6 @@ fn stable_carryover_heads_for_command(
                         stable_old_head_from_worktree_head_reflog(input.worktree, &new_head)?;
                     Some((old_head, new_head))
                 })
-            }
-        }
-        "reset" => {
-            if parsed.has_command_flag("--hard") {
-                None
-            } else if let Some((old_head, new_head)) = ref_head_change.clone() {
-                Some((old_head, new_head))
-            } else {
-                let new_head = post_head
-                    .clone()
-                    .or_else(|| stable_new_head_from_ref_changes(input.ref_changes))
-                    .ok_or_else(|| {
-                        GitAiError::Generic(format!(
-                            "reset missing stable head for carryover capture sid={}",
-                            input.root_sid
-                        ))
-                    })?;
-                let old_head = stable_old_head_from_worktree_head_reflog(input.worktree, &new_head)
-                    .unwrap_or_else(|| new_head.clone());
-                Some((old_head, new_head))
             }
         }
         _ => None,
@@ -1748,48 +1706,47 @@ fn apply_checkout_switch_working_log_side_effect(
 
     if is_merge {
         let tracked_files = tracked_working_log_files(&repo, &old_head)?;
-        if !tracked_files.is_empty() && carryover_snapshot.is_none() {
-            // Carryover snapshot was not captured (e.g. the trace arrived before
-            // the worktree reflog was fully populated, or the wrapper already
-            // handled the migration).  Fall through to the rename path so the
-            // working log is migrated rather than lost.  Attribution may be
-            // slightly misaligned but is preserved.
-            tracing::warn!(
-                command = cmd.primary_command.as_deref().unwrap_or("checkout"),
-                "--merge missing carryover snapshot, falling back to rename"
-            );
-        } else {
-            if let Some(snapshot) = carryover_snapshot {
-                // Fix #957: When --merge produced conflict markers (exit_code != 0),
-                // the snapshot files contain conflict markers.  Strip them before
-                // restoring working-log carryover so byte-level attributions align
-                // with the clean content.
-                let clean_snapshot: HashMap<String, String> = if cmd.exit_code != 0 {
-                    snapshot
-                        .iter()
-                        .map(|(k, v)| {
-                            let clean = if crate::authorship::virtual_attribution::content_has_conflict_markers(v) {
-                                crate::authorship::virtual_attribution::strip_conflict_markers_keep_ours(v)
-                            } else {
-                                v.clone()
-                            };
-                            (k.clone(), clean)
-                        })
-                        .collect()
-                } else {
-                    snapshot.clone()
-                };
-                restore_working_log_carryover(
-                    &repo,
-                    &old_head,
-                    &new_head,
-                    clean_snapshot,
-                    Some(repo.git_author_identity().formatted_or_unknown()),
-                )?;
-            }
+        if tracked_files.is_empty() {
             repo.storage.delete_working_log_for_base_commit(&old_head)?;
             return Ok(());
         }
+
+        let snapshot = carryover_snapshot.ok_or_else(|| {
+            GitAiError::Generic(format!(
+                "{} --merge requires carryover final-state snapshot for {} tracked file(s)",
+                cmd.primary_command.as_deref().unwrap_or("checkout"),
+                tracked_files.len()
+            ))
+        })?;
+
+        // Fix #957: When --merge produced conflict markers (exit_code != 0),
+        // the snapshot files contain conflict markers. Strip them before
+        // restoring working-log carryover so byte-level attributions align
+        // with the clean content.
+        let clean_snapshot: HashMap<String, String> = if cmd.exit_code != 0 {
+            snapshot
+                .iter()
+                .map(|(k, v)| {
+                    let clean = if crate::authorship::virtual_attribution::content_has_conflict_markers(v) {
+                        crate::authorship::virtual_attribution::strip_conflict_markers_keep_ours(v)
+                    } else {
+                        v.clone()
+                    };
+                    (k.clone(), clean)
+                })
+                .collect()
+        } else {
+            snapshot.clone()
+        };
+        restore_working_log_carryover(
+            &repo,
+            &old_head,
+            &new_head,
+            clean_snapshot,
+            Some(repo.git_author_identity().formatted_or_unknown()),
+        )?;
+        repo.storage.delete_working_log_for_base_commit(&old_head)?;
+        return Ok(());
     }
 
     repo.storage.rename_working_log(&old_head, &new_head)?;
@@ -2439,7 +2396,6 @@ struct CarryoverCaptureInput<'a> {
     primary_command: Option<&'a str>,
     argv: &'a [String],
     exit_code: i32,
-    finished_at_ns: u128,
     post_repo: Option<&'a RepoContext>,
     ref_changes: &'a [crate::daemon::domain::RefChange],
 }
@@ -3333,6 +3289,9 @@ impl ActorDaemonCoordinator {
         let Some(command) = command else {
             return Ok(None);
         };
+        if !matches!(command, "rebase" | "pull" | "checkout" | "switch") {
+            return Ok(None);
+        }
 
         // `checkout/switch --merge` exits with code 1 when it produces conflict
         // markers, but HEAD still moves to the new branch.  The daemon requires a
@@ -3342,18 +3301,6 @@ impl ActorDaemonCoordinator {
         let is_merge_checkout = (command == "checkout" || command == "switch")
             && (parsed.has_command_flag("--merge") || parsed.has_command_flag("-m"));
         if input.exit_code != 0 && !is_merge_checkout {
-            return Ok(None);
-        }
-
-        // Repo-creating commands (clone, init) have no meaningful carryover
-        // state — the target repo doesn't exist before the command runs, and the
-        // worktree hint may point to the CWD (a non-repo directory) rather than
-        // the newly created repo.
-        if matches!(command, "clone" | "init") {
-            return Ok(None);
-        }
-
-        if command == "commit" {
             return Ok(None);
         }
 
@@ -3385,18 +3332,6 @@ impl ActorDaemonCoordinator {
                     file_paths.extend(tracked_working_log_files(&repo, &old_head)?);
                 }
             }
-            "reset" => {
-                if !parsed.has_command_flag("--hard")
-                    && let Some((old_head, _new_head)) = stable_heads.clone()
-                    && !old_head.is_empty()
-                {
-                    file_paths.extend(tracked_working_log_files(&repo, &old_head)?);
-                    let pathspecs = parsed.pathspecs();
-                    if !pathspecs.is_empty() {
-                        file_paths.retain(|file| matches_any_pathspec(file, &pathspecs));
-                    }
-                }
-            }
             _ => {}
         }
 
@@ -3404,11 +3339,7 @@ impl ActorDaemonCoordinator {
             return Ok(None);
         }
 
-        let snapshot = read_worktree_snapshot_for_files_at_or_before(
-            input.worktree,
-            &file_paths,
-            input.finished_at_ns,
-        );
+        let snapshot = read_worktree_snapshot_for_files(input.worktree, &file_paths);
         self.store_carryover_snapshot(input.root_sid, snapshot)
     }
 
@@ -4179,37 +4110,12 @@ impl ActorDaemonCoordinator {
                 }
             }
             if object.get("git_ai_carryover_snapshot_id").is_none() {
-                let terminal_time_ns = object
-                    .get("time")
-                    .and_then(Value::as_str)
-                    .and_then(rfc3339_to_unix_nanos)
-                    .or_else(|| {
-                        object
-                            .get("time_ns")
-                            .and_then(Value::as_u64)
-                            .map(u128::from)
-                    })
-                    .or_else(|| object.get("ts").and_then(Value::as_u64).map(u128::from))
-                    .or_else(|| {
-                        object
-                            .get("t_abs")
-                            .and_then(Value::as_f64)
-                            .and_then(|seconds| {
-                                if seconds.is_sign_negative() {
-                                    None
-                                } else {
-                                    Some((seconds * 1_000_000_000_f64) as u128)
-                                }
-                            })
-                    })
-                    .unwrap_or_else(now_unix_nanos);
                 match self.capture_carryover_snapshot_for_command(CarryoverCaptureInput {
                     root_sid: &root,
                     worktree: &worktree,
                     primary_command: effective_primary.as_deref(),
                     argv: &effective_argv,
                     exit_code: terminal_exit_code.unwrap_or(0),
-                    finished_at_ns: terminal_time_ns,
                     post_repo: post_repo.as_ref(),
                     ref_changes: terminal_ref_changes.as_deref().unwrap_or(&[]),
                 }) {
@@ -5190,7 +5096,7 @@ impl ActorDaemonCoordinator {
                     // to carry over, and the warning is benign.
                     tracing::warn!(
                         command = cmd.primary_command.as_deref().unwrap_or("pull"),
-                        "missing captured carryover snapshot for async restore (likely AI conflict-resolution checkpoint; attribution handled via working-log fallback)"
+                        "missing captured carryover snapshot for async restore (likely AI conflict-resolution checkpoint; attribution handled by conflict working-log rewrite path)"
                     );
                 }
             }

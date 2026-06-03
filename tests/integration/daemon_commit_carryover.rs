@@ -6,7 +6,7 @@ use std::fs;
 use std::time::{Duration, SystemTime};
 
 #[test]
-fn test_daemon_commit_carryover_snapshot_does_not_read_next_worktree_edit() {
+fn test_daemon_commit_uses_immutable_commit_content_not_next_worktree_edit() {
     let repo = TestRepo::new_dedicated_daemon();
     let mut file = repo.filename("race.txt");
     let file_path = repo.path().join("race.txt");
