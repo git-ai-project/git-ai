@@ -12,7 +12,7 @@ use git_ai::transcripts::agents::{ClaudeAgent, CopilotAgent, OpenCodeAgent};
 use git_ai::transcripts::watermark::{
     ByteOffsetWatermark, TimestampCursorWatermark, TimestampWatermark, WatermarkStrategy,
 };
-use git_ai::transcripts::{SessionRecord, TranscriptsDatabase};
+use git_ai::transcripts::{StreamRecord, StreamsDatabase};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::PathBuf;
@@ -39,15 +39,15 @@ fn test_fixture_path(name: &str) -> PathBuf {
 fn test_session_database_basic() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("transcripts.db");
-    let db = TranscriptsDatabase::open(&db_path).unwrap();
+    let db = StreamsDatabase::open(&db_path).unwrap();
 
     let now = chrono::Utc::now().timestamp();
-    let session = SessionRecord {
+    let session = StreamRecord {
         session_id: "s_test_123".to_string(),
         stream_kind: "transcript".to_string(),
         tool: "claude".to_string(),
-        transcript_path: "/path/to/transcript.jsonl".to_string(),
-        transcript_format: "claude-jsonl".to_string(),
+        stream_path: "/path/to/transcript.jsonl".to_string(),
+        stream_format: "claude-jsonl".to_string(),
         watermark_type: "byte_offset".to_string(),
         watermark_value: "0".to_string(),
         external_session_id: "test-ext-session".to_string(),
@@ -62,11 +62,11 @@ fn test_session_database_basic() {
     };
 
     // Insert
-    db.insert_session(&session).unwrap();
+    db.insert_stream(&session).unwrap();
 
     // Read
     let retrieved = db
-        .get_session("s_test_123", "transcript", "/path/to/transcript.jsonl")
+        .get_stream("s_test_123", "transcript", "/path/to/transcript.jsonl")
         .unwrap();
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
@@ -84,13 +84,13 @@ fn test_session_database_basic() {
     )
     .unwrap();
     let retrieved_updated = db
-        .get_session("s_test_123", "transcript", "/path/to/transcript.jsonl")
+        .get_stream("s_test_123", "transcript", "/path/to/transcript.jsonl")
         .unwrap()
         .unwrap();
     assert_eq!(retrieved_updated.watermark_value, "100");
 
     // List all sessions
-    let all_sessions = db.all_sessions().unwrap();
+    let all_sessions = db.all_streams().unwrap();
     assert_eq!(all_sessions.len(), 1);
     assert_eq!(all_sessions[0].session_id, "s_test_123");
 }
@@ -153,18 +153,18 @@ fn test_watermark_integration() {
 fn test_multiple_sessions_isolation() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("transcripts.db");
-    let db = TranscriptsDatabase::open(&db_path).unwrap();
+    let db = StreamsDatabase::open(&db_path).unwrap();
 
     let now = chrono::Utc::now().timestamp();
 
     // Create multiple sessions
     for i in 0..5 {
-        let session = SessionRecord {
+        let session = StreamRecord {
             session_id: format!("s_session_{}", i),
             stream_kind: "transcript".to_string(),
             tool: "claude".to_string(),
-            transcript_path: format!("/path/to/transcript_{}.jsonl", i),
-            transcript_format: "claude-jsonl".to_string(),
+            stream_path: format!("/path/to/transcript_{}.jsonl", i),
+            stream_format: "claude-jsonl".to_string(),
             watermark_type: "byte_offset".to_string(),
             watermark_value: (i * 10).to_string(),
             external_session_id: "test-ext-session".to_string(),
@@ -177,17 +177,17 @@ fn test_multiple_sessions_isolation() {
             last_error: None,
             repo_work_dir: None,
         };
-        db.insert_session(&session).unwrap();
+        db.insert_stream(&session).unwrap();
     }
 
     // Verify all sessions exist independently
-    let all_sessions = db.all_sessions().unwrap();
+    let all_sessions = db.all_streams().unwrap();
     assert_eq!(all_sessions.len(), 5);
 
     // Verify each session has correct data
     for i in 0..5 {
         let session = db
-            .get_session(
+            .get_stream(
                 &format!("s_session_{}", i),
                 "transcript",
                 &format!("/path/to/transcript_{}.jsonl", i),
@@ -208,13 +208,13 @@ fn test_database_persistence() {
 
     // Create and close database
     {
-        let db = TranscriptsDatabase::open(&db_path).unwrap();
-        let session = SessionRecord {
+        let db = StreamsDatabase::open(&db_path).unwrap();
+        let session = StreamRecord {
             session_id: "s_persist".to_string(),
             stream_kind: "transcript".to_string(),
             tool: "claude".to_string(),
-            transcript_path: "/path/to/transcript.jsonl".to_string(),
-            transcript_format: "claude-jsonl".to_string(),
+            stream_path: "/path/to/transcript.jsonl".to_string(),
+            stream_format: "claude-jsonl".to_string(),
             watermark_type: "byte_offset".to_string(),
             watermark_value: "42".to_string(),
             external_session_id: "test-ext-session".to_string(),
@@ -227,14 +227,14 @@ fn test_database_persistence() {
             last_error: None,
             repo_work_dir: None,
         };
-        db.insert_session(&session).unwrap();
+        db.insert_stream(&session).unwrap();
     }
 
     // Reopen database
     {
-        let db = TranscriptsDatabase::open(&db_path).unwrap();
+        let db = StreamsDatabase::open(&db_path).unwrap();
         let retrieved = db
-            .get_session("s_persist", "transcript", "/path/to/transcript.jsonl")
+            .get_stream("s_persist", "transcript", "/path/to/transcript.jsonl")
             .unwrap()
             .unwrap();
         assert_eq!(retrieved.session_id, "s_persist");
@@ -247,15 +247,15 @@ fn test_database_persistence() {
 fn test_error_tracking() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("transcripts.db");
-    let db = TranscriptsDatabase::open(&db_path).unwrap();
+    let db = StreamsDatabase::open(&db_path).unwrap();
 
     let now = chrono::Utc::now().timestamp();
-    let session = SessionRecord {
+    let session = StreamRecord {
         session_id: "s_errors".to_string(),
         stream_kind: "transcript".to_string(),
         tool: "claude".to_string(),
-        transcript_path: "/path/to/transcript.jsonl".to_string(),
-        transcript_format: "claude-jsonl".to_string(),
+        stream_path: "/path/to/transcript.jsonl".to_string(),
+        stream_format: "claude-jsonl".to_string(),
         watermark_type: "byte_offset".to_string(),
         watermark_value: "0".to_string(),
         external_session_id: "test-ext-session".to_string(),
@@ -269,7 +269,7 @@ fn test_error_tracking() {
         repo_work_dir: None,
     };
 
-    db.insert_session(&session).unwrap();
+    db.insert_stream(&session).unwrap();
 
     // Simulate errors
     db.record_error(
@@ -280,7 +280,7 @@ fn test_error_tracking() {
     )
     .unwrap();
     let retrieved = db
-        .get_session("s_errors", "transcript", "/path/to/transcript.jsonl")
+        .get_stream("s_errors", "transcript", "/path/to/transcript.jsonl")
         .unwrap()
         .unwrap();
     assert_eq!(retrieved.processing_errors, 1);
@@ -295,7 +295,7 @@ fn test_error_tracking() {
     )
     .unwrap();
     let retrieved2 = db
-        .get_session("s_errors", "transcript", "/path/to/transcript.jsonl")
+        .get_stream("s_errors", "transcript", "/path/to/transcript.jsonl")
         .unwrap()
         .unwrap();
     assert_eq!(retrieved2.processing_errors, 2);
@@ -306,17 +306,17 @@ fn test_error_tracking() {
 fn test_full_pipeline_claude_session_ids_flow_through() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("transcripts.db");
-    let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+    let db = Arc::new(StreamsDatabase::open(&db_path).unwrap());
 
     let fixture = fixture_path("claude_with_ids.jsonl");
     let now = chrono::Utc::now().timestamp();
 
-    let session = SessionRecord {
+    let session = StreamRecord {
         session_id: "sess-parent-abc".to_string(),
         stream_kind: "transcript".to_string(),
         tool: "claude".to_string(),
-        transcript_path: fixture.display().to_string(),
-        transcript_format: "ClaudeJsonl".to_string(),
+        stream_path: fixture.display().to_string(),
+        stream_format: "ClaudeJsonl".to_string(),
         watermark_type: "ByteOffset".to_string(),
         watermark_value: "0".to_string(),
         external_session_id: "sess-parent-abc".to_string(),
@@ -329,10 +329,10 @@ fn test_full_pipeline_claude_session_ids_flow_through() {
         last_error: None,
         repo_work_dir: None,
     };
-    db.insert_session(&session).unwrap();
+    db.insert_stream(&session).unwrap();
 
     let retrieved = db
-        .get_session(
+        .get_stream(
             "sess-parent-abc",
             "transcript",
             &fixture.display().to_string(),
@@ -346,7 +346,7 @@ fn test_full_pipeline_claude_session_ids_flow_through() {
     let watermark = Box::new(ByteOffsetWatermark::new(0));
     let batch = agent
         .read_incremental(
-            &PathBuf::from(&retrieved.transcript_path),
+            &PathBuf::from(&retrieved.stream_path),
             watermark,
             &retrieved.session_id,
         )
@@ -401,17 +401,17 @@ fn test_full_pipeline_opencode_session_ids_flow_through() {
 
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("transcripts.db");
-    let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+    let db = Arc::new(StreamsDatabase::open(&db_path).unwrap());
 
     let fixture = test_fixture_path("opencode-sqlite/opencode.db");
     let now = chrono::Utc::now().timestamp();
 
-    let session = SessionRecord {
+    let session = StreamRecord {
         session_id: "test-session-123".to_string(),
         stream_kind: "transcript".to_string(),
         tool: "opencode".to_string(),
-        transcript_path: fixture.display().to_string(),
-        transcript_format: "OpenCodeSqlite".to_string(),
+        stream_path: fixture.display().to_string(),
+        stream_format: "OpenCodeSqlite".to_string(),
         watermark_type: "Timestamp".to_string(),
         watermark_value: DateTime::<Utc>::UNIX_EPOCH.to_rfc3339(),
         external_session_id: "test-session-123".to_string(),
@@ -424,13 +424,13 @@ fn test_full_pipeline_opencode_session_ids_flow_through() {
         last_error: None,
         repo_work_dir: None,
     };
-    db.insert_session(&session).unwrap();
+    db.insert_stream(&session).unwrap();
 
     let agent = OpenCodeAgent::new();
     let watermark = Box::new(TimestampWatermark::new(DateTime::<Utc>::UNIX_EPOCH));
     let batch = agent
         .read_incremental(
-            &PathBuf::from(&session.transcript_path),
+            &PathBuf::from(&session.stream_path),
             watermark,
             &session.session_id,
         )
@@ -477,7 +477,7 @@ fn test_subagent_session_record_has_parent_link() {
 
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("transcripts.db");
-    let db = TranscriptsDatabase::open(&db_path).unwrap();
+    let db = StreamsDatabase::open(&db_path).unwrap();
 
     let subagent_path = PathBuf::from(
         "/home/user/.claude/projects/proj/sess-parent-abc/subagents/agent-a1b2c3d4e5f6.jsonl",
@@ -486,12 +486,12 @@ fn test_subagent_session_record_has_parent_link() {
     assert_eq!(parent_id, Some("sess-parent-abc".to_string()));
 
     let now = chrono::Utc::now().timestamp();
-    let session = SessionRecord {
+    let session = StreamRecord {
         session_id: "agent-a1b2c3d4e5f6".to_string(),
         stream_kind: "transcript".to_string(),
         tool: "claude".to_string(),
-        transcript_path: subagent_path.display().to_string(),
-        transcript_format: "ClaudeJsonl".to_string(),
+        stream_path: subagent_path.display().to_string(),
+        stream_format: "ClaudeJsonl".to_string(),
         watermark_type: "ByteOffset".to_string(),
         watermark_value: "0".to_string(),
         external_session_id: "agent-a1b2c3d4e5f6".to_string(),
@@ -504,10 +504,10 @@ fn test_subagent_session_record_has_parent_link() {
         last_error: None,
         repo_work_dir: None,
     };
-    db.insert_session(&session).unwrap();
+    db.insert_stream(&session).unwrap();
 
     let retrieved = db
-        .get_session(
+        .get_stream(
             "agent-a1b2c3d4e5f6",
             "transcript",
             &subagent_path.display().to_string(),
@@ -544,18 +544,18 @@ fn test_subagent_session_record_has_parent_link() {
 fn test_copilot_otel_stream_reads_spans_with_event_ids() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("transcripts.db");
-    let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+    let db = Arc::new(StreamsDatabase::open(&db_path).unwrap());
 
     let fixture = test_fixture_path("copilot-otel/traces.db");
     let now = chrono::Utc::now().timestamp();
 
     // Create session record for the OTEL stream
-    let session = SessionRecord {
+    let session = StreamRecord {
         session_id: "copilot-otel-test-session".to_string(),
         stream_kind: "otel_traces".to_string(),
         tool: "github-copilot".to_string(),
-        transcript_path: fixture.display().to_string(),
-        transcript_format: "CopilotOtelSqlite".to_string(),
+        stream_path: fixture.display().to_string(),
+        stream_format: "CopilotOtelSqlite".to_string(),
         watermark_type: "TimestampCursor".to_string(),
         watermark_value: TimestampCursorWatermark::initial().serialize(),
         external_session_id: "copilot-ext-session-1".to_string(),
@@ -568,14 +568,14 @@ fn test_copilot_otel_stream_reads_spans_with_event_ids() {
         last_error: None,
         repo_work_dir: None,
     };
-    db.insert_session(&session).unwrap();
+    db.insert_stream(&session).unwrap();
 
     // Read spans using CopilotAgent (dispatches to copilot_otel reader for .db files)
     let agent = CopilotAgent::new();
     let watermark = Box::new(TimestampCursorWatermark::initial());
     let batch = agent
         .read_incremental(
-            &PathBuf::from(&session.transcript_path),
+            &PathBuf::from(&session.stream_path),
             watermark,
             &session.session_id,
         )

@@ -1,4 +1,4 @@
-//! Transcripts database for tracking session state and watermarks.
+//! Transcripts database for tracking stream cursors and watermarks.
 
 use super::types::TranscriptError;
 use super::watermark::WatermarkStrategy;
@@ -84,17 +84,17 @@ const MIGRATIONS: &[&str] = &[
 
     INSERT INTO schema_version (version) VALUES (3);
     "#,
-    // Version 4: Add stream_kind column with compound PK (session_id, stream_kind, transcript_path).
+    // Version 4: Add stream_kind column with compound PK (session_id, stream_kind, stream_path).
     // The path is part of the PK to prevent collisions when two physically distinct files
     // produce the same session_id (issue #1461).
     r#"
     BEGIN;
-    CREATE TABLE sessions_v4 (
+    CREATE TABLE tracked_streams_v4 (
         session_id TEXT NOT NULL,
         stream_kind TEXT NOT NULL DEFAULT 'transcript',
         tool TEXT NOT NULL,
-        transcript_path TEXT NOT NULL,
-        transcript_format TEXT NOT NULL,
+        stream_path TEXT NOT NULL,
+        stream_format TEXT NOT NULL,
         watermark_type TEXT NOT NULL,
         watermark_value TEXT NOT NULL,
         external_session_id TEXT NOT NULL,
@@ -106,28 +106,28 @@ const MIGRATIONS: &[&str] = &[
         processing_errors INTEGER DEFAULT 0,
         last_error TEXT,
         repo_work_dir TEXT,
-        PRIMARY KEY (session_id, stream_kind, transcript_path)
+        PRIMARY KEY (session_id, stream_kind, stream_path)
     );
-    INSERT INTO sessions_v4 SELECT session_id, 'transcript', tool, transcript_path, transcript_format, watermark_type, watermark_value, external_session_id, external_parent_session_id, first_seen_at, last_processed_at, last_known_size, last_modified, processing_errors, last_error, repo_work_dir FROM sessions;
+    INSERT INTO tracked_streams_v4 SELECT session_id, 'transcript', tool, transcript_path, transcript_format, watermark_type, watermark_value, external_session_id, external_parent_session_id, first_seen_at, last_processed_at, last_known_size, last_modified, processing_errors, last_error, repo_work_dir FROM sessions;
     DROP TABLE sessions;
-    ALTER TABLE sessions_v4 RENAME TO sessions;
-    CREATE INDEX idx_sessions_tool ON sessions(tool);
-    CREATE INDEX idx_sessions_last_processed ON sessions(last_processed_at);
-    CREATE INDEX idx_sessions_errors ON sessions(processing_errors) WHERE processing_errors > 0;
-    CREATE INDEX idx_sessions_transcript_path ON sessions(transcript_path);
+    ALTER TABLE tracked_streams_v4 RENAME TO tracked_streams;
+    CREATE INDEX idx_streams_tool ON tracked_streams(tool);
+    CREATE INDEX idx_streams_last_processed ON tracked_streams(last_processed_at);
+    CREATE INDEX idx_streams_errors ON tracked_streams(processing_errors) WHERE processing_errors > 0;
+    CREATE INDEX idx_streams_stream_path ON tracked_streams(stream_path);
     INSERT INTO schema_version (version) VALUES (4);
     COMMIT;
     "#,
 ];
 
-/// Record representing a session in the database.
+/// Record representing a tracked stream cursor in the database.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionRecord {
+pub struct StreamRecord {
     pub session_id: String,
     pub stream_kind: String,
     pub tool: String,
-    pub transcript_path: String,
-    pub transcript_format: String,
+    pub stream_path: String,
+    pub stream_format: String,
     pub watermark_type: String,
     pub watermark_value: String,
     pub external_session_id: String,
@@ -142,11 +142,11 @@ pub struct SessionRecord {
 }
 
 /// SQLite database for transcript tracking.
-pub struct TranscriptsDatabase {
+pub struct StreamsDatabase {
     conn: Arc<Mutex<Connection>>,
 }
 
-impl TranscriptsDatabase {
+impl StreamsDatabase {
     /// Open or create the transcripts database at the given path.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, TranscriptError> {
         let conn = Connection::open(path.as_ref()).map_err(|e| TranscriptError::Fatal {
@@ -237,8 +237,8 @@ impl TranscriptsDatabase {
         Ok(())
     }
 
-    /// Insert a new session record.
-    pub fn insert_session(&self, record: &SessionRecord) -> Result<(), TranscriptError> {
+    /// Insert a new stream record.
+    pub fn insert_stream(&self, record: &StreamRecord) -> Result<(), TranscriptError> {
         let conn = self
             .conn
             .lock()
@@ -246,8 +246,8 @@ impl TranscriptsDatabase {
 
         conn.execute(
             r#"
-            INSERT INTO sessions (
-                session_id, stream_kind, tool, transcript_path, transcript_format,
+            INSERT INTO tracked_streams (
+                session_id, stream_kind, tool, stream_path, stream_format,
                 watermark_type, watermark_value, external_session_id,
                 external_parent_session_id,
                 first_seen_at, last_processed_at, last_known_size, last_modified,
@@ -258,8 +258,8 @@ impl TranscriptsDatabase {
                 record.session_id,
                 record.stream_kind,
                 record.tool,
-                record.transcript_path,
-                record.transcript_format,
+                record.stream_path,
+                record.stream_format,
                 record.watermark_type,
                 record.watermark_value,
                 record.external_session_id,
@@ -274,20 +274,20 @@ impl TranscriptsDatabase {
             ],
         )
         .map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to insert session: {}", e),
+            message: format!("Failed to insert stream: {}", e),
         })?;
 
         Ok(())
     }
 
-    /// Helper to map a row to a SessionRecord.
-    fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<SessionRecord> {
-        Ok(SessionRecord {
+    /// Helper to map a row to a StreamRecord.
+    fn row_to_stream(row: &rusqlite::Row) -> rusqlite::Result<StreamRecord> {
+        Ok(StreamRecord {
             session_id: row.get(0)?,
             stream_kind: row.get(1)?,
             tool: row.get(2)?,
-            transcript_path: row.get(3)?,
-            transcript_format: row.get(4)?,
+            stream_path: row.get(3)?,
+            stream_format: row.get(4)?,
             watermark_type: row.get(5)?,
             watermark_value: row.get(6)?,
             external_session_id: row.get(7)?,
@@ -302,41 +302,41 @@ impl TranscriptsDatabase {
         })
     }
 
-    /// Get a session record by its full primary key.
-    pub fn get_session(
+    /// Get a stream record by its full primary key.
+    pub fn get_stream(
         &self,
         session_id: &str,
         stream_kind: &str,
-        transcript_path: &str,
-    ) -> Result<Option<SessionRecord>, TranscriptError> {
+        stream_path: &str,
+    ) -> Result<Option<StreamRecord>, TranscriptError> {
         let conn = self
             .conn
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         conn.query_row(
             r#"
-            SELECT session_id, stream_kind, tool, transcript_path, transcript_format,
+            SELECT session_id, stream_kind, tool, stream_path, stream_format,
                    watermark_type, watermark_value, external_session_id,
                    external_parent_session_id,
                    first_seen_at, last_processed_at, last_known_size, last_modified,
                    processing_errors, last_error, repo_work_dir
-            FROM sessions WHERE session_id = ?1 AND stream_kind = ?2 AND transcript_path = ?3
+            FROM tracked_streams WHERE session_id = ?1 AND stream_kind = ?2 AND stream_path = ?3
             "#,
-            params![session_id, stream_kind, transcript_path],
-            Self::row_to_session,
+            params![session_id, stream_kind, stream_path],
+            Self::row_to_stream,
         )
         .optional()
         .map_err(|e| TranscriptError::Fatal {
-            message: format!("Failed to get session: {}", e),
+            message: format!("Failed to get stream: {}", e),
         })
     }
 
-    /// Update the watermark for a session.
+    /// Update the watermark for a stream.
     pub fn update_watermark(
         &self,
         session_id: &str,
         stream_kind: &str,
-        transcript_path: &str,
+        stream_path: &str,
         watermark: &dyn WatermarkStrategy,
     ) -> Result<(), TranscriptError> {
         let conn = self
@@ -347,8 +347,8 @@ impl TranscriptsDatabase {
         let watermark_value = watermark.serialize();
 
         let rows_changed = conn.execute(
-            "UPDATE sessions SET watermark_value = ?1, last_processed_at = ?2 WHERE session_id = ?3 AND stream_kind = ?4 AND transcript_path = ?5",
-            params![watermark_value, now, session_id, stream_kind, transcript_path],
+            "UPDATE tracked_streams SET watermark_value = ?1, last_processed_at = ?2 WHERE session_id = ?3 AND stream_kind = ?4 AND stream_path = ?5",
+            params![watermark_value, now, session_id, stream_kind, stream_path],
         )
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to update watermark: {}", e),
@@ -356,19 +356,19 @@ impl TranscriptsDatabase {
 
         if rows_changed == 0 {
             return Err(TranscriptError::Fatal {
-                message: format!("Session not found: {}", session_id),
+                message: format!("Stream not found: {}", session_id),
             });
         }
 
         Ok(())
     }
 
-    /// Update file metadata (size and modified time) for a session.
+    /// Update file metadata (size and modified time) for a stream.
     pub fn update_file_metadata(
         &self,
         session_id: &str,
         stream_kind: &str,
-        transcript_path: &str,
+        stream_path: &str,
         file_size: u64,
         modified: Option<DateTime<Utc>>,
     ) -> Result<(), TranscriptError> {
@@ -379,8 +379,8 @@ impl TranscriptsDatabase {
         let modified_ts = modified.map(|dt| dt.timestamp());
 
         let rows_changed = conn.execute(
-            "UPDATE sessions SET last_known_size = ?1, last_modified = ?2 WHERE session_id = ?3 AND stream_kind = ?4 AND transcript_path = ?5",
-            params![file_size as i64, modified_ts, session_id, stream_kind, transcript_path],
+            "UPDATE tracked_streams SET last_known_size = ?1, last_modified = ?2 WHERE session_id = ?3 AND stream_kind = ?4 AND stream_path = ?5",
+            params![file_size as i64, modified_ts, session_id, stream_kind, stream_path],
         )
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to update file metadata: {}", e),
@@ -388,19 +388,19 @@ impl TranscriptsDatabase {
 
         if rows_changed == 0 {
             return Err(TranscriptError::Fatal {
-                message: format!("Session not found: {}", session_id),
+                message: format!("Stream not found: {}", session_id),
             });
         }
 
         Ok(())
     }
 
-    /// Update the repo_work_dir for a session.
+    /// Update the repo_work_dir for a stream.
     pub fn update_repo_work_dir(
         &self,
         session_id: &str,
         stream_kind: &str,
-        transcript_path: &str,
+        stream_path: &str,
         repo_work_dir: &str,
     ) -> Result<(), TranscriptError> {
         let conn = self
@@ -410,8 +410,8 @@ impl TranscriptsDatabase {
 
         let rows_changed = conn
             .execute(
-                "UPDATE sessions SET repo_work_dir = ?1 WHERE session_id = ?2 AND stream_kind = ?3 AND transcript_path = ?4",
-                params![repo_work_dir, session_id, stream_kind, transcript_path],
+                "UPDATE tracked_streams SET repo_work_dir = ?1 WHERE session_id = ?2 AND stream_kind = ?3 AND stream_path = ?4",
+                params![repo_work_dir, session_id, stream_kind, stream_path],
             )
             .map_err(|e| TranscriptError::Fatal {
                 message: format!("Failed to update repo_work_dir: {}", e),
@@ -419,19 +419,19 @@ impl TranscriptsDatabase {
 
         if rows_changed == 0 {
             return Err(TranscriptError::Fatal {
-                message: format!("Session not found: {}", session_id),
+                message: format!("Stream not found: {}", session_id),
             });
         }
 
         Ok(())
     }
 
-    /// Record an error for a session.
+    /// Record an error for a stream.
     pub fn record_error(
         &self,
         session_id: &str,
         stream_kind: &str,
-        transcript_path: &str,
+        stream_path: &str,
         error_message: &str,
     ) -> Result<(), TranscriptError> {
         let conn = self
@@ -440,8 +440,8 @@ impl TranscriptsDatabase {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let rows_changed = conn.execute(
-            "UPDATE sessions SET processing_errors = processing_errors + 1, last_error = ?1 WHERE session_id = ?2 AND stream_kind = ?3 AND transcript_path = ?4",
-            params![error_message, session_id, stream_kind, transcript_path],
+            "UPDATE tracked_streams SET processing_errors = processing_errors + 1, last_error = ?1 WHERE session_id = ?2 AND stream_kind = ?3 AND stream_path = ?4",
+            params![error_message, session_id, stream_kind, stream_path],
         )
         .map_err(|e| TranscriptError::Fatal {
             message: format!("Failed to record error: {}", e),
@@ -449,19 +449,19 @@ impl TranscriptsDatabase {
 
         if rows_changed == 0 {
             return Err(TranscriptError::Fatal {
-                message: format!("Session not found: {}", session_id),
+                message: format!("Stream not found: {}", session_id),
             });
         }
 
         Ok(())
     }
 
-    /// Delete a session and its associated data.
-    pub fn delete_session(
+    /// Delete a stream and its associated data.
+    pub fn delete_stream(
         &self,
         session_id: &str,
         stream_kind: &str,
-        transcript_path: &str,
+        stream_path: &str,
     ) -> Result<(), TranscriptError> {
         let conn = self
             .conn
@@ -470,24 +470,24 @@ impl TranscriptsDatabase {
 
         let rows_changed = conn
             .execute(
-                "DELETE FROM sessions WHERE session_id = ?1 AND stream_kind = ?2 AND transcript_path = ?3",
-                params![session_id, stream_kind, transcript_path],
+                "DELETE FROM tracked_streams WHERE session_id = ?1 AND stream_kind = ?2 AND stream_path = ?3",
+                params![session_id, stream_kind, stream_path],
             )
             .map_err(|e| TranscriptError::Fatal {
-                message: format!("Failed to delete session: {}", e),
+                message: format!("Failed to delete stream: {}", e),
             })?;
 
         if rows_changed == 0 {
             return Err(TranscriptError::Fatal {
-                message: format!("Session not found: {}", session_id),
+                message: format!("Stream not found: {}", session_id),
             });
         }
 
         Ok(())
     }
 
-    /// Get all session records.
-    pub fn all_sessions(&self) -> Result<Vec<SessionRecord>, TranscriptError> {
+    /// Get all stream records.
+    pub fn all_streams(&self) -> Result<Vec<StreamRecord>, TranscriptError> {
         let conn = self
             .conn
             .lock()
@@ -495,32 +495,32 @@ impl TranscriptsDatabase {
         let mut stmt = conn
             .prepare(
                 r#"
-            SELECT session_id, stream_kind, tool, transcript_path, transcript_format,
+            SELECT session_id, stream_kind, tool, stream_path, stream_format,
                    watermark_type, watermark_value, external_session_id,
                    external_parent_session_id,
                    first_seen_at, last_processed_at, last_known_size, last_modified,
                    processing_errors, last_error, repo_work_dir
-            FROM sessions
+            FROM tracked_streams
             "#,
             )
             .map_err(|e| TranscriptError::Fatal {
-                message: format!("Failed to prepare all_sessions query: {}", e),
+                message: format!("Failed to prepare all_streams query: {}", e),
             })?;
 
-        let rows =
-            stmt.query_map([], Self::row_to_session)
-                .map_err(|e| TranscriptError::Fatal {
-                    message: format!("Failed to query all sessions: {}", e),
-                })?;
+        let rows = stmt
+            .query_map([], Self::row_to_stream)
+            .map_err(|e| TranscriptError::Fatal {
+                message: format!("Failed to query all streams: {}", e),
+            })?;
 
-        let mut sessions = Vec::new();
+        let mut streams = Vec::new();
         for row in rows {
-            sessions.push(row.map_err(|e| TranscriptError::Fatal {
-                message: format!("Failed to read session row: {}", e),
+            streams.push(row.map_err(|e| TranscriptError::Fatal {
+                message: format!("Failed to read stream row: {}", e),
             })?);
         }
 
-        Ok(sessions)
+        Ok(streams)
     }
 }
 
@@ -530,19 +530,19 @@ mod tests {
     use chrono::TimeZone;
     use tempfile::NamedTempFile;
 
-    fn create_test_db() -> (TranscriptsDatabase, NamedTempFile) {
+    fn create_test_db() -> (StreamsDatabase, NamedTempFile) {
         let temp_file = NamedTempFile::new().unwrap();
-        let db = TranscriptsDatabase::open(temp_file.path()).unwrap();
+        let db = StreamsDatabase::open(temp_file.path()).unwrap();
         (db, temp_file)
     }
 
-    fn create_test_session(session_id: &str) -> SessionRecord {
-        SessionRecord {
+    fn create_test_stream(session_id: &str) -> StreamRecord {
+        StreamRecord {
             session_id: session_id.to_string(),
             stream_kind: "transcript".to_string(),
             tool: "claude".to_string(),
-            transcript_path: "/path/to/transcript.jsonl".to_string(),
-            transcript_format: "jsonl".to_string(),
+            stream_path: "/path/to/transcript.jsonl".to_string(),
+            stream_format: "jsonl".to_string(),
             watermark_type: "ByteOffset".to_string(),
             watermark_value: "0".to_string(),
             external_session_id: "thread-123".to_string(),
@@ -560,13 +560,13 @@ mod tests {
     #[test]
     fn test_database_open_creates_schema() {
         let temp_file = NamedTempFile::new().unwrap();
-        let db = TranscriptsDatabase::open(temp_file.path()).unwrap();
+        let db = StreamsDatabase::open(temp_file.path()).unwrap();
 
         // Verify schema exists
         let conn = db.conn.lock().unwrap();
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sessions'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tracked_streams'",
                 [],
                 |row| row.get(0),
             )
@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn test_database_wal_mode_enabled() {
         let temp_file = NamedTempFile::new().unwrap();
-        let db = TranscriptsDatabase::open(temp_file.path()).unwrap();
+        let db = StreamsDatabase::open(temp_file.path()).unwrap();
 
         let conn = db.conn.lock().unwrap();
         let mode: String = conn
@@ -587,25 +587,25 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_and_get_session() {
+    fn test_insert_and_get_stream() {
         let (db, _temp) = create_test_db();
-        let session = create_test_session("session-1");
+        let stream = create_test_stream("session-1");
 
-        db.insert_session(&session).unwrap();
+        db.insert_stream(&stream).unwrap();
 
         let retrieved = db
-            .get_session("session-1", "transcript", "/path/to/transcript.jsonl")
+            .get_stream("session-1", "transcript", "/path/to/transcript.jsonl")
             .unwrap();
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap(), session);
+        assert_eq!(retrieved.unwrap(), stream);
     }
 
     #[test]
-    fn test_get_nonexistent_session() {
+    fn test_get_nonexistent_stream() {
         let (db, _temp) = create_test_db();
 
         let result = db
-            .get_session("nonexistent", "transcript", "/path/to/transcript.jsonl")
+            .get_stream("nonexistent", "transcript", "/path/to/transcript.jsonl")
             .unwrap();
         assert!(result.is_none());
     }
@@ -613,8 +613,8 @@ mod tests {
     #[test]
     fn test_update_watermark() {
         let (db, _temp) = create_test_db();
-        let session = create_test_session("session-1");
-        db.insert_session(&session).unwrap();
+        let stream = create_test_stream("session-1");
+        db.insert_stream(&stream).unwrap();
 
         use super::super::watermark::ByteOffsetWatermark;
         let new_watermark = ByteOffsetWatermark::new(1234);
@@ -628,18 +628,18 @@ mod tests {
         .unwrap();
 
         let retrieved = db
-            .get_session("session-1", "transcript", "/path/to/transcript.jsonl")
+            .get_stream("session-1", "transcript", "/path/to/transcript.jsonl")
             .unwrap()
             .unwrap();
         assert_eq!(retrieved.watermark_value, "1234");
-        assert!(retrieved.last_processed_at > session.last_processed_at);
+        assert!(retrieved.last_processed_at > stream.last_processed_at);
     }
 
     #[test]
     fn test_update_file_metadata() {
         let (db, _temp) = create_test_db();
-        let session = create_test_session("session-1");
-        db.insert_session(&session).unwrap();
+        let stream = create_test_stream("session-1");
+        db.insert_stream(&stream).unwrap();
 
         let modified = Utc.with_ymd_and_hms(2024, 6, 15, 10, 30, 0).unwrap();
         db.update_file_metadata(
@@ -652,7 +652,7 @@ mod tests {
         .unwrap();
 
         let retrieved = db
-            .get_session("session-1", "transcript", "/path/to/transcript.jsonl")
+            .get_stream("session-1", "transcript", "/path/to/transcript.jsonl")
             .unwrap()
             .unwrap();
         assert_eq!(retrieved.last_known_size, 5678);
@@ -660,44 +660,44 @@ mod tests {
     }
 
     #[test]
-    fn test_all_sessions_empty() {
+    fn test_all_streams_empty() {
         let (db, _temp) = create_test_db();
 
-        let sessions = db.all_sessions().unwrap();
-        assert_eq!(sessions.len(), 0);
+        let streams = db.all_streams().unwrap();
+        assert_eq!(streams.len(), 0);
     }
 
     #[test]
-    fn test_all_sessions_multiple() {
+    fn test_all_streams_multiple() {
         let (db, _temp) = create_test_db();
 
-        let session1 = create_test_session("session-1");
-        let session2 = create_test_session("session-2");
-        let session3 = create_test_session("session-3");
+        let stream1 = create_test_stream("session-1");
+        let stream2 = create_test_stream("session-2");
+        let stream3 = create_test_stream("session-3");
 
-        db.insert_session(&session1).unwrap();
-        db.insert_session(&session2).unwrap();
-        db.insert_session(&session3).unwrap();
+        db.insert_stream(&stream1).unwrap();
+        db.insert_stream(&stream2).unwrap();
+        db.insert_stream(&stream3).unwrap();
 
-        let sessions = db.all_sessions().unwrap();
-        assert_eq!(sessions.len(), 3);
+        let streams = db.all_streams().unwrap();
+        assert_eq!(streams.len(), 3);
 
-        let ids: Vec<String> = sessions.iter().map(|s| s.session_id.clone()).collect();
+        let ids: Vec<String> = streams.iter().map(|s| s.session_id.clone()).collect();
         assert!(ids.contains(&"session-1".to_string()));
         assert!(ids.contains(&"session-2".to_string()));
         assert!(ids.contains(&"session-3".to_string()));
     }
 
     #[test]
-    fn test_session_with_nulls() {
+    fn test_stream_with_nulls() {
         let (db, _temp) = create_test_db();
 
-        let session = SessionRecord {
+        let stream = StreamRecord {
             session_id: "session-null".to_string(),
             stream_kind: "transcript".to_string(),
             tool: "claude".to_string(),
-            transcript_path: "/path".to_string(),
-            transcript_format: "jsonl".to_string(),
+            stream_path: "/path".to_string(),
+            stream_format: "jsonl".to_string(),
             watermark_type: "ByteOffset".to_string(),
             watermark_value: "0".to_string(),
             external_session_id: "session-null".to_string(),
@@ -711,10 +711,10 @@ mod tests {
             repo_work_dir: None,
         };
 
-        db.insert_session(&session).unwrap();
+        db.insert_stream(&stream).unwrap();
 
         let retrieved = db
-            .get_session("session-null", "transcript", "/path")
+            .get_stream("session-null", "transcript", "/path")
             .unwrap()
             .unwrap();
         assert_eq!(retrieved.external_session_id, "session-null");
@@ -726,7 +726,7 @@ mod tests {
     #[test]
     fn test_schema_version_tracking() {
         let temp_file = NamedTempFile::new().unwrap();
-        let db = TranscriptsDatabase::open(temp_file.path()).unwrap();
+        let db = StreamsDatabase::open(temp_file.path()).unwrap();
 
         let conn = db.conn.lock().unwrap();
         let version: u32 = conn
@@ -745,23 +745,23 @@ mod tests {
         let path = temp_file.path().to_path_buf();
 
         {
-            let db = TranscriptsDatabase::open(&path).unwrap();
-            let session = create_test_session("session-1");
-            db.insert_session(&session).unwrap();
+            let db = StreamsDatabase::open(&path).unwrap();
+            let stream = create_test_stream("session-1");
+            db.insert_stream(&stream).unwrap();
         }
 
         // Reopen database
-        let db = TranscriptsDatabase::open(&path).unwrap();
-        let session = db
-            .get_session("session-1", "transcript", "/path/to/transcript.jsonl")
+        let db = StreamsDatabase::open(&path).unwrap();
+        let stream = db
+            .get_stream("session-1", "transcript", "/path/to/transcript.jsonl")
             .unwrap();
-        assert!(session.is_some());
+        assert!(stream.is_some());
     }
 
     #[test]
     fn test_indexes_created() {
         let temp_file = NamedTempFile::new().unwrap();
-        let db = TranscriptsDatabase::open(temp_file.path()).unwrap();
+        let db = StreamsDatabase::open(temp_file.path()).unwrap();
 
         let conn = db
             .conn
@@ -769,7 +769,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_sessions_%'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name LIKE 'idx_streams_%'",
                 [],
                 |row| row.get(0),
             )
@@ -780,7 +780,7 @@ mod tests {
     #[test]
     fn test_performance_pragmas_set() {
         let temp_file = NamedTempFile::new().unwrap();
-        let db = TranscriptsDatabase::open(temp_file.path()).unwrap();
+        let db = StreamsDatabase::open(temp_file.path()).unwrap();
 
         let conn = db
             .conn
@@ -806,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn test_update_watermark_nonexistent_session() {
+    fn test_update_watermark_nonexistent_stream() {
         let (db, _temp) = create_test_db();
 
         use super::super::watermark::ByteOffsetWatermark;
@@ -816,14 +816,14 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(TranscriptError::Fatal { message }) => {
-                assert!(message.contains("Session not found"));
+                assert!(message.contains("Stream not found"));
             }
             _ => panic!("Expected Fatal error"),
         }
     }
 
     #[test]
-    fn test_update_file_metadata_nonexistent_session() {
+    fn test_update_file_metadata_nonexistent_stream() {
         let (db, _temp) = create_test_db();
 
         let modified = Utc.with_ymd_and_hms(2024, 6, 15, 10, 30, 0).unwrap();
@@ -837,7 +837,7 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(TranscriptError::Fatal { message }) => {
-                assert!(message.contains("Session not found"));
+                assert!(message.contains("Stream not found"));
             }
             _ => panic!("Expected Fatal error"),
         }
@@ -846,8 +846,8 @@ mod tests {
     #[test]
     fn test_record_error() {
         let (db, _temp) = create_test_db();
-        let session = create_test_session("session-1");
-        db.insert_session(&session).unwrap();
+        let stream = create_test_stream("session-1");
+        db.insert_stream(&stream).unwrap();
 
         // Record an error
         db.record_error(
@@ -859,7 +859,7 @@ mod tests {
         .unwrap();
 
         let retrieved = db
-            .get_session("session-1", "transcript", "/path/to/transcript.jsonl")
+            .get_stream("session-1", "transcript", "/path/to/transcript.jsonl")
             .unwrap()
             .unwrap();
         assert_eq!(retrieved.processing_errors, 1);
@@ -875,7 +875,7 @@ mod tests {
         .unwrap();
 
         let retrieved = db
-            .get_session("session-1", "transcript", "/path/to/transcript.jsonl")
+            .get_stream("session-1", "transcript", "/path/to/transcript.jsonl")
             .unwrap()
             .unwrap();
         assert_eq!(retrieved.processing_errors, 2);
@@ -883,73 +883,73 @@ mod tests {
     }
 
     #[test]
-    fn test_record_error_nonexistent_session() {
+    fn test_record_error_nonexistent_stream() {
         let (db, _temp) = create_test_db();
 
         let result = db.record_error("nonexistent", "transcript", "/no/such/path", "error");
         assert!(result.is_err());
         match result {
             Err(TranscriptError::Fatal { message }) => {
-                assert!(message.contains("Session not found"));
+                assert!(message.contains("Stream not found"));
             }
             _ => panic!("Expected Fatal error"),
         }
     }
 
     #[test]
-    fn test_delete_session() {
+    fn test_delete_stream() {
         let (db, _temp) = create_test_db();
-        let session = create_test_session("session-1");
-        db.insert_session(&session).unwrap();
+        let stream = create_test_stream("session-1");
+        db.insert_stream(&stream).unwrap();
 
         // Verify it exists
         assert!(
-            db.get_session("session-1", "transcript", "/path/to/transcript.jsonl")
+            db.get_stream("session-1", "transcript", "/path/to/transcript.jsonl")
                 .unwrap()
                 .is_some()
         );
 
         // Delete it
-        db.delete_session("session-1", "transcript", "/path/to/transcript.jsonl")
+        db.delete_stream("session-1", "transcript", "/path/to/transcript.jsonl")
             .unwrap();
 
         // Verify it's gone
         assert!(
-            db.get_session("session-1", "transcript", "/path/to/transcript.jsonl")
+            db.get_stream("session-1", "transcript", "/path/to/transcript.jsonl")
                 .unwrap()
                 .is_none()
         );
     }
 
     #[test]
-    fn test_delete_nonexistent_session() {
+    fn test_delete_nonexistent_stream() {
         let (db, _temp) = create_test_db();
 
-        let result = db.delete_session("nonexistent", "transcript", "/no/such/path");
+        let result = db.delete_stream("nonexistent", "transcript", "/no/such/path");
         assert!(result.is_err());
         match result {
             Err(TranscriptError::Fatal { message }) => {
-                assert!(message.contains("Session not found"));
+                assert!(message.contains("Stream not found"));
             }
             _ => panic!("Expected Fatal error"),
         }
     }
 
     #[test]
-    fn test_insert_session_duplicate_fails() {
+    fn test_insert_stream_duplicate_fails() {
         let (db, _temp) = create_test_db();
 
-        let session = create_test_session("session-1");
-        db.insert_session(&session).unwrap();
+        let stream = create_test_stream("session-1");
+        db.insert_stream(&stream).unwrap();
 
-        // Try to insert a duplicate session_id (should fail)
-        let duplicate = create_test_session("session-1");
-        let result = db.insert_session(&duplicate);
+        // Try to insert a duplicate (should fail)
+        let duplicate = create_test_stream("session-1");
+        let result = db.insert_stream(&duplicate);
         assert!(result.is_err());
 
-        // Original session still intact
+        // Original stream still intact
         let retrieved = db
-            .get_session("session-1", "transcript", "/path/to/transcript.jsonl")
+            .get_stream("session-1", "transcript", "/path/to/transcript.jsonl")
             .unwrap()
             .unwrap();
         assert_eq!(retrieved.session_id, "session-1");
@@ -961,8 +961,8 @@ mod tests {
         use std::thread;
 
         let (db, _temp) = create_test_db();
-        let session = create_test_session("session-1");
-        db.insert_session(&session).unwrap();
+        let stream = create_test_stream("session-1");
+        db.insert_stream(&stream).unwrap();
 
         // Create a scenario that would poison the mutex in older code
         // This is a bit contrived since we now recover from poison automatically
@@ -985,7 +985,7 @@ mod tests {
         let _ = handle.join();
 
         // After the thread completes (or panics), we should still be able to use the database
-        let result = db_arc.get_session("session-1", "transcript", "/path/to/transcript.jsonl");
+        let result = db_arc.get_stream("session-1", "transcript", "/path/to/transcript.jsonl");
         assert!(result.is_ok());
         assert!(result.unwrap().is_some());
     }
@@ -1038,27 +1038,27 @@ mod tests {
             assert_eq!(version, 3);
         }
 
-        // Reopen via TranscriptsDatabase (triggers migration to v4)
-        let db = TranscriptsDatabase::open(&db_path).unwrap();
+        // Reopen via StreamsDatabase (triggers migration to v4)
+        let db = StreamsDatabase::open(&db_path).unwrap();
 
-        // Verify the session migrated with stream_kind = 'transcript'
-        let session = db
-            .get_session("sess-migrate-1", "transcript", "/path/to/transcript.jsonl")
+        // Verify the stream migrated with stream_kind = 'transcript'
+        let stream = db
+            .get_stream("sess-migrate-1", "transcript", "/path/to/transcript.jsonl")
             .unwrap();
-        assert!(session.is_some(), "session should exist after migration");
-        let session = session.unwrap();
-        assert_eq!(session.session_id, "sess-migrate-1");
-        assert_eq!(session.stream_kind, "transcript");
-        assert_eq!(session.tool, "claude");
-        assert_eq!(session.transcript_path, "/path/to/transcript.jsonl");
-        assert_eq!(session.watermark_value, "1234");
-        assert_eq!(session.external_session_id, "external-sess-1");
-        assert_eq!(session.external_parent_session_id, None);
-        assert_eq!(session.last_known_size, 5678);
-        assert_eq!(session.last_modified, Some(900));
-        assert_eq!(session.processing_errors, 2);
-        assert_eq!(session.last_error, Some("some error".to_string()));
-        assert_eq!(session.repo_work_dir, Some("/work/dir".to_string()));
+        assert!(stream.is_some(), "stream should exist after migration");
+        let stream = stream.unwrap();
+        assert_eq!(stream.session_id, "sess-migrate-1");
+        assert_eq!(stream.stream_kind, "transcript");
+        assert_eq!(stream.tool, "claude");
+        assert_eq!(stream.stream_path, "/path/to/transcript.jsonl");
+        assert_eq!(stream.watermark_value, "1234");
+        assert_eq!(stream.external_session_id, "external-sess-1");
+        assert_eq!(stream.external_parent_session_id, None);
+        assert_eq!(stream.last_known_size, 5678);
+        assert_eq!(stream.last_modified, Some(900));
+        assert_eq!(stream.processing_errors, 2);
+        assert_eq!(stream.last_error, Some("some error".to_string()));
+        assert_eq!(stream.repo_work_dir, Some("/work/dir".to_string()));
     }
 
     #[test]
@@ -1102,24 +1102,24 @@ mod tests {
         }
 
         // Reopen (triggers migration)
-        let db = TranscriptsDatabase::open(&db_path).unwrap();
+        let db = StreamsDatabase::open(&db_path).unwrap();
 
-        // All 5 sessions should be present
-        let all = db.all_sessions().unwrap();
+        // All 5 streams should be present
+        let all = db.all_streams().unwrap();
         assert_eq!(all.len(), 5);
 
         // Each should have stream_kind = 'transcript'
         for i in 0..5 {
-            let session = db
-                .get_session(
+            let stream = db
+                .get_stream(
                     &format!("sess-{}", i),
                     "transcript",
                     &format!("/path/to/transcript_{}.jsonl", i),
                 )
                 .unwrap()
                 .unwrap();
-            assert_eq!(session.stream_kind, "transcript");
-            assert_eq!(session.watermark_value, format!("{}", i * 100));
+            assert_eq!(stream.stream_kind, "transcript");
+            assert_eq!(stream.watermark_value, format!("{}", i * 100));
         }
     }
 
@@ -1128,27 +1128,27 @@ mod tests {
         let (db, _temp) = create_test_db();
 
         // Insert same session_id with different stream_kind
-        let mut transcript_session = create_test_session("shared-session");
-        transcript_session.stream_kind = "transcript".to_string();
-        transcript_session.transcript_path = "/path/to/transcript.jsonl".to_string();
-        db.insert_session(&transcript_session).unwrap();
+        let mut transcript_stream = create_test_stream("shared-session");
+        transcript_stream.stream_kind = "transcript".to_string();
+        transcript_stream.stream_path = "/path/to/transcript.jsonl".to_string();
+        db.insert_stream(&transcript_stream).unwrap();
 
-        let mut otel_session = create_test_session("shared-session");
-        otel_session.stream_kind = "otel_traces".to_string();
-        otel_session.transcript_path = "/path/to/traces.db".to_string();
-        otel_session.watermark_type = "TimestampCursor".to_string();
-        otel_session.watermark_value = "0|".to_string();
-        db.insert_session(&otel_session).unwrap();
+        let mut otel_stream = create_test_stream("shared-session");
+        otel_stream.stream_kind = "otel_traces".to_string();
+        otel_stream.stream_path = "/path/to/traces.db".to_string();
+        otel_stream.watermark_type = "TimestampCursor".to_string();
+        otel_stream.watermark_value = "0|".to_string();
+        db.insert_stream(&otel_stream).unwrap();
 
         // Both should exist independently
         let t = db
-            .get_session("shared-session", "transcript", "/path/to/transcript.jsonl")
+            .get_stream("shared-session", "transcript", "/path/to/transcript.jsonl")
             .unwrap()
             .unwrap();
         assert_eq!(t.stream_kind, "transcript");
 
         let o = db
-            .get_session("shared-session", "otel_traces", "/path/to/traces.db")
+            .get_stream("shared-session", "otel_traces", "/path/to/traces.db")
             .unwrap()
             .unwrap();
         assert_eq!(o.stream_kind, "otel_traces");
@@ -1164,14 +1164,14 @@ mod tests {
         .unwrap();
 
         let t_updated = db
-            .get_session("shared-session", "transcript", "/path/to/transcript.jsonl")
+            .get_stream("shared-session", "transcript", "/path/to/transcript.jsonl")
             .unwrap()
             .unwrap();
         assert_eq!(t_updated.watermark_value, "999");
 
         // OTEL watermark unchanged
         let o_unchanged = db
-            .get_session("shared-session", "otel_traces", "/path/to/traces.db")
+            .get_stream("shared-session", "otel_traces", "/path/to/traces.db")
             .unwrap()
             .unwrap();
         assert_eq!(o_unchanged.watermark_value, "0|");
@@ -1182,17 +1182,17 @@ mod tests {
         let (db, _temp) = create_test_db();
 
         // This is the #1461 scenario: same session_id, same stream_kind, different paths
-        let mut session1 = create_test_session("colliding-session");
-        session1.transcript_path = "/worktree-a/transcript.jsonl".to_string();
-        db.insert_session(&session1).unwrap();
+        let mut stream1 = create_test_stream("colliding-session");
+        stream1.stream_path = "/worktree-a/transcript.jsonl".to_string();
+        db.insert_stream(&stream1).unwrap();
 
-        let mut session2 = create_test_session("colliding-session");
-        session2.transcript_path = "/worktree-b/transcript.jsonl".to_string();
-        db.insert_session(&session2).unwrap();
+        let mut stream2 = create_test_stream("colliding-session");
+        stream2.stream_path = "/worktree-b/transcript.jsonl".to_string();
+        db.insert_stream(&stream2).unwrap();
 
         // Both exist independently
         let s1 = db
-            .get_session(
+            .get_stream(
                 "colliding-session",
                 "transcript",
                 "/worktree-a/transcript.jsonl",
@@ -1200,25 +1200,25 @@ mod tests {
             .unwrap()
             .unwrap();
         let s2 = db
-            .get_session(
+            .get_stream(
                 "colliding-session",
                 "transcript",
                 "/worktree-b/transcript.jsonl",
             )
             .unwrap()
             .unwrap();
-        assert_eq!(s1.transcript_path, "/worktree-a/transcript.jsonl");
-        assert_eq!(s2.transcript_path, "/worktree-b/transcript.jsonl");
+        assert_eq!(s1.stream_path, "/worktree-a/transcript.jsonl");
+        assert_eq!(s2.stream_path, "/worktree-b/transcript.jsonl");
 
         // Delete one, the other remains
-        db.delete_session(
+        db.delete_stream(
             "colliding-session",
             "transcript",
             "/worktree-a/transcript.jsonl",
         )
         .unwrap();
         assert!(
-            db.get_session(
+            db.get_stream(
                 "colliding-session",
                 "transcript",
                 "/worktree-a/transcript.jsonl"
@@ -1227,7 +1227,7 @@ mod tests {
             .is_none()
         );
         assert!(
-            db.get_session(
+            db.get_stream(
                 "colliding-session",
                 "transcript",
                 "/worktree-b/transcript.jsonl"

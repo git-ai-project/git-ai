@@ -9,7 +9,7 @@
 
 use git_ai::transcripts::agent::Agent;
 use git_ai::transcripts::agents::ClaudeAgent;
-use git_ai::transcripts::db::TranscriptsDatabase;
+use git_ai::transcripts::db::StreamsDatabase;
 use git_ai::transcripts::sweep::SweepStrategy;
 use git_ai::transcripts::watermark::ByteOffsetWatermark;
 use std::fs;
@@ -77,9 +77,9 @@ fn test_initial_sweep_discovers_all_claude_transcripts() {
     create_claude_transcript(&transcript2, &["Message 2A"]).unwrap();
     create_claude_transcript(&transcript3, &["Message 3A", "Message 3B", "Message 3C"]).unwrap();
 
-    // Create TranscriptsDatabase
+    // Create StreamsDatabase
     let db_path = temp_dir.path().join("transcripts-db");
-    let _db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+    let _db = Arc::new(StreamsDatabase::open(&db_path).unwrap());
 
     // Note: We can't easily mock the dirs::config_dir() to point to our temp directory,
     // so this test verifies the Agent trait implementation directly
@@ -249,7 +249,7 @@ fn test_incremental_processing_completeness() {
 fn test_sweep_deduplication_via_session_id() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("transcripts-db");
-    let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+    let db = Arc::new(StreamsDatabase::open(&db_path).unwrap());
 
     let conversations_dir = temp_dir.path().join("conversations");
     fs::create_dir_all(&conversations_dir).unwrap();
@@ -262,7 +262,7 @@ fn test_sweep_deduplication_via_session_id() {
 
     // First sweep - session doesn't exist
     let session1 = db
-        .get_session(
+        .get_stream(
             session_id,
             "transcript",
             &transcript_path.display().to_string(),
@@ -272,12 +272,12 @@ fn test_sweep_deduplication_via_session_id() {
 
     // Insert session (simulating SweepCoordinator.insert_new_session)
     let now = chrono::Utc::now().timestamp();
-    let record = git_ai::transcripts::db::SessionRecord {
+    let record = git_ai::transcripts::db::StreamRecord {
         session_id: session_id.to_string(),
         stream_kind: "transcript".to_string(),
         tool: "claude".to_string(),
-        transcript_path: transcript_path.display().to_string(),
-        transcript_format: "ClaudeJsonl".to_string(),
+        stream_path: transcript_path.display().to_string(),
+        stream_format: "ClaudeJsonl".to_string(),
         watermark_type: "ByteOffset".to_string(),
         watermark_value: "0".to_string(),
         external_session_id: "test-ext-session".to_string(),
@@ -290,11 +290,11 @@ fn test_sweep_deduplication_via_session_id() {
         last_error: None,
         repo_work_dir: None,
     };
-    db.insert_session(&record).unwrap();
+    db.insert_stream(&record).unwrap();
 
     // Second sweep - session exists, should not be inserted again
     let session2 = db
-        .get_session(
+        .get_stream(
             session_id,
             "transcript",
             &transcript_path.display().to_string(),
@@ -303,7 +303,7 @@ fn test_sweep_deduplication_via_session_id() {
     assert!(session2.is_some(), "Session should exist after insert");
 
     // Attempting to insert again should fail (unique constraint)
-    let result = db.insert_session(&record);
+    let result = db.insert_stream(&record);
     assert!(result.is_err(), "Duplicate insert should fail");
 }
 
@@ -311,7 +311,7 @@ fn test_sweep_deduplication_via_session_id() {
 fn test_behind_detection_on_file_growth() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("transcripts-db");
-    let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+    let db = Arc::new(StreamsDatabase::open(&db_path).unwrap());
 
     let transcript_path = temp_dir.path().join("conversation.jsonl");
     create_claude_transcript(&transcript_path, &["Message 1"]).unwrap();
@@ -321,12 +321,12 @@ fn test_behind_detection_on_file_growth() {
 
     // Insert session with current file size
     let now = chrono::Utc::now().timestamp();
-    let record = git_ai::transcripts::db::SessionRecord {
+    let record = git_ai::transcripts::db::StreamRecord {
         session_id: "test_session".to_string(),
         stream_kind: "transcript".to_string(),
         tool: "claude".to_string(),
-        transcript_path: transcript_path.display().to_string(),
-        transcript_format: "ClaudeJsonl".to_string(),
+        stream_path: transcript_path.display().to_string(),
+        stream_format: "ClaudeJsonl".to_string(),
         watermark_type: "ByteOffset".to_string(),
         watermark_value: "100".to_string(), // Simulating partial processing
         external_session_id: "test-ext-session".to_string(),
@@ -339,7 +339,7 @@ fn test_behind_detection_on_file_growth() {
         last_error: None,
         repo_work_dir: None,
     };
-    db.insert_session(&record).unwrap();
+    db.insert_stream(&record).unwrap();
 
     // Append to file
     append_to_transcript(&transcript_path, &["Message 2", "Message 3"]).unwrap();
@@ -352,7 +352,7 @@ fn test_behind_detection_on_file_growth() {
 
     // SweepCoordinator.is_session_behind would detect this
     let existing = db
-        .get_session(
+        .get_stream(
             "test_session",
             "transcript",
             &transcript_path.display().to_string(),
@@ -401,19 +401,19 @@ fn test_concurrent_processing_deduplication() {
 fn test_watermark_persistence_after_processing() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("transcripts-db");
-    let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+    let db = Arc::new(StreamsDatabase::open(&db_path).unwrap());
 
     let transcript_path = temp_dir.path().join("conversation.jsonl");
     create_claude_transcript(&transcript_path, &["Message 1", "Message 2"]).unwrap();
 
     // Insert session
     let now = chrono::Utc::now().timestamp();
-    let record = git_ai::transcripts::db::SessionRecord {
+    let record = git_ai::transcripts::db::StreamRecord {
         session_id: "test_session".to_string(),
         stream_kind: "transcript".to_string(),
         tool: "claude".to_string(),
-        transcript_path: transcript_path.display().to_string(),
-        transcript_format: "ClaudeJsonl".to_string(),
+        stream_path: transcript_path.display().to_string(),
+        stream_format: "ClaudeJsonl".to_string(),
         watermark_type: "ByteOffset".to_string(),
         watermark_value: "0".to_string(),
         external_session_id: "test-ext-session".to_string(),
@@ -426,7 +426,7 @@ fn test_watermark_persistence_after_processing() {
         last_error: None,
         repo_work_dir: None,
     };
-    db.insert_session(&record).unwrap();
+    db.insert_stream(&record).unwrap();
 
     // Process with agent
     let agent = ClaudeAgent::new();
@@ -451,7 +451,7 @@ fn test_watermark_persistence_after_processing() {
 
     // Verify watermark persisted
     let updated = db
-        .get_session(
+        .get_stream(
             "test_session",
             "transcript",
             &transcript_path.display().to_string(),

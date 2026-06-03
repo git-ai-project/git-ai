@@ -2,7 +2,7 @@
 //!
 //! This module provides:
 //! - Watermarking strategies for incremental transcript processing
-//! - SQLite database for session tracking and state persistence
+//! - SQLite database for stream cursor tracking and state persistence
 //! - Error types for transcript processing failures
 //!
 //! # Architecture
@@ -15,22 +15,23 @@
 //! # Example
 //!
 //! ```ignore
-//! use crate::transcripts::{TranscriptsDatabase, SessionRecord};
+//! use crate::transcripts::{StreamsDatabase, StreamRecord};
 //! use crate::transcripts::watermark::{ByteOffsetWatermark, WatermarkStrategy};
 //!
 //! // Open database
-//! let db = TranscriptsDatabase::open("~/.git-ai/transcripts-db")?;
+//! // Note: the file is still named "transcripts-db" for backwards compatibility.
+//! let db = StreamsDatabase::open("~/.git-ai/transcripts-db")?;
 //!
-//! // Create session with watermark
-//! let session = SessionRecord {
+//! // Create stream record with watermark
+//! let stream = StreamRecord {
 //!     session_id: "session-123".to_string(),
-//!     agent_type: "claude-code".to_string(),
-//!     transcript_path: "/path/to/transcript.jsonl".to_string(),
+//!     tool: "claude-code".to_string(),
+//!     stream_path: "/path/to/transcript.jsonl".to_string(),
 //!     watermark_type: "ByteOffset".to_string(),
 //!     watermark_value: "0".to_string(),
 //!     // ... other fields
 //! };
-//! db.insert_session(&session)?;
+//! db.insert_stream(&stream)?;
 //!
 //! // Process transcript and update watermark
 //! let mut watermark = ByteOffsetWatermark::new(0);
@@ -48,7 +49,7 @@ pub mod types;
 pub mod watermark;
 
 // Re-export main types for convenient access
-pub use db::{SessionRecord, TranscriptsDatabase};
+pub use db::{StreamRecord, StreamsDatabase};
 pub use types::{TranscriptBatch, TranscriptError};
 pub use watermark::{
     ByteOffsetWatermark, HybridWatermark, RecordIndexWatermark, TimestampCursorWatermark,

@@ -3904,7 +3904,7 @@ pub struct ActorDaemonCoordinator {
     telemetry_worker: Option<crate::daemon::telemetry_worker::DaemonTelemetryWorkerHandle>,
     transcript_worker: Option<crate::daemon::transcript_worker::TranscriptWorkerHandle>,
     transcript_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
-    transcripts_db: Option<Arc<crate::transcripts::db::TranscriptsDatabase>>,
+    streams_db: Option<Arc<crate::transcripts::db::StreamsDatabase>>,
     next_trace_ingest_seq: AtomicUsize,
     next_carryover_snapshot_id: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
@@ -4003,7 +4003,7 @@ impl ActorDaemonCoordinator {
             telemetry_worker: None,
             transcript_worker: None,
             transcript_shutdown_notify: std::sync::OnceLock::new(),
-            transcripts_db: None,
+            streams_db: None,
             next_trace_ingest_seq: AtomicUsize::new(0),
             next_carryover_snapshot_id: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
@@ -8460,17 +8460,19 @@ pub(crate) async fn run_daemon(config: DaemonConfig) -> Result<DaemonExitAction,
         .get_feature_flags()
         .transcript_streaming
     {
-        let transcripts_db_path = config.internal_dir.join("transcripts-db");
-        match crate::transcripts::db::TranscriptsDatabase::open(&transcripts_db_path) {
-            Ok(transcripts_db) => {
-                let transcripts_db = std::sync::Arc::new(transcripts_db);
+        // Named "transcripts-db" for backwards compatibility with existing installations.
+        // TODO: rename to "streams-db" with a migration that moves the file.
+        let streams_db_path = config.internal_dir.join("transcripts-db");
+        match crate::transcripts::db::StreamsDatabase::open(&streams_db_path) {
+            Ok(streams_db) => {
+                let streams_db = std::sync::Arc::new(streams_db);
                 let shutdown_notify = Arc::new(tokio::sync::Notify::new());
                 let transcript_handle = crate::daemon::transcript_worker::spawn_transcript_worker(
-                    transcripts_db.clone(),
+                    streams_db.clone(),
                     telemetry_handle.clone(),
                     shutdown_notify.clone(),
                 );
-                coordinator_inner.transcripts_db = Some(transcripts_db);
+                coordinator_inner.streams_db = Some(streams_db);
                 coordinator_inner.transcript_worker = Some(transcript_handle);
                 let _ = coordinator_inner
                     .transcript_shutdown_notify

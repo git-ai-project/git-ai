@@ -1,5 +1,5 @@
 use crate::transcripts::agent::{Agent, StreamDescriptor, get_all_agents};
-use crate::transcripts::db::{SessionRecord, TranscriptsDatabase};
+use crate::transcripts::db::{StreamRecord, StreamsDatabase};
 use crate::transcripts::sweep::{DiscoveredSession, SweepStrategy};
 use crate::transcripts::types::TranscriptError;
 use std::collections::HashSet;
@@ -31,14 +31,14 @@ pub enum SweepItem {
 /// Discovers sessions via each agent's filesystem scan, then checks staleness
 /// separately for owned streams (per-session) and shared streams (once per agent).
 pub struct SweepCoordinator {
-    transcripts_db: Arc<TranscriptsDatabase>,
+    streams_db: Arc<StreamsDatabase>,
     agent_registry: Vec<(String, Box<dyn Agent>)>,
 }
 
 impl SweepCoordinator {
-    pub fn new(transcripts_db: Arc<TranscriptsDatabase>) -> Self {
+    pub fn new(streams_db: Arc<StreamsDatabase>) -> Self {
         Self {
-            transcripts_db,
+            streams_db,
             agent_registry: get_all_agents(),
         }
     }
@@ -124,11 +124,10 @@ impl SweepCoordinator {
             }
 
             let path_str = path.display().to_string();
-            match self.transcripts_db.get_session(
-                &session.session_id,
-                stream.stream_kind,
-                &path_str,
-            )? {
+            match self
+                .streams_db
+                .get_stream(&session.session_id, stream.stream_kind, &path_str)?
+            {
                 None => return Ok(true),
                 Some(existing) => {
                     if Self::is_file_stale(&path, &existing)? {
@@ -166,7 +165,7 @@ impl SweepCoordinator {
         }))
     }
 
-    fn is_file_stale(path: &Path, existing: &SessionRecord) -> Result<bool, TranscriptError> {
+    fn is_file_stale(path: &Path, existing: &StreamRecord) -> Result<bool, TranscriptError> {
         let metadata = std::fs::metadata(path).map_err(|e| TranscriptError::Transient {
             message: format!("failed to stat {}: {}", path.display(), e),
             retry_after: std::time::Duration::from_secs(5),

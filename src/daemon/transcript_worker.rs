@@ -12,7 +12,7 @@ use crate::metrics::{
     EventAttributes, MetricEvent, OtelTraceValues, PosEncoded, SessionEventValues,
 };
 use crate::transcripts::agent::{SHARED_STREAM_SESSION_ID, StreamDescriptor};
-use crate::transcripts::db::{SessionRecord, TranscriptsDatabase};
+use crate::transcripts::db::{StreamRecord, StreamsDatabase};
 use crate::transcripts::types::TranscriptError;
 use crate::transcripts::watermark::{WatermarkStrategy, WatermarkType};
 use chrono::{TimeZone, Utc};
@@ -129,7 +129,7 @@ struct CheckpointNotification {
 
 /// Worker that processes transcript changes.
 struct TranscriptWorker {
-    transcripts_db: Arc<TranscriptsDatabase>,
+    streams_db: Arc<StreamsDatabase>,
     sweep_coordinator: crate::daemon::sweep_coordinator::SweepCoordinator, // NEW
     priority_queue: BinaryHeap<ProcessingTask>,
     delayed_tasks: Vec<ProcessingTask>,
@@ -142,16 +142,16 @@ struct TranscriptWorker {
 impl TranscriptWorker {
     /// Create a new transcript worker.
     fn new(
-        transcripts_db: Arc<TranscriptsDatabase>,
+        streams_db: Arc<StreamsDatabase>,
         telemetry_handle: DaemonTelemetryWorkerHandle,
         shutdown_notify: Arc<Notify>,
         checkpoint_rx: tokio::sync::mpsc::UnboundedReceiver<CheckpointNotification>,
     ) -> Self {
         let sweep_coordinator =
-            crate::daemon::sweep_coordinator::SweepCoordinator::new(transcripts_db.clone());
+            crate::daemon::sweep_coordinator::SweepCoordinator::new(streams_db.clone());
 
         Self {
-            transcripts_db,
+            streams_db,
             sweep_coordinator, // NEW
             priority_queue: BinaryHeap::new(),
             delayed_tasks: Vec::new(),
@@ -533,8 +533,8 @@ impl TranscriptWorker {
     ) -> Result<(), TranscriptError> {
         let path_str = path.display().to_string();
         if self
-            .transcripts_db
-            .get_session(session_id, "transcript", &path_str)?
+            .streams_db
+            .get_stream(session_id, "transcript", &path_str)?
             .is_some()
         {
             return Ok(());
@@ -543,12 +543,12 @@ impl TranscriptWorker {
         use crate::transcripts::watermark::ByteOffsetWatermark;
 
         let initial_watermark = ByteOffsetWatermark::new(0);
-        let record = SessionRecord {
+        let record = StreamRecord {
             session_id: session_id.to_string(),
             stream_kind: "transcript".to_string(),
             tool: "claude".to_string(),
-            transcript_path: path_str,
-            transcript_format: "ClaudeJsonl".to_string(),
+            stream_path: path_str,
+            stream_format: "ClaudeJsonl".to_string(),
             watermark_type: "ByteOffset".to_string(),
             watermark_value: initial_watermark.serialize(),
             external_session_id: external_session_id.to_string(),
@@ -562,7 +562,7 @@ impl TranscriptWorker {
             repo_work_dir: repo_work_dir.map(|p| p.display().to_string()),
         };
 
-        self.transcripts_db.insert_session(&record)
+        self.streams_db.insert_stream(&record)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -578,8 +578,8 @@ impl TranscriptWorker {
     ) -> Result<(), TranscriptError> {
         let path_str = stream_path.display().to_string();
         if self
-            .transcripts_db
-            .get_session(session_id, stream.stream_kind, &path_str)?
+            .streams_db
+            .get_stream(session_id, stream.stream_kind, &path_str)?
             .is_some()
         {
             return Ok(());
@@ -591,12 +591,12 @@ impl TranscriptWorker {
         // For shared streams, external_session_id/parent/repo_work_dir are meaningless
         // since the resource serves all sessions — use empty/None to avoid stale first-caller data
         let is_shared = session_id == SHARED_STREAM_SESSION_ID;
-        let record = SessionRecord {
+        let record = StreamRecord {
             session_id: session_id.to_string(),
             stream_kind: stream.stream_kind.to_string(),
             tool: tool.to_string(),
-            transcript_path: path_str,
-            transcript_format: format!("{:?}", stream.effective_format(stream_path)),
+            stream_path: path_str,
+            stream_format: format!("{:?}", stream.effective_format(stream_path)),
             watermark_type: format!("{:?}", effective_wm_type),
             watermark_value: initial_watermark.serialize(),
             external_session_id: if is_shared {
@@ -622,7 +622,7 @@ impl TranscriptWorker {
             },
         };
 
-        self.transcripts_db.insert_session(&record)
+        self.streams_db.insert_stream(&record)
     }
 
     /// Process the next task from the queue.
@@ -656,7 +656,7 @@ impl TranscriptWorker {
             .insert((task.canonical_path.clone(), task.stream_kind.clone()));
 
         // Process the session (spawn blocking to avoid blocking the worker loop)
-        let db = self.transcripts_db.clone();
+        let db = self.streams_db.clone();
         let telemetry = self.telemetry_handle.clone();
         let task_clone = task.clone();
 
@@ -699,15 +699,15 @@ impl TranscriptWorker {
     /// batches when the telemetry buffer is above a threshold, sleeping to let
     /// the 3-second flush cycle drain it.
     fn process_session_blocking(
-        db: &TranscriptsDatabase,
+        db: &StreamsDatabase,
         telemetry: &DaemonTelemetryWorkerHandle,
         task: &ProcessingTask,
     ) -> Result<(), TranscriptError> {
         let task_path_str = task.canonical_path.display().to_string();
-        let session = db
-            .get_session(&task.session_id, &task.stream_kind, &task_path_str)?
+        let stream = db
+            .get_stream(&task.session_id, &task.stream_kind, &task_path_str)?
             .ok_or_else(|| TranscriptError::Fatal {
-                message: format!("session not found: {}", task.session_id),
+                message: format!("stream not found: {}", task.session_id),
             })?;
 
         let agent = crate::transcripts::agent::get_agent(&task.tool).ok_or_else(|| {
@@ -716,12 +716,12 @@ impl TranscriptWorker {
             }
         })?;
 
-        let watermark_type: WatermarkType = session.watermark_type.parse()?;
+        let watermark_type: WatermarkType = stream.watermark_type.parse()?;
 
-        let mut current_watermark = watermark_type.deserialize(&session.watermark_value)?;
-        let path = PathBuf::from(&session.transcript_path);
+        let mut current_watermark = watermark_type.deserialize(&stream.watermark_value)?;
+        let path = PathBuf::from(&stream.stream_path);
         let mut total_events = 0usize;
-        let is_shared_stream = session.session_id == SHARED_STREAM_SESSION_ID;
+        let is_shared_stream = stream.session_id == SHARED_STREAM_SESSION_ID;
 
         // For shared streams, parent/repo/external attrs are meaningless since they'd
         // reflect whichever session first created the record. Per-event overrides handle
@@ -729,10 +729,10 @@ impl TranscriptWorker {
         let parent_session_id = if is_shared_stream {
             None
         } else {
-            session
+            stream
                 .external_parent_session_id
                 .as_ref()
-                .map(|ext_pid| generate_session_id(ext_pid, &session.tool))
+                .map(|ext_pid| generate_session_id(ext_pid, &stream.tool))
         };
 
         // Resolve repo_work_dir with priority: task (hook) > DB > infer from transcript
@@ -741,31 +741,31 @@ impl TranscriptWorker {
         } else {
             task.repo_work_dir
                 .clone()
-                .or_else(|| session.repo_work_dir.as_ref().map(PathBuf::from))
+                .or_else(|| stream.repo_work_dir.as_ref().map(PathBuf::from))
                 .or_else(|| agent.infer_cwd(&path))
         };
 
-        // Persist inferred cwd to DB if session didn't already have one
+        // Persist inferred cwd to DB if stream didn't already have one
         if !is_shared_stream
-            && session.repo_work_dir.is_none()
+            && stream.repo_work_dir.is_none()
             && let Some(ref work_dir) = resolved_work_dir
         {
             let _ = db.update_repo_work_dir(
-                &session.session_id,
+                &stream.session_id,
                 &task.stream_kind,
-                &session.transcript_path,
+                &stream.stream_path,
                 &work_dir.display().to_string(),
             );
         }
 
         let mut base_attrs = EventAttributes::with_version(env!("CARGO_PKG_VERSION"))
-            .session_id(session.session_id.clone())
-            .tool(&session.tool);
+            .session_id(stream.session_id.clone())
+            .tool(&stream.tool);
 
         if !is_shared_stream {
             base_attrs = base_attrs
-                .external_session_id(session.external_session_id.clone())
-                .external_parent_session_id_opt(session.external_parent_session_id.clone())
+                .external_session_id(stream.external_session_id.clone())
+                .external_parent_session_id_opt(stream.external_parent_session_id.clone())
                 .parent_session_id_opt(parent_session_id);
         }
 
@@ -776,22 +776,22 @@ impl TranscriptWorker {
         }
 
         let file_meta = std::fs::metadata(&path).ok();
-        let watermark_type_str = &session.watermark_type;
-        let is_initial_watermark = session.watermark_value.is_empty()
+        let watermark_type_str = &stream.watermark_type;
+        let is_initial_watermark = stream.watermark_value.is_empty()
             || watermark_type_str
                 .parse::<crate::transcripts::watermark::WatermarkType>()
                 .ok()
-                .map(|wt| wt.create_initial_watermark().serialize() == session.watermark_value)
+                .map(|wt| wt.create_initial_watermark().serialize() == stream.watermark_value)
                 .unwrap_or(false);
 
         loop {
-            let batch = agent.read_incremental(&path, current_watermark, &session.session_id)?;
+            let batch = agent.read_incremental(&path, current_watermark, &stream.session_id)?;
 
             if batch.events.is_empty() {
                 db.update_watermark(
-                    &session.session_id,
+                    &stream.session_id,
                     &task.stream_kind,
-                    &session.transcript_path,
+                    &stream.stream_path,
                     batch.new_watermark.as_ref(),
                 )?;
                 break;
@@ -822,7 +822,7 @@ impl TranscriptWorker {
                     let mut event_attrs = base_attrs.clone().trace_id(trace_id);
 
                     if let Some(event_sid) = agent.extract_event_session_id(&raw_event) {
-                        let derived_session_id = generate_session_id(&event_sid, &session.tool);
+                        let derived_session_id = generate_session_id(&event_sid, &stream.tool);
                         event_attrs = event_attrs
                             .session_id(derived_session_id)
                             .external_session_id(event_sid);
@@ -870,15 +870,15 @@ impl TranscriptWorker {
 
             total_events += batch_count;
             db.update_watermark(
-                &session.session_id,
+                &stream.session_id,
                 &task.stream_kind,
-                &session.transcript_path,
+                &stream.stream_path,
                 batch.new_watermark.as_ref(),
             )?;
             current_watermark = batch.new_watermark;
         }
 
-        if let Ok(metadata) = std::fs::metadata(&session.transcript_path) {
+        if let Ok(metadata) = std::fs::metadata(&stream.stream_path) {
             let file_size = metadata.len();
             let modified = metadata
                 .modified()
@@ -886,9 +886,9 @@ impl TranscriptWorker {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| Utc.timestamp_opt(d.as_secs() as i64, 0).unwrap());
             db.update_file_metadata(
-                &session.session_id,
+                &stream.session_id,
                 &task.stream_kind,
-                &session.transcript_path,
+                &stream.stream_path,
                 file_size,
                 modified,
             )?;
@@ -917,7 +917,7 @@ impl TranscriptWorker {
                         error = %message,
                         "max retries exceeded, dropping task"
                     );
-                    if let Err(e) = self.transcripts_db.record_error(
+                    if let Err(e) = self.streams_db.record_error(
                         &task.session_id,
                         &task.stream_kind,
                         &task.canonical_path.display().to_string(),
@@ -957,7 +957,7 @@ impl TranscriptWorker {
                     error = %message,
                     "parse error, skipping session"
                 );
-                if let Err(e) = self.transcripts_db.record_error(
+                if let Err(e) = self.streams_db.record_error(
                     &task.session_id,
                     &task.stream_kind,
                     &task.canonical_path.display().to_string(),
@@ -973,7 +973,7 @@ impl TranscriptWorker {
                     error = %message,
                     "fatal error, skipping session"
                 );
-                if let Err(e) = self.transcripts_db.record_error(
+                if let Err(e) = self.streams_db.record_error(
                     &task.session_id,
                     &task.stream_kind,
                     &task.canonical_path.display().to_string(),
@@ -1010,7 +1010,7 @@ impl TranscriptWorker {
         for task in immediate_tasks {
             self.in_flight
                 .insert((task.canonical_path.clone(), task.stream_kind.clone()));
-            let db = self.transcripts_db.clone();
+            let db = self.streams_db.clone();
             let telemetry = self.telemetry_handle.clone();
             let task_clone = task.clone();
 
@@ -1037,18 +1037,14 @@ impl TranscriptWorker {
 
 /// Spawn the transcript worker.
 pub fn spawn_transcript_worker(
-    transcripts_db: Arc<TranscriptsDatabase>,
+    streams_db: Arc<StreamsDatabase>,
     telemetry_handle: DaemonTelemetryWorkerHandle,
     shutdown_notify: Arc<Notify>,
 ) -> TranscriptWorkerHandle {
     let (checkpoint_tx, checkpoint_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let worker = TranscriptWorker::new(
-        transcripts_db,
-        telemetry_handle,
-        shutdown_notify,
-        checkpoint_rx,
-    );
+    let worker =
+        TranscriptWorker::new(streams_db, telemetry_handle, shutdown_notify, checkpoint_rx);
 
     tokio::spawn(async move {
         worker.run().await;
@@ -1116,7 +1112,7 @@ mod subagent_sweep_tests {
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn make_worker(db: Arc<TranscriptsDatabase>) -> TranscriptWorker {
+    fn make_worker(db: Arc<StreamsDatabase>) -> TranscriptWorker {
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let shutdown = Arc::new(Notify::new());
         let telemetry = DaemonTelemetryWorkerHandle::new_noop();
@@ -1161,7 +1157,7 @@ mod subagent_sweep_tests {
 
         // Set up worker with DB
         let db_path = tmp.path().join("test.db");
-        let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+        let db = Arc::new(StreamsDatabase::open(&db_path).unwrap());
         let mut worker = make_worker(db.clone());
 
         let notification = CheckpointNotification {
@@ -1187,7 +1183,7 @@ mod subagent_sweep_tests {
         let sub2_canonical = std::fs::canonicalize(&sub2).unwrap();
 
         let rec1 = db
-            .get_session(
+            .get_stream(
                 &sub1_sid,
                 "transcript",
                 &sub1_canonical.display().to_string(),
@@ -1199,7 +1195,7 @@ mod subagent_sweep_tests {
         assert_eq!(rec1.tool, "claude");
 
         let rec2 = db
-            .get_session(
+            .get_stream(
                 &sub2_sid,
                 "transcript",
                 &sub2_canonical.display().to_string(),
@@ -1218,7 +1214,7 @@ mod subagent_sweep_tests {
         writeln!(f, r#"{{"type":"session"}}"#).unwrap();
 
         let db_path = tmp.path().join("test.db");
-        let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+        let db = Arc::new(StreamsDatabase::open(&db_path).unwrap());
         let mut worker = make_worker(db.clone());
 
         let notification = CheckpointNotification {
@@ -1249,7 +1245,7 @@ mod subagent_sweep_tests {
         writeln!(f, r#"{{"type":"message"}}"#).unwrap();
 
         let db_path = tmp.path().join("test.db");
-        let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+        let db = Arc::new(StreamsDatabase::open(&db_path).unwrap());
         let mut worker = make_worker(db.clone());
 
         let notification = CheckpointNotification {
@@ -1288,7 +1284,7 @@ mod subagent_sweep_tests {
         writeln!(f, r#"{{"type":"message"}}"#).unwrap();
 
         let db_path = tmp.path().join("test.db");
-        let db = Arc::new(TranscriptsDatabase::open(&db_path).unwrap());
+        let db = Arc::new(StreamsDatabase::open(&db_path).unwrap());
         let mut worker = make_worker(db.clone());
 
         // Mark the subagent's canonical path as in-flight
