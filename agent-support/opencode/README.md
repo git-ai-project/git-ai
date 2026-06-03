@@ -17,7 +17,7 @@ Build `git-ai` (`cargo build`) and then run the `git-ai install-hooks` or `cargo
 
 ## Requirements
 
-- [git-ai](https://github.com/git-ai-project/git-ai) must be installed and available in PATH
+- [git-ai](https://github.com/git-ai-project/git-ai) must be installed through `git-ai install-hooks`; the plugin uses the absolute binary path injected at install time
 - [OpenCode](https://opencode.ai) with plugin support
 
 ## How It Works
@@ -30,7 +30,7 @@ The plugin intercepts file editing operations (`edit`, `write`, `patch`, `multie
    - Session/conversation ID
    - List of edited file paths
 
-If `git-ai` is not installed or the file is not in a git repository, the plugin gracefully skips checkpoint creation without breaking OpenCode functionality.
+If `git-ai` cannot be launched or the file is not in a git repository, the plugin gracefully skips checkpoint creation without breaking OpenCode functionality. Set `GIT_AI_OPENCODE_DEBUG=1` or `GIT_AI_DEBUG=1` before launching OpenCode to log skipped checkpoint details.
 
 ## Development
 

@@ -215,6 +215,8 @@ mod tests {
         assert!(content.contains("import type { Plugin }"));
         assert!(content.contains("@opencode-ai/plugin"));
         assert!(content.contains("export const GitAiPlugin: Plugin"));
+        assert!(content.contains("export default GitAiPlugin"));
+        assert!(content.contains("child_process"));
         assert!(content.contains("\"tool.execute.before\""));
         assert!(content.contains("\"tool.execute.after\""));
         assert!(content.contains("FILE_EDIT_TOOLS"));
@@ -236,9 +238,10 @@ mod tests {
         // Placeholder should be replaced with the actual binary path in the const
         assert!(!content.contains("__GIT_AI_BINARY_PATH__"));
         assert!(content.contains(r#"const GIT_AI_BIN = "/usr/local/bin/git-ai""#));
-        // Commands reference the const which now holds the absolute path
-        assert!(content.contains("${GIT_AI_BIN} --version"));
-        assert!(content.contains("${GIT_AI_BIN} checkpoint opencode"));
+        // Checkpoint execution uses spawn(), which works in OpenCode CLI and Desktop.
+        assert!(content.contains("spawn(GIT_AI_BIN"));
+        assert!(content.contains(r#""checkpoint", "opencode", "--hook-input", "stdin""#));
+        assert!(!content.contains("Bun.$"));
     }
 
     #[test]
