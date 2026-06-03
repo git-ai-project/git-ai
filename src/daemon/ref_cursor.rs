@@ -1,7 +1,7 @@
 use crate::daemon::analyzers::{command_args, normalized_args};
 use crate::daemon::domain::{Confidence, FamilyKey, FamilyState, NormalizedCommand, RefChange};
 use crate::error::GitAiError;
-use crate::git::cli_parser::{parse_git_cli_args, summarize_rebase_args};
+use crate::git::cli_parser::parse_git_cli_args;
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{git_dir_for_worktree, is_valid_git_oid};
 use std::collections::{HashMap, HashSet};
@@ -459,7 +459,6 @@ impl RefCursor {
         cmd: &mut NormalizedCommand,
         state: &FamilyState,
     ) -> Result<(), GitAiError> {
-        let args = command_args(cmd);
         let expected = ExpectedTransition::from_state_and_working_logs(cmd, state);
         let Some(first) =
             self.find_head_entry(cmd.worktree.as_deref(), &["rebase", "checkout:"], expected)?
@@ -472,19 +471,29 @@ impl RefCursor {
         let mut new = first.new.clone();
         self.consume_entry(&first);
 
-        if cmd.exit_code != 0 && !summarize_rebase_args(&args).is_control_mode {
-            cmd.ref_changes = changes;
-            return Ok(());
-        }
-
-        while let Some(next) = self.find_head_entry(
-            cmd.worktree.as_deref(),
-            &["rebase"],
-            ExpectedTransition::default(),
-        )? {
+        let failed = cmd.exit_code != 0;
+        let mut consumed_finish = rebase_reflog_action_is(&first.message, "finish");
+        while !consumed_finish {
+            let Some(next) = self.find_head_entry(
+                cmd.worktree.as_deref(),
+                &["rebase"],
+                ExpectedTransition::default(),
+            )?
+            else {
+                break;
+            };
+            if failed && rebase_reflog_action_starts_new_command(&next.message) {
+                break;
+            }
             new = next.new.clone();
+            consumed_finish = rebase_reflog_action_is(&next.message, "finish");
             self.consume_entry(&next);
             changes.push(entry_to_ref_change(&next));
+        }
+
+        if failed {
+            cmd.ref_changes = changes;
+            return Ok(());
         }
 
         self.consume_common_refs_matching_transition(&old, &new, &mut changes)?;
@@ -977,6 +986,25 @@ fn pull_reflog_message_prefixes(action: &str) -> Vec<String> {
         return vec!["pull:".to_string(), "pull (".to_string()];
     }
     vec![format!("{}:", action), format!("{} ", action)]
+}
+
+fn rebase_reflog_action(message: &str) -> Option<&str> {
+    let rest = message.strip_prefix("rebase")?;
+    let open = rest.find('(')?;
+    let after_open = &rest[open + 1..];
+    let close = after_open.find("):")?;
+    Some(&after_open[..close])
+}
+
+fn rebase_reflog_action_is(message: &str, expected: &str) -> bool {
+    rebase_reflog_action(message).is_some_and(|action| action == expected)
+}
+
+fn rebase_reflog_action_starts_new_command(message: &str) -> bool {
+    matches!(
+        rebase_reflog_action(message),
+        Some("start" | "continue" | "skip" | "abort" | "quit" | "finish")
+    )
 }
 
 fn read_reflog_entries(
