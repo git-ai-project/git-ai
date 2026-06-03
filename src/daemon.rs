@@ -73,6 +73,8 @@ pub use control_api::{
 
 const PID_META_FILE: &str = "daemon.pid.json";
 const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
+const TRACE_ROOT_ARGV_FIELD: &str = "git_ai_root_argv";
+const TRACE_ROOT_STARTED_AT_NS_FIELD: &str = "git_ai_root_started_at_ns";
 const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_CHECKPOINT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -484,11 +486,35 @@ fn trace_payload_argv(payload: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn trace_payload_effective_argv(payload: &Value) -> Vec<String> {
+    let argv = trace_payload_argv(payload);
+    if !argv.is_empty() {
+        return argv;
+    }
+    payload
+        .get(TRACE_ROOT_ARGV_FIELD)
+        .and_then(Value::as_array)
+        .map(|argv| {
+            argv.iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
 fn trace_payload_primary_command(payload: &Value) -> Option<String> {
     trace_payload_cmd_name(payload).or_else(|| {
         let argv = trace_payload_argv(payload);
         trace_argv_primary_command(&argv)
     })
+}
+
+fn trace_payload_root_started_at_ns(payload: &Value) -> Option<u128> {
+    payload
+        .get(TRACE_ROOT_STARTED_AT_NS_FIELD)
+        .and_then(Value::as_u64)
+        .map(u128::from)
 }
 
 fn trace_argv_primary_command(argv: &[String]) -> Option<String> {
@@ -1841,6 +1867,7 @@ struct TraceIngressState {
     root_worktrees: HashMap<String, PathBuf>,
     root_families: HashMap<String, String>,
     root_argv: HashMap<String, Vec<String>>,
+    root_started_at_ns: HashMap<String, u128>,
     root_mutating: HashMap<String, bool>,
     root_target_repo_only: HashMap<String, bool>,
     root_last_activity_ns: HashMap<String, u64>,
@@ -2268,7 +2295,7 @@ impl ActorDaemonCoordinator {
             .get("event")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if event != "start" {
+        if !matches!(event, "start" | "def_repo") {
             return Ok(());
         }
 
@@ -2280,7 +2307,7 @@ impl ActorDaemonCoordinator {
             return Ok(());
         }
 
-        let argv = trace_payload_argv(payload);
+        let argv = trace_payload_effective_argv(payload);
         let primary_command =
             trace_payload_primary_command(payload).or_else(|| trace_argv_primary_command(&argv));
         if !Self::trace_command_participates_in_family_sequencer(primary_command.as_deref()) {
@@ -2293,7 +2320,9 @@ impl ActorDaemonCoordinator {
         let Some(common_dir) = common_dir_for_worktree(&worktree) else {
             return Ok(());
         };
-        let started_at_ns = trace_payload_time_ns(payload).unwrap_or_else(now_unix_nanos);
+        let started_at_ns = trace_payload_root_started_at_ns(payload)
+            .or_else(|| trace_payload_time_ns(payload))
+            .unwrap_or_else(now_unix_nanos);
         let family = common_dir
             .canonicalize()
             .unwrap_or(common_dir)
@@ -2540,6 +2569,7 @@ impl ActorDaemonCoordinator {
         ingress.root_worktrees.remove(root_sid);
         ingress.root_families.remove(root_sid);
         ingress.root_argv.remove(root_sid);
+        ingress.root_started_at_ns.remove(root_sid);
         ingress.root_mutating.remove(root_sid);
         ingress.root_target_repo_only.remove(root_sid);
         ingress.root_last_activity_ns.remove(root_sid);
@@ -2835,7 +2865,7 @@ impl ActorDaemonCoordinator {
     /// Tracks trace2 root metadata needed for ordering and read-only fast paths.
     /// This deliberately does not read mutable repository state or inject
     /// daemon-derived repository/ref snapshots into the trace payload.
-    fn track_trace_payload_for_ingest(&self, payload: &Value) -> bool {
+    fn track_trace_payload_for_ingest(&self, payload: &mut Value) -> bool {
         let event = payload
             .get("event")
             .and_then(Value::as_str)
@@ -2852,6 +2882,7 @@ impl ActorDaemonCoordinator {
 
         let root = trace_root_sid(&sid).to_string();
         let argv = trace_payload_argv(payload);
+        let started_at_ns = trace_payload_time_ns(payload);
         let early_primary =
             trace_payload_primary_command(payload).or_else(|| trace_argv_primary_command(&argv));
         let event_is_read_only =
@@ -2864,6 +2895,14 @@ impl ActorDaemonCoordinator {
         ingress
             .root_last_activity_ns
             .insert(root.clone(), now_unix_nanos() as u64);
+
+        if event == "start" && sid == root {
+            let started_at_ns = started_at_ns.unwrap_or_else(now_unix_nanos);
+            ingress
+                .root_started_at_ns
+                .entry(root.clone())
+                .or_insert(started_at_ns);
+        }
 
         if let Some(worktree) = trace_payload_worktree_hint(payload) {
             if let Some(common_dir) = common_dir_for_worktree(&worktree) {
@@ -2882,6 +2921,10 @@ impl ActorDaemonCoordinator {
             }
         }
 
+        let inherited = (
+            ingress.root_argv.get(&root).cloned(),
+            ingress.root_started_at_ns.get(&root).copied(),
+        );
         let effective_argv = if argv.is_empty() {
             ingress.root_argv.get(&root).cloned().unwrap_or_default()
         } else {
@@ -2908,10 +2951,30 @@ impl ActorDaemonCoordinator {
             ingress.root_worktrees.remove(&root);
             ingress.root_families.remove(&root);
             ingress.root_argv.remove(&root);
+            ingress.root_started_at_ns.remove(&root);
             ingress.root_mutating.remove(&root);
             ingress.root_target_repo_only.remove(&root);
             ingress.root_last_activity_ns.remove(&root);
             ingress.root_definitely_read_only.remove(&root);
+        }
+
+        drop(ingress);
+
+        if let Some(object) = payload.as_object_mut() {
+            if object.get("argv").is_none()
+                && let Some(root_argv) = inherited.0
+            {
+                object.insert(TRACE_ROOT_ARGV_FIELD.to_string(), json!(root_argv));
+            }
+            if object.get(TRACE_ROOT_STARTED_AT_NS_FIELD).is_none()
+                && let Some(started_at_ns) = inherited.1
+            {
+                let started_at_ns = u64::try_from(started_at_ns).unwrap_or(u64::MAX);
+                object.insert(
+                    TRACE_ROOT_STARTED_AT_NS_FIELD.to_string(),
+                    json!(started_at_ns),
+                );
+            }
         }
 
         read_only_root
@@ -5253,6 +5316,7 @@ fn process_trace_connection_line(
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
+    #[cfg(not(windows))]
     let event = parsed
         .get("event")
         .and_then(Value::as_str)
