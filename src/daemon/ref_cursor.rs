@@ -1,6 +1,7 @@
 use crate::daemon::analyzers::command_args;
 use crate::daemon::domain::{Confidence, FamilyKey, FamilyState, NormalizedCommand, RefChange};
 use crate::error::GitAiError;
+use crate::git::cli_parser::summarize_rebase_args;
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{git_dir_for_worktree, is_valid_git_oid};
 use std::collections::{HashMap, HashSet};
@@ -463,6 +464,7 @@ impl RefCursor {
         cmd: &mut NormalizedCommand,
         state: &FamilyState,
     ) -> Result<(), GitAiError> {
+        let args = command_args(cmd);
         let expected = ExpectedTransition::from_state_and_working_logs(cmd, state);
         let Some(first) =
             self.find_head_entry(cmd.worktree.as_deref(), &["rebase", "checkout:"], expected)?
@@ -474,6 +476,11 @@ impl RefCursor {
         let old = first.old.clone();
         let mut new = first.new.clone();
         self.consume_entry(&first);
+
+        if cmd.exit_code != 0 && !summarize_rebase_args(&args).is_control_mode {
+            cmd.ref_changes = changes;
+            return Ok(());
+        }
 
         while let Some(next) = self.find_head_entry(
             cmd.worktree.as_deref(),

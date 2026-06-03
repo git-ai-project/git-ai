@@ -1233,6 +1233,127 @@ fn daemon_trace_current_dir_commands_reserve_order_from_def_repo() {
 }
 
 #[test]
+fn daemon_failed_rebase_does_not_consume_later_continue_reflog_entry() {
+    let repo = TestRepo::new_dedicated_daemon();
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let worktree = repo_workdir_string(&repo);
+    let git_dir = repo.path().join(".git").to_string_lossy().to_string();
+
+    let mut shared_file = repo.filename("shared.txt");
+    shared_file.set_contents(lines!["line 1".human(), "line 2".human()]);
+    repo.stage_all_and_commit("initial commit")
+        .expect("initial commit should succeed");
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"])
+        .expect("checkout feature should succeed");
+    let mut feature_file = repo.filename("shared.txt");
+    feature_file.set_contents(lines!["line 1".human(), "AI feature line 2".ai()]);
+    repo.stage_all_and_commit("AI feature changes")
+        .expect("feature commit should succeed");
+    let feature_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .expect("rev-parse feature should succeed")
+        .trim()
+        .to_string();
+    assert!(
+        repo.read_authorship_note(&feature_sha).is_some(),
+        "feature commit should have a note before rebase"
+    );
+
+    repo.git(&["checkout", &default_branch])
+        .expect("checkout default branch should succeed");
+    let mut main_file = repo.filename("shared.txt");
+    main_file.set_contents(lines!["line 1".human(), "main change line 2".human()]);
+    repo.stage_all_and_commit("main conflicting change")
+        .expect("main commit should succeed");
+
+    repo.git(&["checkout", "feature"])
+        .expect("checkout feature should succeed");
+    repo.sync_daemon();
+
+    let rebase_result = repo.git_og(&["rebase", &default_branch]);
+    assert!(
+        rebase_result.is_err(),
+        "raw rebase should fail due to conflict"
+    );
+
+    fs::write(
+        repo.path().join("shared.txt"),
+        "line 1\nmain change line 2\nAI feature line 2\n",
+    )
+    .expect("failed to write resolved conflict");
+    repo.git_og(&["add", "shared.txt"])
+        .expect("raw add should succeed");
+    repo.git_og_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")])
+        .expect("raw rebase --continue should succeed");
+    let rebased_sha = repo
+        .git_og(&["rev-parse", "HEAD"])
+        .expect("rev-parse rebased HEAD should succeed")
+        .trim()
+        .to_string();
+    assert_ne!(
+        rebased_sha, feature_sha,
+        "rebase --continue should create a rewritten commit"
+    );
+
+    let rebase_session = repos::test_repo::new_daemon_test_sync_session_id();
+    let continue_session = repos::test_repo::new_daemon_test_sync_session_id();
+    let rebase_session_arg = format!("git-ai.testSyncSession={rebase_session}");
+    let continue_session_arg = format!("git-ai.testSyncSession={continue_session}");
+
+    send_trace_frames(
+        &trace_socket,
+        &[
+            json!({
+                "event": "start",
+                "sid": "failed-rebase-start",
+                "argv": ["git", "-c", rebase_session_arg, "-C", worktree, "rebase", default_branch],
+                "time_ns": 1_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "failed-rebase-start",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 1_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "failed-rebase-start",
+                "code": 1,
+                "time_ns": 1_100u64,
+            }),
+            json!({
+                "event": "start",
+                "sid": "rebase-continue",
+                "argv": ["git", "-c", continue_session_arg, "-C", worktree, "rebase", "--continue"],
+                "time_ns": 2_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "rebase-continue",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 2_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "rebase-continue",
+                "code": 0,
+                "time_ns": 2_100u64,
+            }),
+        ],
+    );
+    repo.sync_daemon_external_completion_sessions(&[rebase_session, continue_session]);
+
+    assert!(
+        repo.read_authorship_note(&rebased_sha).is_some(),
+        "rebased commit should get the remapped note even when failed rebase processing is delayed until after --continue"
+    );
+}
+
+#[test]
 #[serial]
 fn daemon_trace_ingest_treats_atexit_as_terminal_for_reflog_capture() {
     let repo =
