@@ -957,15 +957,12 @@ fn read_reflog_records(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(GitAiError::IoError(error)),
     };
-    let start = start_offset.unwrap_or(0);
-    if start > bytes.len() as u64 {
-        return Err(GitAiError::Generic(format!(
-            "reflog cursor is past end of {} ({} > {})",
-            path.display(),
-            start,
-            bytes.len()
-        )));
-    }
+    let byte_len = bytes.len() as u64;
+    let start = match start_offset {
+        Some(offset) if offset > byte_len => 0,
+        Some(offset) => offset,
+        None => 0,
+    };
 
     let mut entries = Vec::new();
     let mut offset = 0u64;

@@ -2,6 +2,7 @@
 /// on the rewrite-ops branch. Each test models a specific fuzzer failure pattern
 /// using explicit file writes and checkpoint calls.
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
@@ -71,6 +72,110 @@ fn test_raw_git_commit_before_traced_commit_does_not_poison_ref_cursor() {
 
     let mut ai_file = repo.filename("ai.txt");
     ai_file.assert_committed_lines(crate::lines!["ai tracked".ai()]);
+}
+
+fn commit_ai_line(repo: &TestRepo, filename: &str, line: &str, message: &str) {
+    let path = repo.path().join(filename);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(&path, format!("{line}\n")).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", filename]).unwrap();
+    repo.stage_all_and_commit(message).unwrap();
+
+    let mut file = repo.filename(filename);
+    file.assert_committed_lines(crate::lines![line.ai()]);
+}
+
+fn head_reflog(repo: &TestRepo) -> PathBuf {
+    repo.path().join(".git/logs/HEAD")
+}
+
+fn current_branch_reflog(repo: &TestRepo) -> PathBuf {
+    repo.path()
+        .join(".git/logs/refs/heads")
+        .join(repo.current_branch())
+}
+
+fn truncate_reflog_to_first_entry(path: &Path) {
+    let bytes = fs::read(path).unwrap();
+    let first_end = bytes
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map(|index| index + 1)
+        .unwrap_or(bytes.len());
+    assert!(
+        first_end < bytes.len(),
+        "expected multiple reflog entries in {}",
+        path.display()
+    );
+    fs::write(path, &bytes[..first_end]).unwrap();
+}
+
+#[test]
+fn test_empty_head_reflog_does_not_break_trace2_ref_cursor() {
+    let repo = TestRepo::new();
+
+    commit_ai_line(&repo, "base.txt", "base", "initial");
+    fs::write(head_reflog(&repo), "").unwrap();
+    commit_ai_line(&repo, "next.txt", "next ai", "after empty head reflog");
+}
+
+#[test]
+fn test_empty_branch_reflog_does_not_break_trace2_ref_cursor() {
+    let repo = TestRepo::new();
+
+    commit_ai_line(&repo, "base.txt", "base", "initial");
+    fs::write(current_branch_reflog(&repo), "").unwrap();
+    commit_ai_line(&repo, "next.txt", "next ai", "after empty branch reflog");
+}
+
+#[test]
+fn test_partially_pruned_head_reflog_does_not_break_trace2_ref_cursor() {
+    let repo = TestRepo::new();
+
+    commit_ai_line(&repo, "base.txt", "base", "initial");
+    commit_ai_line(&repo, "advance.txt", "advance", "advance cursor");
+    truncate_reflog_to_first_entry(&head_reflog(&repo));
+    commit_ai_line(
+        &repo,
+        "next.txt",
+        "next ai",
+        "after partially pruned head reflog",
+    );
+}
+
+#[test]
+fn test_partially_pruned_branch_reflog_does_not_break_trace2_ref_cursor() {
+    let repo = TestRepo::new();
+
+    commit_ai_line(&repo, "base.txt", "base", "initial");
+    commit_ai_line(&repo, "advance.txt", "advance", "advance cursor");
+    truncate_reflog_to_first_entry(&current_branch_reflog(&repo));
+    commit_ai_line(
+        &repo,
+        "next.txt",
+        "next ai",
+        "after partially pruned branch reflog",
+    );
+}
+
+#[test]
+fn test_deleted_head_reflog_does_not_break_trace2_ref_cursor() {
+    let repo = TestRepo::new();
+
+    commit_ai_line(&repo, "base.txt", "base", "initial");
+    fs::remove_file(head_reflog(&repo)).unwrap();
+    commit_ai_line(&repo, "next.txt", "next ai", "after deleted head reflog");
+}
+
+#[test]
+fn test_deleted_branch_reflog_does_not_break_trace2_ref_cursor() {
+    let repo = TestRepo::new();
+
+    commit_ai_line(&repo, "base.txt", "base", "initial");
+    fs::remove_file(current_branch_reflog(&repo)).unwrap();
+    commit_ai_line(&repo, "next.txt", "next ai", "after deleted branch reflog");
 }
 
 // =============================================================================
