@@ -113,15 +113,9 @@ mod tests {
             exit_code: 0,
             started_at_ns: 1,
             finished_at_ns: 2,
-            pre_repo: None,
-            post_repo: None,
-            inflight_rebase_original_head: None,
-            merge_squash_source_head: None,
-            carryover_snapshot_id: None,
             stash_target_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
-            wrapper_invocation_id: None,
         }
     }
 

@@ -1,35 +1,16 @@
-use crate::daemon::domain::{FamilyKey, RefChange, RepoContext};
+use crate::daemon::domain::FamilyKey;
 use crate::error::GitAiError;
 use crate::git::cli_parser::parse_git_cli_args;
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::common_dir_for_worktree;
 use crate::git::repository::discover_repository_in_path_no_git_exec;
-use crate::git::repository::exec_git_allow_nonzero;
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ReflogCut {
-    pub offsets: HashMap<String, u64>,
-}
-
 pub trait GitBackend: Send + Sync + 'static {
     fn resolve_family(&self, worktree: &Path) -> Result<FamilyKey, GitAiError>;
-
-    fn repo_context(&self, worktree: &Path) -> Result<RepoContext, GitAiError>;
-
-    fn reflog_cut(&self, family: &FamilyKey) -> Result<ReflogCut, GitAiError>;
-
-    fn reflog_delta(
-        &self,
-        family: &FamilyKey,
-        start: &ReflogCut,
-        end: &ReflogCut,
-    ) -> Result<Vec<RefChange>, GitAiError>;
 
     fn resolve_primary_command(
         &self,
@@ -296,104 +277,6 @@ impl GitBackend for SystemGitBackend {
         Ok(FamilyKey::new(common.to_string_lossy().to_string()))
     }
 
-    fn repo_context(&self, worktree: &Path) -> Result<RepoContext, GitAiError> {
-        let head = rev_parse_head(worktree).ok();
-        let symbolic = run_git_allow_nonzero(
-            [
-                "-C",
-                &worktree.to_string_lossy(),
-                "symbolic-ref",
-                "--quiet",
-                "--short",
-                "HEAD",
-            ]
-            .as_slice(),
-        )?;
-        let (branch, detached) = if symbolic.status.success() {
-            let value = String::from_utf8_lossy(&symbolic.stdout).trim().to_string();
-            if value.is_empty() {
-                (None, true)
-            } else {
-                (Some(value), false)
-            }
-        } else {
-            (None, true)
-        };
-
-        Ok(RepoContext {
-            head,
-            branch,
-            detached,
-        })
-    }
-
-    fn reflog_cut(&self, family: &FamilyKey) -> Result<ReflogCut, GitAiError> {
-        let common_dir = PathBuf::from(&family.0);
-        let offsets = reflog_offsets(&common_dir)?;
-        Ok(ReflogCut { offsets })
-    }
-
-    fn reflog_delta(
-        &self,
-        family: &FamilyKey,
-        start: &ReflogCut,
-        end: &ReflogCut,
-    ) -> Result<Vec<RefChange>, GitAiError> {
-        let common_dir = PathBuf::from(&family.0);
-        let refs = start
-            .offsets
-            .keys()
-            .chain(end.offsets.keys())
-            .cloned()
-            .collect::<HashSet<_>>();
-
-        let mut changes = Vec::new();
-        for reference in refs {
-            let start_offset = start.offsets.get(&reference).copied().unwrap_or(0);
-            let end_offset = end.offsets.get(&reference).copied().unwrap_or(start_offset);
-            if end_offset < start_offset {
-                return Err(GitAiError::Generic(format!(
-                    "reflog cut regressed for {} ({} < {})",
-                    reference, end_offset, start_offset
-                )));
-            }
-            if end_offset == start_offset {
-                continue;
-            }
-
-            let reflog_path = common_dir.join("logs").join(&reference);
-            if !reflog_path.exists() {
-                return Err(GitAiError::Generic(format!(
-                    "reflog path missing for {}: {}",
-                    reference,
-                    reflog_path.display()
-                )));
-            }
-
-            let metadata = fs::metadata(&reflog_path)?;
-            let file_len = metadata.len();
-            if file_len < end_offset {
-                return Err(GitAiError::Generic(format!(
-                    "reflog shorter than cut for {} ({} < {})",
-                    reference, file_len, end_offset
-                )));
-            }
-
-            let mut file = File::open(&reflog_path)?;
-            file.seek(SeekFrom::Start(start_offset))?;
-            let take_len = end_offset.saturating_sub(start_offset);
-            let reader = BufReader::new(file.take(take_len));
-            for line in reader.lines() {
-                let line = line?;
-                if let Some(change) = parse_reflog_line(&reference, &line) {
-                    changes.push(change);
-                }
-            }
-        }
-
-        Ok(changes)
-    }
-
     fn resolve_primary_command(
         &self,
         worktree: &Path,
@@ -452,101 +335,6 @@ impl GitBackend for SystemGitBackend {
             .unwrap_or_else(|| PathBuf::from("."));
         resolve_target(target, cwd_hint)
     }
-}
-
-fn rev_parse_head(worktree: &Path) -> Result<String, GitAiError> {
-    run_git_str_allow_nonzero(
-        [
-            "-C",
-            &worktree.to_string_lossy(),
-            "rev-parse",
-            "--verify",
-            "HEAD",
-        ]
-        .as_slice(),
-    )
-}
-
-fn run_git_allow_nonzero(args: &[&str]) -> Result<std::process::Output, GitAiError> {
-    let args_owned = args
-        .iter()
-        .map(|arg| (*arg).to_string())
-        .collect::<Vec<_>>();
-    exec_git_allow_nonzero(&args_owned)
-}
-
-fn run_git_str_allow_nonzero(args: &[&str]) -> Result<String, GitAiError> {
-    let output = run_git_allow_nonzero(args)?;
-    if !output.status.success() {
-        return Err(git_error_for(args, &output));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn git_error_for(args: &[&str], output: &std::process::Output) -> GitAiError {
-    GitAiError::GitCliError {
-        code: output.status.code(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        args: args.iter().map(|s| s.to_string()).collect(),
-    }
-}
-
-fn reflog_offsets(common_dir: &Path) -> Result<HashMap<String, u64>, GitAiError> {
-    let mut out = HashMap::new();
-    let logs_dir = common_dir.join("logs");
-    if !logs_dir.exists() {
-        return Ok(out);
-    }
-    discover_reflog_files(&logs_dir, &logs_dir, &mut out)?;
-    Ok(out)
-}
-
-fn discover_reflog_files(
-    root: &Path,
-    current: &Path,
-    out: &mut HashMap<String, u64>,
-) -> Result<(), GitAiError> {
-    for entry in fs::read_dir(current)? {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            discover_reflog_files(root, &path, out)?;
-            continue;
-        }
-        if !file_type.is_file() {
-            continue;
-        }
-        let relative = match path.strip_prefix(root) {
-            Ok(relative) => relative,
-            Err(_) => continue,
-        };
-        let reference = relative.to_string_lossy().replace('\\', "/");
-        if reference == "HEAD" || reference == "ORIG_HEAD" || reference.starts_with("refs/") {
-            let offset = fs::metadata(&path)?.len();
-            out.insert(reference, offset);
-        }
-    }
-    Ok(())
-}
-
-fn parse_reflog_line(reference: &str, line: &str) -> Option<RefChange> {
-    let head = line.split('\t').next().unwrap_or_default();
-    let mut parts = head.split_whitespace();
-    let old = parts.next()?.trim().to_string();
-    let new = parts.next()?.trim().to_string();
-    if !is_valid_oid(&old) || !is_valid_oid(&new) || old == new {
-        return None;
-    }
-    Some(RefChange {
-        reference: reference.to_string(),
-        old,
-        new,
-    })
-}
-
-fn is_valid_oid(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn is_git_binary(token: &str) -> bool {

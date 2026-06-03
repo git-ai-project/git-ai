@@ -11,7 +11,6 @@
 use crate::daemon::control_api::{
     CasSyncPayload, ControlRequest, ControlResponse, TelemetryEnvelope,
 };
-use crate::daemon::domain::RepoContext;
 use crate::daemon::{DaemonClientStream, open_local_socket_stream_with_timeout};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -252,34 +251,4 @@ pub fn submit_cas(records: Vec<CasSyncPayload>) {
 pub fn submit_notes() {
     let request = ControlRequest::FlushNotes;
     let _ = send_via_daemon(&request);
-}
-
-/// Send wrapper pre-command state to the daemon.
-/// Returns an error if the send fails (caller decides whether to log/ignore).
-pub fn send_wrapper_pre_state(
-    invocation_id: &str,
-    repo_working_dir: &str,
-    repo_context: RepoContext,
-) -> Result<(), String> {
-    let request = ControlRequest::WrapperPreState {
-        invocation_id: invocation_id.to_string(),
-        repo_working_dir: repo_working_dir.to_string(),
-        repo_context,
-    };
-    send_via_daemon(&request).map(|_| ())
-}
-
-/// Send wrapper post-command state to the daemon.
-/// Returns an error if the send fails (caller decides whether to log/ignore).
-pub fn send_wrapper_post_state(
-    invocation_id: &str,
-    repo_working_dir: &str,
-    repo_context: RepoContext,
-) -> Result<(), String> {
-    let request = ControlRequest::WrapperPostState {
-        invocation_id: invocation_id.to_string(),
-        repo_working_dir: repo_working_dir.to_string(),
-        repo_context,
-    };
-    send_via_daemon(&request).map(|_| ())
 }

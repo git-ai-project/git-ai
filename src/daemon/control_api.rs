@@ -1,7 +1,6 @@
 use crate::authorship::working_log::AgentId;
 use crate::commands::checkpoint_agent::bash_tool::StatSnapshot;
 use crate::commands::checkpoint_agent::orchestrator::CheckpointRequest;
-use crate::daemon::domain::RepoContext;
 use crate::metrics::MetricEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,18 +20,6 @@ pub enum ControlRequest {
     /// Signal the daemon that new notes are pending in notes-db and should be flushed.
     #[serde(rename = "notes.flush")]
     FlushNotes,
-    #[serde(rename = "wrapper.pre_state")]
-    WrapperPreState {
-        invocation_id: String,
-        repo_working_dir: String,
-        repo_context: RepoContext,
-    },
-    #[serde(rename = "wrapper.post_state")]
-    WrapperPostState {
-        invocation_id: String,
-        repo_working_dir: String,
-        repo_context: RepoContext,
-    },
     #[serde(rename = "snapshot.watermarks")]
     SnapshotWatermarks { repo_working_dir: String },
     #[serde(rename = "bash_session.start")]

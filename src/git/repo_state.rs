@@ -122,10 +122,6 @@ pub fn read_ref_oid_for_worktree(worktree: &Path, refname: &str) -> Option<Strin
     read_ref_oid_from_paths(refname, &git_dir, &common_dir)
 }
 
-pub fn read_ref_oid_for_common_dir(common_dir: &Path, refname: &str) -> Option<String> {
-    read_ref_oid_from_paths(refname, common_dir, common_dir)
-}
-
 pub fn resolve_stash_target_oid_for_worktree(
     worktree: &Path,
     target_spec: Option<&str>,

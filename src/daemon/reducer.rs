@@ -13,8 +13,6 @@ pub fn reduce_family_command(
     // Analyze against pre-command state so history/ref analyzers can infer old->new correctly.
     let analysis = analyzers.analyze(&cmd, AnalysisView { refs: &state.refs })?;
     apply_ref_changes(state, &cmd);
-    apply_post_repo_refs(state, &cmd, &analysis);
-    apply_analysis_ref_updates(state, &analysis);
     apply_worktree_state(state, &cmd);
 
     state.applied_seq = state.applied_seq.saturating_add(1);
@@ -48,7 +46,7 @@ pub fn reduce_checkpoint(state: &mut FamilyState) {
 
 fn apply_ref_changes(state: &mut FamilyState, cmd: &NormalizedCommand) {
     for change in &cmd.ref_changes {
-        if change.new.trim().is_empty() {
+        if change.new.trim().is_empty() || is_zero_oid(&change.new) {
             state.refs.remove(&change.reference);
         } else {
             state
@@ -58,97 +56,26 @@ fn apply_ref_changes(state: &mut FamilyState, cmd: &NormalizedCommand) {
     }
 }
 
-fn apply_post_repo_refs(
-    state: &mut FamilyState,
-    cmd: &NormalizedCommand,
-    analysis: &AnalysisResult,
-) {
-    if !should_apply_post_repo_refs(cmd, analysis) {
-        return;
-    }
-    let Some(post_repo) = cmd.post_repo.as_ref() else {
-        return;
-    };
-    let Some(head) = post_repo
-        .head
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    else {
-        return;
-    };
-
-    let head = head.to_string();
-    if let Some(branch) = post_repo
-        .branch
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    {
-        state.refs.insert(format!("refs/heads/{}", branch), head);
-    }
-}
-
-fn should_apply_post_repo_refs(cmd: &NormalizedCommand, analysis: &AnalysisResult) -> bool {
-    if cmd.post_repo.is_none() {
-        return false;
-    }
-
-    if cmd
-        .ref_changes
-        .iter()
-        .any(|change| change.reference == "HEAD" || change.reference.starts_with("refs/heads/"))
-    {
-        return false;
-    }
-
-    analysis.events.iter().any(|event| {
-        matches!(
-            event,
-            crate::daemon::domain::SemanticEvent::CommitCreated { .. }
-                | crate::daemon::domain::SemanticEvent::CommitAmended { .. }
-                | crate::daemon::domain::SemanticEvent::Reset { .. }
-                | crate::daemon::domain::SemanticEvent::RebaseComplete { .. }
-                | crate::daemon::domain::SemanticEvent::RebaseAbort { .. }
-                | crate::daemon::domain::SemanticEvent::CherryPickComplete { .. }
-                | crate::daemon::domain::SemanticEvent::CherryPickAbort { .. }
-                | crate::daemon::domain::SemanticEvent::PullCompleted { .. }
-                | crate::daemon::domain::SemanticEvent::RefUpdated { .. }
-                | crate::daemon::domain::SemanticEvent::BranchCreated { .. }
-                | crate::daemon::domain::SemanticEvent::BranchDeleted { .. }
-                | crate::daemon::domain::SemanticEvent::BranchRenamed { .. }
-                | crate::daemon::domain::SemanticEvent::SymbolicRefUpdated { .. }
-        )
-    })
-}
-
-/// Update tracked refs from `RefUpdated` analysis events.  This covers
-/// plumbing commands like `update-ref` where trace2 does not emit
-/// `reference:` events and no `post_repo` snapshot is available.
-fn apply_analysis_ref_updates(state: &mut FamilyState, analysis: &AnalysisResult) {
-    for event in &analysis.events {
-        if let crate::daemon::domain::SemanticEvent::RefUpdated { reference, new, .. } = event
-            && !new.is_empty()
-        {
-            state.refs.insert(reference.clone(), new.clone());
-        }
-    }
+fn is_zero_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.chars().all(|ch| ch == '0')
 }
 
 fn apply_worktree_state(state: &mut FamilyState, cmd: &NormalizedCommand) {
     let Some(worktree) = cmd.worktree.as_ref() else {
         return;
     };
-    let Some(post_repo) = cmd.post_repo.as_ref() else {
-        return;
-    };
+    let head = cmd
+        .ref_changes
+        .iter()
+        .rfind(|change| change.reference == "HEAD")
+        .map(|change| change.new.clone());
 
     state.worktrees.insert(
         canonicalize_path(worktree),
         WorktreeState {
-            head: post_repo.head.clone(),
-            branch: post_repo.branch.clone(),
-            detached: post_repo.detached,
+            head,
+            branch: None,
+            detached: false,
             last_updated_ns: cmd.finished_at_ns,
         },
     );
@@ -192,11 +119,6 @@ mod tests {
             exit_code: 0,
             started_at_ns: 1,
             finished_at_ns: 2,
-            pre_repo: None,
-            post_repo: None,
-            inflight_rebase_original_head: None,
-            merge_squash_source_head: None,
-            carryover_snapshot_id: None,
             stash_target_oid: None,
             ref_changes: vec![RefChange {
                 reference: "refs/heads/main".to_string(),
@@ -204,7 +126,6 @@ mod tests {
                 new: "abc".to_string(),
             }],
             confidence: Confidence::Low,
-            wrapper_invocation_id: None,
         }
     }
 
@@ -226,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn reducer_tracks_head_from_post_repo_snapshot_for_head_moving_commands() {
+    fn reducer_does_not_update_refs_without_ref_transition_for_head_moving_commands() {
         let mut state = family_state();
         let registry = AnalyzerRegistry::new();
         let mut cmd = normalized();
@@ -234,22 +155,14 @@ mod tests {
         cmd.raw_argv = vec!["git".to_string(), "commit".to_string()];
         cmd.primary_command = Some("commit".to_string());
         cmd.invoked_command = Some("commit".to_string());
-        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("def".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
 
         let (_applied, _analysis) = reduce_family_command(&mut state, cmd, &registry).unwrap();
 
-        assert_eq!(
-            state.refs.get("refs/heads/main").map(String::as_str),
-            Some("def")
-        );
+        assert_eq!(state.refs.get("refs/heads/main").map(String::as_str), None);
     }
 
     #[test]
-    fn reducer_ignores_post_repo_snapshot_for_stash_commands() {
+    fn reducer_preserves_refs_for_stash_without_ref_transition() {
         let mut state = family_state();
         state
             .refs
@@ -261,11 +174,6 @@ mod tests {
         cmd.primary_command = Some("stash".to_string());
         cmd.invoked_command = Some("stash".to_string());
         cmd.invoked_args = vec!["push".to_string()];
-        cmd.post_repo = Some(crate::daemon::domain::RepoContext {
-            head: Some("def".to_string()),
-            branch: Some("main".to_string()),
-            detached: false,
-        });
 
         let (_applied, _analysis) = reduce_family_command(&mut state, cmd, &registry).unwrap();
 
@@ -273,6 +181,26 @@ mod tests {
             state.refs.get("refs/heads/main").map(String::as_str),
             Some("abc")
         );
+    }
+
+    #[test]
+    fn reducer_removes_refs_deleted_with_zero_oid() {
+        let mut state = family_state();
+        state.refs.insert(
+            "refs/heads/feature".to_string(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        );
+        let registry = AnalyzerRegistry::new();
+        let mut cmd = normalized();
+        cmd.ref_changes = vec![RefChange {
+            reference: "refs/heads/feature".to_string(),
+            old: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            new: "0000000000000000000000000000000000000000".to_string(),
+        }];
+
+        let (_applied, _analysis) = reduce_family_command(&mut state, cmd, &registry).unwrap();
+
+        assert!(!state.refs.contains_key("refs/heads/feature"));
     }
 
     #[test]

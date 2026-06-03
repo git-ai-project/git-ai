@@ -1,27 +1,19 @@
 use crate::config;
-use crate::daemon::domain::RepoContext;
 use crate::daemon::git_backend::GitBackend;
 use crate::error::GitAiError;
 use crate::git::cli_parser::{
-    ParsedGitInvocation, explicit_rebase_branch_arg, parse_git_cli_args,
-    stash_requires_target_resolution, stash_target_spec, summarize_rebase_args,
+    ParsedGitInvocation, explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args,
 };
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{
-    HeadState, common_dir_for_worktree, git_dir_for_worktree, latest_reflog_old_oid_for_worktree,
-    read_head_state_for_worktree, read_ref_oid_for_worktree, resolve_rebase_segment_for_worktree,
-    resolve_reflog_old_oid_for_ref_new_oid_in_worktree, resolve_squash_source_head_for_worktree,
-    resolve_stash_target_oid_for_worktree, resolve_worktree_head_reflog_old_oid_for_new_head,
+    common_dir_for_worktree, git_dir_for_worktree, read_ref_oid_for_worktree,
     worktree_root_for_path,
 };
 use crate::git::repository::{Repository, discover_repository_in_path_no_git_exec, exec_git};
 use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
 use crate::utils::LockFile;
 use crate::{
-    authorship::virtual_attribution::{
-        restore_virtual_attribution_carryover, restore_working_log_carryover,
-    },
-    authorship::working_log::{AgentId, CheckpointKind},
+    authorship::working_log::CheckpointKind,
     commands::checkpoint_agent::orchestrator::CheckpointRequest,
     daemon::checkpoint::PreparedPathRole,
 };
@@ -44,7 +36,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 #[cfg(windows)]
 use std::io;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(windows)]
 use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
 use std::path::{Path, PathBuf};
@@ -64,6 +56,7 @@ pub mod family_actor;
 pub mod git_backend;
 pub mod global_actor;
 pub mod reducer;
+pub mod ref_cursor;
 pub mod sentry_layer;
 pub mod stream_worker;
 pub mod sweep_coordinator;
@@ -471,24 +464,6 @@ fn trace_payload_time_ns(payload: &Value) -> Option<u128> {
         })
 }
 
-fn daemon_git_dir_for_worktree(worktree: &Path) -> Option<PathBuf> {
-    git_dir_for_worktree(worktree)
-}
-
-fn daemon_worktree_head_reflog_offset(worktree: &Path) -> Option<u64> {
-    let git_dir = daemon_git_dir_for_worktree(worktree)?;
-    let path = git_dir.join("logs").join("HEAD");
-    fs::metadata(path).ok().map(|metadata| metadata.len())
-}
-
-fn repo_context_from_head_state(state: HeadState) -> RepoContext {
-    RepoContext {
-        head: state.head,
-        branch: state.branch,
-        detached: state.detached,
-    }
-}
-
 fn trace_payload_cmd_name(payload: &Value) -> Option<String> {
     payload
         .get("name")
@@ -682,6 +657,7 @@ fn trace_command_may_mutate_refs(primary_command: Option<&str>) -> bool {
                 | "reset"
                 | "stash"
                 | "switch"
+                | "update-ref"
         )
     )
 }
@@ -815,240 +791,6 @@ fn rfc3339_to_unix_nanos(value: &str) -> Option<u128> {
         .and_then(|timestamp| u128::try_from(timestamp.timestamp_nanos_opt()?).ok())
 }
 
-fn read_worktree_snapshot_for_files(
-    worktree: &Path,
-    file_paths: &HashSet<String>,
-) -> HashMap<String, String> {
-    let mut snapshot = HashMap::new();
-    for file_path in file_paths {
-        let absolute = worktree.join(file_path);
-        let content = match fs::read(&absolute) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-            Err(_) => String::new(),
-        };
-        snapshot.insert(file_path.clone(), content);
-    }
-    snapshot
-}
-fn ref_change_span(
-    ref_changes: &[crate::daemon::domain::RefChange],
-    predicate: impl Fn(&crate::daemon::domain::RefChange) -> bool,
-) -> Option<(String, String)> {
-    let matching = ref_changes
-        .iter()
-        .filter(|change| predicate(change) && change.old.trim() != change.new.trim())
-        .collect::<Vec<_>>();
-    let first = matching.first()?;
-    let last = matching.last()?;
-    Some((first.old.clone(), last.new.clone()))
-}
-
-fn stable_head_change_from_ref_changes(
-    ref_changes: &[crate::daemon::domain::RefChange],
-) -> Option<(String, String)> {
-    ref_change_span(ref_changes, |change| change.reference == "HEAD")
-        .or_else(|| {
-            ref_change_span(ref_changes, |change| {
-                change.reference.starts_with("refs/heads/")
-            })
-        })
-        .or_else(|| {
-            ref_change_span(ref_changes, |change| {
-                is_non_auxiliary_ref(&change.reference)
-            })
-        })
-}
-
-fn stable_old_head_from_worktree_head_reflog(worktree: &Path, new_head: &str) -> Option<String> {
-    resolve_worktree_head_reflog_old_oid_for_new_head(worktree, new_head)
-        .ok()
-        .flatten()
-        .filter(|old_head| is_valid_oid(old_head) && !is_zero_oid(old_head))
-}
-
-fn stable_carryover_heads_for_command(
-    repo: &Repository,
-    input: &CarryoverCaptureInput<'_>,
-    parsed: &ParsedGitInvocation,
-) -> Result<Option<(String, String)>, GitAiError> {
-    let command = parsed.command.as_deref().or(input.primary_command);
-    let Some(command) = command else {
-        return Ok(None);
-    };
-
-    let post_head = input
-        .post_repo
-        .and_then(|repo| repo.head.clone())
-        .filter(|head| is_valid_oid(head) && !is_zero_oid(head));
-    let ref_head_change = stable_head_change_from_ref_changes(input.ref_changes);
-    let rebase_start_target_hint = if command == "rebase" {
-        rebase_start_target_hint_from_args(&parsed.command_args)
-    } else {
-        None
-    };
-
-    let resolved = match command {
-        "rebase" | "pull" => ActorDaemonCoordinator::stable_rebase_heads_from_worktree(
-            repo,
-            input.worktree,
-            input.argv,
-            rebase_start_target_hint.as_deref(),
-        )?
-        .map(|(old_head, new_head, _onto_head)| (old_head, new_head))
-        .or_else(|| {
-            ref_head_change.clone().or_else(|| {
-                let new_head = post_head.clone()?;
-                let old_head =
-                    stable_old_head_from_worktree_head_reflog(input.worktree, &new_head)?;
-                Some((old_head, new_head))
-            })
-        }),
-        "checkout" | "switch" => {
-            let is_merge = parsed.has_command_flag("--merge") || parsed.has_command_flag("-m");
-            if !is_merge {
-                None
-            } else {
-                ref_head_change.clone().or_else(|| {
-                    let new_head = post_head.clone()?;
-                    let old_head =
-                        stable_old_head_from_worktree_head_reflog(input.worktree, &new_head)?;
-                    Some((old_head, new_head))
-                })
-            }
-        }
-        _ => None,
-    };
-
-    Ok(resolved)
-}
-
-fn resolve_explicit_rebase_branch_ref(worktree: &Path, argv: &[String]) -> Option<String> {
-    let parsed = parse_git_cli_args(trace_invocation_args(argv));
-    if parsed.command.as_deref() != Some("rebase") {
-        return None;
-    }
-
-    let branch_spec = explicit_rebase_branch_arg(&parsed.command_args)?;
-    let branch_ref = explicit_rebase_branch_ref_name(&branch_spec)?;
-    read_ref_oid_for_worktree(worktree, &branch_ref).map(|_| branch_ref)
-}
-
-fn explicit_rebase_branch_ref_name(branch_spec: &str) -> Option<String> {
-    if branch_spec.starts_with("refs/") {
-        return Some(branch_spec.to_string());
-    }
-    if is_valid_oid(branch_spec) || branch_spec == "HEAD" || branch_spec.starts_with("@{") {
-        return None;
-    }
-    Some(format!("refs/heads/{}", branch_spec))
-}
-
-fn resolve_stash_target_oid_for_command(
-    worktree: &Path,
-    argv: &[String],
-) -> Result<Option<String>, GitAiError> {
-    let parsed = parse_git_cli_args(trace_invocation_args(argv));
-    if parsed.command.as_deref() != Some("stash") {
-        return Ok(None);
-    }
-    if !stash_requires_target_resolution(&parsed.command_args) {
-        return Ok(None);
-    }
-
-    let target_spec = stash_target_spec(&parsed.command_args);
-    let resolved =
-        resolve_stash_target_oid_for_worktree(worktree, target_spec).ok_or_else(|| {
-            GitAiError::Generic(format!(
-                "failed to resolve stash target oid from repo state (spec={:?}, worktree={})",
-                target_spec,
-                worktree.display()
-            ))
-        })?;
-    Ok(Some(resolved))
-}
-
-fn stash_target_spec_is_top_of_stack(target_spec: Option<&str>) -> bool {
-    matches!(
-        target_spec.unwrap_or("stash@{0}"),
-        "stash@{0}" | "refs/stash" | "stash"
-    )
-}
-fn resolve_stash_target_oid_for_terminal_payload(
-    worktree: &Path,
-    argv: &[String],
-    ref_changes: &[crate::daemon::domain::RefChange],
-) -> Result<Option<String>, GitAiError> {
-    let parsed = parse_git_cli_args(trace_invocation_args(argv));
-    if parsed.command.as_deref() != Some("stash") {
-        return Ok(None);
-    }
-
-    let subcommand = parsed
-        .command_args
-        .first()
-        .map(String::as_str)
-        .unwrap_or("push");
-
-    // For push/save: resolve the newly-created stash SHA from ref_changes only.
-    // We cannot fall back to reading refs/stash from the filesystem because under
-    // heavy load the ingress may process this terminal event after a subsequent
-    // push has already overwritten refs/stash with a different OID.
-    if matches!(subcommand, "push" | "save" | "") {
-        let oid = ref_changes
-            .iter()
-            .rfind(|change| change.reference == "refs/stash")
-            .map(|change| change.new.trim().to_string())
-            .filter(|oid| !oid.is_empty() && !is_zero_oid(oid));
-        return Ok(oid);
-    }
-
-    if !stash_requires_target_resolution(&parsed.command_args) {
-        return Ok(None);
-    }
-
-    let target_spec = stash_target_spec(&parsed.command_args);
-    match subcommand {
-        "apply" => resolve_stash_target_oid_for_worktree(worktree, target_spec)
-            .ok_or_else(|| {
-                GitAiError::Generic(format!(
-                    "failed to resolve stash apply target oid from terminal repo state (spec={:?}, worktree={})",
-                    target_spec,
-                    worktree.display()
-                ))
-            })
-            .map(Some),
-        "pop" | "drop" | "branch" => {
-            if let Some(target_oid) = ref_changes
-                .iter()
-                .rfind(|change| change.reference == "refs/stash")
-                .map(|change| change.old.trim().to_string())
-                .filter(|oid| !oid.is_empty() && !is_zero_oid(oid))
-            {
-                return Ok(Some(target_oid));
-            }
-            if stash_target_spec_is_top_of_stack(target_spec) {
-                return latest_reflog_old_oid_for_worktree(worktree, "refs/stash")
-                    .ok_or_else(|| {
-                        GitAiError::Generic(format!(
-                            "failed to resolve stash {:?} target oid from terminal reflog state (spec={:?}, worktree={})",
-                            parsed.command_args.first().map(String::as_str).unwrap_or("stash"),
-                            target_spec,
-                            worktree.display()
-                        ))
-                    })
-                    .map(Some);
-            }
-            Err(GitAiError::Generic(format!(
-                "failed to resolve stash {:?} target oid from terminal state for non-top stash reference (spec={:?}, worktree={})",
-                parsed.command_args.first().map(String::as_str).unwrap_or("stash"),
-                target_spec,
-                worktree.display()
-            )))
-        }
-        _ => Ok(None),
-    }
-}
-
 fn resolve_rebase_original_head_for_worktree(worktree: &Path) -> Option<String> {
     let git_dir = git_dir_for_worktree(worktree)?;
 
@@ -1092,181 +834,6 @@ fn resolve_rebase_onto_for_worktree(worktree: &Path) -> Option<String> {
         return Some(oid.to_string());
     }
     None
-}
-
-type MergeSquashSnapshot = String;
-
-fn capture_merge_squash_source_head_for_command(
-    worktree: &Path,
-    _primary_command: Option<&str>,
-    argv: &[String],
-    exit_code: i32,
-) -> Result<Option<String>, GitAiError> {
-    if exit_code != 0 {
-        return Ok(None);
-    }
-
-    let parsed = parse_git_cli_args(trace_invocation_args(argv));
-    if parsed.command.as_deref() != Some("merge")
-        || !parsed.command_args.iter().any(|arg| arg == "--squash")
-    {
-        return Ok(None);
-    }
-
-    let source_head = resolve_squash_source_head_for_worktree(worktree).ok_or_else(|| {
-        GitAiError::Generic(format!(
-            "merge --squash missing source head from MERGE_HEAD/SQUASH_MSG worktree={}",
-            worktree.display()
-        ))
-    })?;
-    Ok(Some(source_head))
-}
-
-fn capture_inflight_merge_squash_source_head_for_commit(
-    worktree: &Path,
-    primary_command: Option<&str>,
-    argv: &[String],
-) -> Result<Option<String>, GitAiError> {
-    if primary_command != Some("commit") {
-        return Ok(None);
-    }
-
-    let parsed = parse_git_cli_args(trace_invocation_args(argv));
-    if parsed.command.as_deref() != Some("commit") && primary_command != Some("commit") {
-        return Ok(None);
-    }
-
-    let Some(source_head) = resolve_squash_source_head_for_worktree(worktree) else {
-        return Ok(None);
-    };
-    Ok(Some(source_head))
-}
-
-fn tracked_reflog_refs_for_command(
-    command: Option<&str>,
-    repo: Option<&RepoContext>,
-    worktree: &Path,
-    argv: &[String],
-) -> Vec<String> {
-    let mut refs = Vec::new();
-    if let Some(branch) = repo.and_then(|repo| repo.branch.as_deref()) {
-        refs.push(format!("refs/heads/{}", branch));
-    }
-    if command == Some("rebase")
-        && let Some(branch_ref) = resolve_explicit_rebase_branch_ref(worktree, argv)
-    {
-        refs.push(branch_ref);
-    }
-    if matches!(
-        command,
-        Some("reset" | "merge" | "pull" | "rebase" | "cherry-pick" | "checkout" | "switch")
-    ) {
-        refs.push("ORIG_HEAD".to_string());
-    }
-    if command == Some("stash") {
-        refs.push("refs/stash".to_string());
-    }
-    refs.sort();
-    refs.dedup();
-    refs
-}
-
-fn daemon_reflog_offsets_for_refs(
-    worktree: &Path,
-    refs: &[String],
-) -> Option<HashMap<String, u64>> {
-    let common_dir = common_dir_for_worktree(worktree)?;
-    let logs_dir = common_dir.join("logs");
-    let mut offsets = HashMap::new();
-    for reference in refs {
-        let path = logs_dir.join(reference);
-        let len = fs::metadata(&path)
-            .ok()
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        offsets.insert(reference.clone(), len);
-    }
-    Some(offsets)
-}
-
-fn daemon_parse_reflog_line(
-    reference: &str,
-    line: &str,
-) -> Option<crate::daemon::domain::RefChange> {
-    let head = line.split('\t').next().unwrap_or_default();
-    let mut parts = head.split_whitespace();
-    let old = parts.next()?.trim();
-    let new = parts.next()?.trim();
-    if !is_valid_oid(old) || !is_valid_oid(new) || old == new {
-        return None;
-    }
-    Some(crate::daemon::domain::RefChange {
-        reference: reference.to_string(),
-        old: old.to_string(),
-        new: new.to_string(),
-    })
-}
-
-fn daemon_reflog_delta_from_offsets(
-    worktree: &Path,
-    start_offsets: &HashMap<String, u64>,
-    end_offsets: &HashMap<String, u64>,
-) -> Result<Vec<crate::daemon::domain::RefChange>, GitAiError> {
-    let common_dir = common_dir_for_worktree(worktree).ok_or_else(|| {
-        GitAiError::Generic(format!(
-            "failed to resolve common dir for worktree {}",
-            worktree.display()
-        ))
-    })?;
-    let refs = start_offsets
-        .keys()
-        .chain(end_offsets.keys())
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
-
-    let mut out = Vec::new();
-    for reference in refs {
-        let start_offset = start_offsets.get(&reference).copied().unwrap_or(0);
-        let end_offset = end_offsets.get(&reference).copied().unwrap_or(start_offset);
-        if end_offset < start_offset {
-            return Err(GitAiError::Generic(format!(
-                "reflog cut regressed for {} ({} < {})",
-                reference, end_offset, start_offset
-            )));
-        }
-        if end_offset == start_offset {
-            continue;
-        }
-
-        let path = common_dir.join("logs").join(&reference);
-        if !path.exists() {
-            return Err(GitAiError::Generic(format!(
-                "reflog path missing for {}: {}",
-                reference,
-                path.display()
-            )));
-        }
-        let metadata = fs::metadata(&path)?;
-        if metadata.len() < end_offset {
-            return Err(GitAiError::Generic(format!(
-                "reflog shorter than cut for {} ({} < {})",
-                reference,
-                metadata.len(),
-                end_offset
-            )));
-        }
-
-        let mut file = File::open(&path)?;
-        file.seek(SeekFrom::Start(start_offset))?;
-        let reader = BufReader::new(file.take(end_offset.saturating_sub(start_offset)));
-        for line in reader.lines() {
-            let line = line?;
-            if let Some(change) = daemon_parse_reflog_line(&reference, &line) {
-                out.push(change);
-            }
-        }
-    }
-    Ok(out)
 }
 
 fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiError> {
@@ -1652,27 +1219,13 @@ fn remove_working_log_attributions_for_pathspecs(
 
 fn apply_checkout_switch_working_log_side_effect(
     cmd: &crate::daemon::domain::NormalizedCommand,
-    carryover_snapshot: Option<&HashMap<String, String>>,
 ) -> Result<(), GitAiError> {
     let Some(worktree) = cmd.worktree.as_ref() else {
         return Ok(());
     };
     let repo = find_repository_in_path(&worktree.to_string_lossy())?;
     let parsed = parsed_invocation_for_normalized_command(cmd);
-    let old_head = cmd
-        .pre_repo
-        .as_ref()
-        .and_then(|repo| repo.head.as_deref())
-        .unwrap_or_default()
-        .to_string();
-    let new_head = cmd
-        .post_repo
-        .as_ref()
-        .and_then(|repo| repo.head.as_deref())
-        .filter(|h| !h.is_empty())
-        .map(|h| h.to_string())
-        .or_else(|| read_head_state_for_worktree(worktree).and_then(|s| s.head))
-        .unwrap_or_default();
+    let (old_head, new_head) = ActorDaemonCoordinator::resolve_heads_for_command(cmd);
 
     if cmd.primary_command.as_deref() == Some("checkout") {
         let pathspecs = parsed.pathspecs();
@@ -1710,42 +1263,7 @@ fn apply_checkout_switch_working_log_side_effect(
             repo.storage.delete_working_log_for_base_commit(&old_head)?;
             return Ok(());
         }
-
-        let snapshot = carryover_snapshot.ok_or_else(|| {
-            GitAiError::Generic(format!(
-                "{} --merge requires carryover final-state snapshot for {} tracked file(s)",
-                cmd.primary_command.as_deref().unwrap_or("checkout"),
-                tracked_files.len()
-            ))
-        })?;
-
-        // Fix #957: When --merge produced conflict markers (exit_code != 0),
-        // the snapshot files contain conflict markers. Strip them before
-        // restoring working-log carryover so byte-level attributions align
-        // with the clean content.
-        let clean_snapshot: HashMap<String, String> = if cmd.exit_code != 0 {
-            snapshot
-                .iter()
-                .map(|(k, v)| {
-                    let clean = if crate::authorship::virtual_attribution::content_has_conflict_markers(v) {
-                        crate::authorship::virtual_attribution::strip_conflict_markers_keep_ours(v)
-                    } else {
-                        v.clone()
-                    };
-                    (k.clone(), clean)
-                })
-                .collect()
-        } else {
-            snapshot.clone()
-        };
-        restore_working_log_carryover(
-            &repo,
-            &old_head,
-            &new_head,
-            clean_snapshot,
-            Some(repo.git_author_identity().formatted_or_unknown()),
-        )?;
-        repo.storage.delete_working_log_for_base_commit(&old_head)?;
+        repo.storage.rename_working_log(&old_head, &new_head)?;
         return Ok(());
     }
 
@@ -1755,21 +1273,9 @@ fn apply_checkout_switch_working_log_side_effect(
 
 fn recent_checkout_switch_prerequisite_from_command(
     cmd: &crate::daemon::domain::NormalizedCommand,
-    carryover_snapshot: Option<&HashMap<String, String>>,
 ) -> Option<RecentReplayPrerequisite> {
     let parsed = parsed_invocation_for_normalized_command(cmd);
-    let old_head = cmd
-        .pre_repo
-        .as_ref()
-        .and_then(|repo| repo.head.as_deref())
-        .unwrap_or_default()
-        .to_string();
-    let new_head = cmd
-        .post_repo
-        .as_ref()
-        .and_then(|repo| repo.head.as_deref())
-        .unwrap_or_default()
-        .to_string();
+    let (old_head, new_head) = ActorDaemonCoordinator::resolve_heads_for_command(cmd);
 
     if old_head.is_empty() || new_head.is_empty() || old_head == new_head {
         return None;
@@ -1794,34 +1300,7 @@ fn recent_checkout_switch_prerequisite_from_command(
 
     let is_merge = parsed.has_command_flag("--merge") || parsed.has_command_flag("-m");
     if is_merge {
-        return carryover_snapshot.and_then(|snapshot| {
-            (!snapshot.is_empty()).then(|| {
-                // Strip conflict markers before storing so the replay path receives
-                // clean content.  Mirrors the stripping done in the direct side-effect
-                // path (apply_checkout_switch_working_log_side_effect) for the same
-                // reason: --merge with exit_code != 0 leaves conflict markers on disk.
-                let clean_state: HashMap<String, String> = if cmd.exit_code != 0 {
-                    snapshot
-                        .iter()
-                        .map(|(k, v)| {
-                            let clean = if crate::authorship::virtual_attribution::content_has_conflict_markers(v) {
-                                crate::authorship::virtual_attribution::strip_conflict_markers_keep_ours(v)
-                            } else {
-                                v.clone()
-                            };
-                            (k.clone(), clean)
-                        })
-                        .collect()
-                } else {
-                    snapshot.clone()
-                };
-                RecentReplayPrerequisite::CheckoutSwitchMerge {
-                    target_head: new_head,
-                    old_head,
-                    final_state: clean_state,
-                }
-            })
-        });
+        return None;
     }
 
     Some(RecentReplayPrerequisite::CheckoutSwitchRename {
@@ -1848,11 +1327,6 @@ fn is_non_auxiliary_ref(reference: &str) -> bool {
     !(reference.starts_with("refs/notes/")
         || reference.starts_with("refs/tags/")
         || reference.starts_with("refs/replace/"))
-}
-
-fn processed_rebase_new_heads(_repository: &Repository) -> Result<HashSet<String>, GitAiError> {
-    // The rewrite log has been removed; no previously-processed heads to report.
-    Ok(HashSet::new())
 }
 
 /// Check whether `ancestor` is an ancestor of `descendant` using
@@ -1919,41 +1393,12 @@ fn rebase_is_control_mode(cmd: &crate::daemon::domain::NormalizedCommand) -> boo
     summarize_rebase_args(&cmd.invoked_args).is_control_mode
 }
 
-fn rebase_start_target_hint_from_args(args: &[String]) -> Option<String> {
-    let summary = summarize_rebase_args(args);
-    if summary.is_control_mode {
-        return None;
-    }
-    if let Some(onto_spec) = summary.onto_spec {
-        return Some(onto_spec);
-    }
-    if summary.has_root {
-        return None;
-    }
-    summary.positionals.first().cloned()
-}
 fn strict_rebase_original_head_from_command(
     cmd: &crate::daemon::domain::NormalizedCommand,
     semantic_old_head: &str,
 ) -> Option<String> {
-    if let Some(worktree) = cmd.worktree.as_ref()
-        && let Some(old_head) = resolve_rebase_original_head_for_worktree(worktree)
-    {
-        return Some(old_head);
-    }
-
     if is_valid_oid(semantic_old_head) && !is_zero_oid(semantic_old_head) {
         return Some(semantic_old_head.to_string());
-    }
-
-    if !rebase_is_control_mode(cmd)
-        && let Some(old_head) = cmd
-            .pre_repo
-            .as_ref()
-            .and_then(|repo| repo.head.clone())
-            .filter(|head| is_valid_oid(head) && !is_zero_oid(head))
-    {
-        return Some(old_head);
     }
 
     if let Some(branch_spec) = explicit_rebase_branch_arg(&cmd.invoked_args)
@@ -2003,7 +1448,23 @@ fn strict_rebase_original_head_from_command(
                 && !is_zero_oid(&change.new)
         })
         .map(|change| change.new.clone())
+        .or_else(|| {
+            cmd.worktree
+                .as_ref()
+                .and_then(|worktree| resolve_rebase_original_head_for_worktree(worktree))
+        })
 }
+
+fn explicit_rebase_branch_ref_name(branch_spec: &str) -> Option<String> {
+    if branch_spec.starts_with("refs/") {
+        return Some(branch_spec.to_string());
+    }
+    if is_valid_oid(branch_spec) || branch_spec == "HEAD" || branch_spec.starts_with("@{") {
+        return None;
+    }
+    Some(format!("refs/heads/{}", branch_spec))
+}
+
 fn now_unix_nanos() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2356,6 +1817,12 @@ struct PendingRootSlot {
 }
 
 #[derive(Debug, Clone)]
+struct PendingSquashMerge {
+    source_head: String,
+    onto: String,
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum RecentReplayPrerequisite {
     CheckoutSwitchRename {
@@ -2374,30 +1841,13 @@ struct TraceIngressState {
     root_worktrees: HashMap<String, PathBuf>,
     root_families: HashMap<String, String>,
     root_argv: HashMap<String, Vec<String>>,
-    root_pre_repo: HashMap<String, RepoContext>,
-    root_inflight_merge_squash_contexts: HashMap<String, MergeSquashSnapshot>,
-    root_terminal_merge_squash_contexts: HashMap<String, MergeSquashSnapshot>,
     root_mutating: HashMap<String, bool>,
     root_target_repo_only: HashMap<String, bool>,
-    root_reflog_refs: HashMap<String, Vec<String>>,
-    root_head_reflog_start_offsets: HashMap<String, u64>,
-    root_family_reflog_start_offsets: HashMap<String, HashMap<String, u64>>,
     root_last_activity_ns: HashMap<String, u64>,
     /// Roots whose start event was identified as definitely read-only. All
     /// subsequent events for these roots (including exit) take the fast path.
     root_definitely_read_only: HashSet<String>,
     root_open_connections: HashMap<String, usize>,
-    root_close_fallback_enqueued: HashSet<String>,
-}
-
-struct CarryoverCaptureInput<'a> {
-    root_sid: &'a str,
-    worktree: &'a Path,
-    primary_command: Option<&'a str>,
-    argv: &'a [String],
-    exit_code: i32,
-    post_repo: Option<&'a RepoContext>,
-    ref_changes: &'a [crate::daemon::domain::RefChange],
 }
 
 #[doc(hidden)]
@@ -2412,6 +1862,7 @@ pub struct ActorDaemonCoordinator {
     >,
     pending_rebase_original_head_by_worktree: Mutex<HashMap<String, (String, Option<String>)>>,
     pending_cherry_pick_sources_by_worktree: Mutex<HashMap<String, Vec<String>>>,
+    pending_squash_merge_by_worktree: Mutex<HashMap<String, PendingSquashMerge>>,
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
     /// Files with an in-flight AI edit (PreFileEdit received, PostFileEdit not yet completed).
     /// Outer key: family. Inner key: absolute file path string. Value: registration timestamp (nanos).
@@ -2422,8 +1873,6 @@ pub struct ActorDaemonCoordinator {
         Mutex<HashMap<String, VecDeque<RecentReplayPrerequisite>>>,
     side_effect_errors_by_family: Mutex<HashMap<String, BTreeMap<u64, String>>>,
     side_effect_exec_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-    carryover_snapshots_by_id: Mutex<HashMap<String, HashMap<String, String>>>,
-    carryover_snapshot_ids_by_root: Mutex<HashMap<String, Vec<String>>>,
     bash_sessions: Mutex<crate::daemon::bash_sessions::BashSessionState>,
     test_completion_log_dir: Option<PathBuf>,
     test_completion_log_lock: Mutex<()>,
@@ -2435,25 +1884,16 @@ pub struct ActorDaemonCoordinator {
     transcript_shutdown_notify: std::sync::OnceLock<Arc<tokio::sync::Notify>>,
     streams_db: Option<Arc<crate::streams::db::StreamsDatabase>>,
     next_trace_ingest_seq: AtomicUsize,
-    next_carryover_snapshot_id: AtomicUsize,
     queued_trace_payloads: AtomicUsize,
     queued_trace_payloads_by_root: Mutex<HashMap<String, usize>>,
     processed_trace_ingest_seq: AtomicUsize,
     trace_ingest_progress_notify: Notify,
     trace_ingress_state: Mutex<TraceIngressState>,
-    wrapper_states: Mutex<HashMap<String, WrapperStateEntry>>,
-    wrapper_state_notify: Notify,
     shutting_down: AtomicBool,
     shutdown_action: AtomicU8,
     shutdown_notify: Notify,
     shutdown_condvar: std::sync::Condvar,
     shutdown_condvar_mutex: Mutex<()>,
-}
-
-struct WrapperStateEntry {
-    pre_repo: Option<RepoContext>,
-    post_repo: Option<RepoContext>,
-    received_at_ns: u128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2507,6 +1947,7 @@ impl ActorDaemonCoordinator {
             backend,
             pending_rebase_original_head_by_worktree: Mutex::new(HashMap::new()),
             pending_cherry_pick_sources_by_worktree: Mutex::new(HashMap::new()),
+            pending_squash_merge_by_worktree: Mutex::new(HashMap::new()),
             inflight_effects_by_family: Mutex::new(HashMap::new()),
             pending_ai_edits_by_family: Mutex::new(HashMap::new()),
             family_sequencers_by_family: Mutex::new(HashMap::new()),
@@ -2514,8 +1955,6 @@ impl ActorDaemonCoordinator {
             recent_replay_prerequisites_by_family: Mutex::new(HashMap::new()),
             side_effect_errors_by_family: Mutex::new(HashMap::new()),
             side_effect_exec_locks: Mutex::new(HashMap::new()),
-            carryover_snapshots_by_id: Mutex::new(HashMap::new()),
-            carryover_snapshot_ids_by_root: Mutex::new(HashMap::new()),
             bash_sessions: Mutex::new(crate::daemon::bash_sessions::BashSessionState::new()),
             test_completion_log_dir: std::env::var("GIT_AI_TEST_DB_PATH")
                 .ok()
@@ -2534,14 +1973,11 @@ impl ActorDaemonCoordinator {
             transcript_shutdown_notify: std::sync::OnceLock::new(),
             streams_db: None,
             next_trace_ingest_seq: AtomicUsize::new(0),
-            next_carryover_snapshot_id: AtomicUsize::new(0),
             queued_trace_payloads: AtomicUsize::new(0),
             queued_trace_payloads_by_root: Mutex::new(HashMap::new()),
             processed_trace_ingest_seq: AtomicUsize::new(0),
             trace_ingest_progress_notify: Notify::new(),
             trace_ingress_state: Mutex::new(TraceIngressState::default()),
-            wrapper_states: Mutex::new(HashMap::new()),
-            wrapper_state_notify: Notify::new(),
             shutting_down: AtomicBool::new(false),
             shutdown_action: AtomicU8::new(DaemonExitAction::Stop.as_u8()),
             shutdown_notify: Notify::new(),
@@ -2667,17 +2103,16 @@ impl ActorDaemonCoordinator {
         if let Ok(mut map) = self.side_effect_exec_locks.lock() {
             map.retain(|_, lock| Arc::strong_count(lock) <= 1);
         }
-        if let Ok(mut map) = self.carryover_snapshots_by_id.lock() {
-            map.retain(|_, snapshot| !snapshot.is_empty());
-        }
-        if let Ok(mut map) = self.carryover_snapshot_ids_by_root.lock() {
-            map.retain(|_, ids| !ids.is_empty());
-        }
         if let Ok(mut map) = self.pending_rebase_original_head_by_worktree.lock() {
             map.shrink_to_fit();
         }
         if let Ok(mut map) = self.pending_cherry_pick_sources_by_worktree.lock() {
             map.retain(|_, sources| !sources.is_empty());
+        }
+        if let Ok(mut map) = self.pending_squash_merge_by_worktree.lock() {
+            map.retain(|_, pending| {
+                !pending.source_head.trim().is_empty() && !pending.onto.trim().is_empty()
+            });
         }
         if let Ok(mut map) = self.queued_trace_payloads_by_root.lock() {
             map.retain(|_, count| *count > 0);
@@ -2694,13 +2129,6 @@ impl ActorDaemonCoordinator {
                 }
                 map.retain(|_, family_map| !family_map.is_empty());
             }
-        }
-        // Clean wrapper_states entries older than 60s — these represent wrapper
-        // pre/post states that were never consumed by a matching trace2 event.
-        let stale_threshold_ns = 60_000_000_000u128; // 60 seconds in nanoseconds
-        let now_ns = now_unix_nanos();
-        if let Ok(mut map) = self.wrapper_states.lock() {
-            map.retain(|_, entry| now_ns.saturating_sub(entry.received_at_ns) < stale_threshold_ns);
         }
     }
 
@@ -3033,30 +2461,6 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    fn trace_root_is_tracked(ingress: &TraceIngressState, root: &str) -> bool {
-        ingress.root_worktrees.contains_key(root)
-            || ingress.root_families.contains_key(root)
-            || ingress.root_argv.contains_key(root)
-            || ingress.root_pre_repo.contains_key(root)
-            || ingress.root_mutating.contains_key(root)
-            || ingress.root_target_repo_only.contains_key(root)
-            || ingress.root_reflog_refs.contains_key(root)
-            || ingress.root_head_reflog_start_offsets.contains_key(root)
-            || ingress.root_family_reflog_start_offsets.contains_key(root)
-    }
-
-    fn mark_trace_root_activity(&self, root_sid: &str) -> Result<(), GitAiError> {
-        let mut ingress = self
-            .trace_ingress_state
-            .lock()
-            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
-        ingress
-            .root_last_activity_ns
-            .insert(root_sid.to_string(), now_unix_nanos() as u64);
-        ingress.root_close_fallback_enqueued.remove(root_sid);
-        Ok(())
-    }
-
     fn trace_root_connection_opened(&self, root_sid: &str) -> Result<(), GitAiError> {
         let mut ingress = self
             .trace_ingress_state
@@ -3069,12 +2473,11 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    fn record_trace_connection_close(&self, roots: &[String]) -> Result<Vec<String>, GitAiError> {
+    fn record_trace_connection_close(&self, roots: &[String]) -> Result<(), GitAiError> {
         let mut ingress = self
             .trace_ingress_state
             .lock()
             .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
-        let mut stale_roots = Vec::new();
         for root_sid in roots {
             if let Some(count) = ingress.root_open_connections.get_mut(root_sid) {
                 if *count > 1 {
@@ -3083,9 +2486,8 @@ impl ActorDaemonCoordinator {
                 }
                 ingress.root_open_connections.remove(root_sid);
             }
-            stale_roots.push(root_sid.clone());
         }
-        Ok(stale_roots)
+        Ok(())
     }
 
     fn trace_payload_root_sid(payload: &Value) -> Option<String> {
@@ -3130,59 +2532,6 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    fn enqueue_stale_connection_close_fallbacks(&self, roots: &[String]) -> Result<(), GitAiError> {
-        let stale_roots = {
-            let mut ingress = self.trace_ingress_state.lock().map_err(|_| {
-                GitAiError::Generic("trace ingress state lock poisoned".to_string())
-            })?;
-            let mut stale = Vec::new();
-            for root_sid in roots {
-                if !Self::trace_root_is_tracked(&ingress, root_sid) {
-                    continue;
-                }
-                if ingress
-                    .root_open_connections
-                    .get(root_sid)
-                    .copied()
-                    .unwrap_or(0)
-                    > 0
-                {
-                    continue;
-                }
-                if ingress.root_close_fallback_enqueued.contains(root_sid) {
-                    continue;
-                }
-                ingress
-                    .root_close_fallback_enqueued
-                    .insert(root_sid.clone());
-                stale.push(root_sid.clone());
-            }
-            stale
-        };
-
-        for root_sid in stale_roots {
-            let mut payload = json!({
-                "event": "atexit",
-                "sid": root_sid,
-                "code": 0,
-                "time_ns": now_unix_nanos() as u64,
-                "git_ai_connection_close_fallback": true,
-            });
-            if let Some(object) = payload.as_object_mut() {
-                object.insert(
-                    TRACE_INGEST_SEQ_FIELD.to_string(),
-                    json!(self.next_trace_ingest_seq()),
-                );
-            }
-            tracing::debug!(
-                sid = %root_sid,
-                "trace connection close fallback finalized"
-            );
-            self.enqueue_trace_payload(payload)?;
-        }
-        Ok(())
-    }
-
     fn clear_trace_root_tracking(&self, root_sid: &str) -> Result<(), GitAiError> {
         let mut ingress = self
             .trace_ingress_state
@@ -3191,156 +2540,16 @@ impl ActorDaemonCoordinator {
         ingress.root_worktrees.remove(root_sid);
         ingress.root_families.remove(root_sid);
         ingress.root_argv.remove(root_sid);
-        ingress.root_pre_repo.remove(root_sid);
-        ingress.root_inflight_merge_squash_contexts.remove(root_sid);
-        ingress.root_terminal_merge_squash_contexts.remove(root_sid);
         ingress.root_mutating.remove(root_sid);
         ingress.root_target_repo_only.remove(root_sid);
-        ingress.root_reflog_refs.remove(root_sid);
-        ingress.root_head_reflog_start_offsets.remove(root_sid);
-        ingress.root_family_reflog_start_offsets.remove(root_sid);
         ingress.root_last_activity_ns.remove(root_sid);
         ingress.root_definitely_read_only.remove(root_sid);
         ingress.root_open_connections.remove(root_sid);
-        ingress.root_close_fallback_enqueued.remove(root_sid);
         let mut queued = self.queued_trace_payloads_by_root.lock().map_err(|_| {
             GitAiError::Generic("queued trace payloads by root lock poisoned".to_string())
         })?;
         queued.remove(root_sid);
         Ok(())
-    }
-
-    fn discard_carryover_snapshots_for_root(&self, root_sid: &str) -> Result<(), GitAiError> {
-        let snapshot_ids = self
-            .carryover_snapshot_ids_by_root
-            .lock()
-            .map_err(|_| {
-                GitAiError::Generic("carryover snapshot root map lock poisoned".to_string())
-            })?
-            .remove(root_sid)
-            .unwrap_or_default();
-        if !snapshot_ids.is_empty() {
-            let mut snapshots = self.carryover_snapshots_by_id.lock().map_err(|_| {
-                GitAiError::Generic("carryover snapshot store lock poisoned".to_string())
-            })?;
-            for snapshot_id in snapshot_ids {
-                snapshots.remove(&snapshot_id);
-            }
-        }
-        Ok(())
-    }
-
-    fn store_carryover_snapshot(
-        &self,
-        root_sid: &str,
-        snapshot: HashMap<String, String>,
-    ) -> Result<Option<String>, GitAiError> {
-        if snapshot.is_empty() {
-            return Ok(None);
-        }
-
-        let snapshot_id = format!(
-            "{}-{}",
-            now_unix_nanos(),
-            // Relaxed: just a monotone counter for unique IDs; no cross-atomic ordering needed.
-            self.next_carryover_snapshot_id
-                .fetch_add(1, Ordering::Relaxed)
-        );
-        self.carryover_snapshots_by_id
-            .lock()
-            .map_err(|_| GitAiError::Generic("carryover snapshot store lock poisoned".to_string()))?
-            .insert(snapshot_id.clone(), snapshot);
-        self.carryover_snapshot_ids_by_root
-            .lock()
-            .map_err(|_| {
-                GitAiError::Generic("carryover snapshot root map lock poisoned".to_string())
-            })?
-            .entry(root_sid.to_string())
-            .or_insert_with(Vec::new)
-            .push(snapshot_id.clone());
-        Ok(Some(snapshot_id))
-    }
-
-    fn take_carryover_snapshot(
-        &self,
-        root_sid: &str,
-        snapshot_id: &str,
-    ) -> Result<Option<HashMap<String, String>>, GitAiError> {
-        if let Ok(mut root_map) = self.carryover_snapshot_ids_by_root.lock()
-            && let Some(ids) = root_map.get_mut(root_sid)
-        {
-            ids.retain(|existing| existing != snapshot_id);
-            if ids.is_empty() {
-                root_map.remove(root_sid);
-            }
-        }
-        self.carryover_snapshots_by_id
-            .lock()
-            .map_err(|_| GitAiError::Generic("carryover snapshot store lock poisoned".to_string()))
-            .map(|mut store| store.remove(snapshot_id))
-    }
-
-    fn capture_carryover_snapshot_for_command(
-        &self,
-        input: CarryoverCaptureInput<'_>,
-    ) -> Result<Option<String>, GitAiError> {
-        let parsed = parse_git_cli_args(trace_invocation_args(input.argv));
-        let command = parsed.command.as_deref().or(input.primary_command);
-        let Some(command) = command else {
-            return Ok(None);
-        };
-        if !matches!(command, "rebase" | "pull" | "checkout" | "switch") {
-            return Ok(None);
-        }
-
-        // `checkout/switch --merge` exits with code 1 when it produces conflict
-        // markers, but HEAD still moves to the new branch.  The daemon requires a
-        // carryover snapshot for such commands, so we must not bail out early on
-        // non-zero exit here.  All other commands with non-zero exit produce no
-        // meaningful state transition and need no snapshot.
-        let is_merge_checkout = (command == "checkout" || command == "switch")
-            && (parsed.has_command_flag("--merge") || parsed.has_command_flag("-m"));
-        if input.exit_code != 0 && !is_merge_checkout {
-            return Ok(None);
-        }
-
-        let repo = discover_repository_in_path_no_git_exec(input.worktree)?;
-        let stable_heads = stable_carryover_heads_for_command(&repo, &input, &parsed)?;
-
-        let mut file_paths = HashSet::new();
-        match command {
-            "rebase" | "pull" => {
-                if let Some((old_head, new_head)) = stable_heads.clone() {
-                    if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
-                        file_paths.extend(tracked_working_log_files(&repo, &old_head)?);
-                    }
-                } else if command == "rebase" {
-                    return Err(GitAiError::Generic(format!(
-                        "rebase missing stable carryover heads sid={}",
-                        input.root_sid
-                    )));
-                }
-            }
-            "checkout" | "switch" => {
-                let is_merge = parsed.has_command_flag("--merge") || parsed.has_command_flag("-m");
-                if is_merge
-                    && let Some((old_head, new_head)) = stable_heads.clone()
-                    && !old_head.is_empty()
-                    && !new_head.is_empty()
-                    && old_head != new_head
-                {
-                    file_paths.extend(tracked_working_log_files(&repo, &old_head)?);
-                }
-            }
-            _ => {}
-        }
-
-        if file_paths.is_empty() {
-            return Ok(None);
-        }
-
-        let snapshot = read_worktree_snapshot_for_files(input.worktree, &file_paths);
-        self.store_carryover_snapshot(input.root_sid, snapshot)
     }
 
     fn next_trace_ingest_seq(&self) -> u64 {
@@ -3606,7 +2815,7 @@ impl ActorDaemonCoordinator {
     pub(crate) fn prepare_trace_payload_for_ingest(&self, payload: &mut Value) -> bool {
         // Check read-only status BEFORE allocating a sequence number so that
         // read-only invocations never perturb the ingest sequence counter.
-        let is_read_only = self.augment_trace_payload_with_reflog_metadata(payload);
+        let is_read_only = self.track_trace_payload_for_ingest(payload);
         if is_read_only {
             return false;
         }
@@ -3623,21 +2832,10 @@ impl ActorDaemonCoordinator {
         true
     }
 
-    /// Augments `payload` with pre/post repository state and reflog metadata
-    /// needed by the ingest worker.
-    ///
-    /// Returns `true` when the payload belongs to a definitely-read-only
-    /// invocation (e.g. `git status`, `git stash list`, `git worktree list`).
-    /// In that case the caller must **not** enqueue the payload — all required
-    /// bookkeeping has already been performed inline here, and routing the
-    /// event through the serial ingest queue would create unnecessary backlog
-    /// when IDEs fire dozens of read-only commands per second (the Zed IDE
-    /// was observed generating >40 such invocations/sec, flooding the daemon
-    /// with 120–415 trace events/sec and causing >1 min backlog).
-    ///
-    /// Returns `false` for mutating or unknown commands: the caller should
-    /// stamp a sequence number and enqueue the payload normally.
-    fn augment_trace_payload_with_reflog_metadata(&self, payload: &mut Value) -> bool {
+    /// Tracks trace2 root metadata needed for ordering and read-only fast paths.
+    /// This deliberately does not read mutable repository state or inject
+    /// daemon-derived repository/ref snapshots into the trace payload.
+    fn track_trace_payload_for_ingest(&self, payload: &Value) -> bool {
         let event = payload
             .get("event")
             .and_then(Value::as_str)
@@ -3653,85 +2851,19 @@ impl ActorDaemonCoordinator {
         }
 
         let root = trace_root_sid(&sid).to_string();
-
-        // Fast path: for invocations that are definitively read-only (status,
-        // diff, stash list, worktree list, …) skip all expensive filesystem
-        // I/O (worktree resolution, HEAD state reads, reflog captures) and do
-        // only lightweight bookkeeping.  The caller will NOT enqueue these
-        // payloads, keeping the serial ingest queue exclusively for mutating
-        // commands.
         let argv = trace_payload_argv(payload);
         let early_primary =
             trace_payload_primary_command(payload).or_else(|| trace_argv_primary_command(&argv));
-        // Extend the read-only check to cover subcommand-gated cases such as
-        // `stash list` and `worktree list` that would otherwise fall through
-        // to the expensive full path.
         let event_is_read_only =
             trace_invocation_is_definitely_read_only(early_primary.as_deref(), &argv);
-        // For events with no command info (exit/atexit), defer to the cached
-        // flag inside the lock to avoid a second lock acquisition.
-        let may_be_read_only = event_is_read_only || early_primary.is_none();
-        if may_be_read_only {
-            let mut ingress = match self.trace_ingress_state.lock() {
-                Ok(guard) => guard,
-                // If the lock is poisoned we cannot determine read-only status;
-                // fall through and let the ingest worker handle error recovery.
-                Err(_) => return false,
-            };
-            // If the event itself wasn't identified as read-only, check the root flag.
-            if !event_is_read_only && !ingress.root_definitely_read_only.contains(&root) {
-                // Not read-only — drop the lock and fall through to the full path.
-                drop(ingress);
-            } else {
-                // Activity tracking (folded here to avoid a separate lock acquisition)
-                ingress
-                    .root_last_activity_ns
-                    .insert(root.clone(), now_unix_nanos() as u64);
-                ingress.root_close_fallback_enqueued.remove(&root);
-                // Minimal state tracking for connection lifecycle
-                if let Some(worktree) = trace_payload_worktree_hint(payload) {
-                    ingress.root_worktrees.insert(root.clone(), worktree);
-                }
-                if event == "start" && sid == root && !argv.is_empty() {
-                    ingress.root_argv.insert(root.clone(), argv);
-                    ingress.root_definitely_read_only.insert(root.clone());
-                }
-                ingress.root_mutating.entry(root.clone()).or_insert(false);
-                // Cleanup on terminal event
-                if is_terminal_root_trace_event(&event, &sid, &root) {
-                    ingress.root_families.remove(&root);
-                    ingress.root_mutating.remove(&root);
-                    ingress.root_target_repo_only.remove(&root);
-                    ingress.root_argv.remove(&root);
-                    ingress.root_pre_repo.remove(&root);
-                    ingress.root_worktrees.remove(&root);
-                    ingress.root_inflight_merge_squash_contexts.remove(&root);
-                    ingress.root_terminal_merge_squash_contexts.remove(&root);
-                    ingress.root_reflog_refs.remove(&root);
-                    ingress.root_head_reflog_start_offsets.remove(&root);
-                    ingress.root_family_reflog_start_offsets.remove(&root);
-                    ingress.root_last_activity_ns.remove(&root);
-                    ingress.root_definitely_read_only.remove(&root);
-                }
-                // Payload was fully handled inline; tell the caller to skip enqueue.
-                return true;
-            }
-        }
 
-        let _ = self.mark_trace_root_activity(&root);
         let mut ingress = match self.trace_ingress_state.lock() {
             Ok(guard) => guard,
-            Err(_) => {
-                tracing::error!(
-                    component = "daemon",
-                    phase = "augment_trace_payload_with_reflog_metadata",
-                    %sid,
-                    %event,
-                    "trace ingress state lock poisoned"
-                );
-                return false;
-            }
+            Err(_) => return false,
         };
+        ingress
+            .root_last_activity_ns
+            .insert(root.clone(), now_unix_nanos() as u64);
 
         if let Some(worktree) = trace_payload_worktree_hint(payload) {
             if let Some(common_dir) = common_dir_for_worktree(&worktree) {
@@ -3742,418 +2874,47 @@ impl ActorDaemonCoordinator {
             }
             ingress.root_worktrees.insert(root.clone(), worktree);
         }
-        let payload_argv = trace_payload_argv(payload);
-        if event == "start" && sid == root && !payload_argv.is_empty() {
-            ingress.root_argv.insert(root.clone(), payload_argv.clone());
+
+        if event == "start" && sid == root && !argv.is_empty() {
+            ingress.root_argv.insert(root.clone(), argv.clone());
+            if event_is_read_only {
+                ingress.root_definitely_read_only.insert(root.clone());
+            }
         }
-        let effective_argv = if payload_argv.is_empty() {
+
+        let effective_argv = if argv.is_empty() {
             ingress.root_argv.get(&root).cloned().unwrap_or_default()
         } else {
-            payload_argv
+            argv
         };
-        let effective_primary = trace_payload_primary_command(payload)
-            .or_else(|| trace_argv_primary_command(&effective_argv));
-        if let Some(primary) = effective_primary.clone() {
-            let should_capture = trace_command_may_mutate_refs(Some(primary.as_str()));
-            match ingress.root_mutating.get(&root).copied() {
-                Some(false) if should_capture => {
-                    ingress.root_mutating.insert(root.clone(), true);
-                }
-                None => {
-                    ingress.root_mutating.insert(root.clone(), should_capture);
-                }
-                _ => {}
-            }
-            let target_repo_only =
-                trace_command_uses_target_repo_context_only(Some(primary.as_str()));
-            match ingress.root_target_repo_only.get(&root).copied() {
-                Some(false) if target_repo_only => {
-                    ingress.root_target_repo_only.insert(root.clone(), true);
-                    ingress.root_reflog_refs.remove(&root);
-                    ingress.root_head_reflog_start_offsets.remove(&root);
-                    ingress.root_family_reflog_start_offsets.remove(&root);
-                }
-                None => {
-                    ingress
-                        .root_target_repo_only
-                        .insert(root.clone(), target_repo_only);
-                }
-                _ => {}
-            }
-        }
-
-        let Some(worktree) = ingress.root_worktrees.get(&root).cloned() else {
-            if is_terminal_root_trace_event(&event, &sid, &root) {
-                ingress.root_families.remove(&root);
-                ingress.root_mutating.remove(&root);
-                ingress.root_target_repo_only.remove(&root);
-                ingress.root_argv.remove(&root);
-                ingress.root_pre_repo.remove(&root);
-                ingress.root_inflight_merge_squash_contexts.remove(&root);
-                ingress.root_terminal_merge_squash_contexts.remove(&root);
-                ingress.root_reflog_refs.remove(&root);
-                ingress.root_head_reflog_start_offsets.remove(&root);
-                ingress.root_family_reflog_start_offsets.remove(&root);
-            }
-            return false;
-        };
-
-        let should_capture_mutation = *ingress.root_mutating.get(&root).unwrap_or(&false);
-        let target_repo_only = *ingress.root_target_repo_only.get(&root).unwrap_or(&false);
-        if !target_repo_only
-            && !ingress.root_pre_repo.contains_key(&root)
-            && let Some(state) = read_head_state_for_worktree(&worktree)
-        {
+        let effective_primary =
+            early_primary.or_else(|| trace_argv_primary_command(&effective_argv));
+        if let Some(primary) = effective_primary.as_deref() {
+            let mutating = trace_command_may_mutate_refs(Some(primary));
             ingress
-                .root_pre_repo
-                .insert(root.clone(), repo_context_from_head_state(state));
-        }
-        let pre_repo = ingress.root_pre_repo.get(&root).cloned();
-        if should_capture_mutation && !target_repo_only {
-            let contextual_refs = if let Some(repo) = pre_repo.as_ref() {
-                tracked_reflog_refs_for_command(
-                    effective_primary.as_deref(),
-                    Some(repo),
-                    &worktree,
-                    &effective_argv,
-                )
-            } else {
-                tracked_reflog_refs_for_command(
-                    effective_primary.as_deref(),
-                    None,
-                    &worktree,
-                    &effective_argv,
-                )
-            };
-            let refs = ingress
-                .root_reflog_refs
+                .root_mutating
                 .entry(root.clone())
-                .or_insert_with(Vec::new);
-            for reference in contextual_refs {
-                if !refs.iter().any(|existing| existing == &reference) {
-                    refs.push(reference);
-                }
-            }
-            refs.sort();
-            refs.dedup();
-        }
-        let cached_inflight_merge_squash = ingress
-            .root_inflight_merge_squash_contexts
-            .get(&root)
-            .cloned();
-        let cached_terminal_merge_squash = ingress
-            .root_terminal_merge_squash_contexts
-            .get(&root)
-            .cloned();
-        drop(ingress);
-
-        let mut inflight_merge_squash_to_cache = None;
-        if let Some(object) = payload.as_object_mut() {
-            if let Some(repo) = pre_repo.as_ref() {
-                object.insert("git_ai_pre_repo".to_string(), json!(repo));
-            }
-            if object.get("git_ai_merge_squash_source_head").is_none() {
-                let inflight_merge_squash = if let Some(context) = cached_inflight_merge_squash {
-                    Ok(Some(context))
-                } else {
-                    capture_inflight_merge_squash_source_head_for_commit(
-                        &worktree,
-                        effective_primary.as_deref(),
-                        &effective_argv,
-                    )
-                };
-                match inflight_merge_squash {
-                    Ok(Some(source_head)) => {
-                        inflight_merge_squash_to_cache = Some(source_head.clone());
-                        object.insert(
-                            "git_ai_merge_squash_source_head".to_string(),
-                            json!(source_head),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::error!(
-                            component = "daemon",
-                            phase = "augment_trace_payload_with_reflog_metadata",
-                            root_sid = %root,
-                            %sid,
-                            ?effective_argv,
-                            %error,
-                            "commit squash context capture failed"
-                        );
-                    }
-                }
-            }
-            if object.get("git_ai_stash_target_oid").is_none()
-                && object.get("git_ai_stash_target_oid_error").is_none()
-            {
-                match resolve_stash_target_oid_for_command(&worktree, &effective_argv) {
-                    Ok(Some(stash_target_oid)) => {
-                        object.insert(
-                            "git_ai_stash_target_oid".to_string(),
-                            json!(stash_target_oid),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::error!(
-                            component = "daemon",
-                            phase = "augment_trace_payload_with_reflog_metadata",
-                            root_sid = %root,
-                            %sid,
-                            ?effective_argv,
-                            %error,
-                            "stash target resolution failed"
-                        );
-                        object.insert(
-                            "git_ai_stash_target_oid_error".to_string(),
-                            json!(error.to_string()),
-                        );
-                    }
-                }
-            }
-        }
-
-        let terminal_exit_code = if is_terminal_root_trace_event(&event, &sid, &root) {
-            Some(
-                payload
-                    .get("code")
-                    .or_else(|| payload.get("exit_code"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0) as i32,
-            )
-        } else {
-            None
-        };
-        let post_repo = if terminal_exit_code.is_some() {
-            read_head_state_for_worktree(&worktree).map(repo_context_from_head_state)
-        } else {
-            None
-        };
-        let mut terminal_merge_squash_to_cache = None;
-        if is_terminal_root_trace_event(&event, &sid, &root)
-            && let Some(object) = payload.as_object_mut()
-        {
-            if let Some(state) = post_repo.as_ref() {
-                object.insert("git_ai_post_repo".to_string(), json!(state));
-            }
-
-            let terminal_merge_squash = if let Some(context) = cached_terminal_merge_squash {
-                Ok(Some(context))
-            } else {
-                capture_merge_squash_source_head_for_command(
-                    &worktree,
-                    effective_primary.as_deref(),
-                    &effective_argv,
-                    terminal_exit_code.unwrap_or(0),
-                )
-            };
-
-            match terminal_merge_squash {
-                Ok(Some(source_head)) => {
-                    terminal_merge_squash_to_cache = Some(source_head.clone());
-                    object.insert(
-                        "git_ai_merge_squash_source_head".to_string(),
-                        json!(source_head),
-                    );
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::error!(
-                        component = "daemon",
-                        phase = "augment_trace_payload_with_reflog_metadata",
-                        root_sid = %root,
-                        %sid,
-                        ?effective_argv,
-                        %error,
-                        "merge --squash context capture failed"
-                    );
-                }
-            }
-        }
-
-        let mut ingress = match self.trace_ingress_state.lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                tracing::error!(
-                    component = "daemon",
-                    phase = "augment_trace_payload_with_reflog_metadata",
-                    %sid,
-                    %event,
-                    "trace ingress state lock poisoned"
-                );
-                return false;
-            }
-        };
-        if let Some(context) = inflight_merge_squash_to_cache {
+                .or_insert(mutating);
+            let target_repo_only = trace_command_uses_target_repo_context_only(Some(primary));
             ingress
-                .root_inflight_merge_squash_contexts
+                .root_target_repo_only
                 .entry(root.clone())
-                .or_insert(context);
-        }
-        if let Some(context) = terminal_merge_squash_to_cache {
-            ingress
-                .root_terminal_merge_squash_contexts
-                .entry(root.clone())
-                .or_insert(context);
-        }
-        if should_capture_mutation && !target_repo_only {
-            if !ingress.root_head_reflog_start_offsets.contains_key(&root)
-                && let Some(offset) = daemon_worktree_head_reflog_offset(&worktree)
-            {
-                ingress
-                    .root_head_reflog_start_offsets
-                    .insert(root.clone(), offset);
-            }
-            if !ingress.root_family_reflog_start_offsets.contains_key(&root)
-                && let Some(refs) = ingress.root_reflog_refs.get(&root)
-                && let Some(offsets) = daemon_reflog_offsets_for_refs(&worktree, refs)
-            {
-                ingress
-                    .root_family_reflog_start_offsets
-                    .insert(root.clone(), offsets);
-            }
+                .or_insert(target_repo_only);
         }
 
-        if is_terminal_root_trace_event(&event, &sid, &root)
-            && let Some(object) = payload.as_object_mut()
-        {
-            let mut terminal_ref_changes: Option<Vec<crate::daemon::domain::RefChange>> = None;
-            if let Some(state) = post_repo.as_ref() {
-                object.insert("git_ai_post_repo".to_string(), json!(state));
-            }
-            if should_capture_mutation && !target_repo_only {
-                if let Some(start_offset) =
-                    ingress.root_head_reflog_start_offsets.get(&root).copied()
-                {
-                    object.insert(
-                        "git_ai_worktree_head_reflog_start".to_string(),
-                        json!(start_offset),
-                    );
-                }
-                if let Some(end_offset) = daemon_worktree_head_reflog_offset(&worktree) {
-                    object.insert(
-                        "git_ai_worktree_head_reflog_end".to_string(),
-                        json!(end_offset),
-                    );
-                }
-                if let Some(start_offsets) = ingress.root_family_reflog_start_offsets.get(&root) {
-                    object.insert(
-                        "git_ai_family_reflog_start".to_string(),
-                        json!(start_offsets),
-                    );
-                    if let Some(refs) = ingress.root_reflog_refs.get(&root)
-                        && let Some(mut end_offsets) =
-                            daemon_reflog_offsets_for_refs(&worktree, refs)
-                    {
-                        for (reference, start_offset) in start_offsets {
-                            let end_offset = end_offsets
-                                .entry(reference.clone())
-                                .or_insert(*start_offset);
-                            if *end_offset < *start_offset {
-                                *end_offset = *start_offset;
-                            }
-                        }
-                        match daemon_reflog_delta_from_offsets(
-                            &worktree,
-                            start_offsets,
-                            &end_offsets,
-                        ) {
-                            Ok(ref_changes) => {
-                                object.insert(
-                                    "git_ai_family_reflog_changes".to_string(),
-                                    json!(&ref_changes),
-                                );
-                                terminal_ref_changes = Some(ref_changes);
-                            }
-                            Err(error) => {
-                                tracing::debug!(
-                                    %error,
-                                    %sid,
-                                    "trace reflog delta capture error"
-                                );
-                            }
-                        }
-                        object.insert("git_ai_family_reflog_end".to_string(), json!(end_offsets));
-                    }
-                }
-            }
-            if object.get("git_ai_stash_target_oid").is_none() {
-                match resolve_stash_target_oid_for_terminal_payload(
-                    &worktree,
-                    &effective_argv,
-                    terminal_ref_changes.as_deref().unwrap_or(&[]),
-                ) {
-                    Ok(Some(stash_target_oid)) => {
-                        object.remove("git_ai_stash_target_oid_error");
-                        object.insert(
-                            "git_ai_stash_target_oid".to_string(),
-                            json!(stash_target_oid),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::error!(
-                            component = "daemon",
-                            phase = "augment_trace_payload_with_reflog_metadata",
-                            root_sid = %root,
-                            %sid,
-                            ?effective_argv,
-                            %error,
-                            "terminal stash target resolution failed"
-                        );
-                        object.insert(
-                            "git_ai_stash_target_oid_error".to_string(),
-                            json!(error.to_string()),
-                        );
-                    }
-                }
-            }
-            if object.get("git_ai_carryover_snapshot_id").is_none() {
-                match self.capture_carryover_snapshot_for_command(CarryoverCaptureInput {
-                    root_sid: &root,
-                    worktree: &worktree,
-                    primary_command: effective_primary.as_deref(),
-                    argv: &effective_argv,
-                    exit_code: terminal_exit_code.unwrap_or(0),
-                    post_repo: post_repo.as_ref(),
-                    ref_changes: terminal_ref_changes.as_deref().unwrap_or(&[]),
-                }) {
-                    Ok(Some(snapshot_id)) => {
-                        object.insert(
-                            "git_ai_carryover_snapshot_id".to_string(),
-                            json!(snapshot_id),
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::error!(
-                            component = "daemon",
-                            phase = "augment_trace_payload_with_reflog_metadata",
-                            root_sid = %root,
-                            %sid,
-                            ?effective_argv,
-                            %error,
-                            "carryover snapshot capture failed"
-                        );
-                    }
-                }
-            }
+        let read_only_root =
+            event_is_read_only || ingress.root_definitely_read_only.contains(&root);
+        if is_terminal_root_trace_event(&event, &sid, &root) {
             ingress.root_worktrees.remove(&root);
             ingress.root_families.remove(&root);
             ingress.root_argv.remove(&root);
-            ingress.root_pre_repo.remove(&root);
-            ingress.root_inflight_merge_squash_contexts.remove(&root);
-            ingress.root_terminal_merge_squash_contexts.remove(&root);
             ingress.root_mutating.remove(&root);
             ingress.root_target_repo_only.remove(&root);
-            ingress.root_reflog_refs.remove(&root);
-            ingress.root_head_reflog_start_offsets.remove(&root);
-            ingress.root_family_reflog_start_offsets.remove(&root);
+            ingress.root_last_activity_ns.remove(&root);
+            ingress.root_definitely_read_only.remove(&root);
         }
-        // Payload was fully augmented for a mutating command; tell the caller
-        // to stamp a sequence number and enqueue it.
-        false
+
+        read_only_root
     }
 
     fn side_effect_exec_lock(&self, family: &str) -> Result<Arc<AsyncMutex<()>>, GitAiError> {
@@ -4655,19 +3416,35 @@ impl ActorDaemonCoordinator {
             .unwrap_or_default())
     }
 
+    fn set_pending_squash_merge_for_worktree(
+        &self,
+        worktree: &Path,
+        source_head: String,
+        onto: String,
+    ) -> Result<(), GitAiError> {
+        let mut map = self.pending_squash_merge_by_worktree.lock().map_err(|_| {
+            GitAiError::Generic("pending squash merge map lock poisoned".to_string())
+        })?;
+        map.insert(
+            Self::rewrite_worktree_key(worktree),
+            PendingSquashMerge { source_head, onto },
+        );
+        Ok(())
+    }
+
+    fn take_pending_squash_merge_for_worktree(
+        &self,
+        worktree: &Path,
+    ) -> Result<Option<PendingSquashMerge>, GitAiError> {
+        let mut map = self.pending_squash_merge_by_worktree.lock().map_err(|_| {
+            GitAiError::Generic("pending squash merge map lock poisoned".to_string())
+        })?;
+        Ok(map.remove(&Self::rewrite_worktree_key(worktree)))
+    }
+
     fn resolve_heads_for_command(
         cmd: &crate::daemon::domain::NormalizedCommand,
     ) -> (String, String) {
-        let reflog_old_head = cmd
-            .post_repo
-            .as_ref()
-            .and_then(|repo| repo.head.as_deref())
-            .filter(|head| is_valid_oid(head) && !is_zero_oid(head))
-            .and_then(|new_head| {
-                cmd.worktree.as_deref().and_then(|worktree| {
-                    stable_old_head_from_worktree_head_reflog(worktree, new_head)
-                })
-            });
         let old = cmd
             .ref_changes
             .iter()
@@ -4691,8 +3468,6 @@ impl ActorDaemonCoordinator {
                     .find(|change| is_non_auxiliary_ref(&change.reference))
                     .map(|change| change.old.clone())
             })
-            .or(reflog_old_head)
-            .or_else(|| cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()))
             .unwrap_or_default();
         let new = cmd
             .ref_changes
@@ -4711,7 +3486,6 @@ impl ActorDaemonCoordinator {
                     .rfind(|change| is_non_auxiliary_ref(&change.reference))
                     .map(|change| change.new.clone())
             })
-            .or_else(|| cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()))
             .unwrap_or_default();
         (old, new)
     }
@@ -4759,37 +3533,6 @@ impl ActorDaemonCoordinator {
 
         tracing::debug!("Extracted stash pathspecs: {:?}", pathspecs);
         pathspecs
-    }
-
-    fn stable_rebase_heads_from_worktree(
-        repository: &Repository,
-        worktree: &Path,
-        argv: &[String],
-        start_target_hint: Option<&str>,
-    ) -> Result<Option<(String, String, String)>, GitAiError> {
-        let processed_new_heads = processed_rebase_new_heads(repository)?;
-        let mut segment =
-            resolve_rebase_segment_for_worktree(worktree, start_target_hint, &processed_new_heads)?;
-        let Some(mut segment) = segment.take() else {
-            return Ok(None);
-        };
-
-        if let Some(branch_ref) = resolve_explicit_rebase_branch_ref(worktree, argv)
-            && let Some(original_head) = resolve_reflog_old_oid_for_ref_new_oid_in_worktree(
-                worktree,
-                &branch_ref,
-                &segment.new_head,
-            )
-            && original_head != segment.new_head
-        {
-            segment.original_head = original_head;
-        }
-
-        Ok(Some((
-            segment.original_head,
-            segment.new_head,
-            segment.onto_head,
-        )))
     }
 
     /// Detects non-fast-forward ref moves and fires handle_rewrite_event.
@@ -4909,11 +3652,12 @@ impl ActorDaemonCoordinator {
                 crate::authorship::rewrite::handle_rewrite_event(
                     &repo,
                     crate::authorship::rewrite::RewriteEvent::NonFastForward {
-                        old_tip: original_head,
+                        old_tip: original_head.clone(),
                         new_tip: new_tip.clone(),
                         onto: rebase_onto.clone(),
                     },
                 )?;
+                let _ = repo.storage.rename_working_log(&original_head, &new_tip);
                 process_conflict_resolution_working_logs(&repo, &new_tip, rebase_onto.as_deref());
             }
             return Ok(());
@@ -4937,6 +3681,7 @@ impl ActorDaemonCoordinator {
                     onto: onto_hint.clone(),
                 },
             )?;
+            let _ = repo.storage.rename_working_log(old_tip, new_tip);
         }
 
         Ok(())
@@ -4980,9 +3725,11 @@ impl ActorDaemonCoordinator {
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
             let post_head = cmd
-                .post_repo
-                .as_ref()
-                .and_then(|r| r.head.clone())
+                .ref_changes
+                .iter()
+                .rev()
+                .find(|change| change.reference == "HEAD")
+                .map(|change| change.new.clone())
                 .unwrap_or_default();
             tracing::info!(
                 op = primary,
@@ -5022,86 +3769,10 @@ impl ActorDaemonCoordinator {
                 ref_changes_len = cmd.ref_changes.len(),
                 ref_changes = ?cmd.ref_changes,
                 events = ?events,
-                pre_head = ?cmd.pre_repo.as_ref().and_then(|repo| repo.head.clone()),
-                post_head = ?cmd.post_repo.as_ref().and_then(|repo| repo.head.clone()),
                 exit_code = cmd.exit_code,
                 "side-effect trace"
             );
-            tracing::debug!(
-                inflight_rebase_original_head = ?cmd.inflight_rebase_original_head,
-                "side-effect inflight rebase state"
-            );
         }
-        let carryover_snapshot = if let Some(snapshot_id) = cmd.carryover_snapshot_id.as_deref() {
-            self.take_carryover_snapshot(&cmd.root_sid, snapshot_id)?
-        } else {
-            None
-        };
-        let deferred_rewrite_carryover = if let (Some(snapshot), Some(worktree)) =
-            (carryover_snapshot.as_ref(), cmd.worktree.as_ref())
-        {
-            let needs_restore_after_rewrite = cmd.primary_command.as_deref() == Some("rebase")
-                || (saw_pull_event && pull_uses_rebase);
-            if needs_restore_after_rewrite {
-                let (old_head, new_head) = Self::resolve_heads_for_command(cmd);
-                if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
-                    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
-                    let tracked_files = tracked_working_log_files(&repo, &old_head)?;
-                    if tracked_files.is_empty() {
-                        None
-                    } else {
-                        let carried_va = crate::authorship::virtual_attribution::VirtualAttributions::from_persisted_working_log(
-                            repo.clone(),
-                            old_head.clone(),
-                            Some(repo.git_author_identity().formatted_or_unknown()),
-                        )?;
-                        Some((new_head, carried_va, snapshot.clone()))
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        if deferred_rewrite_carryover.is_none()
-            && carryover_snapshot.is_none()
-            && let Some(worktree) = cmd.worktree.as_ref()
-            && (cmd.primary_command.as_deref() == Some("rebase")
-                || (saw_pull_event && pull_uses_rebase))
-        {
-            let (old_head, new_head) = Self::resolve_heads_for_command(cmd);
-            if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
-                let repo = find_repository_in_path(&worktree.to_string_lossy())?;
-                let tracked_files = tracked_working_log_files(&repo, &old_head)?;
-                if !tracked_files.is_empty() {
-                    // No carryover snapshot was captured for the direct pre-command HEAD
-                    // (old_head = conflict-time HEAD during the rebase pause).  This can happen
-                    // legitimately when the working-log entries at old_head are conflict-resolution
-                    // checkpoints written by `git-ai checkpoint` during `rebase --continue`, rather
-                    // than pre-rebase uncommitted attribution changes.
-                    //
-                    // The carryover snapshot capture uses stable_rebase_heads_from_worktree which
-                    // returns the original pre-rebase HEAD (not the conflict-time HEAD), and finds
-                    // no files there — so no snapshot is stored.  The conflict-resolution attribution
-                    // is handled independently by build_note_from_conflict_wl via the rewrite-log
-                    // path, which does not require the carryover snapshot.
-                    //
-                    // If there were genuine pre-rebase uncommitted attribution files, the snapshot
-                    // capture would have found them at the original pre-rebase HEAD and stored the
-                    // snapshot — in that case carryover_snapshot would be Some and the guard would
-                    // not fire.  So reaching here means there are no pre-rebase uncommitted files
-                    // to carry over, and the warning is benign.
-                    tracing::warn!(
-                        command = cmd.primary_command.as_deref().unwrap_or("pull"),
-                        "missing captured carryover snapshot for async restore (likely AI conflict-resolution checkpoint; attribution handled by conflict working-log rewrite path)"
-                    );
-                }
-            }
-        }
-
         // Non-FF rewrite detection: fires for commands that rewrite history via ref moves.
         // Skip for: checkout/switch/branch (no rewriting), cherry-pick (handled separately),
         // and plain commit/amend (CommitCreated/CommitAmended events handle those).
@@ -5145,8 +3816,22 @@ impl ActorDaemonCoordinator {
         }
 
         if cmd.exit_code != 0 {
+            let rebase_start = cmd
+                .ref_changes
+                .iter()
+                .find(|change| {
+                    change.reference == "HEAD"
+                        && is_valid_oid(&change.old)
+                        && !is_zero_oid(&change.old)
+                        && is_valid_oid(&change.new)
+                        && !is_zero_oid(&change.new)
+                })
+                .map(|change| (change.old.clone(), change.new.clone()));
+            let pull_has_rebase_start =
+                cmd.primary_command.as_deref() == Some("pull") && rebase_start.is_some();
             let is_rebase_like = cmd.primary_command.as_deref() == Some("rebase")
-                || (cmd.primary_command.as_deref() == Some("pull") && pull_uses_rebase);
+                || (cmd.primary_command.as_deref() == Some("pull")
+                    && (pull_uses_rebase || pull_has_rebase_start));
             if is_rebase_like {
                 let worktree = cmd.worktree.as_ref().ok_or_else(|| {
                     GitAiError::Generic(format!(
@@ -5157,9 +3842,17 @@ impl ActorDaemonCoordinator {
                 if cmd.invoked_args.iter().any(|arg| arg == "--abort") {
                     self.clear_pending_rebase_original_head_for_worktree(worktree)?;
                 } else if cmd.exit_code != 0 && !rebase_is_control_mode(cmd) {
-                    let pending_old_head = strict_rebase_original_head_from_command(cmd, "");
+                    let semantic_old_head = rebase_start
+                        .as_ref()
+                        .map(|(old, _)| old.as_str())
+                        .unwrap_or("");
+                    let pending_old_head =
+                        strict_rebase_original_head_from_command(cmd, semantic_old_head);
                     if let Some(old_head) = pending_old_head {
-                        let rebase_onto = resolve_rebase_onto_for_worktree(worktree);
+                        let rebase_onto = rebase_start
+                            .as_ref()
+                            .map(|(_, new)| new.clone())
+                            .or_else(|| resolve_rebase_onto_for_worktree(worktree));
                         if std::env::var("GIT_AI_DEBUG_DAEMON_TRACE")
                             .ok()
                             .as_deref()
@@ -5323,6 +4016,13 @@ impl ActorDaemonCoordinator {
                             }
                         }
                     }
+                    crate::daemon::domain::SemanticEvent::MergeSquash { source_head, onto } => {
+                        self.set_pending_squash_merge_for_worktree(
+                            worktree.as_ref(),
+                            source_head.clone(),
+                            onto.clone(),
+                        )?;
+                    }
                     crate::daemon::domain::SemanticEvent::StashOperation { kind, head } => {
                         let repo = find_repository_in_path(&worktree)?;
                         match kind {
@@ -5414,7 +4114,36 @@ impl ActorDaemonCoordinator {
                                 );
                             }
                         }
-                        if is_completing_rebase || is_pull_rebase {
+                        let mut handled_as_squash_merge = false;
+                        if !new_head.is_empty()
+                            && cmd.primary_command.as_deref() == Some("commit")
+                            && let Some(pending) =
+                                self.take_pending_squash_merge_for_worktree(worktree.as_ref())?
+                        {
+                            if base.as_deref().is_some_and(|base| base == pending.onto) {
+                                let repo = find_repository_in_path(&worktree)?;
+                                crate::authorship::rewrite::handle_rewrite_event(
+                                    &repo,
+                                    crate::authorship::rewrite::RewriteEvent::SquashMerge {
+                                        source_head: pending.source_head,
+                                        squash_commit: new_head.clone(),
+                                        onto: pending.onto,
+                                    },
+                                )?;
+                                handled_as_squash_merge = true;
+                            } else {
+                                self.set_pending_squash_merge_for_worktree(
+                                    worktree.as_ref(),
+                                    pending.source_head,
+                                    pending.onto,
+                                )?;
+                            }
+                        }
+
+                        if handled_as_squash_merge {
+                            // Squash authorship is reconstructed from the source ref captured
+                            // in sequenced trace/reflog state at `merge --squash` time.
+                        } else if is_completing_rebase || is_pull_rebase {
                             // During rebase, note transfer is handled by non-FF detection.
                             // Skip post-commit note generation to avoid overwriting shifted notes.
                         } else if !new_head.is_empty()
@@ -5484,23 +4213,6 @@ impl ActorDaemonCoordinator {
                                         %e,
                                         %worktree,
                                         "commit post-commit side effect failed"
-                                    );
-                                }
-                            }
-                            // Squash merge: if this commit was created after merge --squash,
-                            // transfer authorship notes from the source branch commits.
-                            if let Some(source_head) = cmd.merge_squash_source_head.as_deref()
-                                && !source_head.is_empty()
-                            {
-                                let onto = base.clone().unwrap_or_default();
-                                if !onto.is_empty() {
-                                    let _ = crate::authorship::rewrite::handle_rewrite_event(
-                                        &repo,
-                                        crate::authorship::rewrite::RewriteEvent::SquashMerge {
-                                            source_head: source_head.to_string(),
-                                            squash_commit: new_head.clone(),
-                                            onto,
-                                        },
                                     );
                                 }
                             }
@@ -5580,17 +4292,8 @@ impl ActorDaemonCoordinator {
             }
         }
 
-        if let Some((new_head, carried_va, snapshot)) = deferred_rewrite_carryover
-            && let Some(worktree) = cmd.worktree.as_ref()
-        {
-            let repo = find_repository_in_path(&worktree.to_string_lossy())?;
-            restore_virtual_attribution_carryover(&repo, &new_head, carried_va, snapshot)?;
-        }
-
         if matches!(cmd.primary_command.as_deref(), Some("checkout" | "switch")) {
-            if let Some(prerequisite) =
-                recent_checkout_switch_prerequisite_from_command(cmd, carryover_snapshot.as_ref())
-            {
+            if let Some(prerequisite) = recent_checkout_switch_prerequisite_from_command(cmd) {
                 let family = family.map(std::borrow::ToOwned::to_owned).or_else(|| {
                     cmd.worktree.as_ref().and_then(|worktree| {
                         find_repository_in_path(&worktree.to_string_lossy())
@@ -5602,13 +4305,10 @@ impl ActorDaemonCoordinator {
                     self.record_recent_replay_prerequisite(&family, prerequisite)?;
                 }
             }
-            apply_checkout_switch_working_log_side_effect(cmd, carryover_snapshot.as_ref())?;
+            apply_checkout_switch_working_log_side_effect(cmd)?;
         }
 
-        if saw_pull_event
-            && !pull_uses_rebase
-            && let Some(worktree) = cmd.worktree.as_ref()
-        {
+        if saw_pull_event && let Some(worktree) = cmd.worktree.as_ref() {
             let (old_head, new_head) = Self::resolve_heads_for_command(cmd);
             if !old_head.is_empty()
                 && !new_head.is_empty()
@@ -5629,7 +4329,6 @@ impl ActorDaemonCoordinator {
         if primary == "update-ref"
             && let Some(worktree) = cmd.worktree.as_ref()
         {
-            let current_branch = cmd.pre_repo.as_ref().and_then(|r| r.branch.clone());
             for event in events {
                 if let crate::daemon::domain::SemanticEvent::RefUpdated {
                     reference,
@@ -5637,7 +4336,7 @@ impl ActorDaemonCoordinator {
                     new,
                 } = event
                 {
-                    if !reference.starts_with("refs/heads/")
+                    if reference != "HEAD" && !reference.starts_with("refs/heads/")
                         || !is_valid_oid(old)
                         || is_zero_oid(old)
                         || !is_valid_oid(new)
@@ -5648,10 +4347,11 @@ impl ActorDaemonCoordinator {
                     }
                     if let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy()) {
                         if repo_is_ancestor(&repo, old, new) {
-                            let affects_checked_out_branch =
-                                current_branch.as_deref().is_some_and(|branch| {
-                                    reference == &format!("refs/heads/{}", branch)
-                                        || reference == branch
+                            let affects_checked_out_branch = reference == "HEAD"
+                                || cmd.ref_changes.iter().any(|change| {
+                                    change.reference == "HEAD"
+                                        && change.old == *old
+                                        && change.new == *new
                                 });
                             if affects_checked_out_branch {
                                 if repo.storage.has_working_log(old) {
@@ -5745,7 +4445,6 @@ impl ActorDaemonCoordinator {
                 Ok(applied) => TracePayloadApplyOutcome::Applied(Box::new(applied)),
                 Err(error) => {
                     let _ = self.clear_trace_root_tracking(&root_sid);
-                    let _ = self.discard_carryover_snapshots_for_root(&root_sid);
                     return Err(error);
                 }
             }
@@ -5760,12 +4459,9 @@ impl ActorDaemonCoordinator {
         }
         match self.apply_trace_payload_to_state(payload).await? {
             TracePayloadApplyOutcome::None | TracePayloadApplyOutcome::QueuedFamily => {}
-            TracePayloadApplyOutcome::Applied(mut applied) => {
+            TracePayloadApplyOutcome::Applied(applied) => {
                 if let Some(family) = applied.command.family_key.as_ref().map(|key| key.0.clone()) {
                     self.begin_family_effect(&family)?;
-                    if applied.command.wrapper_invocation_id.is_some() {
-                        self.apply_wrapper_state_overlay(&mut applied.command).await;
-                    }
                     let result = self
                         .maybe_apply_side_effects_for_applied_command(Some(&family), &applied)
                         .await;
@@ -5910,22 +4606,6 @@ impl ActorDaemonCoordinator {
                 tokio::task::spawn_blocking(|| {
                     crate::daemon::telemetry_worker::flush_notes();
                 });
-                Ok(ControlResponse::ok(None, None))
-            }
-            ControlRequest::WrapperPreState {
-                invocation_id,
-                repo_context,
-                ..
-            } => {
-                self.store_wrapper_state(&invocation_id, Some(repo_context), None);
-                Ok(ControlResponse::ok(None, None))
-            }
-            ControlRequest::WrapperPostState {
-                invocation_id,
-                repo_context,
-                ..
-            } => {
-                self.store_wrapper_state(&invocation_id, None, Some(repo_context));
                 Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::BashSessionStart {
@@ -6334,10 +5014,63 @@ fn trace_listener_loop_actor(
             let Ok(stream) = stream else {
                 continue;
             };
+            let mut reader = BufReader::new(stream);
+            let mut observed_roots = std::collections::BTreeSet::new();
+            match bootstrap_trace_connection_actor_reader(
+                &mut reader,
+                coordinator.clone(),
+                &mut observed_roots,
+            ) {
+                Ok(TraceConnectionBootstrap::Eof) => {
+                    if let Err(error) =
+                        finalize_trace_connection_roots(coordinator.clone(), observed_roots)
+                    {
+                        tracing::debug!(
+                            %error,
+                            "trace connection close bookkeeping error"
+                        );
+                    }
+                    continue;
+                }
+                Ok(TraceConnectionBootstrap::Stop) => {
+                    if let Err(error) =
+                        finalize_trace_connection_roots(coordinator.clone(), observed_roots)
+                    {
+                        tracing::debug!(
+                            %error,
+                            "trace connection close bookkeeping error"
+                        );
+                    }
+                    continue;
+                }
+                Ok(TraceConnectionBootstrap::Continue) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "trace connection bootstrap error");
+                    if let Err(error) =
+                        finalize_trace_connection_roots(coordinator.clone(), observed_roots)
+                    {
+                        tracing::debug!(
+                            %error,
+                            "trace connection close bookkeeping error"
+                        );
+                    }
+                    continue;
+                }
+            }
+            #[cfg(feature = "test-support")]
+            if let Ok(raw_delay_ms) =
+                std::env::var("GIT_AI_TEST_TRACE_LISTENER_WORKER_SPAWN_DELAY_MS")
+                && let Ok(delay_ms) = raw_delay_ms.parse::<u64>()
+                && delay_ms > 0
+            {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
             let coord = coordinator.clone();
             if std::thread::Builder::new()
                 .spawn(move || {
-                    if let Err(e) = handle_trace_connection_actor(stream, coord) {
+                    if let Err(e) =
+                        handle_trace_connection_actor_reader(reader, coord, observed_roots)
+                    {
                         tracing::debug!(%e, "trace connection error");
                     }
                 })
@@ -6419,7 +5152,11 @@ fn windows_trace_pipe_worker_loop(
 
         {
             let mut reader = BufReader::new(&mut server);
-            if let Err(e) = handle_trace_connection_actor_reader(&mut reader, coordinator.clone()) {
+            if let Err(e) = handle_trace_connection_actor_reader(
+                reader,
+                coordinator.clone(),
+                std::collections::BTreeSet::new(),
+            ) {
                 tracing::debug!(%e, "trace connection error");
             }
         }
@@ -6437,69 +5174,123 @@ fn windows_trace_pipe_worker_loop(
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 fn handle_trace_connection_actor(
     stream: LocalSocketStream,
     coordinator: Arc<ActorDaemonCoordinator>,
 ) -> Result<(), GitAiError> {
-    let mut reader = BufReader::new(stream);
-    handle_trace_connection_actor_reader(&mut reader, coordinator)
+    let reader = BufReader::new(stream);
+    handle_trace_connection_actor_reader(reader, coordinator, std::collections::BTreeSet::new())
+}
+
+enum TraceConnectionBootstrap {
+    Continue,
+    Stop,
+    Eof,
+}
+
+struct TraceLineOutcome {
+    continue_reading: bool,
+    bootstrap_complete: bool,
+}
+
+const TRACE_CONNECTION_BOOTSTRAP_MAX_LINES: usize = 8;
+
+fn bootstrap_trace_connection_actor_reader<R: Read>(
+    reader: &mut BufReader<R>,
+    coordinator: Arc<ActorDaemonCoordinator>,
+    observed_roots: &mut std::collections::BTreeSet<String>,
+) -> Result<TraceConnectionBootstrap, GitAiError> {
+    for _ in 0..TRACE_CONNECTION_BOOTSTRAP_MAX_LINES {
+        let Some(line) = read_json_line(reader)? else {
+            return Ok(TraceConnectionBootstrap::Eof);
+        };
+        let Some(outcome) =
+            process_trace_connection_line(&line, coordinator.clone(), observed_roots)?
+        else {
+            continue;
+        };
+        if !outcome.continue_reading {
+            return Ok(TraceConnectionBootstrap::Stop);
+        }
+        if outcome.bootstrap_complete {
+            return Ok(TraceConnectionBootstrap::Continue);
+        }
+    }
+    Ok(TraceConnectionBootstrap::Continue)
 }
 
 fn handle_trace_connection_actor_reader<R: Read>(
-    reader: &mut BufReader<R>,
+    mut reader: BufReader<R>,
     coordinator: Arc<ActorDaemonCoordinator>,
+    mut observed_roots: std::collections::BTreeSet<String>,
 ) -> Result<(), GitAiError> {
-    let mut observed_roots = std::collections::BTreeSet::new();
-    while let Some(line) = read_json_line(reader)? {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let mut parsed: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if let Some(sid) = parsed.get("sid").and_then(Value::as_str) {
-            let root_sid = trace_root_sid(sid).to_string();
-            if observed_roots.insert(root_sid.clone()) {
-                let _ = coordinator.trace_root_connection_opened(&root_sid);
-            }
-        }
-        // Only enqueue payloads for mutating commands.  Read-only invocations
-        // (status, diff, stash list, worktree list, …) are handled inline by
-        // prepare_trace_payload_for_ingest and must not enter the serial ingest
-        // queue — doing so causes the >1-minute backlog seen with IDEs that
-        // issue dozens of read-only git commands per second.
-        if coordinator.prepare_trace_payload_for_ingest(&mut parsed)
-            && coordinator.enqueue_trace_payload(parsed).is_err()
+    while let Some(line) = read_json_line(&mut reader)? {
+        if process_trace_connection_line(&line, coordinator.clone(), &mut observed_roots)?
+            .is_some_and(|outcome| !outcome.continue_reading)
         {
             break;
         }
     }
 
-    if !observed_roots.is_empty() {
-        let roots = observed_roots.into_iter().collect::<Vec<_>>();
-        match coordinator.record_trace_connection_close(&roots) {
-            Ok(stale_candidates) if !stale_candidates.is_empty() => {
-                if let Err(error) =
-                    coordinator.enqueue_stale_connection_close_fallbacks(&stale_candidates)
-                {
-                    tracing::debug!(
-                        %error,
-                        "trace connection close fallback error"
-                    );
-                }
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "trace connection close bookkeeping error"
-                );
-            }
+    finalize_trace_connection_roots(coordinator, observed_roots)
+}
+
+fn process_trace_connection_line(
+    line: &str,
+    coordinator: Arc<ActorDaemonCoordinator>,
+    observed_roots: &mut std::collections::BTreeSet<String>,
+) -> Result<Option<TraceLineOutcome>, GitAiError> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let mut parsed: Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    let event = parsed
+        .get("event")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let mut bootstrap_complete = false;
+    if let Some(sid) = parsed.get("sid").and_then(Value::as_str) {
+        let root_sid = trace_root_sid(sid).to_string();
+        // `start` carries argv but not the worktree. Keep bootstrapping on the
+        // listener thread until the root `def_repo` event has been processed;
+        // that is the first point where trace augmentation can capture reflog
+        // start offsets with a concrete worktree.
+        if event == "def_repo" && sid == root_sid {
+            bootstrap_complete = true;
+        }
+        if observed_roots.insert(root_sid.clone()) {
+            let _ = coordinator.trace_root_connection_opened(&root_sid);
         }
     }
-    Ok(())
+    // Only enqueue payloads for mutating commands.  Read-only invocations
+    // (status, diff, stash list, worktree list, …) are handled inline by
+    // prepare_trace_payload_for_ingest and must not enter the serial ingest
+    // queue — doing so causes the >1-minute backlog seen with IDEs that
+    // issue dozens of read-only git commands per second.
+    let continue_reading = !(coordinator.prepare_trace_payload_for_ingest(&mut parsed)
+        && coordinator.enqueue_trace_payload(parsed).is_err());
+    Ok(Some(TraceLineOutcome {
+        continue_reading,
+        bootstrap_complete,
+    }))
+}
+
+fn finalize_trace_connection_roots(
+    coordinator: Arc<ActorDaemonCoordinator>,
+    observed_roots: std::collections::BTreeSet<String>,
+) -> Result<(), GitAiError> {
+    if observed_roots.is_empty() {
+        return Ok(());
+    }
+
+    let roots = observed_roots.into_iter().collect::<Vec<_>>();
+    coordinator.record_trace_connection_close(&roots)
 }
 
 /// Git environment variables that must not leak into the daemon process.
@@ -7327,50 +6118,6 @@ mod tests {
                 metadata: std::collections::HashMap::new(),
             }),
         }
-    }
-
-    #[test]
-    fn human_replay_checkpoint_request_has_no_agent_identity() {
-        let request = build_human_replay_checkpoint_request(
-            "/repo",
-            vec!["src/main.rs".to_string()],
-            HashMap::from([("src/main.rs".to_string(), "fn main() {}\n".to_string())]),
-        );
-
-        assert_eq!(request.checkpoint_kind, CheckpointKind::Human);
-        assert_eq!(request.agent_id, None);
-        assert_eq!(request.path_role, PreparedPathRole::WillEdit);
-        assert_eq!(request.files.len(), 1);
-        assert_eq!(
-            request.files[0].path,
-            std::path::PathBuf::from("src/main.rs")
-        );
-        assert_eq!(request.files[0].content.as_deref(), Some("fn main() {}\n"));
-    }
-
-    #[test]
-    fn ai_replay_checkpoint_request_preserves_active_bash_agent_identity() {
-        let agent_id = AgentId {
-            tool: "claude".to_string(),
-            id: "session-123".to_string(),
-            model: "opus-4".to_string(),
-        };
-        let metadata = HashMap::from([("edit_kind".to_string(), "bash".to_string())]);
-
-        let request = build_replay_checkpoint_request(
-            "/repo",
-            vec!["src/main.rs".to_string()],
-            HashMap::from([("src/main.rs".to_string(), "fn main() {}\n".to_string())]),
-            CheckpointKind::AiAgent,
-            Some(agent_id.clone()),
-            PreparedPathRole::Edited,
-            metadata.clone(),
-        );
-
-        assert_eq!(request.checkpoint_kind, CheckpointKind::AiAgent);
-        assert_eq!(request.agent_id, Some(agent_id));
-        assert_eq!(request.path_role, PreparedPathRole::Edited);
-        assert_eq!(request.metadata, metadata);
     }
 
     #[test]

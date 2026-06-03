@@ -57,17 +57,12 @@ pub fn handle_git(args: &[String]) {
     // and delegate directly to the real git so existing completion scripts work.
     if in_shell_completion_context() {
         let orig_args: Vec<String> = std::env::args().skip(1).collect();
-        proxy_to_git(&orig_args, true, None);
+        proxy_to_git(&orig_args, true);
         return;
     }
 
     let parsed = parse_git_cli_args(args);
 
-    // Read-only invocations don't need wrapper state (the daemon fast-paths
-    // their trace events and never processes them through the normalizer).
-    // Skip the invocation_id so we can also suppress trace2 for them,
-    // avoiding unnecessary daemon work and wrapper_states memory leaks.
-    //
     // Use is_definitely_read_only_invocation (not is_definitely_read_only_command)
     // so that subcommand-gated read-only calls like `git stash list` and
     // `git worktree list` are also suppressed — these account for thousands
@@ -80,59 +75,12 @@ pub fn handle_git(args: &[String]) {
     };
 
     if is_read_only {
-        let exit_status = proxy_to_git(args, false, None);
-        exit_with_status(exit_status);
-    }
-
-    // Repo-creating commands (clone, init) have no meaningful pre/post
-    // repo state — the target repo doesn't exist yet. The wrapper would
-    // either capture nothing (clone from outside a repo) or the wrong
-    // repo (clone from inside a different repo). Skip the invocation_id
-    // so the daemon doesn't wait for wrapper state that never arrives or
-    // is misleading; trace2 events still flow normally (trace2 suppression
-    // requires *both* no invocation_id and a read-only command).
-    let is_repo_creating = parsed
-        .command
-        .as_deref()
-        .is_some_and(|cmd| matches!(cmd, "clone" | "init"));
-
-    if is_repo_creating {
-        let exit_status = proxy_to_git(args, false, None);
-        exit_with_status(exit_status);
-    }
-
-    // Initialize the daemon telemetry handle so we can send wrapper state.
-    // If the daemon isn't available, fall back to a plain passthrough proxy
-    // (no invocation_id, no wrapper state, no extra GIT_* env vars).
-    let daemon_connected = matches!(
-        crate::daemon::telemetry_handle::init_daemon_telemetry_handle(),
-        crate::daemon::telemetry_handle::DaemonTelemetryInitResult::Connected
-    );
-
-    if !daemon_connected {
-        let exit_status = proxy_to_git(args, false, None);
+        let exit_status = proxy_to_git(args, false);
         exit_with_status(exit_status);
     }
 
     let repository = find_repository(&parsed.global_args).ok();
-    let worktree = repository.as_ref().and_then(|r| r.workdir().ok());
-
-    let pre_state = worktree
-        .as_deref()
-        .and_then(crate::git::repo_state::read_head_state_for_worktree);
-    let invocation_id = crate::uuid::generate_v4();
-
-    // Send pre-state BEFORE running git so it's available when the daemon
-    // processes the atexit trace event and starts the wrapper state timeout.
-    send_wrapper_pre_state_to_daemon(&invocation_id, worktree.as_deref(), &pre_state);
-
-    let exit_status = proxy_to_git(args, false, Some(&invocation_id));
-
-    let post_state = worktree
-        .as_deref()
-        .and_then(crate::git::repo_state::read_head_state_for_worktree);
-
-    send_wrapper_post_state_to_daemon(&invocation_id, worktree.as_deref(), &post_state);
+    let exit_status = proxy_to_git(args, false);
 
     // After a successful commit, wait briefly for the daemon to produce an
     // authorship note so we can show stats inline (same UX as plain wrapper mode).
@@ -353,75 +301,10 @@ fn maybe_show_async_post_commit_stats(parsed: &ParsedGitInvocation, repo: &Repos
     }
 }
 
-fn head_state_to_repo_context(
-    s: crate::git::repo_state::HeadState,
-) -> crate::daemon::domain::RepoContext {
-    crate::daemon::domain::RepoContext {
-        head: s.head,
-        branch: s.branch,
-        detached: s.detached,
-    }
-}
-
-fn send_wrapper_pre_state_to_daemon(
-    invocation_id: &str,
-    worktree: Option<&std::path::Path>,
-    pre_state: &Option<crate::git::repo_state::HeadState>,
-) {
-    let Some(wt) = worktree else { return };
-    let Some(pre) = pre_state.clone() else { return };
-    let wt_str = wt.to_string_lossy().to_string();
-    if let Err(e) = crate::daemon::telemetry_handle::send_wrapper_pre_state(
-        invocation_id,
-        &wt_str,
-        head_state_to_repo_context(pre),
-    ) {
-        tracing::debug!(
-            "wrapper: failed to send pre-state for {}: {}",
-            invocation_id,
-            e
-        );
-    }
-}
-
-fn send_wrapper_post_state_to_daemon(
-    invocation_id: &str,
-    worktree: Option<&std::path::Path>,
-    post_state: &Option<crate::git::repo_state::HeadState>,
-) {
-    let Some(wt) = worktree else { return };
-    let Some(post) = post_state.clone() else {
-        return;
-    };
-    let wt_str = wt.to_string_lossy().to_string();
-    if let Err(e) = crate::daemon::telemetry_handle::send_wrapper_post_state(
-        invocation_id,
-        &wt_str,
-        head_state_to_repo_context(post),
-    ) {
-        tracing::debug!(
-            "wrapper: failed to send post-state for {}: {}",
-            invocation_id,
-            e
-        );
-    }
-}
-
-fn proxy_to_git(
-    args: &[String],
-    exit_on_completion: bool,
-    wrapper_invocation_id: Option<&str>,
-) -> std::process::ExitStatus {
+fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::ExitStatus {
     // Suppress trace2 for read-only invocations to avoid hitting the daemon
-    // with events that can never produce meaningful state changes.  In async
-    // mode, read-only invocations are handled before this point (no
-    // invocation_id set), so wrapper_invocation_id is only Some for mutating
-    // commands that need trace2 events for the daemon to match wrapper state.
-    //
-    // Use is_definitely_read_only_invocation so that subcommand-gated
-    // read-only calls like `git stash list` and `git worktree list` are also
-    // suppressed (matches the updated wrapper check in handle_git above).
-    let suppress_trace2 = wrapper_invocation_id.is_none() && {
+    // with events that can never produce meaningful state changes.
+    let suppress_trace2 = {
         let parsed = parse_git_cli_args(args);
         let subcommand = parsed.command_args.first().map(String::as_str);
         parsed.command.as_deref().is_some_and(|cmd| {
@@ -444,10 +327,6 @@ fn proxy_to_git(
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
             if suppress_trace2 {
                 cmd.env("GIT_TRACE2_EVENT", "0");
-            }
-            if let Some(id) = wrapper_invocation_id {
-                cmd.env("GIT_AI_WRAPPER_INVOCATION_ID", id);
-                cmd.env("GIT_TRACE2_ENV_VARS", "GIT_AI_WRAPPER_INVOCATION_ID");
             }
             unsafe {
                 let setpgid_flag = should_setpgid;
@@ -472,10 +351,6 @@ fn proxy_to_git(
             cmd.env(ENV_SKIP_MANAGED_HOOKS, "1");
             if suppress_trace2 {
                 cmd.env("GIT_TRACE2_EVENT", "0");
-            }
-            if let Some(id) = wrapper_invocation_id {
-                cmd.env("GIT_AI_WRAPPER_INVOCATION_ID", id);
-                cmd.env("GIT_TRACE2_ENV_VARS", "GIT_AI_WRAPPER_INVOCATION_ID");
             }
 
             #[cfg(windows)]

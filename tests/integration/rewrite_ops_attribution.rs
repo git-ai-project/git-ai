@@ -7,6 +7,73 @@ use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 
 // =============================================================================
+// Category 0: Trace2 ref-cursor branch lifecycle
+// =============================================================================
+
+/// Deleting a branch removes its reflog file. Recreating the same branch name
+/// starts a new reflog generation at byte 0, so the daemon cursor must clear any
+/// offset it learned from the previous generation.
+#[test]
+fn test_branch_delete_recreate_resets_trace2_ref_cursor() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("main.txt");
+
+    fs::write(&file_path, "base\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+    let mut file = repo.filename("main.txt");
+    file.assert_committed_lines(crate::lines!["base".ai()]);
+
+    let main_branch = repo.current_branch();
+    fs::write(&file_path, "base\nmain\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("main advance").unwrap();
+    file.assert_committed_lines(crate::lines!["base".ai(), "main".ai()]);
+
+    let initial = repo.git(&["rev-parse", "HEAD~1"]).unwrap();
+    let initial = initial.trim().to_string();
+    repo.git(&["checkout", "-b", "rebase-side", initial.as_str()])
+        .unwrap();
+    fs::write(&file_path, "base\nside\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
+    repo.stage_all_and_commit("side advance").unwrap();
+    file.assert_committed_lines(crate::lines!["base".ai(), "side".ai()]);
+
+    repo.git(&["checkout", &main_branch]).unwrap();
+    repo.git(&["branch", "-D", "rebase-side"]).unwrap();
+
+    repo.git(&["checkout", "-b", "rebase-side", initial.as_str()])
+        .unwrap();
+    file.assert_committed_lines(crate::lines!["base".ai()]);
+}
+
+/// If an out-of-band raw git commit moves HEAD without trace2/hook handling,
+/// the next traced commit must not consume that stale HEAD reflog entry as its
+/// own ref transition.
+#[test]
+fn test_raw_git_commit_before_traced_commit_does_not_poison_ref_cursor() {
+    let repo = TestRepo::new();
+
+    let base_path = repo.path().join("base.txt");
+    fs::write(&base_path, "base\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "base.txt"]).unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    let raw_path = repo.path().join("raw.txt");
+    fs::write(&raw_path, "raw human\n").unwrap();
+    repo.git_og(&["add", "raw.txt"]).unwrap();
+    repo.git_og(&["commit", "-m", "raw human commit"]).unwrap();
+
+    let ai_path = repo.path().join("ai.txt");
+    fs::write(&ai_path, "ai tracked\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "ai.txt"]).unwrap();
+    repo.stage_all_and_commit("ai tracked commit").unwrap();
+
+    let mut ai_file = repo.filename("ai.txt");
+    ai_file.assert_committed_lines(crate::lines!["ai tracked".ai()]);
+}
+
+// =============================================================================
 // Category A: Secondary file missing from authorship note
 //
 // Reproduction of fuzz_checkpoint_heavy_0:

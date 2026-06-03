@@ -2358,8 +2358,7 @@ impl TestRepo {
                 &tracked_invocation,
             );
         for attempt in 0..=retry_limit {
-            let daemon_command_pending = env_explicitly_enables_trace2(envs)
-                && command_affects_daemon
+            let daemon_command_pending = command_affects_daemon
                 && !git_invocation_routes_to_clone_target(&tracked_invocation);
             let daemon_test_sync_session =
                 daemon_command_pending.then(new_daemon_test_sync_session_id);

@@ -95,10 +95,8 @@ impl<B: GitBackend> Coordinator<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::domain::{
-        CommandScope, Confidence, FamilyKey, NormalizedCommand, RepoContext,
-    };
-    use crate::daemon::git_backend::{GitBackend, ReflogCut};
+    use crate::daemon::domain::{CommandScope, Confidence, FamilyKey, NormalizedCommand};
+    use crate::daemon::git_backend::GitBackend;
     use crate::git::cli_parser::parse_git_cli_args;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -126,23 +124,6 @@ mod tests {
                 .get(worktree.to_string_lossy().as_ref())
                 .cloned()
                 .ok_or_else(|| GitAiError::Generic("family not found".to_string()))
-        }
-
-        fn repo_context(&self, _worktree: &Path) -> Result<RepoContext, GitAiError> {
-            Err(GitAiError::Generic("unused".to_string()))
-        }
-
-        fn reflog_cut(&self, _family: &FamilyKey) -> Result<ReflogCut, GitAiError> {
-            Err(GitAiError::Generic("unused".to_string()))
-        }
-
-        fn reflog_delta(
-            &self,
-            _family: &FamilyKey,
-            _start: &ReflogCut,
-            _end: &ReflogCut,
-        ) -> Result<Vec<crate::daemon::domain::RefChange>, GitAiError> {
-            Ok(Vec::new())
         }
 
         fn resolve_primary_command(
@@ -184,15 +165,9 @@ mod tests {
             exit_code: 0,
             started_at_ns: 1,
             finished_at_ns: 2,
-            pre_repo: None,
-            post_repo: None,
-            inflight_rebase_original_head: None,
-            merge_squash_source_head: None,
-            carryover_snapshot_id: None,
             stash_target_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
-            wrapper_invocation_id: None,
         }
     }
 
@@ -210,15 +185,9 @@ mod tests {
             exit_code: 0,
             started_at_ns: 1,
             finished_at_ns: 2,
-            pre_repo: None,
-            post_repo: None,
-            inflight_rebase_original_head: None,
-            merge_squash_source_head: None,
-            carryover_snapshot_id: None,
             stash_target_oid: None,
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
-            wrapper_invocation_id: None,
         }
     }
 
