@@ -85,25 +85,41 @@ jobs:
       - name: Install Graphite CLI
         run: npm install -g @withgraphite/graphite-cli@stable
 
+      - name: Install Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2
+
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get install -y mold
 
       - name: Run tests (Unix)
         if: runner.os != 'Windows'
-        run: bash scripts/ci-test-with-retry.sh ${{ matrix.test_threads }}
+        run: |
+          if [ "${{ matrix.test_mode }}" = "wrapper-daemon" ]; then
+            task test:wrapper-daemon CARGO_TEST_ARGS=--no-fail-fast TEST_THREADS=${{ matrix.test_threads }}
+          else
+            task test CARGO_TEST_ARGS=--no-fail-fast TEST_THREADS=${{ matrix.test_threads }}
+          fi
         env:
           CARGO_INCREMENTAL: 0
-          GIT_AI_TEST_GIT_MODE: ${{ matrix.test_mode }}
           GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: ${{ matrix.daemon_pool }}
           RUSTFLAGS: ${{ runner.os == 'Linux' && '-C link-arg=-fuse-ld=mold' || '' }}
 
       - name: Run tests (Windows)
         if: runner.os == 'Windows'
-        run: pwsh scripts/ci-test-with-retry.ps1 -TestThreads ${{ matrix.test_threads }}
+        shell: pwsh
+        run: |
+          $gitUsrBin = "C:\Program Files\Git\usr\bin"
+          if ((Test-Path $gitUsrBin) -and -not (($env:Path -split ";") -contains $gitUsrBin)) {
+            $env:Path = "$gitUsrBin;$env:Path"
+          }
+          if ("${{ matrix.test_mode }}" -eq "wrapper-daemon") {
+            task test:wrapper-daemon CARGO_TEST_ARGS=--no-fail-fast TEST_THREADS=${{ matrix.test_threads }}
+          } else {
+            task test CARGO_TEST_ARGS=--no-fail-fast TEST_THREADS=${{ matrix.test_threads }}
+          }
         env:
           CARGO_INCREMENTAL: 0
-          GIT_AI_TEST_GIT_MODE: ${{ matrix.test_mode }}
           GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: ${{ matrix.daemon_pool }}
 
   test-ignored:
