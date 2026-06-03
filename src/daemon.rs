@@ -5,10 +5,7 @@ use crate::git::cli_parser::{
     ParsedGitInvocation, explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args,
 };
 use crate::git::find_repository_in_path;
-use crate::git::repo_state::{
-    common_dir_for_worktree, git_dir_for_worktree, read_ref_oid_for_worktree,
-    worktree_root_for_path,
-};
+use crate::git::repo_state::{common_dir_for_worktree, worktree_root_for_path};
 use crate::git::repository::{Repository, discover_repository_in_path_no_git_exec, exec_git};
 use crate::git::sync_authorship::{fetch_authorship_notes, fetch_remote_from_args};
 use crate::utils::LockFile;
@@ -817,51 +814,6 @@ fn rfc3339_to_unix_nanos(value: &str) -> Option<u128> {
         .and_then(|timestamp| u128::try_from(timestamp.timestamp_nanos_opt()?).ok())
 }
 
-fn resolve_rebase_original_head_for_worktree(worktree: &Path) -> Option<String> {
-    let git_dir = git_dir_for_worktree(worktree)?;
-
-    for candidate in [
-        git_dir.join("rebase-merge").join("orig-head"),
-        git_dir.join("rebase-apply").join("orig-head"),
-        git_dir.join("ORIG_HEAD"),
-    ] {
-        if let Ok(contents) = fs::read_to_string(candidate)
-            && let Some(oid) = contents
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-            && is_valid_oid(oid)
-            && !is_zero_oid(oid)
-        {
-            return Some(oid.to_string());
-        }
-    }
-
-    read_ref_oid_for_worktree(worktree, "ORIG_HEAD")
-        .filter(|oid| is_valid_oid(oid) && !is_zero_oid(oid))
-}
-
-fn resolve_rebase_onto_for_worktree(worktree: &Path) -> Option<String> {
-    let git_dir = git_dir_for_worktree(worktree)?;
-    let onto_path = git_dir.join("rebase-merge").join("onto");
-    if let Ok(contents) = fs::read_to_string(onto_path)
-        && let Some(oid) = contents.lines().map(str::trim).find(|l| !l.is_empty())
-        && is_valid_oid(oid)
-        && !is_zero_oid(oid)
-    {
-        return Some(oid.to_string());
-    }
-    let onto_path = git_dir.join("rebase-apply").join("onto");
-    if let Ok(contents) = fs::read_to_string(onto_path)
-        && let Some(oid) = contents.lines().map(str::trim).find(|l| !l.is_empty())
-        && is_valid_oid(oid)
-        && !is_zero_oid(oid)
-    {
-        return Some(oid.to_string());
-    }
-    None
-}
-
 fn apply_checkpoint_side_effect(request: CheckpointRequest) -> Result<(), GitAiError> {
     if request.files.is_empty() {
         return Ok(());
@@ -1379,44 +1331,59 @@ fn repo_is_ancestor(
     exec_git(&args).is_ok()
 }
 
-/// Collect positional arguments from a cherry-pick command as potential commit
-/// references. Unlike the full-OID-only `is_valid_oid` check, this accepts short SHA prefixes and
-/// symbolic refs (e.g. branch names) that git would resolve on the command line.
-/// Resolution to full OIDs happens later in `resolve_cherry_pick_source_refs`
-/// which runs in the async side-effect path.
-fn cherry_pick_source_refs_from_command(
-    cmd: &crate::daemon::domain::NormalizedCommand,
-) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut skip_next = false;
-    for arg in &cmd.invoked_args {
-        if skip_next {
-            skip_next = false;
-            continue;
-        }
-        if arg == "--abort" || arg == "--continue" || arg == "--quit" || arg == "--skip" {
-            return Vec::new();
-        }
-        if matches!(
-            arg.as_str(),
-            "-m" | "--mainline" | "-X" | "--strategy-option" | "--strategy"
-        ) || arg == "--gpg-sign"
-        {
-            skip_next = true;
-            continue;
-        }
-        if arg.starts_with('-') {
-            continue;
-        }
-        if !arg.is_empty() && !out.iter().any(|seen: &String| seen == arg) {
-            out.push(arg.to_string());
-        }
-    }
-    out
-}
-
 fn rebase_is_control_mode(cmd: &crate::daemon::domain::NormalizedCommand) -> bool {
     summarize_rebase_args(&cmd.invoked_args).is_control_mode
+}
+
+fn cherry_pick_destination_commits(cmd: &crate::daemon::domain::NormalizedCommand) -> Vec<String> {
+    cmd.ref_changes
+        .iter()
+        .filter(|change| change.reference == "HEAD")
+        .filter(|change| {
+            is_valid_oid(&change.old)
+                && !is_zero_oid(&change.old)
+                && is_valid_oid(&change.new)
+                && !is_zero_oid(&change.new)
+                && change.old != change.new
+        })
+        .map(|change| change.new.clone())
+        .collect()
+}
+
+fn apply_cherry_pick_complete_rewrite(
+    repo: &crate::git::repository::Repository,
+    sources: &[String],
+    new_commits: &[String],
+) -> Result<(), GitAiError> {
+    let pairs =
+        crate::authorship::rewrite_cherry_pick::match_cherry_pick_pairs(repo, sources, new_commits);
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    let (src, dst): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+    crate::authorship::rewrite::handle_rewrite_event(
+        repo,
+        crate::authorship::rewrite::RewriteEvent::CherryPickComplete {
+            sources: src,
+            new_commits: dst,
+        },
+    )
+}
+
+fn apply_cherry_pick_no_commit_rewrite(
+    repo: &crate::git::repository::Repository,
+    sources: &[String],
+    new_head: &str,
+) -> Result<(), GitAiError> {
+    if sources.is_empty() || new_head.is_empty() {
+        return Ok(());
+    }
+    let mappings = sources
+        .iter()
+        .map(|source| (source.clone(), new_head.to_string()))
+        .collect::<Vec<_>>();
+    crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, sources);
+    crate::authorship::rewrite::shift_authorship_notes_merging_existing(repo, &mappings)
 }
 
 fn strict_rebase_original_head_from_command(
@@ -1466,19 +1433,7 @@ fn strict_rebase_original_head_from_command(
         return Some(old_head);
     }
 
-    cmd.ref_changes
-        .iter()
-        .find(|change| {
-            change.reference == "ORIG_HEAD"
-                && is_valid_oid(&change.new)
-                && !is_zero_oid(&change.new)
-        })
-        .map(|change| change.new.clone())
-        .or_else(|| {
-            cmd.worktree
-                .as_ref()
-                .and_then(|worktree| resolve_rebase_original_head_for_worktree(worktree))
-        })
+    None
 }
 
 fn explicit_rebase_branch_ref_name(branch_spec: &str) -> Option<String> {
@@ -1849,6 +1804,12 @@ struct PendingSquashMerge {
 }
 
 #[derive(Debug, Clone)]
+struct PendingCherryPickNoCommit {
+    source_commits: Vec<String>,
+    head: String,
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum RecentReplayPrerequisite {
     CheckoutSwitchRename {
@@ -1889,6 +1850,7 @@ pub struct ActorDaemonCoordinator {
     >,
     pending_rebase_original_head_by_worktree: Mutex<HashMap<String, (String, Option<String>)>>,
     pending_cherry_pick_sources_by_worktree: Mutex<HashMap<String, Vec<String>>>,
+    pending_cherry_pick_no_commit_by_worktree: Mutex<HashMap<String, PendingCherryPickNoCommit>>,
     pending_squash_merge_by_worktree: Mutex<HashMap<String, PendingSquashMerge>>,
     inflight_effects_by_family: Mutex<HashMap<String, usize>>,
     /// Files with an in-flight AI edit (PreFileEdit received, PostFileEdit not yet completed).
@@ -1974,6 +1936,7 @@ impl ActorDaemonCoordinator {
             backend,
             pending_rebase_original_head_by_worktree: Mutex::new(HashMap::new()),
             pending_cherry_pick_sources_by_worktree: Mutex::new(HashMap::new()),
+            pending_cherry_pick_no_commit_by_worktree: Mutex::new(HashMap::new()),
             pending_squash_merge_by_worktree: Mutex::new(HashMap::new()),
             inflight_effects_by_family: Mutex::new(HashMap::new()),
             pending_ai_edits_by_family: Mutex::new(HashMap::new()),
@@ -3479,6 +3442,60 @@ impl ActorDaemonCoordinator {
             .unwrap_or_default())
     }
 
+    fn set_pending_cherry_pick_no_commit_for_worktree(
+        &self,
+        worktree: &Path,
+        source_commits: Vec<String>,
+        head: String,
+    ) -> Result<(), GitAiError> {
+        let mut map = self
+            .pending_cherry_pick_no_commit_by_worktree
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("pending cherry-pick no-commit map lock poisoned".to_string())
+            })?;
+        let key = Self::rewrite_worktree_key(worktree);
+        if source_commits.is_empty() || head.is_empty() {
+            map.remove(&key);
+        } else {
+            map.insert(
+                key,
+                PendingCherryPickNoCommit {
+                    source_commits,
+                    head,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn clear_pending_cherry_pick_no_commit_for_worktree(
+        &self,
+        worktree: &Path,
+    ) -> Result<(), GitAiError> {
+        let mut map = self
+            .pending_cherry_pick_no_commit_by_worktree
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("pending cherry-pick no-commit map lock poisoned".to_string())
+            })?;
+        map.remove(&Self::rewrite_worktree_key(worktree));
+        Ok(())
+    }
+
+    fn take_pending_cherry_pick_no_commit_for_worktree(
+        &self,
+        worktree: &Path,
+    ) -> Result<Option<PendingCherryPickNoCommit>, GitAiError> {
+        let mut map = self
+            .pending_cherry_pick_no_commit_by_worktree
+            .lock()
+            .map_err(|_| {
+                GitAiError::Generic("pending cherry-pick no-commit map lock poisoned".to_string())
+            })?;
+        Ok(map.remove(&Self::rewrite_worktree_key(worktree)))
+    }
+
     fn set_pending_squash_merge_for_worktree(
         &self,
         worktree: &Path,
@@ -3518,12 +3535,6 @@ impl ActorDaemonCoordinator {
                     .iter()
                     .find(|change| change.reference.starts_with("refs/heads/"))
                     .map(|change| change.old.clone())
-            })
-            .or_else(|| {
-                cmd.ref_changes
-                    .iter()
-                    .find(|change| change.reference == "ORIG_HEAD")
-                    .map(|change| change.new.clone())
             })
             .or_else(|| {
                 cmd.ref_changes
@@ -3912,10 +3923,7 @@ impl ActorDaemonCoordinator {
                     let pending_old_head =
                         strict_rebase_original_head_from_command(cmd, semantic_old_head);
                     if let Some(old_head) = pending_old_head {
-                        let rebase_onto = rebase_start
-                            .as_ref()
-                            .map(|(_, new)| new.clone())
-                            .or_else(|| resolve_rebase_onto_for_worktree(worktree));
+                        let rebase_onto = rebase_start.as_ref().map(|(_, new)| new.clone());
                         if std::env::var("GIT_AI_DEBUG_DAEMON_TRACE")
                             .ok()
                             .as_deref()
@@ -3945,9 +3953,24 @@ impl ActorDaemonCoordinator {
                 })?;
                 if cmd.invoked_args.iter().any(|arg| arg == "--abort") {
                     self.clear_pending_cherry_pick_sources_for_worktree(worktree)?;
+                    self.clear_pending_cherry_pick_no_commit_for_worktree(worktree)?;
                 } else if cmd.exit_code != 0 {
-                    let source_refs = cherry_pick_source_refs_from_command(cmd);
-                    self.set_pending_cherry_pick_sources_for_worktree(worktree, source_refs)?;
+                    let new_commits = cherry_pick_destination_commits(cmd);
+                    if !new_commits.is_empty() && !cmd.cherry_pick_source_oids.is_empty() {
+                        let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+                        let _ = apply_cherry_pick_complete_rewrite(
+                            &repo,
+                            &cmd.cherry_pick_source_oids,
+                            &new_commits,
+                        );
+                    }
+                    let remaining = cmd
+                        .cherry_pick_source_oids
+                        .iter()
+                        .skip(new_commits.len().min(cmd.cherry_pick_source_oids.len()))
+                        .cloned()
+                        .collect();
+                    self.set_pending_cherry_pick_sources_for_worktree(worktree, remaining)?;
                 }
             }
             // Fix #957: `checkout/switch --merge` exits with code 1 when it produces
@@ -4019,15 +4042,12 @@ impl ActorDaemonCoordinator {
                     crate::daemon::domain::SemanticEvent::CherryPickComplete {
                         original_head,
                         new_head,
+                        source_commits,
+                        new_commits,
                     } => {
                         if !new_head.is_empty() {
                             let repo = find_repository_in_path(&worktree)?;
-                            let mut sources =
-                                crate::authorship::rewrite_cherry_pick::expand_cherry_pick_sources(
-                                    &repo,
-                                    &cmd.invoked_args,
-                                );
-                            // For --continue, args don't contain source refs — use stored state
+                            let mut sources = source_commits.clone();
                             if sources.is_empty() {
                                 sources = self.take_pending_cherry_pick_sources_for_worktree(
                                     worktree.as_ref(),
@@ -4037,46 +4057,30 @@ impl ActorDaemonCoordinator {
                                     worktree.as_ref(),
                                 )?;
                             }
-                            let new_commits =
-                                crate::authorship::rewrite_cherry_pick::new_commits_since(
-                                    &repo,
-                                    original_head,
-                                );
-                            let pairs =
-                                crate::authorship::rewrite_cherry_pick::match_cherry_pick_pairs(
+                            let destinations = if new_commits.is_empty() {
+                                vec![new_head.clone()]
+                            } else {
+                                new_commits.clone()
+                            };
+                            if !sources.is_empty() && original_head != new_head {
+                                let _ = apply_cherry_pick_complete_rewrite(
                                     &repo,
                                     &sources,
-                                    &new_commits,
-                                );
-                            if !pairs.is_empty() {
-                                let (src, dst): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-                                let _ = crate::authorship::rewrite::handle_rewrite_event(
-                                    &repo,
-                                    crate::authorship::rewrite::RewriteEvent::CherryPickComplete {
-                                        sources: src,
-                                        new_commits: dst,
-                                    },
+                                    &destinations,
                                 );
                             }
                         }
                     }
                     crate::daemon::domain::SemanticEvent::CherryPickNoCommit {
-                        source_refs,
+                        source_commits,
                         head,
                     } => {
-                        if !head.is_empty() {
-                            let repo = find_repository_in_path(&worktree)?;
-                            let sources =
-                                crate::authorship::rewrite_cherry_pick::expand_cherry_pick_sources(
-                                    &repo,
-                                    source_refs,
-                                );
-                            if !sources.is_empty() {
-                                let _ =
-                                    crate::authorship::rewrite_cherry_pick::handle_cherry_pick_no_commit(
-                                        &repo, &sources, head,
-                                    );
-                            }
+                        if !head.is_empty() && !source_commits.is_empty() {
+                            self.set_pending_cherry_pick_no_commit_for_worktree(
+                                worktree.as_ref(),
+                                source_commits.clone(),
+                                head.clone(),
+                            )?;
                         }
                     }
                     crate::daemon::domain::SemanticEvent::MergeSquash { source_head, onto } => {
@@ -4277,6 +4281,27 @@ impl ActorDaemonCoordinator {
                                         %worktree,
                                         "commit post-commit side effect failed"
                                     );
+                                }
+                            }
+
+                            if cmd.primary_command.as_deref() == Some("commit")
+                                && let Some(pending) = self
+                                    .take_pending_cherry_pick_no_commit_for_worktree(
+                                        worktree.as_ref(),
+                                    )?
+                            {
+                                if base.as_deref().is_some_and(|base| base == pending.head) {
+                                    let _ = apply_cherry_pick_no_commit_rewrite(
+                                        &repo,
+                                        &pending.source_commits,
+                                        new_head,
+                                    );
+                                } else {
+                                    self.set_pending_cherry_pick_no_commit_for_worktree(
+                                        worktree.as_ref(),
+                                        pending.source_commits,
+                                        pending.head,
+                                    )?;
                                 }
                             }
                         }

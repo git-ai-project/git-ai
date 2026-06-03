@@ -52,6 +52,7 @@ pub struct NormalizedCommand {
     pub started_at_ns: u128,
     pub finished_at_ns: u128,
     pub stash_target_oid: Option<String>,
+    pub cherry_pick_source_oids: Vec<String>,
     pub ref_changes: Vec<RefChange>,
     pub confidence: Confidence,
 }
@@ -128,9 +129,11 @@ pub enum SemanticEvent {
     CherryPickComplete {
         original_head: String,
         new_head: String,
+        source_commits: Vec<String>,
+        new_commits: Vec<String>,
     },
     CherryPickNoCommit {
-        source_refs: Vec<String>,
+        source_commits: Vec<String>,
         head: String,
     },
     CherryPickAbort {

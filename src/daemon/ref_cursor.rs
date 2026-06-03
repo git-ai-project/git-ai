@@ -4,6 +4,7 @@ use crate::error::GitAiError;
 use crate::git::cli_parser::parse_git_cli_args;
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{git_dir_for_worktree, is_valid_git_oid};
+use crate::git::repository::{Repository, exec_git_allow_nonzero};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ pub struct RefCursor {
     family: FamilyKey,
     offsets: HashMap<String, u64>,
     stash_stack: Vec<String>,
+    pending_cherry_pick_source_oids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +79,7 @@ impl RefCursor {
             family,
             offsets: HashMap::new(),
             stash_stack: Vec::new(),
+            pending_cherry_pick_source_oids: Vec::new(),
         }
     }
 
@@ -136,19 +139,7 @@ impl RefCursor {
                 &["merge"],
                 ExpectedTransition::from_state_and_working_logs(cmd, state),
             ),
-            "cherry-pick" => {
-                let args = command_args(cmd);
-                if args.iter().any(|arg| arg == "--no-commit" || arg == "-n") {
-                    Ok(())
-                } else {
-                    self.consume_head_span_for_command(
-                        cmd,
-                        state,
-                        &["cherry-pick:", "commit:", "commit (cherry-pick):"],
-                        ExpectedTransition::from_state_and_working_logs(cmd, state),
-                    )
-                }
-            }
+            "cherry-pick" => self.enrich_cherry_pick(cmd, state),
             "rebase" => self.consume_rebase_transition(cmd, state),
             "pull" => self.consume_pull_transition(cmd, state),
             "branch" => self.enrich_branch(cmd, state),
@@ -178,6 +169,75 @@ impl RefCursor {
         let expected = ExpectedTransition::from_state_and_working_logs(cmd, state)
             .with_reflog_messages(commit_reflog_messages(&args, amend));
         self.consume_head_transition_for_command(cmd, state, prefixes, expected)
+    }
+
+    fn enrich_cherry_pick(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<(), GitAiError> {
+        let args = command_args(cmd);
+        if args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--abort" | "--quit"))
+        {
+            self.pending_cherry_pick_source_oids.clear();
+            return Ok(());
+        }
+
+        let is_no_commit = args.iter().any(|arg| arg == "--no-commit" || arg == "-n");
+        let is_continue = args.iter().any(|arg| arg == "--continue");
+        let is_skip = args.iter().any(|arg| arg == "--skip");
+
+        if is_skip && !self.pending_cherry_pick_source_oids.is_empty() {
+            self.pending_cherry_pick_source_oids.remove(0);
+        }
+
+        let explicit_sources = if is_continue || is_skip {
+            Vec::new()
+        } else {
+            resolve_cherry_pick_source_oids(cmd, state)?
+        };
+        cmd.cherry_pick_source_oids = if explicit_sources.is_empty() {
+            self.pending_cherry_pick_source_oids.clone()
+        } else {
+            explicit_sources
+        };
+
+        if is_no_commit {
+            return Ok(());
+        }
+
+        let source_limit = cmd.cherry_pick_source_oids.len().max(1);
+        self.consume_head_span_for_command_limited(
+            cmd,
+            state,
+            &["cherry-pick:", "commit:", "commit (cherry-pick):"],
+            ExpectedTransition::from_state_and_working_logs(cmd, state),
+            source_limit,
+        )?;
+
+        let applied_count = cmd
+            .ref_changes
+            .iter()
+            .filter(|change| change.reference == "HEAD")
+            .count();
+        if cmd.exit_code != 0 {
+            self.pending_cherry_pick_source_oids = cmd
+                .cherry_pick_source_oids
+                .iter()
+                .skip(applied_count.min(cmd.cherry_pick_source_oids.len()))
+                .cloned()
+                .collect();
+        } else if is_continue
+            || is_skip
+            || !cmd.cherry_pick_source_oids.is_empty()
+            || applied_count > 0
+        {
+            self.pending_cherry_pick_source_oids.clear();
+        }
+
+        Ok(())
     }
 
     fn enrich_branch(
@@ -257,7 +317,7 @@ impl RefCursor {
         new_reference: String,
         changes: &mut Vec<RefChange>,
     ) -> Result<(), GitAiError> {
-        let lifecycle = self.latest_branch_lifecycle_record(&new_reference, kind)?;
+        let lifecycle = self.consume_branch_lifecycle_record(&new_reference, kind)?;
         let source_reference = old_reference.or_else(|| {
             lifecycle
                 .as_ref()
@@ -268,7 +328,6 @@ impl RefCursor {
             .and_then(|reference| state.refs.get(reference).cloned())
             .or_else(|| lifecycle.as_ref().map(|record| record.oid.clone()));
         let Some(source_oid) = source_oid.filter(|oid| valid_non_zero_oid(oid)) else {
-            self.advance_common_ref_cursor_to_log_end(&new_reference)?;
             return Ok(());
         };
 
@@ -297,7 +356,6 @@ impl RefCursor {
                 new: source_oid,
             });
         }
-        self.advance_common_ref_cursor_to_log_end(&new_reference)?;
         Ok(())
     }
 
@@ -430,7 +488,7 @@ impl RefCursor {
             .clone()
             .or_else(|| self.resolve_stash_target_at_cursor(target).ok().flatten());
         let Some(target_oid) = target_oid else {
-            self.advance_common_ref_cursor_to_log_end("refs/stash")?;
+            self.sync_common_ref_cursor_to_log_end_after_rewrite("refs/stash")?;
             return Ok(());
         };
 
@@ -450,7 +508,7 @@ impl RefCursor {
             cmd.stash_target_oid = Some(target_oid);
         }
 
-        self.advance_common_ref_cursor_to_log_end("refs/stash")?;
+        self.sync_common_ref_cursor_to_log_end_after_rewrite("refs/stash")?;
         Ok(())
     }
 
@@ -511,11 +569,12 @@ impl RefCursor {
         let action = pull_reflog_action(cmd);
         let prefixes = pull_reflog_message_prefixes(&action);
         let prefix_refs = prefixes.iter().map(String::as_str).collect::<Vec<_>>();
-        self.consume_head_span_for_command(
+        self.consume_pull_head_span_for_action(
             cmd,
             state,
             &prefix_refs,
             ExpectedTransition::from_state_and_working_logs(cmd, state),
+            &action,
         )
     }
 
@@ -537,19 +596,22 @@ impl RefCursor {
         let new = entry.new.clone();
         let mut changes = vec![entry_to_ref_change(&entry)];
         self.consume_common_refs_matching_transition(&old, &new, &mut changes)?;
-        self.consume_aux_refs_for_head_move(&old, &new, &mut changes)?;
         dedup_ref_changes(&mut changes);
         cmd.ref_changes = changes;
         Ok(())
     }
 
-    fn consume_head_span_for_command(
+    fn consume_head_span_for_command_limited(
         &mut self,
         cmd: &mut NormalizedCommand,
         _state: &FamilyState,
         message_prefixes: &[&str],
         expected: ExpectedTransition,
+        limit: usize,
     ) -> Result<(), GitAiError> {
+        if limit == 0 {
+            return Ok(());
+        }
         let Some(first) =
             self.find_head_entry(cmd.worktree.as_deref(), message_prefixes, expected)?
         else {
@@ -561,18 +623,71 @@ impl RefCursor {
         let mut changes = vec![entry_to_ref_change(&first)];
         self.consume_entry(&first);
 
-        while let Some(next) = self.find_head_entry(
-            cmd.worktree.as_deref(),
-            message_prefixes,
-            ExpectedTransition::default(),
-        )? {
+        while changes.len() < limit
+            && let Some(next) = self.find_head_entry(
+                cmd.worktree.as_deref(),
+                message_prefixes,
+                ExpectedTransition {
+                    old_oids: [new.clone()].into_iter().collect(),
+                    new_oid: None,
+                    messages: HashSet::new(),
+                },
+            )?
+        {
             new = next.new.clone();
             self.consume_entry(&next);
             changes.push(entry_to_ref_change(&next));
         }
 
         self.consume_common_refs_matching_transition(&old, &new, &mut changes)?;
-        self.consume_aux_refs_for_head_move(&old, &new, &mut changes)?;
+        dedup_ref_changes(&mut changes);
+        cmd.ref_changes = changes;
+        Ok(())
+    }
+
+    fn consume_pull_head_span_for_action(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        _state: &FamilyState,
+        message_prefixes: &[&str],
+        expected: ExpectedTransition,
+        action: &str,
+    ) -> Result<(), GitAiError> {
+        let Some(first) =
+            self.find_head_entry(cmd.worktree.as_deref(), message_prefixes, expected)?
+        else {
+            return Ok(());
+        };
+
+        let old = first.old.clone();
+        let mut new = first.new.clone();
+        let mut changes = vec![entry_to_ref_change(&first)];
+        let mut consumed_finish = pull_reflog_action_state(&first.message, action).is_none()
+            || pull_reflog_action_is(&first.message, action, "finish");
+        self.consume_entry(&first);
+
+        while !consumed_finish
+            && let Some(next) = self.find_head_entry(
+                cmd.worktree.as_deref(),
+                message_prefixes,
+                ExpectedTransition {
+                    old_oids: [new.clone()].into_iter().collect(),
+                    new_oid: None,
+                    messages: HashSet::new(),
+                },
+            )?
+        {
+            if pull_reflog_action_starts_new_command(&next.message, action) {
+                break;
+            }
+            new = next.new.clone();
+            consumed_finish = pull_reflog_action_is(&next.message, action, "finish");
+            self.consume_entry(&next);
+            changes.push(entry_to_ref_change(&next));
+        }
+
+        self.consume_common_refs_matching_transition(&old, &new, &mut changes)?;
+        self.consume_common_refs_with_new(&new, message_prefixes, &mut changes)?;
         dedup_ref_changes(&mut changes);
         cmd.ref_changes = changes;
         Ok(())
@@ -685,27 +800,6 @@ impl RefCursor {
         Ok(())
     }
 
-    fn consume_aux_refs_for_head_move(
-        &mut self,
-        old: &str,
-        new: &str,
-        out: &mut Vec<RefChange>,
-    ) -> Result<(), GitAiError> {
-        let reference = "ORIG_HEAD";
-        let expected = ExpectedTransition {
-            old_oids: HashSet::new(),
-            new_oid: None,
-            messages: HashSet::new(),
-        };
-        if let Some(entry) = self.find_common_ref_entry(reference, expected, &[])?
-            && (entry.new == old || entry.new == new || entry.old == old)
-        {
-            self.consume_entry(&entry);
-            out.push(entry_to_ref_change(&entry));
-        }
-        Ok(())
-    }
-
     fn resolve_stash_target_at_cursor(
         &self,
         target: Option<&String>,
@@ -777,29 +871,41 @@ impl RefCursor {
         self.offsets.insert(entry.key.clone(), entry.end_offset);
     }
 
-    fn latest_branch_lifecycle_record(
-        &self,
+    fn consume_branch_lifecycle_record(
+        &mut self,
         reference: &str,
         kind: BranchLifecycleKind,
     ) -> Result<Option<BranchLifecycleRecord>, GitAiError> {
         let path = self.common_dir().join("logs").join(reference);
-        let records = read_reflog_records(&path, Some(0))?;
-        Ok(records.into_iter().rev().find_map(|record| {
-            parse_branch_lifecycle_message(kind, &record.message).and_then(
-                |(old_reference, new_reference)| {
-                    if new_reference != reference {
-                        return None;
-                    }
-                    Some(BranchLifecycleRecord {
-                        old_reference,
-                        oid: record.new,
-                    })
-                },
-            )
-        }))
+        let key = common_key(reference);
+        let entries = read_reflog_entries(
+            key.clone(),
+            &path,
+            reference,
+            self.offsets.get(&key).copied(),
+        )?;
+        for entry in entries {
+            let Some((old_reference, new_reference)) =
+                parse_branch_lifecycle_message(kind, &entry.message)
+            else {
+                continue;
+            };
+            if new_reference != reference {
+                continue;
+            }
+            self.consume_entry(&entry);
+            return Ok(Some(BranchLifecycleRecord {
+                old_reference,
+                oid: entry.new,
+            }));
+        }
+        Ok(None)
     }
 
-    fn advance_common_ref_cursor_to_log_end(&mut self, reference: &str) -> Result<(), GitAiError> {
+    fn sync_common_ref_cursor_to_log_end_after_rewrite(
+        &mut self,
+        reference: &str,
+    ) -> Result<(), GitAiError> {
         let key = common_key(reference);
         let path = self.common_dir().join("logs").join(reference);
         match fs::metadata(path) {
@@ -954,6 +1060,215 @@ fn commit_subject(message: &str) -> Option<String> {
         .map(|line| line.to_string())
 }
 
+fn resolve_cherry_pick_source_oids(
+    cmd: &NormalizedCommand,
+    state: &FamilyState,
+) -> Result<Vec<String>, GitAiError> {
+    let Some(worktree) = cmd.worktree.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    for source in cherry_pick_source_args(&command_args(cmd)) {
+        let resolved = if cherry_pick_source_is_range(source) {
+            expand_cherry_pick_range(&repo, source, &state.refs)?
+        } else {
+            resolve_cherry_pick_revision(&repo, source, &state.refs)?
+                .into_iter()
+                .collect()
+        };
+        for oid in resolved {
+            if seen.insert(oid.clone()) {
+                out.push(oid);
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+fn cherry_pick_source_args(args: &[String]) -> Vec<&str> {
+    let args = if args.first().is_some_and(|arg| arg == "cherry-pick") {
+        &args[1..]
+    } else {
+        args
+    };
+    let mut sources = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        if arg == "--" {
+            sources.extend(args[idx + 1..].iter().map(String::as_str));
+            break;
+        }
+        if matches!(arg, "--abort" | "--continue" | "--quit" | "--skip") {
+            return Vec::new();
+        }
+        if matches!(
+            arg,
+            "-m" | "--mainline" | "-X" | "--strategy-option" | "--strategy" | "--gpg-sign"
+        ) {
+            idx = idx.saturating_add(2);
+            continue;
+        }
+        if arg.starts_with("--mainline=")
+            || arg.starts_with("--strategy=")
+            || arg.starts_with("--strategy-option=")
+            || arg.starts_with("--gpg-sign=")
+            || arg.starts_with("-m")
+            || arg.starts_with("-X")
+            || arg.starts_with("-S")
+        {
+            idx += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        if !arg.is_empty() {
+            sources.push(arg);
+        }
+        idx += 1;
+    }
+    sources
+}
+
+fn cherry_pick_source_is_range(source: &str) -> bool {
+    source.contains("..")
+}
+
+fn expand_cherry_pick_range(
+    repo: &Repository,
+    source: &str,
+    refs: &HashMap<String, String>,
+) -> Result<Vec<String>, GitAiError> {
+    let Some(range) = concretize_revision_range(source, refs) else {
+        return Ok(Vec::new());
+    };
+    let mut args = repo.global_args_for_exec();
+    args.extend(["rev-list".to_string(), "--reverse".to_string(), range]);
+    let output = exec_git_allow_nonzero(&args)?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| is_valid_git_oid(line))
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn resolve_cherry_pick_revision(
+    repo: &Repository,
+    source: &str,
+    refs: &HashMap<String, String>,
+) -> Result<Option<String>, GitAiError> {
+    if is_valid_git_oid(source) {
+        return Ok(Some(source.to_string()));
+    }
+    let Some(expr) = concretize_revision_expr(source, refs) else {
+        return Ok(None);
+    };
+    rev_parse_commit(repo, &expr)
+}
+
+fn rev_parse_commit(repo: &Repository, expr: &str) -> Result<Option<String>, GitAiError> {
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "rev-parse".to_string(),
+        "--verify".to_string(),
+        format!("{expr}^{{commit}}"),
+    ]);
+    let output = exec_git_allow_nonzero(&args)?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(is_valid_git_oid(&resolved).then_some(resolved))
+}
+
+fn concretize_revision_range(source: &str, refs: &HashMap<String, String>) -> Option<String> {
+    let (left, sep, right) = if let Some((left, right)) = source.split_once("...") {
+        (left, "...", right)
+    } else {
+        let (left, right) = source.split_once("..")?;
+        (left, "..", right)
+    };
+    let left = if left.is_empty() {
+        refs.get("HEAD").cloned()
+    } else {
+        concretize_revision_expr(left, refs)
+    }?;
+    let right = if right.is_empty() {
+        refs.get("HEAD").cloned()
+    } else {
+        concretize_revision_expr(right, refs)
+    }?;
+    Some(format!("{left}{sep}{right}"))
+}
+
+fn concretize_revision_expr(expr: &str, refs: &HashMap<String, String>) -> Option<String> {
+    if expr.is_empty() {
+        return refs.get("HEAD").cloned();
+    }
+    if is_valid_git_oid(expr) || is_hex_oid_prefix(expr) {
+        return Some(expr.to_string());
+    }
+    if let Some(oid) = resolve_ref_from_state(expr, refs) {
+        return Some(oid);
+    }
+    let (base, suffix) = split_revision_suffix(expr);
+    if suffix.is_empty() {
+        return None;
+    }
+    let base_oid = if base.is_empty() {
+        refs.get("HEAD").cloned()
+    } else if is_valid_git_oid(base) || is_hex_oid_prefix(base) {
+        Some(base.to_string())
+    } else {
+        resolve_ref_from_state(base, refs)
+    }?;
+    Some(format!("{base_oid}{suffix}"))
+}
+
+fn split_revision_suffix(expr: &str) -> (&str, &str) {
+    let idx = expr
+        .char_indices()
+        .find_map(|(idx, ch)| matches!(ch, '~' | '^').then_some(idx))
+        .unwrap_or(expr.len());
+    expr.split_at(idx)
+}
+
+fn resolve_ref_from_state(name: &str, refs: &HashMap<String, String>) -> Option<String> {
+    if name == "HEAD" || name == "@" {
+        return refs
+            .get("HEAD")
+            .filter(|oid| valid_non_zero_oid(oid))
+            .cloned();
+    }
+    if let Some(value) = refs.get(name).filter(|oid| valid_non_zero_oid(oid)) {
+        return Some(value.clone());
+    }
+    for candidate in [
+        format!("refs/heads/{name}"),
+        format!("refs/remotes/{name}"),
+        format!("refs/tags/{name}"),
+    ] {
+        if let Some(value) = refs.get(&candidate).filter(|oid| valid_non_zero_oid(oid)) {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+
+fn is_hex_oid_prefix(value: &str) -> bool {
+    (4..=64).contains(&value.len()) && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
 fn pull_reflog_action(cmd: &NormalizedCommand) -> String {
     let raw_args = normalized_args(&cmd.raw_argv);
     let parsed = parse_git_cli_args(&raw_args);
@@ -986,6 +1301,25 @@ fn pull_reflog_message_prefixes(action: &str) -> Vec<String> {
         return vec!["pull:".to_string(), "pull (".to_string()];
     }
     vec![format!("{}:", action), format!("{} ", action)]
+}
+
+fn pull_reflog_action_state<'a>(message: &'a str, action: &str) -> Option<&'a str> {
+    let rest = message.strip_prefix(action)?;
+    let open = rest.find('(')?;
+    let after_open = &rest[open + 1..];
+    let close = after_open.find("):")?;
+    Some(&after_open[..close])
+}
+
+fn pull_reflog_action_is(message: &str, action: &str, expected: &str) -> bool {
+    pull_reflog_action_state(message, action).is_some_and(|state| state == expected)
+}
+
+fn pull_reflog_action_starts_new_command(message: &str, action: &str) -> bool {
+    matches!(
+        pull_reflog_action_state(message, action),
+        Some("start" | "continue" | "skip" | "abort" | "quit" | "finish")
+    )
 }
 
 fn rebase_reflog_action(message: &str) -> Option<&str> {
@@ -1513,7 +1847,7 @@ fn command_uses_ref_cursor(primary: &str) -> bool {
 fn command_can_move_refs_on_nonzero(primary: Option<&str>) -> bool {
     matches!(
         primary,
-        Some("checkout" | "switch" | "stash" | "rebase" | "pull" | "branch")
+        Some("checkout" | "switch" | "stash" | "rebase" | "pull" | "branch" | "cherry-pick")
     )
 }
 

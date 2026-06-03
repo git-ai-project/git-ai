@@ -61,19 +61,16 @@ impl CommandAnalyzer for HistoryAnalyzer {
                         head: current_head_from_ref_data(cmd, state.refs).unwrap_or_default(),
                     });
                 } else if args.iter().any(|arg| arg == "--no-commit" || arg == "-n") {
-                    let source_refs: Vec<String> = args
-                        .iter()
-                        .filter(|arg| !arg.starts_with('-') && !arg.is_empty())
-                        .cloned()
-                        .collect();
                     events.push(SemanticEvent::CherryPickNoCommit {
-                        source_refs,
+                        source_commits: cmd.cherry_pick_source_oids.clone(),
                         head: current_head_from_ref_data(cmd, state.refs).unwrap_or_default(),
                     });
                 } else if let Some((old_head, new_head)) = head_change(cmd, state.refs) {
                     events.push(SemanticEvent::CherryPickComplete {
                         original_head: old_head,
                         new_head,
+                        source_commits: cmd.cherry_pick_source_oids.clone(),
+                        new_commits: cherry_pick_new_commits(cmd),
                     });
                 }
             }
@@ -300,6 +297,15 @@ fn single_branch_ref_change(cmd: &NormalizedCommand) -> Option<(String, String)>
     change_span(&branch_refs)
 }
 
+fn cherry_pick_new_commits(cmd: &NormalizedCommand) -> Vec<String> {
+    cmd.ref_changes
+        .iter()
+        .filter(|change| change.reference == "HEAD")
+        .filter_map(valid_ref_transition)
+        .map(|(_, new)| new)
+        .collect()
+}
+
 fn rebase_change(
     cmd: &NormalizedCommand,
     refs: &std::collections::HashMap<String, String>,
@@ -408,6 +414,7 @@ mod tests {
             started_at_ns: 1,
             finished_at_ns: 2,
             stash_target_oid: None,
+            cherry_pick_source_oids: Vec::new(),
             ref_changes: vec![RefChange {
                 reference: "HEAD".to_string(),
                 old: "a".to_string(),
@@ -899,7 +906,8 @@ mod tests {
                 event,
                 SemanticEvent::CherryPickComplete {
                     original_head,
-                    new_head
+                    new_head,
+                    ..
                 } if original_head == "a" && new_head == "d"
             )),
             "expected cherry-pick span event, got {:?}",

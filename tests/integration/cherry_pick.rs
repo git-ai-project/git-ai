@@ -5,6 +5,7 @@ use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 use git_ai::authorship::working_log::AgentId;
 use git_ai::git::refs::notes_add;
 use std::collections::HashMap;
+use std::fs;
 
 /// Test cherry-picking a single AI-authored commit
 #[test]
@@ -826,6 +827,38 @@ fn test_cherry_pick_from_remote_without_prefetched_notes() {
     target_file.assert_lines_and_blame(crate::lines!["base".ai(), "AI line".ai(),]);
 }
 
+#[test]
+fn test_cherry_pick_no_commit_defers_to_final_commit_tree() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("file.txt");
+
+    fs::write(&file_path, "base\n").unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+    let main_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    fs::write(&file_path, "base\nAI picked line\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "file.txt"]).unwrap();
+    repo.stage_all_and_commit("ai source").unwrap();
+    let source_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    repo.git(&["checkout", &main_branch]).unwrap();
+    repo.git(&["cherry-pick", "--no-commit", &source_commit])
+        .unwrap();
+
+    fs::write(&file_path, "base\nAI picked line\nlate untracked line\n").unwrap();
+    repo.git(&["add", "file.txt"]).unwrap();
+    repo.commit("commit no-commit cherry-pick with later edit")
+        .unwrap();
+
+    let mut file = repo.filename("file.txt");
+    file.assert_committed_lines(crate::lines![
+        "base".unattributed_human(),
+        "AI picked line".ai(),
+        "late untracked line".unattributed_human(),
+    ]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_single_commit_cherry_pick,
     test_cherry_pick_preserves_human_only_commit_note_metadata,
@@ -840,4 +873,5 @@ crate::reuse_tests_in_worktree!(
     test_cherry_pick_bad_args_dont_corrupt_subsequent_attribution,
     test_cherry_pick_skip_preserves_subsequent_attribution,
     test_cherry_pick_from_remote_without_prefetched_notes,
+    test_cherry_pick_no_commit_defers_to_final_commit_tree,
 );

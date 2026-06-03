@@ -216,6 +216,21 @@ pub fn shift_authorship_notes(
     repo: &Repository,
     mappings: &[(String, String)],
 ) -> Result<(), GitAiError> {
+    shift_authorship_notes_with_existing_mode(repo, mappings, false)
+}
+
+pub fn shift_authorship_notes_merging_existing(
+    repo: &Repository,
+    mappings: &[(String, String)],
+) -> Result<(), GitAiError> {
+    shift_authorship_notes_with_existing_mode(repo, mappings, true)
+}
+
+fn shift_authorship_notes_with_existing_mode(
+    repo: &Repository,
+    mappings: &[(String, String)],
+    merge_existing_targets: bool,
+) -> Result<(), GitAiError> {
     use crate::authorship::hunk_shift::apply_hunk_shifts_to_file_attestation;
 
     tracing::debug!("shift_authorship_notes: {} mappings", mappings.len());
@@ -259,13 +274,19 @@ pub fn shift_authorship_notes(
     let mut pending: Vec<PendingShift> = Vec::new();
     let mut verbatim_writes: Vec<(String, String)> = Vec::new();
     let mut diff_pairs: Vec<(String, String)> = Vec::new();
+    let mut existing_by_target: HashMap<String, AuthorshipLog> = HashMap::new();
 
     for (source_sha, new_sha) in mappings {
-        // Skip if target already has non-empty attestations
         if let Some(existing_raw) = notes_map.get(new_sha) {
             if let Ok(existing_log) = AuthorshipLog::deserialize_from_string(existing_raw) {
                 if !existing_log.attestations.is_empty() {
-                    continue;
+                    if merge_existing_targets {
+                        existing_by_target
+                            .entry(new_sha.clone())
+                            .or_insert(existing_log);
+                    } else {
+                        continue;
+                    }
                 }
             } else {
                 continue;
@@ -277,7 +298,9 @@ pub fn shift_authorship_notes(
         };
 
         let Ok(log) = AuthorshipLog::deserialize_from_string(raw_note) else {
-            verbatim_writes.push((new_sha.clone(), raw_note.clone()));
+            if !merge_existing_targets {
+                verbatim_writes.push((new_sha.clone(), raw_note.clone()));
+            }
             continue;
         };
 
@@ -302,7 +325,7 @@ pub fn shift_authorship_notes(
     };
 
     // Apply shifts and merge logs that share a target commit
-    let mut merged_by_target: HashMap<String, AuthorshipLog> = HashMap::new();
+    let mut merged_by_target = existing_by_target;
 
     for shift in pending {
         let diff_result = &diff_results[shift.diff_pair_idx];
