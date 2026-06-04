@@ -48,6 +48,11 @@ use super::test_file::TestFile;
 const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 const DAEMON_TEST_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]
+const DAEMON_TEST_READY_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(not(windows))]
+const DAEMON_TEST_READY_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+const DAEMON_TEST_READY_CONTROL_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(windows)]
 const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(not(windows))]
 const DAEMON_TEST_SYNC_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -284,7 +289,8 @@ impl DaemonProcess {
     fn wait_until_ready(&self, repo_path: &Path, child: &mut Child) -> Result<(), String> {
         let repo_working_dir = repo_path.to_string_lossy().to_string();
         let mut last_status_error: Option<String> = None;
-        for _ in 0..1200 {
+        let start = Instant::now();
+        while start.elapsed() < DAEMON_TEST_READY_TOTAL_TIMEOUT {
             if let Some(status) = child
                 .try_wait()
                 .map_err(|e| format!("failed polling daemon child status: {}", e))?
@@ -318,7 +324,7 @@ impl DaemonProcess {
                 &ControlRequest::StatusFamily {
                     repo_working_dir: repo_working_dir.clone(),
                 },
-                DAEMON_TEST_CONTROL_TIMEOUT,
+                DAEMON_TEST_READY_CONTROL_TIMEOUT,
             );
             match status {
                 Ok(response) => {
@@ -351,7 +357,8 @@ impl DaemonProcess {
 
         let stderr_tail = self.read_stderr_tail();
         Err(format!(
-            "daemon did not become ready at {} (trace socket: {}, last_status_error={})",
+            "daemon did not become ready within {:?} at {} (trace socket: {}, last_status_error={})",
+            DAEMON_TEST_READY_TOTAL_TIMEOUT,
             self.control_socket_path.display(),
             self.trace_socket_path.display(),
             last_status_error.as_deref().unwrap_or("none")
