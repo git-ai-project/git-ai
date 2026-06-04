@@ -119,8 +119,7 @@ pub fn init_daemon_telemetry_handle() -> DaemonTelemetryInitResult {
         return DaemonTelemetryInitResult::Skipped;
     }
 
-    // In test builds, only connect if the daemon control socket is explicitly set
-    // (i.e., wrapper-daemon mode where the test harness manages the daemon).
+    // In test builds, only connect if the daemon control socket is explicitly set.
     #[cfg(any(test, feature = "test-support"))]
     {
         let socket_path = std::env::var("GIT_AI_DAEMON_CONTROL_SOCKET")

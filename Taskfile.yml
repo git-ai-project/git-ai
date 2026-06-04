@@ -57,32 +57,18 @@ tasks:
     cmds:
       - cargo test {{.CARGO_TEST_ARGS}} {{.TEST_FILTER}} -- --test-threads {{.TEST_THREADS}} {{.TEST_BINARY_ARGS}} {{.SUBTASK_BINARY_ARGS}}
     env:
-      GIT_AI_TEST_GIT_MODE: "{{.GIT_AI_TEST_GIT_MODE}}"
       GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: "{{.TEST_THREADS}}"
 
   test:
-    desc: Run unit tests (daemon mode by default)
+    desc: Run tests
     cmds:
       - task: test:base
-        vars:
-          GIT_AI_TEST_GIT_MODE: daemon
-
-  test:wrapper-daemon:
-    desc: |
-      Run unit tests in wrapper-daemon mode. Wrapper-daemon mode is where we simulate `git` pointing to the git-ai-wrapped git, but
-      all git-ai processing is still done in the shared daemon with some extra context from the wrapper that is passed over the control
-      socket. Do not use this test mode unless explicitly requested, use `task test` for normal testing purposes.
-    cmds:
-      - task: test:base
-        vars:
-          GIT_AI_TEST_GIT_MODE: wrapper-daemon
 
   test:fuzz:
     desc: Run the attribution fuzzer (fixed seeds only)
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_seed_
 
   test:fuzz:all:
@@ -90,7 +76,6 @@ tasks:
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_
 
   test:fuzz:heavy:
@@ -98,7 +83,6 @@ tasks:
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_
           SUBTASK_BINARY_ARGS: "--nocapture"
 
@@ -107,7 +91,6 @@ tasks:
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_partial_stage_
 
   test:fuzz:destructive:
@@ -115,7 +98,6 @@ tasks:
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_destructive_
 
   test:fuzz:squash:
@@ -123,7 +105,6 @@ tasks:
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_squash_
 
   test:fuzz:combined:
@@ -131,7 +112,6 @@ tasks:
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_combined_
 
   test:fuzz:workflow:
@@ -139,7 +119,6 @@ tasks:
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_workflow_
 
   test:fuzz:marathon:
@@ -147,7 +126,6 @@ tasks:
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_marathon_
           SUBTASK_BINARY_ARGS: "--ignored"
 

@@ -139,7 +139,6 @@ test:fuzz:
   cmds:
     - task: test:base
       vars:
-        GIT_AI_TEST_GIT_MODE: daemon
         TEST_FILTER: fuzz_
 
 test:fuzz:heavy:
@@ -147,7 +146,6 @@ test:fuzz:heavy:
   cmds:
     - cargo test fuzz_ -- --test-threads 4 --nocapture
   env:
-    GIT_AI_TEST_GIT_MODE: daemon
     GIT_AI_FUZZ_OPS: "500"
 ```
 

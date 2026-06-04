@@ -2,7 +2,7 @@
 #[path = "integration/repos/mod.rs"]
 mod repos;
 
-use repos::test_repo::{GitTestMode, real_git_executable};
+use repos::test_repo::real_git_executable;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -36,13 +36,8 @@ fn run_git(args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-fn read_note_from_worktree(
-    repo_path: &Path,
-    commit_sha: &str,
-    mode: GitTestMode,
-) -> Option<String> {
-    repos::test_repo::TestRepo::new_at_path_with_mode(repo_path, mode)
-        .read_authorship_note(commit_sha)
+fn read_note_from_worktree(repo_path: &Path, commit_sha: &str) -> Option<String> {
+    repos::test_repo::TestRepo::new_at_path(repo_path).read_authorship_note(commit_sha)
 }
 
 worktree_test_wrappers! {
@@ -91,7 +86,7 @@ worktree_test_wrappers! {
             .git(&["clone", upstream_str.as_str(), clone_dir_str.as_str()])
             .expect("clone should succeed");
 
-        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha, TestRepo::git_mode());
+        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha);
         assert!(
             cloned_note.is_some(),
             "cloned repository should have fetched authorship notes for commit {}",
@@ -102,8 +97,6 @@ worktree_test_wrappers! {
 
 worktree_test_wrappers! {
     fn notes_sync_clone_relative_target_from_external_cwd_fetches_authorship_notes() {
-        // Hooks mode can't intercept clone (no repo exists to have hooks installed)
-
         let (local, upstream) = TestRepo::new_with_remote();
 
         fs::write(local.path().join("clone-relative-seed.txt"), "seed\n")
@@ -156,7 +149,7 @@ worktree_test_wrappers! {
             clone_dir.display()
         );
 
-        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha, TestRepo::git_mode());
+        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha);
         assert!(
             cloned_note.is_some(),
             "cloned repository should have fetched authorship notes for commit {}",
@@ -165,13 +158,10 @@ worktree_test_wrappers! {
     }
 }
 
-// Regression test: clone from a non-repo directory is the exact scenario that
-// triggered the wrapper state timeout bug. The wrapper has worktree=None so no
-// wrapper state is sent; the daemon must handle notes sync purely via trace2 events.
+// Regression test: clone from a non-repo directory must be handled from trace2
+// alone because there is no existing repository context for the clone target.
 worktree_test_wrappers! {
     fn notes_sync_clone_from_non_repo_directory_fetches_authorship_notes() {
-        // Hooks mode can't intercept clone (no repo exists to have hooks installed)
-
         let (local, upstream) = TestRepo::new_with_remote();
 
         fs::write(local.path().join("non-repo-clone-seed.txt"), "seed\n")
@@ -207,8 +197,7 @@ worktree_test_wrappers! {
             .expect("pushing notes should succeed");
 
         // Clone from a non-repo directory (not inside any git repository).
-        // This is the common production scenario and the one that triggers the
-        // wrapper state timeout because the wrapper can't determine a worktree.
+        // This is the common production scenario for first-time clones.
         let external_cwd = unique_temp_path("notes-sync-clone-non-repo-cwd");
         let _ = fs::remove_dir_all(&external_cwd);
         fs::create_dir_all(&external_cwd).expect("failed to create non-repo cwd");
@@ -230,7 +219,7 @@ worktree_test_wrappers! {
             clone_dir.display()
         );
 
-        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha, TestRepo::git_mode());
+        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha);
         assert!(
             cloned_note.is_some(),
             "cloned repository should have fetched authorship notes for commit {} (clone from non-repo directory)",
@@ -303,7 +292,7 @@ worktree_test_wrappers! {
             clone_dir.display()
         );
 
-        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha, TestRepo::git_mode());
+        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha);
         assert!(
             cloned_note.is_some(),
             "cloned repository should have fetched authorship notes for commit {} (absolute target from non-repo CWD)",
@@ -384,7 +373,7 @@ worktree_test_wrappers! {
             clone_dir.display()
         );
 
-        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha, TestRepo::git_mode());
+        let cloned_note = read_note_from_worktree(&clone_dir, &seed_sha);
         assert!(
             cloned_note.is_some(),
             "cloned repository should have fetched authorship notes for commit {} (implicit target from non-repo CWD)",
@@ -395,8 +384,6 @@ worktree_test_wrappers! {
 
 worktree_test_wrappers! {
     fn notes_sync_fetch_does_not_import_authorship_notes() {
-        let mode = TestRepo::git_mode();
-
         let (local, _upstream) = TestRepo::new_with_remote();
 
         fs::write(local.path().join("fetch-seed.txt"), "seed\n")
@@ -442,14 +429,11 @@ worktree_test_wrappers! {
             .expect("fetch should succeed");
 
         let fetched_note = local.read_authorship_note(&seed_sha);
-        match mode {
-            GitTestMode::Daemon | GitTestMode::WrapperDaemon => assert!(
-                fetched_note.is_none(),
-                "plain git fetch should not import authorship note for commit {} in {:?} mode",
-                seed_sha,
-                mode
-            ),
-        }
+        assert!(
+            fetched_note.is_none(),
+            "plain git fetch should not import authorship note for commit {}",
+            seed_sha
+        );
     }
 }
 
@@ -550,7 +534,7 @@ worktree_test_wrappers! {
 worktree_test_wrappers! {
     fn notes_sync_pull_fast_forward_syncs_only_selected_remote() {
         let (local, upstream) = TestRepo::new_with_remote();
-        let backup = repos::test_repo::TestRepo::new_bare_with_mode(TestRepo::git_mode());
+        let backup = repos::test_repo::TestRepo::new_bare();
         let default_branch = local.current_branch();
 
         fs::write(local.path().join("pull-base.txt"), "base\n")

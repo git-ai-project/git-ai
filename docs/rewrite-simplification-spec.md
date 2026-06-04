@@ -960,7 +960,7 @@ The majority of the test suite (~1,990 of 2,103 tests) uses `TestRepo.git_ai()` 
 - `tests/integration/install_hooks_comprehensive.rs` — 48 tests, tests deleted `install_hooks` module internals
 - `tests/integration/rebase_authorship_unit.rs` — 27 tests, tests deleted `rebase_authorship` functions directly
 - `tests/integration/git_alias_resolution.rs` — 14 tests, tests deleted `git_handlers::resolve_alias_invocation`
-- ~15-20 tests using `WrapperDaemon` mode across `async_mode.rs`, `daemon_mode.rs`, `notes_sync_regression.rs`
+- Wrapper-daemon test variants across `async_mode.rs`, `daemon_mode.rs`, `notes_sync_regression.rs`
 
 **Tests to REWRITE** (test surviving features via deleted paths):
 - `tests/integration/ci_squash_rebase.rs` — 14 tests, calls `rewrite_authorship_after_squash_or_rebase()` directly. Must be updated to call `handle_rewrite_event` or test via the CI module's public API.
@@ -1031,4 +1031,3 @@ Remove `rewrite_stash` from `src/feature_flags.rs` — the feature flag is vesti
 - All plumbing commands (update-ref, including --stdin) flow through the same detection
 - CI module continues to work via the new entrypoint
 - Authorship notes continue to be pushed to remotes on `git push`
-

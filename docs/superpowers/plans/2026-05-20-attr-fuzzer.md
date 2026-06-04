@@ -1021,15 +1021,12 @@ git commit -m "feat: add attribution fuzzer for e2e randomized testing"
 
 - [ ] **Step 1: Add fuzzer tasks to Taskfile.yml**
 
-Add after the existing `test:wrapper-daemon` task:
-
 ```yaml
   test:fuzz:
     desc: Run the attribution fuzzer (fixed seeds)
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_seed
 
   test:fuzz:all:
@@ -1037,7 +1034,6 @@ Add after the existing `test:wrapper-daemon` task:
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_
 
   test:fuzz:heavy:
@@ -1045,7 +1041,6 @@ Add after the existing `test:wrapper-daemon` task:
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: daemon
           TEST_FILTER: fuzz_
           NO_CAPTURE: "true"
 ```

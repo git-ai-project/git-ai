@@ -67,41 +67,6 @@ const TEST_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(120);
 const TEST_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GitTestMode {
-    Daemon,
-    WrapperDaemon,
-}
-
-impl GitTestMode {
-    pub fn from_env() -> Self {
-        let mode = std::env::var("GIT_AI_TEST_GIT_MODE")
-            .unwrap_or_else(|_| "daemon".to_string())
-            .to_lowercase();
-        Self::from_mode_name(&mode)
-    }
-
-    pub fn from_mode_name(mode: &str) -> Self {
-        match mode.to_lowercase().as_str() {
-            "daemon" | "trace-daemon" | "pure-daemon" => Self::Daemon,
-            "wrapper-daemon" => Self::WrapperDaemon,
-            _ => Self::Daemon,
-        }
-    }
-
-    pub fn uses_wrapper(self) -> bool {
-        matches!(self, Self::WrapperDaemon)
-    }
-
-    pub fn uses_hooks(self) -> bool {
-        false
-    }
-
-    pub fn uses_daemon(self) -> bool {
-        true
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DaemonTestScope {
     Shared,
     Dedicated,
@@ -791,17 +756,8 @@ fn create_file_symlink(target: &PathBuf, link: &PathBuf) -> std::io::Result<()> 
         .or_else(|_| std::fs::copy(target, link).map(|_| ()))
 }
 
-fn resolve_test_db_path(
-    base: &std::path::Path,
-    id: u64,
-    test_home: &std::path::Path,
-    git_mode: GitTestMode,
-) -> PathBuf {
-    if git_mode.uses_hooks() {
-        test_home.join(".git-ai").join("internal").join("db")
-    } else {
-        base.join(format!("{}-db", id))
-    }
+fn resolve_test_db_path(base: &std::path::Path, id: u64, _test_home: &std::path::Path) -> PathBuf {
+    base.join(format!("{}-db", id))
 }
 
 #[derive(Debug, Default)]
@@ -1066,7 +1022,6 @@ pub struct TestRepo {
     pub(crate) config_patch: Option<ConfigPatch>,
     test_db_path: PathBuf,
     test_home: PathBuf,
-    git_mode: GitTestMode,
     daemon_scope: DaemonTestScope,
     daemon_process: Option<Arc<DaemonProcess>>,
     /// When this TestRepo is backed by a linked worktree, holds the base repo path
@@ -1111,7 +1066,7 @@ impl TestRepo {
         if WORKTREE_MODE.with(|flag| flag.get()) {
             return Self::new_worktree_variant_with_daemon_scope(daemon_scope);
         }
-        Self::new_with_mode_and_daemon_scope(GitTestMode::from_env(), daemon_scope)
+        Self::new_with_daemon_scope_inner(daemon_scope)
     }
 
     pub fn new_dedicated_daemon() -> Self {
@@ -1181,10 +1136,7 @@ impl TestRepo {
         fs::write(&config_path, serialized).expect("failed to write test HOME config");
     }
 
-    fn sync_test_home_config_for_hooks(&self) {
-        if !self.git_mode.uses_hooks() && !self.git_mode.uses_daemon() {
-            return;
-        }
+    fn sync_test_home_config(&self) {
         self.write_test_config_to_home(&self.test_home);
         if let Some(daemon) = &self.daemon_process
             && daemon.daemon_home != self.test_home
@@ -1212,7 +1164,7 @@ impl TestRepo {
     }
 
     fn new_worktree_variant_with_daemon_scope(daemon_scope: DaemonTestScope) -> Self {
-        let mut base = Self::new_with_mode_and_daemon_scope(GitTestMode::from_env(), daemon_scope);
+        let mut base = Self::new_with_daemon_scope_inner(daemon_scope);
 
         let default_branch = default_branchname();
         let base_branch = base.current_branch();
@@ -1311,21 +1263,16 @@ impl TestRepo {
         let base_test_db_path = base.test_db_path.clone();
         let feature_flags = base.feature_flags.clone();
         let config_patch = base.config_patch.clone();
-        let git_mode = base.git_mode;
         let daemon_scope = base.daemon_scope;
         let daemon_process = base.daemon_process.take();
 
         // Prevent base Drop from running - we manage cleanup in the worktree Drop
         std::mem::forget(base);
 
-        let wt_test_db_path = if git_mode.uses_daemon() {
-            // Daemon mode uses a single process-scoped internal DB path.
-            // Reuse the base DB path for linked worktrees so test expectations and daemon writes align.
-            base_test_db_path.clone()
-        } else {
-            let wt_db_n: u64 = rng.random_range(0..10_000_000_000);
-            std::env::temp_dir().join(format!("{}-db", wt_db_n))
-        };
+        // Daemon tests use a single process-scoped internal DB path. Reuse
+        // the base DB path for linked worktrees so test expectations and
+        // daemon writes align.
+        let wt_test_db_path = base_test_db_path.clone();
 
         let mut repo = Self {
             path: worktree_path,
@@ -1333,7 +1280,6 @@ impl TestRepo {
             config_patch,
             test_db_path: wt_test_db_path,
             test_home: base_test_home,
-            git_mode,
             daemon_scope,
             daemon_process,
             _base_repo_path: Some(base_path),
@@ -1342,18 +1288,10 @@ impl TestRepo {
         };
 
         repo.apply_default_config_patch();
-        repo.setup_git_hooks_mode();
         repo
     }
 
-    pub fn new_with_mode(git_mode: GitTestMode) -> Self {
-        Self::new_with_mode_and_daemon_scope(git_mode, DaemonTestScope::Shared)
-    }
-
-    pub fn new_with_mode_and_daemon_scope(
-        git_mode: GitTestMode,
-        daemon_scope: DaemonTestScope,
-    ) -> Self {
+    fn new_with_daemon_scope_inner(daemon_scope: DaemonTestScope) -> Self {
         // Isolate this test binary's HOME before any git or git-ai subprocess is spawned.
         ensure_isolated_process_home();
 
@@ -1362,7 +1300,7 @@ impl TestRepo {
         let base = std::env::temp_dir();
         let path = base.join(n.to_string());
         let test_home = base.join(format!("{}-home", n));
-        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
+        let test_db_path = resolve_test_db_path(&base, n, &test_home);
 
         // Clone from cached template (git init + config + symbolic-ref already done)
         clone_template_to(&path);
@@ -1373,7 +1311,6 @@ impl TestRepo {
             config_patch: None,
             test_db_path,
             test_home,
-            git_mode,
             daemon_scope,
             daemon_process: None,
             _base_repo_path: None,
@@ -1383,7 +1320,6 @@ impl TestRepo {
 
         repo.apply_default_config_patch();
         repo.setup_daemon_mode();
-        repo.setup_git_hooks_mode();
 
         repo
     }
@@ -1396,8 +1332,7 @@ impl TestRepo {
         let base = std::env::temp_dir();
         let path = base.join(n.to_string());
         let test_home = base.join(format!("{}-home", n));
-        let git_mode = GitTestMode::from_env();
-        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
+        let test_db_path = resolve_test_db_path(&base, n, &test_home);
 
         clone_template_to(&path);
 
@@ -1407,7 +1342,6 @@ impl TestRepo {
             config_patch: None,
             test_db_path,
             test_home,
-            git_mode,
             daemon_scope: DaemonTestScope::Dedicated,
             daemon_process: None,
             _base_repo_path: None,
@@ -1426,31 +1360,23 @@ impl TestRepo {
         ));
         repo.test_db_path = daemon.test_db_path.clone();
         repo.daemon_process = Some(daemon);
-        repo.sync_test_home_config_for_hooks();
+        repo.sync_test_home_config();
 
-        repo.setup_git_hooks_mode();
         repo
     }
 
     pub fn new_worktree() -> Self {
-        Self::new_worktree_with_mode(GitTestMode::from_env())
+        Self::new_worktree_with_daemon_scope(DaemonTestScope::Shared)
     }
 
-    pub fn new_worktree_with_mode(git_mode: GitTestMode) -> Self {
-        Self::new_worktree_with_mode_and_daemon_scope(git_mode, DaemonTestScope::Shared)
-    }
-
-    pub fn new_worktree_with_mode_and_daemon_scope(
-        git_mode: GitTestMode,
-        daemon_scope: DaemonTestScope,
-    ) -> Self {
+    pub fn new_worktree_with_daemon_scope(daemon_scope: DaemonTestScope) -> Self {
         let mut rng = rand::rng();
         let n: u64 = rng.random_range(0..10000000000);
         let base = std::env::temp_dir();
         let main_path = base.join(format!("{}-main", n));
         let worktree_path = base.join(format!("{}-wt", n));
         let test_home = base.join(format!("{}-home", n));
-        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
+        let test_db_path = resolve_test_db_path(&base, n, &test_home);
 
         // Clone from cached template (git init + config + symbolic-ref already done)
         clone_template_to(&main_path);
@@ -1500,7 +1426,6 @@ impl TestRepo {
             config_patch: None,
             test_db_path,
             test_home,
-            git_mode,
             daemon_scope,
             daemon_process: None,
             _base_repo_path: Some(main_path),
@@ -1510,30 +1435,21 @@ impl TestRepo {
 
         repo.apply_default_config_patch();
         repo.setup_daemon_mode();
-        repo.setup_git_hooks_mode();
         repo
     }
 
     /// Create a standalone bare repository for testing
     pub fn new_bare() -> Self {
-        Self::new_bare_with_mode(GitTestMode::from_env())
+        Self::new_bare_with_daemon_scope(DaemonTestScope::Shared)
     }
 
-    /// Create a standalone bare repository for testing
-    pub fn new_bare_with_mode(git_mode: GitTestMode) -> Self {
-        Self::new_bare_with_mode_and_daemon_scope(git_mode, DaemonTestScope::Shared)
-    }
-
-    pub fn new_bare_with_mode_and_daemon_scope(
-        git_mode: GitTestMode,
-        daemon_scope: DaemonTestScope,
-    ) -> Self {
+    pub fn new_bare_with_daemon_scope(daemon_scope: DaemonTestScope) -> Self {
         let mut rng = rand::rng();
         let n: u64 = rng.random_range(0..10000000000);
         let base = std::env::temp_dir();
         let path = base.join(n.to_string());
         let test_home = base.join(format!("{}-home", n));
-        let test_db_path = resolve_test_db_path(&base, n, &test_home, git_mode);
+        let test_db_path = resolve_test_db_path(&base, n, &test_home);
 
         // Clone from cached bare template
         clone_bare_template_to(&path);
@@ -1544,7 +1460,6 @@ impl TestRepo {
             config_patch: None,
             test_db_path,
             test_home,
-            git_mode,
             daemon_scope,
             daemon_process: None,
             _base_repo_path: None,
@@ -1554,7 +1469,6 @@ impl TestRepo {
 
         let mut repo = repo;
         repo.setup_daemon_mode();
-        repo.setup_git_hooks_mode();
         repo
     }
 
@@ -1574,17 +1488,10 @@ impl TestRepo {
     /// mirror.git(&["push", "origin", "main"]);
     /// ```
     pub fn new_with_remote() -> (Self, Self) {
-        Self::new_with_remote_with_mode(GitTestMode::from_env())
+        Self::new_with_remote_with_daemon_scope(DaemonTestScope::Shared)
     }
 
-    pub fn new_with_remote_with_mode(git_mode: GitTestMode) -> (Self, Self) {
-        Self::new_with_remote_with_mode_and_daemon_scope(git_mode, DaemonTestScope::Shared)
-    }
-
-    pub fn new_with_remote_with_mode_and_daemon_scope(
-        git_mode: GitTestMode,
-        daemon_scope: DaemonTestScope,
-    ) -> (Self, Self) {
+    pub fn new_with_remote_with_daemon_scope(daemon_scope: DaemonTestScope) -> (Self, Self) {
         let mut rng = rand::rng();
         let base = std::env::temp_dir();
 
@@ -1592,8 +1499,7 @@ impl TestRepo {
         let upstream_n: u64 = rng.random_range(0..10000000000);
         let upstream_path = base.join(upstream_n.to_string());
         let upstream_test_home = base.join(format!("{}-home", upstream_n));
-        let upstream_test_db_path =
-            resolve_test_db_path(&base, upstream_n, &upstream_test_home, git_mode);
+        let upstream_test_db_path = resolve_test_db_path(&base, upstream_n, &upstream_test_home);
         clone_bare_template_to(&upstream_path);
 
         let mut upstream = Self {
@@ -1602,7 +1508,6 @@ impl TestRepo {
             config_patch: None,
             test_db_path: upstream_test_db_path,
             test_home: upstream_test_home,
-            git_mode,
             daemon_scope,
             daemon_process: None,
             _base_repo_path: None,
@@ -1617,8 +1522,7 @@ impl TestRepo {
         let mirror_n: u64 = rng.random_range(0..10000000000);
         let mirror_path = base.join(mirror_n.to_string());
         let mirror_test_home = base.join(format!("{}-home", mirror_n));
-        let mirror_test_db_path =
-            resolve_test_db_path(&base, mirror_n, &mirror_test_home, git_mode);
+        let mirror_test_db_path = resolve_test_db_path(&base, mirror_n, &mirror_test_home);
 
         let mut command = Command::new(real_git_executable());
         command.args([
@@ -1645,7 +1549,6 @@ impl TestRepo {
             config_patch: None,
             test_db_path: mirror_test_db_path,
             test_home: mirror_test_home,
-            git_mode,
             daemon_scope,
             daemon_process: None,
             _base_repo_path: None,
@@ -1662,29 +1565,19 @@ impl TestRepo {
         // The upstream side of new_with_remote() is a bare remote fixture. It is not the repo
         // under test for daemon mode, and bootstrapping the shared daemon against a bare repo
         // breaks the readiness handshake for this test process.
-        upstream.setup_git_hooks_mode();
-        mirror.setup_git_hooks_mode();
 
         (mirror, upstream)
     }
 
     pub fn new_at_path(path: &Path) -> Self {
-        Self::new_at_path_with_mode(path, GitTestMode::from_env())
+        Self::new_at_path_with_daemon_scope(path, DaemonTestScope::Shared)
     }
 
-    pub fn new_at_path_with_mode(path: &Path, git_mode: GitTestMode) -> Self {
-        Self::new_at_path_with_mode_and_daemon_scope(path, git_mode, DaemonTestScope::Shared)
-    }
-
-    pub fn new_at_path_with_mode_and_daemon_scope(
-        path: &Path,
-        git_mode: GitTestMode,
-        daemon_scope: DaemonTestScope,
-    ) -> Self {
+    pub fn new_at_path_with_daemon_scope(path: &Path, daemon_scope: DaemonTestScope) -> Self {
         let mut rng = rand::rng();
         let db_n: u64 = rng.random_range(0..10000000000);
         let test_home = std::env::temp_dir().join(format!("{}-home", db_n));
-        let test_db_path = resolve_test_db_path(&std::env::temp_dir(), db_n, &test_home, git_mode);
+        let test_db_path = resolve_test_db_path(&std::env::temp_dir(), db_n, &test_home);
 
         // Clone from cached template (git init + config + symbolic-ref already done).
         // If path already has a .git directory (e.g. a real repo cloned from GitHub),
@@ -1701,7 +1594,6 @@ impl TestRepo {
             config_patch: None,
             test_db_path,
             test_home,
-            git_mode,
             daemon_scope,
             daemon_process: None,
             _base_repo_path: None,
@@ -1711,7 +1603,6 @@ impl TestRepo {
 
         repo.apply_default_config_patch();
         repo.setup_daemon_mode();
-        repo.setup_git_hooks_mode();
         repo
     }
 
@@ -1761,9 +1652,6 @@ impl TestRepo {
     }
 
     fn setup_daemon_mode(&mut self) {
-        if !self.git_mode.uses_daemon() {
-            return;
-        }
         if self.daemon_process.is_some() {
             return;
         }
@@ -1778,7 +1666,7 @@ impl TestRepo {
         };
         self.test_db_path = daemon.test_db_path.clone();
         self.daemon_process = Some(daemon);
-        self.sync_test_home_config_for_hooks();
+        self.sync_test_home_config();
     }
 
     fn daemon_completion_log_path_for_family(&self, family_key: &str) -> PathBuf {
@@ -2273,33 +2161,6 @@ impl TestRepo {
         }
     }
 
-    fn setup_git_hooks_mode(&self) {
-        if !self.git_mode.uses_hooks() {
-            return;
-        }
-
-        self.sync_test_home_config_for_hooks();
-
-        let binary_path = get_binary_path();
-        let mut command = Command::new(binary_path);
-        command
-            .current_dir(&self.path)
-            .args(["git-hooks", "ensure"]);
-        self.configure_git_ai_env(&mut command);
-        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
-        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
-
-        let output = run_command_output(&mut command, "git-ai git-hooks ensure in test setup")
-            .expect("failed to run git-ai git-hooks ensure in test setup");
-        if !output.status.success() {
-            panic!(
-                "git-ai git-hooks ensure failed during test setup:\nstdout: {}\nstderr: {}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-        }
-    }
-
     fn configure_command_env(&self, command: &mut Command) {
         // Isolate all git + git-ai config reads from developer machine settings.
         configure_test_home_env(command, &self.test_home);
@@ -2310,28 +2171,6 @@ impl TestRepo {
                 DaemonConfig::trace2_event_target_for_path(&self.daemon_trace_socket_path()),
             );
             command.env("GIT_TRACE2_EVENT_NESTING", Self::trace2_nesting_value());
-        }
-
-        if self.git_mode.uses_hooks() {
-            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
-        }
-
-        if self.git_mode.uses_wrapper() {
-            command.env("GIT_AI", "git");
-        }
-
-        // In WrapperDaemon mode, the wrapper needs the daemon socket paths
-        // to initialize the telemetry handle and send wrapper state.
-        if self.git_mode == GitTestMode::WrapperDaemon {
-            command.env("GIT_AI_DAEMON_HOME", self.daemon_home_path());
-            command.env(
-                "GIT_AI_DAEMON_CONTROL_SOCKET",
-                self.daemon_control_socket_path(),
-            );
-            command.env(
-                "GIT_AI_DAEMON_TRACE_SOCKET",
-                self.daemon_trace_socket_path(),
-            );
         }
     }
 
@@ -2352,10 +2191,6 @@ impl TestRepo {
 
         if self.has_active_daemon() {
             command.env("GIT_AI_DAEMON_CHECKPOINT_DELEGATE", "true");
-        }
-
-        if self.git_mode.uses_hooks() {
-            command.env("GIT_AI_GLOBAL_GIT_HOOKS", "true");
         }
     }
 
@@ -2378,7 +2213,7 @@ impl TestRepo {
         let mut patch = self.config_patch.take().unwrap_or_default();
         f(&mut patch);
         self.config_patch = Some(patch);
-        self.sync_test_home_config_for_hooks();
+        self.sync_test_home_config();
     }
 
     pub fn path(&self) -> &PathBuf {
@@ -2399,12 +2234,8 @@ impl TestRepo {
         &self.test_home
     }
 
-    pub fn mode(&self) -> GitTestMode {
-        self.git_mode
-    }
-
     fn has_active_daemon(&self) -> bool {
-        self.git_mode.uses_daemon() && self.daemon_process.is_some()
+        self.daemon_process.is_some()
     }
 
     pub fn sync_daemon(&self) {
@@ -2642,11 +2473,7 @@ impl TestRepo {
             let daemon_test_sync_session =
                 daemon_command_pending.then(new_daemon_test_sync_session_id);
 
-            let mut command = if self.git_mode.uses_wrapper() {
-                Command::new(get_binary_path())
-            } else {
-                Command::new(real_git_executable())
-            };
+            let mut command = Command::new(real_git_executable());
 
             // If working_dir is provided, use current_dir instead of -C flag
             // This tests that git-ai correctly finds the repository root when run from a subdirectory
@@ -3061,7 +2888,7 @@ impl TestRepo {
                 // visible after the session completes due to filesystem flush
                 // timing. Retry briefly before failing.
                 let mut content = git_ai::git::refs::show_authorship_note(&repo, &head_commit);
-                if content.is_none() && self.git_mode.uses_daemon() {
+                if content.is_none() {
                     for _ in 0..10 {
                         thread::sleep(Duration::from_millis(50));
                         content = git_ai::git::refs::show_authorship_note(&repo, &head_commit);
@@ -3110,8 +2937,7 @@ impl Drop for TestRepo {
             daemon.shutdown();
         }
 
-        let remove_test_db =
-            !(self.git_mode.uses_daemon() && self.daemon_scope == DaemonTestScope::Shared);
+        let remove_test_db = self.daemon_scope != DaemonTestScope::Shared;
 
         if let Some(base_path) = &self._base_repo_path {
             let mut command = Command::new(real_git_executable());
@@ -3282,7 +3108,7 @@ fn find_real_git_by_probe() -> String {
 /// Redirect this test binary's own HOME to an isolated temp directory.
 ///
 /// This must run before any code reads HOME, which is why it is called at the
-/// top of both `real_git_executable()` and `new_with_mode_and_daemon_scope()`.
+/// top of both `real_git_executable()` and `new_with_daemon_scope()`.
 /// The `OnceLock` guarantees the init runs exactly once even under parallel tests.
 ///
 /// After this call:

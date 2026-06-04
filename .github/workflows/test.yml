@@ -41,13 +41,13 @@ jobs:
       - id: set-matrix
         run: |
           if [ "${{ github.event_name }}" = "merge_group" ]; then
-            echo 'matrix={"include":[{"os":"ubuntu-latest","test_mode":"daemon","test_threads":4,"daemon_pool":4},{"os":"ubuntu-latest","test_mode":"wrapper-daemon","test_threads":4,"daemon_pool":4},{"os":"macos-latest","test_mode":"daemon","test_threads":2,"daemon_pool":2},{"os":"macos-latest","test_mode":"wrapper-daemon","test_threads":2,"daemon_pool":2}]}' >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"os":"ubuntu-latest","test_threads":4,"daemon_pool":4},{"os":"macos-latest","test_threads":2,"daemon_pool":2}]}' >> "$GITHUB_OUTPUT"
           else
-            echo 'matrix={"include":[{"os":"ubuntu-latest","test_mode":"daemon","test_threads":4,"daemon_pool":4},{"os":"ubuntu-latest","test_mode":"wrapper-daemon","test_threads":4,"daemon_pool":4},{"os":"windows-latest","test_mode":"daemon","test_threads":4,"daemon_pool":4},{"os":"windows-latest","test_mode":"wrapper-daemon","test_threads":4,"daemon_pool":4},{"os":"macos-latest","test_mode":"daemon","test_threads":2,"daemon_pool":2},{"os":"macos-latest","test_mode":"wrapper-daemon","test_threads":2,"daemon_pool":2}]}' >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[{"os":"ubuntu-latest","test_threads":4,"daemon_pool":4},{"os":"windows-latest","test_threads":4,"daemon_pool":4},{"os":"macos-latest","test_threads":2,"daemon_pool":2}]}' >> "$GITHUB_OUTPUT"
           fi
 
   test:
-    name: Test on ${{ matrix.os }} (${{ matrix.test_mode }})
+    name: Test on ${{ matrix.os }}
     needs: compute-matrix
     runs-on: ${{ matrix.os }}
     strategy:
@@ -66,29 +66,15 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Cache dependencies (Unix)
-        if: runner.os != 'Windows'
+      - name: Cache dependencies
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ matrix.test_mode }}-${{ hashFiles('Cargo.lock') }}
+            ${{ runner.os != 'Windows' && 'target' || '' }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.test_mode }}-
-            ${{ runner.os }}-cargo-
-
-      - name: Cache dependencies (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ matrix.test_mode }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.test_mode }}-
             ${{ runner.os }}-cargo-
 
       - name: Install Node.js
@@ -108,12 +94,7 @@ jobs:
 
       - name: Run tests (Unix)
         if: runner.os != 'Windows'
-        run: |
-          if [ "${{ matrix.test_mode }}" = "wrapper-daemon" ]; then
-            task test:wrapper-daemon CARGO_TEST_ARGS=--no-fail-fast TEST_THREADS=${{ matrix.test_threads }}
-          else
-            task test CARGO_TEST_ARGS=--no-fail-fast TEST_THREADS=${{ matrix.test_threads }}
-          fi
+        run: task test CARGO_TEST_ARGS=--no-fail-fast TEST_THREADS=${{ matrix.test_threads }}
         env:
           CARGO_INCREMENTAL: 0
           GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: ${{ matrix.daemon_pool }}
@@ -127,11 +108,7 @@ jobs:
           if ((Test-Path $gitUsrBin) -and -not (($env:Path -split ";") -contains $gitUsrBin)) {
             $env:Path = "$gitUsrBin;$env:Path"
           }
-          if ("${{ matrix.test_mode }}" -eq "wrapper-daemon") {
-            task test:wrapper-daemon CARGO_TEST_ARGS=--no-fail-fast TEST_THREADS=${{ matrix.test_threads }}
-          } else {
-            task test CARGO_TEST_ARGS=--no-fail-fast TEST_THREADS=${{ matrix.test_threads }}
-          }
+          task test CARGO_TEST_ARGS=--no-fail-fast TEST_THREADS=${{ matrix.test_threads }}
         env:
           CARGO_INCREMENTAL: 0
           GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: ${{ matrix.daemon_pool }}
@@ -158,7 +135,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
+            ${{ runner.os != 'Windows' && 'target' || '' }}
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
