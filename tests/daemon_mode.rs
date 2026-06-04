@@ -1069,6 +1069,92 @@ fn daemon_test_mode_human_checkpoint_with_explicit_preset_queues_via_daemon() {
 }
 
 #[test]
+#[cfg(unix)]
+#[serial]
+fn daemon_symlink_repo_path_trace_and_status_use_same_family() {
+    let unique = format!(
+        "git-ai-symlink-family-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let real_path = std::env::temp_dir().join(format!("{unique}-real"));
+    let alias_path = std::env::temp_dir().join(format!("{unique}-alias"));
+    fs::create_dir_all(&real_path).expect("failed to create real test repo path");
+    std::os::unix::fs::symlink(&real_path, &alias_path).expect("failed to create repo symlink");
+
+    let repo = TestRepo::new_at_path_with_mode_and_daemon_scope(
+        &alias_path,
+        GitTestMode::Daemon,
+        DaemonTestScope::Dedicated,
+    );
+    assert_ne!(
+        repo.path(),
+        &repo.canonical_path(),
+        "test must exercise an alias path distinct from its canonical path"
+    );
+
+    let completion_baseline = repo.daemon_total_completion_count();
+    fs::write(repo.path().join("alias.txt"), "alias\n").expect("failed writing aliased file");
+    repo.git(&["add", "alias.txt"])
+        .expect("aliased path git add should succeed");
+    repo.wait_for_daemon_total_completion_count(
+        completion_baseline,
+        completion_baseline.saturating_add(1),
+    );
+
+    let status = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::StatusFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+    )
+    .expect("daemon status request should succeed for aliased path");
+    assert!(status.ok, "aliased path daemon status should be ok");
+
+    let checkpoint_baseline = repo.daemon_total_completion_count();
+    fs::write(repo.path().join("alias.txt"), "alias\nhuman\n")
+        .expect("failed writing human aliased file");
+    repo.git_ai(&["checkpoint", "human"])
+        .expect("aliased path human checkpoint should succeed");
+    repo.wait_for_next_daemon_checkpoint_completion(checkpoint_baseline);
+
+    let watermark_for = |path: &Path| {
+        let response = send_control_request(
+            &daemon_control_socket_path(&repo),
+            &ControlRequest::SnapshotWatermarks {
+                repo_working_dir: path.to_string_lossy().to_string(),
+            },
+        )
+        .expect("daemon watermark request should succeed");
+        assert!(
+            response.ok,
+            "daemon watermark response should be ok for {}: {:?}",
+            path.display(),
+            response.error
+        );
+        response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("worktree_watermark"))
+            .and_then(serde_json::Value::as_u64)
+    };
+
+    assert!(
+        watermark_for(repo.path()).is_some(),
+        "aliased worktree path should see full-checkpoint watermark"
+    );
+    assert!(
+        watermark_for(&repo.canonical_path()).is_some(),
+        "canonical worktree path should see same full-checkpoint watermark"
+    );
+
+    let _ = fs::remove_file(&alias_path);
+}
+
+#[test]
 #[serial]
 fn daemon_pure_trace_socket_commit_after_ai_checkpoint_preserves_ai_replacement_attribution() {
     let repo =
