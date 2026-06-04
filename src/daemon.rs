@@ -76,6 +76,8 @@ const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_CHECKPOINT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
 const DAEMON_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
+#[cfg(not(windows))]
+const TRACE_CONNECTION_BOOTSTRAP_READ_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(windows)]
 const WINDOWS_TRACE_PIPE_WORKERS: usize = 16;
 #[cfg(windows)]
@@ -5107,6 +5109,11 @@ fn trace_listener_loop_actor(
             let Ok(stream) = stream else {
                 continue;
             };
+            if let Err(error) =
+                stream.set_recv_timeout(Some(TRACE_CONNECTION_BOOTSTRAP_READ_TIMEOUT))
+            {
+                tracing::debug!(%error, "trace connection bootstrap timeout setup failed");
+            }
             let mut reader = BufReader::new(stream);
             let mut observed_roots = std::collections::BTreeSet::new();
             match bootstrap_trace_connection_actor_reader(
@@ -5149,6 +5156,9 @@ fn trace_listener_loop_actor(
                     }
                     continue;
                 }
+            }
+            if let Err(error) = reader.get_ref().set_recv_timeout(None) {
+                tracing::debug!(%error, "trace connection bootstrap timeout clear failed");
             }
             #[cfg(feature = "test-support")]
             if let Ok(raw_delay_ms) =
@@ -5299,8 +5309,13 @@ fn bootstrap_trace_connection_actor_reader<R: Read>(
     observed_roots: &mut std::collections::BTreeSet<String>,
 ) -> Result<TraceConnectionBootstrap, GitAiError> {
     for _ in 0..TRACE_CONNECTION_BOOTSTRAP_MAX_LINES {
-        let Some(line) = read_json_line(reader)? else {
-            return Ok(TraceConnectionBootstrap::Eof);
+        let line = match read_json_line(reader) {
+            Ok(Some(line)) => line,
+            Ok(None) => return Ok(TraceConnectionBootstrap::Eof),
+            Err(error) if trace_bootstrap_read_timed_out(&error) => {
+                return Ok(TraceConnectionBootstrap::Continue);
+            }
+            Err(error) => return Err(error),
         };
         let Some(outcome) =
             process_trace_connection_line(&line, coordinator.clone(), observed_roots)?
@@ -5315,6 +5330,18 @@ fn bootstrap_trace_connection_actor_reader<R: Read>(
         }
     }
     Ok(TraceConnectionBootstrap::Continue)
+}
+
+#[cfg(not(windows))]
+fn trace_bootstrap_read_timed_out(error: &GitAiError) -> bool {
+    matches!(
+        error,
+        GitAiError::IoError(io_error)
+            if matches!(
+                io_error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            )
+    )
 }
 
 fn handle_trace_connection_actor_reader<R: Read>(

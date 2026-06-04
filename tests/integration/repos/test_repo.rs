@@ -24,9 +24,9 @@ use rand::RngExt;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
@@ -56,6 +56,10 @@ const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 #[cfg(not(windows))]
 const DAEMON_TEST_SYNC_IDLE_TIMEOUT: Duration = Duration::from_secs(20);
 const DAEMON_TEST_TRACE_READY_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(windows)]
+const TEST_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(not(windows))]
+const TEST_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GitTestMode {
@@ -379,12 +383,13 @@ impl DaemonProcess {
             .env("GIT_TRACE2_EVENT_NESTING", "10");
         configure_test_home_env(&mut command, &self.daemon_home);
 
-        let output = command.output().map_err(|error| {
-            format!(
-                "failed to run daemon readiness probe git notes list: {}",
-                error
-            )
-        })?;
+        let output = run_command_output(&mut command, "daemon readiness probe git notes list")
+            .map_err(|error| {
+                format!(
+                    "failed to run daemon readiness probe git notes list: {}",
+                    error
+                )
+            })?;
         if !output.status.success() {
             return Err(format!(
                 "daemon readiness probe git notes list failed:\nstdout: {}\nstderr: {}",
@@ -526,6 +531,124 @@ fn configure_test_home_env(command: &mut Command, test_home: &Path) {
         command.env("APPDATA", test_home.join("AppData").join("Roaming"));
         command.env("LOCALAPPDATA", test_home.join("AppData").join("Local"));
     }
+}
+
+fn run_command_output(command: &mut Command, label: &str) -> Result<Output, String> {
+    run_command_output_with_timeout(command, label, TEST_SUBPROCESS_TIMEOUT)
+}
+
+fn run_command_output_with_stdin(
+    command: &mut Command,
+    label: &str,
+    stdin_data: &[u8],
+) -> Result<Output, String> {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let debug_command = format!("{:?}", command);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to spawn {label}: {error}\ncommand: {debug_command}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(stdin_data)
+            .map_err(|error| format!("failed to write stdin for {label}: {error}"))?;
+    }
+    collect_child_output_with_timeout(child, label, debug_command, TEST_SUBPROCESS_TIMEOUT)
+}
+
+fn run_command_output_with_timeout(
+    command: &mut Command,
+    label: &str,
+    timeout: Duration,
+) -> Result<Output, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let debug_command = format!("{:?}", command);
+    let child = command
+        .spawn()
+        .map_err(|error| format!("failed to spawn {label}: {error}\ncommand: {debug_command}"))?;
+    collect_child_output_with_timeout(child, label, debug_command, timeout)
+}
+
+fn collect_child_output_with_timeout(
+    mut child: Child,
+    label: &str,
+    debug_command: String,
+    timeout: Duration,
+) -> Result<Output, String> {
+    let pid = child.id();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{label} child stdout was not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("{label} child stderr was not piped"))?;
+
+    let stdout_reader = thread::spawn(move || {
+        let mut stdout = stdout;
+        let mut buffer = Vec::new();
+        let _ = stdout.read_to_end(&mut buffer);
+        buffer
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut stderr = stderr;
+        let mut buffer = Vec::new();
+        let _ = stderr.read_to_end(&mut buffer);
+        buffer
+    });
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = stdout_reader.join().unwrap_or_default();
+                let stderr = stderr_reader.join().unwrap_or_default();
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let stdout = stdout_reader.join().unwrap_or_default();
+                let stderr = stderr_reader.join().unwrap_or_default();
+                return Err(format!(
+                    "failed polling {label} child process {pid}: {error}\ncommand: {debug_command}\nstdout tail:\n{}\nstderr tail:\n{}",
+                    output_tail(&stdout),
+                    output_tail(&stderr)
+                ));
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = stdout_reader.join().unwrap_or_default();
+            let stderr = stderr_reader.join().unwrap_or_default();
+            return Err(format!(
+                "{label} timed out after {timeout:?} (pid {pid})\ncommand: {debug_command}\nstdout tail:\n{}\nstderr tail:\n{}",
+                output_tail(&stdout),
+                output_tail(&stderr)
+            ));
+        }
+
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn output_tail(bytes: &[u8]) -> String {
+    const MAX_TAIL_BYTES: usize = 4096;
+    let start = bytes.len().saturating_sub(MAX_TAIL_BYTES);
+    String::from_utf8_lossy(&bytes[start..]).to_string()
 }
 
 static SHARED_DAEMON_PROCESS: OnceLock<Arc<DaemonProcess>> = OnceLock::new();
@@ -1091,16 +1214,19 @@ impl TestRepo {
             let n: u64 = rng.random_range(0..10_000_000_000);
             let temp_branch = format!("base-worktree-{}", n);
             let temp_ref = format!("refs/heads/{}", temp_branch);
-            let switch_output = Command::new(real_git_executable())
-                .args([
-                    "-C",
-                    base.path.to_str().unwrap(),
-                    "symbolic-ref",
-                    "HEAD",
-                    &temp_ref,
-                ])
-                .output()
-                .expect("failed to move base repo off default branch");
+            let mut command = Command::new(real_git_executable());
+            command.args([
+                "-C",
+                base.path.to_str().unwrap(),
+                "symbolic-ref",
+                "HEAD",
+                &temp_ref,
+            ]);
+            let switch_output = run_command_output(
+                &mut command,
+                "move base repo off default branch for worktree variant",
+            )
+            .expect("failed to move base repo off default branch");
             if !switch_output.status.success() {
                 panic!(
                     "failed to move base repo off default branch:\nstdout: {}\nstderr: {}",
@@ -1114,16 +1240,16 @@ impl TestRepo {
         let wt_n: u64 = rng.random_range(0..10_000_000_000);
         let worktree_path = std::env::temp_dir().join(format!("{}-wt", wt_n));
 
-        let output = Command::new(real_git_executable())
-            .args([
-                "-C",
-                base.path.to_str().unwrap(),
-                "worktree",
-                "add",
-                "--orphan",
-                worktree_path.to_str().unwrap(),
-            ])
-            .output()
+        let mut command = Command::new(real_git_executable());
+        command.args([
+            "-C",
+            base.path.to_str().unwrap(),
+            "worktree",
+            "add",
+            "--orphan",
+            worktree_path.to_str().unwrap(),
+        ]);
+        let output = run_command_output(&mut command, "add orphan worktree")
             .expect("failed to add worktree");
 
         if !output.status.success() {
@@ -1134,14 +1260,14 @@ impl TestRepo {
             );
         }
 
-        let branch_name_output = Command::new(real_git_executable())
-            .args([
-                "-C",
-                worktree_path.to_str().unwrap(),
-                "branch",
-                "--show-current",
-            ])
-            .output()
+        let mut command = Command::new(real_git_executable());
+        command.args([
+            "-C",
+            worktree_path.to_str().unwrap(),
+            "branch",
+            "--show-current",
+        ]);
+        let branch_name_output = run_command_output(&mut command, "inspect worktree branch")
             .expect("failed to inspect worktree branch");
         if !branch_name_output.status.success() {
             panic!(
@@ -1154,15 +1280,15 @@ impl TestRepo {
             .trim()
             .to_string();
         if current_branch != default_branch {
-            let rename_output = Command::new(real_git_executable())
-                .args([
-                    "-C",
-                    worktree_path.to_str().unwrap(),
-                    "branch",
-                    "-m",
-                    default_branch,
-                ])
-                .output()
+            let mut command = Command::new(real_git_executable());
+            command.args([
+                "-C",
+                worktree_path.to_str().unwrap(),
+                "branch",
+                "-m",
+                default_branch,
+            ]);
+            let rename_output = run_command_output(&mut command, "rename worktree branch")
                 .expect("failed to rename worktree branch");
             if !rename_output.status.success() {
                 panic!(
@@ -1322,17 +1448,18 @@ impl TestRepo {
         // Clone from cached template (git init + config + symbolic-ref already done)
         clone_template_to(&main_path);
 
-        let initial_commit_output = Command::new(real_git_executable())
-            .args([
-                "-C",
-                main_path.to_str().unwrap(),
-                "commit",
-                "--allow-empty",
-                "-m",
-                "initial",
-            ])
-            .output()
-            .expect("failed to create initial commit for worktree base");
+        let mut command = Command::new(real_git_executable());
+        command.args([
+            "-C",
+            main_path.to_str().unwrap(),
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ]);
+        let initial_commit_output =
+            run_command_output(&mut command, "create initial commit for worktree base")
+                .expect("failed to create initial commit for worktree base");
         if !initial_commit_output.status.success() {
             panic!(
                 "failed to create initial worktree base commit:\nstdout: {}\nstderr: {}",
@@ -1341,15 +1468,15 @@ impl TestRepo {
             );
         }
 
-        let worktree_output = Command::new(real_git_executable())
-            .args([
-                "-C",
-                main_path.to_str().unwrap(),
-                "worktree",
-                "add",
-                worktree_path.to_str().unwrap(),
-            ])
-            .output()
+        let mut command = Command::new(real_git_executable());
+        command.args([
+            "-C",
+            main_path.to_str().unwrap(),
+            "worktree",
+            "add",
+            worktree_path.to_str().unwrap(),
+        ]);
+        let worktree_output = run_command_output(&mut command, "create linked worktree")
             .expect("failed to create linked worktree");
 
         if !worktree_output.status.success() {
@@ -1486,13 +1613,13 @@ impl TestRepo {
         let mirror_test_db_path =
             resolve_test_db_path(&base, mirror_n, &mirror_test_home, git_mode);
 
-        let clone_output = Command::new(real_git_executable())
-            .args([
-                "clone",
-                upstream_path.to_str().unwrap(),
-                mirror_path.to_str().unwrap(),
-            ])
-            .output()
+        let mut command = Command::new(real_git_executable());
+        command.args([
+            "clone",
+            upstream_path.to_str().unwrap(),
+            mirror_path.to_str().unwrap(),
+        ]);
+        let clone_output = run_command_output(&mut command, "clone upstream repository")
             .expect("failed to clone upstream repository");
 
         if !clone_output.status.success() {
@@ -2155,8 +2282,7 @@ impl TestRepo {
         command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
         command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
-        let output = command
-            .output()
+        let output = run_command_output(&mut command, "git-ai git-hooks ensure in test setup")
             .expect("failed to run git-ai git-hooks ensure in test setup");
         if !output.status.success() {
             panic!(
@@ -2377,9 +2503,7 @@ impl TestRepo {
                 command.env(key, value);
             }
 
-            let output = command
-                .output()
-                .unwrap_or_else(|_| panic!("Failed to execute git_og command: {:?}", args));
+            let output = run_command_output(&mut command, &format!("git_og {:?}", args))?;
 
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2552,9 +2676,7 @@ impl TestRepo {
                 command.env(key, value);
             }
 
-            let output = command
-                .output()
-                .unwrap_or_else(|_| panic!("Failed to execute git command with env: {:?}", args));
+            let output = run_command_output(&mut command, &format!("git {:?}", args))?;
 
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2642,9 +2764,7 @@ impl TestRepo {
         command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
         command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
 
-        let output = command
-            .output()
-            .unwrap_or_else(|_| panic!("Failed to execute git-ai command: {:?}", args));
+        let output = run_command_output(&mut command, &format!("git-ai {:?}", args))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2712,9 +2832,7 @@ impl TestRepo {
             command.env(key, value);
         }
 
-        let output = command
-            .output()
-            .unwrap_or_else(|_| panic!("Failed to execute git-ai command: {:?}", args));
+        let output = run_command_output(&mut command, &format!("git-ai {:?}", args))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2752,9 +2870,6 @@ impl TestRepo {
 
     /// Run a git-ai command with data provided on stdin
     pub fn git_ai_with_stdin(&self, args: &[&str], stdin_data: &[u8]) -> Result<String, String> {
-        use std::io::Write;
-        use std::process::Stdio;
-
         if git_ai_command_requires_daemon_sync(args) {
             self.sync_daemon_force();
         }
@@ -2765,12 +2880,7 @@ impl TestRepo {
         let normalized_args = normalize_test_git_ai_checkpoint_args(args);
 
         let mut command = Command::new(binary_path);
-        command
-            .args(&normalized_args)
-            .current_dir(&self.path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        command.args(&normalized_args).current_dir(&self.path);
         self.configure_git_ai_env(&mut command);
 
         // Add config patch as environment variable if present
@@ -2780,20 +2890,11 @@ impl TestRepo {
             command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
         }
 
-        let mut child = command
-            .spawn()
-            .unwrap_or_else(|_| panic!("Failed to spawn git-ai command: {:?}", args));
-
-        // Write stdin data
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(stdin_data)
-                .expect("Failed to write to stdin");
-        }
-
-        let output = child
-            .wait_with_output()
-            .unwrap_or_else(|_| panic!("Failed to wait for git-ai command: {:?}", args));
+        let output = run_command_output_with_stdin(
+            &mut command,
+            &format!("git-ai stdin {:?}", args),
+            stdin_data,
+        )?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2882,8 +2983,7 @@ impl TestRepo {
             commit_sha,
         ]);
 
-        let output = command
-            .output()
+        let output = run_command_output(&mut command, "git notes show in git dir")
             .expect("failed to run git notes show in git dir");
 
         if !output.status.success() {
@@ -3007,16 +3107,16 @@ impl Drop for TestRepo {
             !(self.git_mode.uses_daemon() && self.daemon_scope == DaemonTestScope::Shared);
 
         if let Some(base_path) = &self._base_repo_path {
-            let _ = Command::new(real_git_executable())
-                .args([
-                    "-C",
-                    base_path.to_str().unwrap(),
-                    "worktree",
-                    "remove",
-                    "--force",
-                    self.path.to_str().unwrap(),
-                ])
-                .output();
+            let mut command = Command::new(real_git_executable());
+            command.args([
+                "-C",
+                base_path.to_str().unwrap(),
+                "worktree",
+                "remove",
+                "--force",
+                self.path.to_str().unwrap(),
+            ]);
+            let _ = run_command_output(&mut command, "remove linked test worktree");
 
             let _ = remove_dir_all_with_retry(&self.path, 80, Duration::from_millis(50));
             let _ = remove_dir_all_with_retry(base_path, 80, Duration::from_millis(50));
@@ -3276,9 +3376,9 @@ fn init_template_repo() -> PathBuf {
     let p = path.to_str().unwrap();
     let git = real_git_executable();
 
-    let output = Command::new(git)
-        .args(["init", p])
-        .output()
+    let mut command = Command::new(git);
+    command.args(["init", p]);
+    let output = run_command_output(&mut command, "init template repo")
         .expect("failed to init template repo");
     assert!(output.status.success(), "template git init failed");
 
@@ -3287,9 +3387,9 @@ fn init_template_repo() -> PathBuf {
         vec!["-C", p, "config", "user.email", "test@example.com"],
         vec!["-C", p, "symbolic-ref", "HEAD", "refs/heads/main"],
     ] {
-        let output = Command::new(git)
-            .args(&args)
-            .output()
+        let mut command = Command::new(git);
+        command.args(&args);
+        let output = run_command_output(&mut command, "configure template repo")
             .expect("failed to configure template repo");
         assert!(
             output.status.success(),
@@ -3309,15 +3409,15 @@ fn init_bare_template_repo() -> PathBuf {
     let p = path.to_str().unwrap();
     let git = real_git_executable();
 
-    let output = Command::new(git)
-        .args(["init", "--bare", p])
-        .output()
+    let mut command = Command::new(git);
+    command.args(["init", "--bare", p]);
+    let output = run_command_output(&mut command, "init bare template repo")
         .expect("failed to init bare template repo");
     assert!(output.status.success(), "bare template git init failed");
 
-    let output = Command::new(git)
-        .args(["-C", p, "symbolic-ref", "HEAD", "refs/heads/main"])
-        .output()
+    let mut command = Command::new(git);
+    command.args(["-C", p, "symbolic-ref", "HEAD", "refs/heads/main"]);
+    let output = run_command_output(&mut command, "set HEAD in bare template")
         .expect("failed to set HEAD in bare template");
     assert!(output.status.success());
 
@@ -3359,9 +3459,9 @@ fn set_repo_user_config(repo_path: &std::path::Path) {
         vec!["-C", p, "config", "user.name", "Test User"],
         vec!["-C", p, "config", "user.email", "test@example.com"],
     ] {
-        let output = Command::new(git)
-            .args(&args)
-            .output()
+        let mut command = Command::new(git);
+        command.args(&args);
+        let output = run_command_output(&mut command, "set repo user config")
             .expect("failed to set user config");
         assert!(output.status.success());
     }
