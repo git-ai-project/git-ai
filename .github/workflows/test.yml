@@ -94,7 +94,7 @@ jobs:
 
       - name: Run tests (Unix)
         if: runner.os != 'Windows'
-        run: task test CARGO_TEST_ARGS=--no-fail-fast TEST_THREADS=${{ matrix.test_threads }}
+        run: task test TEST_THREADS=${{ matrix.test_threads }}
         env:
           CARGO_INCREMENTAL: 0
           GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: ${{ matrix.daemon_pool }}
@@ -108,7 +108,7 @@ jobs:
           if ((Test-Path $gitUsrBin) -and -not (($env:Path -split ";") -contains $gitUsrBin)) {
             $env:Path = "$gitUsrBin;$env:Path"
           }
-          task test CARGO_TEST_ARGS=--no-fail-fast TEST_THREADS=${{ matrix.test_threads }}
+          task test TEST_THREADS=${{ matrix.test_threads }}
         env:
           CARGO_INCREMENTAL: 0
           GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: ${{ matrix.daemon_pool }}
