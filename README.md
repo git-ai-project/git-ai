@@ -62,7 +62,10 @@ fe2c4c8 (claude [session_id] 2025-12-02 19:25:13 -0500  142)             let fro
 <td align="center"><img src="assets/docs/agents/gray/junie_white.png" alt="Junie" width="160" /></td>
 <td align="center"><img src="assets/docs/agents/gray/rovodev.png" alt="Rovo Dev" width="160" /></td>
 <td align="center"><img src="assets/docs/agents/gray/firebender.png" alt="Firebender" width="160" /></td>
-<td align="center"><a href="https://usegitai.com/docs/cli/add-your-agent">+ Add an Agent</a></td>
+<td align="center"><img src="assets/docs/agents/gray/kilo.png" alt="Kilo Code" width="160" /></td>
+</tr>
+<tr>
+<td align="center" colspan="5"><a href="https://usegitai.com/docs/cli/add-your-agent">+ Add an Agent</a></td>
 </tr>
 </table>
 

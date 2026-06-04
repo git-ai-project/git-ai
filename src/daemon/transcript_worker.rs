@@ -497,7 +497,7 @@ impl TranscriptWorker {
             || session.watermark_value == "1970-01-01T00:00:00+00:00";
 
         loop {
-            let batch = agent.read_incremental(&path, current_watermark, &session.session_id)?;
+            let batch = agent.read_incremental(&path, current_watermark, &session.external_session_id)?;
 
             if batch.events.is_empty() {
                 db.update_watermark(&session.session_id, batch.new_watermark.as_ref())?;

@@ -12,6 +12,7 @@ mod firebender;
 mod gemini;
 mod github_copilot;
 mod human;
+mod kilo;
 mod known_human;
 mod mock_ai;
 mod mock_known_human;
@@ -118,6 +119,7 @@ pub enum TranscriptFormat {
     CopilotEventStreamJsonl,
     AmpThreadJson,
     OpenCodeSqlite,
+    KiloCodeSqlite,
     PiJsonl,
 }
 
@@ -136,7 +138,7 @@ impl TranscriptFormat {
             Self::CopilotSessionJson | Self::ContinueJson | Self::AmpThreadJson => {
                 WatermarkType::RecordIndex
             }
-            Self::OpenCodeSqlite => WatermarkType::Timestamp,
+            Self::OpenCodeSqlite | Self::KiloCodeSqlite => WatermarkType::Timestamp,
         }
     }
 }
@@ -161,6 +163,7 @@ pub fn resolve_preset(name: &str) -> Result<Box<dyn AgentPreset>, GitAiError> {
         "agent-v1" => Ok(Box::new(agent_v1::AgentV1Preset)),
         "droid" => Ok(Box::new(droid::DroidPreset)),
         "opencode" => Ok(Box::new(opencode::OpenCodePreset)),
+        "kilo" => Ok(Box::new(kilo::KiloPreset)),
         "pi" => Ok(Box::new(pi::PiPreset)),
         "human" => Ok(Box::new(human::HumanPreset)),
         "mock_ai" => Ok(Box::new(mock_ai::MockAiPreset)),

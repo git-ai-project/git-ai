@@ -98,6 +98,7 @@ const ALL_AGENT_TYPES: &[&str] = &[
     "copilot-cli",
     "gemini",
     "continue-cli",
+    "kilo",
     "windsurf",
     "codex",
     "amp",
@@ -119,6 +120,7 @@ pub fn get_agent(agent_type: &str) -> Option<Box<dyn Agent>> {
         }
         "gemini" => Some(Box::new(super::agents::GeminiAgent::new())),
         "continue-cli" => Some(Box::new(super::agents::ContinueAgent::new())),
+        "kilo" | "kilocode" => Some(Box::new(super::agents::KiloAgent::new())),
         "windsurf" => Some(Box::new(super::agents::WindsurfAgent::new())),
         "codex" => Some(Box::new(super::agents::CodexAgent::new())),
         "amp" => Some(Box::new(super::agents::AmpAgent::new())),

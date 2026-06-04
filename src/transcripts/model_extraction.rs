@@ -15,7 +15,9 @@ pub fn extract_model(
         | TranscriptFormat::GeminiJsonl => extract_model_from_jsonl_tail(path),
         TranscriptFormat::CopilotSessionJson => extract_model_from_copilot_session_json(path),
         TranscriptFormat::AmpThreadJson => extract_model_from_amp_thread_json(path),
-        TranscriptFormat::OpenCodeSqlite => extract_model_from_opencode_sqlite(path, session_id),
+        TranscriptFormat::OpenCodeSqlite | TranscriptFormat::KiloCodeSqlite => {
+            extract_model_from_opencode_sqlite(path, session_id)
+        }
         // Droid uses extract_model_from_droid_settings() with the settings path instead
         _ => Ok(None),
     }

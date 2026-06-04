@@ -37,6 +37,13 @@ object StackTraceAnalyzer {
                 "com.intellij.ml.llm.matterhorn"
             ),
             classPatterns = listOf("junie", "matterhorn", "embark")
+        ),
+        AgentPattern(
+            name = "kilo",
+            packagePatterns = listOf(
+                "ai.kilocode"
+            ),
+            classPatterns = listOf("kilo")
         )
     )
 

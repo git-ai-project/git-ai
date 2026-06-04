@@ -83,6 +83,7 @@ pub enum TranscriptFormat {
     CodexJsonl,
     AmpThreadJson,
     OpenCodeSqlite,
+    KiloCodeSqlite,
     PiJsonl,
 }
 
@@ -100,6 +101,7 @@ impl std::fmt::Display for TranscriptFormat {
             Self::CodexJsonl => write!(f, "CodexJsonl"),
             Self::AmpThreadJson => write!(f, "AmpThreadJson"),
             Self::OpenCodeSqlite => write!(f, "OpenCodeSqlite"),
+            Self::KiloCodeSqlite => write!(f, "KiloCodeSqlite"),
             Self::PiJsonl => write!(f, "PiJsonl"),
         }
     }
@@ -120,7 +122,7 @@ impl TranscriptFormat {
             Self::CopilotSessionJson | Self::ContinueJson | Self::AmpThreadJson => {
                 WatermarkType::RecordIndex
             }
-            Self::OpenCodeSqlite => WatermarkType::Timestamp,
+            Self::OpenCodeSqlite | Self::KiloCodeSqlite => WatermarkType::Timestamp,
         }
     }
 }
