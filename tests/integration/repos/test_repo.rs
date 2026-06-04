@@ -1669,6 +1669,15 @@ impl TestRepo {
         self.sync_test_home_config();
     }
 
+    pub(crate) fn start_dedicated_daemon_for_test(&mut self) {
+        assert!(
+            self.daemon_process.is_none(),
+            "test repo already has an active daemon"
+        );
+        self.daemon_scope = DaemonTestScope::Dedicated;
+        self.setup_daemon_mode();
+    }
+
     fn daemon_completion_log_path_for_family(&self, family_key: &str) -> PathBuf {
         DaemonConfig::from_home(&self.daemon_home_path())
             .test_completion_log_path_for_family(family_key)

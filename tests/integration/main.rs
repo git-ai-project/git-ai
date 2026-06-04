@@ -41,6 +41,7 @@ mod ci_partial_clone;
 mod ci_squash_rebase;
 mod claude_code;
 mod codex;
+mod cold_trace2_repo;
 mod commit_post_stats_benchmark;
 mod config_pattern_detection;
 mod continue_cli;

@@ -239,18 +239,6 @@ pub fn notes_add_batch(repo: &Repository, entries: &[(String, String)]) -> Resul
         return Ok(());
     }
 
-    if let Ok(debug_path) = std::env::var("GIT_AI_DEBUG_FILE") {
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&debug_path)
-        {
-            let shas: Vec<&str> = entries.iter().map(|(sha, _)| sha.as_str()).collect();
-            let _ = writeln!(f, "[notes_add_batch] {} entries: {:?}", entries.len(), shas);
-        }
-    }
-
     let mut args = repo.global_args_for_exec();
     args.push("rev-parse".to_string());
     args.push("--verify".to_string());
