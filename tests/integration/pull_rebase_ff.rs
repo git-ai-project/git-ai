@@ -1,3 +1,5 @@
+use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
+
 use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::TestRepo;
 
@@ -850,6 +852,13 @@ fn test_regular_rebase_with_conflict_preserves_ai_notes() {
         pre_rebase_note.is_some(),
         "Feature AI commit should have authorship notes before rebase"
     );
+    let pre_rebase_note = pre_rebase_note.unwrap();
+    let pre_rebase_log =
+        AuthorshipLog::deserialize_from_string(&pre_rebase_note).expect("parse pre-rebase note");
+    assert!(
+        !pre_rebase_log.metadata.sessions.is_empty(),
+        "precondition: feature AI commit should have session metadata"
+    );
 
     // Rebase feature onto main — should conflict on shared.txt
     let rebase_result = repo.git(&["rebase", &setup.default_branch]);
@@ -895,6 +904,12 @@ fn test_regular_rebase_with_conflict_preserves_ai_notes() {
     // (git diff-tree shows the region as modified), so attribution is correctly dropped.
     // The note exists (metadata preserved) but shared.txt has no attributed lines.
     let note_content = post_rebase_note.unwrap();
+    let post_rebase_log =
+        AuthorshipLog::deserialize_from_string(&note_content).expect("parse post-rebase note");
+    assert_eq!(
+        post_rebase_log.metadata.sessions, pre_rebase_log.metadata.sessions,
+        "session metadata should be preserved even when changed-hunk attestations are dropped"
+    );
     assert!(
         !note_content.contains("shared.txt"),
         "Authorship note should NOT reference shared.txt (lines inside diff hunk), got: {}",
