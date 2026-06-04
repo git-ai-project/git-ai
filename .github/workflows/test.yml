@@ -74,8 +74,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ matrix.test_mode }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.test_mode }}-
             ${{ runner.os }}-cargo-
 
       - name: Cache dependencies (Windows)
@@ -85,8 +86,9 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ matrix.test_mode }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.test_mode }}-
             ${{ runner.os }}-cargo-
 
       - name: Install Node.js
