@@ -1,17 +1,24 @@
+tests/integration/fuzzer/engine.rs
+  s_af2d349a5e032c::t_0b24471627300a 62
+  s_af2d349a5e032c::t_2c8059c01fbd65 188
+  s_af2d349a5e032c::t_935cc3c7593335 168-169
+tests/integration/fuzzer/mod.rs
+  s_af2d349a5e032c::t_3024ae34d362a7 7
+  s_af2d349a5e032c::t_e73ca8c28c3abb 59-60
 Taskfile.yml
-  s_f00ef7c0f45b07::t_0d109c51f16dd5 137-142
+  s_af2d349a5e032c::t_73592192da5a9e 137-144
 ---
 {
   "schema_version": "authorship/3.0.0",
-  "git_ai_version": "development:1.5.3",
+  "git_ai_version": "development:1.4.10",
   "base_commit_sha": "d21bd32fb1c6b9291709b041822043de0d511225",
   "prompts": {},
   "sessions": {
-    "s_f00ef7c0f45b07": {
+    "s_af2d349a5e032c": {
       "agent_id": {
-        "tool": "codex",
-        "id": "019e8a16-5b53-7712-a050-7f3b646aa3e3",
-        "model": "gpt-5.5"
+        "tool": "claude",
+        "id": "ac381f5d-82d0-459b-b1f2-f85792a62a07",
+        "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov <sasha@sashavarlamov.com>"
     }
