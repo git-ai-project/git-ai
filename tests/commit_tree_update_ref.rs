@@ -11,11 +11,11 @@ use git_ai::git::find_repository_in_path;
 use git_ai::git::refs::show_authorship_note;
 use git_ai::git::repository::Repository as GitAiRepository;
 use repos::test_file::ExpectedLineExt;
-use repos::test_repo::{TestRepo, real_git_executable};
+use repos::test_repo::{TestRepo, new_daemon_test_sync_session_id, real_git_executable};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
 use std::time::Duration;
 
 fn setup_initial_commit(repo: &TestRepo) {
@@ -115,6 +115,20 @@ fn raw_untraced_git(repo: &TestRepo, args: &[&str]) -> String {
 }
 
 fn raw_git_trace_to_file(repo: &TestRepo, args: &[&str], trace_path: &Path) -> String {
+    let output = raw_git_trace_to_file_output(repo, args, trace_path);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "raw traced git {:?} failed\nstdout: {}\nstderr: {}",
+        args,
+        stdout,
+        stderr
+    );
+    combined_output(stdout, stderr)
+}
+
+fn raw_git_trace_to_file_output(repo: &TestRepo, args: &[&str], trace_path: &Path) -> Output {
     let _ = fs::remove_file(trace_path);
     let mut command = Command::new(real_git_executable());
     command.arg("-C").arg(repo.path()).args(args);
@@ -131,18 +145,12 @@ fn raw_git_trace_to_file(repo: &TestRepo, args: &[&str], trace_path: &Path) -> S
         std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string()),
     );
 
-    let output = command
+    command
         .output()
-        .unwrap_or_else(|error| panic!("failed to run raw traced git {:?}: {}", args, error));
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    assert!(
-        output.status.success(),
-        "raw traced git {:?} failed\nstdout: {}\nstderr: {}",
-        args,
-        stdout,
-        stderr
-    );
+        .unwrap_or_else(|error| panic!("failed to run raw traced git {:?}: {}", args, error))
+}
+
+fn combined_output(stdout: String, stderr: String) -> String {
     if stdout.is_empty() {
         stderr
     } else if stderr.is_empty() {
@@ -682,6 +690,63 @@ fn test_delayed_cherry_pick_trace_replay_preserves_picked_commit_attribution() {
     repo.wait_for_daemon_total_completion_count(baseline, baseline + 1);
 
     assert_note_has_ai_for_file(&repo, &picked_commit, "picked.txt");
+}
+
+#[test]
+fn test_delayed_failed_cherry_pick_with_unresolved_source_does_not_consume_later_pick() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("file.txt");
+
+    file.set_contents(lines!["base line"]);
+    repo.stage_all_and_commit("initial").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.insert_at(1, lines!["AI line 1".ai()]);
+    repo.stage_all_and_commit("AI commit 1").unwrap();
+    let source_one = head_sha(&repo);
+
+    file.insert_at(2, lines!["AI line 2".ai()]);
+    repo.stage_all_and_commit("AI commit 2").unwrap();
+    let source_two = head_sha(&repo);
+
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.sync_daemon();
+
+    let trace_dir = tempfile::tempdir().expect("trace temp dir");
+    let failed_trace = trace_dir.path().join("failed-cherry-pick.trace2");
+    let good_trace = trace_dir.path().join("good-cherry-pick.trace2");
+    let failed_session = new_daemon_test_sync_session_id();
+    let good_session = new_daemon_test_sync_session_id();
+    let failed_session_arg = format!("git-ai.testSyncSession={failed_session}");
+    let good_session_arg = format!("git-ai.testSyncSession={good_session}");
+    let bad_source_arg = format!("{source_one} {source_two}");
+
+    let failed = raw_git_trace_to_file_output(
+        &repo,
+        &["-c", &failed_session_arg, "cherry-pick", &bad_source_arg],
+        &failed_trace,
+    );
+    assert!(
+        !failed.status.success(),
+        "combined cherry-pick source should be invalid\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&failed.stdout),
+        String::from_utf8_lossy(&failed.stderr)
+    );
+
+    raw_git_trace_to_file(
+        &repo,
+        &["-c", &good_session_arg, "cherry-pick", &source_one],
+        &good_trace,
+    );
+    let picked_commit = head_sha(&repo);
+
+    replay_trace_file_to_daemon(&repo, &failed_trace);
+    replay_trace_file_to_daemon(&repo, &good_trace);
+    repo.sync_daemon_external_completion_sessions(&[failed_session, good_session]);
+
+    assert_note_has_ai_for_file(&repo, &picked_commit, "file.txt");
+    file.assert_committed_lines(lines!["base line".ai(), "AI line 1".ai()]);
 }
 
 #[test]

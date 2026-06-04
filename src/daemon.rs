@@ -25,6 +25,7 @@ use interprocess::{
 use named_pipe::{
     ConnectingServer as WindowsConnectingServer, OpenMode as WindowsPipeOpenMode,
     PipeClient as WindowsPipeClient, PipeOptions as WindowsPipeOptions,
+    PipeServer as WindowsPipeServer,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -76,6 +77,7 @@ const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_CHECKPOINT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
 const DAEMON_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
+const TRACE_INGEST_QUEUE_CAPACITY: usize = 16_384;
 #[cfg(not(windows))]
 const TRACE_CONNECTION_BOOTSTRAP_READ_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(windows)]
@@ -2553,14 +2555,26 @@ impl ActorDaemonCoordinator {
         (self.next_trace_ingest_seq.fetch_add(1, Ordering::Relaxed) as u64) + 1
     }
 
+    fn trace_ingest_queue_capacity() -> usize {
+        #[cfg(feature = "test-support")]
+        if let Ok(raw) = std::env::var("GIT_AI_TEST_TRACE_INGEST_QUEUE_CAPACITY")
+            && let Ok(capacity) = raw.parse::<usize>()
+            && capacity > 0
+        {
+            return capacity;
+        }
+
+        TRACE_INGEST_QUEUE_CAPACITY
+    }
+
     fn start_trace_ingest_worker(self: &Arc<Self>) -> Result<(), GitAiError> {
         // Idempotent: if OnceLock is already set, worker is already running.
         if self.trace_ingest_tx.get().is_some() {
             return Ok(());
         }
 
-        const TRACE_INGEST_QUEUE_CAPACITY: usize = 16_384;
-        let (tx, mut rx) = mpsc::channel::<Value>(TRACE_INGEST_QUEUE_CAPACITY);
+        let queue_capacity = Self::trace_ingest_queue_capacity();
+        let (tx, mut rx) = mpsc::channel::<Value>(queue_capacity);
         // OnceLock::set fails if another thread raced us to initialize — that
         // means the worker is already running; just drop our channel ends.
         if self.trace_ingest_tx.set(tx).is_err() {
@@ -2569,6 +2583,15 @@ impl ActorDaemonCoordinator {
 
         let coordinator = self.clone();
         tokio::spawn(async move {
+            #[cfg(feature = "test-support")]
+            if let Ok(raw_delay_ms) =
+                std::env::var("GIT_AI_TEST_TRACE_INGEST_WORKER_START_DELAY_MS")
+                && let Ok(delay_ms) = raw_delay_ms.parse::<u64>()
+                && delay_ms > 0
+            {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+
             let mut next_seq: u64 = 1;
             let mut pending_by_seq: BTreeMap<u64, Value> = BTreeMap::new();
             let mut gc_counter: u64 = 0;
@@ -2600,7 +2623,7 @@ impl ActorDaemonCoordinator {
                     break;
                 };
 
-                if pending_by_seq.len() >= TRACE_INGEST_QUEUE_CAPACITY {
+                if pending_by_seq.len() >= queue_capacity {
                     tracing::error!(
                         component = "daemon",
                         phase = "trace_ingest_worker",
@@ -2724,45 +2747,47 @@ impl ActorDaemonCoordinator {
             self.trace_ingest_tx.get().cloned().ok_or_else(|| {
                 GitAiError::Generic("trace ingest worker not started".to_string())
             })?;
-        let payload_root = Self::trace_payload_root_sid(&payload);
+        let permit = match tx.try_reserve() {
+            Ok(permit) => permit,
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {
+                tracing::error!(
+                    component = "daemon",
+                    phase = "enqueue_trace_payload",
+                    reason = "ingest_worker_channel_closed",
+                    "trace ingest queue send failed: worker may have crashed"
+                );
+                self.request_shutdown();
+                return Err(GitAiError::Generic(
+                    "trace ingest queue send failed: worker may have crashed".to_string(),
+                ));
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
+                tracing::error!(
+                    component = "daemon",
+                    phase = "enqueue_trace_payload",
+                    reason = "ingest_worker_queue_full",
+                    "trace ingest queue is full"
+                );
+                self.request_shutdown();
+                return Err(GitAiError::Generic(
+                    "trace ingest queue is full; daemon shutting down".to_string(),
+                ));
+            }
+        };
         self.record_trace_payload_enqueued(&payload)?;
+        let mut payload = payload;
+        if let Some(object) = payload.as_object_mut()
+            && object.get(TRACE_INGEST_SEQ_FIELD).is_none()
+        {
+            object.insert(
+                TRACE_INGEST_SEQ_FIELD.to_string(),
+                json!(self.next_trace_ingest_seq()),
+            );
+        }
         // Relaxed: this counter tracks in-flight count for monitoring; no
         // ordering dependency with any other atomic.
         self.queued_trace_payloads.fetch_add(1, Ordering::Relaxed);
-        let send_result = match tx.try_send(payload) {
-            Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_payload)) => Err(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(payload)) => {
-                if tokio::runtime::Handle::try_current().is_ok() {
-                    tokio::task::block_in_place(|| tx.blocking_send(payload)).map_err(|_| ())
-                } else {
-                    tx.blocking_send(payload).map_err(|_| ())
-                }
-            }
-        };
-        if send_result.is_err() {
-            let _ = self.queued_trace_payloads.fetch_update(
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-                |current| Some(current.saturating_sub(1)),
-            );
-            if let Err(error) = self.record_trace_payload_processed_root(payload_root.as_deref()) {
-                tracing::debug!(
-                    %error,
-                    "trace payload accounting rollback error"
-                );
-            }
-            tracing::error!(
-                component = "daemon",
-                phase = "enqueue_trace_payload",
-                reason = "ingest_worker_channel_closed",
-                "trace ingest queue send failed: worker may have crashed"
-            );
-            self.request_shutdown();
-            return Err(GitAiError::Generic(
-                "trace ingest queue send failed: worker may have crashed".to_string(),
-            ));
-        }
+        permit.send(payload);
         Ok(())
     }
 
@@ -2782,47 +2807,40 @@ impl ActorDaemonCoordinator {
         if target_seq == 0 {
             return;
         }
-        // The target is (next - 1) because next_trace_ingest_seq is pre-incremented
-        // by fetch_add before use, so the last *assigned* seq is (current_value - 1).
-        // But since we loaded AFTER the fetch_add that assigned the seq, we need to
-        // check processed_seq >= target_seq - 1 (the last allocated seq).
-        let target = target_seq.saturating_sub(1);
+        // next_trace_ingest_seq stores the last assigned sequence value. Because
+        // enqueue_trace_payload reserves capacity before assigning a sequence,
+        // there are no intentional gaps between this target and the ingest queue.
+        let target = target_seq;
         loop {
             let processed = self.processed_trace_ingest_seq.load(Ordering::Acquire) as u64;
             if processed >= target {
                 return;
             }
-            self.trace_ingest_progress_notify.notified().await;
+            let progress = self.trace_ingest_progress_notify.notified();
+            tokio::select! {
+                _ = progress => {}
+                _ = self.wait_for_shutdown() => return,
+            }
         }
     }
 
     /// Prepares `payload` for ingestion and returns whether it should be
     /// enqueued.
     ///
-    /// - `true`  — payload is for a mutating command; a sequence number has
-    ///   been stamped and the caller MUST call `enqueue_trace_payload`.
+    /// - `true`  — payload is for a mutating command; the caller MUST call
+    ///   `enqueue_trace_payload`.
     /// - `false` — payload is for a definitely-read-only invocation; it was
     ///   handled inline and the caller MUST NOT enqueue it.
     ///
-    /// Sequence numbers are only allocated for payloads that will be enqueued,
-    /// so the `processed_trace_ingest_seq` watermark (used by checkpoint
-    /// `wait_for_trace_ingest_processed_through`) advances without gaps.
+    /// Sequence numbers are allocated only after `enqueue_trace_payload` has
+    /// reserved queue capacity, so the `processed_trace_ingest_seq` watermark
+    /// used by checkpoint drain waits advances without unqueued gaps.
     pub(crate) fn prepare_trace_payload_for_ingest(&self, payload: &mut Value) -> bool {
         // Check read-only status BEFORE allocating a sequence number so that
         // read-only invocations never perturb the ingest sequence counter.
         let is_read_only = self.track_trace_payload_for_ingest(payload);
         if is_read_only {
             return false;
-        }
-        // Mutating command: stamp a sequence number so the ingest worker can
-        // reorder out-of-order events from concurrent git invocations.
-        if let Some(object) = payload.as_object_mut()
-            && object.get(TRACE_INGEST_SEQ_FIELD).is_none()
-        {
-            object.insert(
-                TRACE_INGEST_SEQ_FIELD.to_string(),
-                json!(self.next_trace_ingest_seq()),
-            );
         }
         true
     }
@@ -4933,6 +4951,7 @@ fn control_listener_loop_actor(
     #[cfg(windows)]
     {
         let mut workers = Vec::new();
+        let worker_count = windows_control_pipe_worker_count();
         let first_connecting = windows_pipe_connecting_server(&control_socket_path, true)?;
         {
             let path = control_socket_path.clone();
@@ -4948,7 +4967,7 @@ fn control_listener_loop_actor(
                 result
             }));
         }
-        for _ in 1..WINDOWS_CONTROL_PIPE_WORKERS {
+        for _ in 1..worker_count {
             let path = control_socket_path.clone();
             let coord = coordinator.clone();
             let handle = runtime_handle.clone();
@@ -4968,7 +4987,7 @@ fn control_listener_loop_actor(
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
-        wake_windows_pipe_workers(&control_socket_path, WINDOWS_CONTROL_PIPE_WORKERS);
+        wake_windows_pipe_workers(&control_socket_path, worker_count);
 
         for worker in workers {
             let result = worker
@@ -5000,6 +5019,32 @@ fn windows_pipe_connecting_server(
 }
 
 #[cfg(windows)]
+fn windows_trace_pipe_worker_count() -> usize {
+    #[cfg(feature = "test-support")]
+    if let Ok(raw) = std::env::var("GIT_AI_TEST_WINDOWS_TRACE_PIPE_WORKERS")
+        && let Ok(count) = raw.parse::<usize>()
+        && count > 0
+    {
+        return count;
+    }
+
+    WINDOWS_TRACE_PIPE_WORKERS
+}
+
+#[cfg(windows)]
+fn windows_control_pipe_worker_count() -> usize {
+    #[cfg(feature = "test-support")]
+    if let Ok(raw) = std::env::var("GIT_AI_TEST_WINDOWS_CONTROL_PIPE_WORKERS")
+        && let Ok(count) = raw.parse::<usize>()
+        && count > 0
+    {
+        return count;
+    }
+
+    WINDOWS_CONTROL_PIPE_WORKERS
+}
+
+#[cfg(windows)]
 fn wake_windows_pipe_workers(pipe_path: &Path, worker_count: usize) {
     for _ in 0..worker_count {
         let _ = WindowsPipeClient::connect_ms(pipe_path.as_os_str(), 100);
@@ -5014,7 +5059,7 @@ fn windows_control_pipe_worker_loop(
     runtime_handle: tokio::runtime::Handle,
 ) -> Result<(), GitAiError> {
     loop {
-        let mut server = connecting.wait().map_err(|e| {
+        let server = connecting.wait().map_err(|e| {
             GitAiError::Generic(format!(
                 "failed accepting control pipe {}: {}",
                 control_socket_path.display(),
@@ -5027,27 +5072,37 @@ fn windows_control_pipe_worker_loop(
             break;
         }
 
-        {
-            let mut reader = BufReader::new(&mut server);
-            if let Err(e) = handle_control_connection_actor_reader(
-                &mut reader,
-                coordinator.clone(),
-                runtime_handle.clone(),
-            ) {
-                tracing::debug!(%e, "control connection error");
-            }
-        }
+        connecting = windows_pipe_connecting_server(&control_socket_path, false)?;
 
-        connecting = server.disconnect().map_err(|e| {
-            GitAiError::Generic(format!(
-                "failed recycling control pipe {}: {}",
-                control_socket_path.display(),
-                e
-            ))
-        })?;
+        let coord = coordinator.clone();
+        let handle = runtime_handle.clone();
+        std::thread::Builder::new()
+            .spawn(move || {
+                handle_windows_control_pipe_connection(server, coord, handle);
+            })
+            .map_err(|e| {
+                GitAiError::Generic(format!(
+                    "failed spawning control pipe handler for {}: {}",
+                    control_socket_path.display(),
+                    e
+                ))
+            })?;
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn handle_windows_control_pipe_connection(
+    mut server: WindowsPipeServer,
+    coordinator: Arc<ActorDaemonCoordinator>,
+    runtime_handle: tokio::runtime::Handle,
+) {
+    let mut reader = BufReader::new(&mut server);
+    if let Err(e) = handle_control_connection_actor_reader(&mut reader, coordinator, runtime_handle)
+    {
+        tracing::debug!(%e, "control connection error");
+    }
 }
 
 #[cfg(not(windows))]
@@ -5189,6 +5244,7 @@ fn trace_listener_loop_actor(
     #[cfg(windows)]
     {
         let mut workers = Vec::new();
+        let worker_count = windows_trace_pipe_worker_count();
         let first_connecting = windows_pipe_connecting_server(&trace_socket_path, true)?;
         {
             let path = trace_socket_path.clone();
@@ -5202,7 +5258,7 @@ fn trace_listener_loop_actor(
                 result
             }));
         }
-        for _ in 1..WINDOWS_TRACE_PIPE_WORKERS {
+        for _ in 1..worker_count {
             let path = trace_socket_path.clone();
             let coord = coordinator.clone();
             let connecting = windows_pipe_connecting_server(&path, false)?;
@@ -5220,7 +5276,7 @@ fn trace_listener_loop_actor(
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
-        wake_windows_pipe_workers(&trace_socket_path, WINDOWS_TRACE_PIPE_WORKERS);
+        wake_windows_pipe_workers(&trace_socket_path, worker_count);
 
         for worker in workers {
             let result = worker
@@ -5240,7 +5296,7 @@ fn windows_trace_pipe_worker_loop(
     coordinator: Arc<ActorDaemonCoordinator>,
 ) -> Result<(), GitAiError> {
     loop {
-        let mut server = connecting.wait().map_err(|e| {
+        let server = connecting.wait().map_err(|e| {
             GitAiError::Generic(format!(
                 "failed accepting trace pipe {}: {}",
                 trace_socket_path.display(),
@@ -5253,27 +5309,36 @@ fn windows_trace_pipe_worker_loop(
             break;
         }
 
-        {
-            let reader = BufReader::new(&mut server);
-            if let Err(e) = handle_trace_connection_actor_reader(
-                reader,
-                coordinator.clone(),
-                std::collections::BTreeSet::new(),
-            ) {
-                tracing::debug!(%e, "trace connection error");
-            }
-        }
+        connecting = windows_pipe_connecting_server(&trace_socket_path, false)?;
 
-        connecting = server.disconnect().map_err(|e| {
-            GitAiError::Generic(format!(
-                "failed recycling trace pipe {}: {}",
-                trace_socket_path.display(),
-                e
-            ))
-        })?;
+        let coord = coordinator.clone();
+        std::thread::Builder::new()
+            .spawn(move || {
+                handle_windows_trace_pipe_connection(server, coord);
+            })
+            .map_err(|e| {
+                GitAiError::Generic(format!(
+                    "failed spawning trace pipe handler for {}: {}",
+                    trace_socket_path.display(),
+                    e
+                ))
+            })?;
     }
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn handle_windows_trace_pipe_connection(
+    mut server: WindowsPipeServer,
+    coordinator: Arc<ActorDaemonCoordinator>,
+) {
+    let reader = BufReader::new(&mut server);
+    if let Err(e) =
+        handle_trace_connection_actor_reader(reader, coordinator, std::collections::BTreeSet::new())
+    {
+        tracing::debug!(%e, "trace connection error");
+    }
 }
 
 #[cfg(not(windows))]
@@ -6571,7 +6636,8 @@ mod tests {
 
     #[tokio::test]
     async fn mutating_commit_start_event_is_enqueued() {
-        let coord = ActorDaemonCoordinator::new();
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        coord.start_trace_ingest_worker().unwrap();
         let mut payload = make_start_payload(&["git", "commit", "-m", "test commit"]);
         let should_enqueue = coord.prepare_trace_payload_for_ingest(&mut payload);
         assert!(
@@ -6579,9 +6645,22 @@ mod tests {
             "commit start event should be enqueued (mutating)"
         );
         assert!(
-            payload.get(TRACE_INGEST_SEQ_FIELD).is_some(),
-            "mutating event must receive an ingest sequence number"
+            payload.get(TRACE_INGEST_SEQ_FIELD).is_none(),
+            "mutating event must not receive an ingest sequence number before enqueue capacity is reserved"
         );
+        assert_eq!(
+            coord.next_trace_ingest_seq.load(Ordering::Acquire),
+            0,
+            "prepare must not allocate an ingest sequence"
+        );
+        coord
+            .enqueue_trace_payload(payload)
+            .expect("mutating event should enqueue");
+        assert!(
+            coord.next_trace_ingest_seq.load(Ordering::Acquire) > 0,
+            "enqueue must allocate an ingest sequence number"
+        );
+        coord.request_shutdown();
     }
 
     #[tokio::test]
@@ -6724,6 +6803,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn enqueue_accounting_error_does_not_allocate_ingest_sequence() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        coord.start_trace_ingest_worker().unwrap();
+        let poison_coord = coord.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_coord
+                .queued_trace_payloads_by_root
+                .lock()
+                .expect("mutex should be lockable before intentional poison");
+            panic!("intentional queue accounting mutex poison");
+        })
+        .join();
+
+        let payload = serde_json::json!({
+            "event": "start",
+            "sid": "20260411T120000.000000-Paccounting",
+            "argv": ["git", "commit", "-m", "test"],
+        });
+        assert!(
+            coord.enqueue_trace_payload(payload).is_err(),
+            "poisoned queue accounting must fail enqueue"
+        );
+        assert_eq!(
+            coord.next_trace_ingest_seq.load(Ordering::Acquire),
+            0,
+            "failed enqueue must not allocate an ingest sequence that can block checkpoint drains"
+        );
+        coord.request_shutdown();
+    }
+
     /// After `request_shutdown()`, `is_shutting_down()` returns true and the
     /// coordinator stays in a consistent state.  The ingest worker (started
     /// via `start_trace_ingest_worker`) must exit cleanly even when the sender
@@ -6742,6 +6852,21 @@ mod tests {
         tokio::task::yield_now().await;
     }
 
+    #[tokio::test]
+    async fn checkpoint_trace_ingest_drain_returns_on_shutdown() {
+        let coord = ActorDaemonCoordinator::new();
+        coord.next_trace_ingest_seq.store(1, Ordering::Release);
+        coord.processed_trace_ingest_seq.store(0, Ordering::Release);
+        coord.request_shutdown();
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            coord.wait_for_trace_ingest_processed_through(),
+        )
+        .await
+        .expect("checkpoint trace ingest drain must return when daemon shutdown is requested");
+    }
+
     /// Concurrent enqueues from multiple threads must never deadlock or
     /// corrupt the accounting counter.
     #[tokio::test]
@@ -6753,8 +6878,8 @@ mod tests {
         const TASKS: usize = 8;
         const PER_TASK: usize = 20;
 
-        // Use prepare_trace_payload_for_ingest (which allocates seq numbers
-        // and enqueues) from multiple tasks concurrently.
+        // Use prepare_trace_payload_for_ingest + enqueue_trace_payload from
+        // multiple tasks concurrently.
         let mut handles = Vec::with_capacity(TASKS);
         for task_id in 0..TASKS {
             let c = coord.clone();
@@ -6766,8 +6891,10 @@ mod tests {
                         "sid": sid,
                         "argv": ["git", "commit", "-m", "msg"],
                     });
-                    // This calls enqueue_trace_payload internally for mutating cmds.
-                    let _ = c.prepare_trace_payload_for_ingest(&mut payload);
+                    if c.prepare_trace_payload_for_ingest(&mut payload) {
+                        c.enqueue_trace_payload(payload)
+                            .expect("mutating event should enqueue");
+                    }
                 }
             }));
         }

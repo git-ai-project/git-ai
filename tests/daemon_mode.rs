@@ -111,6 +111,20 @@ fn send_trace_frames(trace_socket_path: &Path, payloads: &[Value]) {
     stream.flush().expect("failed to flush trace payloads");
 }
 
+#[cfg(not(windows))]
+fn write_trace_frames_to_stream(stream: &mut impl Write, payloads: &[Value]) {
+    for payload in payloads {
+        let raw = serde_json::to_string(payload).expect("failed to serialize trace payload");
+        stream
+            .write_all(raw.as_bytes())
+            .expect("failed to write trace payload");
+        stream
+            .write_all(b"\n")
+            .expect("failed to write trace newline");
+    }
+    stream.flush().expect("failed to flush trace payloads");
+}
+
 fn repo_workdir_string(repo: &TestRepo) -> String {
     repo.path().to_string_lossy().to_string()
 }
@@ -1373,6 +1387,262 @@ fn daemon_trace_listener_stalled_connection_does_not_block_later_trace_connectio
     panic!(
         "daemon did not process a later trace connection while an earlier trace socket was stalled"
     );
+}
+
+#[test]
+#[cfg(not(windows))]
+fn daemon_trace_listener_partial_line_does_not_block_later_trace_connections() {
+    let repo = TestRepo::new_dedicated_daemon();
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let worktree = repo_workdir_string(&repo);
+    let git_dir = repo.path().join(".git").to_string_lossy().to_string();
+
+    let mut stalled_stream =
+        open_local_socket_stream_with_timeout(&trace_socket, DAEMON_TEST_PROBE_TIMEOUT)
+            .expect("failed to open stalled trace socket");
+    stalled_stream
+        .write_all(br#"{"event":"start""#)
+        .expect("failed to write partial trace frame");
+    stalled_stream
+        .flush()
+        .expect("failed to flush partial trace frame");
+    thread::sleep(Duration::from_millis(200));
+
+    let session = repos::test_repo::new_daemon_test_sync_session_id();
+    let session_arg = format!("git-ai.testSyncSession={session}");
+
+    send_trace_frames(
+        &trace_socket,
+        &[
+            json!({
+                "event": "start",
+                "sid": "partial-listener-followup",
+                "argv": ["git", "-c", session_arg, "commit", "-m", "synthetic"],
+                "time_ns": 10_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "partial-listener-followup",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 10_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "partial-listener-followup",
+                "code": 0,
+                "time_ns": 10_100u64,
+            }),
+        ],
+    );
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        if repo
+            .daemon_completion_entries()
+            .iter()
+            .any(|entry| entry.test_sync_session.as_deref() == Some(session.as_str()))
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    panic!(
+        "daemon did not process a later trace connection while an earlier trace socket held a partial line"
+    );
+}
+
+#[test]
+#[cfg(not(windows))]
+fn daemon_control_listener_stalled_connection_does_not_block_later_control_requests() {
+    let repo = TestRepo::new_dedicated_daemon();
+    let control_socket = daemon_control_socket_path(&repo);
+    let _stalled_stream =
+        open_local_socket_stream_with_timeout(&control_socket, DAEMON_TEST_PROBE_TIMEOUT)
+            .expect("failed to open stalled control socket");
+    thread::sleep(Duration::from_millis(50));
+
+    let response = send_control_request(
+        &control_socket,
+        &ControlRequest::StatusFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+    )
+    .expect("later control request should complete while an earlier control socket is stalled");
+
+    assert!(
+        response.ok,
+        "later control request should return an ok response: {:?}",
+        response
+    );
+}
+
+#[test]
+#[cfg(windows)]
+fn daemon_windows_control_pipe_worker_exhaustion_does_not_block_later_control_requests() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let mut daemon = DaemonGuard::start_with_env(
+        &repo,
+        &[
+            ("GIT_AI_TEST_WINDOWS_CONTROL_PIPE_WORKERS", "2"),
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "86400"),
+            ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "86400"),
+        ],
+    );
+    let control_socket = daemon_control_socket_path(&repo);
+
+    let _stalled_streams = (0..2)
+        .map(|_| {
+            open_local_socket_stream_with_timeout(&control_socket, DAEMON_TEST_PROBE_TIMEOUT)
+                .expect("failed to open stalled control pipe")
+        })
+        .collect::<Vec<_>>();
+    thread::sleep(Duration::from_millis(100));
+
+    let response = send_control_request(
+        &control_socket,
+        &ControlRequest::StatusFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+    )
+    .expect("control request should complete after every original pipe worker is stalled");
+
+    assert!(
+        response.ok,
+        "later control request should return an ok response: {:?}",
+        response
+    );
+    daemon.shutdown();
+}
+
+#[test]
+#[cfg(windows)]
+fn daemon_windows_trace_pipe_worker_exhaustion_does_not_block_later_trace_connections() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let mut daemon = DaemonGuard::start_with_env(
+        &repo,
+        &[
+            ("GIT_AI_TEST_WINDOWS_TRACE_PIPE_WORKERS", "2"),
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "86400"),
+            ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "86400"),
+        ],
+    );
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let worktree = repo_workdir_string(&repo);
+    let git_dir = repo.path().join(".git").to_string_lossy().to_string();
+
+    let _stalled_streams = (0..2)
+        .map(|_| {
+            open_local_socket_stream_with_timeout(&trace_socket, DAEMON_TEST_PROBE_TIMEOUT)
+                .expect("failed to open stalled trace pipe")
+        })
+        .collect::<Vec<_>>();
+    thread::sleep(Duration::from_millis(100));
+
+    let session = repos::test_repo::new_daemon_test_sync_session_id();
+    let session_arg = format!("git-ai.testSyncSession={session}");
+    send_trace_frames(
+        &trace_socket,
+        &[
+            json!({
+                "event": "start",
+                "sid": "windows-exhaustion-followup",
+                "argv": ["git", "-c", session_arg, "commit", "-m", "synthetic"],
+                "time_ns": 15_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "windows-exhaustion-followup",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 15_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "windows-exhaustion-followup",
+                "code": 0,
+                "time_ns": 15_100u64,
+            }),
+        ],
+    );
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        if repo
+            .daemon_completion_entries()
+            .iter()
+            .any(|entry| entry.test_sync_session.as_deref() == Some(session.as_str()))
+        {
+            daemon.shutdown();
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    daemon.shutdown();
+    panic!(
+        "daemon did not process a later trace connection after every original pipe worker was stalled"
+    );
+}
+
+#[test]
+#[serial]
+#[cfg(not(windows))]
+fn daemon_trace_ingest_backpressure_shuts_down_without_blocking_listener() {
+    let repo =
+        TestRepo::new_with_mode_and_daemon_scope(GitTestMode::Daemon, DaemonTestScope::NoDaemon);
+    let mut daemon = DaemonGuard::start_with_env(
+        &repo,
+        &[
+            ("GIT_AI_TEST_TRACE_INGEST_QUEUE_CAPACITY", "1"),
+            ("GIT_AI_TEST_TRACE_INGEST_WORKER_START_DELAY_MS", "5000"),
+            ("GIT_AI_DAEMON_UPDATE_CHECK_INTERVAL", "86400"),
+            ("GIT_AI_DAEMON_MAX_UPTIME_SECS", "86400"),
+        ],
+    );
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let worktree = repo_workdir_string(&repo);
+    let git_dir = repo.path().join(".git").to_string_lossy().to_string();
+
+    let mut stream =
+        open_local_socket_stream_with_timeout(&trace_socket, DAEMON_TEST_PROBE_TIMEOUT)
+            .expect("failed to connect trace socket");
+    write_trace_frames_to_stream(
+        &mut stream,
+        &[
+            json!({
+                "event": "start",
+                "sid": "backpressure-root",
+                "argv": ["git", "commit", "-m", "synthetic"],
+                "time_ns": 20_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "backpressure-root",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 20_001u64,
+            }),
+        ],
+    );
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        if daemon
+            .child
+            .try_wait()
+            .expect("failed to poll daemon")
+            .is_some()
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    panic!("daemon did not fail closed within 2s when trace ingest queue capacity was exhausted");
 }
 
 #[test]

@@ -193,16 +193,27 @@ impl RefCursor {
             self.pending_cherry_pick_source_oids.remove(0);
         }
 
+        let source_args = if is_continue || is_skip {
+            Vec::new()
+        } else {
+            cherry_pick_source_args(&args)
+        };
         let explicit_sources = if is_continue || is_skip {
             Vec::new()
         } else {
-            resolve_cherry_pick_source_oids(cmd, state)?
+            resolve_cherry_pick_source_oids_from_sources(cmd, state, &source_args)?
         };
-        cmd.cherry_pick_source_oids = if explicit_sources.is_empty() {
+        let unresolved_explicit_sources = !source_args.is_empty() && explicit_sources.is_empty();
+        cmd.cherry_pick_source_oids = if explicit_sources.is_empty() && !unresolved_explicit_sources
+        {
             self.pending_cherry_pick_source_oids.clone()
         } else {
             explicit_sources
         };
+
+        if cmd.exit_code != 0 && unresolved_explicit_sources {
+            return Ok(());
+        }
 
         if is_no_commit {
             return Ok(());
@@ -1057,9 +1068,10 @@ fn commit_subject(message: &str) -> Option<String> {
         .map(|line| line.to_string())
 }
 
-fn resolve_cherry_pick_source_oids(
+fn resolve_cherry_pick_source_oids_from_sources(
     cmd: &NormalizedCommand,
     state: &FamilyState,
+    sources: &[&str],
 ) -> Result<Vec<String>, GitAiError> {
     let Some(worktree) = cmd.worktree.as_ref() else {
         return Ok(Vec::new());
@@ -1068,7 +1080,7 @@ fn resolve_cherry_pick_source_oids(
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    for source in cherry_pick_source_args(&command_args(cmd)) {
+    for &source in sources {
         let resolved = if cherry_pick_source_is_range(source) {
             expand_cherry_pick_range(&repo, source, &state.refs)?
         } else {

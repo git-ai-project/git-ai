@@ -270,8 +270,11 @@ fn daemon_startup_is_blocked(config: &DaemonConfig) -> bool {
 }
 
 pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {
-    if !config.control_socket_path.exists() || !config.trace_socket_path.exists() {
-        return false;
+    #[cfg(not(windows))]
+    {
+        if !config.control_socket_path.exists() || !config.trace_socket_path.exists() {
+            return false;
+        }
     }
     local_socket_connects_with_timeout(&config.control_socket_path, Duration::from_millis(100))
         .is_ok()
