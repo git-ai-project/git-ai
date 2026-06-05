@@ -142,7 +142,7 @@ fn print_help() {
     eprintln!("  --help                            Show this help");
     eprintln!();
     eprintln!("Statistics are sourced from locally recorded metric events.");
-    eprintln!("Delivered metric history is retained locally for approximately 30 days.");
+    eprintln!("Metric rows older than approximately 45 days are pruned locally.");
 }
 
 fn print_terminal(

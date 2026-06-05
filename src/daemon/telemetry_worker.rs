@@ -956,13 +956,26 @@ mod tests {
         format!(r#"{{"t":{ts},"e":1,"v":{{}},"a":{{}}}}"#)
     }
 
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    fn now_ts() -> u32 {
+        unix_now().min(u32::MAX as u64) as u32
+    }
+
     #[test]
     fn flush_pending_metric_records_uploads_from_db_and_marks_delivered() {
         let db = Rc::new(RefCell::new(
             MetricsDatabase::new_in_memory_for_tests().unwrap(),
         ));
+        let ts1 = now_ts().saturating_sub(2);
+        let ts2 = now_ts().saturating_sub(1);
         db.borrow_mut()
-            .insert_events(&[event_json(1), event_json(2)])
+            .insert_events(&[event_json(ts1), event_json(ts2)])
             .unwrap();
 
         let uploaded = Rc::new(RefCell::new(Vec::<Vec<u32>>::new()));
@@ -973,7 +986,7 @@ mod tests {
             },
             {
                 let db = Rc::clone(&db);
-                move |ids| db.borrow_mut().mark_records_delivered(ids, 1_700_000_000)
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
             },
             {
                 let uploaded = Rc::clone(&uploaded);
@@ -997,7 +1010,7 @@ mod tests {
                 invalid_records: 0,
             }
         );
-        assert_eq!(*uploaded.borrow(), vec![vec![1], vec![2]]);
+        assert_eq!(*uploaded.borrow(), vec![vec![ts1], vec![ts2]]);
         assert_eq!(db.borrow().count().unwrap(), 0);
         assert_eq!(
             db.borrow().get_metric_history(0, None, &[1]).unwrap().len(),
@@ -1010,8 +1023,9 @@ mod tests {
         let db = Rc::new(RefCell::new(
             MetricsDatabase::new_in_memory_for_tests().unwrap(),
         ));
+        let ts = now_ts();
         db.borrow_mut()
-            .insert_events(&["not-json".to_string(), event_json(2)])
+            .insert_events(&["not-json".to_string(), event_json(ts)])
             .unwrap();
 
         let uploaded = Rc::new(RefCell::new(Vec::<u32>::new()));
@@ -1022,7 +1036,7 @@ mod tests {
             },
             {
                 let db = Rc::clone(&db);
-                move |ids| db.borrow_mut().mark_records_delivered(ids, 1_700_000_000)
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
             },
             {
                 let uploaded = Rc::clone(&uploaded);
@@ -1046,7 +1060,7 @@ mod tests {
                 invalid_records: 1,
             }
         );
-        assert_eq!(*uploaded.borrow(), vec![2]);
+        assert_eq!(*uploaded.borrow(), vec![ts]);
         assert_eq!(db.borrow().count().unwrap(), 0);
         assert_eq!(
             db.borrow().get_metric_history(0, None, &[1]).unwrap().len(),
@@ -1059,7 +1073,8 @@ mod tests {
         let db = Rc::new(RefCell::new(
             MetricsDatabase::new_in_memory_for_tests().unwrap(),
         ));
-        db.borrow_mut().insert_events(&[event_json(1)]).unwrap();
+        let ts = now_ts();
+        db.borrow_mut().insert_events(&[event_json(ts)]).unwrap();
 
         let result = flush_pending_metric_records_with(
             {
@@ -1068,7 +1083,7 @@ mod tests {
             },
             {
                 let db = Rc::clone(&db);
-                move |ids| db.borrow_mut().mark_records_delivered(ids, 1_700_000_000)
+                move |ids| db.borrow_mut().mark_records_delivered(ids, unix_now())
             },
             |_batch| Err(GitAiError::Generic("upload failed".to_string())),
             std::time::Instant::now() + std::time::Duration::from_secs(60),
