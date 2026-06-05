@@ -572,7 +572,7 @@ fn strip_protocol(url: &str) -> &str {
 /// Render a block bar where `value` out of `max` determines the fill ratio.
 fn ratio_bar(value: u32, max: u32, width: u32) -> String {
     let filled = if max > 0 {
-        (value * width / max).min(width)
+        ((value as u64 * width as u64 / max as u64).min(width as u64)) as u32
     } else {
         0
     };

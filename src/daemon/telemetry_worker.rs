@@ -188,11 +188,13 @@ impl DaemonTelemetryWorkerHandle {
             return usize::MAX;
         }
 
-        let pending = MetricsDatabase::global()
-            .ok()
-            .and_then(|db| db.try_lock().ok())
-            .and_then(|db| db.count().ok())
-            .unwrap_or(0);
+        let pending = match MetricsDatabase::global() {
+            Ok(db) => match db.try_lock() {
+                Ok(db) => db.count().unwrap_or(usize::MAX),
+                Err(_) => usize::MAX,
+            },
+            Err(_) => 0,
+        };
         buffered.saturating_add(pending)
     }
 

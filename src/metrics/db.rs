@@ -9,6 +9,7 @@ use crate::metrics::attrs::attr_pos;
 use crate::metrics::pos_encoded::sparse_get_string;
 use crate::metrics::types::MetricEvent;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -511,11 +512,17 @@ fn metric_row_is_older_than_cutoff(
     delivered_ts: Option<i64>,
     cutoff: u64,
 ) -> bool {
-    if let Ok(event) = serde_json::from_str::<MetricEvent>(event_json) {
+    if let Ok(event) = serde_json::from_str::<MetricTimestampOnly>(event_json) {
         return u64::from(event.timestamp) < cutoff;
     }
 
     delivered_ts.is_some_and(|ts| ts >= 0 && (ts as u64) < cutoff)
+}
+
+#[derive(Deserialize)]
+struct MetricTimestampOnly {
+    #[serde(rename = "t")]
+    timestamp: u32,
 }
 
 #[cfg(test)]
