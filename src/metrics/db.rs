@@ -125,6 +125,22 @@ impl MetricsDatabase {
         Ok(db)
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_in_memory_for_tests() -> Result<Self, GitAiError> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            "#,
+        )?;
+
+        let mut db = Self { conn };
+        db.initialize_schema()?;
+
+        Ok(db)
+    }
+
     /// Get database path: ~/.git-ai/internal/metrics-db
     fn database_path() -> Result<PathBuf, GitAiError> {
         // Allow test override via environment variable

@@ -233,10 +233,55 @@ fn parse_alias_tokens(value: &str) -> Option<Vec<String>> {
 mod tests {
     use super::*;
     use std::process::Command;
+    use std::sync::OnceLock;
+
+    fn real_git_for_test() -> &'static str {
+        static REAL_GIT: OnceLock<String> = OnceLock::new();
+        REAL_GIT
+            .get_or_init(|| {
+                #[cfg(not(windows))]
+                {
+                    for candidate in [
+                        "/opt/homebrew/bin/git",
+                        "/usr/local/bin/git",
+                        "/usr/bin/git",
+                        "/bin/git",
+                    ] {
+                        if crate::config::is_real_git_candidate(Path::new(candidate)) {
+                            return candidate.to_string();
+                        }
+                    }
+                }
+
+                if let Some(path) = std::env::var_os("PATH") {
+                    for dir in std::env::split_paths(&path) {
+                        for name in git_binary_names_for_path_lookup() {
+                            let candidate = dir.join(name);
+                            if crate::config::is_real_git_candidate(&candidate) {
+                                return candidate.to_string_lossy().to_string();
+                            }
+                        }
+                    }
+                }
+
+                "git".to_string()
+            })
+            .as_str()
+    }
+
+    #[cfg(windows)]
+    fn git_binary_names_for_path_lookup() -> &'static [&'static str] {
+        &["git.exe", "git.cmd", "git.bat", "git"]
+    }
+
+    #[cfg(not(windows))]
+    fn git_binary_names_for_path_lookup() -> &'static [&'static str] {
+        &["git"]
+    }
 
     fn init_repo() -> tempfile::TempDir {
         let temp = tempfile::tempdir().expect("create tempdir");
-        let status = Command::new("git")
+        let status = Command::new(real_git_for_test())
             .arg("init")
             .env("GIT_TRACE2", "0")
             .env("GIT_TRACE2_EVENT", "0")
@@ -251,7 +296,7 @@ mod tests {
     }
 
     fn git_config(repo: &Path, key: &str, value: &str) {
-        let status = Command::new("git")
+        let status = Command::new(real_git_for_test())
             .args(["config", key, value])
             .env("GIT_TRACE2", "0")
             .env("GIT_TRACE2_EVENT", "0")

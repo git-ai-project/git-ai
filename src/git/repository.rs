@@ -2262,9 +2262,6 @@ fn git_config_file_for_repo_paths(
     git_dir: &Path,
     git_common_dir: &Path,
 ) -> Result<gix_config::File<'static>, GitAiError> {
-    let mut config =
-        gix_config::File::from_globals().map_err(|e| GitAiError::GixError(e.to_string()))?;
-
     let home = dirs::home_dir();
     let options = gix_config::file::init::Options {
         includes: gix_config::file::includes::Options::follow(
@@ -2279,6 +2276,13 @@ fn git_config_file_for_repo_paths(
         ),
         ..Default::default()
     };
+
+    let mut config = gix_config::File::default();
+    for (path, source) in no_exec_global_config_paths() {
+        let file = gix_config::File::from_path_no_includes(path, source)
+            .map_err(|e| GitAiError::GixError(e.to_string()))?;
+        config.append(file);
+    }
 
     config
         .resolve_includes(options)
@@ -2319,6 +2323,69 @@ fn git_config_file_for_repo_paths(
     );
 
     Ok(config)
+}
+
+fn no_exec_global_config_paths() -> Vec<(PathBuf, gix_config::Source)> {
+    let mut paths = Vec::new();
+    let nosystem = std::env::var_os("GIT_CONFIG_NOSYSTEM").is_some_and(|value| {
+        let value = value.to_string_lossy();
+        !matches!(value.as_ref(), "" | "0" | "false" | "FALSE" | "off" | "OFF")
+    });
+
+    if !nosystem {
+        if let Some(path) = std::env::var_os("GIT_CONFIG_SYSTEM").map(PathBuf::from) {
+            push_existing_config_path(&mut paths, path, gix_config::Source::System);
+        } else {
+            #[cfg(unix)]
+            push_existing_config_path(
+                &mut paths,
+                PathBuf::from("/etc/gitconfig"),
+                gix_config::Source::System,
+            );
+        }
+    }
+
+    if let Some(path) = std::env::var_os("GIT_CONFIG_GLOBAL").map(PathBuf::from) {
+        push_existing_config_path(&mut paths, path, gix_config::Source::Git);
+    } else {
+        let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| home_dir_from_env().map(|home| home.join(".config")));
+        if let Some(xdg_config_home) = xdg_config_home {
+            push_existing_config_path(
+                &mut paths,
+                xdg_config_home.join("git").join("config"),
+                gix_config::Source::Git,
+            );
+        }
+
+        if let Some(home) = home_dir_from_env() {
+            push_existing_config_path(
+                &mut paths,
+                home.join(".gitconfig"),
+                gix_config::Source::User,
+            );
+        }
+    }
+
+    paths
+}
+
+fn home_dir_from_env() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn push_existing_config_path(
+    paths: &mut Vec<(PathBuf, gix_config::Source)>,
+    path: PathBuf,
+    source: gix_config::Source,
+) {
+    if path.is_file() {
+        paths.push((path, source));
+    }
 }
 
 pub fn config_get_str_for_path_no_git_exec(

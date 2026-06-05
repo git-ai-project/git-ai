@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::error::GitAiError;
 use crate::metrics::MetricEvent;
+use crate::metrics::db::MetricsDatabase;
 
 pub mod performance_targets;
 
@@ -11,18 +13,28 @@ pub const MAX_METRICS_PER_ENVELOPE: usize = 1000;
 /// Submit telemetry envelopes via the best available path:
 /// 1. External daemon control socket (wrapper processes)
 /// 2. In-process daemon telemetry worker (daemon process itself)
-/// 3. Silently drop if neither is available
+/// 3. Local SQLite storage for metric events if neither daemon path is available
 fn submit_telemetry_envelope(envelopes: Vec<crate::daemon::TelemetryEnvelope>) {
-    if crate::daemon::telemetry_handle::daemon_telemetry_available() {
-        crate::daemon::telemetry_handle::submit_telemetry(envelopes);
-    } else if crate::daemon::daemon_process_active() {
-        crate::daemon::telemetry_worker::submit_daemon_internal_telemetry(envelopes);
-    } else {
-        store_metrics_envelopes_locally(envelopes);
+    if crate::daemon::telemetry_handle::daemon_telemetry_available()
+        && crate::daemon::telemetry_handle::submit_telemetry(envelopes.clone())
+    {
+        return;
+    }
+
+    if crate::daemon::daemon_process_active()
+        && crate::daemon::telemetry_worker::submit_daemon_internal_telemetry(envelopes.clone())
+    {
+        return;
+    }
+
+    if let Err(e) = store_metrics_envelopes_locally(envelopes) {
+        tracing::warn!(%e, "telemetry: failed to persist metrics locally");
     }
 }
 
-fn store_metrics_envelopes_locally(envelopes: Vec<crate::daemon::TelemetryEnvelope>) {
+fn store_metrics_envelopes_locally(
+    envelopes: Vec<crate::daemon::TelemetryEnvelope>,
+) -> Result<(), GitAiError> {
     let mut events = Vec::new();
     for envelope in envelopes {
         if let crate::daemon::TelemetryEnvelope::Metrics {
@@ -34,24 +46,26 @@ fn store_metrics_envelopes_locally(envelopes: Vec<crate::daemon::TelemetryEnvelo
     }
 
     if events.is_empty() {
-        return;
+        return Ok(());
     }
 
     for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
         let event_jsons: Vec<String> = chunk
             .iter()
-            .filter_map(|event| serde_json::to_string(event).ok())
-            .collect();
+            .map(serde_json::to_string)
+            .collect::<Result<_, _>>()?;
         if event_jsons.is_empty() {
             continue;
         }
 
-        if let Ok(db) = crate::metrics::db::MetricsDatabase::global()
-            && let Ok(mut db_lock) = db.lock()
-        {
-            let _ = db_lock.insert_events(&event_jsons);
-        }
+        let db = MetricsDatabase::global()?;
+        let mut db_lock = db
+            .lock()
+            .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
+        db_lock.insert_events(&event_jsons)?;
     }
+
+    Ok(())
 }
 
 /// Log an error to Sentry (via daemon telemetry worker)
