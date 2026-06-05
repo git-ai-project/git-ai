@@ -3,6 +3,7 @@ pub mod attribution_tracker;
 pub mod authorship_log;
 pub mod authorship_log_serialization;
 pub mod background_agent;
+pub mod conflict_resolution;
 pub mod diff_ai_accepted;
 pub mod git_ai_hooks;
 pub mod hunk_shift;

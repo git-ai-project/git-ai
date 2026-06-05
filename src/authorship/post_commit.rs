@@ -73,15 +73,13 @@ pub fn post_commit_from_working_log(
     human_author: String,
     supress_output: bool,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
-    post_commit_from_working_log_with_options(
+    post_commit_from_working_log_with_transform(
         repo,
         base_commit,
         commit_sha,
         human_author,
-        PostCommitOptions {
-            supress_output,
-            compute_stats: true,
-        },
+        supress_output,
+        Ok,
     )
 }
 
@@ -91,13 +89,41 @@ pub(crate) struct PostCommitOptions {
     pub compute_stats: bool,
 }
 
-pub(crate) fn post_commit_from_working_log_with_options(
+pub fn post_commit_from_working_log_with_transform<F>(
+    repo: &Repository,
+    base_commit: Option<String>,
+    commit_sha: String,
+    human_author: String,
+    supress_output: bool,
+    transform: F,
+) -> Result<(String, AuthorshipLog), GitAiError>
+where
+    F: FnOnce(AuthorshipLog) -> Result<AuthorshipLog, GitAiError>,
+{
+    post_commit_from_working_log_with_transform_and_options(
+        repo,
+        base_commit,
+        commit_sha,
+        human_author,
+        PostCommitOptions {
+            supress_output,
+            compute_stats: true,
+        },
+        transform,
+    )
+}
+
+pub(crate) fn post_commit_from_working_log_with_transform_and_options<F>(
     repo: &Repository,
     base_commit: Option<String>,
     commit_sha: String,
     human_author: String,
     options: PostCommitOptions,
-) -> Result<(String, AuthorshipLog), GitAiError> {
+    transform: F,
+) -> Result<(String, AuthorshipLog), GitAiError>
+where
+    F: FnOnce(AuthorshipLog) -> Result<AuthorshipLog, GitAiError>,
+{
     // Use base_commit parameter if provided, otherwise use "initial" for empty repos
     // This matches the convention in checkpoint.rs
     let parent_sha = base_commit.unwrap_or_else(|| "initial".to_string());
@@ -180,6 +206,9 @@ pub(crate) fn post_commit_from_working_log_with_options(
             );
         }
     }
+
+    authorship_log = transform(authorship_log)?;
+    authorship_log.metadata.base_commit_sha = commit_sha.clone();
 
     // Long-lived daemon processes should read a fresh config snapshot.
     // Always use Config::fresh() to support runtime config updates
