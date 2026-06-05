@@ -88,6 +88,6 @@ impl<S: Subscriber> Layer<S> for SentryLayer {
             context,
         };
 
-        crate::daemon::telemetry_worker::submit_daemon_internal_telemetry(vec![envelope]);
+        let _ = crate::daemon::telemetry_worker::submit_daemon_internal_telemetry(vec![envelope]);
     }
 }
