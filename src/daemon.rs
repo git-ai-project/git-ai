@@ -747,12 +747,7 @@ fn resolve_stash_sha(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<&
 /// After a rebase completes, check if any newly-rebased commits were created
 /// from conflict resolution with AI checkpoints. If so, merge those resolution
 /// checkpoints into the already-shifted source authorship note for the new commit.
-fn process_conflict_resolution_working_logs(
-    repo: &Repository,
-    new_tip: &str,
-    onto: Option<&str>,
-    source_mappings: &[(String, String)],
-) {
+fn process_conflict_resolution_working_logs(repo: &Repository, new_tip: &str, onto: Option<&str>) {
     let onto_sha = match onto {
         Some(s) if !s.is_empty() => s,
         _ => return,
@@ -770,10 +765,6 @@ fn process_conflict_resolution_working_logs(
         Err(_) => return,
     };
     let log_output = String::from_utf8_lossy(&output.stdout);
-    let source_by_destination: HashMap<String, String> = source_mappings
-        .iter()
-        .map(|(source, destination)| (destination.clone(), source.clone()))
-        .collect();
 
     let commit_parent_pairs = log_output
         .lines()
@@ -798,7 +789,6 @@ fn process_conflict_resolution_working_logs(
         let existing_shifted_log = existing_notes
             .get(&commit_sha)
             .and_then(|raw| AuthorshipLog::deserialize_from_string(raw).ok());
-        let source_sha = source_by_destination.get(&commit_sha).cloned();
         let commit_for_transform = commit_sha.clone();
         let commit_for_log = commit_sha.clone();
         if let Err(err) =
@@ -814,10 +804,8 @@ fn process_conflict_resolution_working_logs(
                 move |resolution_log| {
                     Ok(
                         crate::authorship::conflict_resolution::merge_conflict_resolution_authorship(
-                        repo,
                         existing_shifted_log,
                         resolution_log,
-                        source_sha.as_deref(),
                         &commit_for_transform,
                     ),
                     )
@@ -3759,7 +3747,7 @@ impl ActorDaemonCoordinator {
                 && original_head != new_tip
                 && !is_ancestor_commit(&repo, &original_head, &new_tip)
             {
-                let mappings = crate::authorship::rewrite::handle_non_fast_forward_rewrite(
+                let _ = crate::authorship::rewrite::handle_non_fast_forward_rewrite(
                     &repo,
                     &original_head,
                     &new_tip,
@@ -3768,12 +3756,7 @@ impl ActorDaemonCoordinator {
                 let _ = repo.storage.rename_working_log(&original_head, &new_tip);
                 let conflict_base =
                     rebase_completion_base_from_command(cmd).or(rebase_onto.clone());
-                process_conflict_resolution_working_logs(
-                    &repo,
-                    &new_tip,
-                    conflict_base.as_deref(),
-                    &mappings,
-                );
+                process_conflict_resolution_working_logs(&repo, &new_tip, conflict_base.as_deref());
             }
             return Ok(());
         }
@@ -3788,7 +3771,7 @@ impl ActorDaemonCoordinator {
                 continue;
             }
 
-            let mappings = crate::authorship::rewrite::handle_non_fast_forward_rewrite(
+            let _ = crate::authorship::rewrite::handle_non_fast_forward_rewrite(
                 &repo,
                 old_tip,
                 new_tip,
@@ -3798,12 +3781,7 @@ impl ActorDaemonCoordinator {
             if is_rebase_cmd {
                 let conflict_base =
                     rebase_completion_base_from_command(cmd).or_else(|| onto_hint.clone());
-                process_conflict_resolution_working_logs(
-                    &repo,
-                    new_tip,
-                    conflict_base.as_deref(),
-                    &mappings,
-                );
+                process_conflict_resolution_working_logs(&repo, new_tip, conflict_base.as_deref());
             }
         }
 
