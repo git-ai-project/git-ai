@@ -7602,9 +7602,15 @@ impl ActorDaemonCoordinator {
                 }),
             ControlRequest::SubmitTelemetry { envelopes } => {
                 if let Some(worker) = &self.telemetry_worker {
-                    worker.submit_telemetry(envelopes).await;
+                    match worker.submit_telemetry(envelopes).await {
+                        Ok(()) => Ok(ControlResponse::ok(None, None)),
+                        Err(e) => Ok(ControlResponse::err(format!(
+                            "telemetry worker failed: {e}"
+                        ))),
+                    }
+                } else {
+                    Ok(ControlResponse::err("telemetry worker unavailable"))
                 }
-                Ok(ControlResponse::ok(None, None))
             }
             ControlRequest::SubmitCas { records } => {
                 if let Some(worker) = &self.telemetry_worker {
