@@ -1,9 +1,6 @@
-use std::collections::HashMap;
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::collections::{HashMap, HashSet};
 
-use crate::config;
-use crate::git::repository::{Repository, exec_git_allow_nonzero};
+use crate::git::repository::{Repository, exec_git_stdin};
 
 /// Pairs source commits with their cherry-picked counterparts using a two-pass algorithm.
 ///
@@ -14,20 +11,22 @@ pub fn match_cherry_pick_pairs(
     repo: &Repository,
     sources: &[String],
     new_commits: &[String],
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>, crate::error::GitAiError> {
     if sources.is_empty() || new_commits.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
+
+    let patch_ids = compute_patch_ids(repo, sources, new_commits)?;
 
     // Compute patch-ids for both sides
     let source_patch_ids: Vec<Option<String>> = sources
         .iter()
-        .map(|sha| compute_single_patch_id(repo, sha))
+        .map(|sha| patch_ids.get(sha).cloned())
         .collect();
 
     let new_patch_ids: Vec<Option<String>> = new_commits
         .iter()
-        .map(|sha| compute_single_patch_id(repo, sha))
+        .map(|sha| patch_ids.get(sha).cloned())
         .collect();
 
     // Build map: patch_id -> list of indices in new_commits
@@ -78,46 +77,60 @@ pub fn match_cherry_pick_pairs(
         pairs.push((sources[*src_pos].clone(), new_commits[*new_pos].clone()));
     }
 
-    pairs
+    Ok(pairs)
 }
 
-fn compute_single_patch_id(repo: &Repository, sha: &str) -> Option<String> {
-    // Get the diff output via git show
-    let mut show_args = repo.global_args_for_exec();
-    show_args.extend(["show".to_string(), sha.to_string()]);
-    let show_output = exec_git_allow_nonzero(&show_args).ok()?;
-    if !show_output.status.success() || show_output.stdout.is_empty() {
-        return None;
+fn compute_patch_ids(
+    repo: &Repository,
+    sources: &[String],
+    new_commits: &[String],
+) -> Result<HashMap<String, String>, crate::error::GitAiError> {
+    let mut commits = Vec::new();
+    let mut seen = HashSet::new();
+    for sha in sources.iter().chain(new_commits.iter()) {
+        if seen.insert(sha.clone()) {
+            commits.push(sha.clone());
+        }
+    }
+    if commits.is_empty() {
+        return Ok(HashMap::new());
     }
 
-    // Pipe to git patch-id --stable
-    let git_bin = config::Config::get().git_cmd().to_string();
-    let mut child = Command::new(&git_bin)
-        .args(["patch-id", "--stable"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    {
-        let stdin = child.stdin.as_mut()?;
-        stdin.write_all(&show_output.stdout).ok()?;
-    }
-    // stdin is dropped here, closing the pipe
-
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
-        return None;
+    let mut log_args = repo.global_args_for_exec();
+    log_args.extend([
+        "log".to_string(),
+        "--stdin".to_string(),
+        "--no-walk".to_string(),
+        "--reverse".to_string(),
+        "--no-ext-diff".to_string(),
+        "--no-color".to_string(),
+        "--format=medium".to_string(),
+        "-p".to_string(),
+    ]);
+    let stdin_data = commits.join("\n") + "\n";
+    let log_output = exec_git_stdin(&log_args, stdin_data.as_bytes())?;
+    if log_output.stdout.is_empty() {
+        return Ok(HashMap::new());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let patch_id = stdout.split_whitespace().next()?;
-    if patch_id.is_empty() {
-        return None;
+    let mut patch_args = repo.global_args_for_exec();
+    patch_args.extend(["patch-id".to_string(), "--stable".to_string()]);
+    let patch_output = exec_git_stdin(&patch_args, &log_output.stdout)?;
+
+    let stdout = String::from_utf8_lossy(&patch_output.stdout);
+    let mut patch_ids = HashMap::new();
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(patch_id) = parts.next() else {
+            continue;
+        };
+        let Some(commit_sha) = parts.next() else {
+            continue;
+        };
+        patch_ids.insert(commit_sha.to_string(), patch_id.to_string());
     }
 
-    Some(patch_id.to_string())
+    Ok(patch_ids)
 }
 
 #[cfg(test)]

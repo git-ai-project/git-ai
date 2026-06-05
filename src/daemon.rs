@@ -1359,8 +1359,11 @@ fn apply_cherry_pick_complete_rewrite(
     sources: &[String],
     new_commits: &[String],
 ) -> Result<(), GitAiError> {
-    let pairs =
-        crate::authorship::rewrite_cherry_pick::match_cherry_pick_pairs(repo, sources, new_commits);
+    let pairs = crate::authorship::rewrite_cherry_pick::match_cherry_pick_pairs(
+        repo,
+        sources,
+        new_commits,
+    )?;
     if pairs.is_empty() {
         return Ok(());
     }

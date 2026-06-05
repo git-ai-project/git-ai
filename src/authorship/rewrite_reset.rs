@@ -4,8 +4,8 @@ use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::authorship::hunk_shift::{DiffHunk, apply_hunk_shifts_to_line_attributions};
 use crate::authorship::rewrite::compute_diff_trees_batch;
 use crate::error::GitAiError;
-use crate::git::notes_api::read_authorship_v3;
-use crate::git::repository::Repository;
+use crate::git::notes_api;
+use crate::git::repository::{Repository, batch_read_paths_at_treeishes};
 use std::collections::HashMap;
 
 /// Handles working log reconstruction after a backward reset (e.g. git reset --mixed HEAD~N).
@@ -26,8 +26,12 @@ pub fn reconstruct_working_log_after_backward_reset(
 
     // Read authorship notes for all un-done commits
     let mut commit_logs: Vec<(String, AuthorshipLog)> = Vec::new();
+    let notes = notes_api::read_notes_batch(repo, &commits)?;
     for commit_sha in &commits {
-        let Ok(log) = read_authorship_v3(repo, commit_sha) else {
+        let Some(raw_note) = notes.get(commit_sha) else {
+            continue;
+        };
+        let Ok(log) = AuthorshipLog::deserialize_from_string(raw_note) else {
             continue;
         };
         commit_logs.push((commit_sha.clone(), log));
@@ -93,13 +97,24 @@ pub fn reconstruct_working_log_after_backward_reset(
     // We cannot read the working directory here because by the time the daemon processes
     // the reset event, the user may have already modified files further.
     let mut file_blobs: HashMap<String, String> = HashMap::new();
+    let mut blob_requests = Vec::new();
     for file_path in file_attributions.keys() {
-        let content = file_content_at_commit(repo, old_tip, file_path);
-        if !content.is_empty() {
-            let target_content = file_content_at_commit(repo, new_tip, file_path);
-            if content != target_content {
-                file_blobs.insert(file_path.clone(), content);
-            }
+        blob_requests.push((old_tip.to_string(), file_path.clone()));
+        blob_requests.push((new_tip.to_string(), file_path.clone()));
+    }
+    let tree_contents = batch_read_paths_at_treeishes(repo, &blob_requests)?;
+    for file_path in file_attributions.keys() {
+        let old_key = (old_tip.to_string(), file_path.clone());
+        let Some(content) = tree_contents.get(&old_key) else {
+            continue;
+        };
+        if content.is_empty() {
+            continue;
+        }
+
+        let new_key = (new_tip.to_string(), file_path.clone());
+        if tree_contents.get(&new_key) != Some(content) {
+            file_blobs.insert(file_path.clone(), content.clone());
         }
     }
 
@@ -215,15 +230,4 @@ fn extract_attributions_from_log_shifted(
 
 fn list_commits_in_range(repo: &Repository, base: &str, tip: &str) -> Vec<String> {
     crate::authorship::rewrite::list_commits_in_range(repo, base, tip)
-}
-
-pub(crate) fn file_content_at_commit(repo: &Repository, commit: &str, file_path: &str) -> String {
-    use crate::git::repository::exec_git_allow_nonzero;
-    let mut args = repo.global_args_for_exec();
-    args.extend(["show".to_string(), format!("{}:{}", commit, file_path)]);
-    exec_git_allow_nonzero(&args)
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default()
 }

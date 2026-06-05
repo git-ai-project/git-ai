@@ -4,7 +4,7 @@ use crate::error::GitAiError;
 use crate::git::cli_parser::parse_git_cli_args;
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{git_dir_for_worktree, is_valid_git_oid};
-use crate::git::repository::{Repository, exec_git_allow_nonzero};
+use crate::git::repository::exec_git_stdin;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1080,18 +1080,18 @@ fn resolve_cherry_pick_source_oids_from_sources(
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
-    for &source in sources {
-        let resolved = if cherry_pick_source_is_range(source) {
-            expand_cherry_pick_range(&repo, source, &state.refs)?
-        } else {
-            resolve_cherry_pick_revision(&repo, source, &state.refs)?
-                .into_iter()
-                .collect()
-        };
-        for oid in resolved {
-            if seen.insert(oid.clone()) {
-                out.push(oid);
-            }
+    let has_range = sources
+        .iter()
+        .any(|source| cherry_pick_source_is_range(source));
+    let resolved = if has_range {
+        resolve_cherry_pick_sources_with_rev_list(&repo, sources, &state.refs)?
+    } else {
+        resolve_cherry_pick_sources_with_cat_file(&repo, sources, &state.refs)?
+    };
+
+    for oid in resolved {
+        if seen.insert(oid.clone()) {
+            out.push(oid);
         }
     }
 
@@ -1149,20 +1149,33 @@ fn cherry_pick_source_is_range(source: &str) -> bool {
     source.contains("..")
 }
 
-fn expand_cherry_pick_range(
-    repo: &Repository,
-    source: &str,
+fn resolve_cherry_pick_sources_with_rev_list(
+    repo: &crate::git::repository::Repository,
+    sources: &[&str],
     refs: &HashMap<String, String>,
 ) -> Result<Vec<String>, GitAiError> {
-    let Some(range) = concretize_revision_range(source, refs) else {
-        return Ok(Vec::new());
-    };
-    let mut args = repo.global_args_for_exec();
-    args.extend(["rev-list".to_string(), "--reverse".to_string(), range]);
-    let output = exec_git_allow_nonzero(&args)?;
-    if !output.status.success() {
+    let concretized: Vec<String> = sources
+        .iter()
+        .filter_map(|source| {
+            if cherry_pick_source_is_range(source) {
+                concretize_revision_range(source, refs)
+            } else {
+                concretize_revision_expr(source, refs)
+            }
+        })
+        .collect();
+    if concretized.is_empty() {
         return Ok(Vec::new());
     }
+
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "rev-list".to_string(),
+        "--reverse".to_string(),
+        "--stdin".to_string(),
+    ]);
+    let stdin_data = concretized.join("\n") + "\n";
+    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(str::trim)
@@ -1171,33 +1184,35 @@ fn expand_cherry_pick_range(
         .collect())
 }
 
-fn resolve_cherry_pick_revision(
-    repo: &Repository,
-    source: &str,
+fn resolve_cherry_pick_sources_with_cat_file(
+    repo: &crate::git::repository::Repository,
+    sources: &[&str],
     refs: &HashMap<String, String>,
-) -> Result<Option<String>, GitAiError> {
-    if is_valid_git_oid(source) {
-        return Ok(Some(source.to_string()));
+) -> Result<Vec<String>, GitAiError> {
+    let specs: Vec<String> = sources
+        .iter()
+        .filter_map(|source| concretize_revision_expr(source, refs))
+        .map(|expr| format!("{expr}^{{commit}}"))
+        .collect();
+    if specs.is_empty() {
+        return Ok(Vec::new());
     }
-    let Some(expr) = concretize_revision_expr(source, refs) else {
-        return Ok(None);
-    };
-    rev_parse_commit(repo, &expr)
-}
 
-fn rev_parse_commit(repo: &Repository, expr: &str) -> Result<Option<String>, GitAiError> {
     let mut args = repo.global_args_for_exec();
     args.extend([
-        "rev-parse".to_string(),
-        "--verify".to_string(),
-        format!("{expr}^{{commit}}"),
+        "cat-file".to_string(),
+        "--batch-check=%(objectname) %(objecttype)".to_string(),
     ]);
-    let output = exec_git_allow_nonzero(&args)?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(is_valid_git_oid(&resolved).then_some(resolved))
+    let stdin_data = specs.join("\n") + "\n";
+    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let oid = parts.next()?;
+            (parts.next() == Some("commit") && is_valid_git_oid(oid)).then(|| oid.to_string())
+        })
+        .collect())
 }
 
 fn concretize_revision_range(source: &str, refs: &HashMap<String, String>) -> Option<String> {

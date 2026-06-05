@@ -6,7 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::authorship::attribution_tracker::LineAttribution;
 use crate::authorship::imara_diff_utils::{DiffOp, capture_diff_slices};
 use crate::error::GitAiError;
-use crate::git::repository::{Repository, exec_git_allow_nonzero};
+use crate::git::repository::{
+    Repository, batch_read_paths_at_treeishes, disable_internal_git_hooks,
+    exec_git_allow_nonzero_with_env,
+};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StashMetadata {
@@ -109,12 +112,7 @@ pub fn handle_stash_pop_or_apply_with_head(
     };
 
     if metadata.base_commit != current_head {
-        restore_stash_attributions_with_shift(
-            repo,
-            stash_sha,
-            &metadata.base_commit,
-            current_head,
-        )?;
+        restore_stash_attributions_with_shift(repo, stash_sha, current_head)?;
     } else {
         restore_stash_attributions(repo, stash_sha, current_head)?;
     }
@@ -214,7 +212,6 @@ fn restore_stash_attributions(
 fn restore_stash_attributions_with_shift(
     repo: &Repository,
     stash_sha: &str,
-    base_commit: &str,
     current_head: &str,
 ) -> Result<(), GitAiError> {
     use crate::authorship::virtual_attribution::VirtualAttributions;
@@ -283,6 +280,14 @@ fn restore_stash_attributions_with_shift(
         humans.insert(key.clone(), record.clone());
     }
 
+    let applied_paths: Vec<String> = authorship_log
+        .attestations
+        .iter()
+        .map(|fa| fa.file_path.clone())
+        .collect();
+    let applied_contents =
+        reconstruct_stash_applied_contents(repo, stash_sha, current_head, &applied_paths)?;
+
     for fa in &authorship_log.attestations {
         let file_path = &fa.file_path;
         let stash_content = stash_file_contents
@@ -290,13 +295,7 @@ fn restore_stash_attributions_with_shift(
             .cloned()
             .or_else(|| va.get_file_content(file_path).cloned())
             .unwrap_or_default();
-        let current_content = reconstruct_stash_applied_content(
-            repo,
-            base_commit,
-            current_head,
-            file_path,
-            &stash_content,
-        )?;
+        let current_content = applied_contents.get(file_path).cloned().unwrap_or_default();
 
         if current_content.is_empty() {
             continue;
@@ -370,73 +369,18 @@ fn restore_stash_attributions_with_shift(
     Ok(())
 }
 
-fn reconstruct_stash_applied_content(
+fn reconstruct_stash_applied_contents(
     repo: &Repository,
-    base_commit: &str,
+    stash_sha: &str,
     target_head: &str,
-    file_path: &str,
-    stash_content: &str,
-) -> Result<String, GitAiError> {
-    let base_content = file_content_at_commit(repo, base_commit, file_path)?;
-    let target_content = file_content_at_commit(repo, target_head, file_path)?;
-    if base_content == stash_content {
-        return Ok(target_content);
+    file_paths: &[String],
+) -> Result<HashMap<String, String>, GitAiError> {
+    if file_paths.is_empty() {
+        return Ok(HashMap::new());
     }
-    if target_content == base_content {
-        return Ok(stash_content.to_string());
-    }
-    git_merge_file_contents(&base_content, &target_content, stash_content)
-}
 
-fn file_content_at_commit(
-    repo: &Repository,
-    commit: &str,
-    file_path: &str,
-) -> Result<String, GitAiError> {
-    match repo.get_file_content(file_path, commit) {
-        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).to_string()),
-        Err(err @ GitAiError::GitCliError { .. }) => {
-            if tree_contains_path(repo, commit, file_path)? {
-                Err(err)
-            } else {
-                Ok(String::new())
-            }
-        }
-        Err(err) => Err(err),
-    }
-}
-
-fn tree_contains_path(
-    repo: &Repository,
-    commit: &str,
-    file_path: &str,
-) -> Result<bool, GitAiError> {
-    let mut args = repo.global_args_for_exec();
-    args.extend([
-        "ls-tree".to_string(),
-        "-z".to_string(),
-        commit.to_string(),
-        "--".to_string(),
-        file_path.to_string(),
-    ]);
-    let output = exec_git_allow_nonzero(&args)?;
-    if !output.status.success() {
-        return Err(GitAiError::GitCliError {
-            code: output.status.code(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            args,
-        });
-    }
-    Ok(!output.stdout.is_empty())
-}
-
-fn git_merge_file_contents(
-    base_content: &str,
-    target_content: &str,
-    stash_content: &str,
-) -> Result<String, GitAiError> {
     let unique = format!(
-        "git-ai-stash-merge-{}-{}",
+        "git-ai-stash-apply-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -444,38 +388,89 @@ fn git_merge_file_contents(
             .as_nanos()
     );
     let temp_dir = std::env::temp_dir().join(unique);
-    fs::create_dir(&temp_dir)?;
-
-    let current_path = temp_dir.join("current");
-    let base_path = temp_dir.join("base");
-    let other_path = temp_dir.join("other");
+    let index_path = temp_dir.join("index");
+    let worktree_path = temp_dir.join("worktree");
+    fs::create_dir_all(&worktree_path)?;
 
     let result = (|| {
-        fs::write(&current_path, target_content)?;
-        fs::write(&base_path, base_content)?;
-        fs::write(&other_path, stash_content)?;
-
-        let args = vec![
-            "merge-file".to_string(),
-            "-p".to_string(),
-            current_path.to_string_lossy().to_string(),
-            base_path.to_string_lossy().to_string(),
-            other_path.to_string_lossy().to_string(),
-        ];
-        let output = exec_git_allow_nonzero(&args)?;
-        if !output.status.success() && output.stdout.is_empty() {
-            return Err(GitAiError::GitCliError {
-                code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                args,
-            });
-        }
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let _guard = disable_internal_git_hooks();
+        run_isolated_git(
+            repo,
+            vec!["read-tree".to_string(), target_head.to_string()],
+            &index_path,
+            &worktree_path,
+            true,
+        )?;
+        run_isolated_git(
+            repo,
+            vec!["checkout-index".to_string(), "-a".to_string()],
+            &index_path,
+            &worktree_path,
+            true,
+        )?;
+        let _ = run_isolated_git(
+            repo,
+            vec![
+                "stash".to_string(),
+                "apply".to_string(),
+                stash_sha.to_string(),
+            ],
+            &index_path,
+            &worktree_path,
+            false,
+        )?;
+        run_isolated_git(
+            repo,
+            vec!["add".to_string(), "-A".to_string()],
+            &index_path,
+            &worktree_path,
+            true,
+        )?;
+        let output = run_isolated_git(
+            repo,
+            vec!["write-tree".to_string()],
+            &index_path,
+            &worktree_path,
+            true,
+        )?;
+        let result_tree = String::from_utf8(output.stdout)?.trim().to_string();
+        let requests: Vec<(String, String)> = file_paths
+            .iter()
+            .map(|path| (result_tree.clone(), path.clone()))
+            .collect();
+        let contents = batch_read_paths_at_treeishes(repo, &requests)?;
+        Ok(contents
+            .into_iter()
+            .map(|((_, path), content)| (path, content))
+            .collect())
     })();
 
     let _ = fs::remove_dir_all(&temp_dir);
     result
+}
+
+fn run_isolated_git(
+    repo: &Repository,
+    args: Vec<String>,
+    index_path: &std::path::Path,
+    worktree_path: &std::path::Path,
+    require_success: bool,
+) -> Result<std::process::Output, GitAiError> {
+    let mut full_args = repo.global_args_for_exec();
+    full_args.extend(args);
+    let envs = [
+        ("GIT_INDEX_FILE", index_path.as_os_str()),
+        ("GIT_WORK_TREE", worktree_path.as_os_str()),
+    ];
+    let output = exec_git_allow_nonzero_with_env(&full_args, &envs)?;
+    if require_success && !output.status.success() {
+        return Err(GitAiError::GitCliError {
+            code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            args: full_args,
+        });
+    }
+    Ok(output)
 }
 
 fn merge_initial_files(
