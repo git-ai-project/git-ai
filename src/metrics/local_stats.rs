@@ -1,4 +1,4 @@
-//! In-memory aggregation of local_events for `git-ai usage`.
+//! In-memory aggregation of persisted metric events for `git-ai usage`.
 
 /// How long after a session's last message a subsequent commit is attributed
 /// to that session for yield and ai_lines_committed calculations.
@@ -6,7 +6,7 @@ const YIELD_WINDOW_SECS: u32 = 4 * 3600;
 
 use crate::error::GitAiError;
 use crate::metrics::attrs::attr_pos;
-use crate::metrics::db::{LocalEventRecord, MetricsDatabase};
+use crate::metrics::db::{MetricHistoryRecord, MetricsDatabase};
 use crate::metrics::events::{checkpoint_pos, committed_pos, session_event_pos};
 use crate::metrics::pos_encoded::{
     sparse_get_string, sparse_get_u32, sparse_get_vec_string, sparse_get_vec_u32,
@@ -137,19 +137,26 @@ pub enum BucketGranularity {
     Monthly,
 }
 
-/// Acquire the global DB lock and fetch all local events for the given window.
-fn fetch_local_events(
+/// Event types useful for local usage stats.
+const USAGE_EVENT_IDS: &[u16] = &[
+    1, // Committed
+    4, // Checkpoint
+    5, // SessionEvent
+];
+
+/// Acquire the global DB lock and fetch metric history for the given window.
+fn fetch_metric_history(
     since_ts: u32,
     repo_filter: Option<&str>,
-) -> Result<Vec<LocalEventRecord>, GitAiError> {
+) -> Result<Vec<MetricHistoryRecord>, GitAiError> {
     let db = MetricsDatabase::global()?;
     let db_lock = db
         .lock()
         .map_err(|_| GitAiError::Generic("metrics DB lock poisoned".to_string()))?;
-    db_lock.get_local_events(since_ts, repo_filter)
+    db_lock.get_metric_history(since_ts, repo_filter, USAGE_EVENT_IDS)
 }
 
-/// Aggregate local_events since `since_ts` (Unix seconds) into activity stats.
+/// Aggregate metric history since `since_ts` (Unix seconds) into activity stats.
 ///
 /// When `repo_filter` is `Some(url)`, only events from that repository are
 /// aggregated. When `None`, events from all repositories are included.
@@ -159,17 +166,17 @@ pub fn compute_activity(
     granularity: BucketGranularity,
     repo_filter: Option<&str>,
 ) -> Result<LocalActivityStats, GitAiError> {
-    let records = fetch_local_events(since_ts, repo_filter)?;
-    let refs: Vec<&LocalEventRecord> = records.iter().collect();
+    let records = fetch_metric_history(since_ts, repo_filter)?;
+    let refs: Vec<&MetricHistoryRecord> = records.iter().collect();
     compute_activity_from_records(&refs, since_ts, period_label, granularity)
 }
 
-/// Aggregate a pre-fetched slice of `LocalEventRecord`s into activity stats.
+/// Aggregate a pre-fetched slice of `MetricHistoryRecord`s into activity stats.
 ///
 /// Separated from `compute_activity` so callers that already hold all events
 /// (e.g. `compute_repo_summaries`) can avoid re-fetching from the DB per repo.
 fn compute_activity_from_records(
-    records: &[&LocalEventRecord],
+    records: &[&MetricHistoryRecord],
     since_ts: u32,
     period_label: String,
     granularity: BucketGranularity,
@@ -216,16 +223,13 @@ fn compute_activity_from_records(
     let mut commit_timestamps: Vec<u32> = Vec::new();
 
     for record in records {
-        let event: MetricEvent = match serde_json::from_str(&record.event_json) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let event = &record.event;
 
         match record.event_id {
             1 => {
                 commit_timestamps.push(record.ts);
                 let c = aggregate_committed(
-                    &event,
+                    event,
                     &mut total_commits,
                     &mut total_ai_lines,
                     &mut total_human_lines,
@@ -257,7 +261,7 @@ fn compute_activity_from_records(
                 }
             }
             4 => aggregate_checkpoint(
-                &event,
+                event,
                 &mut total_checkpoints,
                 &mut ai_lines_added,
                 &mut human_lines_added,
@@ -265,7 +269,7 @@ fn compute_activity_from_records(
                 &mut checkpoint_ai_by_tool,
             ),
             5 => {
-                aggregate_session(&event, &mut session_ids, &mut session_tool_counts);
+                aggregate_session(event, &mut session_ids, &mut session_tool_counts);
 
                 // Track last-seen timestamp per session for yield classification.
                 if let Some(sid) = sparse_get_string(&event.attrs, attr_pos::SESSION_ID).flatten() {
@@ -276,12 +280,12 @@ fn compute_activity_from_records(
                     .flatten()
                     .unwrap_or_default();
                 if tool == "codex" {
-                    aggregate_codex_tokens(&event, record.ts, &mut codex_sessions);
+                    aggregate_codex_tokens(event, record.ts, &mut codex_sessions);
                 } else {
                     let sid = sparse_get_string(&event.attrs, attr_pos::SESSION_ID)
                         .flatten()
                         .unwrap_or_default();
-                    aggregate_session_tokens(&event, record.ts, sid, &mut message_usage);
+                    aggregate_session_tokens(event, record.ts, sid, &mut message_usage);
                 }
             }
             _ => {}
@@ -291,10 +295,9 @@ fn compute_activity_from_records(
     // Yield classification: for each unique session, check if a commit landed
     // within 4 hours of the session's last observed event.
     //
-    // Limitation: local_events aggregates activity across all repos globally,
-    // so a commit in repo-A can incorrectly "claim" a nearby session that was
-    // working in repo-B. Fixing this properly requires storing the repo path
-    // on both session and committed events (a future schema change).
+    // Limitation: the all-repos view aggregates activity globally, so a commit
+    // in repo-A can incorrectly "claim" a nearby session from repo-B. The
+    // per-repo view avoids this by grouping on repo_url before aggregation.
 
     commit_timestamps.sort_unstable();
     let mut yield_shipped = 0u32;
@@ -1048,13 +1051,13 @@ pub struct RepoActivitySummary {
 
 /// Aggregate a pre-fetched slice of events into a per-repository breakdown.
 fn repo_summaries_from_records(
-    all_records: &[LocalEventRecord],
+    all_records: &[MetricHistoryRecord],
     since_ts: u32,
     granularity: BucketGranularity,
 ) -> Result<Vec<RepoActivitySummary>, GitAiError> {
     // Group records by repo_url, skipping events with no repo (NULL) — these
-    // predate the repo_url column and have no meaningful identity to display.
-    let mut by_repo: HashMap<String, Vec<&LocalEventRecord>> = HashMap::new();
+    // predate repo_url emission and have no meaningful identity to display.
+    let mut by_repo: HashMap<String, Vec<&MetricHistoryRecord>> = HashMap::new();
     for record in all_records {
         if let Some(ref url) = record.repo_url {
             by_repo.entry(url.clone()).or_default().push(record);
@@ -1089,8 +1092,8 @@ pub fn compute_all(
     granularity: BucketGranularity,
     repo_filter: Option<&str>,
 ) -> Result<(LocalActivityStats, Vec<RepoActivitySummary>), GitAiError> {
-    let records = fetch_local_events(since_ts, repo_filter)?;
-    let refs: Vec<&LocalEventRecord> = records.iter().collect();
+    let records = fetch_metric_history(since_ts, repo_filter)?;
+    let refs: Vec<&MetricHistoryRecord> = records.iter().collect();
     let stats = compute_activity_from_records(&refs, since_ts, period_label, granularity)?;
     let repos = repo_summaries_from_records(&records, since_ts, granularity)?;
     Ok((stats, repos))
@@ -1106,6 +1109,6 @@ pub fn compute_repo_summaries(
     granularity: BucketGranularity,
     repo_filter: Option<&str>,
 ) -> Result<Vec<RepoActivitySummary>, GitAiError> {
-    let all_records = fetch_local_events(since_ts, repo_filter)?;
+    let all_records = fetch_metric_history(since_ts, repo_filter)?;
     repo_summaries_from_records(&all_records, since_ts, granularity)
 }

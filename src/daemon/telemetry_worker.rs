@@ -6,9 +6,7 @@
 use crate::api::{ApiClient, ApiContext, CasObject, CasUploadRequest};
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
-use crate::metrics::attrs::attr_pos;
 use crate::metrics::db::MetricsDatabase;
-use crate::metrics::pos_encoded::sparse_get_string;
 use crate::metrics::{MetricEvent, MetricsBatch};
 use crate::observability::MAX_METRICS_PER_ENVELOPE;
 use serde_json::{Value, json};
@@ -318,13 +316,6 @@ fn flush_telemetry_batch(batch: TelemetryBuffer) {
 }
 
 fn flush_metrics(events: &[MetricEvent]) {
-    // Event types useful for local activity stats (git-ai usage).
-    const INTERESTING: &[u16] = &[
-        1, // Committed
-        4, // Checkpoint
-        5, // SessionEvent
-    ];
-
     let context = ApiContext::new(None);
     let api_base_url = context.base_url.clone();
     let client = ApiClient::new(context);
@@ -335,39 +326,23 @@ fn flush_metrics(events: &[MetricEvent]) {
     let mut upload_failed = false;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
 
-    // local_event tuples collected across all chunks, inserted once at the end.
-    let mut local_tuples: Vec<(u16, u32, Option<String>, String)> = Vec::new();
-
     for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
-        // Collect interesting events from this chunk in the same pass as upload.
-        for e in chunk.iter().filter(|e| INTERESTING.contains(&e.event_id)) {
-            if let Ok(json) = serde_json::to_string(e) {
-                let repo_url = sparse_get_string(&e.attrs, attr_pos::REPO_URL).flatten();
-                local_tuples.push((e.event_id, e.timestamp, repo_url, json));
-            }
-        }
+        let record_ids = store_metrics_in_db(chunk);
 
         if should_upload && !upload_failed && std::time::Instant::now() < deadline {
             let batch = MetricsBatch::new(chunk.to_vec());
             if client.upload_metrics(&batch).is_ok() {
+                mark_metrics_delivered(&record_ids);
                 continue;
             }
             upload_failed = true;
         }
-        store_metrics_in_db(chunk);
-    }
-
-    if !local_tuples.is_empty()
-        && let Ok(db) = MetricsDatabase::global()
-        && let Ok(mut db_lock) = db.lock()
-    {
-        let _ = db_lock.insert_local_events(&local_tuples);
     }
 }
 
-fn store_metrics_in_db(events: &[MetricEvent]) {
+fn store_metrics_in_db(events: &[MetricEvent]) -> Vec<i64> {
     if events.is_empty() {
-        return;
+        return Vec::new();
     }
 
     let event_jsons: Vec<String> = events
@@ -376,13 +351,32 @@ fn store_metrics_in_db(events: &[MetricEvent]) {
         .collect();
 
     if event_jsons.is_empty() {
-        return;
+        return Vec::new();
     }
 
     if let Ok(db) = MetricsDatabase::global()
         && let Ok(mut db_lock) = db.lock()
     {
-        let _ = db_lock.insert_events(&event_jsons);
+        return db_lock.insert_events(&event_jsons).unwrap_or_default();
+    }
+
+    Vec::new()
+}
+
+fn mark_metrics_delivered(ids: &[i64]) {
+    if ids.is_empty() {
+        return;
+    }
+
+    let delivered_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if let Ok(db) = MetricsDatabase::global()
+        && let Ok(mut db_lock) = db.lock()
+    {
+        let _ = db_lock.mark_records_delivered(ids, delivered_ts);
     }
 }
 
