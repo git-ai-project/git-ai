@@ -4558,6 +4558,7 @@ impl ActorDaemonCoordinator {
 
     async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
         let result = match request {
+            ControlRequest::Ping => Ok(ControlResponse::ok(None, None)),
             ControlRequest::CheckpointRun { request } => {
                 if let Some(worker) = &self.stream_worker
                     && let Some(stream_source) = &request.stream_source

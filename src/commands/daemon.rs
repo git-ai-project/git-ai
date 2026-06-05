@@ -1,7 +1,7 @@
 use crate::daemon::daemon_log_file_path;
 use crate::daemon::{
     ControlRequest, DaemonConfig, local_socket_connects_with_timeout, read_daemon_pid,
-    remove_stale_daemon_files, send_control_request,
+    remove_stale_daemon_files, send_control_request, send_control_request_with_timeout,
 };
 use crate::utils::LockFile;
 #[cfg(windows)]
@@ -276,10 +276,15 @@ pub(crate) fn daemon_is_up(config: &DaemonConfig) -> bool {
             return false;
         }
     }
-    local_socket_connects_with_timeout(&config.control_socket_path, Duration::from_millis(100))
-        .is_ok()
-        && local_socket_connects_with_timeout(&config.trace_socket_path, Duration::from_millis(100))
-            .is_ok()
+    let probe_timeout = Duration::from_millis(100);
+    let control_ok = send_control_request_with_timeout(
+        &config.control_socket_path,
+        &ControlRequest::Ping,
+        probe_timeout,
+    )
+    .is_ok();
+    control_ok
+        && local_socket_connects_with_timeout(&config.trace_socket_path, probe_timeout).is_ok()
 }
 
 #[cfg(any(windows, not(any(test, feature = "test-support"))))]

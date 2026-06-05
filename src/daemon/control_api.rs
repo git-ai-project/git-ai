@@ -9,6 +9,8 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params")]
 pub enum ControlRequest {
+    #[serde(rename = "ping")]
+    Ping,
     #[serde(rename = "checkpoint.run")]
     CheckpointRun { request: Box<CheckpointRequest> },
     #[serde(rename = "status.family")]
