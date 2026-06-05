@@ -15,17 +15,23 @@ pub const MAX_METRICS_PER_ENVELOPE: usize = 1000;
 /// 2. In-process daemon telemetry worker (daemon process itself)
 /// 3. Local SQLite storage for metric events if neither daemon path is available
 fn submit_telemetry_envelope(envelopes: Vec<crate::daemon::TelemetryEnvelope>) {
-    if crate::daemon::telemetry_handle::daemon_telemetry_available()
-        && crate::daemon::telemetry_handle::submit_telemetry(envelopes.clone())
-    {
-        return;
-    }
+    let envelopes = if crate::daemon::telemetry_handle::daemon_telemetry_available() {
+        match crate::daemon::telemetry_handle::submit_telemetry(envelopes) {
+            Ok(()) => return,
+            Err(envelopes) => envelopes,
+        }
+    } else {
+        envelopes
+    };
 
-    if crate::daemon::daemon_process_active()
-        && crate::daemon::telemetry_worker::submit_daemon_internal_telemetry(envelopes.clone())
-    {
-        return;
-    }
+    let envelopes = if crate::daemon::daemon_process_active() {
+        match crate::daemon::telemetry_worker::submit_daemon_internal_telemetry(envelopes) {
+            Ok(()) => return,
+            Err(envelopes) => envelopes,
+        }
+    } else {
+        envelopes
+    };
 
     if let Err(e) = store_metrics_envelopes_locally(envelopes) {
         tracing::warn!(%e, "telemetry: failed to persist metrics locally");

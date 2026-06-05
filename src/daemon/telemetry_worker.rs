@@ -203,25 +203,30 @@ impl DaemonTelemetryWorkerHandle {
     /// Used by the daemon process's own `observability::log_*()` calls which
     /// cannot go through the control socket (the daemon can't connect to itself).
     /// Uses `try_lock()` to avoid blocking the caller if the buffer is contested.
-    pub fn submit_telemetry_sync(&self, envelopes: Vec<TelemetryEnvelope>) -> bool {
+    pub fn submit_telemetry_sync(
+        &self,
+        envelopes: Vec<TelemetryEnvelope>,
+    ) -> Result<(), Vec<TelemetryEnvelope>> {
         let (buffered_envelopes, metric_events) = split_metric_envelopes(envelopes);
         if !metric_events.is_empty()
             && let Err(e) = store_metrics_in_db(&metric_events)
         {
             tracing::warn!(%e, "telemetry: failed to persist daemon metrics locally");
-            return false;
+            return Err(rebuild_telemetry_envelopes(
+                buffered_envelopes,
+                metric_events,
+            ));
         }
 
         if buffered_envelopes.is_empty() {
-            return true;
+            return Ok(());
         }
 
         if let Ok(mut buf) = self.buffer.try_lock() {
             buf.ingest_envelopes(buffered_envelopes);
-            true
-        } else {
-            false
         }
+
+        Ok(())
     }
 
     /// Submit CAS records synchronously (best-effort, non-blocking).
@@ -250,12 +255,15 @@ pub fn set_daemon_internal_telemetry(handle: DaemonTelemetryWorkerHandle) {
 }
 
 /// Submit telemetry from within the daemon process.
-/// Returns true if the handle was available and envelopes were submitted.
-pub fn submit_daemon_internal_telemetry(envelopes: Vec<TelemetryEnvelope>) -> bool {
+/// Returns the original envelopes when metrics were not persisted through the
+/// in-process handle, so metric callers can fall back to SQLite directly.
+pub fn submit_daemon_internal_telemetry(
+    envelopes: Vec<TelemetryEnvelope>,
+) -> Result<(), Vec<TelemetryEnvelope>> {
     if let Some(handle) = DAEMON_INTERNAL_TELEMETRY.get() {
         handle.submit_telemetry_sync(envelopes)
     } else {
-        false
+        Err(envelopes)
     }
 }
 
@@ -273,6 +281,18 @@ fn split_metric_envelopes(
     }
 
     (buffered_envelopes, metric_events)
+}
+
+fn rebuild_telemetry_envelopes(
+    mut buffered_envelopes: Vec<TelemetryEnvelope>,
+    metric_events: Vec<MetricEvent>,
+) -> Vec<TelemetryEnvelope> {
+    if !metric_events.is_empty() {
+        buffered_envelopes.push(TelemetryEnvelope::Metrics {
+            events: metric_events,
+        });
+    }
+    buffered_envelopes
 }
 
 /// Submit CAS records from within the daemon process (sync, best-effort).
