@@ -76,6 +76,11 @@ pub struct MetricsDatabase {
 }
 
 impl MetricsDatabase {
+    /// How long delivered metric rows are retained for local history (30 days).
+    const METRICS_RETENTION_SECS: u64 = 30 * 24 * 3600;
+    /// Minimum interval between prune passes (24 hours).
+    const METRICS_PRUNE_INTERVAL_SECS: u64 = 24 * 3600;
+
     /// Get or initialize the global database
     pub fn global() -> Result<&'static Mutex<MetricsDatabase>, GitAiError> {
         let db_mutex = METRICS_DB.get_or_init(|| {
@@ -263,6 +268,7 @@ impl MetricsDatabase {
         }
 
         tx.commit()?;
+        self.prune_delivered_metrics_if_due()?;
         Ok(ids)
     }
 
@@ -312,6 +318,47 @@ impl MetricsDatabase {
         }
 
         tx.commit()?;
+        self.prune_delivered_metrics_if_due()?;
+        Ok(())
+    }
+
+    /// Delete delivered metric rows outside the local history window.
+    ///
+    /// Pending rows are never pruned here because they still need upload.
+    fn prune_delivered_metrics_if_due(&mut self) -> Result<(), GitAiError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let last_prune: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT value FROM schema_metadata WHERE key = 'metrics_last_prune_ts'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .and_then(|v: String| v.parse().ok());
+
+        if let Some(last) = last_prune
+            && now.saturating_sub(last as u64) < Self::METRICS_PRUNE_INTERVAL_SECS
+        {
+            return Ok(());
+        }
+
+        let cutoff = now.saturating_sub(Self::METRICS_RETENTION_SECS);
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_metadata (key, value) VALUES ('metrics_last_prune_ts', ?1)",
+            params![now.to_string()],
+        )?;
+        tx.execute(
+            "DELETE FROM metrics WHERE delivered_ts IS NOT NULL AND delivered_ts < ?1",
+            params![cutoff as i64],
+        )?;
+        tx.commit()?;
+
         Ok(())
     }
 
@@ -586,10 +633,14 @@ mod tests {
     fn test_insert_events_with_delivered_ts_skips_batch() {
         let (mut db, _temp_dir) = create_test_db();
 
+        let delivered_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let delivered = vec![r#"{"t":1,"e":1,"v":{},"a":{}}"#.to_string()];
         let pending = vec![r#"{"t":2,"e":1,"v":{},"a":{}}"#.to_string()];
 
-        db.insert_events_with_delivered_ts(&delivered, Some(1_700_000_000))
+        db.insert_events_with_delivered_ts(&delivered, Some(delivered_ts))
             .unwrap();
         db.insert_events(&pending).unwrap();
 
@@ -609,6 +660,10 @@ mod tests {
     fn test_get_metric_history_reads_authoritative_metrics_table() {
         let (mut db, _temp_dir) = create_test_db();
 
+        let delivered_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let delivered = vec![
             r#"{"t":10,"e":1,"v":{},"a":{"1":"https://github.com/acme/project"}}"#.to_string(),
         ];
@@ -618,7 +673,7 @@ mod tests {
             r#"{"t":40,"e":5,"v":{},"a":{"1":"https://github.com/other/repo"}}"#.to_string(),
         ];
 
-        db.insert_events_with_delivered_ts(&delivered, Some(1_700_000_000))
+        db.insert_events_with_delivered_ts(&delivered, Some(delivered_ts))
             .unwrap();
         db.insert_events(&pending).unwrap();
 
@@ -634,6 +689,36 @@ mod tests {
         // Delivered rows are retained for history, but only undelivered rows flush.
         let batch = db.get_batch(10).unwrap();
         assert_eq!(batch.len(), 3);
+    }
+
+    #[test]
+    fn test_prunes_only_old_delivered_metrics() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        let old_delivered_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_sub(MetricsDatabase::METRICS_RETENTION_SECS + 1);
+        let old_delivered = vec![r#"{"t":1,"e":1,"v":{},"a":{}}"#.to_string()];
+        db.insert_events_with_delivered_ts(&old_delivered, Some(old_delivered_ts))
+            .unwrap();
+
+        let total_after_prune: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total_after_prune, 0);
+
+        let pending = vec![r#"{"t":2,"e":1,"v":{},"a":{}}"#.to_string()];
+        db.insert_events(&pending).unwrap();
+
+        let total: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(db.count().unwrap(), 1);
     }
 
     #[test]
