@@ -17,6 +17,40 @@ fn submit_telemetry_envelope(envelopes: Vec<crate::daemon::TelemetryEnvelope>) {
         crate::daemon::telemetry_handle::submit_telemetry(envelopes);
     } else if crate::daemon::daemon_process_active() {
         crate::daemon::telemetry_worker::submit_daemon_internal_telemetry(envelopes);
+    } else {
+        store_metrics_envelopes_locally(envelopes);
+    }
+}
+
+fn store_metrics_envelopes_locally(envelopes: Vec<crate::daemon::TelemetryEnvelope>) {
+    let mut events = Vec::new();
+    for envelope in envelopes {
+        if let crate::daemon::TelemetryEnvelope::Metrics {
+            events: metric_events,
+        } = envelope
+        {
+            events.extend(metric_events);
+        }
+    }
+
+    if events.is_empty() {
+        return;
+    }
+
+    for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
+        let event_jsons: Vec<String> = chunk
+            .iter()
+            .filter_map(|event| serde_json::to_string(event).ok())
+            .collect();
+        if event_jsons.is_empty() {
+            continue;
+        }
+
+        if let Ok(db) = crate::metrics::db::MetricsDatabase::global()
+            && let Ok(mut db_lock) = db.lock()
+        {
+            let _ = db_lock.insert_events(&event_jsons);
+        }
     }
 }
 
