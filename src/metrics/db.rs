@@ -1,15 +1,19 @@
-//! Simple metrics storage for offline buffering.
+//! Metrics storage for local history and offline buffering.
 //!
-//! Events are stored here when API conditions aren't met.
-//! Server handles idempotency - no retry/queue logic needed.
+//! Every metric event is stored here. `delivered_ts IS NULL` means the row is
+//! still pending upload; delivered rows are retained as the local history.
+//! Server handles idempotency.
 
 use crate::error::GitAiError;
+use crate::metrics::attrs::attr_pos;
+use crate::metrics::pos_encoded::sparse_get_string;
+use crate::metrics::types::MetricEvent;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// Current schema version (must match MIGRATIONS.len())
-const SCHEMA_VERSION: usize = 4;
+const SCHEMA_VERSION: usize = 6;
 
 /// Database migrations - each migration upgrades the schema by one version
 const MIGRATIONS: &[&str] = &[
@@ -27,21 +31,23 @@ const MIGRATIONS: &[&str] = &[
         last_sent_ts INTEGER NOT NULL
     );
     "#,
-    // Migration 2 -> 3: Persistent local event history for `git-ai usage`
+    // Migration 2 -> 3: Reserved for a removed local_events design.
     r#"
-    CREATE TABLE IF NOT EXISTS local_events (
+    "#,
+    // Migration 3 -> 4: Reserved for a removed local_events repo_url migration.
+    r#"
+    "#,
+    // Migration 4 -> 5: Keep delivered metrics in the authoritative metrics table.
+    r#"
+    CREATE TABLE IF NOT EXISTS metrics (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        event_id INTEGER NOT NULL,
-        ts INTEGER NOT NULL,
         event_json TEXT NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS local_events_ts ON local_events (ts);
-    CREATE INDEX IF NOT EXISTS local_events_event_id ON local_events (event_id);
+    ALTER TABLE metrics ADD COLUMN delivered_ts INTEGER;
     "#,
-    // Migration 3 -> 4: Add repo_url column to local_events for per-repo filtering
+    // Migration 5 -> 6: Speed pending queue scans.
     r#"
-    ALTER TABLE local_events ADD COLUMN repo_url TEXT;
-    CREATE INDEX IF NOT EXISTS local_events_repo_url ON local_events (repo_url);
+    CREATE INDEX IF NOT EXISTS metrics_delivered_ts_id ON metrics (delivered_ts, id);
     "#,
 ];
 
@@ -55,13 +61,13 @@ pub struct MetricRecord {
     pub event_json: String,
 }
 
-/// Record from the local_events table
+/// Record returned for local usage aggregation from the metrics table.
 #[derive(Debug, Clone)]
-pub struct LocalEventRecord {
+pub struct MetricHistoryRecord {
     pub event_id: u16,
     pub ts: u32,
     pub repo_url: Option<String>,
-    pub event_json: String,
+    pub event: MetricEvent,
 }
 
 /// Database wrapper for metrics storage
@@ -223,31 +229,50 @@ impl MetricsDatabase {
         Ok(())
     }
 
-    /// Insert events as JSON strings
-    pub fn insert_events(&mut self, events: &[String]) -> Result<(), GitAiError> {
+    /// Insert undelivered events as JSON strings.
+    pub fn insert_events(&mut self, events: &[String]) -> Result<Vec<i64>, GitAiError> {
+        self.insert_events_with_delivered_ts(events, None)
+    }
+
+    /// Insert events as JSON strings, optionally marking them delivered immediately.
+    pub fn insert_events_with_delivered_ts(
+        &mut self,
+        events: &[String],
+        delivered_ts: Option<u64>,
+    ) -> Result<Vec<i64>, GitAiError> {
         if events.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let tx = self.conn.transaction()?;
+        let mut ids = Vec::with_capacity(events.len());
 
         {
             let mut stmt = tx.prepare_cached("INSERT INTO metrics (event_json) VALUES (?1)")?;
+            let mut delivered_stmt = tx
+                .prepare_cached("INSERT INTO metrics (event_json, delivered_ts) VALUES (?1, ?2)")?;
 
             for event_json in events {
-                stmt.execute(params![event_json])?;
+                if let Some(ts) = delivered_ts {
+                    delivered_stmt.execute(params![event_json, ts as i64])?;
+                } else {
+                    stmt.execute(params![event_json])?;
+                }
+                ids.push(tx.last_insert_rowid());
             }
         }
 
         tx.commit()?;
-        Ok(())
+        Ok(ids)
     }
 
-    /// Get batch of events (oldest first)
+    /// Get a batch of undelivered events (oldest first).
     pub fn get_batch(&self, limit: usize) -> Result<Vec<MetricRecord>, GitAiError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, event_json FROM metrics ORDER BY id ASC LIMIT ?1")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, event_json FROM metrics \
+             WHERE delivered_ts IS NULL \
+             ORDER BY id ASC LIMIT ?1",
+        )?;
 
         let rows = stmt.query_map(params![limit], |row| {
             Ok(MetricRecord {
@@ -264,8 +289,12 @@ impl MetricsDatabase {
         Ok(records)
     }
 
-    /// Delete records by ID (after successful upload)
-    pub fn delete_records(&mut self, ids: &[i64]) -> Result<(), GitAiError> {
+    /// Mark records as delivered after a successful upload.
+    pub fn mark_records_delivered(
+        &mut self,
+        ids: &[i64],
+        delivered_ts: u64,
+    ) -> Result<(), GitAiError> {
         if ids.is_empty() {
             return Ok(());
         }
@@ -273,10 +302,12 @@ impl MetricsDatabase {
         let tx = self.conn.transaction()?;
 
         {
-            let mut stmt = tx.prepare_cached("DELETE FROM metrics WHERE id = ?1")?;
+            let mut stmt = tx.prepare_cached(
+                "UPDATE metrics SET delivered_ts = ?1 WHERE id = ?2 AND delivered_ts IS NULL",
+            )?;
 
             for id in ids {
-                stmt.execute(params![id])?;
+                stmt.execute(params![delivered_ts as i64, id])?;
             }
         }
 
@@ -284,148 +315,61 @@ impl MetricsDatabase {
         Ok(())
     }
 
-    /// Get count of pending metrics
+    /// Get count of pending metrics.
     pub fn count(&self) -> Result<usize, GitAiError> {
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))?;
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM metrics WHERE delivered_ts IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
         Ok(count as usize)
     }
 
-    /// How long local_events rows are retained (30 days in seconds).
-    const LOCAL_EVENTS_RETENTION_SECS: u64 = 30 * 24 * 3600;
-    /// Minimum interval between prune passes (24 hours in seconds).
-    const LOCAL_EVENTS_PRUNE_INTERVAL_SECS: u64 = 24 * 3600;
-
-    /// Insert events into the local_events table.
-    ///
-    /// Each tuple is (event_id, ts, repo_url, event_json). Call this with events
-    /// filtered to only the interesting event types before inserting.
-    /// Opportunistically prunes rows older than 30 days at most once per day.
-    pub fn insert_local_events(
-        &mut self,
-        events: &[(u16, u32, Option<String>, String)],
-    ) -> Result<(), GitAiError> {
-        if events.is_empty() {
-            return Ok(());
-        }
-
-        let tx = self.conn.transaction()?;
-
-        {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO local_events (event_id, ts, repo_url, event_json) VALUES (?1, ?2, ?3, ?4)",
-            )?;
-
-            for (event_id, ts, repo_url, json) in events {
-                stmt.execute(params![
-                    *event_id as i64,
-                    *ts as i64,
-                    repo_url.as_deref(),
-                    json
-                ])?;
-            }
-        }
-
-        tx.commit()?;
-        self.prune_local_events_if_due()?;
-        Ok(())
-    }
-
-    /// Delete local_events rows older than `LOCAL_EVENTS_RETENTION_SECS`, but
-    /// only if the last prune was more than `LOCAL_EVENTS_PRUNE_INTERVAL_SECS` ago.
-    fn prune_local_events_if_due(&mut self) -> Result<(), GitAiError> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let last_prune: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT value FROM schema_metadata WHERE key = 'local_events_last_prune_ts'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?
-            .and_then(|v: String| v.parse().ok());
-
-        if let Some(last) = last_prune
-            && now.saturating_sub(last as u64) < Self::LOCAL_EVENTS_PRUNE_INTERVAL_SECS
-        {
-            return Ok(());
-        }
-
-        let cutoff = now.saturating_sub(Self::LOCAL_EVENTS_RETENTION_SECS);
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT OR REPLACE INTO schema_metadata (key, value) VALUES ('local_events_last_prune_ts', ?1)",
-            params![now.to_string()],
-        )?;
-        tx.execute(
-            "DELETE FROM local_events WHERE ts < ?1",
-            params![cutoff as i64],
-        )?;
-        tx.commit()?;
-
-        Ok(())
-    }
-
-    /// Query local_events since `since_ts` (Unix seconds), returning all interesting event types.
+    /// Query persisted metric rows since `since_ts` (Unix seconds).
     ///
     /// When `repo_filter` is `Some(url)`, only events matching that repo_url are returned.
     /// An empty string `""` is a sentinel meaning "events with no repo_url (NULL)".
     /// When `None`, all events are returned regardless of repo.
-    pub fn get_local_events(
+    pub fn get_metric_history(
         &self,
         since_ts: u32,
         repo_filter: Option<&str>,
-    ) -> Result<Vec<LocalEventRecord>, GitAiError> {
-        // Shared row mapper used by all three query branches below.
-        let map_row = |row: &rusqlite::Row<'_>| {
-            Ok(LocalEventRecord {
-                event_id: row.get::<_, i64>(0)? as u16,
-                ts: row.get::<_, i64>(1)? as u32,
-                repo_url: row.get(2)?,
-                event_json: row.get(3)?,
-            })
-        };
+        event_ids: &[u16],
+    ) -> Result<Vec<MetricHistoryRecord>, GitAiError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT event_json FROM metrics ORDER BY id ASC")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
 
-        let records = if let Some(repo_url) = repo_filter {
-            if repo_url.is_empty() {
-                let mut stmt = self.conn.prepare(
-                    "SELECT event_id, ts, repo_url, event_json FROM local_events \
-                     WHERE ts >= ?1 AND repo_url IS NULL \
-                     ORDER BY ts ASC",
-                )?;
-                stmt.query_map(params![since_ts as i64], map_row)?
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                // Escape LIKE special characters so a user-supplied substring
-                // like "my_org/my%repo" matches literally, not as wildcards.
-                // We use '\' as the escape character.
-                let escaped = repo_url
-                    .replace('\\', "\\\\")
-                    .replace('%', "\\%")
-                    .replace('_', "\\_");
-                let pattern = format!("%{}%", escaped);
-                let mut stmt = self.conn.prepare(
-                    "SELECT event_id, ts, repo_url, event_json FROM local_events \
-                     WHERE ts >= ?1 AND repo_url LIKE ?2 ESCAPE '\\' \
-                     ORDER BY ts ASC",
-                )?;
-                stmt.query_map(params![since_ts as i64, pattern], map_row)?
-                    .collect::<Result<Vec<_>, _>>()?
+        let mut records = Vec::new();
+        for row in rows {
+            let event_json = row?;
+            let Ok(event) = serde_json::from_str::<MetricEvent>(&event_json) else {
+                continue;
+            };
+
+            if event.timestamp < since_ts || !event_ids.contains(&event.event_id) {
+                continue;
             }
-        } else {
-            let mut stmt = self.conn.prepare(
-                "SELECT event_id, ts, repo_url, event_json FROM local_events \
-                 WHERE ts >= ?1 \
-                 ORDER BY ts ASC",
-            )?;
-            stmt.query_map(params![since_ts as i64], map_row)?
-                .collect::<Result<Vec<_>, _>>()?
-        };
+
+            let repo_url = sparse_get_string(&event.attrs, attr_pos::REPO_URL).flatten();
+            let repo_matches = match repo_filter {
+                None => true,
+                Some("") => repo_url.is_none(),
+                Some(filter) => repo_url.as_deref().is_some_and(|url| url.contains(filter)),
+            };
+            if !repo_matches {
+                continue;
+            }
+
+            records.push(MetricHistoryRecord {
+                event_id: event.event_id,
+                ts: event.timestamp,
+                repo_url,
+                event,
+            });
+        }
+
         Ok(records)
     }
 
@@ -513,7 +457,18 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "6");
+
+        // Verify delivered_ts exists on the authoritative metrics table.
+        let delivered_ts_columns: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('metrics') WHERE name = 'delivered_ts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(delivered_ts_columns, 1);
     }
 
     #[test]
@@ -551,7 +506,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "6");
     }
 
     #[test]
@@ -563,10 +518,11 @@ mod tests {
             r#"{"t":1234567891,"e":1,"v":{"0":"def456"},"a":{"0":"1.0.0"}}"#.to_string(),
         ];
 
-        db.insert_events(&events).unwrap();
+        let ids = db.insert_events(&events).unwrap();
 
         let count = db.count().unwrap();
         assert_eq!(count, 2);
+        assert_eq!(ids.len(), 2);
     }
 
     #[test]
@@ -592,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_records() {
+    fn test_mark_records_delivered() {
         let (mut db, _temp_dir) = create_test_db();
 
         let events = vec![
@@ -603,20 +559,81 @@ mod tests {
 
         db.insert_events(&events).unwrap();
 
-        // Get batch and delete first two
+        // Get batch and mark first two delivered.
         let batch = db.get_batch(2).unwrap();
         let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
 
-        db.delete_records(&ids).unwrap();
+        db.mark_records_delivered(&ids, 1_700_000_000).unwrap();
 
-        // Verify only one remains
+        // Verify only one remains pending.
         let count = db.count().unwrap();
         assert_eq!(count, 1);
 
-        // Verify remaining is the third one
+        // Verify remaining pending row is the third one.
         let remaining = db.get_batch(10).unwrap();
         assert_eq!(remaining.len(), 1);
         assert!(remaining[0].event_json.contains("\"t\":3"));
+
+        // Verify delivered rows are retained.
+        let total: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn test_insert_events_with_delivered_ts_skips_batch() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        let delivered = vec![r#"{"t":1,"e":1,"v":{},"a":{}}"#.to_string()];
+        let pending = vec![r#"{"t":2,"e":1,"v":{},"a":{}}"#.to_string()];
+
+        db.insert_events_with_delivered_ts(&delivered, Some(1_700_000_000))
+            .unwrap();
+        db.insert_events(&pending).unwrap();
+
+        let batch = db.get_batch(10).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert!(batch[0].event_json.contains("\"t\":2"));
+        assert_eq!(db.count().unwrap(), 1);
+
+        let total: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 2);
+    }
+
+    #[test]
+    fn test_get_metric_history_reads_authoritative_metrics_table() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        let delivered = vec![
+            r#"{"t":10,"e":1,"v":{},"a":{"1":"https://github.com/acme/project"}}"#.to_string(),
+        ];
+        let pending = vec![
+            r#"{"t":20,"e":4,"v":{},"a":{"1":"https://github.com/acme/project"}}"#.to_string(),
+            r#"{"t":30,"e":2,"v":{},"a":{"1":"https://github.com/acme/project"}}"#.to_string(),
+            r#"{"t":40,"e":5,"v":{},"a":{"1":"https://github.com/other/repo"}}"#.to_string(),
+        ];
+
+        db.insert_events_with_delivered_ts(&delivered, Some(1_700_000_000))
+            .unwrap();
+        db.insert_events(&pending).unwrap();
+
+        let records = db
+            .get_metric_history(0, Some("acme/project"), &[1, 4, 5])
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].event_id, 1);
+        assert_eq!(records[0].ts, 10);
+        assert_eq!(records[1].event_id, 4);
+        assert_eq!(records[1].ts, 20);
+
+        // Delivered rows are retained for history, but only undelivered rows flush.
+        let batch = db.get_batch(10).unwrap();
+        assert_eq!(batch.len(), 3);
     }
 
     #[test]
@@ -630,8 +647,8 @@ mod tests {
         let batch = db.get_batch(10).unwrap();
         assert!(batch.is_empty());
 
-        // Delete empty should succeed
-        db.delete_records(&[]).unwrap();
+        // Marking an empty set delivered should succeed.
+        db.mark_records_delivered(&[], 1_700_000_000).unwrap();
 
         // Count empty should return 0
         let count = db.count().unwrap();

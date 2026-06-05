@@ -1,6 +1,6 @@
 //! Handle flush-metrics-db command (kept for manual human use).
 //!
-//! Drains the metrics database queue by uploading batches to the API.
+//! Uploads pending metrics database rows to the API.
 
 use crate::api::{ApiClient, ApiContext, upload_metrics_with_retry};
 use crate::metrics::db::MetricsDatabase;
@@ -69,9 +69,10 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
                 record_ids.push(record.id);
             } else {
                 total_invalid += 1;
-                // Invalid JSON - delete the record
+                // Invalid JSON cannot upload successfully. Mark it delivered so
+                // future flushes can continue past the malformed historical row.
                 if let Ok(mut db_lock) = db.lock() {
-                    let _ = db_lock.delete_records(&[record.id]);
+                    let _ = db_lock.mark_records_delivered(&[record.id], current_unix_ts());
                 }
             }
         }
@@ -92,10 +93,10 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
                     "  ✓ batch {} - uploaded {} events",
                     total_batches, event_count
                 );
-                // Success - delete ALL records from this batch
-                // Validation errors are logged to Sentry and won't succeed on retry
+                // Success - keep rows as history and mark them delivered.
+                // Validation errors are logged to Sentry and won't succeed on retry.
                 if let Ok(mut db_lock) = db.lock() {
-                    let _ = db_lock.delete_records(&record_ids);
+                    let _ = db_lock.mark_records_delivered(&record_ids, current_unix_ts());
                 }
             }
             Err(e) => {
@@ -111,7 +112,7 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
 
     if total_invalid > 0 {
         eprintln!(
-            "flush-metrics-db: discarded {} invalid record(s)",
+            "flush-metrics-db: marked {} invalid record(s) delivered",
             total_invalid
         );
     }
@@ -120,4 +121,11 @@ pub fn handle_flush_metrics_db(_args: &[String]) {
         "flush-metrics-db: uploaded {} events in {} batch(es)",
         total_uploaded, total_batches
     );
+}
+
+fn current_unix_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
