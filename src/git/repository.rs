@@ -14,7 +14,7 @@ use gix_index::entry::Stage;
 use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2373,9 +2373,41 @@ fn no_exec_global_config_paths() -> Vec<(PathBuf, gix_config::Source)> {
 }
 
 fn home_dir_from_env() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    env_path_from_value(std::env::var_os("HOME")).or_else(windows_home_dir_from_env)
+}
+
+fn env_path_from_value(value: Option<OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+#[cfg(windows)]
+fn windows_home_dir_from_env() -> Option<PathBuf> {
+    windows_home_dir_from_values(
+        std::env::var_os("HOMEDRIVE"),
+        std::env::var_os("HOMEPATH"),
+        std::env::var_os("USERPROFILE"),
+    )
+}
+
+#[cfg(not(windows))]
+fn windows_home_dir_from_env() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(windows)]
+fn windows_home_dir_from_values(
+    homedrive: Option<OsString>,
+    homepath: Option<OsString>,
+    userprofile: Option<OsString>,
+) -> Option<PathBuf> {
+    if let (Some(homedrive), Some(homepath)) = (
+        env_path_from_value(homedrive),
+        env_path_from_value(homepath),
+    ) {
+        return Some(homedrive.join(homepath));
+    }
+
+    env_path_from_value(userprofile)
 }
 
 fn push_existing_config_path(
@@ -3334,6 +3366,30 @@ mod tests {
 
         assert_eq!(forwarded[0], "-c");
         assert!(forwarded[1].starts_with("core.hooksPath="));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_home_dir_values_prefer_homedrive_homepath() {
+        let home = windows_home_dir_from_values(
+            Some(OsString::from("C:")),
+            Some(OsString::from(r"\Users\git-ai")),
+            Some(OsString::from(r"D:\Users\fallback")),
+        );
+
+        assert_eq!(home, Some(PathBuf::from(r"C:\Users\git-ai")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_home_dir_values_fall_back_to_userprofile() {
+        let home = windows_home_dir_from_values(
+            Some(OsString::from("")),
+            Some(OsString::from(r"\Users\git-ai")),
+            Some(OsString::from(r"D:\Users\fallback")),
+        );
+
+        assert_eq!(home, Some(PathBuf::from(r"D:\Users\fallback")));
     }
 
     #[test]
