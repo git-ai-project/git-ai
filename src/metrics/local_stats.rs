@@ -143,6 +143,7 @@ const USAGE_EVENT_IDS: &[u16] = &[
     4, // Checkpoint
     5, // SessionEvent
 ];
+const SESSION_RAW_JSON_KEY: &str = "0";
 
 /// Acquire the global DB lock and fetch metric history for the given window.
 fn fetch_metric_history(
@@ -948,7 +949,8 @@ fn aggregate_session_tokens(
     session_id: String,
     message_usage: &mut HashMap<String, (String, TokenAccum, u32, String)>,
 ) {
-    let Some(raw) = event.values.get(&session_event_pos::RAW_JSON.to_string()) else {
+    debug_assert_eq!(session_event_pos::RAW_JSON, 0);
+    let Some(raw) = event.values.get(SESSION_RAW_JSON_KEY) else {
         return;
     };
     let Some(message) = raw.get("message") else {
@@ -1010,7 +1012,8 @@ fn aggregate_codex_tokens(
     let Some(session_id) = sparse_get_string(&event.attrs, attr_pos::SESSION_ID).flatten() else {
         return;
     };
-    let Some(raw) = event.values.get(&session_event_pos::RAW_JSON.to_string()) else {
+    debug_assert_eq!(session_event_pos::RAW_JSON, 0);
+    let Some(raw) = event.values.get(SESSION_RAW_JSON_KEY) else {
         return;
     };
     let Some(payload) = raw.get("payload") else {
@@ -1057,10 +1060,10 @@ fn repo_summaries_from_records(
 ) -> Result<Vec<RepoActivitySummary>, GitAiError> {
     // Group records by repo_url, skipping events with no repo (NULL) — these
     // predate repo_url emission and have no meaningful identity to display.
-    let mut by_repo: HashMap<String, Vec<&MetricHistoryRecord>> = HashMap::new();
+    let mut by_repo: HashMap<&str, Vec<&MetricHistoryRecord>> = HashMap::new();
     for record in all_records {
         if let Some(ref url) = record.repo_url {
-            by_repo.entry(url.clone()).or_default().push(record);
+            by_repo.entry(url.as_str()).or_default().push(record);
         }
     }
 
@@ -1071,7 +1074,7 @@ fn repo_summaries_from_records(
                 compute_activity_from_records(&records, since_ts, String::new(), granularity)
                     .ok()?;
             Some(RepoActivitySummary {
-                repo_url: url,
+                repo_url: url.to_string(),
                 ai_lines: stats.commits.ai_lines,
                 commits: stats.commits.total,
                 sessions: stats.sessions.total,
