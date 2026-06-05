@@ -76,8 +76,8 @@ pub struct MetricsDatabase {
 }
 
 impl MetricsDatabase {
-    /// How long delivered metric rows are retained for local history (30 days).
-    const METRICS_RETENTION_SECS: u64 = 30 * 24 * 3600;
+    /// How long metric rows are retained for local history/offline retry (45 days).
+    const METRICS_RETENTION_SECS: u64 = 45 * 24 * 3600;
     /// Minimum interval between prune passes (24 hours).
     const METRICS_PRUNE_INTERVAL_SECS: u64 = 24 * 3600;
 
@@ -284,7 +284,7 @@ impl MetricsDatabase {
         }
 
         tx.commit()?;
-        self.prune_delivered_metrics_if_due()?;
+        self.prune_old_metrics_if_due()?;
         Ok(ids)
     }
 
@@ -334,14 +334,16 @@ impl MetricsDatabase {
         }
 
         tx.commit()?;
-        self.prune_delivered_metrics_if_due()?;
+        self.prune_old_metrics_if_due()?;
         Ok(())
     }
 
-    /// Delete delivered metric rows outside the local history window.
+    /// Delete metric rows outside the local retention window.
     ///
-    /// Pending rows are never pruned here because they still need upload.
-    fn prune_delivered_metrics_if_due(&mut self) -> Result<(), GitAiError> {
+    /// Valid rows are pruned by event timestamp, regardless of delivery state. Malformed
+    /// rows cannot be aged by event timestamp, so delivered malformed rows fall back to
+    /// `delivered_ts`.
+    fn prune_old_metrics_if_due(&mut self) -> Result<(), GitAiError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -364,18 +366,44 @@ impl MetricsDatabase {
         }
 
         let cutoff = now.saturating_sub(Self::METRICS_RETENTION_SECS);
+        let rows_to_prune = self.old_metric_row_ids(cutoff)?;
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT OR REPLACE INTO schema_metadata (key, value) VALUES ('metrics_last_prune_ts', ?1)",
             params![now.to_string()],
         )?;
-        tx.execute(
-            "DELETE FROM metrics WHERE delivered_ts IS NOT NULL AND delivered_ts < ?1",
-            params![cutoff as i64],
-        )?;
+        {
+            let mut stmt = tx.prepare_cached("DELETE FROM metrics WHERE id = ?1")?;
+            for id in rows_to_prune {
+                stmt.execute(params![id])?;
+            }
+        }
         tx.commit()?;
 
         Ok(())
+    }
+
+    fn old_metric_row_ids(&self, cutoff: u64) -> Result<Vec<i64>, GitAiError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, event_json, delivered_ts FROM metrics ORDER BY id ASC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        })?;
+
+        let mut ids = Vec::new();
+        for row in rows {
+            let (id, event_json, delivered_ts) = row?;
+            if metric_row_is_older_than_cutoff(&event_json, delivered_ts, cutoff) {
+                ids.push(id);
+            }
+        }
+
+        Ok(ids)
     }
 
     /// Get count of pending metrics.
@@ -478,6 +506,18 @@ impl MetricsDatabase {
     }
 }
 
+fn metric_row_is_older_than_cutoff(
+    event_json: &str,
+    delivered_ts: Option<i64>,
+    cutoff: u64,
+) -> bool {
+    if let Ok(event) = serde_json::from_str::<MetricEvent>(event_json) {
+        return u64::from(event.timestamp) < cutoff;
+    }
+
+    delivered_ts.is_some_and(|ts| ts >= 0 && (ts as u64) < cutoff)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,6 +534,27 @@ mod tests {
         db.initialize_schema().unwrap();
 
         (db, temp_dir)
+    }
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    fn days_ago(days: u64) -> u32 {
+        unix_now()
+            .saturating_sub(days * 24 * 3600)
+            .min(u32::MAX as u64) as u32
+    }
+
+    fn event_json(ts: u32) -> String {
+        format!(r#"{{"t":{ts},"e":1,"v":{{}},"a":{{}}}}"#)
+    }
+
+    fn event_json_with_repo(ts: u32, event_id: u16, repo: &str) -> String {
+        format!(r#"{{"t":{ts},"e":{event_id},"v":{{}},"a":{{"1":"{repo}"}}}}"#)
     }
 
     #[test]
@@ -575,10 +636,12 @@ mod tests {
     #[test]
     fn test_insert_events() {
         let (mut db, _temp_dir) = create_test_db();
+        let ts1 = days_ago(2);
+        let ts2 = days_ago(1);
 
         let events = vec![
-            r#"{"t":1234567890,"e":1,"v":{"0":"abc123"},"a":{"0":"1.0.0"}}"#.to_string(),
-            r#"{"t":1234567891,"e":1,"v":{"0":"def456"},"a":{"0":"1.0.0"}}"#.to_string(),
+            format!(r#"{{"t":{ts1},"e":1,"v":{{"0":"abc123"}},"a":{{"0":"1.0.0"}}}}"#),
+            format!(r#"{{"t":{ts2},"e":1,"v":{{"0":"def456"}},"a":{{"0":"1.0.0"}}}}"#),
         ];
 
         let ids = db.insert_events(&events).unwrap();
@@ -591,12 +654,11 @@ mod tests {
     #[test]
     fn test_get_batch() {
         let (mut db, _temp_dir) = create_test_db();
+        let ts1 = days_ago(3);
+        let ts2 = days_ago(2);
+        let ts3 = days_ago(1);
 
-        let events = vec![
-            r#"{"t":1,"e":1,"v":{},"a":{}}"#.to_string(),
-            r#"{"t":2,"e":1,"v":{},"a":{}}"#.to_string(),
-            r#"{"t":3,"e":1,"v":{},"a":{}}"#.to_string(),
-        ];
+        let events = vec![event_json(ts1), event_json(ts2), event_json(ts3)];
 
         db.insert_events(&events).unwrap();
 
@@ -606,19 +668,18 @@ mod tests {
 
         // Verify order (oldest first)
         assert!(batch[0].id < batch[1].id);
-        assert!(batch[0].event_json.contains("\"t\":1"));
-        assert!(batch[1].event_json.contains("\"t\":2"));
+        assert!(batch[0].event_json.contains(&format!("\"t\":{ts1}")));
+        assert!(batch[1].event_json.contains(&format!("\"t\":{ts2}")));
     }
 
     #[test]
     fn test_mark_records_delivered() {
         let (mut db, _temp_dir) = create_test_db();
+        let ts1 = days_ago(3);
+        let ts2 = days_ago(2);
+        let ts3 = days_ago(1);
 
-        let events = vec![
-            r#"{"t":1,"e":1,"v":{},"a":{}}"#.to_string(),
-            r#"{"t":2,"e":1,"v":{},"a":{}}"#.to_string(),
-            r#"{"t":3,"e":1,"v":{},"a":{}}"#.to_string(),
-        ];
+        let events = vec![event_json(ts1), event_json(ts2), event_json(ts3)];
 
         db.insert_events(&events).unwrap();
 
@@ -626,7 +687,7 @@ mod tests {
         let batch = db.get_batch(2).unwrap();
         let ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
 
-        db.mark_records_delivered(&ids, 1_700_000_000).unwrap();
+        db.mark_records_delivered(&ids, unix_now()).unwrap();
 
         // Verify only one remains pending.
         let count = db.count().unwrap();
@@ -635,7 +696,7 @@ mod tests {
         // Verify remaining pending row is the third one.
         let remaining = db.get_batch(10).unwrap();
         assert_eq!(remaining.len(), 1);
-        assert!(remaining[0].event_json.contains("\"t\":3"));
+        assert!(remaining[0].event_json.contains(&format!("\"t\":{ts3}")));
 
         // Verify delivered rows are retained.
         let total: i64 = db
@@ -649,12 +710,11 @@ mod tests {
     fn test_insert_events_with_delivered_ts_skips_batch() {
         let (mut db, _temp_dir) = create_test_db();
 
-        let delivered_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let delivered = vec![r#"{"t":1,"e":1,"v":{},"a":{}}"#.to_string()];
-        let pending = vec![r#"{"t":2,"e":1,"v":{},"a":{}}"#.to_string()];
+        let delivered_ts = unix_now();
+        let delivered_event_ts = days_ago(2);
+        let pending_event_ts = days_ago(1);
+        let delivered = vec![event_json(delivered_event_ts)];
+        let pending = vec![event_json(pending_event_ts)];
 
         db.insert_events_with_delivered_ts(&delivered, Some(delivered_ts))
             .unwrap();
@@ -662,7 +722,11 @@ mod tests {
 
         let batch = db.get_batch(10).unwrap();
         assert_eq!(batch.len(), 1);
-        assert!(batch[0].event_json.contains("\"t\":2"));
+        assert!(
+            batch[0]
+                .event_json
+                .contains(&format!("\"t\":{pending_event_ts}"))
+        );
         assert_eq!(db.count().unwrap(), 1);
 
         let total: i64 = db
@@ -676,17 +740,20 @@ mod tests {
     fn test_get_metric_history_reads_authoritative_metrics_table() {
         let (mut db, _temp_dir) = create_test_db();
 
-        let delivered_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let delivered = vec![
-            r#"{"t":10,"e":1,"v":{},"a":{"1":"https://github.com/acme/project"}}"#.to_string(),
-        ];
+        let delivered_ts = unix_now();
+        let ts1 = days_ago(4);
+        let ts2 = days_ago(3);
+        let ts3 = days_ago(2);
+        let ts4 = days_ago(1);
+        let delivered = vec![event_json_with_repo(
+            ts1,
+            1,
+            "https://github.com/acme/project",
+        )];
         let pending = vec![
-            r#"{"t":20,"e":4,"v":{},"a":{"1":"https://github.com/acme/project"}}"#.to_string(),
-            r#"{"t":30,"e":2,"v":{},"a":{"1":"https://github.com/acme/project"}}"#.to_string(),
-            r#"{"t":40,"e":5,"v":{},"a":{"1":"https://github.com/other/repo"}}"#.to_string(),
+            event_json_with_repo(ts2, 4, "https://github.com/acme/project"),
+            event_json_with_repo(ts3, 2, "https://github.com/acme/project"),
+            event_json_with_repo(ts4, 5, "https://github.com/other/repo"),
         ];
 
         db.insert_events_with_delivered_ts(&delivered, Some(delivered_ts))
@@ -698,9 +765,9 @@ mod tests {
             .unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].event_id, 1);
-        assert_eq!(records[0].ts, 10);
+        assert_eq!(records[0].ts, ts1);
         assert_eq!(records[1].event_id, 4);
-        assert_eq!(records[1].ts, 20);
+        assert_eq!(records[1].ts, ts2);
 
         // Delivered rows are retained for history, but only undelivered rows flush.
         let batch = db.get_batch(10).unwrap();
@@ -708,25 +775,36 @@ mod tests {
     }
 
     #[test]
-    fn test_prunes_only_old_delivered_metrics() {
+    fn test_prunes_metric_rows_older_than_retention_by_event_timestamp() {
         let (mut db, _temp_dir) = create_test_db();
 
-        let old_delivered_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            .saturating_sub(MetricsDatabase::METRICS_RETENTION_SECS + 1);
-        let old_delivered = vec![r#"{"t":1,"e":1,"v":{},"a":{}}"#.to_string()];
-        db.insert_events_with_delivered_ts(&old_delivered, Some(old_delivered_ts))
+        let delivered_ts = unix_now();
+        let old_event_ts = days_ago(46);
+        let recent_event_ts = days_ago(44);
+        let events = vec![event_json(old_event_ts), event_json(recent_event_ts)];
+
+        db.insert_events_with_delivered_ts(&events, Some(delivered_ts))
             .unwrap();
 
         let total_after_prune: i64 = db
             .conn
             .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(total_after_prune, 0);
+        assert_eq!(total_after_prune, 1);
 
-        let pending = vec![r#"{"t":2,"e":1,"v":{},"a":{}}"#.to_string()];
+        let records = db.get_metric_history(0, None, &[1]).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].ts, recent_event_ts);
+    }
+
+    #[test]
+    fn test_prunes_old_pending_metric_rows() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        let old_event_ts = days_ago(46);
+        let recent_event_ts = days_ago(1);
+        let pending = vec![event_json(old_event_ts), event_json(recent_event_ts)];
+
         db.insert_events(&pending).unwrap();
 
         let total: i64 = db
@@ -735,6 +813,30 @@ mod tests {
             .unwrap();
         assert_eq!(total, 1);
         assert_eq!(db.count().unwrap(), 1);
+
+        let batch = db.get_batch(10).unwrap();
+        assert_eq!(batch.len(), 1);
+        assert!(
+            batch[0]
+                .event_json
+                .contains(&format!("\"t\":{recent_event_ts}"))
+        );
+    }
+
+    #[test]
+    fn test_prunes_malformed_delivered_rows_by_delivered_timestamp() {
+        let (mut db, _temp_dir) = create_test_db();
+
+        let old_delivered_ts =
+            unix_now().saturating_sub(MetricsDatabase::METRICS_RETENTION_SECS + 1);
+        db.insert_events_with_delivered_ts(&["not-json".to_string()], Some(old_delivered_ts))
+            .unwrap();
+
+        let total: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 0);
     }
 
     #[test]
