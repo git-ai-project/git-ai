@@ -253,6 +253,7 @@ fn shift_authorship_notes_with_existing_mode(
 
     // Determine which mappings need processing
     struct PendingShift {
+        source_sha: String,
         new_sha: String,
         log: AuthorshipLog,
         diff_pair_idx: usize,
@@ -294,6 +295,7 @@ fn shift_authorship_notes_with_existing_mode(
         let diff_pair_idx = diff_pairs.len();
         diff_pairs.push((source_sha.clone(), new_sha.clone()));
         pending.push(PendingShift {
+            source_sha: source_sha.clone(),
             new_sha: new_sha.clone(),
             log,
             diff_pair_idx,
@@ -313,10 +315,34 @@ fn shift_authorship_notes_with_existing_mode(
 
     // Apply shifts and merge logs that share a target commit
     let mut merged_by_target = existing_by_target;
+    let mut recoveries: Vec<(String, String, AuthorshipLog, HashMap<String, String>)> = Vec::new();
 
     for shift in pending {
         let diff_result = &diff_results[shift.diff_pair_idx];
         let mut log = shift.log;
+        let destination_path_by_source_path: HashMap<String, String> = diff_result
+            .hunks_by_file
+            .keys()
+            .map(|path| {
+                let source_path = diff_result
+                    .renames
+                    .iter()
+                    .find_map(|(old_path, new_path)| {
+                        if new_path == path {
+                            Some(old_path.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| path.clone());
+                (source_path, path.clone())
+            })
+            .collect();
+        let source_log_for_recovery = if destination_path_by_source_path.is_empty() {
+            None
+        } else {
+            Some(log.clone())
+        };
 
         for (old_path, new_path) in &diff_result.renames {
             for attestation in &mut log.attestations {
@@ -342,8 +368,30 @@ fn shift_authorship_notes_with_existing_mode(
         match merged_by_target.get_mut(&shift.new_sha) {
             Some(existing) => merge_authorship_logs(existing, &log),
             None => {
-                merged_by_target.insert(shift.new_sha, log);
+                merged_by_target.insert(shift.new_sha.clone(), log);
             }
+        }
+
+        if let Some(source_log) = source_log_for_recovery {
+            recoveries.push((
+                shift.source_sha,
+                shift.new_sha,
+                source_log,
+                destination_path_by_source_path,
+            ));
+        }
+    }
+
+    for (source_sha, new_sha, source_log, destination_path_by_source_path) in recoveries {
+        if let Some(target_log) = merged_by_target.get_mut(&new_sha) {
+            crate::authorship::conflict_resolution::recover_exact_source_lines_from_source_log(
+                repo,
+                target_log,
+                &source_log,
+                &source_sha,
+                &new_sha,
+                &destination_path_by_source_path,
+            );
         }
     }
 

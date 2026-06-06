@@ -983,21 +983,27 @@ fn test_regular_rebase_with_conflict_preserves_ai_notes() {
         "Rebased commit should have authorship notes (notes should follow SHA rewrite)"
     );
 
-    // After conflict resolution, AI-attributed lines fall inside diff hunks
-    // (git diff-tree shows the region as modified), so attribution is correctly dropped.
-    // The note exists (metadata preserved) but shared.txt has no attributed lines.
+    // Even though Git's raw diff sees the final newline change as a replacement
+    // of the AI line, the logical line content survived and should retain attribution.
     let note_content = post_rebase_note.unwrap();
     let post_rebase_log =
         AuthorshipLog::deserialize_from_string(&note_content).expect("parse post-rebase note");
     assert_eq!(
         post_rebase_log.metadata.sessions, pre_rebase_log.metadata.sessions,
-        "session metadata should be preserved even when changed-hunk attestations are dropped"
+        "session metadata should be preserved for recovered logical-line attribution"
     );
     assert!(
-        !note_content.contains("shared.txt"),
-        "Authorship note should NOT reference shared.txt (lines inside diff hunk), got: {}",
+        note_content.contains("shared.txt"),
+        "Authorship note should reference shared.txt for logically preserved lines, got: {}",
         note_content
     );
+
+    let mut final_file = repo.filename("shared.txt");
+    final_file.assert_committed_lines(crate::lines![
+        "line 1".human(),
+        "main change line 2".human(),
+        "AI feature line 2".ai(),
+    ]);
 }
 
 #[test]

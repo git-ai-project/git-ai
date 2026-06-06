@@ -7758,15 +7758,16 @@ fn test_slow_path_file_grows_then_unique_files_each_commit() {
 // ============================================================================
 // Category 3: Conflict Resolved by Human
 // Feature branch has AI-generated changes that conflict with main branch.
-// Human resolves via fs::write (no checkpoint) — conflicted file loses AI
-// attribution for that specific rebased commit.  All other AI files in the
-// chain retain their attribution.
+// Human resolves via fs::write (no checkpoint): exact AI source lines that
+// survive resolution retain attribution, while replaced source lines are not
+// attributed. All other AI files in the chain retain their attribution.
 // ============================================================================
 
 /// Test 1: Python auth.py — feature adds AI login/logout functions, main edits
 /// the same file's header comment → conflict on C1.  Human resolves by keeping
-/// both parts.  C1' must have NO auth.py in its note; C2'–C5' accumulate other
-/// AI files (models.py, views.py, serializers.py, signals.py) normally.
+/// both parts.  C1' keeps the exact AI lines that survive resolution; C2'–C5'
+/// accumulate other AI files (models.py, views.py, serializers.py, signals.py)
+/// normally.
 #[test]
 fn test_human_conflict_python_auth_c1_conflicts_rest_accumulate() {
     let repo = TestRepo::new();
@@ -7937,8 +7938,8 @@ fn test_human_conflict_python_auth_c1_conflicts_rest_accumulate() {
 
 /// Test 2: Rust lib.rs — feature adds AI parser functions, main edits the same
 /// mod declaration at the top → conflict on C2 (middle of chain).
-/// C1' is attributed normally; C2' loses lib.rs; C3'–C5' accumulate helpers.rs,
-/// types.rs, error.rs as expected.
+/// C1' is attributed normally; C2' keeps the exact AI line that survives the
+/// human resolution; C3'–C5' accumulate helpers.rs, types.rs, error.rs as expected.
 #[test]
 fn test_human_conflict_rust_lib_c2_conflicts_surroundings_ok() {
     let repo = TestRepo::new();
@@ -8065,9 +8066,20 @@ fn test_human_conflict_rust_lib_c2_conflicts_surroundings_ok() {
     assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["src/tokenizer.rs"]);
 
-    // C2': lib.rs human-resolved conflict — all AI lines inside diff hunk, attribution dropped
+    // C2': lib.rs human-resolved conflict — the exact AI line survived resolution
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
-    assert_note_files_exact(&repo, &chain[1], "c2_files", &[]);
+    assert_note_files_exact(&repo, &chain[1], "c2_files", &["src/lib.rs"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[1],
+        "src/lib.rs",
+        "c2_blame",
+        &[
+            ("pub mod parser;", false),
+            ("pub mod types;", false),
+            ("pub mod tokenizer;", true),
+        ],
+    );
 
     // C3': helpers.rs only
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
@@ -8084,7 +8096,8 @@ fn test_human_conflict_rust_lib_c2_conflicts_surroundings_ok() {
 
 /// Test 3: TypeScript api.ts — feature adds AI REST handlers, main adds an
 /// import at the top that conflicts with feature's C3.  C1'–C2' accumulate
-/// dto.ts and service.ts; C3' loses api.ts attribution; C4'–C5' add more files.
+/// dto.ts and service.ts; C3' keeps the exact AI import that survives human
+/// resolution; C4'–C5' add more files.
 #[test]
 fn test_human_conflict_typescript_api_c3_conflicts_accumulation_intact() {
     let repo = TestRepo::new();
@@ -8223,9 +8236,20 @@ fn test_human_conflict_typescript_api_c3_conflicts_accumulation_intact() {
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
     assert_note_files_exact(&repo, &chain[1], "c2_files", &["src/service.ts"]);
 
-    // C3': api.ts human-resolved conflict — AI lines inside diff hunk, attribution dropped
+    // C3': api.ts human-resolved conflict — the exact AI import survived resolution
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
-    assert_note_files_exact(&repo, &chain[2], "c3_files", &[]);
+    assert_note_files_exact(&repo, &chain[2], "c3_files", &["src/api.ts"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[2],
+        "src/api.ts",
+        "c3_blame",
+        &[
+            ("// api module", false),
+            ("export { version };", false),
+            ("import { createUser, getUser } from './service';", true),
+        ],
+    );
 
     // C4': middleware.ts only
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
@@ -8238,7 +8262,7 @@ fn test_human_conflict_typescript_api_c3_conflicts_accumulation_intact() {
 
 /// Test 4: Python models.py — main adds a class attribute that conflicts with
 /// feature's last commit (C5).  All prior AI commits C1'–C4' are attributed
-/// normally; C5' loses models.py.
+/// normally; C5' keeps the exact AI validator line that survives human resolution.
 #[test]
 fn test_human_conflict_python_models_c5_last_commit_conflicts() {
     let repo = TestRepo::new();
@@ -8380,16 +8404,32 @@ fn test_human_conflict_python_models_c5_last_commit_conflicts() {
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
     assert_note_files_exact(&repo, &chain[3], "c4_files", &["events.py"]);
 
-    // C5': models.py human-resolved conflict — AI lines inside diff hunk, attribution dropped
+    // C5': models.py human-resolved conflict — the exact AI validator survived resolution
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
-    assert_note_files_exact(&repo, &chain[4], "c5_files", &[]);
+    assert_note_files_exact(&repo, &chain[4], "c5_files", &["models.py"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[4],
+        "models.py",
+        "c5_blame",
+        &[
+            ("class User:", false),
+            ("    table_name = 'users'", false),
+            (
+                "    def validate(self): return bool(getattr(self, 'name', None))",
+                true,
+            ),
+            ("    pass", false),
+        ],
+    );
 }
 
 /// Test 5: Rust src/config.rs — main and feature both extend a constants block,
-/// triggering a conflict on C2.  C1' has config.rs attributed; C2' loses it
-/// due to human resolution; C3'–C5' accumulate cache.rs, retry.rs, timeout.rs.
+/// triggering a conflict on C2.  C1' has config.rs attributed; C2' keeps the
+/// exact AI constant that survives human resolution; C3'–C5' accumulate cache.rs,
+/// retry.rs, timeout.rs.
 #[test]
-fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
+fn test_human_conflict_rust_config_c2_preserves_surviving_ai_line() {
     let repo = TestRepo::new();
 
     write_raw_commit(
@@ -8520,9 +8560,20 @@ fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
     assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["src/defaults.rs"]);
 
-    // C2': config.rs human-resolved conflict — AI lines inside diff hunk, attribution dropped
+    // C2': config.rs human-resolved conflict — the exact AI constant survived resolution
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
-    assert_note_files_exact(&repo, &chain[1], "c2_files", &[]);
+    assert_note_files_exact(&repo, &chain[1], "c2_files", &["src/config.rs"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[1],
+        "src/config.rs",
+        "c2_blame",
+        &[
+            ("pub const MAX_CONN: u32 = 10;", false),
+            ("pub const TIMEOUT_MS: u64 = 5000;", false),
+            ("pub const IDLE_TIMEOUT_MS: u64 = 30_000;", true),
+        ],
+    );
 
     // C3': cache.rs only
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
@@ -8540,8 +8591,8 @@ fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
 /// Test 6: TypeScript store.ts — the entire feature file is written by the AI
 /// via fs::write + git_og add + checkpoint (simulating an AI-created file).
 /// Main edits the same file causing conflict on C1; human resolves.
-/// No file is attributed in C1' (human resolved the only AI file in that commit).
-/// C2'–C5' accumulate actions.ts, selectors.ts, reducers.ts, hooks.ts.
+/// C1' keeps the exact AI lines that survive resolution. C2'–C5' accumulate
+/// actions.ts, selectors.ts, reducers.ts, hooks.ts.
 #[test]
 fn test_human_conflict_typescript_store_ai_created_file_conflict() {
     let repo = TestRepo::new();
@@ -8692,7 +8743,8 @@ fn test_human_conflict_typescript_store_ai_created_file_conflict() {
 
 /// Test 7: Rust src/server.rs — feature adds AI HTTP handler functions; main
 /// adds a conflicting use declaration in C4.  C1'–C3' and C5' keep their AI
-/// attribution; C4' (server.rs) is dropped due to human resolution.
+/// attribution; C4' has no server.rs attestation because the human resolution
+/// changed the original AI line.
 #[test]
 fn test_human_conflict_rust_server_c4_human_resolved_c5_accumulates() {
     let repo = TestRepo::new();
@@ -8858,7 +8910,8 @@ fn test_human_conflict_rust_server_c4_human_resolved_c5_accumulates() {
 
 /// Test 8: Python pipeline.py — feature starts from a mixed human+AI baseline,
 /// then modifies the same file as main in C3.  C1' + C2' accumulate other AI
-/// files; C3' loses pipeline.py; C4'–C5' add transform.py and sink.py.
+/// files; C3' keeps the exact AI filter line that survives human resolution;
+/// C4'–C5' add transform.py and sink.py.
 #[test]
 fn test_human_conflict_python_pipeline_mixed_baseline_c3_conflict() {
     let repo = TestRepo::new();
@@ -9004,9 +9057,25 @@ fn test_human_conflict_python_pipeline_mixed_baseline_c3_conflict() {
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
     assert_note_files_exact(&repo, &chain[1], "c2_files", &["filter.py"]);
 
-    // C3': pipeline.py human-resolved conflict — AI lines inside diff hunk, attribution dropped
+    // C3': pipeline.py human-resolved conflict — the exact AI filter survived resolution
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
-    assert_note_files_exact(&repo, &chain[2], "c3_files", &[]);
+    assert_note_files_exact(&repo, &chain[2], "c3_files", &["pipeline.py"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[2],
+        "pipeline.py",
+        "c3_blame",
+        &[
+            ("class Pipeline:", false),
+            ("    def __init__(self): self.stages = []", false),
+            ("    def run(self, data): return data", false),
+            ("    def validate(self, data): return bool(data)", false),
+            (
+                "    def add_filter(self, f): self.stages.append(f); return self",
+                true,
+            ),
+        ],
+    );
 
     // C4': transform.py only
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
@@ -9019,8 +9088,8 @@ fn test_human_conflict_python_pipeline_mixed_baseline_c3_conflict() {
 
 /// Test 9: TypeScript component.tsx — AI writes entire component file (via
 /// fs::write + checkpoint), main adds a style import that conflicts on C2.
-/// C1' accumulates hooks.ts; C2' loses component.tsx; C3'–C5' add context.ts,
-/// provider.tsx, types.ts normally.
+/// C1' accumulates hooks.ts; C2' keeps the exact AI lines that survive human
+/// resolution; C3'–C5' add context.ts, provider.tsx, types.ts normally.
 #[test]
 fn test_human_conflict_typescript_component_ai_created_c2_conflict() {
     let repo = TestRepo::new();
@@ -9172,8 +9241,9 @@ fn test_human_conflict_typescript_component_ai_created_c2_conflict() {
 
 /// Test 10: Rust 7-commit chain — feature adds AI functions across multiple
 /// files; main edits shared.rs causing conflict on C4 (middle of a 7-commit
-/// chain).  Verifies 7-element chain: C1'–C3' accumulate normally, C4' loses
-/// shared.rs, C5'–C7' continue accumulating math.rs, string_utils.rs, io.rs.
+/// chain).  Verifies 7-element chain: C1'–C3' accumulate normally, C4' keeps
+/// the exact AI clamp line that survives human resolution, C5'–C7' continue
+/// accumulating math.rs, string_utils.rs, io.rs.
 #[test]
 fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
     let repo = TestRepo::new();
@@ -9347,9 +9417,20 @@ fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["src/result_utils.rs"]);
 
-    // C4': shared.rs human-resolved conflict — AI lines inside diff hunk, attribution dropped
+    // C4': shared.rs human-resolved conflict — the exact AI clamp survived resolution
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
-    assert_note_files_exact(&repo, &chain[3], "c4_files", &[]);
+    assert_note_files_exact(&repo, &chain[3], "c4_files", &["src/shared.rs"]);
+    assert_blame_at_commit(
+        &repo,
+        &chain[3],
+        "src/shared.rs",
+        "c4_blame",
+        &[
+            ("pub const VERSION: &str = \"1.0\";", false),
+            ("pub fn identity<T>(x: T) -> T { x }", false),
+            ("pub fn clamp<T: PartialOrd>(x: T, lo: T, hi: T) -> T", true),
+        ],
+    );
 
     // C5': math.rs only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
@@ -9365,9 +9446,8 @@ fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
 }
 
 /// Test: Human resolves conflict by replacing ALL AI lines with completely
-/// different content.  After rebase, the conflict commit should have NO note
-/// (commit_has_attestations=false → else branch returns None).
-/// Subsequent AI commits should be unaffected.
+/// different content. After rebase, the conflict commit keeps note metadata but
+/// has no file attestations. Subsequent AI commits should be unaffected.
 #[test]
 fn test_human_conflict_resolves_all_ai_lines_replaced() {
     let repo = TestRepo::new();
@@ -9431,10 +9511,9 @@ fn test_human_conflict_resolves_all_ai_lines_replaced() {
     // match original AI content, so diff_based_line_attribution_transfer produces
     // only Replace ops → commit_has_attestations = false.
     //
-    // However, the original commit DID have an AI authorship note.  Rather than
-    // silently dropping provenance, the slow-path fallback remaps the original note
-    // to the rebased commit.  The attestation line numbers may be stale but the AI
-    // authorship record is preserved.
+    // However, the original commit DID have an AI authorship note. Rather than
+    // silently dropping provenance, the rewrite keeps the metadata note on the
+    // rebased commit while leaving compute.py unattributed.
     fs::write(
         repo.path().join("compute.py"),
         "# human resolved\nresult = 42\n",
@@ -9564,7 +9643,7 @@ fn test_human_conflict_ai_file_is_conflict_file_note_preserved() {
 /// commit's file conflicts with upstream.  After human conflict resolution and
 /// `rebase --continue`, ALL three rebased commits must retain their authorship
 /// notes.  Before the fix, the conflict commit's note was lost (content-diff
-/// produced nothing for the manually resolved file and the fallback remap was
+/// produced nothing for the manually resolved file and metadata preservation was
 /// too narrow).
 #[test]
 fn test_human_conflict_multicommit_chain_middle_conflict_all_notes_preserved() {
@@ -9833,7 +9912,7 @@ fn test_conflict_ai_resolves_timeout_constant() {
     // C3': config.py only (AI-resolved, TIMEOUT = 90 attributed as AI)
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["config.py"]);
-    // 1 AI line: TIMEOUT = 90 (working-log fallback path must set accepted_lines correctly)
+    // 1 AI line: TIMEOUT = 90 (working-log resolution path must set accepted_lines correctly)
     assert_accepted_lines_exact(&repo, &chain[2], "c3_accepted_lines", 1);
 
     // blame at chain[2] for config.py: the AI-resolved TIMEOUT line should be AI
@@ -11766,7 +11845,7 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
 // Category 5: Path-specific correctness tests
 // ============================================================================
 
-/// Verify that the working-log fallback path is the **sole** source of attribution
+/// Verify that the conflict-resolution working-log path is the sole source of attribution
 /// when an AI conflict resolution writes *different* content than the original commit.
 ///
 /// Scenario:
@@ -11775,7 +11854,7 @@ fn test_conflict_mixed_ai_and_human_resolve_different_commits() {
 ///   - AI resolves by setting `TIMEOUT = 45` (a compromise — different from both sides).
 ///   - `set_contents` records a working-log checkpoint for the resolved value.
 ///   - Content-diff compares original (`= 30`) with resolved (`= 45`) → Replace → no match.
-///   - The working-log fallback must fire and attribute `= 45` as AI.
+///   - The working-log resolution path must attribute `= 45` as AI.
 ///
 /// Regression: if `build_note_from_conflict_wl` were removed, C1' would have no note.
 #[test]
@@ -11851,7 +11930,7 @@ fn test_conflict_working_log_is_sole_attribution_source() {
 
     let chain = get_commit_chain(&repo, 2);
 
-    // C1': config.py only — note MUST exist (working-log fallback fired)
+    // C1': config.py only — note MUST exist (working-log resolution path fired)
     assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["config.py"]);
     // 1 AI line: TIMEOUT = 45 — accepted_lines must be 1 (not 0).
@@ -12142,7 +12221,7 @@ fn test_conflict_ai_resolves_timeout_constant_standard_human() {
     // C3': config.py only (AI-resolved, TIMEOUT = 90 attributed as AI)
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["config.py"]);
-    // 1 AI line: TIMEOUT = 90 (working-log fallback path must set accepted_lines correctly)
+    // 1 AI line: TIMEOUT = 90 (working-log resolution path must set accepted_lines correctly)
     assert_accepted_lines_exact(&repo, &chain[2], "c3_accepted_lines", 1);
 
     // blame at chain[2] for config.py: the AI-resolved TIMEOUT line should be AI
@@ -13574,7 +13653,7 @@ crate::reuse_tests_in_worktree!(
     test_human_conflict_rust_lib_c2_conflicts_surroundings_ok,
     test_human_conflict_typescript_api_c3_conflicts_accumulation_intact,
     test_human_conflict_python_models_c5_last_commit_conflicts,
-    test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate,
+    test_human_conflict_rust_config_c2_preserves_surviving_ai_line,
     test_human_conflict_typescript_store_ai_created_file_conflict,
     test_human_conflict_rust_server_c4_human_resolved_c5_accumulates,
     test_human_conflict_python_pipeline_mixed_baseline_c3_conflict,
