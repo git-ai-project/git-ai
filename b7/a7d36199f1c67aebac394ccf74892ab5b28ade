@@ -9,5 +9,18 @@ src/commands/checkpoint.rs
   "schema_version": "authorship/3.0.0",
   "git_ai_version": "1.3.4",
   "base_commit_sha": "b7a7d36199f1c67aebac394ccf74892ab5b28ade",
-  "prompts": {}
+  "prompts": {
+    "dacf127c97d5a34b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "73568fd6-810b-410c-80b7-8b19b027eee1",
+        "model": "claude-opus-4-6"
+      },
+      "human_author": "Sasha Varlamov",
+      "total_additions": 1,
+      "total_deletions": 452,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  }
 }

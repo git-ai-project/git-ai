@@ -1,5 +1,25 @@
 src/commands/checkpoint_agent/presets/known_human.rs
   dacf127c97d5a34b 10
+src/commands/checkpoint_agent/presets/opencode.rs
+  dacf127c97d5a34b 2
+src/commands/checkpoint_agent/presets/amp.rs
+  dacf127c97d5a34b 3
+src/commands/checkpoint_agent/presets/gemini.rs
+  dacf127c97d5a34b 3
+src/commands/checkpoint_agent/presets/firebender.rs
+  dacf127c97d5a34b 3
+src/commands/checkpoint_agent/presets/codex.rs
+  dacf127c97d5a34b 4
+src/commands/checkpoint_agent/presets/windsurf.rs
+  dacf127c97d5a34b 3
+src/commands/checkpoint_agent/presets/pi.rs
+  dacf127c97d5a34b 2
+src/commands/checkpoint_agent/presets/continue_cli.rs
+  dacf127c97d5a34b 3
+src/commands/checkpoint_agent/presets/claude.rs
+  dacf127c97d5a34b 3
+src/commands/checkpoint_agent/presets/droid.rs
+  dacf127c97d5a34b 3
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -13,7 +33,6 @@ src/commands/checkpoint_agent/presets/known_human.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 20,
       "total_deletions": 232,
       "accepted_lines": 1,

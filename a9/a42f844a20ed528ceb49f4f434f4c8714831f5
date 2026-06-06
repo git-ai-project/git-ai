@@ -13,7 +13,6 @@ src/commands/checkpoint_agent/orchestrator.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 16,
       "total_deletions": 5,
       "accepted_lines": 16,

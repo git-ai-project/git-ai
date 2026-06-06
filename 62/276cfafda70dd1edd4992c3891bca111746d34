@@ -1,5 +1,5 @@
 docs/superpowers/specs/2026-05-03-checkpoint-rewrite-design.md
-  dacf127c97d5a34b 1-130,132-141,152-177,180-199,202-203
+  dacf127c97d5a34b 1-130,1-203,132-141,152-177,180-199,202-203
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -13,7 +13,6 @@ docs/superpowers/specs/2026-05-03-checkpoint-rewrite-design.md
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 203,
       "total_deletions": 0,
       "accepted_lines": 188,

@@ -1,5 +1,5 @@
 src/commands/checkpoint_agent/orchestrator.rs
-  dacf127c97d5a34b 9,15-28,34,177,188
+  dacf127c97d5a34b 5,9,12-13,15-28,34,40-95,126,132,143,154,162,168,176,177,182,188,189-191,195,200
 ---
 {
   "schema_version": "authorship/3.0.0",
@@ -13,7 +13,6 @@ src/commands/checkpoint_agent/orchestrator.rs
         "model": "claude-opus-4-6"
       },
       "human_author": "Sasha Varlamov",
-      "messages": [],
       "total_additions": 72,
       "total_deletions": 124,
       "accepted_lines": 16,
