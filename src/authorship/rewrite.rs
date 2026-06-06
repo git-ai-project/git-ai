@@ -40,26 +40,7 @@ pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<()
             ref old_tip,
             ref new_tip,
             ref onto,
-        } => {
-            let result = derive_mappings_from_range_diff(repo, old_tip, new_tip, onto.as_deref())?;
-            match result {
-                RangeDiffResult::Squash { base } => {
-                    handle_squash_merge(repo, old_tip, new_tip, &base)
-                }
-                RangeDiffResult::Mappings(mappings) => {
-                    if mappings.is_empty() {
-                        return Ok(());
-                    }
-                    let source_shas: Vec<String> =
-                        mappings.iter().map(|(src, _)| src.clone()).collect();
-                    crate::git::sync_authorship::fetch_missing_notes_for_commits(
-                        repo,
-                        &source_shas,
-                    );
-                    shift_authorship_notes(repo, &mappings)
-                }
-            }
-        }
+        } => handle_non_fast_forward_rewrite(repo, old_tip, new_tip, onto.as_deref()).map(|_| ()),
         RewriteEvent::CherryPickComplete {
             sources,
             new_commits,
@@ -71,6 +52,30 @@ pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<()
             let source_shas: Vec<String> = mappings.iter().map(|(src, _)| src.clone()).collect();
             crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &source_shas);
             shift_authorship_notes(repo, &mappings)
+        }
+    }
+}
+
+pub fn handle_non_fast_forward_rewrite(
+    repo: &Repository,
+    old_tip: &str,
+    new_tip: &str,
+    onto: Option<&str>,
+) -> Result<Vec<(String, String)>, GitAiError> {
+    let result = derive_mappings_from_range_diff(repo, old_tip, new_tip, onto)?;
+    match result {
+        RangeDiffResult::Squash { base } => {
+            handle_squash_merge(repo, old_tip, new_tip, &base)?;
+            Ok(Vec::new())
+        }
+        RangeDiffResult::Mappings(mappings) => {
+            if mappings.is_empty() {
+                return Ok(Vec::new());
+            }
+            let source_shas: Vec<String> = mappings.iter().map(|(src, _)| src.clone()).collect();
+            crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &source_shas);
+            shift_authorship_notes(repo, &mappings)?;
+            Ok(mappings)
         }
     }
 }

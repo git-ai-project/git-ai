@@ -1,3 +1,4 @@
+use crate::authorship::authorship_log_serialization::AuthorshipLog;
 use crate::config;
 use crate::daemon::git_backend::GitBackend;
 use crate::error::GitAiError;
@@ -744,9 +745,14 @@ fn resolve_stash_sha(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<&
 }
 
 /// After a rebase completes, check if any newly-rebased commits were created
-/// from conflict resolution with AI checkpoints. If so, run post_commit on
-/// those commits to incorporate the AI attribution from the working log.
-fn process_conflict_resolution_working_logs(repo: &Repository, new_tip: &str, onto: Option<&str>) {
+/// from conflict resolution with AI checkpoints. If so, merge those resolution
+/// checkpoints into the already-shifted source authorship note for the new commit.
+fn process_conflict_resolution_working_logs(
+    repo: &Repository,
+    new_tip: &str,
+    onto: Option<&str>,
+    source_mappings: &[(String, String)],
+) {
     let onto_sha = match onto {
         Some(s) if !s.is_empty() => s,
         _ => return,
@@ -764,6 +770,10 @@ fn process_conflict_resolution_working_logs(repo: &Repository, new_tip: &str, on
         Err(_) => return,
     };
     let log_output = String::from_utf8_lossy(&output.stdout);
+    let source_by_destination: HashMap<String, String> = source_mappings
+        .iter()
+        .map(|(source, destination)| (destination.clone(), source.clone()))
+        .collect();
 
     let commit_parent_pairs = log_output
         .lines()
@@ -785,39 +795,40 @@ fn process_conflict_resolution_working_logs(repo: &Repository, new_tip: &str, on
             continue;
         }
 
-        // There's a working log at this parent — conflict resolution happened here.
-        // Save the existing shifted note so we can restore it if the working log
-        // produces a worse result (fewer attestation entries).
-        let existing_note_raw = existing_notes.get(&commit_sha).cloned();
-        let existing_entry_count = existing_note_raw
-            .as_ref()
-            .and_then(|raw| {
-                crate::authorship::authorship_log_serialization::AuthorshipLog::deserialize_from_string(raw).ok()
-            })
-            .map(|log| log.attestations.iter().map(|a| a.entries.len()).sum::<usize>())
-            .unwrap_or(0);
-
-        let _ = crate::authorship::post_commit::post_commit_from_working_log_with_options(
-            repo,
-            Some(parent_sha),
-            commit_sha.clone(),
-            author.clone(),
-            crate::authorship::post_commit::PostCommitOptions {
-                supress_output: true,
-                compute_stats: false,
-            },
-        );
-
-        // If the working log produced a worse note, restore the shifted one
-        if existing_entry_count > 0
-            && let Ok(new_log) = crate::git::notes_api::read_authorship_v3(repo, &commit_sha)
+        let existing_shifted_log = existing_notes
+            .get(&commit_sha)
+            .and_then(|raw| AuthorshipLog::deserialize_from_string(raw).ok());
+        let source_sha = source_by_destination.get(&commit_sha).cloned();
+        let commit_for_transform = commit_sha.clone();
+        let commit_for_log = commit_sha.clone();
+        if let Err(err) =
+            crate::authorship::post_commit::post_commit_from_working_log_with_transform_and_options(
+                repo,
+                Some(parent_sha),
+                commit_sha,
+                author.clone(),
+                crate::authorship::post_commit::PostCommitOptions {
+                    supress_output: true,
+                    compute_stats: false,
+                },
+                move |resolution_log| {
+                    Ok(
+                        crate::authorship::conflict_resolution::merge_conflict_resolution_authorship(
+                        repo,
+                        existing_shifted_log,
+                        resolution_log,
+                        source_sha.as_deref(),
+                        &commit_for_transform,
+                    ),
+                    )
+                },
+            )
         {
-            let new_count: usize = new_log.attestations.iter().map(|a| a.entries.len()).sum();
-            if new_count < existing_entry_count
-                && let Some(raw) = existing_note_raw
-            {
-                let _ = crate::git::notes_api::write_note(repo, &commit_sha, &raw);
-            }
+            tracing::debug!(
+                "failed to merge rebase conflict resolution authorship for {}: {}",
+                commit_for_log,
+                err
+            );
         }
     }
 }
@@ -3748,18 +3759,21 @@ impl ActorDaemonCoordinator {
                 && original_head != new_tip
                 && !is_ancestor_commit(&repo, &original_head, &new_tip)
             {
-                crate::authorship::rewrite::handle_rewrite_event(
+                let mappings = crate::authorship::rewrite::handle_non_fast_forward_rewrite(
                     &repo,
-                    crate::authorship::rewrite::RewriteEvent::NonFastForward {
-                        old_tip: original_head.clone(),
-                        new_tip: new_tip.clone(),
-                        onto: rebase_onto.clone(),
-                    },
+                    &original_head,
+                    &new_tip,
+                    rebase_onto.as_deref(),
                 )?;
                 let _ = repo.storage.rename_working_log(&original_head, &new_tip);
                 let conflict_base =
                     rebase_completion_base_from_command(cmd).or(rebase_onto.clone());
-                process_conflict_resolution_working_logs(&repo, &new_tip, conflict_base.as_deref());
+                process_conflict_resolution_working_logs(
+                    &repo,
+                    &new_tip,
+                    conflict_base.as_deref(),
+                    &mappings,
+                );
             }
             return Ok(());
         }
@@ -3774,19 +3788,22 @@ impl ActorDaemonCoordinator {
                 continue;
             }
 
-            crate::authorship::rewrite::handle_rewrite_event(
+            let mappings = crate::authorship::rewrite::handle_non_fast_forward_rewrite(
                 &repo,
-                crate::authorship::rewrite::RewriteEvent::NonFastForward {
-                    old_tip: old_tip.to_string(),
-                    new_tip: new_tip.to_string(),
-                    onto: onto_hint.clone(),
-                },
+                old_tip,
+                new_tip,
+                onto_hint.as_deref(),
             )?;
             let _ = repo.storage.rename_working_log(old_tip, new_tip);
             if is_rebase_cmd {
                 let conflict_base =
                     rebase_completion_base_from_command(cmd).or_else(|| onto_hint.clone());
-                process_conflict_resolution_working_logs(&repo, new_tip, conflict_base.as_deref());
+                process_conflict_resolution_working_logs(
+                    &repo,
+                    new_tip,
+                    conflict_base.as_deref(),
+                    &mappings,
+                );
             }
         }
 

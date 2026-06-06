@@ -322,7 +322,7 @@ fn test_ai_checkpoint_without_agent_id_is_rejected() {
 }
 
 #[test]
-fn test_checkpoint_skips_conflicted_files() {
+fn test_checkpoint_records_conflicted_files() {
     // Create a repo with an initial commit
     let (repo, lines_file, _) = setup_repo_with_base_commit();
 
@@ -374,23 +374,18 @@ fn test_checkpoint_skips_conflicted_files() {
     repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
         .unwrap();
 
-    // Checkpoint should skip conflicted files — either no new checkpoint is created,
-    // or the new checkpoint has 0 entries. Both outcomes mean conflicted files were skipped.
+    // Checkpoints record conflicted files so conflict-resolution attribution can be
+    // merged into the eventual rebase/merge commit.
     let checkpoints_after = working_log.read_all_checkpoints().unwrap();
-    if checkpoints_after.len() > count_before {
-        let latest = checkpoints_after.last().unwrap();
-        assert_eq!(
-            latest.entries.len(),
-            0,
-            "Should have 0 entries (conflicted file should be skipped)"
-        );
-    } else {
-        assert_eq!(
-            checkpoints_after.len(),
-            count_before,
-            "No new checkpoint should be created for conflicted files"
-        );
-    }
+    assert!(
+        checkpoints_after.len() > count_before,
+        "Should create a checkpoint for conflicted files"
+    );
+    let latest = checkpoints_after.last().unwrap();
+    assert!(
+        latest.entries.iter().any(|entry| entry.file == lines_file),
+        "Should record an entry for the conflicted file"
+    );
 }
 
 #[test]
@@ -566,7 +561,8 @@ fn test_checkpoint_works_after_conflict_resolution_maintains_authorship() {
     let has_conflicts = output.is_err();
     assert!(has_conflicts, "Should have merge conflicts");
 
-    // While there are conflicts, checkpoint should skip the file
+    // While there are conflicts, checkpoint should still record the file so the
+    // eventual resolution can carry explicit attribution.
     let gitai_repo = find_repository_in_path(repo.path().to_str().unwrap()).unwrap();
     let base_commit = repo
         .git_og(&["rev-parse", "HEAD"])
@@ -583,23 +579,20 @@ fn test_checkpoint_works_after_conflict_resolution_maintains_authorship() {
     repo.git_ai(&["checkpoint", "mock_known_human", &lines_file])
         .unwrap();
 
-    // Checkpoint should skip conflicted files — either no new checkpoint is created,
-    // or the new checkpoint has 0 entries.
+    // Checkpoint should record conflicted files during the conflict.
     let checkpoints_after_conflict_checkpoint = working_log.read_all_checkpoints().unwrap();
-    if checkpoints_after_conflict_checkpoint.len() > count_before {
-        let checkpoint_during_conflict = checkpoints_after_conflict_checkpoint.last().unwrap();
-        assert_eq!(
-            checkpoint_during_conflict.entries.len(),
-            0,
-            "Should skip conflicted files during conflict"
-        );
-    } else {
-        assert_eq!(
-            checkpoints_after_conflict_checkpoint.len(),
-            count_before,
-            "No new checkpoint should be created for conflicted files"
-        );
-    }
+    assert!(
+        checkpoints_after_conflict_checkpoint.len() > count_before,
+        "Should create a checkpoint for conflicted files"
+    );
+    let checkpoint_during_conflict = checkpoints_after_conflict_checkpoint.last().unwrap();
+    assert!(
+        checkpoint_during_conflict
+            .entries
+            .iter()
+            .any(|entry| entry.file == lines_file),
+        "Should record conflicted files during conflict"
+    );
 
     // Resolve the conflict by choosing "ours" (base branch)
     repo.git_og(&["checkout", "--ours", &lines_file]).unwrap();
