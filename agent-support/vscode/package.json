@@ -11,7 +11,7 @@
   },
   "engines": {
     "vscode": ">=1.99.3",
-    "node": ">=20.18.1"
+    "node": ">=20.20.0"
   },
   "categories": [
     "Other"
@@ -69,13 +69,13 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "pnpm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
+    "pretest": "pnpm run compile && pnpm run lint",
     "lint": "eslint src",
     "test": "vscode-test",
-    "package": "npm run copy-static && npm run compile && vsce package",
+    "package": "pnpm run copy-static && pnpm run compile && vsce package",
     "copy-static": "cp ../../assets/docs/git-ai.png ./git-ai.png",
     "publish": "vsce publish"
   },
@@ -92,12 +92,15 @@
     "ovsx": "0.10.12",
     "typescript": "^6.0.3"
   },
-  "overrides": {
-    "glob": ">=11.1.0",
-    "tar-fs": ">=2.1.4",
-    "test-exclude": ">=7.0.0"
-  },
   "dependencies": {
     "posthog-node": "^5.35.14"
+  },
+  "packageManager": "pnpm@11.5.2",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.5.2",
+      "onFail": "error"
+    }
   }
 }

@@ -1,0 +1,16 @@
+{
+  "name": "git-ai",
+  "private": true,
+  "packageManager": "pnpm@11.5.2",
+  "engines": {
+    "node": ">=20.20.0",
+    "pnpm": "11.5.2"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.5.2",
+      "onFail": "error"
+    }
+  }
+}

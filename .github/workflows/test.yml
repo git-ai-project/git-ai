@@ -82,8 +82,14 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.5.2
+          run_install: false
+
       - name: Install Graphite CLI
-        run: npm install -g @withgraphite/graphite-cli@stable
+        run: pnpm add --global @withgraphite/graphite-cli@stable
 
       - name: Install mold linker (Linux)
         if: runner.os == 'Linux'

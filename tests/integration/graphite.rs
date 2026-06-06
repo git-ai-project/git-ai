@@ -72,7 +72,7 @@ const DETERMINISTIC_GIT_DATE: &str = "2000-01-01T00:00:00+00:00";
 // ---------------------------------------------------------------------------
 
 /// Resolve and cache the absolute path to the `gt` CLI binary.
-/// On Windows, npm installs `gt` as `gt.cmd` (a batch wrapper), which Rust's
+/// On Windows, the package manager installs `gt` as `gt.cmd` (a batch wrapper), which Rust's
 /// `Command::new("gt")` cannot find because it only searches for `.exe` files.
 /// By resolving the full path once via `where`/`which`, we can use the absolute
 /// path in all subsequent Command invocations.
@@ -107,7 +107,7 @@ macro_rules! require_gt {
             if std::env::var("CI").is_ok() {
                 panic!(
                     "Graphite CLI (`gt`) is required in CI but was not found. \
-                     Install it with: npm install -g @withgraphite/graphite-cli@stable"
+                     Install it with: pnpm add --global @withgraphite/graphite-cli@stable"
                 );
             } else {
                 eprintln!("SKIP: `gt` CLI not found — skipping Graphite test");
@@ -261,7 +261,7 @@ fn gt(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
     let gt_path =
         find_gt_binary().expect("gt binary not found; require_gt! should have been called");
 
-    // On Windows, npm installs `gt` as `gt.cmd` (a batch wrapper). Rust's
+    // On Windows, the package manager installs `gt` as `gt.cmd` (a batch wrapper). Rust's
     // Command cannot execute `.cmd` files directly — they must be run through
     // `cmd.exe /C`. On Unix, we invoke the binary directly.
     #[cfg(windows)]

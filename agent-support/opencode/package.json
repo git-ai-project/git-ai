@@ -13,5 +13,17 @@
   "devDependencies": {
     "@types/node": "^25.x",
     "typescript": "^5.8.3"
+  },
+  "packageManager": "pnpm@11.5.2",
+  "engines": {
+    "node": ">=20.20.0",
+    "pnpm": "11.5.2"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.5.2",
+      "onFail": "error"
+    }
   }
 }

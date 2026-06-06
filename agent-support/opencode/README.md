@@ -38,14 +38,14 @@ If `git-ai` cannot be launched or the file is not in a git repository, the plugi
 
 Run type checking:
 ```bash
-npm run type-check
+pnpm run type-check
 ```
 
 ### Dependencies
 
 Install dependencies:
 ```bash
-npm install
+pnpm install
 ```
 
 ## See Also

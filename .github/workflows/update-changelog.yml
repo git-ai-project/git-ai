@@ -64,6 +64,12 @@ jobs:
         with:
           node-version: 20
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.5.2
+          run_install: false
+
       - name: Get release body
         id: release-body
         env:
@@ -84,7 +90,7 @@ jobs:
           RELEASE_TAG: ${{ steps.config.outputs.release_tag }}
           RELEASE_BODY: ${{ github.event_name == 'workflow_dispatch' && steps.release-body.outputs.body || github.event.release.body }}
         run: |
-          npx @nyaomaru/changelog-bot@0.1.16 \
+          pnpm dlx @nyaomaru/changelog-bot@0.1.16 \
             --release-tag "$RELEASE_TAG" \
             --release-name "$RELEASE_TAG" \
             --release-body "$RELEASE_BODY" \
