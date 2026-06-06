@@ -604,8 +604,7 @@ impl RefCursor {
         state: &FamilyState,
     ) -> Result<(), GitAiError> {
         let expected = ExpectedTransition::from_state_and_working_logs(cmd, state);
-        let Some(first) =
-            self.find_head_entry(cmd.worktree.as_deref(), &["rebase", "checkout:"], expected)?
+        let Some(first) = self.find_head_entry(cmd.worktree.as_deref(), &["rebase"], expected)?
         else {
             return Ok(());
         };
@@ -626,7 +625,11 @@ impl RefCursor {
             let Some(next) = self.find_head_entry(
                 cmd.worktree.as_deref(),
                 &["rebase"],
-                ExpectedTransition::default(),
+                ExpectedTransition {
+                    old_oids: [new.clone()].into_iter().collect(),
+                    new_oid: None,
+                    messages: HashSet::new(),
+                },
             )?
             else {
                 break;
@@ -2223,6 +2226,10 @@ mod tests {
     const A: &str = "1111111111111111111111111111111111111111";
     const B: &str = "2222222222222222222222222222222222222222";
     const C: &str = "3333333333333333333333333333333333333333";
+    const D: &str = "4444444444444444444444444444444444444444";
+    const E: &str = "5555555555555555555555555555555555555555";
+    const F: &str = "6666666666666666666666666666666666666666";
+    const G: &str = "7777777777777777777777777777777777777777";
 
     fn family_state(family: &FamilyKey) -> FamilyState {
         FamilyState {
@@ -2431,6 +2438,111 @@ mod tests {
                     reference: "refs/heads/topic".to_string(),
                     old: A.to_string(),
                     new: C.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rebase_does_not_consume_adjacent_checkout_head_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (A, B, "checkout: moving from topic-1 to topic-2"),
+                (B, C, "rebase (start): checkout topic-1"),
+                (C, D, "rebase (pick): Topic 2"),
+            ],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/topic-2",
+            &[(B, D, "rebase (finish): refs/heads/topic-2 onto topic-1")],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["rebase", "topic-1"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic-2".to_string(),
+                    old: B.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rebase_span_stops_before_later_rebase_after_checkout() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (B, C, "rebase (start): checkout topic-1"),
+                (C, D, "rebase (pick): Topic 2"),
+                (D, E, "checkout: moving from topic-2 to topic-3"),
+                (E, F, "rebase (start): checkout topic-2"),
+                (F, G, "rebase (pick): Topic 3"),
+            ],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/topic-2",
+            &[(B, D, "rebase (finish): refs/heads/topic-2 onto topic-1")],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/topic-3",
+            &[(E, G, "rebase (finish): refs/heads/topic-3 onto topic-2")],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["rebase", "topic-1"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic-2".to_string(),
+                    old: B.to_string(),
+                    new: D.to_string(),
                 },
             ]
         );

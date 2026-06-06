@@ -40,26 +40,7 @@ pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<()
             ref old_tip,
             ref new_tip,
             ref onto,
-        } => {
-            let result = derive_mappings_from_range_diff(repo, old_tip, new_tip, onto.as_deref())?;
-            match result {
-                RangeDiffResult::Squash { base } => {
-                    handle_squash_merge(repo, old_tip, new_tip, &base)
-                }
-                RangeDiffResult::Mappings(mappings) => {
-                    if mappings.is_empty() {
-                        return Ok(());
-                    }
-                    let source_shas: Vec<String> =
-                        mappings.iter().map(|(src, _)| src.clone()).collect();
-                    crate::git::sync_authorship::fetch_missing_notes_for_commits(
-                        repo,
-                        &source_shas,
-                    );
-                    shift_authorship_notes(repo, &mappings)
-                }
-            }
-        }
+        } => handle_non_fast_forward_rewrite(repo, old_tip, new_tip, onto.as_deref()).map(|_| ()),
         RewriteEvent::CherryPickComplete {
             sources,
             new_commits,
@@ -73,6 +54,22 @@ pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<()
             shift_authorship_notes(repo, &mappings)
         }
     }
+}
+
+pub fn handle_non_fast_forward_rewrite(
+    repo: &Repository,
+    old_tip: &str,
+    new_tip: &str,
+    onto: Option<&str>,
+) -> Result<Vec<(String, String)>, GitAiError> {
+    let mappings = derive_mappings_from_range_diff(repo, old_tip, new_tip, onto)?;
+    if mappings.is_empty() {
+        return Ok(Vec::new());
+    }
+    let source_shas: Vec<String> = mappings.iter().map(|(src, _)| src.clone()).collect();
+    crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &source_shas);
+    shift_authorship_notes_merging_existing(repo, &mappings)?;
+    Ok(mappings)
 }
 
 fn handle_squash_merge(
@@ -407,19 +404,14 @@ fn merge_authorship_logs(target: &mut AuthorshipLog, source: &AuthorshipLog) {
     }
 }
 
-enum RangeDiffResult {
-    Mappings(Vec<(String, String)>),
-    Squash { base: String },
-}
-
 fn derive_mappings_from_range_diff(
     repo: &Repository,
     old_tip: &str,
     new_tip: &str,
     onto_hint: Option<&str>,
-) -> Result<RangeDiffResult, GitAiError> {
+) -> Result<Vec<(String, String)>, GitAiError> {
     let Some(base) = find_merge_base(repo, old_tip, new_tip) else {
-        return Ok(RangeDiffResult::Mappings(Vec::new()));
+        return Ok(Vec::new());
     };
 
     // Rewind: branch moved backward
@@ -427,18 +419,12 @@ fn derive_mappings_from_range_diff(
         crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
             repo, old_tip, new_tip,
         )?;
-        return Ok(RangeDiffResult::Mappings(Vec::new()));
+        return Ok(Vec::new());
     }
 
     // Fast-forward: no rewrite happened
     if base == old_tip {
-        return Ok(RangeDiffResult::Mappings(Vec::new()));
-    }
-
-    // Full squash: all old commits collapsed into one new commit.
-    // Signal to caller so it can delegate to handle_squash_merge.
-    if is_full_squash(repo, &base, old_tip, new_tip, onto_hint) {
-        return Ok(RangeDiffResult::Squash { base });
+        return Ok(Vec::new());
     }
 
     // Validate onto_hint: it must be an ancestor of new_tip and different from new_tip.
@@ -456,7 +442,7 @@ fn derive_mappings_from_range_diff(
     let merge_mappings = derive_merge_commit_mappings(repo, &base, old_tip, new_tip, &mappings)?;
     mappings.extend(merge_mappings);
 
-    Ok(RangeDiffResult::Mappings(mappings))
+    Ok(mappings)
 }
 
 fn is_ancestor(repo: &Repository, ancestor: &str, descendant: &str) -> bool {
@@ -484,47 +470,6 @@ fn find_merge_base(repo: &Repository, a: &str, b: &str) -> Option<String> {
     if base.is_empty() { None } else { Some(base) }
 }
 
-fn is_full_squash(
-    repo: &Repository,
-    base: &str,
-    old_tip: &str,
-    new_tip: &str,
-    onto_hint: Option<&str>,
-) -> bool {
-    let old_count = count_commits_in_range(repo, base, old_tip);
-    if old_count <= 1 {
-        return false;
-    }
-
-    // If we have a valid onto hint, count commits between onto and new_tip (the rebased commits)
-    let valid_onto = onto_hint
-        .filter(|hint| *hint != new_tip && *hint != old_tip && is_ancestor(repo, hint, new_tip));
-    let new_rebased_count = if let Some(onto) = valid_onto {
-        count_commits_in_range(repo, onto, new_tip)
-    } else {
-        // Fallback: count commits unique to new side using three-dot symmetric diff
-        let mut args = repo.global_args_for_exec();
-        args.extend([
-            "rev-list".to_string(),
-            "--count".to_string(),
-            "--right-only".to_string(),
-            format!("{}...{}", old_tip, new_tip),
-        ]);
-        exec_git_allow_nonzero(&args)
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .trim()
-                    .parse::<usize>()
-                    .ok()
-            })
-            .unwrap_or(0)
-    };
-
-    new_rebased_count == 1
-}
-
 pub(crate) fn list_commits_in_range(repo: &Repository, base: &str, tip: &str) -> Vec<String> {
     let mut args = repo.global_args_for_exec();
     args.extend([
@@ -543,25 +488,6 @@ pub(crate) fn list_commits_in_range(repo: &Repository, base: &str, tip: &str) ->
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn count_commits_in_range(repo: &Repository, base: &str, tip: &str) -> usize {
-    let mut args = repo.global_args_for_exec();
-    args.extend([
-        "rev-list".to_string(),
-        "--count".to_string(),
-        format!("{}..{}", base, tip),
-    ]);
-    exec_git_allow_nonzero(&args)
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .trim()
-                .parse::<usize>()
-                .ok()
-        })
-        .unwrap_or(0)
 }
 
 fn run_range_diff(
@@ -588,6 +514,7 @@ fn run_range_diff(
 fn parse_range_diff_output(output: &str) -> Vec<(String, String)> {
     let mut mappings = Vec::new();
     let mut pending_dropped: Vec<String> = Vec::new();
+    let mut previous_new_sha: Option<String> = None;
 
     for line in output.lines() {
         let trimmed = line.trim();
@@ -610,7 +537,11 @@ fn parse_range_diff_output(output: &str) -> Vec<(String, String)> {
             '<' => {
                 // Dropped commit (squashed into a later commit)
                 if !old_sha.chars().all(|c| c == '0') {
-                    pending_dropped.push(old_sha);
+                    if let Some(new_sha) = previous_new_sha.as_ref() {
+                        mappings.push((old_sha, new_sha.clone()));
+                    } else {
+                        pending_dropped.push(old_sha);
+                    }
                 }
             }
             '=' | '!' => {
@@ -626,6 +557,7 @@ fn parse_range_diff_output(output: &str) -> Vec<(String, String)> {
                 for dropped in pending_dropped.drain(..) {
                     mappings.push((dropped, new_sha.clone()));
                 }
+                previous_new_sha = Some(new_sha.clone());
                 mappings.push((old_sha, new_sha));
             }
             _ => {
@@ -1111,6 +1043,55 @@ Binary files a/image.png and b/image.png differ
 ";
         let mappings = parse_range_diff_output(output);
         assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn test_parse_range_diff_output_dropped_then_matched_maps_both_to_destination() {
+        let output = "\
+1:  1111111111111111111111111111111111111111 < -:  ---------------------------------------- Add Python joke
+2:  2222222222222222222222222222222222222222 ! 1:  3333333333333333333333333333333333333333 Add Rust joke
+";
+        let mappings = parse_range_diff_output(output);
+        assert_eq!(
+            mappings,
+            vec![
+                (
+                    "1111111111111111111111111111111111111111".to_string(),
+                    "3333333333333333333333333333333333333333".to_string()
+                ),
+                (
+                    "2222222222222222222222222222222222222222".to_string(),
+                    "3333333333333333333333333333333333333333".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_range_diff_output_matched_then_dropped_maps_all_to_destination() {
+        let output = "\
+1:  1111111111111111111111111111111111111111 ! 1:  4444444444444444444444444444444444444444 AI commit 1
+2:  2222222222222222222222222222222222222222 < -:  ---------------------------------------- AI commit 2
+3:  3333333333333333333333333333333333333333 < -:  ---------------------------------------- AI commit 3
+";
+        let mappings = parse_range_diff_output(output);
+        assert_eq!(
+            mappings,
+            vec![
+                (
+                    "1111111111111111111111111111111111111111".to_string(),
+                    "4444444444444444444444444444444444444444".to_string()
+                ),
+                (
+                    "2222222222222222222222222222222222222222".to_string(),
+                    "4444444444444444444444444444444444444444".to_string()
+                ),
+                (
+                    "3333333333333333333333333333333333333333".to_string(),
+                    "4444444444444444444444444444444444444444".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]
