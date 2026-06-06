@@ -4,10 +4,7 @@ use std::fs;
 
 use crate::repos::test_repo::TestRepo;
 
-use super::helpers::{
-    is_ai_author_name, note_covers_line_as_ai, note_covers_line_as_human, parse_blame_line,
-    parse_porcelain_line_info,
-};
+use super::helpers::{is_ai_author_name, parse_blame_line};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineAttribution {
@@ -61,8 +58,9 @@ impl AttrRegistry {
 pub struct FileModel {
     pub filename: String,
     pub lines: Vec<char>,
-    /// Per-line attribution AFTER reconciliation. This is what we assert against.
-    /// Updated by reconcile() — can downgrade from registry's value to Untracked.
+    /// Per-line attribution predicted by the model. This is what we assert against.
+    /// Reconciliation must not inspect git-ai's actual notes; missing notes are
+    /// implementation failures, not new expected behavior.
     pub resolved_attrs: Vec<LineAttribution>,
 }
 
@@ -98,67 +96,22 @@ impl FileModel {
         self.resolved_attrs = self.lines.iter().map(|&ch| registry.get(ch)).collect();
     }
 
-    /// Reconcile the in-memory model against git blame state.
-    ///
-    /// After any commit-producing operation, git blame may assign lines to different
-    /// commits. If a line's blamed commit doesn't have an authorship note covering
-    /// that line, its resolved attribution becomes Untracked.
-    ///
-    /// This IS our prediction of what git-ai blame will return.
-    pub fn reconcile(&mut self, repo: &TestRepo) {
-        let path = repo.path().join(&self.filename);
-        if !path.exists() || self.lines.is_empty() {
-            return;
-        }
+    /// Reconcile hook retained for operation flow symmetry. The model is the
+    /// oracle, so this intentionally does not read git blame or authorship notes.
+    pub fn reconcile(&mut self, _repo: &TestRepo) {
+        self.resolved_attrs = self
+            .lines
+            .iter()
+            .map(|&ch| self.resolved_attr(ch))
+            .collect();
+    }
 
-        let porcelain_output = repo
-            .git(&["blame", "--line-porcelain", "--", &self.filename])
-            .unwrap_or_else(|e| {
-                panic!(
-                    "git blame --line-porcelain failed for '{}': {}",
-                    self.filename, e
-                )
-            });
-        let line_info = parse_porcelain_line_info(&porcelain_output);
-
-        if line_info.len() != self.lines.len() {
-            panic!(
-                "Porcelain line count ({}) != model line count ({}) for '{}'",
-                line_info.len(),
-                self.lines.len(),
-                self.filename
-            );
-        }
-
-        let mut note_cache: HashMap<String, Option<String>> = HashMap::new();
-
-        for (i, attr) in self.resolved_attrs.iter_mut().enumerate() {
-            if matches!(attr, LineAttribution::Untracked) {
-                continue;
-            }
-
-            let info = &line_info[i];
-            let note = note_cache
-                .entry(info.commit_sha.clone())
-                .or_insert_with(|| repo.read_authorship_note(&info.commit_sha));
-
-            let still_covered = match note.as_deref() {
-                None => false,
-                Some(n) => match attr {
-                    LineAttribution::Ai => {
-                        note_covers_line_as_ai(n, &self.filename, info.orig_line)
-                    }
-                    LineAttribution::KnownHuman => {
-                        note_covers_line_as_human(n, &self.filename, info.orig_line)
-                    }
-                    LineAttribution::Untracked => unreachable!(),
-                },
-            };
-
-            if !still_covered {
-                *attr = LineAttribution::Untracked;
-            }
-        }
+    fn resolved_attr(&self, ch: char) -> LineAttribution {
+        self.lines
+            .iter()
+            .zip(&self.resolved_attrs)
+            .find_map(|(&candidate, &attr)| (candidate == ch).then_some(attr))
+            .unwrap_or(LineAttribution::Untracked)
     }
 
     /// Assert that git-ai blame output matches our model EXACTLY.

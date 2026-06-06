@@ -69,7 +69,7 @@ tasks:
     cmds:
       - task: test:base
         vars:
-          TEST_FILTER: fuzz_seed_
+          TEST_FILTER: fuzz_standard_seed_
 
   test:fuzz:all:
     desc: Run all fuzzer tests including random seed and heavy variants

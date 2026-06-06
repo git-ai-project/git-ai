@@ -80,6 +80,7 @@ mod tests {
             finished_at_ns: seq + 1,
             stash_target_oid: None,
             cherry_pick_source_oids: Vec::new(),
+            revert_source_oids: Vec::new(),
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
         }

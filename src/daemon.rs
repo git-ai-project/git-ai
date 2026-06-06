@@ -765,22 +765,30 @@ fn process_conflict_resolution_working_logs(repo: &Repository, new_tip: &str, on
     };
     let log_output = String::from_utf8_lossy(&output.stdout);
 
-    for line in log_output.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let commit_sha = parts[0];
-        let parent_sha = parts[1]; // first parent
+    let commit_parent_pairs = log_output
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            (parts.len() >= 2).then(|| (parts[0].to_string(), parts[1].to_string()))
+        })
+        .collect::<Vec<_>>();
+    let commit_shas = commit_parent_pairs
+        .iter()
+        .map(|(commit_sha, _)| commit_sha.clone())
+        .collect::<Vec<_>>();
+    let existing_notes =
+        crate::git::notes_api::read_notes_batch(repo, &commit_shas).unwrap_or_default();
+    let author = repo.git_author_identity().formatted_or_unknown();
 
-        if !repo.storage.has_working_log(parent_sha) {
+    for (commit_sha, parent_sha) in commit_parent_pairs {
+        if !repo.storage.has_working_log(&parent_sha) {
             continue;
         }
 
         // There's a working log at this parent — conflict resolution happened here.
         // Save the existing shifted note so we can restore it if the working log
         // produces a worse result (fewer attestation entries).
-        let existing_note_raw = crate::git::notes_api::read_note(repo, commit_sha);
+        let existing_note_raw = existing_notes.get(&commit_sha).cloned();
         let existing_entry_count = existing_note_raw
             .as_ref()
             .and_then(|raw| {
@@ -789,24 +797,26 @@ fn process_conflict_resolution_working_logs(repo: &Repository, new_tip: &str, on
             .map(|log| log.attestations.iter().map(|a| a.entries.len()).sum::<usize>())
             .unwrap_or(0);
 
-        let author = repo.git_author_identity().formatted_or_unknown();
-        let _ = crate::authorship::post_commit::post_commit_from_working_log(
+        let _ = crate::authorship::post_commit::post_commit_from_working_log_with_options(
             repo,
-            Some(parent_sha.to_string()),
-            commit_sha.to_string(),
-            author,
-            true,
+            Some(parent_sha),
+            commit_sha.clone(),
+            author.clone(),
+            crate::authorship::post_commit::PostCommitOptions {
+                supress_output: true,
+                compute_stats: false,
+            },
         );
 
         // If the working log produced a worse note, restore the shifted one
         if existing_entry_count > 0
-            && let Ok(new_log) = crate::git::notes_api::read_authorship_v3(repo, commit_sha)
+            && let Ok(new_log) = crate::git::notes_api::read_authorship_v3(repo, &commit_sha)
         {
             let new_count: usize = new_log.attestations.iter().map(|a| a.entries.len()).sum();
             if new_count < existing_entry_count
                 && let Some(raw) = existing_note_raw
             {
-                let _ = crate::git::notes_api::write_note(repo, commit_sha, &raw);
+                let _ = crate::git::notes_api::write_note(repo, &commit_sha, &raw);
             }
         }
     }
@@ -1337,6 +1347,22 @@ fn repo_is_ancestor(
 
 fn rebase_is_control_mode(cmd: &crate::daemon::domain::NormalizedCommand) -> bool {
     summarize_rebase_args(&cmd.invoked_args).is_control_mode
+}
+
+fn rebase_completion_base_from_command(
+    cmd: &crate::daemon::domain::NormalizedCommand,
+) -> Option<String> {
+    cmd.ref_changes
+        .iter()
+        .find(|change| {
+            change.reference == "HEAD"
+                && is_valid_oid(&change.old)
+                && !is_zero_oid(&change.old)
+                && is_valid_oid(&change.new)
+                && !is_zero_oid(&change.new)
+                && change.old != change.new
+        })
+        .map(|change| change.old.clone())
 }
 
 fn cherry_pick_destination_commits(cmd: &crate::daemon::domain::NormalizedCommand) -> Vec<String> {
@@ -3731,7 +3757,9 @@ impl ActorDaemonCoordinator {
                     },
                 )?;
                 let _ = repo.storage.rename_working_log(&original_head, &new_tip);
-                process_conflict_resolution_working_logs(&repo, &new_tip, rebase_onto.as_deref());
+                let conflict_base =
+                    rebase_completion_base_from_command(cmd).or(rebase_onto.clone());
+                process_conflict_resolution_working_logs(&repo, &new_tip, conflict_base.as_deref());
             }
             return Ok(());
         }
@@ -3755,6 +3783,11 @@ impl ActorDaemonCoordinator {
                 },
             )?;
             let _ = repo.storage.rename_working_log(old_tip, new_tip);
+            if is_rebase_cmd {
+                let conflict_base =
+                    rebase_completion_base_from_command(cmd).or_else(|| onto_hint.clone());
+                process_conflict_resolution_working_logs(&repo, new_tip, conflict_base.as_deref());
+            }
         }
 
         Ok(())
@@ -4207,6 +4240,7 @@ impl ActorDaemonCoordinator {
                                 &repo,
                                 new_head,
                                 base.as_deref(),
+                                cmd.revert_source_oids.first().map(String::as_str),
                             ) {
                                 tracing::debug!(%e, "revert attribution transfer failed");
                             }
@@ -4401,6 +4435,7 @@ impl ActorDaemonCoordinator {
             }
         }
 
+        let parsed_invocation = parsed_invocation_for_normalized_command(cmd);
         for trigger in transcript_sweep_triggers_for_events(events) {
             if trigger == crate::daemon::stream_worker::SweepTrigger::PostPush
                 && crate::git::cli_parser::is_dry_run(&parsed_invocation.command_args)

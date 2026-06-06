@@ -500,6 +500,16 @@ pub fn get_commits_with_notes_from_list(
         }
     }
 
+    let note_blob_oids = note_blob_oids_for_commits(repo, commit_shas)?;
+    let mut unique_blob_oids = Vec::new();
+    let mut seen_blob_oids = HashSet::new();
+    for blob_oid in note_blob_oids.values() {
+        if seen_blob_oids.insert(blob_oid.clone()) {
+            unique_blob_oids.push(blob_oid.clone());
+        }
+    }
+    let note_blob_contents = batch_read_blob_contents(repo, &unique_blob_oids)?;
+
     // Build the result Vec
     let mut result = Vec::new();
     for sha in commit_shas {
@@ -508,8 +518,11 @@ pub fn get_commits_with_notes_from_list(
             .cloned()
             .unwrap_or_else(|| "Unknown".to_string());
 
-        // Check if this commit has a note by trying to show it
-        if let Some(authorship_log) = get_authorship(repo, sha) {
+        if let Some(blob_oid) = note_blob_oids.get(sha)
+            && let Some(content) = note_blob_contents.get(blob_oid)
+            && let Ok(mut authorship_log) = AuthorshipLog::deserialize_from_string(content)
+        {
+            authorship_log.metadata.base_commit_sha = sha.clone();
             result.push(CommitAuthorship::Log {
                 sha: sha.clone(),
                 git_author,

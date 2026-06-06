@@ -671,6 +671,14 @@ fn derive_merge_commit_mappings(
 
     // Batch-check which old merges have notes
     let commits_with_notes = notes_api::commits_with_notes(repo, &old_merges)?;
+    let merge_parent_map = get_commit_parents_batch(
+        repo,
+        &old_merges
+            .iter()
+            .chain(new_merges.iter())
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
 
     let mut merge_mappings: Vec<(String, String)> = Vec::new();
 
@@ -679,7 +687,7 @@ fn derive_merge_commit_mappings(
             continue;
         }
 
-        let old_parents = get_commit_parents(repo, old_merge);
+        let old_parents = merge_parent_map.get(old_merge).cloned().unwrap_or_default();
         if old_parents.is_empty() {
             continue;
         }
@@ -689,7 +697,7 @@ fn derive_merge_commit_mappings(
                 continue;
             }
 
-            let new_parents = get_commit_parents(repo, new_merge);
+            let new_parents = merge_parent_map.get(new_merge).cloned().unwrap_or_default();
             if new_parents.len() != old_parents.len() {
                 continue;
             }
@@ -737,22 +745,35 @@ fn list_merge_commits(repo: &Repository, base: &str, tip: &str) -> Result<Vec<St
         .collect())
 }
 
-fn get_commit_parents(repo: &Repository, sha: &str) -> Vec<String> {
+fn get_commit_parents_batch(repo: &Repository, shas: &[String]) -> HashMap<String, Vec<String>> {
+    if shas.is_empty() {
+        return HashMap::new();
+    }
     let mut args = repo.global_args_for_exec();
-    args.extend(["rev-parse".to_string(), format!("{}^@", sha)]);
+    args.extend([
+        "show".to_string(),
+        "-s".to_string(),
+        "--format=%H %P".to_string(),
+        "--no-walk".to_string(),
+    ]);
+    args.extend(shas.iter().cloned());
 
     let Ok(output) = exec_git_allow_nonzero(&args) else {
-        return Vec::new();
+        return HashMap::new();
     };
     if !output.status.success() {
-        return Vec::new();
+        return HashMap::new();
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout
         .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let sha = parts.next()?.to_string();
+            let parents = parts.map(ToOwned::to_owned).collect::<Vec<_>>();
+            Some((sha, parents))
+        })
         .collect()
 }
 

@@ -444,12 +444,13 @@ impl CiContext {
                     previous_head_sha, head_sha
                 );
 
-                rewrite_authorship_after_rebase_v2(
+                handle_rewrite_event(
                     &self.repo,
-                    previous_head_sha,
-                    &original_commits,
-                    &new_commits,
-                    "",
+                    RewriteEvent::NonFastForward {
+                        old_tip: previous_head_sha.to_string(),
+                        new_tip: head_sha.to_string(),
+                        onto: Some(resolved_base_sha.clone()),
+                    },
                 )?;
                 println!("Rewrote authorship.");
 

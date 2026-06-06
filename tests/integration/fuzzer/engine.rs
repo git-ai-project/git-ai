@@ -32,6 +32,15 @@ impl FuzzerConfig {
             rewrite_weight: 70,
         }
     }
+
+    pub fn chaos(seed: u64, ops: usize) -> Self {
+        Self {
+            seed,
+            ops,
+            max_lines_per_edit: 6,
+            rewrite_weight: 85,
+        }
+    }
 }
 
 pub fn run_fuzzer(config: FuzzerConfig) {

@@ -74,6 +74,75 @@ fn test_raw_git_commit_before_traced_commit_does_not_poison_ref_cursor() {
     ai_file.assert_committed_lines(crate::lines!["ai tracked".ai()]);
 }
 
+#[test]
+fn test_revert_older_commit_restores_original_ai_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("revert.txt");
+
+    fs::write(&file_path, "keep\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "revert.txt"])
+        .unwrap();
+    fs::write(&file_path, "keep\nrestored ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "revert.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("initial mixed attribution")
+        .unwrap();
+
+    let mut file = repo.filename("revert.txt");
+    file.assert_committed_lines(crate::lines!["keep".human(), "restored ai".ai()]);
+
+    fs::write(&file_path, "keep\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "revert.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("delete ai line").unwrap();
+    let delete_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    file.assert_committed_lines(crate::lines!["keep".human()]);
+
+    fs::write(repo.path().join("advance.txt"), "later human\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "advance.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("later unrelated commit").unwrap();
+    let mut advance = repo.filename("advance.txt");
+    advance.assert_committed_lines(crate::lines!["later human".human()]);
+
+    repo.git(&["revert", &delete_commit]).unwrap();
+    file.assert_committed_lines(crate::lines!["keep".human(), "restored ai".ai()]);
+}
+
+#[test]
+fn test_revert_restored_ai_attribution_survives_shifted_line_numbers() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("revert_shift.txt");
+
+    fs::write(&file_path, "keep\nrestored ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "revert_shift.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("source ai line").unwrap();
+    let mut file = repo.filename("revert_shift.txt");
+    file.assert_committed_lines(crate::lines!["keep".ai(), "restored ai".ai()]);
+
+    fs::write(&file_path, "keep\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "revert_shift.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("delete ai line").unwrap();
+    let delete_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    file.assert_committed_lines(crate::lines!["keep".ai()]);
+
+    fs::write(&file_path, "later human\nkeep\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "revert_shift.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("prepend later human line")
+        .unwrap();
+    file.assert_committed_lines(crate::lines!["later human".human(), "keep".ai()]);
+
+    repo.git(&["revert", &delete_commit]).unwrap();
+    file.assert_committed_lines(crate::lines![
+        "later human".human(),
+        "keep".ai(),
+        "restored ai".ai(),
+    ]);
+}
+
 fn commit_ai_line(repo: &TestRepo, filename: &str, line: &str, message: &str) {
     let path = repo.path().join(filename);
     if let Some(parent) = path.parent() {
