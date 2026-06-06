@@ -151,17 +151,17 @@ impl DaemonTelemetryWorkerHandle {
         envelopes: Vec<TelemetryEnvelope>,
     ) -> Result<(), GitAiError> {
         let (buffered_envelopes, metric_events) = split_metric_envelopes(envelopes);
-        if !metric_events.is_empty() {
-            tokio::task::spawn_blocking(move || store_metrics_in_db(&metric_events).map(|_| ()))
-                .await
-                .map_err(|e| GitAiError::Generic(format!("metrics DB task failed: {e}")))??;
-        }
-
         if !buffered_envelopes.is_empty() {
             self.buffer
                 .lock()
                 .await
                 .ingest_envelopes(buffered_envelopes);
+        }
+
+        if !metric_events.is_empty() {
+            tokio::task::spawn_blocking(move || store_metrics_in_db(&metric_events).map(|_| ()))
+                .await
+                .map_err(|e| GitAiError::Generic(format!("metrics DB task failed: {e}")))??;
         }
 
         Ok(())
@@ -207,7 +207,13 @@ impl DaemonTelemetryWorkerHandle {
         &self,
         envelopes: Vec<TelemetryEnvelope>,
     ) -> Result<(), Vec<TelemetryEnvelope>> {
-        let (buffered_envelopes, metric_events) = split_metric_envelopes(envelopes);
+        let (mut buffered_envelopes, metric_events) = split_metric_envelopes(envelopes);
+        if !buffered_envelopes.is_empty()
+            && let Ok(mut buf) = self.buffer.try_lock()
+        {
+            buf.ingest_envelopes(std::mem::take(&mut buffered_envelopes));
+        }
+
         if !metric_events.is_empty()
             && let Err(e) = store_metrics_in_db(&metric_events)
         {
@@ -216,14 +222,6 @@ impl DaemonTelemetryWorkerHandle {
                 buffered_envelopes,
                 metric_events,
             ));
-        }
-
-        if buffered_envelopes.is_empty() {
-            return Ok(());
-        }
-
-        if let Ok(mut buf) = self.buffer.try_lock() {
-            buf.ingest_envelopes(buffered_envelopes);
         }
 
         Ok(())
@@ -351,9 +349,8 @@ async fn telemetry_flush_loop(buffer: Arc<Mutex<TelemetryBuffer>>) {
         tokio::task::spawn_blocking(move || {
             if let Some(snapshot) = snapshot {
                 flush_telemetry_batch(snapshot);
-            } else {
-                flush_pending_metrics();
             }
+            flush_pending_metrics();
         })
         .await
         .unwrap_or_else(|e| {
