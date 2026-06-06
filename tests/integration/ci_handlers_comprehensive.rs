@@ -91,6 +91,7 @@ fn test_ci_event_merge_structure() {
             assert_eq!(base_sha, "ghi789");
             assert_eq!(fork_clone_url, None);
         }
+        CiEvent::Sync { .. } => panic!("expected merge event"),
     }
 }
 

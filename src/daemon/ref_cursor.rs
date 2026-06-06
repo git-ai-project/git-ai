@@ -7,12 +7,16 @@ use crate::git::repo_state::{git_dir_for_worktree, is_valid_git_oid};
 use crate::git::repository::exec_git_stdin;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub struct RefCursor {
     family: FamilyKey,
     offsets: HashMap<String, u64>,
+    anchors: HashMap<String, ReflogAnchor>,
+    consumed_offsets: HashMap<String, HashSet<u64>>,
+    consumed_anchors: HashMap<String, HashMap<u64, ReflogAnchor>>,
     stash_stack: Vec<String>,
     pending_cherry_pick_source_oids: Vec<String>,
 }
@@ -20,6 +24,7 @@ pub struct RefCursor {
 #[derive(Debug, Clone)]
 struct CursorEntry {
     key: String,
+    path: PathBuf,
     reference: String,
     old: String,
     new: String,
@@ -73,11 +78,22 @@ struct ReflogRecord {
     end_offset: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReflogAnchor {
+    old: String,
+    new: String,
+    message: String,
+    end_offset: u64,
+}
+
 impl RefCursor {
     pub fn new(family: FamilyKey) -> Self {
         Self {
             family,
             offsets: HashMap::new(),
+            anchors: HashMap::new(),
+            consumed_offsets: HashMap::new(),
+            consumed_anchors: HashMap::new(),
             stash_stack: Vec::new(),
             pending_cherry_pick_source_oids: Vec::new(),
         }
@@ -103,12 +119,7 @@ impl RefCursor {
 
         match primary {
             "commit" => self.enrich_commit(cmd, state),
-            "revert" => self.consume_head_transition_for_command(
-                cmd,
-                state,
-                &["revert:"],
-                ExpectedTransition::from_state_and_working_logs(cmd, state),
-            ),
+            "revert" => self.enrich_revert(cmd, state),
             "reset" => self.consume_head_transition_for_command(
                 cmd,
                 state,
@@ -162,7 +173,7 @@ impl RefCursor {
         let args = command_args(cmd);
         let amend = args.iter().any(|arg| arg == "--amend");
         let prefixes = if amend {
-            &["commit (amend):", "commit:"] as &[&str]
+            &["commit (amend):"] as &[&str]
         } else {
             &["commit", "commit (initial):"]
         };
@@ -251,6 +262,48 @@ impl RefCursor {
         Ok(())
     }
 
+    fn enrich_revert(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+        state: &FamilyState,
+    ) -> Result<(), GitAiError> {
+        let args = command_args(cmd);
+        if args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--abort" | "--quit"))
+        {
+            return Ok(());
+        }
+
+        let is_no_commit = args.iter().any(|arg| arg == "--no-commit" || arg == "-n");
+        let is_continue = args.iter().any(|arg| arg == "--continue");
+        let is_skip = args.iter().any(|arg| arg == "--skip");
+        let source_args = if is_continue || is_skip {
+            Vec::new()
+        } else {
+            revert_source_args(&args)
+        };
+        let explicit_sources = if source_args.is_empty() {
+            Vec::new()
+        } else {
+            resolve_cherry_pick_source_oids_from_sources(cmd, state, &source_args)?
+        };
+        cmd.revert_source_oids = explicit_sources;
+
+        if is_no_commit {
+            return Ok(());
+        }
+
+        let source_limit = cmd.revert_source_oids.len().max(1);
+        self.consume_head_span_for_command_limited(
+            cmd,
+            state,
+            &["revert:"],
+            ExpectedTransition::from_state_and_working_logs(cmd, state),
+            source_limit,
+        )
+    }
+
     fn enrich_branch(
         &mut self,
         cmd: &mut NormalizedCommand,
@@ -267,14 +320,14 @@ impl RefCursor {
                     ExpectedTransition::default(),
                     &["branch:"],
                 )? {
-                    self.consume_entry(&entry);
+                    self.consume_entry(&entry)?;
                     changes.push(entry_to_ref_change(&entry));
                 }
             }
             BranchCommandSpec::Delete { references } => {
                 let zero = zero_oid();
                 for reference in references {
-                    self.offsets.remove(&common_key(&reference));
+                    self.clear_ref_cursor(&common_key(&reference));
                     if let Some(old) = state
                         .refs
                         .get(&reference)
@@ -346,7 +399,7 @@ impl RefCursor {
             && let Some(source_reference) = source_reference.as_ref()
             && source_reference != &new_reference
         {
-            self.offsets.remove(&common_key(source_reference));
+            self.clear_ref_cursor(&common_key(source_reference));
             changes.push(RefChange {
                 reference: source_reference.clone(),
                 old: source_oid.clone(),
@@ -378,6 +431,28 @@ impl RefCursor {
         let args = command_args(cmd);
         let spec = parse_update_ref_spec(&args)?;
         let Some(spec) = spec else {
+            let mut changes = Vec::new();
+            if let Some(worktree) = cmd.worktree.as_deref() {
+                while let Some(entry) =
+                    self.find_head_entry(Some(worktree), &[], ExpectedTransition::default())?
+                {
+                    self.consume_entry(&entry)?;
+                    changes.push(entry_to_ref_change(&entry));
+                }
+            }
+            for reference in self.discover_common_refs()? {
+                if reference == "ORIG_HEAD" {
+                    continue;
+                }
+                while let Some(entry) =
+                    self.find_common_ref_entry(&reference, ExpectedTransition::default(), &[])?
+                {
+                    self.consume_entry(&entry)?;
+                    changes.push(entry_to_ref_change(&entry));
+                }
+            }
+            dedup_ref_changes(&mut changes);
+            cmd.ref_changes = changes;
             return Ok(());
         };
 
@@ -392,7 +467,7 @@ impl RefCursor {
                     messages: HashSet::new(),
                 },
             )? {
-                self.consume_entry(&entry);
+                self.consume_entry(&entry)?;
                 changes.push(entry_to_ref_change(&entry));
                 self.consume_common_refs_matching_transition(&entry.old, &entry.new, &mut changes)?;
             }
@@ -405,7 +480,7 @@ impl RefCursor {
             },
             &[],
         )? {
-            self.consume_entry(&entry);
+            self.consume_entry(&entry)?;
             let old = entry.old.clone();
             let new = entry.new.clone();
             changes.push(entry_to_ref_change(&entry));
@@ -418,7 +493,7 @@ impl RefCursor {
                     messages: HashSet::new(),
                 },
             )? {
-                self.consume_entry(&head);
+                self.consume_entry(&head)?;
                 changes.push(entry_to_ref_change(&head));
             }
         }
@@ -449,7 +524,7 @@ impl RefCursor {
         if matches!(kind, "push" | "save") {
             let expected = ExpectedTransition::default();
             if let Some(entry) = self.find_common_ref_entry("refs/stash", expected, &[])? {
-                self.consume_entry(&entry);
+                self.consume_entry(&entry)?;
                 self.apply_stash_ref_entry(kind, &entry);
                 cmd.ref_changes.push(entry_to_ref_change(&entry));
             }
@@ -468,7 +543,7 @@ impl RefCursor {
             if let Some(head) = self.find_head_entry(cmd.worktree.as_deref(), &[], expected)?
                 && message_matches(&head.message, &["reset:", "checkout:"])
             {
-                self.consume_entry(&head);
+                self.consume_entry(&head)?;
                 cmd.ref_changes.push(entry_to_ref_change(&head));
             }
         }
@@ -538,7 +613,7 @@ impl RefCursor {
         let mut changes = vec![entry_to_ref_change(&first)];
         let old = first.old.clone();
         let mut new = first.new.clone();
-        self.consume_entry(&first);
+        self.consume_entry(&first)?;
 
         let failed = cmd.exit_code != 0;
         if failed {
@@ -558,7 +633,7 @@ impl RefCursor {
             };
             new = next.new.clone();
             consumed_finish = rebase_reflog_action_is(&next.message, "finish");
-            self.consume_entry(&next);
+            self.consume_entry(&next)?;
             changes.push(entry_to_ref_change(&next));
         }
 
@@ -599,7 +674,7 @@ impl RefCursor {
             return Ok(());
         };
 
-        self.consume_entry(&entry);
+        self.consume_entry(&entry)?;
         let old = entry.old.clone();
         let new = entry.new.clone();
         let mut changes = vec![entry_to_ref_change(&entry)];
@@ -629,7 +704,7 @@ impl RefCursor {
         let old = first.old.clone();
         let mut new = first.new.clone();
         let mut changes = vec![entry_to_ref_change(&first)];
-        self.consume_entry(&first);
+        self.consume_entry(&first)?;
 
         while changes.len() < limit
             && let Some(next) = self.find_head_entry(
@@ -643,7 +718,7 @@ impl RefCursor {
             )?
         {
             new = next.new.clone();
-            self.consume_entry(&next);
+            self.consume_entry(&next)?;
             changes.push(entry_to_ref_change(&next));
         }
 
@@ -672,7 +747,7 @@ impl RefCursor {
         let mut changes = vec![entry_to_ref_change(&first)];
         let mut consumed_finish = pull_reflog_action_state(&first.message, action).is_none()
             || pull_reflog_action_is(&first.message, action, "finish");
-        self.consume_entry(&first);
+        self.consume_entry(&first)?;
 
         while !consumed_finish
             && let Some(next) = self.find_head_entry(
@@ -690,7 +765,7 @@ impl RefCursor {
             }
             new = next.new.clone();
             consumed_finish = pull_reflog_action_is(&next.message, action, "finish");
-            self.consume_entry(&next);
+            self.consume_entry(&next)?;
             changes.push(entry_to_ref_change(&next));
         }
 
@@ -702,7 +777,7 @@ impl RefCursor {
     }
 
     fn find_head_entry(
-        &self,
+        &mut self,
         worktree: Option<&Path>,
         message_prefixes: &[&str],
         expected: ExpectedTransition,
@@ -724,7 +799,7 @@ impl RefCursor {
     }
 
     fn find_common_ref_entry(
-        &self,
+        &mut self,
         reference: &str,
         expected: ExpectedTransition,
         message_prefixes: &[&str],
@@ -740,21 +815,19 @@ impl RefCursor {
     }
 
     fn find_entry_in_log(
-        &self,
+        &mut self,
         key: String,
         path: &Path,
         reference: &str,
         expected: ExpectedTransition,
         message_prefixes: &[&str],
     ) -> Result<Option<CursorEntry>, GitAiError> {
-        let entries = read_reflog_entries(
-            key.clone(),
-            path,
-            reference,
-            self.offsets.get(&key).copied(),
-        )?;
+        let start = self.reflog_start_offset(&key, path)?;
+        let entries = read_reflog_entries(key.clone(), path, reference, start)?;
         Ok(entries.into_iter().find(|entry| {
-            expected.matches(entry) && message_matches(&entry.message, message_prefixes)
+            !self.entry_consumed(entry)
+                && expected.matches(entry)
+                && message_matches(&entry.message, message_prefixes)
         }))
     }
 
@@ -775,7 +848,7 @@ impl RefCursor {
                 messages: HashSet::new(),
             };
             if let Some(entry) = self.find_common_ref_entry(&reference, expected, &[])? {
-                self.consume_entry(&entry);
+                self.consume_entry(&entry)?;
                 out.push(entry_to_ref_change(&entry));
             }
         }
@@ -801,7 +874,7 @@ impl RefCursor {
             if let Some(entry) =
                 self.find_common_ref_entry(&reference, expected, message_prefixes)?
             {
-                self.consume_entry(&entry);
+                self.consume_entry(&entry)?;
                 out.push(entry_to_ref_change(&entry));
             }
         }
@@ -875,8 +948,99 @@ impl RefCursor {
         Ok(refs)
     }
 
-    fn consume_entry(&mut self, entry: &CursorEntry) {
-        self.offsets.insert(entry.key.clone(), entry.end_offset);
+    fn entry_consumed(&self, entry: &CursorEntry) -> bool {
+        self.consumed_offsets
+            .get(&entry.key)
+            .is_some_and(|offsets| offsets.contains(&entry.end_offset))
+            && self
+                .consumed_anchors
+                .get(&entry.key)
+                .and_then(|anchors| anchors.get(&entry.end_offset))
+                .is_some_and(|anchor| anchor == &ReflogAnchor::from(entry))
+    }
+
+    fn reflog_start_offset(&mut self, key: &str, path: &Path) -> Result<Option<u64>, GitAiError> {
+        let Some(offset) = self.offsets.get(key).copied() else {
+            return Ok(None);
+        };
+        if offset == 0 {
+            return Ok(Some(0));
+        }
+
+        let len = match fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.clear_ref_cursor(key);
+                return Ok(None);
+            }
+            Err(error) => return Err(GitAiError::IoError(error)),
+        };
+        if offset > len {
+            self.clear_ref_cursor(key);
+            return Ok(None);
+        }
+
+        if let Some(anchor) = self.anchors.get(key) {
+            let record = read_reflog_record_ending_at(path, offset)?;
+            if record.as_ref().map(ReflogAnchor::from) != Some(anchor.clone()) {
+                self.clear_ref_cursor(key);
+                return Ok(None);
+            }
+        }
+
+        Ok(Some(offset))
+    }
+
+    fn consume_entry(&mut self, entry: &CursorEntry) -> Result<(), GitAiError> {
+        self.consumed_offsets
+            .entry(entry.key.clone())
+            .or_default()
+            .insert(entry.end_offset);
+        self.consumed_anchors
+            .entry(entry.key.clone())
+            .or_default()
+            .insert(entry.end_offset, ReflogAnchor::from(entry));
+        self.compact_consumed_entries(&entry.key, &entry.path, &entry.reference)
+    }
+
+    fn compact_consumed_entries(
+        &mut self,
+        key: &str,
+        path: &Path,
+        reference: &str,
+    ) -> Result<(), GitAiError> {
+        let start = self.offsets.get(key).copied();
+        let entries = read_reflog_entries(key.to_string(), path, reference, start)?;
+        let mut advanced_to = start.unwrap_or(0);
+        let mut anchor = None;
+        for entry in entries {
+            if self.entry_consumed(&entry) {
+                advanced_to = entry.end_offset;
+                anchor = Some(ReflogAnchor::from(&entry));
+            } else {
+                break;
+            }
+        }
+
+        if advanced_to > start.unwrap_or(0) {
+            self.offsets.insert(key.to_string(), advanced_to);
+            if let Some(anchor) = anchor {
+                self.anchors.insert(key.to_string(), anchor);
+            }
+            if let Some(consumed) = self.consumed_offsets.get_mut(key) {
+                consumed.retain(|offset| *offset > advanced_to);
+                if consumed.is_empty() {
+                    self.consumed_offsets.remove(key);
+                }
+            }
+            if let Some(anchors) = self.consumed_anchors.get_mut(key) {
+                anchors.retain(|offset, _| *offset > advanced_to);
+                if anchors.is_empty() {
+                    self.consumed_anchors.remove(key);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn consume_branch_lifecycle_record(
@@ -886,12 +1050,8 @@ impl RefCursor {
     ) -> Result<Option<BranchLifecycleRecord>, GitAiError> {
         let path = self.common_dir().join("logs").join(reference);
         let key = common_key(reference);
-        let entries = read_reflog_entries(
-            key.clone(),
-            &path,
-            reference,
-            self.offsets.get(&key).copied(),
-        )?;
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key.clone(), &path, reference, start)?;
         for entry in entries {
             let Some((old_reference, new_reference)) =
                 parse_branch_lifecycle_message(kind, &entry.message)
@@ -901,7 +1061,7 @@ impl RefCursor {
             if new_reference != reference {
                 continue;
             }
-            self.consume_entry(&entry);
+            self.consume_entry(&entry)?;
             return Ok(Some(BranchLifecycleRecord {
                 old_reference,
                 oid: entry.new,
@@ -916,13 +1076,21 @@ impl RefCursor {
     ) -> Result<(), GitAiError> {
         let key = common_key(reference);
         let path = self.common_dir().join("logs").join(reference);
-        match fs::metadata(path) {
+        match fs::metadata(&path) {
             Ok(metadata) => {
-                self.offsets.insert(key, metadata.len());
+                let len = metadata.len();
+                self.offsets.insert(key.clone(), len);
+                self.consumed_offsets.remove(&key);
+                self.consumed_anchors.remove(&key);
+                if let Some(record) = read_reflog_record_ending_at(&path, len)? {
+                    self.anchors.insert(key, ReflogAnchor::from(&record));
+                } else {
+                    self.anchors.remove(&key);
+                }
                 Ok(())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.offsets.remove(&key);
+                self.clear_ref_cursor(&key);
                 Ok(())
             }
             Err(error) => Err(GitAiError::IoError(error)),
@@ -955,6 +1123,35 @@ impl RefCursor {
 
     fn common_dir(&self) -> PathBuf {
         PathBuf::from(&self.family.0)
+    }
+
+    fn clear_ref_cursor(&mut self, key: &str) {
+        self.offsets.remove(key);
+        self.anchors.remove(key);
+        self.consumed_offsets.remove(key);
+        self.consumed_anchors.remove(key);
+    }
+}
+
+impl From<&CursorEntry> for ReflogAnchor {
+    fn from(entry: &CursorEntry) -> Self {
+        Self {
+            old: entry.old.clone(),
+            new: entry.new.clone(),
+            message: entry.message.clone(),
+            end_offset: entry.end_offset,
+        }
+    }
+}
+
+impl From<&ReflogRecord> for ReflogAnchor {
+    fn from(record: &ReflogRecord) -> Self {
+        Self {
+            old: record.old.clone(),
+            new: record.new.clone(),
+            message: record.message.clone(),
+            end_offset: record.end_offset,
+        }
     }
 }
 
@@ -1019,7 +1216,7 @@ fn commit_reflog_messages(args: &[String], amend: bool) -> HashSet<String> {
         return HashSet::new();
     };
     let modes = if amend {
-        ["commit (amend):", "commit:"].as_slice()
+        ["commit (amend):"].as_slice()
     } else {
         [
             "commit:",
@@ -1130,6 +1327,48 @@ fn cherry_pick_source_args(args: &[String]) -> Vec<&str> {
             || arg.starts_with("-X")
             || arg.starts_with("-S")
         {
+            idx += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            idx += 1;
+            continue;
+        }
+        if !arg.is_empty() {
+            sources.push(arg);
+        }
+        idx += 1;
+    }
+    sources
+}
+
+fn revert_source_args(args: &[String]) -> Vec<&str> {
+    let args = if args.first().is_some_and(|arg| arg == "revert") {
+        &args[1..]
+    } else {
+        args
+    };
+    let mut sources = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        let arg = args[idx].as_str();
+        if arg == "--" {
+            sources.extend(args[idx + 1..].iter().map(String::as_str));
+            break;
+        }
+        if matches!(arg, "--abort" | "--continue" | "--quit" | "--skip") {
+            return Vec::new();
+        }
+        if matches!(arg, "-m" | "--mainline" | "-S" | "--gpg-sign") {
+            idx = idx.saturating_add(2);
+            continue;
+        }
+        if arg.starts_with("--mainline=") || arg.starts_with("--gpg-sign=") || arg.starts_with("-S")
+        {
+            idx += 1;
+            continue;
+        }
+        if matches!(arg, "-n" | "--no-commit" | "--no-edit" | "-e" | "--edit") {
             idx += 1;
             continue;
         }
@@ -1370,6 +1609,7 @@ fn read_reflog_entries(
         .filter(|record| record.old != record.new)
         .map(|record| CursorEntry {
             key: key.clone(),
+            path: path.to_path_buf(),
             reference: reference.to_string(),
             old: record.old,
             new: record.new,
@@ -1383,26 +1623,27 @@ fn read_reflog_records(
     path: &Path,
     start_offset: Option<u64>,
 ) -> Result<Vec<ReflogRecord>, GitAiError> {
-    let bytes = match fs::read(path) {
-        Ok(bytes) => bytes,
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(GitAiError::IoError(error)),
     };
-    let byte_len = bytes.len() as u64;
+    let byte_len = file.metadata().map_err(GitAiError::IoError)?.len();
     let start = match start_offset {
         Some(offset) if offset > byte_len => 0,
         Some(offset) => offset,
         None => 0,
     };
+    file.seek(SeekFrom::Start(start))
+        .map_err(GitAiError::IoError)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(GitAiError::IoError)?;
 
     let mut entries = Vec::new();
-    let mut offset = 0u64;
+    let mut offset = start;
     for raw_line in bytes.split_inclusive(|byte| *byte == b'\n') {
         let line_start = offset;
         offset = offset.saturating_add(raw_line.len() as u64);
-        if offset <= start {
-            continue;
-        }
         let line = String::from_utf8_lossy(raw_line);
         let line = line.trim_end_matches(['\r', '\n']);
         let Some(entry) = parse_reflog_line(line, offset) else {
@@ -1413,6 +1654,62 @@ fn read_reflog_records(
         }
     }
     Ok(entries)
+}
+
+fn read_reflog_record_ending_at(
+    path: &Path,
+    end_offset: u64,
+) -> Result<Option<ReflogRecord>, GitAiError> {
+    if end_offset == 0 {
+        return Ok(None);
+    }
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(GitAiError::IoError(error)),
+    };
+    let byte_len = file.metadata().map_err(GitAiError::IoError)?.len();
+    if end_offset > byte_len {
+        return Ok(None);
+    }
+
+    let mut cursor = end_offset;
+    let mut suffix = Vec::new();
+    loop {
+        let chunk_start = cursor.saturating_sub(8192);
+        let chunk_len = (cursor - chunk_start) as usize;
+        let mut chunk = vec![0; chunk_len];
+        file.seek(SeekFrom::Start(chunk_start))
+            .map_err(GitAiError::IoError)?;
+        file.read_exact(&mut chunk).map_err(GitAiError::IoError)?;
+
+        let search_end = if cursor == end_offset && chunk.last().is_some_and(|byte| *byte == b'\n')
+        {
+            chunk.len().saturating_sub(1)
+        } else {
+            chunk.len()
+        };
+        if let Some(index) = chunk[..search_end].iter().rposition(|byte| *byte == b'\n') {
+            let line_start = chunk_start + index as u64 + 1;
+            let mut line = chunk[index + 1..].to_vec();
+            line.extend_from_slice(&suffix);
+            let line = String::from_utf8_lossy(&line);
+            let line = line.trim_end_matches(['\r', '\n']);
+            return Ok(
+                parse_reflog_line(line, end_offset).filter(|record| record.end_offset > line_start)
+            );
+        }
+
+        let mut line = chunk;
+        line.extend_from_slice(&suffix);
+        suffix = line;
+        if chunk_start == 0 {
+            let line = String::from_utf8_lossy(&suffix);
+            let line = line.trim_end_matches(['\r', '\n']);
+            return Ok(parse_reflog_line(line, end_offset).filter(|record| record.end_offset > 0));
+        }
+        cursor = chunk_start;
+    }
 }
 
 fn parse_reflog_line(line: &str, end_offset: u64) -> Option<ReflogRecord> {
@@ -1471,9 +1768,7 @@ fn parse_update_ref_spec(args: &[String]) -> Result<Option<UpdateRefSpec>, GitAi
                 idx += 1;
             }
             "--stdin" | "--batch-updates" => {
-                return Err(GitAiError::Generic(
-                    "trace2 cursor does not support update-ref stdin/batch updates".to_string(),
-                ));
+                return Ok(None);
             }
             "-d" | "--delete" => {
                 delete = true;
@@ -1914,4 +2209,230 @@ fn head_key(git_dir: &Path) -> String {
         .to_string_lossy()
         .to_string();
     format!("worktree:{}:HEAD", normalized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::domain::{
+        CommandScope, Confidence, FamilyKey, FamilyState, NormalizedCommand, WatermarkState,
+    };
+    use std::collections::HashMap;
+    use std::fs;
+
+    const A: &str = "1111111111111111111111111111111111111111";
+    const B: &str = "2222222222222222222222222222222222222222";
+    const C: &str = "3333333333333333333333333333333333333333";
+
+    fn family_state(family: &FamilyKey) -> FamilyState {
+        FamilyState {
+            family_key: family.clone(),
+            refs: HashMap::new(),
+            worktrees: HashMap::new(),
+            last_error: None,
+            applied_seq: 0,
+            watermarks: WatermarkState::default(),
+        }
+    }
+
+    fn command(family: &FamilyKey, args: &[&str]) -> NormalizedCommand {
+        command_with_worktree(family, None, args)
+    }
+
+    fn command_with_worktree(
+        family: &FamilyKey,
+        worktree: Option<PathBuf>,
+        args: &[&str],
+    ) -> NormalizedCommand {
+        NormalizedCommand {
+            scope: CommandScope::Family(family.clone()),
+            family_key: Some(family.clone()),
+            worktree,
+            root_sid: "sid".to_string(),
+            raw_argv: std::iter::once("git".to_string())
+                .chain(args.iter().map(|arg| arg.to_string()))
+                .collect(),
+            primary_command: args.first().map(|arg| arg.to_string()),
+            invoked_command: args.first().map(|arg| arg.to_string()),
+            invoked_args: args.iter().map(|arg| arg.to_string()).collect(),
+            observed_child_commands: Vec::new(),
+            exit_code: 0,
+            started_at_ns: 1,
+            finished_at_ns: 2,
+            stash_target_oid: None,
+            cherry_pick_source_oids: Vec::new(),
+            revert_source_oids: Vec::new(),
+            ref_changes: Vec::new(),
+            confidence: Confidence::Low,
+        }
+    }
+
+    #[test]
+    fn amend_without_message_does_not_match_plain_commit_reflog_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (A, B, "commit: older plain commit"),
+                (B, C, "commit (amend): older plain commit"),
+            ],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["commit", "--amend", "--no-edit"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+    }
+
+    fn append_reflog(common_dir: &Path, reference: &str, entries: &[(&str, &str, &str)]) {
+        let path = common_dir.join("logs").join(reference);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut text = String::new();
+        for (old, new, message) in entries {
+            text.push_str(&format!(
+                "{old} {new} Test User <test@example.com> 0 +0000\t{message}\n"
+            ));
+        }
+        fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn skipped_reflog_entry_remains_available_for_later_sequenced_command() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(
+            temp.path(),
+            "refs/heads/main",
+            &[
+                (A, B, "ordered second command"),
+                (B, C, "ordered first command"),
+            ],
+        );
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut first = command(&family, &["update-ref", "refs/heads/main", C, B]);
+        cursor.enrich_command(&mut first, &state).unwrap();
+        assert_eq!(
+            first.ref_changes,
+            vec![RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+
+        let mut second = command(&family, &["update-ref", "refs/heads/main", B, A]);
+        cursor.enrich_command(&mut second, &state).unwrap();
+        assert_eq!(
+            second.ref_changes,
+            vec![RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: A.to_string(),
+                new: B.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn reflog_generation_reset_with_same_byte_length_clears_sparse_consumption() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(
+            temp.path(),
+            "refs/heads/main",
+            &[
+                (A, B, "ordered second command"),
+                (B, C, "ordered first command"),
+            ],
+        );
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut first = command(&family, &["update-ref", "refs/heads/main", C, B]);
+        cursor.enrich_command(&mut first, &state).unwrap();
+        assert_eq!(
+            first.ref_changes,
+            vec![RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+
+        let old_len = fs::metadata(temp.path().join("logs/refs/heads/main"))
+            .unwrap()
+            .len();
+        append_reflog(
+            temp.path(),
+            "refs/heads/main",
+            &[
+                (A, B, "ordered second command"),
+                (B, C, "ordered third command"),
+            ],
+        );
+        assert_eq!(
+            fs::metadata(temp.path().join("logs/refs/heads/main"))
+                .unwrap()
+                .len(),
+            old_len
+        );
+
+        let mut second = command(&family, &["update-ref", "refs/heads/main", C, B]);
+        cursor.enrich_command(&mut second, &state).unwrap();
+        assert_eq!(
+            second.ref_changes,
+            vec![RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn update_ref_stdin_is_reconstructed_from_reflog_delta() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(temp.path(), "refs/heads/main", &[(A, B, "stdin update")]);
+        append_reflog(temp.path(), "refs/heads/topic", &[(A, C, "stdin update")]);
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command(&family, &["update-ref", "--stdin"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+        cmd.ref_changes
+            .sort_by(|left, right| left.reference.cmp(&right.reference));
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "refs/heads/main".to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic".to_string(),
+                    old: A.to_string(),
+                    new: C.to_string(),
+                },
+            ]
+        );
+    }
 }

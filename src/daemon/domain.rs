@@ -53,6 +53,7 @@ pub struct NormalizedCommand {
     pub finished_at_ns: u128,
     pub stash_target_oid: Option<String>,
     pub cherry_pick_source_oids: Vec<String>,
+    pub revert_source_oids: Vec<String>,
     pub ref_changes: Vec<RefChange>,
     pub confidence: Confidence,
 }

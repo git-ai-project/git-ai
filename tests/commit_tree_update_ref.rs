@@ -15,7 +15,7 @@ use repos::test_repo::{TestRepo, new_daemon_test_sync_session_id, real_git_execu
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
 fn setup_initial_commit(repo: &TestRepo) {
@@ -107,6 +107,54 @@ fn raw_traced_git(repo: &TestRepo, args: &[&str]) -> String {
     } else {
         format!("{}{}", stdout, stderr)
     }
+}
+
+fn raw_traced_git_stdin(repo: &TestRepo, args: &[&str], stdin: &str) -> String {
+    let mut command = Command::new(real_git_executable());
+    command.arg("-C").arg(repo.path()).args(args);
+    command.env("HOME", repo.test_home_path());
+    command.env(
+        "GIT_CONFIG_GLOBAL",
+        repo.test_home_path().join(".gitconfig"),
+    );
+    command.env("XDG_CONFIG_HOME", repo.test_home_path().join(".config"));
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    command.env(
+        "GIT_TRACE2_EVENT",
+        git_ai::daemon::DaemonConfig::trace2_event_target_for_path(
+            &repo.daemon_trace_socket_path(),
+        ),
+    );
+    command.env(
+        "GIT_TRACE2_EVENT_NESTING",
+        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string()),
+    );
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("failed to run raw traced git {:?}: {}", args, error));
+    child
+        .stdin
+        .take()
+        .expect("stdin should be piped")
+        .write_all(stdin.as_bytes())
+        .expect("write stdin to raw traced git");
+    let output = child
+        .wait_with_output()
+        .unwrap_or_else(|error| panic!("failed to wait for raw traced git {:?}: {}", args, error));
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "raw traced git {:?} failed\nstdout: {}\nstderr: {}",
+        args,
+        stdout,
+        stderr
+    );
+    combined_output(stdout, stderr)
 }
 
 fn raw_untraced_git(repo: &TestRepo, args: &[&str]) -> String {
@@ -1212,4 +1260,42 @@ fn test_update_ref_head_with_new_content_then_amend_preserves_attribution() {
 
     let mut feature_file = repo.filename("feature.txt");
     feature_file.assert_lines_and_blame(lines!["ai line 1".ai(), "ai line 2".ai()]);
+}
+
+#[test]
+fn test_update_ref_stdin_head_with_new_content_preserves_attribution() {
+    let repo = TestRepo::new();
+    setup_initial_commit(&repo);
+
+    fs::write(repo.path().join("stdin.txt"), "stdin ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "stdin.txt"])
+        .unwrap();
+    raw_untraced_git(&repo, &["add", "-A"]);
+
+    let parent_sha = head_sha(&repo);
+    let tree_sha = raw_untraced_git(&repo, &["write-tree"]).trim().to_string();
+    let commit_sha = raw_untraced_git(
+        &repo,
+        &[
+            "commit-tree",
+            &tree_sha,
+            "-p",
+            &parent_sha,
+            "-m",
+            "stdin commit",
+        ],
+    )
+    .trim()
+    .to_string();
+
+    repo.sync_daemon();
+    let baseline = repo.daemon_total_completion_count();
+    raw_traced_git_stdin(
+        &repo,
+        &["update-ref", "--stdin"],
+        &format!("update HEAD {} {}\n", commit_sha, parent_sha),
+    );
+    repo.wait_for_daemon_total_completion_count(baseline, baseline + 1);
+
+    assert_note_has_ai_for_file(&repo, &commit_sha, "stdin.txt");
 }

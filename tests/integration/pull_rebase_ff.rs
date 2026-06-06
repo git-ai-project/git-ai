@@ -918,6 +918,114 @@ fn test_regular_rebase_with_conflict_preserves_ai_notes() {
 }
 
 #[test]
+fn test_regular_rebase_two_conflicts_ai_rewrite_after_skipped_conflict_is_attributed() {
+    use std::fs;
+
+    let repo = TestRepo::new();
+    let jokes_path = repo.path().join("jokes-programming.csv");
+    let base = "\
+setup,punchline
+How many programmers does it take to change a light bulb?,None that's a hardware problem
+Why do Java developers wear glasses?,Because they don't C#
+Why did the programmer quit his job?,Because he didn't get arrays
+";
+
+    fs::write(&jokes_path, base).expect("write base jokes");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("base AI checkpoint should succeed");
+    repo.stage_all_and_commit("Base jokes")
+        .expect("base commit should succeed");
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "scenario-2-multi-conflict-same-file"])
+        .expect("checkout feature branch should succeed");
+    fs::write(
+        &jokes_path,
+        format!(
+            "{}Why do Python developers make bad partners?,They only speak one language\n",
+            base
+        ),
+    )
+    .expect("write first feature joke");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("first feature AI checkpoint should succeed");
+    repo.stage_all_and_commit("Add Python joke")
+        .expect("first feature commit should succeed");
+
+    fs::write(
+        &jokes_path,
+        format!(
+            "{}Why do Python developers make bad partners?,They only speak one language\nHow many Rust developers does it take to change a lightbulb?,Two one to change it and one to write a song about the old one\n",
+            base
+        ),
+    )
+    .expect("write second feature joke");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("second feature AI checkpoint should succeed");
+    repo.stage_all_and_commit("Add Rust joke")
+        .expect("second feature commit should succeed");
+
+    repo.git(&["checkout", &default_branch])
+        .expect("checkout default branch should succeed");
+    let main = format!(
+        "{}Why do C++ developers get halloween mixed up with christmas?,Because Oct31 equals Dec25\nWhy did the developer go broke?,Because he used up all his cache\n",
+        base
+    );
+    fs::write(&jokes_path, &main).expect("write main jokes");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("main AI checkpoint should succeed");
+    repo.stage_all_and_commit("Add C++ jokes")
+        .expect("main commit should succeed");
+
+    let rebase_result = repo.git(&[
+        "rebase",
+        &default_branch,
+        "scenario-2-multi-conflict-same-file",
+    ]);
+    assert!(
+        rebase_result.is_err(),
+        "first rebase stop should conflict on the Python joke"
+    );
+
+    fs::write(&jokes_path, &main).expect("resolve first conflict by keeping main side");
+    repo.git(&["add", "jokes-programming.csv"])
+        .expect("stage first conflict resolution");
+    let second_stop = repo.git(&["rebase", "--skip"]);
+    assert!(
+        second_stop.is_err(),
+        "skipping the first feature commit should immediately stop on the Rust conflict"
+    );
+
+    let rewritten = format!(
+        "{}Why do C++ developers get halloween mixed up with christmas?,Because Oct31 equals Dec25\nWhy did the developer go broke?,Because he used up all his cache\nWhy do Rust developers write songs?,Because they're afraid of memory leaks in the lyrics\n",
+        base
+    );
+    repo.git_ai(&["checkpoint", "human", "jokes-programming.csv"])
+        .expect("pre-resolution checkpoint should succeed");
+    fs::write(&jokes_path, rewritten).expect("rewrite second conflict resolution");
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-programming.csv"])
+        .expect("AI resolution checkpoint should succeed");
+    repo.git(&["add", "jokes-programming.csv"])
+        .expect("stage AI conflict resolution");
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .expect("rebase --continue should finish");
+
+    let mut jokes = repo.filename("jokes-programming.csv");
+    jokes.assert_committed_lines(crate::lines![
+        "setup,punchline".ai(),
+        "How many programmers does it take to change a light bulb?,None that's a hardware problem"
+            .ai(),
+        "Why do Java developers wear glasses?,Because they don't C#".ai(),
+        "Why did the programmer quit his job?,Because he didn't get arrays".ai(),
+        "Why do C++ developers get halloween mixed up with christmas?,Because Oct31 equals Dec25"
+            .ai(),
+        "Why did the developer go broke?,Because he used up all his cache".ai(),
+        "Why do Rust developers write songs?,Because they're afraid of memory leaks in the lyrics"
+            .ai(),
+    ]);
+}
+
+#[test]
 fn test_regular_rebase_with_conflict_abort_preserves_original_notes() {
     let setup = setup_regular_rebase_conflict();
     let repo = setup.repo;
@@ -973,5 +1081,6 @@ crate::reuse_tests_in_worktree!(
     test_pull_rebase_with_conflict_preserves_ai_notes,
     test_pull_rebase_with_conflict_abort_preserves_original_notes,
     test_regular_rebase_with_conflict_preserves_ai_notes,
+    test_regular_rebase_two_conflicts_ai_rewrite_after_skipped_conflict_is_attributed,
     test_regular_rebase_with_conflict_abort_preserves_original_notes,
 );

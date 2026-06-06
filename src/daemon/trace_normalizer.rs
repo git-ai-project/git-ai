@@ -651,6 +651,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             finished_at_ns,
             stash_target_oid: None,
             cherry_pick_source_oids: Vec::new(),
+            revert_source_oids: Vec::new(),
             ref_changes,
             confidence,
         };

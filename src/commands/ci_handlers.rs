@@ -21,6 +21,18 @@ fn print_ci_result(result: &CiRunResult, prefix: &str) {
         CiRunResult::SkippedFastForward => {
             println!("{}: skipped fast-forward merge", prefix);
         }
+        CiRunResult::SyncAuthorshipRewritten { commit_count } => {
+            println!(
+                "{}: authorship rewritten successfully for {} rebased commits",
+                prefix, commit_count
+            );
+        }
+        CiRunResult::SkippedNonRebaseSync => {
+            println!("{}: skipped non-rebase PR sync", prefix);
+        }
+        CiRunResult::SkippedExistingSyncNotes => {
+            println!("{}: skipped PR sync with existing authorship", prefix);
+        }
         CiRunResult::NoAuthorshipAvailable => {
             println!(
                 "{}: no AI authorship to track (pre-git-ai commits or human-only code)",
@@ -271,6 +283,7 @@ fn handle_ci_local(args: &[String]) {
                 skip_fetch_notes,
                 skip_fetch_base,
                 skip_fetch_fork_notes,
+                skip_fetch_sync_refs: false,
                 skip_push,
             }) {
                 Ok(result) => {

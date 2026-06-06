@@ -121,6 +121,7 @@ mod tests {
             finished_at_ns: 2,
             stash_target_oid: None,
             cherry_pick_source_oids: Vec::new(),
+            revert_source_oids: Vec::new(),
             ref_changes: vec![RefChange {
                 reference: "refs/heads/main".to_string(),
                 old: "".to_string(),

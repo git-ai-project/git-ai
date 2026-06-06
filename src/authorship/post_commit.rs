@@ -8,10 +8,9 @@ use crate::authorship::working_log::{Checkpoint, CheckpointKind, WorkingLogEntry
 use crate::config::Config;
 use crate::error::GitAiError;
 use crate::git::notes_api::write_note as notes_add;
-use crate::git::repository::Repository;
+use crate::git::repository::{Repository, batch_read_paths_at_treeishes};
 use std::collections::{HashMap, HashSet};
 use std::io::IsTerminal;
-use std::path::Path;
 
 /// Skip expensive post-commit stats when this threshold is exceeded.
 /// High hunk density is the strongest predictor of slow diff_ai_accepted_stats.
@@ -73,6 +72,31 @@ pub fn post_commit_from_working_log(
     commit_sha: String,
     human_author: String,
     supress_output: bool,
+) -> Result<(String, AuthorshipLog), GitAiError> {
+    post_commit_from_working_log_with_options(
+        repo,
+        base_commit,
+        commit_sha,
+        human_author,
+        PostCommitOptions {
+            supress_output,
+            compute_stats: true,
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PostCommitOptions {
+    pub supress_output: bool,
+    pub compute_stats: bool,
+}
+
+pub(crate) fn post_commit_from_working_log_with_options(
+    repo: &Repository,
+    base_commit: Option<String>,
+    commit_sha: String,
+    human_author: String,
+    options: PostCommitOptions,
 ) -> Result<(String, AuthorshipLog), GitAiError> {
     // Use base_commit parameter if provided, otherwise use "initial" for empty repos
     // This matches the convention in checkpoint.rs
@@ -182,65 +206,71 @@ pub fn post_commit_from_working_log(
     // Compute stats once (needed for both metrics and terminal output), unless preflight
     // estimate predicts this would be too expensive for the commit hook path.
     let mut stats: Option<crate::authorship::stats::CommitStats> = None;
-    let is_merge_commit = repo
-        .find_commit(commit_sha.clone())
-        .map(|commit| commit.parent_count().unwrap_or(0) > 1)
-        .unwrap_or(false);
-    let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
-    let skip_reason = if is_merge_commit {
-        Some(StatsSkipReason::MergeCommit)
-    } else {
-        estimate_stats_cost(repo, &parent_sha, &commit_sha, &ignore_patterns)
-            .ok()
-            .and_then(|estimate| {
-                if should_skip_expensive_post_commit_stats(&estimate) {
-                    Some(StatsSkipReason::Expensive(estimate))
-                } else {
-                    None
-                }
-            })
-    };
+    let mut skip_reason = None;
 
-    if skip_reason.is_none() {
-        let diff_base = if parent_sha == "initial" {
-            "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+    if options.compute_stats {
+        let is_merge_commit = repo
+            .find_commit(commit_sha.clone())
+            .map(|commit| commit.parent_count().unwrap_or(0) > 1)
+            .unwrap_or(false);
+        let ignore_patterns = effective_ignore_patterns(repo, &[], &[]);
+        skip_reason = if is_merge_commit {
+            Some(StatsSkipReason::MergeCommit)
         } else {
-            &parent_sha
+            estimate_stats_cost(repo, &parent_sha, &commit_sha, &ignore_patterns)
+                .ok()
+                .and_then(|estimate| {
+                    if should_skip_expensive_post_commit_stats(&estimate) {
+                        Some(StatsSkipReason::Expensive(estimate))
+                    } else {
+                        None
+                    }
+                })
         };
 
-        let diff_hunks =
-            crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &commit_sha)?;
+        if skip_reason.is_none() {
+            let diff_base = if parent_sha == "initial" {
+                "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+            } else {
+                &parent_sha
+            };
 
-        let computed = stats_for_commit_stats_from_hunks(
-            repo,
-            &commit_sha,
-            &ignore_patterns,
-            &diff_hunks,
-            Some(&authorship_log),
-        )?;
+            let diff_hunks =
+                crate::commands::diff::get_diff_with_line_numbers(repo, diff_base, &commit_sha)?;
 
-        let hunks_json = crate::commands::diff::build_diff_artifacts_from_hunks(
-            repo,
-            diff_hunks,
-            &commit_sha,
-            Some(&authorship_log),
-        )
-        .ok()
-        .and_then(|artifacts| serde_json::to_string(&artifacts.json_hunks).ok());
+            let computed = stats_for_commit_stats_from_hunks(
+                repo,
+                &commit_sha,
+                &ignore_patterns,
+                &diff_hunks,
+                Some(&authorship_log),
+            )?;
 
-        // Record metrics only when we have full stats.
-        record_commit_metrics(
-            repo,
-            &commit_sha,
-            &parent_sha,
-            &human_author,
-            &authorship_note_str,
-            &computed,
-            &parent_working_log,
-            hunks_json.as_deref(),
-        );
-        stats = Some(computed);
-    } else {
+            let hunks_json = crate::commands::diff::build_diff_artifacts_from_hunks(
+                repo,
+                diff_hunks,
+                &commit_sha,
+                Some(&authorship_log),
+            )
+            .ok()
+            .and_then(|artifacts| serde_json::to_string(&artifacts.json_hunks).ok());
+
+            // Record metrics only when we have full stats.
+            record_commit_metrics(
+                repo,
+                &commit_sha,
+                &parent_sha,
+                &human_author,
+                &authorship_note_str,
+                &computed,
+                &parent_working_log,
+                hunks_json.as_deref(),
+            );
+            stats = Some(computed);
+        }
+    }
+
+    if options.compute_stats && skip_reason.is_some() {
         match skip_reason.as_ref() {
             Some(StatsSkipReason::MergeCommit) => {
                 tracing::debug!("Skipping post-commit stats for merge commit {}", commit_sha);
@@ -275,7 +305,7 @@ pub fn post_commit_from_working_log(
     repo_storage.delete_working_log_for_base_commit(&parent_sha)?;
 
     // Use Config::fresh() to support runtime config updates
-    if !supress_output && !Config::fresh().is_quiet() {
+    if !options.supress_output && !Config::fresh().is_quiet() {
         // Only print stats if we're in an interactive terminal and quiet mode is disabled
         let is_interactive = std::io::stdout().is_terminal();
         if let Some(stats) = stats.as_ref() {
@@ -310,21 +340,20 @@ fn commit_tree_snapshot_for_files(
     commit_sha: &str,
     file_paths: &HashSet<String>,
 ) -> Result<HashMap<String, String>, GitAiError> {
-    let commit = repo.find_commit(commit_sha.to_string())?;
-    let tree = commit.tree()?;
-    let mut snapshot = HashMap::new();
-
+    let requests = file_paths
+        .iter()
+        .map(|file_path| (commit_sha.to_string(), file_path.clone()))
+        .collect::<Vec<_>>();
+    let contents = batch_read_paths_at_treeishes(repo, &requests)?;
+    let mut snapshot = HashMap::with_capacity(file_paths.len());
     for file_path in file_paths {
-        let content = match tree.get_path(Path::new(file_path)) {
-            Ok(entry) => match repo.find_blob(entry.id()) {
-                Ok(blob) => {
-                    String::from_utf8_lossy(&blob.content().unwrap_or_default()).to_string()
-                }
-                Err(_) => String::new(),
-            },
-            Err(_) => String::new(),
-        };
-        snapshot.insert(file_path.clone(), content);
+        snapshot.insert(
+            file_path.clone(),
+            contents
+                .get(&(commit_sha.to_string(), file_path.clone()))
+                .cloned()
+                .unwrap_or_default(),
+        );
     }
 
     Ok(snapshot)
