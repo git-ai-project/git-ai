@@ -2327,10 +2327,8 @@ fn git_config_file_for_repo_paths(
 
 fn no_exec_global_config_paths() -> Vec<(PathBuf, gix_config::Source)> {
     let mut paths = Vec::new();
-    let nosystem = std::env::var_os("GIT_CONFIG_NOSYSTEM").is_some_and(|value| {
-        let value = value.to_string_lossy();
-        !matches!(value.as_ref(), "" | "0" | "false" | "FALSE" | "off" | "OFF")
-    });
+    let nosystem =
+        std::env::var_os("GIT_CONFIG_NOSYSTEM").is_some_and(|value| !git_env_bool_is_false(&value));
 
     if !nosystem {
         if let Some(path) = std::env::var_os("GIT_CONFIG_SYSTEM").map(PathBuf::from) {
@@ -2370,6 +2368,14 @@ fn no_exec_global_config_paths() -> Vec<(PathBuf, gix_config::Source)> {
     }
 
     paths
+}
+
+fn git_env_bool_is_false(value: &std::ffi::OsStr) -> bool {
+    let value = value.to_string_lossy();
+    matches!(value.as_ref(), "" | "0")
+        || value.eq_ignore_ascii_case("false")
+        || value.eq_ignore_ascii_case("no")
+        || value.eq_ignore_ascii_case("off")
 }
 
 fn home_dir_from_env() -> Option<PathBuf> {
@@ -3366,6 +3372,28 @@ mod tests {
 
         assert_eq!(forwarded[0], "-c");
         assert!(forwarded[1].starts_with("core.hooksPath="));
+    }
+
+    #[test]
+    fn git_env_bool_false_values_match_git_parsing() {
+        for value in [
+            "", "0", "false", "FALSE", "False", "no", "NO", "No", "off", "OFF", "Off",
+        ] {
+            assert!(
+                git_env_bool_is_false(&OsString::from(value)),
+                "{value:?} should parse as false"
+            );
+        }
+    }
+
+    #[test]
+    fn git_env_bool_non_false_values_parse_as_true() {
+        for value in ["1", "true", "yes", "on", "anything-else"] {
+            assert!(
+                !git_env_bool_is_false(&OsString::from(value)),
+                "{value:?} should not parse as false"
+            );
+        }
     }
 
     #[cfg(windows)]
