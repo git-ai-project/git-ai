@@ -53,6 +53,7 @@ pub fn handle_git_ai(args: &[String]) {
             | "install-hooks"
             | "install"
             | "uninstall-hooks"
+            | "workflows"
     );
     if needs_daemon {
         use crate::daemon::telemetry_handle::{
@@ -192,6 +193,9 @@ pub fn handle_git_ai(args: &[String]) {
         }
         "whoami" => {
             commands::whoami::handle_whoami(&args[1..]);
+        }
+        "workflows" => {
+            commands::workflows::handle_workflows(&args[1..]);
         }
         "exchange-nonce" => {
             commands::exchange_nonce::handle_exchange_nonce(&args[1..]);
@@ -370,6 +374,7 @@ fn print_help() {
     eprintln!("  login              Authenticate with Git AI");
     eprintln!("  logout             Clear stored credentials");
     eprintln!("  whoami             Show auth state and login identity");
+    eprintln!("  workflows          Develop, upload, and inspect custom workflows");
     eprintln!("  version, -v, --version     Print the git-ai version");
     eprintln!("  help, -h, --help           Show this help message");
     eprintln!();

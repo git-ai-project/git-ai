@@ -24,3 +24,4 @@ pub mod squash_authorship;
 pub mod status;
 pub mod upgrade;
 pub mod whoami;
+pub mod workflows;

@@ -1196,6 +1196,7 @@ dependencies = [
 name = "git-ai"
 version = "1.5.4"
 dependencies = [
+ "base64",
  "chrono",
  "clap",
  "criterion",

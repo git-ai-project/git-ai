@@ -52,6 +52,11 @@ tasks:
     cmds:
       - cargo build
 
+  workflows:smoke:
+    desc: Verify the generated workflow scaffold against a local @git-ai-project/workflows package
+    cmds:
+      - ./scripts/check-workflows-local-smoke.sh {{.CLI_WORKFLOW_SMOKE_ARGS}}
+
   test:base:
     internal: true
     cmds:
