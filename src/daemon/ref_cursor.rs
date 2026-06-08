@@ -1,7 +1,7 @@
 use crate::daemon::analyzers::{command_args, normalized_args};
 use crate::daemon::domain::{Confidence, FamilyKey, FamilyState, NormalizedCommand, RefChange};
 use crate::error::GitAiError;
-use crate::git::cli_parser::parse_git_cli_args;
+use crate::git::cli_parser::{explicit_rebase_branch_arg, parse_git_cli_args};
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{git_dir_for_worktree, is_valid_git_oid};
 use crate::git::repository::exec_git_stdin;
@@ -603,6 +603,10 @@ impl RefCursor {
         cmd: &mut NormalizedCommand,
         state: &FamilyState,
     ) -> Result<(), GitAiError> {
+        if cmd.exit_code != 0 && self.consume_failed_explicit_branch_rebase_start(cmd)? {
+            return Ok(());
+        }
+
         let expected = ExpectedTransition::from_state_and_working_logs(cmd, state);
         let Some(first) = self.find_head_entry(cmd.worktree.as_deref(), &["rebase"], expected)?
         else {
@@ -645,6 +649,54 @@ impl RefCursor {
         dedup_ref_changes(&mut changes);
         cmd.ref_changes = changes;
         Ok(())
+    }
+
+    fn consume_failed_explicit_branch_rebase_start(
+        &mut self,
+        cmd: &mut NormalizedCommand,
+    ) -> Result<bool, GitAiError> {
+        let args = rebase_command_args(cmd);
+        let Some(branch_arg) = explicit_rebase_branch_arg(&args) else {
+            return Ok(false);
+        };
+        let Some(worktree) = cmd.worktree.as_deref() else {
+            return Ok(false);
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(false);
+        };
+
+        let branch_ref = branch_arg_to_ref(&branch_arg);
+        let head_key = head_key(&git_dir);
+        let head_path = git_dir.join("logs").join("HEAD");
+        let start = self.reflog_start_offset(&head_key, &head_path)?;
+        let head_entries =
+            read_reflog_entries_including_noops(head_key, &head_path, "HEAD", start)?;
+        let Some(start_marker) =
+            rebase_start_marker_for_explicit_branch(&head_entries, &branch_ref)
+        else {
+            return Ok(false);
+        };
+
+        let finish_new = latest_rebase_finish_for_branch(&head_entries, &branch_ref)
+            .filter(|finish| finish.end_offset > start_marker.end_offset)
+            .map(|finish| finish.new.as_str());
+        let original_head =
+            self.original_head_for_explicit_rebase_branch(&branch_ref, finish_new)?;
+
+        let mut changes = vec![entry_to_ref_change(start_marker)];
+        if let Some(original_head) = original_head {
+            changes.push(RefChange {
+                reference: branch_ref,
+                old: original_head.clone(),
+                new: original_head,
+            });
+        }
+
+        self.advance_cursor_to_entry(start_marker);
+        dedup_ref_changes(&mut changes);
+        cmd.ref_changes = changes;
+        Ok(true)
     }
 
     fn consume_pull_transition(
@@ -1006,6 +1058,14 @@ impl RefCursor {
         self.compact_consumed_entries(&entry.key, &entry.path, &entry.reference)
     }
 
+    fn advance_cursor_to_entry(&mut self, entry: &CursorEntry) {
+        self.offsets.insert(entry.key.clone(), entry.end_offset);
+        self.anchors
+            .insert(entry.key.clone(), ReflogAnchor::from(entry));
+        self.consumed_offsets.remove(&entry.key);
+        self.consumed_anchors.remove(&entry.key);
+    }
+
     fn compact_consumed_entries(
         &mut self,
         key: &str,
@@ -1107,6 +1167,33 @@ impl RefCursor {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(GitAiError::IoError(error)),
         }
+    }
+
+    fn original_head_for_explicit_rebase_branch(
+        &mut self,
+        branch_ref: &str,
+        finished_new: Option<&str>,
+    ) -> Result<Option<String>, GitAiError> {
+        let path = self.common_dir().join("logs").join(branch_ref);
+        let key = common_key(branch_ref);
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key, &path, branch_ref, start)?;
+
+        if let Some(finished_new) = finished_new
+            && let Some(entry) = entries.iter().rev().find(|entry| {
+                entry.new == finished_new
+                    && rebase_branch_finish_message_is(&entry.message, branch_ref)
+                    && valid_non_zero_oid(&entry.old)
+            })
+        {
+            return Ok(Some(entry.old.clone()));
+        }
+
+        Ok(entries
+            .iter()
+            .rev()
+            .find(|entry| valid_non_zero_oid(&entry.new))
+            .map(|entry| entry.new.clone()))
     }
 
     fn remove_stash_from_stack(&mut self, target_index: Option<usize>, target_oid: &str) {
@@ -1600,6 +1687,42 @@ fn rebase_reflog_action_is(message: &str, expected: &str) -> bool {
     rebase_reflog_action(message).is_some_and(|action| action == expected)
 }
 
+fn rebase_finish_returns_to_branch(message: &str, branch_ref: &str) -> bool {
+    message == format!("rebase (finish): returning to {}", branch_ref)
+}
+
+fn rebase_branch_finish_message_is(message: &str, branch_ref: &str) -> bool {
+    message.starts_with(&format!("rebase (finish): {}", branch_ref))
+}
+
+fn latest_rebase_finish_for_branch<'a>(
+    entries: &'a [CursorEntry],
+    branch_ref: &str,
+) -> Option<&'a CursorEntry> {
+    entries
+        .iter()
+        .rev()
+        .find(|entry| rebase_finish_returns_to_branch(&entry.message, branch_ref))
+}
+
+fn rebase_start_marker_for_explicit_branch<'a>(
+    entries: &'a [CursorEntry],
+    branch_ref: &str,
+) -> Option<&'a CursorEntry> {
+    if let Some(finish) = latest_rebase_finish_for_branch(entries, branch_ref)
+        && let Some(start) = entries.iter().rev().find(|entry| {
+            entry.end_offset < finish.end_offset && rebase_reflog_action_is(&entry.message, "start")
+        })
+    {
+        return Some(start);
+    }
+
+    entries
+        .iter()
+        .rev()
+        .find(|entry| rebase_reflog_action_is(&entry.message, "start"))
+}
+
 fn read_reflog_entries(
     key: String,
     path: &Path,
@@ -1610,6 +1733,27 @@ fn read_reflog_entries(
     Ok(records
         .into_iter()
         .filter(|record| record.old != record.new)
+        .map(|record| CursorEntry {
+            key: key.clone(),
+            path: path.to_path_buf(),
+            reference: reference.to_string(),
+            old: record.old,
+            new: record.new,
+            message: record.message,
+            end_offset: record.end_offset,
+        })
+        .collect())
+}
+
+fn read_reflog_entries_including_noops(
+    key: String,
+    path: &Path,
+    reference: &str,
+    start_offset: Option<u64>,
+) -> Result<Vec<CursorEntry>, GitAiError> {
+    let records = read_reflog_records(path, start_offset)?;
+    Ok(records
+        .into_iter()
         .map(|record| CursorEntry {
             key: key.clone(),
             path: path.to_path_buf(),
@@ -2141,6 +2285,15 @@ fn stash_target_index(target: Option<&String>) -> Option<usize> {
         .and_then(|value| value.parse::<usize>().ok())
 }
 
+fn rebase_command_args(cmd: &NormalizedCommand) -> Vec<String> {
+    let args = command_args(cmd);
+    if args.first().is_some_and(|arg| arg == "rebase") {
+        args[1..].to_vec()
+    } else {
+        args
+    }
+}
+
 fn command_uses_ref_cursor(primary: &str) -> bool {
     matches!(
         primary,
@@ -2203,6 +2356,14 @@ fn dedup_ref_changes(changes: &mut Vec<RefChange>) {
 
 fn common_key(reference: &str) -> String {
     format!("common:{}", reference)
+}
+
+fn branch_arg_to_ref(branch: &str) -> String {
+    if branch.starts_with("refs/") {
+        branch.to_string()
+    } else {
+        format!("refs/heads/{}", branch)
+    }
 }
 
 fn head_key(git_dir: &Path) -> String {
@@ -2487,6 +2648,82 @@ mod tests {
                     reference: "refs/heads/topic-2".to_string(),
                     old: B.to_string(),
                     new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn failed_explicit_branch_rebase_consumes_noop_start_marker_before_continue() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (B, C, "rebase (pick): stale rebase from another branch"),
+                (C, C, "rebase (finish): returning to refs/heads/stale-topic"),
+                (A, A, "rebase (start): checkout master"),
+                (A, E, "rebase (continue): Topic"),
+                (E, E, "rebase (finish): returning to refs/heads/topic"),
+            ],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/topic",
+            &[
+                (A, D, "commit: Topic"),
+                (D, E, "rebase (finish): refs/heads/topic onto main"),
+            ],
+        );
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut failed = command_with_worktree(
+            &family,
+            Some(worktree.clone()),
+            &["rebase", "master", "topic"],
+        );
+        failed.exit_code = 1;
+
+        cursor.enrich_command(&mut failed, &state).unwrap();
+
+        assert_eq!(
+            failed.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: A.to_string(),
+                    new: A.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic".to_string(),
+                    old: D.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+
+        let mut continued =
+            command_with_worktree(&family, Some(worktree), &["rebase", "--continue"]);
+
+        cursor.enrich_command(&mut continued, &state).unwrap();
+
+        assert_eq!(
+            continued.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: A.to_string(),
+                    new: E.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic".to_string(),
+                    old: D.to_string(),
+                    new: E.to_string(),
                 },
             ]
         );

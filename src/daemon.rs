@@ -1422,6 +1422,60 @@ fn rebase_onto_from_command(
         })
 }
 
+fn valid_non_zero_ref_change(change: &crate::daemon::domain::RefChange) -> bool {
+    is_valid_oid(&change.old)
+        && !is_zero_oid(&change.old)
+        && is_valid_oid(&change.new)
+        && !is_zero_oid(&change.new)
+        && change.old != change.new
+}
+
+fn rebase_new_tip_from_command(
+    cmd: &crate::daemon::domain::NormalizedCommand,
+    original_head: &str,
+) -> Option<String> {
+    if let Some(new_tip) = cmd
+        .ref_changes
+        .iter()
+        .rev()
+        .find(|change| {
+            change.reference.starts_with("refs/heads/")
+                && valid_non_zero_ref_change(change)
+                && change.old == original_head
+        })
+        .map(|change| change.new.clone())
+    {
+        return Some(new_tip);
+    }
+
+    let branch_ref_names = cmd
+        .ref_changes
+        .iter()
+        .filter(|change| {
+            change.reference.starts_with("refs/heads/") && valid_non_zero_ref_change(change)
+        })
+        .map(|change| change.reference.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if branch_ref_names.len() == 1
+        && let Some(new_tip) = cmd
+            .ref_changes
+            .iter()
+            .rev()
+            .find(|change| {
+                change.reference.starts_with("refs/heads/") && valid_non_zero_ref_change(change)
+            })
+            .map(|change| change.new.clone())
+    {
+        return Some(new_tip);
+    }
+
+    cmd.ref_changes
+        .iter()
+        .rev()
+        .find(|change| change.reference == "HEAD" && valid_non_zero_ref_change(change))
+        .map(|change| change.new.clone())
+}
+
 fn cherry_pick_destination_commits(cmd: &crate::daemon::domain::NormalizedCommand) -> Vec<String> {
     cmd.ref_changes
         .iter()
@@ -1528,10 +1582,6 @@ fn strict_rebase_original_head_from_command(
     cmd: &crate::daemon::domain::NormalizedCommand,
     semantic_old_head: &str,
 ) -> Option<String> {
-    if is_valid_oid(semantic_old_head) && !is_zero_oid(semantic_old_head) {
-        return Some(semantic_old_head.to_string());
-    }
-
     if let Some(branch_spec) = explicit_rebase_branch_arg(&cmd.invoked_args)
         && let Some(branch_ref) = explicit_rebase_branch_ref_name(&branch_spec)
         && let Some(old_head) = cmd
@@ -1545,6 +1595,10 @@ fn strict_rebase_original_head_from_command(
             .map(|change| change.old.clone())
     {
         return Some(old_head);
+    }
+
+    if is_valid_oid(semantic_old_head) && !is_zero_oid(semantic_old_head) {
+        return Some(semantic_old_head.to_string());
     }
 
     if let Some(old_head) = cmd
@@ -3884,16 +3938,11 @@ impl ActorDaemonCoordinator {
             .next();
 
         // If we have a pending original head from a failed rebase, use it as old_tip
-        // with the last HEAD new value as new_tip. This handles rebase --skip/--continue
-        // where trace2 only shows the within-command HEAD movement (onto → new_tip).
+        // with the branch ref update as new_tip. This handles rebase --skip/--continue
+        // where HEAD can contain extra checkout/detach movement that is not the
+        // rebased branch tip.
         if let Some((original_head, stored_onto)) = pending_original_head {
-            let new_tip = cmd
-                .ref_changes
-                .iter()
-                .filter(|rc| rc.reference == "HEAD" || rc.reference.starts_with("refs/heads/"))
-                .filter(|rc| is_valid_oid(&rc.new) && !is_zero_oid(&rc.new))
-                .map(|rc| rc.new.clone())
-                .next_back();
+            let new_tip = rebase_new_tip_from_command(cmd, &original_head);
             if let Some(new_tip) = new_tip
                 && original_head != new_tip
                 && !is_ancestor_commit(&repo, &original_head, &new_tip)
@@ -6456,6 +6505,98 @@ mod tests {
                 },
             ]),
             vec![SweepTrigger::PostCommit, SweepTrigger::PostPush]
+        );
+    }
+
+    fn test_rebase_command(
+        invoked_args: &[&str],
+        ref_changes: Vec<crate::daemon::domain::RefChange>,
+    ) -> crate::daemon::domain::NormalizedCommand {
+        crate::daemon::domain::NormalizedCommand {
+            scope: crate::daemon::domain::CommandScope::Family(crate::daemon::domain::FamilyKey(
+                "/repo/.git".to_string(),
+            )),
+            family_key: Some(crate::daemon::domain::FamilyKey("/repo/.git".to_string())),
+            worktree: Some(PathBuf::from("/repo")),
+            root_sid: "rebase-test".to_string(),
+            raw_argv: std::iter::once("git")
+                .chain(std::iter::once("rebase"))
+                .chain(invoked_args.iter().copied())
+                .map(str::to_string)
+                .collect(),
+            primary_command: Some("rebase".to_string()),
+            invoked_command: Some("rebase".to_string()),
+            invoked_args: invoked_args.iter().map(|arg| (*arg).to_string()).collect(),
+            observed_child_commands: Vec::new(),
+            exit_code: 0,
+            started_at_ns: 1,
+            finished_at_ns: 2,
+            stash_target_oid: None,
+            cherry_pick_source_oids: Vec::new(),
+            revert_source_oids: Vec::new(),
+            ref_changes,
+            confidence: crate::daemon::domain::Confidence::High,
+        }
+    }
+
+    fn ref_change(reference: &str, old: &str, new: &str) -> crate::daemon::domain::RefChange {
+        crate::daemon::domain::RefChange {
+            reference: reference.to_string(),
+            old: old.to_string(),
+            new: new.to_string(),
+        }
+    }
+
+    #[test]
+    fn explicit_branch_rebase_original_head_prefers_branch_ref_over_head() {
+        const MAIN: &str = "1111111111111111111111111111111111111111";
+        const FEATURE: &str = "2222222222222222222222222222222222222222";
+        const ONTO: &str = "3333333333333333333333333333333333333333";
+
+        let cmd = test_rebase_command(
+            &["master", "scenario-3-multi-file-conflict"],
+            vec![
+                ref_change("HEAD", MAIN, FEATURE),
+                ref_change("HEAD", FEATURE, ONTO),
+                ref_change(
+                    "refs/heads/scenario-3-multi-file-conflict",
+                    FEATURE,
+                    FEATURE,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            strict_rebase_original_head_from_command(&cmd, MAIN),
+            Some(FEATURE.to_string()),
+            "explicit branch rebase must store the target branch tip, not the caller's original HEAD"
+        );
+    }
+
+    #[test]
+    fn pending_rebase_new_tip_prefers_matching_branch_ref_over_later_head_noise() {
+        const ORIGINAL: &str = "1111111111111111111111111111111111111111";
+        const ONTO: &str = "2222222222222222222222222222222222222222";
+        const NEW_TIP: &str = "3333333333333333333333333333333333333333";
+        const UNRELATED_HEAD: &str = "4444444444444444444444444444444444444444";
+
+        let cmd = test_rebase_command(
+            &["--continue"],
+            vec![
+                ref_change("HEAD", ONTO, NEW_TIP),
+                ref_change(
+                    "refs/heads/scenario-3-multi-file-conflict",
+                    ORIGINAL,
+                    NEW_TIP,
+                ),
+                ref_change("HEAD", NEW_TIP, UNRELATED_HEAD),
+            ],
+        );
+
+        assert_eq!(
+            rebase_new_tip_from_command(&cmd, ORIGINAL),
+            Some(NEW_TIP.to_string()),
+            "pending rebase completion must use the branch ref update that rewrote the original tip"
         );
     }
 

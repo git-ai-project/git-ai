@@ -1678,6 +1678,18 @@ impl TestRepo {
         self.setup_daemon_mode();
     }
 
+    pub(crate) fn restart_dedicated_daemon_for_test(&mut self) {
+        assert_eq!(
+            self.daemon_scope,
+            DaemonTestScope::Dedicated,
+            "restart_dedicated_daemon_for_test requires a dedicated daemon repo"
+        );
+        if let Some(daemon) = self.daemon_process.take() {
+            daemon.shutdown();
+        }
+        self.setup_daemon_mode();
+    }
+
     fn daemon_completion_log_path_for_family(&self, family_key: &str) -> PathBuf {
         DaemonConfig::from_home(&self.daemon_home_path())
             .test_completion_log_path_for_family(family_key)

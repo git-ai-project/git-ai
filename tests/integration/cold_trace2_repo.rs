@@ -1,5 +1,6 @@
 use git_ai::authorship::authorship_log_serialization::AuthorshipLog;
 
+use crate::repos::test_file::ExpectedLineExt;
 use crate::repos::test_repo::{DaemonTestScope, TestRepo};
 use std::fs;
 
@@ -39,6 +40,15 @@ fn write_file(repo: &TestRepo, path: &str, content: &str) {
 fn raw_commit_file(repo: &TestRepo, path: &str, content: &str, message: &str) -> String {
     write_file(repo, path, content);
     raw_commit_all(repo, message)
+}
+
+fn traced_ai_commit_file(repo: &TestRepo, path: &str, content: &str, message: &str) -> String {
+    write_file(repo, path, content);
+    repo.git_ai(&["checkpoint", "mock_ai", path])
+        .unwrap_or_else(|error| panic!("mock_ai checkpoint for {} failed: {}", path, error));
+    repo.stage_all_and_commit(message)
+        .unwrap_or_else(|error| panic!("commit {} failed: {}", message, error))
+        .commit_sha
 }
 
 fn read_file(repo: &TestRepo, path: &str) -> String {
@@ -158,6 +168,70 @@ fn test_cold_repo_first_traced_rebase_is_processed() {
     raw_git(&repo, &["merge-base", "--is-ancestor", &main_tip, "HEAD"]);
     assert_eq!(read_file(&repo, "feature.txt"), "feature\n");
     assert_no_ai_authorship_for_commit(&repo, &rebased);
+}
+
+#[test]
+fn test_cold_repo_first_traced_conflict_rebase_ignores_stale_rebase_reflog_history() {
+    let mut repo = TestRepo::new_dedicated_daemon();
+    traced_ai_commit_file(&repo, "base.txt", "base\n", "ai base");
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    repo.git(&["checkout", "-b", "old-topic"]).unwrap();
+    traced_ai_commit_file(&repo, "old.txt", "old topic\n", "ai old topic");
+    repo.git(&["checkout", "main"]).unwrap();
+    traced_ai_commit_file(&repo, "main.txt", "main advance\n", "ai main advance");
+    repo.git(&["checkout", "old-topic"]).unwrap();
+    repo.git(&["rebase", "main"]).unwrap();
+    repo.git(&["checkout", "main"]).unwrap();
+
+    traced_ai_commit_file(
+        &repo,
+        "jokes-animals.csv",
+        "setup,punchline\nWhat do you call a bear with no teeth?,A gummy bear\n",
+        "ai initial jokes",
+    );
+    repo.git(&["checkout", "-b", "scenario-3-multi-file-conflict"])
+        .unwrap();
+    let feature_tip = traced_ai_commit_file(
+        &repo,
+        "jokes-animals.csv",
+        "setup,punchline\nWhat do you call a bear with no teeth?,A gummy bear\nWhat do you call a sleeping bull?,A dozer\n",
+        "ai bull joke",
+    );
+    repo.git(&["checkout", "main"]).unwrap();
+    traced_ai_commit_file(
+        &repo,
+        "jokes-animals.csv",
+        "setup,punchline\nWhat do you call a bear with no teeth?,A gummy bear\nWhat's a cat's favorite color?,Purr-ple\n",
+        "ai cat joke",
+    );
+
+    repo.restart_dedicated_daemon_for_test();
+    let rebase = repo.git(&["rebase", "main", "scenario-3-multi-file-conflict"]);
+    assert!(
+        rebase.is_err(),
+        "rebase should stop for a conflict, got: {:?}",
+        rebase
+    );
+    write_file(
+        &repo,
+        "jokes-animals.csv",
+        "setup,punchline\nWhat do you call a bear with no teeth?,A gummy bear\nWhat's a cat's favorite color?,Purr-ple\nWhat do you call a sleeping bull?,A dozer\n",
+    );
+    repo.git(&["add", "jokes-animals.csv"]).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
+    repo.sync_daemon_force();
+
+    let rebased = raw_head(&repo);
+    assert_ne!(rebased, feature_tip);
+    let mut file = repo.filename("jokes-animals.csv");
+    file.assert_committed_lines(crate::lines![
+        "setup,punchline".ai(),
+        "What do you call a bear with no teeth?,A gummy bear".ai(),
+        "What's a cat's favorite color?,Purr-ple".ai(),
+        "What do you call a sleeping bull?,A dozer".ai(),
+    ]);
 }
 
 #[test]
