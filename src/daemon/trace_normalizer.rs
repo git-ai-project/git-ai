@@ -42,6 +42,7 @@ pub struct TraceNormalizerState {
 pub struct DeferredRootExit {
     pub exit_code: i32,
     pub finished_at_ns: u128,
+    pub is_atexit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -245,8 +246,8 @@ impl<B: GitBackend> TraceNormalizer<B> {
             "cmd_name" => self.handle_cmd_name(payload, sid, &root_sid),
             "def_param" => self.handle_def_param(payload, &root_sid),
             "exec" => Ok(None),
-            "exit" => self.handle_exit(payload, sid, &root_sid, ts),
-            "atexit" => self.handle_exit(payload, sid, &root_sid, ts),
+            "exit" => self.handle_exit(payload, sid, &root_sid, ts, false),
+            "atexit" => self.handle_exit(payload, sid, &root_sid, ts, true),
             _ => Ok(None),
         }
     }
@@ -316,7 +317,16 @@ impl<B: GitBackend> TraceNormalizer<B> {
             pending.root_cmd_name = Some(prestart_cmd_name);
         }
         if let Some(deferred) = self.state.deferred_exits.remove(root_sid) {
-            return self.finalize_root_exit(root_sid, deferred.exit_code, deferred.finished_at_ns);
+            if deferred.is_atexit {
+                return self.finalize_root_exit(
+                    root_sid,
+                    deferred.exit_code,
+                    deferred.finished_at_ns,
+                );
+            }
+            self.state
+                .deferred_exits
+                .insert(root_sid.to_string(), deferred);
         }
 
         Ok(None)
@@ -460,6 +470,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
         sid: &str,
         root_sid: &str,
         finished_at_ns: u128,
+        is_atexit: bool,
     ) -> Result<Option<NormalizedCommand>, GitAiError> {
         if sid != root_sid {
             let _ = payload;
@@ -483,20 +494,44 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 .or_insert(DeferredRootExit {
                     exit_code,
                     finished_at_ns,
+                    is_atexit,
+                });
+            deferred.exit_code = exit_code;
+            deferred.is_atexit |= is_atexit;
+            if finished_at_ns > deferred.finished_at_ns {
+                deferred.finished_at_ns = finished_at_ns;
+            }
+            trace_debug_lifecycle(&format!(
+                "trace normalizer deferred terminal event sid={} code={} is_atexit={} (start not seen yet)",
+                root_sid, exit_code, is_atexit
+            ));
+            return Ok(None);
+        }
+
+        if !is_atexit {
+            let deferred = self
+                .state
+                .deferred_exits
+                .entry(root_sid.to_string())
+                .or_insert(DeferredRootExit {
+                    exit_code,
+                    finished_at_ns,
+                    is_atexit: false,
                 });
             deferred.exit_code = exit_code;
             if finished_at_ns > deferred.finished_at_ns {
                 deferred.finished_at_ns = finished_at_ns;
             }
             trace_debug_lifecycle(&format!(
-                "trace normalizer deferred exit sid={} code={} (start not seen yet)",
+                "trace normalizer observed exit sid={} code={} waiting for atexit",
                 root_sid, exit_code
             ));
             return Ok(None);
         }
 
+        self.state.deferred_exits.remove(root_sid);
         trace_debug_lifecycle(&format!(
-            "trace normalizer exit sid={} code={} pending_before_finalize={}",
+            "trace normalizer atexit sid={} code={} pending_before_finalize={}",
             root_sid,
             exit_code,
             self.state.pending.len()
@@ -1094,8 +1129,17 @@ mod tests {
         })
     }
 
+    fn atexit_payload(sid: &str, ts: u64) -> Value {
+        serde_json::json!({
+            "event": "atexit",
+            "sid": sid,
+            "ts": ts,
+            "code": 0,
+        })
+    }
+
     #[test]
-    fn normalizer_emits_one_command_for_start_exit() {
+    fn normalizer_emits_one_command_for_start_exit_atexit() {
         let backend = Arc::new(MockBackend::default());
         backend.set_family("/repo", "/repo/.git");
         let mut normalizer = TraceNormalizer::new(backend);
@@ -1113,9 +1157,16 @@ mod tests {
             "ts":2,
             "code":0
         });
+        let atexit = serde_json::json!({
+            "event":"atexit",
+            "sid":"s1",
+            "ts":3,
+            "code":0
+        });
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
-        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
         assert_eq!(cmd.root_sid, "s1");
         assert_eq!(cmd.primary_command.as_deref(), Some("status"));
         assert_eq!(cmd.exit_code, 0);
@@ -1145,6 +1196,43 @@ mod tests {
         let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
         assert_eq!(cmd.root_sid, "s1-atexit");
         assert_eq!(cmd.primary_command.as_deref(), Some("status"));
+        assert_eq!(cmd.exit_code, 0);
+    }
+
+    #[test]
+    fn normalizer_defers_root_completion_until_atexit() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_family("/repo", "/repo/.git");
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"s1-defer",
+            "ts":1,
+            "argv":["git","rebase","main","feature"],
+            "worktree":"/repo"
+        });
+        let exit = serde_json::json!({
+            "event":"exit",
+            "sid":"s1-defer",
+            "ts":2,
+            "code":0
+        });
+        let atexit = serde_json::json!({
+            "event":"atexit",
+            "sid":"s1-defer",
+            "ts":3,
+            "code":0
+        });
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(
+            normalizer.ingest_payload(&exit).unwrap().is_none(),
+            "trace2 exit fires before Git atexit cleanup, so it must not finalize reflog-driven side effects"
+        );
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
+        assert_eq!(cmd.root_sid, "s1-defer");
+        assert_eq!(cmd.primary_command.as_deref(), Some("rebase"));
         assert_eq!(cmd.exit_code, 0);
     }
 
@@ -1199,14 +1287,16 @@ mod tests {
             "ts":2,
             "code":0
         });
+        let atexit = atexit_payload("alias-commit", 3);
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
-        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
         assert_eq!(cmd.primary_command.as_deref(), Some("commit"));
     }
 
     #[test]
-    fn normalizer_errors_on_exit_without_start() {
+    fn normalizer_defers_exit_seen_before_start_until_atexit() {
         let backend = Arc::new(MockBackend::default());
         backend.set_family("/repo", "/repo/.git");
         let mut normalizer = TraceNormalizer::new(backend);
@@ -1224,9 +1314,16 @@ mod tests {
             "argv":["git","status"],
             "worktree":"/repo"
         });
+        let atexit = serde_json::json!({
+            "event":"atexit",
+            "sid":"s2",
+            "ts":11,
+            "code":0
+        });
 
         assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
-        let cmd = normalizer.ingest_payload(&start).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
         assert_eq!(cmd.root_sid, "s2");
         assert_eq!(cmd.primary_command.as_deref(), Some("status"));
         assert_eq!(cmd.exit_code, 0);
@@ -1257,10 +1354,12 @@ mod tests {
             "ts":3,
             "code":0
         });
+        let atexit = atexit_payload("s3", 4);
 
         normalizer.ingest_payload(&start).unwrap();
         normalizer.ingest_payload(&child).unwrap();
-        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
         assert_eq!(cmd.observed_child_commands, vec!["status".to_string()]);
         assert_eq!(cmd.primary_command.as_deref(), Some("status"));
     }
@@ -1302,6 +1401,7 @@ mod tests {
             "ts":5,
             "code":0
         });
+        let root_atexit = atexit_payload("s-exec", 6);
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
         assert!(normalizer.ingest_payload(&cmd_name).unwrap().is_none());
@@ -1309,7 +1409,8 @@ mod tests {
         assert!(normalizer.ingest_payload(&child_exit).unwrap().is_none());
         assert_eq!(normalizer.state().pending.len(), 1);
 
-        let cmd = normalizer.ingest_payload(&root_exit).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&root_exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&root_atexit).unwrap().unwrap();
         assert_eq!(cmd.root_sid, "s-exec");
         assert_eq!(cmd.primary_command.as_deref(), Some("notes"));
         assert_eq!(cmd.exit_code, 0);
@@ -1353,6 +1454,7 @@ mod tests {
             "ts":5,
             "code":0
         });
+        let root_atexit = atexit_payload("s-exec-oop", 6);
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
         assert!(normalizer.ingest_payload(&cmd_name).unwrap().is_none());
@@ -1360,7 +1462,8 @@ mod tests {
         assert_eq!(normalizer.state().pending.len(), 1);
 
         assert!(normalizer.ingest_payload(&exec).unwrap().is_none());
-        let cmd = normalizer.ingest_payload(&root_exit).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&root_exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&root_atexit).unwrap().unwrap();
         assert_eq!(cmd.root_sid, "s-exec-oop");
         assert_eq!(cmd.primary_command.as_deref(), Some("notes"));
         assert_eq!(cmd.exit_code, 0);
@@ -1395,10 +1498,12 @@ mod tests {
             "ts":3,
             "code":0
         });
+        let atexit = atexit_payload("clone-rel", 4);
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
         assert!(normalizer.ingest_payload(&def_repo).unwrap().is_none());
-        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
 
         assert_eq!(cmd.primary_command.as_deref(), Some("clone"));
         assert_eq!(cmd.worktree.as_ref(), Some(&clone_dir));
@@ -1439,6 +1544,7 @@ mod tests {
             "ts":4,
             "code":0
         });
+        let atexit = atexit_payload("clone-late-family", 5);
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
         assert!(normalizer.ingest_payload(&def_repo).unwrap().is_none());
@@ -1447,8 +1553,9 @@ mod tests {
         // Simulate repo discoverability only once clone is about to exit.
         fs::create_dir_all(clone_dir.join(".git")).expect("create clone git dir");
 
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
         let cmd = normalizer
-            .ingest_payload(&exit)
+            .ingest_payload(&atexit)
             .expect("clone finalize should not error")
             .expect("clone should emit a normalized command");
 
@@ -1485,10 +1592,12 @@ mod tests {
             "ts":3,
             "code":0
         });
+        let atexit = atexit_payload("clone-source-cwd", 4);
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
         assert!(normalizer.ingest_payload(&def_repo).unwrap().is_none());
-        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
 
         assert_eq!(cmd.primary_command.as_deref(), Some("clone"));
         assert_eq!(cmd.worktree.as_ref(), Some(&cloned_repo));
@@ -1545,6 +1654,7 @@ mod tests {
             "ts": 4,
             "code": 0
         });
+        let atexit = atexit_payload(root_sid, 5);
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
         assert!(normalizer.ingest_payload(&root_def_repo).unwrap().is_none());
@@ -1556,7 +1666,8 @@ mod tests {
                 .is_none()
         );
 
-        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
         assert_eq!(cmd.primary_command.as_deref(), Some("clone"));
         assert_eq!(
             cmd.worktree.as_ref(),
@@ -1582,9 +1693,11 @@ mod tests {
             "ts":2,
             "code":0
         });
+        let atexit = atexit_payload("s4", 3);
 
         normalizer.ingest_payload(&start).unwrap();
-        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
         assert!(matches!(cmd.scope, CommandScope::Global));
     }
 
@@ -1632,17 +1745,21 @@ mod tests {
             "ts":4,
             "code":0
         });
+        let atexit_b = atexit_payload("s-b", 5);
+        let atexit_a = atexit_payload("s-a", 6);
 
         assert!(normalizer.ingest_payload(&start_a).unwrap().is_none());
         assert!(normalizer.ingest_payload(&start_b).unwrap().is_none());
 
-        let cmd_b = normalizer.ingest_payload(&exit_b).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&exit_b).unwrap().is_none());
+        let cmd_b = normalizer.ingest_payload(&atexit_b).unwrap().unwrap();
         assert_eq!(cmd_b.root_sid, "s-b");
         assert_eq!(cmd_b.primary_command.as_deref(), Some("push"));
         assert_eq!(cmd_b.worktree.as_deref(), Some(repo_b.as_path()));
         assert!(matches!(cmd_b.scope, CommandScope::Family(_)));
 
-        let cmd_a = normalizer.ingest_payload(&exit_a).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&exit_a).unwrap().is_none());
+        let cmd_a = normalizer.ingest_payload(&atexit_a).unwrap().unwrap();
         assert_eq!(cmd_a.root_sid, "s-a");
         assert_eq!(cmd_a.primary_command.as_deref(), Some("commit"));
         assert_eq!(cmd_a.worktree.as_deref(), Some(repo_a.as_path()));
@@ -1704,12 +1821,14 @@ mod tests {
             "ts":4,
             "code":0
         });
+        let atexit = atexit_payload("s-repo-field", 5);
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
         assert!(normalizer.ingest_payload(&def_repo).unwrap().is_none());
         assert!(normalizer.ingest_payload(&cmd_name).unwrap().is_none());
 
-        let cmd = normalizer.ingest_payload(&exit).unwrap().unwrap();
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
         assert_eq!(cmd.worktree.as_deref(), Some(worker_worktree.as_path()));
     }
 
@@ -1734,12 +1853,14 @@ mod tests {
             "ts":2,
             "code":0
         });
+        let atexit = atexit_payload("stash-missing-meta", 3);
 
         assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&exit).unwrap().is_none());
         let cmd = normalizer
-            .ingest_payload(&exit)
+            .ingest_payload(&atexit)
             .expect("missing stash metadata should not block normalization")
-            .expect("exit payload should emit a normalized command");
+            .expect("atexit payload should emit a normalized command");
         assert!(cmd.stash_target_oid.is_none());
     }
 }

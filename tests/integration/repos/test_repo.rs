@@ -2093,7 +2093,9 @@ impl TestRepo {
         }
 
         let family_key = self.daemon_family_key();
+        self.sync_daemon_family(&self.path);
         self.sync_pending_daemon_sessions(&family_key);
+        self.sync_daemon_family(&self.path);
     }
 
     pub(crate) fn sync_daemon_external_completion_sessions(&self, sessions: &[String]) {
@@ -2128,6 +2130,39 @@ impl TestRepo {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         registry.mark_synced_through(&family_key, observed_count);
+        self.sync_daemon_family(target_repo_path);
+    }
+
+    fn sync_daemon_family(&self, repo_path: &Path) {
+        let repo_working_dir = repo_path
+            .canonicalize()
+            .unwrap_or_else(|_| repo_path.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+        let start = Instant::now();
+        loop {
+            match send_control_request(
+                &self.daemon_control_socket_path(),
+                &ControlRequest::SyncFamily {
+                    repo_working_dir: repo_working_dir.clone(),
+                },
+            ) {
+                Ok(response) if response.ok => return,
+                Ok(response) => {
+                    panic!(
+                        "daemon sync.family failed: {}",
+                        response
+                            .error
+                            .unwrap_or_else(|| "unknown daemon error".to_string())
+                    );
+                }
+                Err(error) if start.elapsed() < Duration::from_secs(5) => {
+                    std::thread::sleep(Duration::from_millis(25));
+                    let _ = error;
+                }
+                Err(error) => panic!("daemon sync.family failed: {}", error),
+            }
+        }
     }
 
     fn sync_pending_daemon_sessions(&self, family_key: &str) {

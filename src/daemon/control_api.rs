@@ -13,6 +13,8 @@ pub enum ControlRequest {
     Ping,
     #[serde(rename = "checkpoint.run")]
     CheckpointRun { request: Box<CheckpointRequest> },
+    #[serde(rename = "sync.family")]
+    SyncFamily { repo_working_dir: String },
     #[serde(rename = "status.family")]
     StatusFamily { repo_working_dir: String },
     #[serde(rename = "telemetry.submit")]

@@ -156,6 +156,273 @@ fn commit_ai_line(repo: &TestRepo, filename: &str, line: &str, message: &str) {
     file.assert_committed_lines(crate::lines![line.ai()]);
 }
 
+#[test]
+fn test_named_branch_conflict_rebase_keeps_feature_side_ai_attribution() {
+    let repo = TestRepo::new();
+    let animals_path = repo.path().join("jokes-animals.csv");
+    let dad_path = repo.path().join("jokes-dad.csv");
+
+    let animals_base = "\
+setup,punchline
+What do you call a bear with no teeth?,A gummy bear
+Why did the chicken go to the movie?,To see the hen-ema
+What do you call an alligator in a vest?,An investigator
+";
+    let dad_base = "\
+setup,punchline
+Why don't scientists trust atoms?,Because they make up everything
+What did the ocean say to the beach?,Nothing it just waved
+";
+
+    fs::write(&animals_path, animals_base).unwrap();
+    fs::write(&dad_path, dad_base).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-animals.csv"])
+        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-dad.csv"])
+        .unwrap();
+    repo.stage_all_and_commit("base jokes").unwrap();
+    let main_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "scenario-3-multi-file-conflict"])
+        .unwrap();
+    fs::write(
+        &animals_path,
+        format!("{animals_base}What do you call a sleeping bull?,A dozer\n"),
+    )
+    .unwrap();
+    fs::write(
+        &dad_path,
+        format!("{dad_base}What do you call a bear in the rain?,A drizzly bear\n"),
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-animals.csv"])
+        .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-dad.csv"])
+        .unwrap();
+    repo.stage_all_and_commit("Add bull and drizzly bear jokes")
+        .unwrap();
+    let feature_commit = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    repo.git(&["checkout", &main_branch]).unwrap();
+    fs::write(
+        &animals_path,
+        format!("{animals_base}What's a cat's favorite color?,Purr-ple\n"),
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "jokes-animals.csv"])
+        .unwrap();
+    repo.stage_all_and_commit("Add purple cat joke").unwrap();
+
+    let rebase_result = repo.git(&["rebase", &main_branch, "scenario-3-multi-file-conflict"]);
+    assert!(
+        rebase_result.is_err(),
+        "named-branch rebase should conflict on jokes-animals.csv"
+    );
+
+    fs::write(
+        &animals_path,
+        format!(
+            "{animals_base}What's a cat's favorite color?,Purr-ple\nWhat do you call a sleeping bull?,A dozer\n"
+        ),
+    )
+    .unwrap();
+    repo.git(&["add", "jokes-animals.csv"]).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
+
+    let rebased_head = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    assert_ne!(
+        rebased_head, feature_commit,
+        "rebase should rewrite the feature commit"
+    );
+    let note = repo
+        .read_authorship_note(&rebased_head)
+        .expect("rebased feature commit should have an authorship note");
+    assert!(
+        note.contains("jokes-animals.csv"),
+        "rebased note should retain conflict-file attribution: {note}"
+    );
+
+    let mut animals = repo.filename("jokes-animals.csv");
+    animals.assert_committed_lines(crate::lines![
+        "setup,punchline".ai(),
+        "What do you call a bear with no teeth?,A gummy bear".ai(),
+        "Why did the chicken go to the movie?,To see the hen-ema".ai(),
+        "What do you call an alligator in a vest?,An investigator".ai(),
+        "What's a cat's favorite color?,Purr-ple".ai(),
+        "What do you call a sleeping bull?,A dozer".ai(),
+    ]);
+}
+
+#[test]
+fn test_cherry_pick_conflict_ai_rewrite_resolution_is_attributed() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("conflict.csv");
+
+    let base = "id,value\nbase,seed\n";
+    fs::write(&file_path, base).unwrap();
+    repo.stage_all_and_commit("base").unwrap();
+    let main_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "source"]).unwrap();
+    fs::write(&file_path, format!("{base}feature,source\n")).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.csv"])
+        .unwrap();
+    repo.stage_all_and_commit("source line").unwrap();
+    let source_sha = repo.git(&["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    let mut file = repo.filename("conflict.csv");
+    file.assert_committed_lines(crate::lines![
+        "id,value".unattributed_human(),
+        "base,seed".unattributed_human(),
+        "feature,source".ai(),
+    ]);
+
+    repo.git(&["checkout", &main_branch]).unwrap();
+    fs::write(&file_path, format!("{base}main,target\n")).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.csv"])
+        .unwrap();
+    repo.stage_all_and_commit("main line").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "id,value".unattributed_human(),
+        "base,seed".unattributed_human(),
+        "main,target".ai(),
+    ]);
+
+    assert!(
+        repo.git(&["cherry-pick", &source_sha]).is_err(),
+        "cherry-pick should conflict"
+    );
+
+    repo.git_ai(&["checkpoint", "human", "conflict.csv"])
+        .unwrap();
+    fs::write(&file_path, format!("{base}main,target\nresolver,rewrite\n")).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.csv"])
+        .unwrap();
+    repo.git(&["add", "conflict.csv"]).unwrap();
+    repo.git_with_env(
+        &["cherry-pick", "--continue"],
+        &[("GIT_EDITOR", "true")],
+        None,
+    )
+    .unwrap();
+
+    file.assert_committed_lines(crate::lines![
+        "id,value".unattributed_human(),
+        "base,seed".unattributed_human(),
+        "main,target".ai(),
+        "resolver,rewrite".ai(),
+    ]);
+}
+
+#[test]
+fn test_squash_merge_conflict_keep_both_preserves_ai_attribution() {
+    let repo = TestRepo::new();
+    let file_path = repo.path().join("conflict.csv");
+
+    let base = "id,value\nbase,seed\n";
+    fs::write(&file_path, base).unwrap();
+    repo.stage_all_and_commit("base").unwrap();
+    let main_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    fs::write(&file_path, format!("{base}feature,squash\n")).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.csv"])
+        .unwrap();
+    repo.stage_all_and_commit("feature line").unwrap();
+    let mut file = repo.filename("conflict.csv");
+    file.assert_committed_lines(crate::lines![
+        "id,value".unattributed_human(),
+        "base,seed".unattributed_human(),
+        "feature,squash".ai(),
+    ]);
+
+    repo.git(&["checkout", &main_branch]).unwrap();
+    fs::write(&file_path, format!("{base}main,squash\n")).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.csv"])
+        .unwrap();
+    repo.stage_all_and_commit("main line").unwrap();
+    file.assert_committed_lines(crate::lines![
+        "id,value".unattributed_human(),
+        "base,seed".unattributed_human(),
+        "main,squash".ai(),
+    ]);
+
+    assert!(
+        repo.git(&["merge", "--squash", "feature"]).is_err(),
+        "squash merge should conflict"
+    );
+
+    repo.git_ai(&["checkpoint", "human", "conflict.csv"])
+        .unwrap();
+    fs::write(&file_path, format!("{base}main,squash\nfeature,squash\n")).unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.csv"])
+        .unwrap();
+    repo.git(&["add", "conflict.csv"]).unwrap();
+    repo.commit("squash feature").unwrap();
+
+    file.assert_committed_lines(crate::lines![
+        "id,value".unattributed_human(),
+        "base,seed".unattributed_human(),
+        "main,squash".ai(),
+        "feature,squash".ai(),
+    ]);
+}
+
+#[test]
+fn test_rebase_autostash_preserves_uncommitted_ai_worktree_attribution() {
+    let repo = TestRepo::new();
+    let committed_path = repo.path().join("committed.csv");
+    let worktree_path = repo.path().join("worktree.csv");
+
+    fs::write(&committed_path, "id,value\nbase,seed\n").unwrap();
+    fs::write(&worktree_path, "id,value\nwork,seed\n").unwrap();
+    repo.stage_all_and_commit("base").unwrap();
+    let main_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    fs::write(&committed_path, "id,value\nbase,seed\nfeature,rebase\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "committed.csv"])
+        .unwrap();
+    repo.stage_all_and_commit("feature committed line").unwrap();
+    let mut committed = repo.filename("committed.csv");
+    committed.assert_committed_lines(crate::lines![
+        "id,value".unattributed_human(),
+        "base,seed".unattributed_human(),
+        "feature,rebase".ai(),
+    ]);
+
+    fs::write(&worktree_path, "id,value\nwork,seed\nworktree,ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "worktree.csv"])
+        .unwrap();
+    let mut worktree = repo.filename("worktree.csv");
+
+    repo.git(&["stash", "push", "-m", "temporary-worktree"])
+        .unwrap();
+    repo.git(&["checkout", &main_branch]).unwrap();
+    fs::write(repo.path().join("main.csv"), "id,value\nmain,rebase\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "main.csv"]).unwrap();
+    repo.stage_all_and_commit("main unrelated line").unwrap();
+
+    repo.git(&["checkout", "feature"]).unwrap();
+    repo.git(&["stash", "pop"]).unwrap();
+
+    repo.git(&["rebase", &main_branch, "--autostash"]).unwrap();
+
+    committed.assert_lines_and_blame(crate::lines![
+        "id,value".unattributed_human(),
+        "base,seed".unattributed_human(),
+        "feature,rebase".ai(),
+    ]);
+
+    repo.git(&["add", "worktree.csv"]).unwrap();
+    repo.commit("commit autostashed worktree line").unwrap();
+    worktree.assert_committed_lines(crate::lines![
+        "id,value".unattributed_human(),
+        "work,seed".unattributed_human(),
+        "worktree,ai".ai(),
+    ]);
+}
+
 fn head_reflog(repo: &TestRepo) -> PathBuf {
     repo.path().join(".git/logs/HEAD")
 }
@@ -624,53 +891,15 @@ fn test_rebase_preserves_attribution() {
     file.assert_committed_lines(crate::lines!["base".ai(), "feature-ai".ai()]);
 }
 
-/// Minimal reproduction: hard reset erases working logs, subsequent AI checkpoints
-/// produce incomplete authorship notes.
-#[test]
-fn test_hard_reset_then_ai_checkpoint_loses_attribution() {
-    let repo = TestRepo::new();
-    let file_path = repo.path().join("main.txt");
-
-    // Initial commit
-    fs::write(&file_path, "base\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
-    repo.stage_all_and_commit("initial").unwrap();
-
-    // Second commit
-    fs::write(&file_path, "base\nextra\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
-    repo.git(&["add", "-A"]).unwrap();
-    repo.commit("second").unwrap();
-
-    // Hard reset back to initial
-    repo.git(&["reset", "--hard", "HEAD~1"]).unwrap();
-
-    // New AI edits after hard reset
-    fs::write(&file_path, "new-ai-1\nnew-ai-2\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
-    repo.git(&["add", "-A"]).unwrap();
-    repo.commit("after hard reset").unwrap();
-
-    let mut file = repo.filename("main.txt");
-    file.assert_committed_lines(crate::lines!["new-ai-1".ai(), "new-ai-2".ai(),]);
-}
-
 // =============================================================================
-// Category C: Race condition — checkpoint arrives before daemon processes reset
+// Category C: Reset sequencing before subsequent checkpoints
 //
-// Root cause: `git reset` fires a trace2 event that the daemon processes
-// asynchronously (via family sequencer). If a `git-ai checkpoint` arrives
-// before the daemon has updated working log state from the reset, the
-// checkpoint diff is computed against stale (pre-reset) state, producing
-// incomplete attribution (first line(s) missing from note).
-//
-// The race is between the trace2 ingest path (PendingRoot → ReadyCommand)
-// and the checkpoint path (FamilyMsg::ApplyCheckpoint).
+// A checkpoint immediately after reset must see working-log state after reset,
+// not stale state from the commit that reset just removed.
 // =============================================================================
 
-/// Demonstrates the race: no delay after reset → first AI line dropped.
 #[test]
-fn test_hard_reset_race_condition_no_delay() {
+fn test_hard_reset_then_ai_checkpoint_preserves_new_attribution() {
     let repo = TestRepo::new();
     let file_path = repo.path().join("main.txt");
 
@@ -708,34 +937,6 @@ fn test_overwrite_all_content_ai() {
     repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
     repo.git(&["add", "-A"]).unwrap();
     repo.commit("second").unwrap();
-
-    let mut file = repo.filename("main.txt");
-    file.assert_committed_lines(crate::lines!["new-1".ai(), "new-2".ai(),]);
-}
-
-/// Same test but with 200ms delay after reset — passes because daemon has time
-/// to process the trace2 event. Confirms the race condition diagnosis.
-#[test]
-fn test_hard_reset_race_condition_with_delay() {
-    let repo = TestRepo::new();
-    let file_path = repo.path().join("main.txt");
-
-    fs::write(&file_path, "base\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
-    repo.stage_all_and_commit("initial").unwrap();
-
-    fs::write(&file_path, "base\nextra\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
-    repo.git(&["add", "-A"]).unwrap();
-    repo.commit("second").unwrap();
-
-    repo.git(&["reset", "--hard", "HEAD~1"]).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(200));
-
-    fs::write(&file_path, "new-1\nnew-2\n").unwrap();
-    repo.git_ai(&["checkpoint", "mock_ai", "main.txt"]).unwrap();
-    repo.git(&["add", "-A"]).unwrap();
-    repo.commit("after reset").unwrap();
 
     let mut file = repo.filename("main.txt");
     file.assert_committed_lines(crate::lines!["new-1".ai(), "new-2".ai(),]);
@@ -978,9 +1179,8 @@ fn test_overbroad_after_hard_reset_overwrite_human() {
     repo.git(&["add", "-A"]).unwrap();
     repo.commit("second").unwrap();
 
-    // Hard reset back
+    // Hard reset back, then checkpoint immediately.
     repo.git(&["reset", "--hard", "HEAD~1"]).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(200));
 
     // AI OverwriteAll
     fs::write(&file_path, "Y-ai\nY-ai\n").unwrap();
@@ -1036,9 +1236,8 @@ fn test_overbroad_checkpoint_storm_then_reset_then_overwrite_human() {
     repo.git(&["add", "-A"]).unwrap();
     repo.commit("storm commit").unwrap();
 
-    // Hard reset back to initial (kills the storm commit)
+    // Hard reset back to initial, then checkpoint immediately.
     repo.git(&["reset", "--hard", "HEAD~1"]).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(200));
 
     // AI OverwriteAll
     fs::write(&file_path, "Y-1\nY-2\n").unwrap();
@@ -1079,9 +1278,8 @@ fn test_overbroad_storm_reset_overwrite_then_cherry_pick_abort() {
     repo.git(&["add", "-A"]).unwrap();
     repo.commit("storm").unwrap();
 
-    // Hard reset
+    // Hard reset, then checkpoint immediately.
     repo.git(&["reset", "--hard", "HEAD~1"]).unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(200));
 
     // OverwriteAll (AI) + Append (Human) + commit
     fs::write(&file_path, "Y-1\nY-2\n").unwrap();

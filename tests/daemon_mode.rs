@@ -110,6 +110,15 @@ fn send_trace_frames(trace_socket_path: &Path, payloads: &[Value]) {
     stream.flush().expect("failed to flush trace payloads");
 }
 
+fn trace_atexit_frame(sid: &str, code: i32, time_ns: u64) -> Value {
+    json!({
+        "event": "atexit",
+        "sid": sid,
+        "code": code,
+        "time_ns": time_ns,
+    })
+}
+
 #[cfg(not(windows))]
 fn write_trace_frames_to_stream(stream: &mut impl Write, payloads: &[Value]) {
     for payload in payloads {
@@ -891,11 +900,6 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
         daemon_control_socket_path(&repo).display(),
         repo_workdir_string(&repo)
     );
-    let _ = send_control_request(
-        &daemon_control_socket_path(&repo),
-        &ControlRequest::Shutdown,
-    );
-
     let checkpoints = repo
         .current_working_logs()
         .read_all_checkpoints()
@@ -905,6 +909,11 @@ fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
             .iter()
             .any(|checkpoint| checkpoint.kind == CheckpointKind::AiAgent),
         "delegated checkpoint should write ai_agent checkpoint via daemon"
+    );
+
+    let _ = send_control_request(
+        &daemon_control_socket_path(&repo),
+        &ControlRequest::Shutdown,
     );
 }
 
@@ -1290,12 +1299,14 @@ fn daemon_trace_current_dir_commands_reserve_order_from_def_repo() {
                 "code": 0,
                 "time_ns": 2_100u64,
             }),
+            trace_atexit_frame("current-dir-b", 0, 2_101u64),
             json!({
                 "event": "exit",
                 "sid": "current-dir-a",
                 "code": 0,
                 "time_ns": 1_100u64,
             }),
+            trace_atexit_frame("current-dir-a", 0, 1_101u64),
         ],
     );
     repo.sync_daemon_external_completion_sessions(&[session_a, session_b]);
@@ -1351,6 +1362,7 @@ fn daemon_trace_listener_stalled_connection_does_not_block_later_trace_connectio
                 "code": 0,
                 "time_ns": 10_100u64,
             }),
+            trace_atexit_frame("stalled-listener-followup", 0, 10_101u64),
         ],
     );
 
@@ -1415,6 +1427,7 @@ fn daemon_trace_listener_partial_line_does_not_block_later_trace_connections() {
                 "code": 0,
                 "time_ns": 10_100u64,
             }),
+            trace_atexit_frame("partial-listener-followup", 0, 10_101u64),
         ],
     );
 
@@ -1546,6 +1559,7 @@ fn daemon_windows_trace_pipe_worker_exhaustion_does_not_block_later_trace_connec
                 "code": 0,
                 "time_ns": 15_100u64,
             }),
+            trace_atexit_frame("windows-exhaustion-followup", 0, 15_101u64),
         ],
     );
 
@@ -1716,6 +1730,7 @@ fn daemon_failed_rebase_does_not_consume_later_continue_reflog_entry() {
                 "code": 1,
                 "time_ns": 1_100u64,
             }),
+            trace_atexit_frame("failed-rebase-start", 1, 1_101u64),
             json!({
                 "event": "start",
                 "sid": "rebase-continue",
@@ -1735,6 +1750,7 @@ fn daemon_failed_rebase_does_not_consume_later_continue_reflog_entry() {
                 "code": 0,
                 "time_ns": 2_100u64,
             }),
+            trace_atexit_frame("rebase-continue", 0, 2_101u64),
         ],
     );
     repo.sync_daemon_external_completion_sessions(&[rebase_session, continue_session]);
@@ -1830,6 +1846,7 @@ fn daemon_failed_rebase_does_not_consume_later_skip_reflog_entry() {
                 "code": 1,
                 "time_ns": 1_100u64,
             }),
+            trace_atexit_frame("failed-rebase-before-skip", 1, 1_101u64),
             json!({
                 "event": "start",
                 "sid": "rebase-skip",
@@ -1849,6 +1866,7 @@ fn daemon_failed_rebase_does_not_consume_later_skip_reflog_entry() {
                 "code": 0,
                 "time_ns": 2_100u64,
             }),
+            trace_atexit_frame("rebase-skip", 0, 2_101u64),
         ],
     );
     repo.sync_daemon_external_completion_sessions(&[rebase_session, skip_session]);
@@ -3364,6 +3382,7 @@ fn daemon_delayed_pull_rebase_autostash_does_not_consume_later_commit() {
                 "code": 0,
                 "time_ns": 1_100u64,
             }),
+            trace_atexit_frame("delayed-pull-autostash", 0, 1_101u64),
             json!({
                 "event": "start",
                 "sid": "delayed-commit-after-pull",
@@ -3383,6 +3402,7 @@ fn daemon_delayed_pull_rebase_autostash_does_not_consume_later_commit() {
                 "code": 0,
                 "time_ns": 2_100u64,
             }),
+            trace_atexit_frame("delayed-commit-after-pull", 0, 2_101u64),
         ],
     );
     local.sync_daemon_external_completion_sessions(&[pull_session, commit_session]);
@@ -3522,6 +3542,7 @@ fn daemon_delayed_failed_rebase_continue_does_not_consume_final_continue() {
                 "code": 1,
                 "time_ns": 1_100u64,
             }),
+            trace_atexit_frame("delayed-rebase-start", 1, 1_101u64),
             json!({
                 "event": "start",
                 "sid": "delayed-first-rebase-continue",
@@ -3541,6 +3562,7 @@ fn daemon_delayed_failed_rebase_continue_does_not_consume_final_continue() {
                 "code": 1,
                 "time_ns": 2_100u64,
             }),
+            trace_atexit_frame("delayed-first-rebase-continue", 1, 2_101u64),
             json!({
                 "event": "start",
                 "sid": "delayed-final-rebase-continue",
@@ -3560,6 +3582,7 @@ fn daemon_delayed_failed_rebase_continue_does_not_consume_final_continue() {
                 "code": 0,
                 "time_ns": 3_100u64,
             }),
+            trace_atexit_frame("delayed-final-rebase-continue", 0, 3_101u64),
         ],
     );
     repo.sync_daemon_external_completion_sessions(&[
@@ -3911,7 +3934,7 @@ fn daemon_memory_does_not_grow_unbounded_under_trace_load() {
 
     let worktree_str = repo.path().to_string_lossy().to_string();
 
-    // Send 2000 complete git trace lifecycle rounds (start + exit).
+    // Send 2000 complete git trace lifecycle rounds (start + exit + atexit).
     // Each round simulates a complete `git status` invocation with a unique SID.
     for batch in 0..20 {
         let mut frames = Vec::new();
@@ -3935,6 +3958,11 @@ fn daemon_memory_does_not_grow_unbounded_under_trace_load() {
                 "code": 0,
                 "time_ns": 1000000001u64 + (batch * 100) as u64 + i,
             }));
+            frames.push(trace_atexit_frame(
+                &sid,
+                0,
+                1000000002u64 + (batch * 100) as u64 + i,
+            ));
         }
         send_trace_frames(&guard.trace_socket_path, &frames);
         // Small delay to let the daemon process frames.

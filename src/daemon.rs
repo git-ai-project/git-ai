@@ -322,7 +322,7 @@ fn trace_root_sid(sid: &str) -> &str {
 }
 
 fn is_terminal_root_trace_event(event: &str, sid: &str, root: &str) -> bool {
-    sid == root && matches!(event, "exit" | "atexit")
+    sid == root && event == "atexit"
 }
 
 fn daemon_worktree_from_repo_path(repo_path: &Path) -> Option<PathBuf> {
@@ -794,10 +794,6 @@ fn process_conflict_resolution_working_logs(
     let author = repo.git_author_identity().formatted_or_unknown();
 
     for (commit_sha, parent_sha) in commit_parent_pairs {
-        if !repo.storage.has_working_log(&parent_sha) {
-            continue;
-        }
-
         let existing_shifted_log = existing_notes
             .get(&commit_sha)
             .and_then(|raw| AuthorshipLog::deserialize_from_string(raw).ok());
@@ -805,38 +801,58 @@ fn process_conflict_resolution_working_logs(
             .get(&commit_sha)
             .cloned()
             .unwrap_or_default();
-        let commit_for_transform = commit_sha.clone();
-        let commit_for_log = commit_sha.clone();
-        if let Err(err) =
-            crate::authorship::post_commit::post_commit_from_working_log_with_transform_and_options(
-                repo,
-                Some(parent_sha),
-                commit_sha,
-                author.clone(),
-                crate::authorship::post_commit::PostCommitOptions {
-                    supress_output: true,
-                    compute_stats: false,
-                },
-                move |resolution_log| {
-                    Ok(
-                        crate::authorship::conflict_resolution::merge_conflict_resolution_authorship(
-                        repo,
-                        existing_shifted_log,
-                        resolution_log,
-                        &source_shas,
-                        &commit_for_transform,
-                    ),
-                    )
-                },
-            )
-        {
+        if let Err(err) = post_conflict_resolution_working_log(
+            repo,
+            &parent_sha,
+            &commit_sha,
+            author.clone(),
+            existing_shifted_log,
+            source_shas,
+        ) {
             tracing::debug!(
                 "failed to merge rebase conflict resolution authorship for {}: {}",
-                commit_for_log,
+                commit_sha,
                 err
             );
         }
     }
+}
+
+fn post_conflict_resolution_working_log(
+    repo: &Repository,
+    parent_sha: &str,
+    commit_sha: &str,
+    author: String,
+    existing_shifted_log: Option<AuthorshipLog>,
+    source_shas: Vec<String>,
+) -> Result<(), GitAiError> {
+    if !repo.storage.has_working_log(parent_sha) {
+        return Ok(());
+    }
+
+    let commit_for_transform = commit_sha.to_string();
+    crate::authorship::post_commit::post_commit_from_working_log_with_transform_and_options(
+        repo,
+        Some(parent_sha.to_string()),
+        commit_sha.to_string(),
+        author,
+        crate::authorship::post_commit::PostCommitOptions {
+            supress_output: true,
+            compute_stats: false,
+        },
+        move |resolution_log| {
+            Ok(
+                crate::authorship::conflict_resolution::merge_conflict_resolution_authorship(
+                    repo,
+                    existing_shifted_log,
+                    resolution_log,
+                    &source_shas,
+                    &commit_for_transform,
+                ),
+            )
+        },
+    )
+    .map(|_| ())
 }
 
 fn rfc3339_to_unix_nanos(value: &str) -> Option<u128> {
@@ -1421,8 +1437,23 @@ fn cherry_pick_destination_commits(cmd: &crate::daemon::domain::NormalizedComman
         .collect()
 }
 
+fn cherry_pick_original_head(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<String> {
+    cmd.ref_changes
+        .iter()
+        .find(|change| {
+            change.reference == "HEAD"
+                && is_valid_oid(&change.old)
+                && !is_zero_oid(&change.old)
+                && is_valid_oid(&change.new)
+                && !is_zero_oid(&change.new)
+                && change.old != change.new
+        })
+        .map(|change| change.old.clone())
+}
+
 fn apply_cherry_pick_complete_rewrite(
     repo: &crate::git::repository::Repository,
+    original_head: &str,
     sources: &[String],
     new_commits: &[String],
 ) -> Result<(), GitAiError> {
@@ -1434,14 +1465,47 @@ fn apply_cherry_pick_complete_rewrite(
     if pairs.is_empty() {
         return Ok(());
     }
+    let sources_by_destination: HashMap<String, Vec<String>> =
+        pairs
+            .iter()
+            .fold(HashMap::new(), |mut acc, (source, destination)| {
+                acc.entry(destination.clone())
+                    .or_default()
+                    .push(source.clone());
+                acc
+            });
     let (src, dst): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
     crate::authorship::rewrite::handle_rewrite_event(
         repo,
         crate::authorship::rewrite::RewriteEvent::CherryPickComplete {
             sources: src,
-            new_commits: dst,
+            new_commits: dst.clone(),
         },
-    )
+    )?;
+
+    let existing_notes = crate::git::notes_api::read_notes_batch(repo, &dst).unwrap_or_default();
+    let author = repo.git_author_identity().formatted_or_unknown();
+    let mut parent = original_head.to_string();
+    for commit_sha in new_commits {
+        let existing_shifted_log = existing_notes
+            .get(commit_sha)
+            .and_then(|raw| AuthorshipLog::deserialize_from_string(raw).ok());
+        let source_shas = sources_by_destination
+            .get(commit_sha)
+            .cloned()
+            .unwrap_or_default();
+        post_conflict_resolution_working_log(
+            repo,
+            &parent,
+            commit_sha,
+            author.clone(),
+            existing_shifted_log,
+            source_shas,
+        )?;
+        parent = commit_sha.clone();
+    }
+
+    Ok(())
 }
 
 fn apply_cherry_pick_no_commit_rewrite(
@@ -1910,6 +1974,7 @@ struct TraceIngressState {
     /// subsequent events for these roots (including exit) take the fast path.
     root_definitely_read_only: HashSet<String>,
     root_open_connections: HashMap<String, usize>,
+    unidentified_open_connections: usize,
 }
 
 #[doc(hidden)]
@@ -2540,19 +2605,43 @@ impl ActorDaemonCoordinator {
     }
 
     fn record_trace_connection_close(&self, roots: &[String]) -> Result<(), GitAiError> {
+        {
+            let mut ingress = self.trace_ingress_state.lock().map_err(|_| {
+                GitAiError::Generic("trace ingress state lock poisoned".to_string())
+            })?;
+            for root_sid in roots {
+                if let Some(count) = ingress.root_open_connections.get_mut(root_sid) {
+                    if *count > 1 {
+                        *count -= 1;
+                        continue;
+                    }
+                    ingress.root_open_connections.remove(root_sid);
+                }
+            }
+        }
+        self.trace_ingest_progress_notify.notify_waiters();
+        Ok(())
+    }
+
+    fn trace_unidentified_connection_opened(&self) -> Result<(), GitAiError> {
         let mut ingress = self
             .trace_ingress_state
             .lock()
             .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
-        for root_sid in roots {
-            if let Some(count) = ingress.root_open_connections.get_mut(root_sid) {
-                if *count > 1 {
-                    *count -= 1;
-                    continue;
-                }
-                ingress.root_open_connections.remove(root_sid);
-            }
-        }
+        ingress.unidentified_open_connections =
+            ingress.unidentified_open_connections.saturating_add(1);
+        self.trace_ingest_progress_notify.notify_waiters();
+        Ok(())
+    }
+
+    fn trace_unidentified_connection_identified_or_closed(&self) -> Result<(), GitAiError> {
+        let mut ingress = self
+            .trace_ingress_state
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
+        ingress.unidentified_open_connections =
+            ingress.unidentified_open_connections.saturating_sub(1);
+        self.trace_ingest_progress_notify.notify_waiters();
         Ok(())
     }
 
@@ -2599,24 +2688,38 @@ impl ActorDaemonCoordinator {
     }
 
     fn clear_trace_root_tracking(&self, root_sid: &str) -> Result<(), GitAiError> {
-        let mut ingress = self
-            .trace_ingress_state
-            .lock()
-            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
-        ingress.root_worktrees.remove(root_sid);
-        ingress.root_families.remove(root_sid);
-        ingress.root_argv.remove(root_sid);
-        ingress.root_started_at_ns.remove(root_sid);
-        ingress.root_mutating.remove(root_sid);
-        ingress.root_target_repo_only.remove(root_sid);
-        ingress.root_last_activity_ns.remove(root_sid);
-        ingress.root_definitely_read_only.remove(root_sid);
-        ingress.root_open_connections.remove(root_sid);
+        {
+            let mut ingress = self.trace_ingress_state.lock().map_err(|_| {
+                GitAiError::Generic("trace ingress state lock poisoned".to_string())
+            })?;
+            ingress.root_worktrees.remove(root_sid);
+            ingress.root_families.remove(root_sid);
+            ingress.root_argv.remove(root_sid);
+            ingress.root_started_at_ns.remove(root_sid);
+            ingress.root_mutating.remove(root_sid);
+            ingress.root_target_repo_only.remove(root_sid);
+            ingress.root_last_activity_ns.remove(root_sid);
+            ingress.root_definitely_read_only.remove(root_sid);
+            ingress.root_open_connections.remove(root_sid);
+        }
         let mut queued = self.queued_trace_payloads_by_root.lock().map_err(|_| {
             GitAiError::Generic("queued trace payloads by root lock poisoned".to_string())
         })?;
         queued.remove(root_sid);
+        self.trace_ingest_progress_notify.notify_waiters();
         Ok(())
+    }
+
+    fn has_open_trace_roots_that_may_mutate_refs(&self) -> bool {
+        let Ok(ingress) = self.trace_ingress_state.lock() else {
+            return false;
+        };
+        ingress.unidentified_open_connections > 0
+            || ingress.root_open_connections.iter().any(|(root, count)| {
+                *count > 0
+                    && !ingress.root_definitely_read_only.contains(root)
+                    && ingress.root_mutating.get(root).copied().unwrap_or(true)
+            })
     }
 
     fn next_trace_ingest_seq(&self) -> u64 {
@@ -2862,31 +2965,40 @@ impl ActorDaemonCoordinator {
     }
 
     /// Waits until all trace payloads enqueued up to now have been processed
-    /// by the ingest worker. This is a causal drain fence: it guarantees that
-    /// any trace2 event already in the ingest queue (e.g., from a `git reset`
-    /// that exited before this function was called) has been fully processed
-    /// before returning.
+    /// by the ingest worker, and any observed trace connection that may mutate
+    /// refs has closed. This is a causal drain fence: it guarantees that trace2
+    /// data already visible to the daemon for prior mutating git operations
+    /// has reached the family sequencer before returning.
     ///
     /// Used by checkpoint entry to ensure ordering: a checkpoint must not be
-    /// processed until all causally-prior git operations have been ingested.
+    /// processed until all causally-prior git operations have been ingested
+    /// through their root `atexit`/connection-close boundary.
     async fn wait_for_trace_ingest_processed_through(&self) {
-        // Read the current high-water mark. Any payload enqueued before this
-        // point has a seq <= this value. We need to wait until the ingest
-        // worker has processed through at least this seq.
-        let target_seq = self.next_trace_ingest_seq.load(Ordering::Acquire) as u64;
-        if target_seq == 0 {
-            return;
-        }
-        // next_trace_ingest_seq stores the last assigned sequence value. Because
-        // enqueue_trace_payload reserves capacity before assigning a sequence,
-        // there are no intentional gaps between this target and the ingest queue.
-        let target = target_seq;
         loop {
-            let processed = self.processed_trace_ingest_seq.load(Ordering::Acquire) as u64;
-            if processed >= target {
+            // Read the current high-water mark. Any payload enqueued before this
+            // point has a seq <= this value. We need to wait until the ingest
+            // worker has processed through at least this seq.
+            let target = self.next_trace_ingest_seq.load(Ordering::Acquire) as u64;
+            loop {
+                let processed = self.processed_trace_ingest_seq.load(Ordering::Acquire) as u64;
+                if processed >= target {
+                    break;
+                }
+                let progress = self.trace_ingest_progress_notify.notified();
+                tokio::select! {
+                    _ = progress => {}
+                    _ = self.wait_for_shutdown() => return,
+                }
+            }
+
+            if !self.has_open_trace_roots_that_may_mutate_refs() {
                 return;
             }
+
             let progress = self.trace_ingest_progress_notify.notified();
+            if !self.has_open_trace_roots_that_may_mutate_refs() {
+                return;
+            }
             tokio::select! {
                 _ = progress => {}
                 _ = self.wait_for_shutdown() => return,
@@ -3050,10 +3162,8 @@ impl ActorDaemonCoordinator {
         request: CheckpointRequest,
         respond_to: Option<oneshot::Sender<Result<u64, GitAiError>>>,
     ) -> Result<(), GitAiError> {
-        // Causal drain fence: ensure all trace2 events already in the ingest
-        // queue have been processed before we insert this checkpoint. Without
-        // this, a checkpoint can race ahead of a git reset/rebase trace2 event
-        // and compute its diff against stale working-log state.
+        // Causal drain fence: ensure already-visible trace2 work has reached
+        // the family sequencer before inserting this checkpoint.
         self.wait_for_trace_ingest_processed_through().await;
 
         let exec_lock = self.side_effect_exec_lock(family)?;
@@ -4048,11 +4158,14 @@ impl ActorDaemonCoordinator {
                     let new_commits = cherry_pick_destination_commits(cmd);
                     if !new_commits.is_empty() && !cmd.cherry_pick_source_oids.is_empty() {
                         let repo = find_repository_in_path(&worktree.to_string_lossy())?;
-                        let _ = apply_cherry_pick_complete_rewrite(
-                            &repo,
-                            &cmd.cherry_pick_source_oids,
-                            &new_commits,
-                        );
+                        if let Some(original_head) = cherry_pick_original_head(cmd) {
+                            let _ = apply_cherry_pick_complete_rewrite(
+                                &repo,
+                                &original_head,
+                                &cmd.cherry_pick_source_oids,
+                                &new_commits,
+                            );
+                        }
                     }
                     let remaining = cmd
                         .cherry_pick_source_oids
@@ -4091,7 +4204,14 @@ impl ActorDaemonCoordinator {
                         }
                     )
                 });
-            if !is_merge_checkout && !is_stash_restore {
+            let is_merge_squash = cmd.primary_command.as_deref() == Some("merge")
+                && events.iter().any(|event| {
+                    matches!(
+                        event,
+                        crate::daemon::domain::SemanticEvent::MergeSquash { .. }
+                    )
+                });
+            if !is_merge_checkout && !is_stash_restore && !is_merge_squash {
                 return Ok(());
             }
             if is_stash_restore {
@@ -4155,6 +4275,7 @@ impl ActorDaemonCoordinator {
                             if !sources.is_empty() && original_head != new_head {
                                 let _ = apply_cherry_pick_complete_rewrite(
                                     &repo,
+                                    original_head,
                                     &sources,
                                     &destinations,
                                 );
@@ -4649,6 +4770,18 @@ impl ActorDaemonCoordinator {
         })
     }
 
+    async fn sync_family(&self, repo_working_dir: String) -> Result<FamilyStatus, GitAiError> {
+        let family = self.backend.resolve_family(Path::new(&repo_working_dir))?;
+        self.wait_for_trace_ingest_processed_through().await;
+
+        let exec_lock = self.side_effect_exec_lock(&family.0)?;
+        let _guard = exec_lock.lock().await;
+        self.drain_ready_family_sequencer_entries_locked(&family.0)
+            .await?;
+
+        self.status_for_family(repo_working_dir).await
+    }
+
     async fn handle_control_request(&self, request: ControlRequest) -> ControlResponse {
         let result = match request {
             ControlRequest::Ping => Ok(ControlResponse::ok(None, None)),
@@ -4680,6 +4813,13 @@ impl ActorDaemonCoordinator {
                 }
 
                 self.ingest_checkpoint_payload(*request).await
+            }
+            ControlRequest::SyncFamily { repo_working_dir } => {
+                self.sync_family(repo_working_dir).await.and_then(|status| {
+                    serde_json::to_value(status)
+                        .map(|v| ControlResponse::ok(None, Some(v)))
+                        .map_err(GitAiError::from)
+                })
             }
             ControlRequest::StatusFamily { repo_working_dir } => self
                 .status_for_family(repo_working_dir)
@@ -5066,6 +5206,10 @@ fn trace_listener_loop_actor(
             let Ok(stream) = stream else {
                 continue;
             };
+            if let Err(error) = coordinator.trace_unidentified_connection_opened() {
+                tracing::debug!(%error, "trace connection open bookkeeping error");
+                continue;
+            }
             if let Err(error) =
                 stream.set_recv_timeout(Some(TRACE_CONNECTION_BOOTSTRAP_READ_TIMEOUT))
             {
@@ -5126,6 +5270,7 @@ fn trace_listener_loop_actor(
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
             }
             let coord = coordinator.clone();
+            let observed_roots_on_spawn_failure = observed_roots.clone();
             if std::thread::Builder::new()
                 .spawn(move || {
                     if let Err(e) =
@@ -5137,6 +5282,15 @@ fn trace_listener_loop_actor(
                 .is_err()
             {
                 tracing::error!("trace listener: failed to spawn handler thread");
+                if let Err(error) = finalize_trace_connection_roots(
+                    coordinator.clone(),
+                    observed_roots_on_spawn_failure,
+                ) {
+                    tracing::debug!(
+                        %error,
+                        "trace connection close bookkeeping error"
+                    );
+                }
                 break;
             }
         }
@@ -5235,6 +5389,10 @@ fn handle_windows_trace_pipe_connection(
     mut server: WindowsPipeServer,
     coordinator: Arc<ActorDaemonCoordinator>,
 ) {
+    if let Err(e) = coordinator.trace_unidentified_connection_opened() {
+        tracing::debug!(%e, "trace connection open bookkeeping error");
+        return;
+    }
     let reader = BufReader::new(&mut server);
     if let Err(e) =
         handle_trace_connection_actor_reader(reader, coordinator, std::collections::BTreeSet::new())
@@ -5249,6 +5407,7 @@ fn handle_trace_connection_actor(
     stream: LocalSocketStream,
     coordinator: Arc<ActorDaemonCoordinator>,
 ) -> Result<(), GitAiError> {
+    coordinator.trace_unidentified_connection_opened()?;
     let reader = BufReader::new(stream);
     handle_trace_connection_actor_reader(reader, coordinator, std::collections::BTreeSet::new())
 }
@@ -5349,6 +5508,7 @@ fn process_trace_connection_line(
     #[cfg(not(windows))]
     let mut bootstrap_complete = false;
     if let Some(sid) = parsed.get("sid").and_then(Value::as_str) {
+        let was_unidentified = observed_roots.is_empty();
         let root_sid = trace_root_sid(sid).to_string();
         // `start` carries argv but not the worktree. Keep bootstrapping on the
         // listener thread until the root `def_repo` event has been processed;
@@ -5360,6 +5520,9 @@ fn process_trace_connection_line(
         }
         if observed_roots.insert(root_sid.clone()) {
             let _ = coordinator.trace_root_connection_opened(&root_sid);
+        }
+        if was_unidentified {
+            coordinator.trace_unidentified_connection_identified_or_closed()?;
         }
     }
     // Only enqueue payloads for mutating commands.  Read-only invocations
@@ -5381,6 +5544,7 @@ fn finalize_trace_connection_roots(
     observed_roots: std::collections::BTreeSet<String>,
 ) -> Result<(), GitAiError> {
     if observed_roots.is_empty() {
+        coordinator.trace_unidentified_connection_identified_or_closed()?;
         return Ok(());
     }
 
@@ -5882,6 +6046,10 @@ fn checkpoint_control_response_timeout(
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         }
         ControlRequest::CheckpointRun { .. } => DAEMON_CONTROL_RESPONSE_TIMEOUT,
+        ControlRequest::SyncFamily { .. } if use_ci_or_test_budget => {
+            DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
+        }
+        ControlRequest::SyncFamily { .. } => DAEMON_CONTROL_RESPONSE_TIMEOUT,
         ControlRequest::SnapshotWatermarks { .. } => Duration::from_millis(500),
         _ => DAEMON_CONTROL_RESPONSE_TIMEOUT,
     }
@@ -6005,22 +6173,43 @@ fn write_all_daemon_client_stream(
 fn read_daemon_client_line(
     reader: &mut BufReader<DaemonClientStream>,
     socket_path: &Path,
+    response_timeout: Duration,
 ) -> Result<String, GitAiError> {
     let mut line = String::new();
-    let read = reader.read_line(&mut line).map_err(|e| {
-        GitAiError::Generic(format!(
-            "failed reading daemon response from {}: {}",
-            socket_path.display(),
-            e
-        ))
-    })?;
-    if read == 0 {
-        return Err(GitAiError::Generic(format!(
-            "daemon socket {} closed without a response",
-            socket_path.display()
-        )));
+    let deadline = std::time::Instant::now() + response_timeout;
+    loop {
+        match reader.read_line(&mut line) {
+            Ok(0) => {
+                return Err(GitAiError::Generic(format!(
+                    "daemon socket {} closed without a response",
+                    socket_path.display()
+                )));
+            }
+            Ok(_) => return Ok(line),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                if std::time::Instant::now() >= deadline {
+                    return Err(GitAiError::Generic(format!(
+                        "timed out after {:?} reading daemon response from {}",
+                        response_timeout,
+                        socket_path.display()
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => {
+                return Err(GitAiError::Generic(format!(
+                    "failed reading daemon response from {}: {}",
+                    socket_path.display(),
+                    error
+                )));
+            }
+        }
     }
-    Ok(line)
 }
 
 #[cfg(windows)]
@@ -6037,7 +6226,7 @@ fn send_control_request_with_timeouts_windows(
     write_all_daemon_client_stream(&mut stream, socket_path, &body)?;
 
     let mut response_reader = BufReader::new(stream);
-    let line = read_daemon_client_line(&mut response_reader, socket_path)?;
+    let line = read_daemon_client_line(&mut response_reader, socket_path, response_timeout)?;
     if line.trim().is_empty() {
         return Err(GitAiError::Generic(
             "empty daemon control response".to_string(),
@@ -6060,7 +6249,7 @@ fn send_control_request_with_timeouts_unix(
     write_all_daemon_client_stream(&mut stream, socket_path, &body)?;
 
     let mut response_reader = BufReader::new(stream);
-    let line = read_daemon_client_line(&mut response_reader, socket_path)?;
+    let line = read_daemon_client_line(&mut response_reader, socket_path, response_timeout)?;
     if line.trim().is_empty() {
         return Err(GitAiError::Generic(
             "empty daemon control response".to_string(),
@@ -6400,6 +6589,17 @@ mod tests {
         })
     }
 
+    #[test]
+    fn exit_is_not_a_root_completion_boundary() {
+        let sid = "20260411T120000.000000-Psid1";
+
+        assert!(
+            !is_terminal_root_trace_event("exit", sid, sid),
+            "trace2 exit can fire before Git atexit cleanup and must not complete root processing"
+        );
+        assert!(is_terminal_root_trace_event("atexit", sid, sid));
+    }
+
     #[tokio::test]
     async fn readonly_start_event_is_not_enqueued() {
         let coord = ActorDaemonCoordinator::new();
@@ -6563,6 +6763,64 @@ mod tests {
             "enqueue must allocate an ingest sequence number"
         );
         coord.request_shutdown();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_fence_waits_for_open_mutating_trace_root() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let sid = "20260411T120000.000000-Psid1";
+        coord.trace_root_connection_opened(sid).unwrap();
+        let mut payload = make_start_payload(&["git", "commit", "-m", "test commit"]);
+        assert!(
+            coord.prepare_trace_payload_for_ingest(&mut payload),
+            "commit start should mark the root as mutating"
+        );
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                coord.wait_for_trace_ingest_processed_through()
+            )
+            .await
+            .is_err(),
+            "checkpoint fence must not pass while a mutating trace root is still open"
+        );
+
+        coord
+            .record_trace_connection_close(&[sid.to_string()])
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            coord.wait_for_trace_ingest_processed_through(),
+        )
+        .await
+        .expect("checkpoint fence should pass once the mutating trace root closes");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_fence_waits_for_unidentified_trace_connection() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        coord.trace_unidentified_connection_opened().unwrap();
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                coord.wait_for_trace_ingest_processed_through()
+            )
+            .await
+            .is_err(),
+            "checkpoint fence must not pass while an accepted trace connection has no root yet"
+        );
+
+        coord
+            .trace_unidentified_connection_identified_or_closed()
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            coord.wait_for_trace_ingest_processed_through(),
+        )
+        .await
+        .expect("checkpoint fence should pass once the unidentified connection is resolved");
     }
 
     #[tokio::test]

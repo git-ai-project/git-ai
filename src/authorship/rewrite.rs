@@ -51,7 +51,7 @@ pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<()
             }
             let source_shas: Vec<String> = mappings.iter().map(|(src, _)| src.clone()).collect();
             crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, &source_shas);
-            shift_authorship_notes(repo, &mappings)
+            shift_authorship_notes_merging_existing(repo, &mappings)
         }
     }
 }
@@ -80,14 +80,11 @@ fn handle_squash_merge(
 ) -> Result<(), GitAiError> {
     use crate::authorship::hunk_shift::apply_hunk_shifts_to_file_attestation;
 
-    // Check if target already has non-empty attestations (e.g. from post-commit hook)
     let target_notes = notes_api::read_notes_batch(repo, &[squash_commit.to_string()])?;
-    if let Some(existing_raw) = target_notes.get(squash_commit)
-        && let Ok(existing_log) = AuthorshipLog::deserialize_from_string(existing_raw)
-        && !existing_log.attestations.is_empty()
-    {
-        return Ok(());
-    }
+    let existing_target_log = target_notes
+        .get(squash_commit)
+        .and_then(|raw| AuthorshipLog::deserialize_from_string(raw).ok())
+        .filter(|log| !log.attestations.is_empty());
 
     let base = find_merge_base(repo, source_head, onto).unwrap_or_else(|| onto.to_string());
     let source_commits = list_commits_in_range(repo, &base, source_head);
@@ -131,7 +128,18 @@ fn handle_squash_merge(
     }
 
     if source_notes.is_empty() {
-        return Ok(());
+        if let Some(existing_log) = existing_target_log.as_ref()
+            && !repo.storage.has_working_log(onto)
+        {
+            return write_authorship_log(repo, squash_commit, existing_log);
+        }
+        return post_squash_resolution_working_log(
+            repo,
+            onto,
+            squash_commit,
+            existing_target_log,
+            &sources,
+        );
     }
 
     // Add the final source_head→squash_commit pair
@@ -202,11 +210,76 @@ fn handle_squash_merge(
 
     final_log.metadata.base_commit_sha = squash_commit.to_string();
 
-    let serialized = final_log.serialize_to_string().map_err(|e| {
-        GitAiError::Generic(format!("failed to serialize squash authorship log: {}", e))
+    let shifted_log = match existing_target_log {
+        Some(existing) => {
+            crate::authorship::conflict_resolution::merge_conflict_resolution_authorship(
+                repo,
+                Some(final_log),
+                existing,
+                &sources,
+                squash_commit,
+            )
+        }
+        None => final_log,
+    };
+
+    if repo.storage.has_working_log(onto) {
+        post_squash_resolution_working_log(repo, onto, squash_commit, Some(shifted_log), &sources)
+    } else {
+        write_authorship_log(repo, squash_commit, &shifted_log)
+    }
+}
+
+fn post_squash_resolution_working_log(
+    repo: &Repository,
+    onto: &str,
+    squash_commit: &str,
+    existing_shifted_log: Option<AuthorshipLog>,
+    sources: &[String],
+) -> Result<(), GitAiError> {
+    if !repo.storage.has_working_log(onto) {
+        if let Some(log) = existing_shifted_log {
+            return write_authorship_log(repo, squash_commit, &log);
+        }
+        return Ok(());
+    }
+
+    let source_shas = sources.to_vec();
+    let commit_for_transform = squash_commit.to_string();
+    let author = repo.git_author_identity().formatted_or_unknown();
+    crate::authorship::post_commit::post_commit_from_working_log_with_transform_and_options(
+        repo,
+        Some(onto.to_string()),
+        squash_commit.to_string(),
+        author,
+        crate::authorship::post_commit::PostCommitOptions {
+            supress_output: true,
+            compute_stats: false,
+        },
+        move |resolution_log| {
+            Ok(
+                crate::authorship::conflict_resolution::merge_conflict_resolution_authorship(
+                    repo,
+                    existing_shifted_log,
+                    resolution_log,
+                    &source_shas,
+                    &commit_for_transform,
+                ),
+            )
+        },
+    )
+    .map(|_| ())
+}
+
+fn write_authorship_log(
+    repo: &Repository,
+    commit_sha: &str,
+    log: &AuthorshipLog,
+) -> Result<(), GitAiError> {
+    let serialized = log.serialize_to_string().map_err(|e| {
+        GitAiError::Generic(format!("failed to serialize rewrite authorship log: {}", e))
     })?;
-    notes_api::write_notes_batch(repo, &[(squash_commit.to_string(), serialized)])?;
-    Ok(())
+    notes_api::write_notes_batch(repo, &[(commit_sha.to_string(), serialized)])
 }
 
 pub fn shift_authorship_notes(
