@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 /// Droid's settings.json uses JSONC (JSON with `//` line comments, `/* */` block
 /// comments, and trailing commas). Standard `serde_json` rejects these, so we
 /// parse through `jsonc_parser` first and convert to `serde_json::Value`.
+/// NOTE: This parse-to-serde-Value approach discards JSONC comments and trailing
+/// commas. If comment preservation becomes important, migrate to CstRootNode
+/// (as used in utils.rs::update_vscode_chat_hook_settings).
 fn parse_jsonc_settings(content: &str) -> Result<Value, GitAiError> {
     let parsed = jsonc_parser::parse_to_value(content, &ParseOptions::default())
         .map_err(|e| GitAiError::Generic(format!("Failed to parse Droid settings: {e}")))?;
