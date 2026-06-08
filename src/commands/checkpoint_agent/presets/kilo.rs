@@ -186,7 +186,10 @@ impl KiloPreset {
             let home = dirs::home_dir().ok_or_else(|| {
                 GitAiError::Generic("Could not determine home directory".to_string())
             })?;
-            Ok(home.join(".local").join("share").join("kilo"))
+            Ok(home
+                .join("Library")
+                .join("Application Support")
+                .join("kilo"))
         }
 
         #[cfg(target_os = "linux")]
@@ -197,10 +200,7 @@ impl KiloPreset {
                 let home = dirs::home_dir().ok_or_else(|| {
                     GitAiError::Generic("Could not determine home directory".to_string())
                 })?;
-                Ok(home
-                    .join("Library")
-                    .join("Application Support")
-                    .join("kilo"))
+                Ok(home.join(".local").join("share").join("kilo"))
             }
         }
 
