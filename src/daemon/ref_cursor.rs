@@ -1,7 +1,9 @@
 use crate::daemon::analyzers::{command_args, normalized_args};
 use crate::daemon::domain::{Confidence, FamilyKey, FamilyState, NormalizedCommand, RefChange};
 use crate::error::GitAiError;
-use crate::git::cli_parser::{explicit_rebase_branch_arg, parse_git_cli_args};
+use crate::git::cli_parser::{
+    explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args,
+};
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{git_dir_for_worktree, is_valid_git_oid};
 use crate::git::repository::exec_git_stdin;
@@ -608,8 +610,11 @@ impl RefCursor {
         }
 
         let expected = ExpectedTransition::from_state_and_working_logs(cmd, state);
-        let Some(first) = self.find_head_entry(cmd.worktree.as_deref(), &["rebase"], expected)?
-        else {
+        let first = match self.find_rebase_start_entry(cmd, expected.clone())? {
+            Some(entry) => Some(entry),
+            None => self.find_head_entry(cmd.worktree.as_deref(), &["rebase"], expected)?,
+        };
+        let Some(first) = first else {
             return Ok(());
         };
 
@@ -649,6 +654,34 @@ impl RefCursor {
         dedup_ref_changes(&mut changes);
         cmd.ref_changes = changes;
         Ok(())
+    }
+
+    fn find_rebase_start_entry(
+        &mut self,
+        cmd: &NormalizedCommand,
+        expected: ExpectedTransition,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        let Some(worktree) = cmd.worktree.as_deref() else {
+            return Ok(None);
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(None);
+        };
+        let args = rebase_command_args(cmd);
+        let target = rebase_start_checkout_target_from_args(&args);
+        let key = head_key(&git_dir);
+        let path = git_dir.join("logs").join("HEAD");
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key, &path, "HEAD", start)?;
+
+        Ok(entries.into_iter().find(|entry| {
+            !self.entry_consumed(entry)
+                && rebase_reflog_action_is(&entry.message, "start")
+                && expected.matches_rebase_start(entry)
+                && target
+                    .as_deref()
+                    .is_none_or(|target| rebase_start_message_targets(&entry.message, target))
+        }))
     }
 
     fn consume_failed_explicit_branch_rebase_start(
@@ -1299,6 +1332,27 @@ impl ExpectedTransition {
         }
         true
     }
+
+    fn matches_rebase_start(&self, entry: &CursorEntry) -> bool {
+        if !valid_ref_transition(&entry.old, &entry.new) {
+            return false;
+        }
+        if !self.messages.is_empty() && !self.messages.contains(&entry.message) {
+            return false;
+        }
+        if !self.old_oids.is_empty()
+            && !self.old_oids.contains(&entry.old)
+            && !self.old_oids.contains(&entry.new)
+        {
+            return false;
+        }
+        if let Some(new_oid) = self.new_oid.as_ref()
+            && &entry.new != new_oid
+        {
+            return false;
+        }
+        true
+    }
 }
 
 fn commit_reflog_messages(args: &[String], amend: bool) -> HashSet<String> {
@@ -1685,6 +1739,22 @@ fn rebase_reflog_action(message: &str) -> Option<&str> {
 
 fn rebase_reflog_action_is(message: &str, expected: &str) -> bool {
     rebase_reflog_action(message).is_some_and(|action| action == expected)
+}
+
+fn rebase_start_checkout_target_from_args(args: &[String]) -> Option<String> {
+    let summary = summarize_rebase_args(args);
+    if summary.is_control_mode {
+        return None;
+    }
+    summary
+        .onto_spec
+        .or_else(|| summary.positionals.first().cloned())
+}
+
+fn rebase_start_message_targets(message: &str, target: &str) -> bool {
+    message
+        .strip_prefix("rebase (start): checkout ")
+        .is_some_and(|message_target| message_target == target)
 }
 
 fn rebase_finish_returns_to_branch(message: &str, branch_ref: &str) -> bool {
@@ -2778,6 +2848,59 @@ mod tests {
                 },
                 RefChange {
                     reference: "refs/heads/topic-2".to_string(),
+                    old: B.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rebase_prefers_start_entry_when_expected_state_matches_pick() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (B, C, "rebase (start): checkout topic-2"),
+                (C, D, "rebase (pick): Topic 3"),
+                (D, D, "rebase (finish): returning to refs/heads/topic-3"),
+            ],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/topic-3",
+            &[(B, D, "rebase (finish): refs/heads/topic-3 onto topic-2")],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), C.to_string());
+        state
+            .refs
+            .insert("refs/heads/topic-2".to_string(), C.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["rebase", "topic-2"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic-3".to_string(),
                     old: B.to_string(),
                     new: D.to_string(),
                 },
