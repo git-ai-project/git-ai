@@ -22,7 +22,25 @@ impl KiloInstaller {
                 .join("plugins")
                 .join("git-ai.ts")
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            let base = if let Ok(xdg_config) = std::env::var("XDG_CONFIG_HOME") {
+                PathBuf::from(xdg_config)
+            } else {
+                home_dir().join(".config")
+            };
+            base.join("kilo").join("plugins").join("git-ai.ts")
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let base = if let Ok(app_data) = std::env::var("APPDATA") {
+                PathBuf::from(app_data)
+            } else {
+                home_dir().join("AppData").join("Roaming")
+            };
+            base.join("kilo").join("plugins").join("git-ai.ts")
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             home_dir()
                 .join(".config")
