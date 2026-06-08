@@ -773,6 +773,7 @@ mod tests {
         let worktree = dir.path();
         let git_dir = worktree.join(".git");
         fs::create_dir_all(git_dir.join("logs")).expect("create logs");
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
         fs::write(
             git_dir.join("logs").join("HEAD"),
             concat!(

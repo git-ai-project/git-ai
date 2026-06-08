@@ -1810,6 +1810,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("create tempdir");
         let worktree = temp.path().join("repo");
         fs::create_dir_all(worktree.join(".git")).expect("create git dir");
+        fs::write(worktree.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
         backend.set_alias(worktree.to_str().expect("utf8 worktree"), "ci", "commit");
         let mut normalizer = TraceNormalizer::new(backend);
 
@@ -2015,6 +2016,7 @@ mod tests {
         let outer = temp.path().join("outer");
         let clone_dir = outer.join("nested").join("relative-clone");
         fs::create_dir_all(clone_dir.join(".git")).expect("create clone git dir");
+        fs::write(clone_dir.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
 
         let start = serde_json::json!({
             "event":"start",
@@ -2086,6 +2088,7 @@ mod tests {
 
         // Simulate repo discoverability only once clone is about to exit.
         fs::create_dir_all(clone_dir.join(".git")).expect("create clone git dir");
+        fs::write(clone_dir.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
 
         let cmd = normalizer
             .ingest_payload(&exit)
@@ -2104,7 +2107,9 @@ mod tests {
         let source_repo = temp.path().join("source-repo");
         let cloned_repo = temp.path().join("cloned-repo");
         fs::create_dir_all(source_repo.join(".git")).expect("create source git dir");
+        fs::write(source_repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
         fs::create_dir_all(cloned_repo.join(".git")).expect("create cloned git dir");
+        fs::write(cloned_repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
 
         let start = serde_json::json!({
             "event":"start",
@@ -2154,6 +2159,7 @@ mod tests {
         let cwd = temp.path().join("projects"); // non-repo CWD
         let clone_dest = cwd.join("testing-git"); // the clone destination
         fs::create_dir_all(clone_dest.join(".git")).expect("create clone git dir");
+        fs::write(clone_dest.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
 
         let root_sid = "20260327T000000.000000Z-Hdeadbeef-P00010000";
         let child_sid = format!("{}/20260327T000000.000001Z-Hdeadbeef-P00010001", root_sid);
@@ -2244,7 +2250,9 @@ mod tests {
         let repo_a = temp.path().join("repo-a");
         let repo_b = temp.path().join("repo-b");
         fs::create_dir_all(repo_a.join(".git")).expect("create repo-a git dir");
+        fs::write(repo_a.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
         fs::create_dir_all(repo_b.join(".git")).expect("create repo-b git dir");
+        fs::write(repo_b.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
 
         let start_a = serde_json::json!({
             "event":"start",
@@ -2376,6 +2384,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("create tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(repo.join(".git")).expect("create git dir");
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
 
         let start = serde_json::json!({
             "event":"start",
@@ -2417,6 +2426,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("create tempdir");
         let repo = temp.path().join("repo");
         fs::create_dir_all(repo.join(".git")).expect("create git dir");
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write HEAD");
 
         let start = serde_json::json!({
             "event":"start",
