@@ -64,21 +64,141 @@ fn apply_worktree_state(state: &mut FamilyState, cmd: &NormalizedCommand) {
     let Some(worktree) = cmd.worktree.as_ref() else {
         return;
     };
-    let head = cmd
+    let key = canonicalize_path(worktree);
+    let previous = state.worktrees.get(&key);
+    let head_change = cmd
         .ref_changes
         .iter()
-        .rfind(|change| change.reference == "HEAD")
-        .map(|change| change.new.clone());
+        .rfind(|change| change.reference == "HEAD");
+
+    let (head, branch, detached) = if let Some(head_change) = head_change {
+        let branch = unique_branch_for_head_change(cmd, head_change);
+        (
+            Some(head_change.new.clone()),
+            branch.clone(),
+            branch.is_none(),
+        )
+    } else if let Some(branch) = checkout_or_switch_branch_target(cmd) {
+        (
+            previous.and_then(|worktree| worktree.head.clone()),
+            Some(branch),
+            false,
+        )
+    } else {
+        (
+            previous.and_then(|worktree| worktree.head.clone()),
+            previous.and_then(|worktree| worktree.branch.clone()),
+            previous.is_some_and(|worktree| worktree.detached),
+        )
+    };
 
     state.worktrees.insert(
-        canonicalize_path(worktree),
+        key,
         WorktreeState {
             head,
-            branch: None,
-            detached: false,
+            branch,
+            detached,
             last_updated_ns: cmd.finished_at_ns,
         },
     );
+}
+
+fn unique_branch_for_head_change(
+    cmd: &NormalizedCommand,
+    head_change: &crate::daemon::domain::RefChange,
+) -> Option<String> {
+    let mut matches = cmd
+        .ref_changes
+        .iter()
+        .filter(|change| {
+            change.reference.starts_with("refs/heads/")
+                && change.old == head_change.old
+                && change.new == head_change.new
+        })
+        .map(|change| change.reference.clone());
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(first)
+}
+
+fn checkout_or_switch_branch_target(cmd: &NormalizedCommand) -> Option<String> {
+    let command = cmd.primary_command.as_deref()?;
+    let args = command_args(cmd);
+    match command {
+        "checkout" => checkout_created_branch_target(&args),
+        "switch" => switch_branch_target(&args),
+        _ => None,
+    }
+    .map(|branch| {
+        if branch.starts_with("refs/") {
+            branch
+        } else {
+            format!("refs/heads/{branch}")
+        }
+    })
+}
+
+fn command_args(cmd: &NormalizedCommand) -> Vec<String> {
+    if !cmd.invoked_args.is_empty() {
+        let mut args = vec![
+            cmd.invoked_command
+                .clone()
+                .or_else(|| cmd.primary_command.clone())
+                .unwrap_or_default(),
+        ];
+        args.extend(cmd.invoked_args.clone());
+        return args;
+    }
+    cmd.raw_argv
+        .iter()
+        .skip_while(|arg| arg.as_str() != cmd.primary_command.as_deref().unwrap_or(""))
+        .cloned()
+        .collect()
+}
+
+fn checkout_created_branch_target(args: &[String]) -> Option<String> {
+    let mut idx = usize::from(args.first().is_some_and(|arg| arg == "checkout"));
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "-b" | "-B" => return args.get(idx + 1).cloned(),
+            value if value.starts_with("-b") && value.len() > 2 => {
+                return Some(value[2..].to_string());
+            }
+            value if value.starts_with("-B") && value.len() > 2 => {
+                return Some(value[2..].to_string());
+            }
+            "--" => return None,
+            _ => idx += 1,
+        }
+    }
+    None
+}
+
+fn switch_branch_target(args: &[String]) -> Option<String> {
+    let mut idx = usize::from(args.first().is_some_and(|arg| arg == "switch"));
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "-c" | "-C" | "--create" | "--force-create" => return args.get(idx + 1).cloned(),
+            value if value.starts_with("--create=") => {
+                return Some(value["--create=".len()..].to_string());
+            }
+            value if value.starts_with("--force-create=") => {
+                return Some(value["--force-create=".len()..].to_string());
+            }
+            value if value.starts_with("-c") && value.len() > 2 => {
+                return Some(value[2..].to_string());
+            }
+            value if value.starts_with("-C") && value.len() > 2 => {
+                return Some(value[2..].to_string());
+            }
+            "--detach" | "-d" | "--" => return None,
+            value if !value.starts_with('-') => return Some(value.to_string()),
+            _ => idx += 1,
+        }
+    }
+    None
 }
 
 fn canonicalize_path(path: &Path) -> PathBuf {
@@ -91,6 +211,7 @@ mod tests {
     use crate::daemon::analyzers::AnalyzerRegistry;
     use crate::daemon::domain::{
         CommandScope, Confidence, FamilyKey, FamilyState, GlobalState, RefChange, WatermarkState,
+        WorktreeState,
     };
     use std::collections::HashMap;
 
@@ -204,6 +325,112 @@ mod tests {
         let (_applied, _analysis) = reduce_family_command(&mut state, cmd, &registry).unwrap();
 
         assert!(!state.refs.contains_key("refs/heads/feature"));
+    }
+
+    #[test]
+    fn reducer_records_worktree_branch_from_unique_head_branch_transition() {
+        let mut state = family_state();
+        let registry = AnalyzerRegistry::new();
+        let mut cmd = normalized();
+        cmd.ref_changes = vec![
+            RefChange {
+                reference: "HEAD".to_string(),
+                old: "aaa".to_string(),
+                new: "bbb".to_string(),
+            },
+            RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: "aaa".to_string(),
+                new: "bbb".to_string(),
+            },
+        ];
+
+        let (_applied, _analysis) = reduce_family_command(&mut state, cmd, &registry).unwrap();
+        let worktree = state.worktrees.get(&PathBuf::from("/tmp/repo")).unwrap();
+
+        assert_eq!(worktree.head.as_deref(), Some("bbb"));
+        assert_eq!(worktree.branch.as_deref(), Some("refs/heads/main"));
+        assert!(!worktree.detached);
+    }
+
+    #[test]
+    fn reducer_preserves_worktree_branch_when_command_does_not_move_head() {
+        let mut state = family_state();
+        state.worktrees.insert(
+            PathBuf::from("/tmp/repo"),
+            WorktreeState {
+                head: Some("aaa".to_string()),
+                branch: Some("refs/heads/main".to_string()),
+                detached: false,
+                last_updated_ns: 1,
+            },
+        );
+        let registry = AnalyzerRegistry::new();
+        let mut cmd = normalized();
+        cmd.ref_changes = vec![RefChange {
+            reference: "refs/heads/other".to_string(),
+            old: "ccc".to_string(),
+            new: "ddd".to_string(),
+        }];
+
+        let (_applied, _analysis) = reduce_family_command(&mut state, cmd, &registry).unwrap();
+        let worktree = state.worktrees.get(&PathBuf::from("/tmp/repo")).unwrap();
+
+        assert_eq!(worktree.head.as_deref(), Some("aaa"));
+        assert_eq!(worktree.branch.as_deref(), Some("refs/heads/main"));
+        assert!(!worktree.detached);
+    }
+
+    #[test]
+    fn reducer_updates_branch_for_checkout_new_branch_without_head_oid_move() {
+        let mut state = family_state();
+        state.worktrees.insert(
+            PathBuf::from("/tmp/repo"),
+            WorktreeState {
+                head: Some("aaa".to_string()),
+                branch: Some("refs/heads/main".to_string()),
+                detached: false,
+                last_updated_ns: 1,
+            },
+        );
+        let registry = AnalyzerRegistry::new();
+        let mut cmd = normalized();
+        cmd.raw_argv = vec![
+            "git".to_string(),
+            "checkout".to_string(),
+            "-b".to_string(),
+            "feature".to_string(),
+        ];
+        cmd.primary_command = Some("checkout".to_string());
+        cmd.invoked_command = Some("checkout".to_string());
+        cmd.invoked_args = vec!["-b".to_string(), "feature".to_string()];
+        cmd.ref_changes.clear();
+
+        let (_applied, _analysis) = reduce_family_command(&mut state, cmd, &registry).unwrap();
+        let worktree = state.worktrees.get(&PathBuf::from("/tmp/repo")).unwrap();
+
+        assert_eq!(worktree.head.as_deref(), Some("aaa"));
+        assert_eq!(worktree.branch.as_deref(), Some("refs/heads/feature"));
+        assert!(!worktree.detached);
+    }
+
+    #[test]
+    fn reducer_marks_head_only_transition_as_detached_or_unknown_branch() {
+        let mut state = family_state();
+        let registry = AnalyzerRegistry::new();
+        let mut cmd = normalized();
+        cmd.ref_changes = vec![RefChange {
+            reference: "HEAD".to_string(),
+            old: "aaa".to_string(),
+            new: "bbb".to_string(),
+        }];
+
+        let (_applied, _analysis) = reduce_family_command(&mut state, cmd, &registry).unwrap();
+        let worktree = state.worktrees.get(&PathBuf::from("/tmp/repo")).unwrap();
+
+        assert_eq!(worktree.head.as_deref(), Some("bbb"));
+        assert_eq!(worktree.branch, None);
+        assert!(worktree.detached);
     }
 
     #[test]

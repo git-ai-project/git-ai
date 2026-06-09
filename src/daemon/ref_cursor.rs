@@ -31,6 +31,7 @@ struct CursorEntry {
     old: String,
     new: String,
     message: String,
+    timestamp_secs: Option<i64>,
     end_offset: u64,
 }
 
@@ -454,7 +455,7 @@ impl RefCursor {
     fn enrich_update_ref(
         &mut self,
         cmd: &mut NormalizedCommand,
-        _state: &FamilyState,
+        state: &FamilyState,
     ) -> Result<(), GitAiError> {
         let args = command_args(cmd);
         let spec = parse_update_ref_spec(&args)?;
@@ -469,7 +470,7 @@ impl RefCursor {
                 }
             }
             for reference in self.discover_common_refs()? {
-                if reference == "ORIG_HEAD" {
+                if reference == "HEAD" || reference == "ORIG_HEAD" {
                     continue;
                 }
                 while let Some(entry) =
@@ -488,11 +489,43 @@ impl RefCursor {
         if spec.reference == "HEAD" {
             if let Some(change) = direct_update_ref_change_from_argv(&spec) {
                 changes.push(change.clone());
-                self.consume_common_refs_matching_transition(
-                    &change.old,
-                    &change.new,
-                    &mut changes,
-                )?;
+                if let Some(head) =
+                    self.find_direct_ref_transition_entry(cmd, "HEAD", &change.old, &change.new)?
+                {
+                    let head_timestamp = head.timestamp_secs;
+                    self.consume_entry(&head)?;
+                    if let Some(timestamp) = head_timestamp {
+                        if let Some(branch) = current_worktree_branch_ref(cmd, state) {
+                            if let Some(entry) = self
+                                .direct_ref_transition_entries(
+                                    cmd,
+                                    branch,
+                                    &change.old,
+                                    &change.new,
+                                )?
+                                .into_iter()
+                                .find(|entry| entry.timestamp_secs == Some(timestamp))
+                            {
+                                self.consume_entry(&entry)?;
+                                changes.push(entry_to_ref_change(&entry));
+                            }
+                        } else {
+                            self.consume_unique_direct_common_ref_matching_timestamp(
+                                cmd,
+                                &change.old,
+                                &change.new,
+                                timestamp,
+                                &mut changes,
+                            )?;
+                        }
+                    }
+                } else {
+                    self.consume_common_refs_matching_transition(
+                        &change.old,
+                        &change.new,
+                        &mut changes,
+                    )?;
+                }
             } else if let Some(entry) = self.find_head_entry(
                 cmd.worktree.as_deref(),
                 &[],
@@ -510,12 +543,23 @@ impl RefCursor {
             let old = change.old.clone();
             let new = change.new.clone();
             changes.push(change);
-            if self.head_reflog_has_direct_update_ref_mirror(cmd, &spec.reference, &old, &new)? {
-                changes.push(RefChange {
-                    reference: "HEAD".to_string(),
-                    old,
-                    new,
-                });
+            if let Some(branch) =
+                self.find_direct_ref_transition_entry(cmd, &spec.reference, &old, &new)?
+            {
+                let branch_timestamp = branch.timestamp_secs;
+                self.consume_entry(&branch)?;
+                let branch_can_affect_head = current_worktree_branch_ref(cmd, state)
+                    .is_none_or(|current_branch| current_branch == spec.reference);
+                if branch_can_affect_head
+                    && let Some(timestamp) = branch_timestamp
+                    && let Some(head) = self
+                        .direct_ref_transition_entries(cmd, "HEAD", &old, &new)?
+                        .into_iter()
+                        .find(|entry| entry.timestamp_secs == Some(timestamp))
+                {
+                    self.consume_entry(&head)?;
+                    changes.push(entry_to_ref_change(&head));
+                }
             }
         } else if let Some(entry) = self.find_common_ref_entry(
             &spec.reference,
@@ -1015,40 +1059,92 @@ impl RefCursor {
         )
     }
 
-    fn head_reflog_has_direct_update_ref_mirror(
-        &self,
+    fn consume_unique_direct_common_ref_matching_timestamp(
+        &mut self,
         cmd: &NormalizedCommand,
-        updated_reference: &str,
         old: &str,
         new: &str,
-    ) -> Result<bool, GitAiError> {
-        let Some(worktree) = cmd.worktree.as_deref() else {
-            return Ok(false);
-        };
-        let Some(git_dir) = git_dir_for_worktree(worktree) else {
-            return Ok(false);
-        };
-        let command_window = reflog_timestamp_window(cmd);
-        let branch_log = self.common_dir().join("logs").join(updated_reference);
-        let head_log = git_dir.join("logs").join("HEAD");
+        timestamp: i64,
+        out: &mut Vec<RefChange>,
+    ) -> Result<(), GitAiError> {
+        let mut matches = Vec::new();
+        for reference in self.discover_common_refs()? {
+            if reference == "ORIG_HEAD" || reference == "refs/stash" {
+                continue;
+            }
+            matches.extend(
+                self.direct_ref_transition_entries(cmd, &reference, old, new)?
+                    .into_iter()
+                    .filter(|entry| entry.timestamp_secs == Some(timestamp)),
+            );
+        }
+        if matches.len() == 1 {
+            let entry = matches.remove(0);
+            self.consume_entry(&entry)?;
+            out.push(entry_to_ref_change(&entry));
+        }
+        Ok(())
+    }
 
-        let branch_timestamps: HashSet<i64> = read_reflog_records(&branch_log, None)?
+    fn find_direct_ref_transition_entry(
+        &mut self,
+        cmd: &NormalizedCommand,
+        reference: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        Ok(self
+            .direct_ref_transition_entries(cmd, reference, old, new)?
             .into_iter()
-            .filter(|record| record.old == old && record.new == new)
-            .filter_map(|record| record.timestamp_secs)
-            .filter(|timestamp| command_window.contains(*timestamp))
-            .collect();
-        if branch_timestamps.is_empty() {
-            return Ok(false);
+            .next())
+    }
+
+    fn direct_ref_transition_entries(
+        &mut self,
+        cmd: &NormalizedCommand,
+        reference: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<Vec<CursorEntry>, GitAiError> {
+        let (key, path) = if reference == "HEAD" {
+            let Some(worktree) = cmd.worktree.as_deref() else {
+                return Ok(Vec::new());
+            };
+            let Some(git_dir) = git_dir_for_worktree(worktree) else {
+                return Ok(Vec::new());
+            };
+            (head_key(&git_dir), git_dir.join("logs").join("HEAD"))
+        } else {
+            (
+                common_key(reference),
+                self.common_dir().join("logs").join(reference),
+            )
+        };
+
+        let command_window = reflog_timestamp_window(cmd);
+        let matches_command = |entry: &CursorEntry, this: &Self| {
+            !this.entry_consumed(entry)
+                && entry.old == old
+                && entry.new == new
+                && entry
+                    .timestamp_secs
+                    .is_some_and(|timestamp| command_window.contains(timestamp))
+        };
+
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key.clone(), &path, reference, start)?;
+        let matches = entries
+            .into_iter()
+            .filter(|entry| matches_command(entry, self))
+            .collect::<Vec<_>>();
+        if !matches.is_empty() {
+            return Ok(matches);
         }
 
-        Ok(read_reflog_records(&head_log, None)?
+        Ok(read_reflog_entries(key, &path, reference, None)?
             .into_iter()
-            .filter(|record| record.old == old && record.new == new)
-            .filter_map(|record| record.timestamp_secs)
-            .any(|timestamp| {
-                command_window.contains(timestamp) && branch_timestamps.contains(&timestamp)
-            }))
+            .filter(|entry| matches_command(entry, self))
+            .collect())
     }
 
     fn find_common_ref_entry(
@@ -1657,6 +1753,19 @@ struct ExpectedTransition {
     messages: HashSet<String>,
 }
 
+fn current_worktree_branch_ref<'a>(
+    cmd: &NormalizedCommand,
+    state: &'a FamilyState,
+) -> Option<&'a str> {
+    let worktree = cmd.worktree.as_ref()?;
+    let canonical = worktree.canonicalize().unwrap_or_else(|_| worktree.clone());
+    state
+        .worktrees
+        .get(&canonical)
+        .or_else(|| state.worktrees.get(worktree))
+        .and_then(|worktree| worktree.branch.as_deref())
+}
+
 impl ExpectedTransition {
     fn with_reflog_messages(mut self, messages: HashSet<String>) -> Self {
         self.messages = messages;
@@ -2197,6 +2306,7 @@ fn read_reflog_entries(
             old: record.old,
             new: record.new,
             message: record.message,
+            timestamp_secs: record.timestamp_secs,
             end_offset: record.end_offset,
         })
         .collect())
@@ -2218,6 +2328,7 @@ fn read_reflog_entries_including_noops(
             old: record.old,
             new: record.new,
             message: record.message,
+            timestamp_secs: record.timestamp_secs,
             end_offset: record.end_offset,
         })
         .collect())
@@ -2373,7 +2484,7 @@ fn discover_reflog_refs(
             continue;
         };
         let reference = relative.to_string_lossy().replace('\\', "/");
-        if reference == "HEAD" || reference == "ORIG_HEAD" || reference.starts_with("refs/") {
+        if reference == "ORIG_HEAD" || reference.starts_with("refs/") {
             out.push(reference);
         }
     }
@@ -2929,6 +3040,7 @@ mod tests {
     use super::*;
     use crate::daemon::domain::{
         CommandScope, Confidence, FamilyKey, FamilyState, NormalizedCommand, WatermarkState,
+        WorktreeState,
     };
     use std::collections::HashMap;
     use std::fs;
@@ -3242,6 +3354,270 @@ mod tests {
                 old: C.to_string(),
                 new: D.to_string(),
             }]
+        );
+    }
+
+    #[test]
+    fn direct_update_ref_consumes_matching_reflog_entry_before_later_unstructured_update_ref() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(temp.path(), "refs/heads/main", &[(A, B, "")]);
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut direct = command(&family, &["update-ref", "refs/heads/main", B, A]);
+        cursor.enrich_command(&mut direct, &state).unwrap();
+        assert_eq!(
+            direct.ref_changes,
+            vec![RefChange {
+                reference: "refs/heads/main".to_string(),
+                old: A.to_string(),
+                new: B.to_string(),
+            }]
+        );
+
+        let mut later = command(&family, &["update-ref", "--stdin"]);
+        cursor.enrich_command(&mut later, &state).unwrap();
+
+        assert!(
+            later.ref_changes.is_empty(),
+            "later unstructured update-ref must not replay reflog entry already represented by argv: {:?}",
+            later.ref_changes
+        );
+    }
+
+    #[test]
+    fn direct_branch_update_ref_consumes_head_mirror_before_later_unstructured_update_ref() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let reference = "refs/heads/feature";
+        append_reflog(&git_dir, reference, &[(A, B, "")]);
+        append_reflog(&git_dir, "HEAD", &[(A, B, "")]);
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut direct = command_with_worktree(
+            &family,
+            Some(worktree.clone()),
+            &["update-ref", reference, B, A],
+        );
+        cursor.enrich_command(&mut direct, &state).unwrap();
+        assert_eq!(
+            direct.ref_changes,
+            vec![
+                RefChange {
+                    reference: reference.to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+            ]
+        );
+
+        let mut later = command_with_worktree(&family, Some(worktree), &["update-ref", "--stdin"]);
+        cursor.enrich_command(&mut later, &state).unwrap();
+
+        assert!(
+            later.ref_changes.is_empty(),
+            "later unstructured update-ref must not replay HEAD or branch reflog entries already represented by argv: {:?}",
+            later.ref_changes
+        );
+    }
+
+    #[test]
+    fn direct_head_update_ref_uses_argv_and_late_cursor_branch_mirror_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let reference = "refs/heads/feature";
+        append_reflog(&git_dir, reference, &[(A, B, "")]);
+        append_reflog(&git_dir, "HEAD", &[(A, B, "")]);
+        let branch_len = fs::metadata(git_dir.join("logs").join(reference))
+            .unwrap()
+            .len();
+        let head_len = fs::metadata(git_dir.join("logs").join("HEAD"))
+            .unwrap()
+            .len();
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut direct = command_with_worktree(
+            &family,
+            Some(worktree.clone()),
+            &["update-ref", "HEAD", B, A],
+        );
+        direct
+            .reflog_start_offsets
+            .insert(common_key(reference), branch_len);
+        direct
+            .reflog_start_offsets
+            .insert(head_key(&git_dir), head_len);
+        cursor.enrich_command(&mut direct, &state).unwrap();
+        assert_eq!(
+            direct.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+                RefChange {
+                    reference: reference.to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+            ]
+        );
+
+        let mut later = command_with_worktree(&family, Some(worktree), &["update-ref", "--stdin"]);
+        cursor.enrich_command(&mut later, &state).unwrap();
+
+        assert!(
+            later.ref_changes.is_empty(),
+            "later unstructured update-ref must not replay branch mirror already represented by direct HEAD update-ref: {:?}",
+            later.ref_changes
+        );
+    }
+
+    #[test]
+    fn direct_head_update_ref_uses_known_worktree_branch_when_other_branch_matches_same_second() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let current = "refs/heads/main";
+        let other = "refs/heads/other";
+        append_reflog(&git_dir, current, &[(A, B, "")]);
+        append_reflog(&git_dir, other, &[(A, B, "")]);
+        append_reflog(&git_dir, "HEAD", &[(A, B, "")]);
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.worktrees.insert(
+            worktree.canonicalize().unwrap(),
+            WorktreeState {
+                head: Some(A.to_string()),
+                branch: Some(current.to_string()),
+                detached: false,
+                last_updated_ns: 0,
+            },
+        );
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut direct = command_with_worktree(
+            &family,
+            Some(worktree.clone()),
+            &["update-ref", "HEAD", B, A],
+        );
+        cursor.enrich_command(&mut direct, &state).unwrap();
+        assert_eq!(
+            direct.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+                RefChange {
+                    reference: current.to_string(),
+                    old: A.to_string(),
+                    new: B.to_string(),
+                },
+            ]
+        );
+
+        let mut later =
+            command_with_worktree(&family, Some(worktree), &["update-ref", other, B, A]);
+        cursor.enrich_command(&mut later, &state).unwrap();
+
+        assert_eq!(
+            later.ref_changes,
+            vec![RefChange {
+                reference: other.to_string(),
+                old: A.to_string(),
+                new: B.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn direct_head_update_ref_without_known_branch_does_not_guess_ambiguous_branch_mirror() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        append_reflog(&git_dir, "refs/heads/main", &[(A, B, "")]);
+        append_reflog(&git_dir, "refs/heads/other", &[(A, B, "")]);
+        append_reflog(&git_dir, "HEAD", &[(A, B, "")]);
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut direct =
+            command_with_worktree(&family, Some(worktree), &["update-ref", "HEAD", B, A]);
+        cursor.enrich_command(&mut direct, &state).unwrap();
+
+        assert_eq!(
+            direct.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: A.to_string(),
+                new: B.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn direct_branch_update_ref_does_not_attach_head_when_state_names_different_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let current = "refs/heads/main";
+        let updated = "refs/heads/feature";
+        append_reflog(&git_dir, updated, &[(A, B, "")]);
+        append_reflog(&git_dir, "HEAD", &[(A, B, "")]);
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.worktrees.insert(
+            worktree.canonicalize().unwrap(),
+            WorktreeState {
+                head: Some(A.to_string()),
+                branch: Some(current.to_string()),
+                detached: false,
+                last_updated_ns: 0,
+            },
+        );
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut direct =
+            command_with_worktree(&family, Some(worktree), &["update-ref", updated, B, A]);
+        cursor.enrich_command(&mut direct, &state).unwrap();
+
+        assert_eq!(
+            direct.ref_changes,
+            vec![RefChange {
+                reference: updated.to_string(),
+                old: A.to_string(),
+                new: B.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn common_ref_discovery_excludes_worktree_head_log() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(temp.path(), "HEAD", &[(A, B, "")]);
+        append_reflog(temp.path(), "refs/heads/main", &[(A, B, "")]);
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let cursor = RefCursor::new(family);
+
+        assert_eq!(
+            cursor.discover_common_refs().unwrap(),
+            vec!["refs/heads/main".to_string()]
         );
     }
 
