@@ -77,6 +77,7 @@ struct ReflogRecord {
     old: String,
     new: String,
     message: String,
+    timestamp_secs: Option<i64>,
     end_offset: u64,
 }
 
@@ -485,7 +486,14 @@ impl RefCursor {
 
         let mut changes = Vec::new();
         if spec.reference == "HEAD" {
-            if let Some(entry) = self.find_head_entry(
+            if let Some(change) = direct_update_ref_change_from_argv(&spec) {
+                changes.push(change.clone());
+                self.consume_common_refs_matching_transition(
+                    &change.old,
+                    &change.new,
+                    &mut changes,
+                )?;
+            } else if let Some(entry) = self.find_head_entry(
                 cmd.worktree.as_deref(),
                 &[],
                 ExpectedTransition {
@@ -497,6 +505,17 @@ impl RefCursor {
                 self.consume_entry(&entry)?;
                 changes.push(entry_to_ref_change(&entry));
                 self.consume_common_refs_matching_transition(&entry.old, &entry.new, &mut changes)?;
+            }
+        } else if let Some(change) = direct_update_ref_change_from_argv(&spec) {
+            let old = change.old.clone();
+            let new = change.new.clone();
+            changes.push(change);
+            if self.head_reflog_has_direct_update_ref_mirror(cmd, &spec.reference, &old, &new)? {
+                changes.push(RefChange {
+                    reference: "HEAD".to_string(),
+                    old,
+                    new,
+                });
             }
         } else if let Some(entry) = self.find_common_ref_entry(
             &spec.reference,
@@ -994,6 +1013,42 @@ impl RefCursor {
             expected,
             message_prefixes,
         )
+    }
+
+    fn head_reflog_has_direct_update_ref_mirror(
+        &self,
+        cmd: &NormalizedCommand,
+        updated_reference: &str,
+        old: &str,
+        new: &str,
+    ) -> Result<bool, GitAiError> {
+        let Some(worktree) = cmd.worktree.as_deref() else {
+            return Ok(false);
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(false);
+        };
+        let command_window = reflog_timestamp_window(cmd);
+        let branch_log = self.common_dir().join("logs").join(updated_reference);
+        let head_log = git_dir.join("logs").join("HEAD");
+
+        let branch_timestamps: HashSet<i64> = read_reflog_records(&branch_log, None)?
+            .into_iter()
+            .filter(|record| record.old == old && record.new == new)
+            .filter_map(|record| record.timestamp_secs)
+            .filter(|timestamp| command_window.contains(*timestamp))
+            .collect();
+        if branch_timestamps.is_empty() {
+            return Ok(false);
+        }
+
+        Ok(read_reflog_records(&head_log, None)?
+            .into_iter()
+            .filter(|record| record.old == old && record.new == new)
+            .filter_map(|record| record.timestamp_secs)
+            .any(|timestamp| {
+                command_window.contains(timestamp) && branch_timestamps.contains(&timestamp)
+            }))
     }
 
     fn find_common_ref_entry(
@@ -2284,8 +2339,15 @@ fn parse_reflog_line(line: &str, end_offset: u64) -> Option<ReflogRecord> {
         old: old.to_string(),
         new: new.to_string(),
         message: message.to_string(),
+        timestamp_secs: parse_reflog_timestamp_secs(head),
         end_offset,
     })
+}
+
+fn parse_reflog_timestamp_secs(head: &str) -> Option<i64> {
+    let mut parts = head.split_whitespace().rev();
+    let _timezone = parts.next()?;
+    parts.next()?.parse().ok()
 }
 
 fn discover_reflog_refs(
@@ -2785,6 +2847,43 @@ fn zero_oid() -> String {
     "0000000000000000000000000000000000000000".to_string()
 }
 
+fn direct_update_ref_change_from_argv(spec: &UpdateRefSpec) -> Option<RefChange> {
+    let old = spec.old_oid.as_ref()?;
+    if !is_valid_git_oid(old) || !is_valid_git_oid(&spec.new_oid) {
+        return None;
+    }
+    Some(RefChange {
+        reference: spec.reference.clone(),
+        old: old.clone(),
+        new: spec.new_oid.clone(),
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReflogTimestampWindow {
+    start_secs: i64,
+    end_secs: i64,
+}
+
+impl ReflogTimestampWindow {
+    fn contains(self, timestamp_secs: i64) -> bool {
+        timestamp_secs >= self.start_secs && timestamp_secs <= self.end_secs
+    }
+}
+
+fn reflog_timestamp_window(cmd: &NormalizedCommand) -> ReflogTimestampWindow {
+    let start = unix_nanos_to_reflog_secs(cmd.started_at_ns).saturating_sub(1);
+    let end = unix_nanos_to_reflog_secs(cmd.finished_at_ns).saturating_add(1);
+    ReflogTimestampWindow {
+        start_secs: start.min(end),
+        end_secs: start.max(end),
+    }
+}
+
+fn unix_nanos_to_reflog_secs(value: u128) -> i64 {
+    i64::try_from(value / 1_000_000_000).unwrap_or(i64::MAX)
+}
+
 fn entry_to_ref_change(entry: &CursorEntry) -> RefChange {
     RefChange {
         reference: entry.reference.clone(),
@@ -3048,6 +3147,91 @@ mod tests {
         let mut cmd = command(&family, &["update-ref", "--stdin"]);
         cmd.reflog_start_offsets
             .insert(common_key(reference), start_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: reference.to_string(),
+                old: C.to_string(),
+                new: D.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn direct_branch_update_ref_uses_argv_transition_when_reflog_cursor_starts_too_late() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let reference = "refs/heads/feature";
+        fs::create_dir_all(git_dir.join("logs").join("refs/heads")).unwrap();
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+
+        let branch_line = format!("{C} {D} Test User <test@example.com> 0 +0000\t\n");
+        let head_line = format!("{C} {D} Test User <test@example.com> 0 +0000\t\n");
+        let branch_log = git_dir.join("logs").join(reference);
+        let head_log = git_dir.join("logs").join("HEAD");
+        fs::write(&branch_log, &branch_line).unwrap();
+        fs::write(&head_log, &head_line).unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["update-ref", reference, D, C]);
+        cmd.reflog_start_offsets
+            .insert(common_key(reference), branch_line.len() as u64);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), head_line.len() as u64);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: reference.to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn direct_branch_update_ref_does_not_treat_stale_head_reflog_match_as_current_head_move() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let reference = "refs/heads/feature";
+        fs::create_dir_all(git_dir.join("logs").join("refs/heads")).unwrap();
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+
+        let stale_branch_line = format!("{C} {D} Test User <test@example.com> 0 +0000\t\n");
+        let stale_head_line = format!("{C} {D} Test User <test@example.com> 0 +0000\t\n");
+        let branch_log = git_dir.join("logs").join(reference);
+        let head_log = git_dir.join("logs").join("HEAD");
+        fs::write(&branch_log, &stale_branch_line).unwrap();
+        fs::write(&head_log, &stale_head_line).unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["update-ref", reference, D, C]);
+        cmd.started_at_ns = 2_000_000_000;
+        cmd.finished_at_ns = 2_000_000_000;
+        cmd.reflog_start_offsets
+            .insert(common_key(reference), stale_branch_line.len() as u64);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), stale_head_line.len() as u64);
 
         cursor.enrich_command(&mut cmd, &state).unwrap();
 

@@ -725,13 +725,17 @@ fn trace_debug_lifecycle(message: &str) {
 }
 
 fn payload_timestamp_ns(payload: &Value) -> Result<u128, GitAiError> {
+    for key in ["ts", "time_ns", "time"] {
+        if let Some(time) = payload.get(key).and_then(Value::as_u64) {
+            return Ok(time as u128);
+        }
+    }
     if let Some(time) = payload
-        .get("ts")
-        .or_else(|| payload.get("time"))
-        .or_else(|| payload.get("time_ns"))
-        .and_then(Value::as_u64)
+        .get("time")
+        .and_then(Value::as_str)
+        .and_then(rfc3339_to_unix_nanos)
     {
-        return Ok(time as u128);
+        return Ok(time);
     }
     if let Some(seconds) = payload.get("t_abs").and_then(Value::as_f64) {
         return Ok((seconds * 1_000_000_000_f64) as u128);
@@ -740,6 +744,12 @@ fn payload_timestamp_ns(payload: &Value) -> Result<u128, GitAiError> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos())
+}
+
+fn rfc3339_to_unix_nanos(value: &str) -> Option<u128> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .and_then(|timestamp| u128::try_from(timestamp.timestamp_nanos_opt()?).ok())
 }
 
 fn payload_argv(payload: &Value) -> Vec<String> {
@@ -1155,6 +1165,21 @@ mod tests {
             "ts": ts,
             "code": 0,
         })
+    }
+
+    #[test]
+    fn payload_timestamp_prefers_stock_trace2_rfc3339_time_over_relative_t_abs() {
+        let payload = serde_json::json!({
+            "event": "start",
+            "sid": "s-time",
+            "time": "2026-06-09T22:47:40.822668Z",
+            "t_abs": 0.000226,
+        });
+
+        assert_eq!(
+            payload_timestamp_ns(&payload).unwrap(),
+            1_781_045_260_822_668_000
+        );
     }
 
     #[test]

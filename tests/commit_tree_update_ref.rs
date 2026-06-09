@@ -1546,6 +1546,57 @@ fn test_update_ref_current_branch_with_new_content_preserves_attribution() {
 }
 
 #[test]
+fn test_delayed_current_branch_update_ref_trace_preserves_new_commit_attribution() {
+    let repo = TestRepo::new();
+    setup_initial_commit(&repo);
+
+    repo.git(&["checkout", "-b", "feature"])
+        .expect("checkout feature should succeed");
+
+    fs::write(
+        repo.path().join("delayed-branch-plumbing.txt"),
+        "branch ai\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "delayed-branch-plumbing.txt"])
+        .unwrap();
+    raw_untraced_git(&repo, &["add", "-A"]);
+    repo.sync_daemon();
+    let baseline = repo.daemon_total_completion_count();
+
+    let parent_sha = head_sha(&repo);
+    let tree_sha = raw_untraced_git(&repo, &["write-tree"]).trim().to_string();
+    let commit_sha = raw_untraced_git(
+        &repo,
+        &[
+            "commit-tree",
+            &tree_sha,
+            "-p",
+            &parent_sha,
+            "-m",
+            "delayed branch plumbing commit",
+        ],
+    )
+    .trim()
+    .to_string();
+
+    let trace_dir = tempfile::tempdir().expect("trace temp dir");
+    let update_ref_trace = trace_dir.path().join("update-ref.trace2");
+    raw_git_trace_to_file(
+        &repo,
+        &["update-ref", "refs/heads/feature", &commit_sha, &parent_sha],
+        &update_ref_trace,
+    );
+
+    replay_trace_file_to_daemon(&repo, &update_ref_trace);
+    repo.wait_for_daemon_total_completion_count(baseline, baseline + 1);
+
+    assert_note_has_ai_for_file(&repo, &commit_sha, "delayed-branch-plumbing.txt");
+    let mut feature_file = repo.filename("delayed-branch-plumbing.txt");
+    feature_file.assert_lines_and_blame(lines!["branch ai".ai()]);
+}
+
+#[test]
 fn test_update_ref_stdin_head_with_new_content_preserves_attribution() {
     let repo = TestRepo::new();
     setup_initial_commit(&repo);
