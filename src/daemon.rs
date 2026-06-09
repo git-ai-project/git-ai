@@ -74,6 +74,7 @@ const PID_META_FILE: &str = "daemon.pid.json";
 const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
 const TRACE_ROOT_ARGV_FIELD: &str = "git_ai_root_argv";
 const TRACE_ROOT_STARTED_AT_NS_FIELD: &str = "git_ai_root_started_at_ns";
+const TRACE_ROOT_WORKTREE_FIELD: &str = "git_ai_root_worktree";
 pub(crate) const TRACE_ROOT_REFLOG_START_OFFSETS_FIELD: &str = "git_ai_root_reflog_start_offsets";
 const TRACE_CONNECTION_CLOSED_EVENT: &str = "git_ai_connection_closed";
 const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
@@ -367,6 +368,12 @@ fn trace_payload_worktree_hint(payload: &Value) -> Option<PathBuf> {
         }
     }
     if let Some(path) = payload.get("worktree").and_then(Value::as_str) {
+        return Some(normalize(PathBuf::from(path)));
+    }
+    if let Some(path) = payload
+        .get(TRACE_ROOT_WORKTREE_FIELD)
+        .and_then(Value::as_str)
+    {
         return Some(normalize(PathBuf::from(path)));
     }
     if let Some(cwd) = payload.get("cwd").and_then(Value::as_str)
@@ -2340,7 +2347,7 @@ impl ActorDaemonCoordinator {
             .get("event")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if !matches!(event, "start" | "def_repo") {
+        if event == TRACE_CONNECTION_CLOSED_EVENT {
             return Ok(());
         }
 
@@ -2377,6 +2384,37 @@ impl ActorDaemonCoordinator {
             .to_string_lossy()
             .to_string();
         self.append_pending_root_entry(&family, root_sid, started_at_ns)
+    }
+
+    async fn append_ready_command_entry(
+        &self,
+        family: &str,
+        command: crate::daemon::domain::NormalizedCommand,
+    ) -> Result<(), GitAiError> {
+        let exec_lock = self.side_effect_exec_lock(family)?;
+        let _guard = exec_lock.lock().await;
+        {
+            let mut sequencers = self.family_sequencers_by_family.lock().map_err(|_| {
+                GitAiError::Generic("family sequencer map lock poisoned".to_string())
+            })?;
+            let state =
+                sequencers
+                    .entry(family.to_string())
+                    .or_insert_with(|| FamilySequencerState {
+                        next_ordinal: 1,
+                        entries: BTreeMap::new(),
+                    });
+            let order = FamilySequencerOrder {
+                started_at_ns: command.started_at_ns,
+                ordinal: state.next_ordinal,
+            };
+            state.next_ordinal = state.next_ordinal.saturating_add(1);
+            state
+                .entries
+                .insert(order, FamilySequencerEntry::ReadyCommand(Box::new(command)));
+        }
+        self.drain_ready_family_sequencer_entries_locked(family)
+            .await
     }
 
     async fn replace_pending_root_entry(
@@ -3113,6 +3151,7 @@ impl ActorDaemonCoordinator {
             ingress.root_argv.get(&root).cloned(),
             ingress.root_started_at_ns.get(&root).copied(),
             ingress.root_reflog_start_offsets.get(&root).cloned(),
+            ingress.root_worktrees.get(&root).cloned(),
         );
         if terminal {
             ingress.root_worktrees.remove(&root);
@@ -3149,6 +3188,16 @@ impl ActorDaemonCoordinator {
                 object.insert(
                     TRACE_ROOT_REFLOG_START_OFFSETS_FIELD.to_string(),
                     json!(offsets),
+                );
+            }
+            if object.get(TRACE_ROOT_WORKTREE_FIELD).is_none()
+                && object.get("worktree").is_none()
+                && object.get("repo_working_dir").is_none()
+                && let Some(worktree) = inherited.3
+            {
+                object.insert(
+                    TRACE_ROOT_WORKTREE_FIELD.to_string(),
+                    json!(worktree.to_string_lossy().to_string()),
                 );
             }
         }
@@ -4684,6 +4733,14 @@ impl ActorDaemonCoordinator {
             .await?
         {
             let _ = family;
+            TracePayloadApplyOutcome::QueuedFamily
+        } else if let Some(family) = command.family_key.as_ref().map(|family| family.0.clone())
+            && Self::trace_invocation_participates_in_family_sequencer(
+                command.primary_command.as_deref(),
+                &command.raw_argv,
+            )
+        {
+            self.append_ready_command_entry(&family, command).await?;
             TracePayloadApplyOutcome::QueuedFamily
         } else {
             match self.coordinator.route_command(command).await {
@@ -6985,6 +7042,67 @@ mod tests {
             "enqueue must allocate an ingest sequence number"
         );
         coord.request_shutdown();
+    }
+
+    #[tokio::test]
+    async fn mutating_pending_root_is_created_when_repo_and_argv_arrive_on_different_events() {
+        let coord = ActorDaemonCoordinator::new();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(temp.path())
+            .arg("init")
+            .arg("repo")
+            .output()
+            .expect("git init should run");
+        assert!(
+            init.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+
+        let sid = "20260411T120000.000000-Psid-split-metadata";
+        let mut def_repo = serde_json::json!({
+            "event": "def_repo",
+            "sid": sid,
+            "worktree": repo,
+            "time_ns": 1u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut def_repo));
+        coord
+            .apply_trace_payload_to_state(def_repo)
+            .await
+            .expect("def_repo should ingest");
+        assert!(
+            !coord
+                .pending_root_slots_by_root
+                .lock()
+                .unwrap()
+                .contains_key(sid),
+            "repo-only metadata is not enough to sequence a command"
+        );
+
+        let mut start = serde_json::json!({
+            "event": "start",
+            "sid": sid,
+            "argv": ["git", "reset", "--soft", "HEAD~1"],
+            "time_ns": 2u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut start));
+        coord
+            .apply_trace_payload_to_state(start)
+            .await
+            .expect("start should ingest");
+
+        assert!(
+            coord
+                .pending_root_slots_by_root
+                .lock()
+                .unwrap()
+                .contains_key(sid),
+            "mutating roots must be sequenced once argv and repo metadata are both known, even when they arrive on different events"
+        );
     }
 
     #[tokio::test]

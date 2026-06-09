@@ -12,11 +12,14 @@ use git_ai::git::refs::show_authorship_note;
 use git_ai::git::repository::Repository as GitAiRepository;
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{TestRepo, new_daemon_test_sync_session_id, real_git_executable};
+use serde_json::{Value, json};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
+
+const TRACE_ROOT_REFLOG_START_OFFSETS_FIELD: &str = "git_ai_root_reflog_start_offsets";
 
 fn setup_initial_commit(repo: &TestRepo) {
     let mut readme = repo.filename("README.md");
@@ -264,6 +267,41 @@ fn replay_trace_file_to_daemon(repo: &TestRepo, trace_path: &Path) {
     stream.flush().expect("flush delayed trace payload");
 }
 
+fn replay_trace_payloads_to_daemon(repo: &TestRepo, payloads: &[Value]) {
+    let mut stream = open_local_socket_stream_with_timeout(
+        &repo.daemon_trace_socket_path(),
+        Duration::from_secs(2),
+    )
+    .expect("connect to daemon trace socket");
+    for payload in payloads {
+        let line = serde_json::to_string(payload).expect("serialize trace payload");
+        stream
+            .write_all(line.as_bytes())
+            .expect("write trace payload to daemon");
+        stream.write_all(b"\n").expect("write trace newline");
+    }
+    stream.flush().expect("flush trace payloads");
+}
+
+fn current_reflog_offsets(repo: &TestRepo) -> serde_json::Map<String, Value> {
+    let git_dir = repo.path().join(".git").canonicalize().unwrap();
+    let mut offsets = serde_json::Map::new();
+    let head_log = git_dir.join("logs").join("HEAD");
+    if let Ok(metadata) = fs::metadata(&head_log) {
+        offsets.insert(
+            format!("worktree:{}:HEAD", git_dir.to_string_lossy()),
+            json!(metadata.len()),
+        );
+    }
+    let branch = repo.current_branch();
+    let branch_ref = format!("refs/heads/{branch}");
+    let branch_log = git_dir.join("logs").join(&branch_ref);
+    if let Ok(metadata) = fs::metadata(&branch_log) {
+        offsets.insert(format!("common:{branch_ref}"), json!(metadata.len()));
+    }
+    offsets
+}
+
 fn commit_tree_rewrite_current_branch(
     repo: &TestRepo,
     branch: &str,
@@ -403,6 +441,59 @@ fn test_soft_reset_amend_then_branch_move_preserves_squashed_child_attribution()
 
     parent_file.assert_lines_and_blame(lines!["parent line 1".human(), "parent line 2".human(),]);
     child_file.assert_lines_and_blame(lines!["child ai 1".ai(), "child ai 2".ai()]);
+}
+
+#[test]
+fn test_split_trace_metadata_still_sequences_amend_authorship() {
+    let repo = TestRepo::new();
+    setup_initial_commit(&repo);
+
+    let mut file = repo.filename("split_trace.txt");
+    file.set_contents(lines!["split trace ai".ai()]);
+    repo.stage_all_and_commit("split trace base")
+        .expect("base commit should succeed");
+    file.assert_committed_lines(lines!["split trace ai".ai()]);
+    repo.sync_daemon();
+
+    let offsets = current_reflog_offsets(&repo);
+    let session = new_daemon_test_sync_session_id();
+    let session_arg = format!("git-ai.testSyncSession={session}");
+    raw_untraced_git(&repo, &["commit", "--amend", "-m", "split trace amended"]);
+    let amended = head_sha(&repo);
+
+    let sid = "20260411T120000.000000-Psplitmetadata";
+    let mut start = json!({
+        "event": "start",
+        "sid": sid,
+        "argv": ["git", "-c", session_arg, "commit", "--amend", "-m", "split trace amended"],
+        "time_ns": 2u64,
+    });
+    start.as_object_mut().unwrap().insert(
+        TRACE_ROOT_REFLOG_START_OFFSETS_FIELD.to_string(),
+        Value::Object(offsets),
+    );
+    replay_trace_payloads_to_daemon(
+        &repo,
+        &[
+            json!({
+                "event": "def_repo",
+                "sid": sid,
+                "worktree": repo.path().to_string_lossy().to_string(),
+                "time_ns": 1u64,
+            }),
+            start,
+            json!({
+                "event": "atexit",
+                "sid": sid,
+                "code": 0,
+                "time_ns": 3u64,
+            }),
+        ],
+    );
+    repo.sync_daemon_external_completion_sessions(&[session]);
+
+    assert_note_has_ai_for_file(&repo, &amended, "split_trace.txt");
+    file.assert_committed_lines(lines!["split trace ai".ai()]);
 }
 
 #[test]
