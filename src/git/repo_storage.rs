@@ -644,23 +644,6 @@ impl PersistedWorkingLog {
 
     /* INITIAL attributions file */
 
-    /// Write initial attributions to the INITIAL file.
-    /// This seeds the working log with known attributions from rewrite operations.
-    /// Only writes files that have non-empty attributions.
-    pub fn write_initial_attributions(
-        &self,
-        attributions: HashMap<String, Vec<LineAttribution>>,
-        prompts: HashMap<String, PromptRecord>,
-    ) -> Result<(), GitAiError> {
-        self.write_initial(InitialAttributions {
-            files: attributions,
-            prompts,
-            file_blobs: HashMap::new(),
-            humans: std::collections::BTreeMap::new(),
-            sessions: std::collections::BTreeMap::new(),
-        })
-    }
-
     /// Persist INITIAL attributions plus exact file snapshots for the target working log.
     pub fn write_initial_attributions_with_contents(
         &self,
@@ -676,10 +659,14 @@ impl PersistedWorkingLog {
             .collect();
         let mut file_blobs = HashMap::new();
         for file_path in filtered.keys() {
-            if let Some(content) = file_contents.get(file_path) {
-                let blob_sha = self.persist_file_version(content)?;
-                file_blobs.insert(file_path.clone(), blob_sha);
-            }
+            let content = file_contents.get(file_path).ok_or_else(|| {
+                GitAiError::Generic(format!(
+                    "INITIAL missing file content snapshot for {}",
+                    file_path
+                ))
+            })?;
+            let blob_sha = self.persist_file_version(content)?;
+            file_blobs.insert(file_path.clone(), blob_sha);
         }
 
         self.write_initial(InitialAttributions {
@@ -732,16 +719,10 @@ impl PersistedWorkingLog {
             return Ok(Some(content));
         }
         if initial.files.contains_key(file_path) {
-            // Graceful skip for legacy INITIAL data (pre-March-2026) that lacks file_blobs.
-            // The checkpoint flow sets dirty_files to only the files being checkpointed, but
-            // this function iterates ALL files in INITIAL (including ones not in the current
-            // checkpoint). For those files, read_current_file_content will error since they're
-            // not in dirty_files — returning None is safe because it just means we can't provide
-            // supplementary context for that file's prior state.
-            match self.read_current_file_content(file_path) {
-                Ok(content) => return Ok(Some(content)),
-                Err(_) => return Ok(None),
-            }
+            return Err(GitAiError::Generic(format!(
+                "INITIAL missing persisted file snapshot for {}",
+                file_path
+            )));
         }
         Ok(None)
     }

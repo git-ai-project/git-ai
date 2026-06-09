@@ -353,6 +353,43 @@ fn test_write_initial_with_contents_persists_snapshot_blob() {
     assert_eq!(persisted, "fn main() {}\n");
 }
 
+#[test]
+fn test_write_initial_with_contents_rejects_missing_snapshot() {
+    let repo = TestRepo::new();
+    let repo_storage = storage_for(&repo);
+    let working_log = repo_storage
+        .working_log_for_base_commit("test-commit-sha")
+        .unwrap();
+
+    let mut attributions = HashMap::new();
+    attributions.insert(
+        "src/test.rs".to_string(),
+        vec![LineAttribution {
+            start_line: 1,
+            end_line: 1,
+            author_id: "ai-1".to_string(),
+            overrode: None,
+        }],
+    );
+
+    let error = working_log
+        .write_initial_attributions_with_contents(
+            attributions,
+            HashMap::new(),
+            std::collections::BTreeMap::new(),
+            HashMap::new(),
+            std::collections::BTreeMap::new(),
+        )
+        .expect_err("missing content snapshot must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("INITIAL missing file content snapshot for src/test.rs"),
+        "unexpected error: {error}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 9. test_write_initial_empty_removes_existing_file
 // ---------------------------------------------------------------------------
@@ -376,7 +413,13 @@ fn test_write_initial_empty_removes_existing_file() {
         }],
     );
     working_log
-        .write_initial_attributions(attributions, HashMap::new())
+        .write_initial_attributions_with_contents(
+            attributions,
+            HashMap::new(),
+            std::collections::BTreeMap::new(),
+            HashMap::from([("src/test.rs".to_string(), "fn main() {}\n".to_string())]),
+            std::collections::BTreeMap::new(),
+        )
         .expect("write INITIAL");
     assert!(working_log.initial_file.exists(), "INITIAL should exist");
 

@@ -1260,11 +1260,12 @@ fn test_checkpoint_stale_crlf_blob_causes_ai_reattribution() {
     );
 }
 
-/// Regression test: legacy INITIAL attributions without stored file_blobs should not
-/// abort checkpoints. When a file is in INITIAL but has no blob and isn't in dirty_files,
-/// initial_file_content_from should gracefully return None instead of erroring.
+/// Regression test: INITIAL attributions without stored file_blobs are invalid.
+/// Line attributions are only meaningful relative to the exact file snapshot
+/// they describe, so checkpointing must fail loudly instead of guessing from
+/// dirty-file content.
 #[test]
-fn test_checkpoint_succeeds_with_legacy_initial_missing_blobs() {
+fn test_checkpoint_fails_with_initial_missing_blobs() {
     let repo = TestRepo::new();
     let file_a = repo.path().join("file_a.txt");
     let file_b = repo.path().join("file_b.txt");
@@ -1313,9 +1314,10 @@ fn test_checkpoint_succeeds_with_legacy_initial_missing_blobs() {
     let json = serde_json::to_string(&legacy_initial).unwrap();
     std::fs::write(&working_log.initial_file, &json).unwrap();
 
-    // Directly invoke checkpoint daemon logic on file_b only.
-    // dirty_files contains only file_b, but INITIAL references file_a too.
-    // Without the fix, this errors because file_a can't be read from dirty_files.
+    // Directly invoke checkpoint daemon logic on file_b only. The no-blob INITIAL
+    // state is invalid even though dirty_files contains file_b, because INITIAL
+    // also references file_a and neither attribution can be resolved against the
+    // exact snapshot it describes.
     let mut dirty_files = HashMap::new();
     dirty_files.insert(
         "file_b.txt".to_string(),
@@ -1358,10 +1360,12 @@ fn test_checkpoint_succeeds_with_legacy_initial_missing_blobs() {
         checkpoint_request,
         resolved,
     );
+    let error = result.expect_err("checkpoint should reject INITIAL without persisted blobs");
     assert!(
-        result.is_ok(),
-        "Checkpoint should succeed with legacy INITIAL missing blobs, got: {:?}",
-        result.err()
+        error
+            .to_string()
+            .contains("INITIAL missing persisted file snapshot"),
+        "unexpected error: {error}"
     );
 }
 
