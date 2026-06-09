@@ -19,6 +19,10 @@ fn raw_git(repo: &TestRepo, args: &[&str]) -> String {
         .unwrap_or_else(|error| panic!("raw trace-disabled git {:?} failed: {}", args, error))
 }
 
+fn raw_git_result(repo: &TestRepo, args: &[&str]) -> Result<String, String> {
+    repo.git_og_with_env(args, &TRACE2_DISABLED_ENV)
+}
+
 fn raw_head(repo: &TestRepo) -> String {
     raw_git(repo, &["rev-parse", "HEAD"]).trim().to_string()
 }
@@ -76,7 +80,25 @@ fn assert_no_ai_authorship_for_commit(repo: &TestRepo, commit_sha: &str) {
     let Some(note) = repo.read_authorship_note(commit_sha) else {
         return;
     };
-    let log = AuthorshipLog::deserialize_from_string(&note)
+    assert_note_has_no_ai_authorship(commit_sha, &note);
+}
+
+fn assert_no_authorship_note(repo: &TestRepo, commit_sha: &str) {
+    assert!(
+        repo.read_authorship_note(commit_sha).is_none(),
+        "commit {commit_sha} should not have an authorship note"
+    );
+}
+
+fn assert_traced_commit_has_no_ai_authorship(repo: &TestRepo, commit_sha: &str) {
+    let note = repo
+        .read_authorship_note(commit_sha)
+        .unwrap_or_else(|| panic!("traced commit {commit_sha} should have an authorship note"));
+    assert_note_has_no_ai_authorship(commit_sha, &note);
+}
+
+fn assert_note_has_no_ai_authorship(commit_sha: &str, note: &str) {
+    let log = AuthorshipLog::deserialize_from_string(note)
         .unwrap_or_else(|error| panic!("failed to parse authorship note: {}", error));
     assert!(
         log.attestations
@@ -111,6 +133,49 @@ fn test_cold_repo_first_traced_commit_is_processed() {
     assert_no_ai_authorship_for_commit(&repo, &raw_first);
     assert_no_ai_authorship_for_commit(&repo, &raw_second);
     assert_no_ai_authorship_for_commit(&repo, &head);
+}
+
+#[test]
+fn test_traced_commit_after_untraced_head_move_creates_authorship_note() {
+    let repo = TestRepo::new_dedicated_daemon();
+
+    write_file(&repo, "base.txt", "base\n");
+    repo.git(&["add", "base.txt"]).unwrap();
+    run_traced_git(&repo, &["commit", "-m", "traced base"]);
+    let traced_base = raw_head(&repo);
+    assert_traced_commit_has_no_ai_authorship(&repo, &traced_base);
+
+    let raw_unseen = raw_commit_file(&repo, "raw.txt", "raw unseen\n", "raw unseen");
+    assert_no_ai_authorship_for_commit(&repo, &raw_unseen);
+
+    write_file(&repo, "next.txt", "next traced\n");
+    repo.git(&["add", "next.txt"]).unwrap();
+    run_traced_git(&repo, &["commit", "-m", "traced after raw"]);
+    let traced_after_raw = raw_head(&repo);
+
+    assert_traced_commit_has_no_ai_authorship(&repo, &traced_after_raw);
+}
+
+#[test]
+fn test_traced_commit_after_untraced_duplicate_message_head_move_notes_traced_commit() {
+    let repo = TestRepo::new_dedicated_daemon();
+
+    write_file(&repo, "base.txt", "base\n");
+    repo.git(&["add", "base.txt"]).unwrap();
+    run_traced_git(&repo, &["commit", "-m", "traced base"]);
+    let traced_base = raw_head(&repo);
+    assert_traced_commit_has_no_ai_authorship(&repo, &traced_base);
+
+    let raw_unseen = raw_commit_file(&repo, "raw.txt", "raw unseen\n", "same message");
+    assert_no_authorship_note(&repo, &raw_unseen);
+
+    write_file(&repo, "next.txt", "next traced\n");
+    repo.git(&["add", "next.txt"]).unwrap();
+    run_traced_git(&repo, &["commit", "-m", "same message"]);
+    let traced_after_raw = raw_head(&repo);
+
+    assert_no_authorship_note(&repo, &raw_unseen);
+    assert_traced_commit_has_no_ai_authorship(&repo, &traced_after_raw);
 }
 
 #[test]
@@ -235,6 +300,116 @@ fn test_cold_repo_first_traced_conflict_rebase_ignores_stale_rebase_reflog_histo
 }
 
 #[test]
+fn test_cold_repo_mid_rebase_continue_preserves_ai_conflict_resolution() {
+    let mut repo = TestRepo::new_dedicated_daemon();
+    traced_ai_commit_file(&repo, "conflict.txt", "base\n", "ai base");
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    let feature_tip = traced_ai_commit_file(&repo, "conflict.txt", "feature\n", "ai feature");
+
+    repo.git(&["checkout", "main"]).unwrap();
+    traced_ai_commit_file(&repo, "conflict.txt", "main\n", "ai main");
+
+    repo.git(&["checkout", "feature"]).unwrap();
+    let rebase = raw_git_result(&repo, &["rebase", "main"]);
+    assert!(
+        rebase.is_err(),
+        "raw trace-disabled rebase should stop for conflict, got: {:?}",
+        rebase
+    );
+
+    repo.restart_dedicated_daemon_for_test();
+    repo.git_ai(&["checkpoint", "human", "conflict.txt"])
+        .unwrap();
+    write_file(&repo, "conflict.txt", "resolved by ai\n");
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.txt"])
+        .unwrap();
+    repo.git(&["add", "conflict.txt"]).unwrap();
+    repo.git_with_env(&["rebase", "--continue"], &[("GIT_EDITOR", "true")], None)
+        .unwrap();
+    repo.sync_daemon_force();
+
+    let rebased = raw_head(&repo);
+    assert_ne!(rebased, feature_tip);
+    let mut file = repo.filename("conflict.txt");
+    file.assert_committed_lines(crate::lines!["resolved by ai".ai()]);
+}
+
+#[test]
+fn test_cold_repo_mid_cherry_pick_continue_preserves_ai_conflict_resolution() {
+    let mut repo = TestRepo::new_dedicated_daemon();
+    traced_ai_commit_file(&repo, "conflict.txt", "base\n", "ai base");
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    repo.git(&["checkout", "-b", "source"]).unwrap();
+    let source_commit = traced_ai_commit_file(&repo, "conflict.txt", "source\n", "ai source");
+
+    repo.git(&["checkout", "main"]).unwrap();
+    traced_ai_commit_file(&repo, "conflict.txt", "main\n", "ai main");
+
+    let cherry_pick = raw_git_result(&repo, &["cherry-pick", &source_commit]);
+    assert!(
+        cherry_pick.is_err(),
+        "raw trace-disabled cherry-pick should stop for conflict, got: {:?}",
+        cherry_pick
+    );
+
+    repo.restart_dedicated_daemon_for_test();
+    repo.git_ai(&["checkpoint", "human", "conflict.txt"])
+        .unwrap();
+    write_file(&repo, "conflict.txt", "resolved by ai\n");
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.txt"])
+        .unwrap();
+    repo.git(&["add", "conflict.txt"]).unwrap();
+    repo.git_with_env(
+        &["cherry-pick", "--continue"],
+        &[("GIT_EDITOR", "true")],
+        None,
+    )
+    .unwrap();
+    repo.sync_daemon_force();
+
+    let picked = raw_head(&repo);
+    assert_ne!(picked, source_commit);
+    let mut file = repo.filename("conflict.txt");
+    file.assert_committed_lines(crate::lines!["resolved by ai".ai()]);
+}
+
+#[test]
+fn test_cold_repo_mid_merge_commit_preserves_ai_conflict_resolution() {
+    let mut repo = TestRepo::new_dedicated_daemon();
+    traced_ai_commit_file(&repo, "conflict.txt", "base\n", "ai base");
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    traced_ai_commit_file(&repo, "conflict.txt", "feature\n", "ai feature");
+
+    repo.git(&["checkout", "main"]).unwrap();
+    traced_ai_commit_file(&repo, "conflict.txt", "main\n", "ai main");
+
+    let merge = raw_git_result(&repo, &["merge", "feature"]);
+    assert!(
+        merge.is_err(),
+        "raw trace-disabled merge should stop for conflict, got: {:?}",
+        merge
+    );
+
+    repo.restart_dedicated_daemon_for_test();
+    repo.git_ai(&["checkpoint", "human", "conflict.txt"])
+        .unwrap();
+    write_file(&repo, "conflict.txt", "resolved by ai\n");
+    repo.git_ai(&["checkpoint", "mock_ai", "conflict.txt"])
+        .unwrap();
+    repo.git(&["add", "conflict.txt"]).unwrap();
+    repo.git(&["commit", "-m", "merge resolved"]).unwrap();
+    repo.sync_daemon_force();
+
+    let mut file = repo.filename("conflict.txt");
+    file.assert_committed_lines(crate::lines!["resolved by ai".ai()]);
+}
+
+#[test]
 fn test_cold_repo_first_traced_cherry_pick_is_processed() {
     let mut repo = cold_repo();
     raw_commit_file(&repo, "base.txt", "base\n", "raw base");
@@ -356,9 +531,14 @@ fn test_cold_repo_traced_stash_after_raw_stash_history_preserves_current_ai_attr
 
 crate::reuse_tests_in_worktree!(
     test_cold_repo_first_traced_commit_is_processed,
+    test_traced_commit_after_untraced_head_move_creates_authorship_note,
+    test_traced_commit_after_untraced_duplicate_message_head_move_notes_traced_commit,
     test_cold_repo_first_traced_amend_is_processed,
     test_cold_repo_first_traced_soft_reset_is_processed,
     test_cold_repo_first_traced_rebase_is_processed,
+    test_cold_repo_mid_rebase_continue_preserves_ai_conflict_resolution,
+    test_cold_repo_mid_cherry_pick_continue_preserves_ai_conflict_resolution,
+    test_cold_repo_mid_merge_commit_preserves_ai_conflict_resolution,
     test_cold_repo_first_traced_cherry_pick_is_processed,
     test_cold_repo_first_traced_squash_merge_is_processed,
     test_cold_repo_first_traced_merge_is_processed,

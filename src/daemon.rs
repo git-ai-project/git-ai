@@ -1555,9 +1555,6 @@ fn apply_cherry_pick_complete_rewrite(
         sources,
         new_commits,
     )?;
-    if pairs.is_empty() {
-        return Ok(());
-    }
     let sources_by_destination: HashMap<String, Vec<String>> =
         pairs
             .iter()
@@ -1567,16 +1564,19 @@ fn apply_cherry_pick_complete_rewrite(
                     .push(source.clone());
                 acc
             });
-    let (src, dst): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-    crate::authorship::rewrite::handle_rewrite_event(
-        repo,
-        crate::authorship::rewrite::RewriteEvent::CherryPickComplete {
-            sources: src,
-            new_commits: dst.clone(),
-        },
-    )?;
+    if !pairs.is_empty() {
+        let (src, dst): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
+        crate::authorship::rewrite::handle_rewrite_event(
+            repo,
+            crate::authorship::rewrite::RewriteEvent::CherryPickComplete {
+                sources: src,
+                new_commits: dst,
+            },
+        )?;
+    }
 
-    let existing_notes = crate::git::notes_api::read_notes_batch(repo, &dst).unwrap_or_default();
+    let existing_notes =
+        crate::git::notes_api::read_notes_batch(repo, new_commits).unwrap_or_default();
     let author = repo.git_author_identity().formatted_or_unknown();
     let mut parent = original_head.to_string();
     for commit_sha in new_commits {
@@ -3191,7 +3191,6 @@ impl ActorDaemonCoordinator {
         let command_mutates_refs = effective_primary
             .as_deref()
             .is_some_and(|primary| trace_command_may_mutate_refs(Some(primary)));
-        let command_needs_stash_reflog_start_offset = effective_primary.as_deref() == Some("stash");
         if let Some(primary) = effective_primary.as_deref() {
             ingress
                 .root_mutating
@@ -3205,17 +3204,15 @@ impl ActorDaemonCoordinator {
         }
 
         let terminal = is_terminal_root_trace_event(&event, &sid, &root);
-        if command_needs_stash_reflog_start_offset
-            && command_mutates_refs
+        if command_mutates_refs
             && !terminal
             && !ingress.root_reflog_start_offsets.contains_key(&root)
             && let Some(worktree) = worktree_hint
                 .clone()
                 .or_else(|| ingress.root_worktrees.get(&root).cloned())
         {
-            let offsets = crate::daemon::ref_cursor::capture_stash_reflog_start_offset_for_worktree(
-                &worktree,
-            );
+            let offsets =
+                crate::daemon::ref_cursor::capture_reflog_start_offsets_for_worktree(&worktree);
             ingress
                 .root_reflog_start_offsets
                 .insert(root.clone(), offsets);
@@ -4410,7 +4407,7 @@ impl ActorDaemonCoordinator {
                             } else {
                                 new_commits.clone()
                             };
-                            if !sources.is_empty() && original_head != new_head {
+                            if original_head != new_head {
                                 let _ = apply_cherry_pick_complete_rewrite(
                                     &repo,
                                     original_head,
@@ -6991,18 +6988,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stash_trace_payload_captures_stash_reflog_start_offset() {
+    async fn mutating_trace_payload_captures_repo_reflog_start_offsets() {
         let coord = ActorDaemonCoordinator::new();
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
+        let git_dir = repo.join(".git");
+        let head_log = git_dir.join("logs/HEAD");
         let stash_log = repo.join(".git/logs/refs/stash");
+        let branch_log = repo.join(".git/logs/refs/heads/main");
+        std::fs::create_dir_all(head_log.parent().unwrap()).unwrap();
         std::fs::create_dir_all(stash_log.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(branch_log.parent().unwrap()).unwrap();
+        let old_head_reflog = b"old HEAD reflog entry\n";
         let old_reflog = b"old stash reflog entry\n";
+        let old_branch_reflog = b"old branch reflog entry\n";
+        std::fs::write(&head_log, old_head_reflog).unwrap();
         std::fs::write(&stash_log, old_reflog).unwrap();
+        std::fs::write(&branch_log, old_branch_reflog).unwrap();
         let mut payload = serde_json::json!({
             "event": "start",
             "sid": "20260411T120000.000000-Psid-reflog",
-            "argv": ["git", "stash", "push"],
+            "argv": ["git", "reset", "--hard", "HEAD~1"],
             "worktree": repo,
         });
 
@@ -7012,9 +7018,23 @@ mod tests {
             .get(TRACE_ROOT_REFLOG_START_OFFSETS_FIELD)
             .and_then(Value::as_object)
             .expect("mutating trace payload should include reflog start offsets");
+        let head_key = format!(
+            "worktree:{}:HEAD",
+            git_dir.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            offsets.get(&head_key).and_then(Value::as_u64),
+            Some(old_head_reflog.len() as u64)
+        );
         assert_eq!(
             offsets.get("common:refs/stash").and_then(Value::as_u64),
             Some(old_reflog.len() as u64)
+        );
+        assert_eq!(
+            offsets
+                .get("common:refs/heads/main")
+                .and_then(Value::as_u64),
+            Some(old_branch_reflog.len() as u64)
         );
     }
 

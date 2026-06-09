@@ -3069,8 +3069,13 @@ fn daemon_pure_trace_socket_pull_rebase_tracks_pull_and_rebase_completion() {
         .parent()
         .expect("test repo path should have parent")
         .to_path_buf();
-    let bare_remote = root.join("origin-rebase.git");
-    let remote_clone = root.join("origin-rebase-work");
+    let unique = repo
+        .path()
+        .file_name()
+        .expect("test repo path should have filename")
+        .to_string_lossy();
+    let bare_remote = root.join(format!("origin-rebase-{unique}.git"));
+    let remote_clone = root.join(format!("origin-rebase-work-{unique}"));
     let bare_remote_str = bare_remote.to_string_lossy().to_string();
     let remote_clone_str = remote_clone.to_string_lossy().to_string();
     let _ = fs::remove_dir_all(&bare_remote);
