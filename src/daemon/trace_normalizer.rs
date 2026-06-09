@@ -195,7 +195,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
     }
 
     fn refresh_pending_mutation_capture(&mut self, root_sid: &str) -> Result<(), GitAiError> {
-        let primary_hint = {
+        let (primary_hint, raw_argv) = {
             let pending = match self.state.pending.get(root_sid) {
                 Some(pending) => pending,
                 None => return Ok(()),
@@ -207,15 +207,18 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 return Ok(());
             };
 
-            self.resolve_primary_hint(
-                pending.root_cmd_name.as_deref(),
-                &pending.observed_child_commands,
-                &pending.raw_argv,
-                Some(worktree),
-                Some(family),
-            )?
+            (
+                self.resolve_primary_hint(
+                    pending.root_cmd_name.as_deref(),
+                    &pending.observed_child_commands,
+                    &pending.raw_argv,
+                    Some(worktree),
+                    Some(family),
+                )?,
+                pending.raw_argv.clone(),
+            )
         };
-        if !command_may_mutate_refs(primary_hint.as_deref()) {
+        if !command_may_mutate_refs(primary_hint.as_deref(), &raw_argv) {
             return Ok(());
         }
         // Ref transitions are resolved by the family cursor after normalization.
@@ -923,26 +926,14 @@ fn takes_value_option(token: &str) -> bool {
     )
 }
 
-fn command_may_mutate_refs(primary_command: Option<&str>) -> bool {
-    matches!(
-        primary_command,
-        Some(
-            "cherry-pick"
-                | "checkout"
-                | "clone"
-                | "commit"
-                | "fetch"
-                | "init"
-                | "merge"
-                | "pull"
-                | "push"
-                | "rebase"
-                | "reset"
-                | "stash"
-                | "switch"
-                | "update-ref"
+fn command_may_mutate_refs(primary_command: Option<&str>, raw_argv: &[String]) -> bool {
+    primary_command.is_some_and(|command| {
+        let (_invoked_command, invoked_args) = canonical_invocation(raw_argv, Some(command));
+        crate::git::command_classification::git_invocation_may_mutate_repo_state(
+            command,
+            &invoked_args,
         )
-    )
+    })
 }
 
 fn select_primary_command(

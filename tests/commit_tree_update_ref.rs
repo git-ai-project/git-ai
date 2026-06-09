@@ -1512,6 +1512,40 @@ fn test_update_ref_head_with_new_content_then_amend_preserves_attribution() {
 }
 
 #[test]
+fn test_update_ref_current_branch_with_new_content_preserves_attribution() {
+    let repo = TestRepo::new();
+    setup_initial_commit(&repo);
+
+    repo.git(&["checkout", "-b", "feature"])
+        .expect("checkout feature should succeed");
+
+    fs::write(repo.path().join("branch-plumbing.txt"), "branch ai\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "branch-plumbing.txt"])
+        .unwrap();
+    repo.git(&["add", "-A"]).unwrap();
+
+    let parent_sha = head_sha(&repo);
+    let tree_sha = repo.git(&["write-tree"]).unwrap().trim().to_string();
+    let commit_sha = repo
+        .git(&[
+            "commit-tree",
+            &tree_sha,
+            "-p",
+            &parent_sha,
+            "-m",
+            "branch plumbing commit",
+        ])
+        .unwrap()
+        .trim()
+        .to_string();
+    repo.git(&["update-ref", "refs/heads/feature", &commit_sha, &parent_sha])
+        .unwrap();
+
+    let mut feature_file = repo.filename("branch-plumbing.txt");
+    feature_file.assert_lines_and_blame(lines!["branch ai".ai()]);
+}
+
+#[test]
 fn test_update_ref_stdin_head_with_new_content_preserves_attribution() {
     let repo = TestRepo::new();
     setup_initial_commit(&repo);

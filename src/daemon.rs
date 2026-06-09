@@ -569,127 +569,32 @@ fn trace_argv_primary_command(argv: &[String]) -> Option<String> {
     None
 }
 
-/// Extract the subcommand from a trace2 argv after the primary command.
-///
-/// For an invocation like `git -c core.fsmonitor=false stash list` this
-/// returns `Some("list")`.  Used together with the primary command to
-/// identify read-only invocations such as `stash list` and `worktree list`
-/// that would otherwise be misclassified as potentially-mutating.
-fn trace_argv_subcommand(argv: &[String]) -> Option<String> {
-    // Walk the argv twice:
-    //   pass 1 — find the index of the primary command (same logic as
-    //            trace_argv_primary_command)
-    //   pass 2 — find the first non-flag token after that index
-    let mut idx = 0;
-    // Skip the git binary itself
-    if argv
-        .first()
-        .map(|token| {
-            let file_name = Path::new(token)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(token);
-            file_name == "git" || file_name == "git.exe"
-        })
-        .unwrap_or(false)
-    {
-        idx = 1;
-    }
-    // Skip git global flags to reach the primary command
-    let cmd_idx = loop {
-        if idx >= argv.len() {
-            return None;
-        }
-        let token = argv[idx].as_str();
-        if token == "-C" {
-            idx += 2;
-            continue;
-        }
-        if matches!(
-            token,
-            "-c" | "--config-env"
-                | "--git-dir"
-                | "--work-tree"
-                | "--namespace"
-                | "--super-prefix"
-                | "--exec-path"
-                | "--worktree-attributes"
-                | "--attr-source"
-        ) {
-            idx += 2;
-            continue;
-        }
-        if token.starts_with("--") && token.contains('=') {
-            idx += 1;
-            continue;
-        }
-        if token.starts_with('-') {
-            idx += 1;
-            continue;
-        }
-        break idx;
-    };
-    // cmd_idx points at the primary command.  Advance past it and find the
-    // first non-flag positional argument — the subcommand.
-    let mut idx = cmd_idx + 1;
-    while idx < argv.len() {
-        let token = argv[idx].as_str();
-        if token.starts_with('-') {
-            idx += 1;
-            continue;
-        }
-        return Some(token.to_string());
-    }
-    None
-}
-
-/// Returns true when the trace2 event's command+subcommand pair is
+/// Returns true when the trace2 event's command+argument pair is
 /// guaranteed to never mutate repository state.
 ///
-/// This extends the simple command check to handle commands like `stash`
-/// and `worktree` whose mutability depends on the subcommand (e.g.,
-/// `git stash list` is read-only while `git stash pop` is not).
+/// This extends the simple command check to handle mixed read/write commands
+/// such as `branch`, `remote`, `stash`, `tag`, and `worktree`.
 fn trace_invocation_is_definitely_read_only(
     primary_command: Option<&str>,
     argv: &[String],
 ) -> bool {
-    use crate::git::command_classification::is_definitely_read_only_invocation;
+    use crate::git::command_classification::is_definitely_read_only_git_invocation;
     match primary_command {
-        Some(cmd) => {
-            // Only parse the subcommand for commands that need it; parsing is
-            // cheap but this avoids it for the majority of clearly-read-only
-            // commands like status, diff, show, etc.
-            let subcommand = if matches!(cmd, "stash" | "worktree") {
-                trace_argv_subcommand(argv)
-            } else {
-                None
-            };
-            is_definitely_read_only_invocation(cmd, subcommand.as_deref())
-        }
+        Some(cmd) => is_definitely_read_only_git_invocation(
+            cmd,
+            &trace_invocation_command_args(Some(cmd), argv),
+        ),
         None => false,
     }
 }
 
-fn trace_command_may_mutate_refs(primary_command: Option<&str>) -> bool {
-    matches!(
-        primary_command,
-        Some(
-            "cherry-pick"
-                | "checkout"
-                | "clone"
-                | "commit"
-                | "fetch"
-                | "init"
-                | "merge"
-                | "pull"
-                | "push"
-                | "rebase"
-                | "reset"
-                | "stash"
-                | "switch"
-                | "update-ref"
+fn trace_invocation_may_mutate_refs(primary_command: Option<&str>, argv: &[String]) -> bool {
+    primary_command.is_some_and(|cmd| {
+        crate::git::command_classification::git_invocation_may_mutate_repo_state(
+            cmd,
+            &trace_invocation_command_args(Some(cmd), argv),
         )
-    )
+    })
 }
 
 fn trace_command_uses_target_repo_context_only(primary_command: Option<&str>) -> bool {
@@ -711,6 +616,24 @@ fn trace_invocation_args(argv: &[String]) -> &[String] {
     } else {
         argv
     }
+}
+
+fn trace_invocation_command_args(primary_command: Option<&str>, argv: &[String]) -> Vec<String> {
+    let invocation = trace_invocation_args(argv);
+    let parsed = parse_git_cli_args(invocation);
+    if parsed.command.as_deref() == primary_command {
+        return parsed.command_args;
+    }
+
+    let Some(primary) = primary_command else {
+        return Vec::new();
+    };
+    invocation
+        .iter()
+        .position(|arg| arg == primary)
+        .and_then(|idx| invocation.get(idx + 1..))
+        .map(|args| args.to_vec())
+        .unwrap_or_default()
 }
 
 fn matches_any_pathspec(file: &str, pathspecs: &[String]) -> bool {
@@ -761,10 +684,10 @@ fn process_conflict_resolution_working_logs(
     new_tip: &str,
     onto: Option<&str>,
     source_mappings: &[(String, String)],
-) {
+) -> Result<(), GitAiError> {
     let onto_sha = match onto {
         Some(s) if !s.is_empty() => s,
-        _ => return,
+        _ => return Ok(()),
     };
 
     // Walk rebased commits between onto and new_tip
@@ -774,10 +697,7 @@ fn process_conflict_resolution_working_logs(
         "--format=%H %P".to_string(),
         format!("{}..{}", onto_sha, new_tip),
     ]);
-    let output = match crate::git::repository::exec_git(&args) {
-        Ok(o) => o,
-        Err(_) => return,
-    };
+    let output = crate::git::repository::exec_git(&args)?;
     let log_output = String::from_utf8_lossy(&output.stdout);
     let mut sources_by_destination: HashMap<String, Vec<String>> = HashMap::new();
     for (source, destination) in source_mappings {
@@ -798,8 +718,7 @@ fn process_conflict_resolution_working_logs(
         .iter()
         .map(|(commit_sha, _)| commit_sha.clone())
         .collect::<Vec<_>>();
-    let existing_notes =
-        crate::git::notes_api::read_notes_batch(repo, &commit_shas).unwrap_or_default();
+    let existing_notes = crate::git::notes_api::read_notes_batch(repo, &commit_shas)?;
     let author = repo.git_author_identity().formatted_or_unknown();
 
     for (commit_sha, parent_sha) in commit_parent_pairs {
@@ -810,21 +729,16 @@ fn process_conflict_resolution_working_logs(
             .get(&commit_sha)
             .cloned()
             .unwrap_or_default();
-        if let Err(err) = post_conflict_resolution_working_log(
+        post_conflict_resolution_working_log(
             repo,
             &parent_sha,
             &commit_sha,
             author.clone(),
             existing_shifted_log,
             source_shas,
-        ) {
-            tracing::debug!(
-                "failed to merge rebase conflict resolution authorship for {}: {}",
-                commit_sha,
-                err
-            );
-        }
+        )?;
     }
+    Ok(())
 }
 
 fn post_conflict_resolution_working_log(
@@ -1075,7 +989,7 @@ fn apply_push_side_effect(
 ) -> Result<(), GitAiError> {
     use crate::config::NotesBackendKind;
     use crate::git::cli_parser::is_dry_run;
-    use crate::git::sync_authorship::push_authorship_notes;
+    use crate::git::sync_authorship::{push_authorship_notes, push_remote_from_args};
 
     if crate::config::Config::get().notes_backend_kind() == NotesBackendKind::Http {
         tracing::debug!("apply_push_side_effect: skipping authorship push (Http backend)");
@@ -1095,44 +1009,12 @@ fn apply_push_side_effect(
         return Ok(());
     }
 
-    let remote = resolve_push_remote_for_side_effect(&parsed, &repo);
-    let Some(remote) = remote else {
-        tracing::debug!("no remotes found for authorship push; skipping");
-        return Ok(());
-    };
+    let remote = push_remote_from_args(&repo, &parsed)?;
 
     crate::commands::upgrade::maybe_schedule_background_update_check();
     tracing::debug!("started pushing authorship notes to remote: {}", remote);
 
-    if let Err(e) = push_authorship_notes(&repo, &remote) {
-        tracing::debug!("authorship push failed: {}", e);
-    }
-    Ok(())
-}
-
-fn resolve_push_remote_for_side_effect(
-    parsed_args: &crate::git::cli_parser::ParsedGitInvocation,
-    repository: &Repository,
-) -> Option<String> {
-    let remotes = repository.remotes().ok();
-    let remote_names: Vec<String> = remotes
-        .as_ref()
-        .map(|r| {
-            (0..r.len())
-                .filter_map(|i| r.get(i).map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let upstream_remote = repository.upstream_remote().ok().flatten();
-    let default_remote = repository.get_default_remote().ok().flatten();
-
-    let positional_remote = parsed_args
-        .command_args
-        .iter()
-        .find(|arg| !arg.starts_with('-') && remote_names.contains(arg))
-        .cloned();
-
-    positional_remote.or(upstream_remote).or(default_remote)
+    push_authorship_notes(&repo, &remote)
 }
 
 fn transcript_sweep_triggers_for_events(
@@ -1169,35 +1051,14 @@ fn apply_pull_notes_sync_side_effect(
 ) -> Result<(), GitAiError> {
     let repo = find_repository_in_path(worktree)?;
     let parsed = parsed_invocation_for_side_effect(command, args);
-    let remote = match fetch_remote_from_args(&repo, &parsed) {
-        Ok(remote) => remote,
-        Err(error) => {
-            tracing::debug!(
-                %error,
-                command = parsed.command.as_deref().unwrap_or("pull"),
-                "notes sync: failed to determine remote"
-            );
-            return Ok(());
-        }
-    };
-    if let Err(error) = fetch_authorship_notes(&repo, &remote) {
-        tracing::debug!(
-            %error,
-            %remote,
-            "notes sync: failed to fetch authorship notes"
-        );
-    }
+    let remote = fetch_remote_from_args(&repo, &parsed)?;
+    fetch_authorship_notes(&repo, &remote)?;
     Ok(())
 }
 
 fn apply_clone_notes_sync_side_effect(worktree: &str) -> Result<(), GitAiError> {
     let repo = find_repository_in_path(worktree)?;
-    if let Err(error) = fetch_authorship_notes(&repo, "origin") {
-        tracing::debug!(
-            %error,
-            "notes sync: failed to fetch clone authorship notes from origin"
-        );
-    }
+    fetch_authorship_notes(&repo, "origin")?;
     Ok(())
 }
 
@@ -1576,8 +1437,7 @@ fn apply_cherry_pick_complete_rewrite(
         )?;
     }
 
-    let existing_notes =
-        crate::git::notes_api::read_notes_batch(repo, new_commits).unwrap_or_default();
+    let existing_notes = crate::git::notes_api::read_notes_batch(repo, new_commits)?;
     let author = repo.git_author_identity().formatted_or_unknown();
     let mut parent = original_head.to_string();
     for commit_sha in new_commits {
@@ -1614,7 +1474,7 @@ fn apply_cherry_pick_no_commit_rewrite(
         .iter()
         .map(|source| (source.clone(), new_head.to_string()))
         .collect::<Vec<_>>();
-    crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, sources);
+    crate::git::sync_authorship::fetch_missing_notes_for_commits(repo, sources)?;
     crate::authorship::rewrite::shift_authorship_notes_merging_existing(repo, &mappings)
 }
 
@@ -2400,29 +2260,16 @@ impl ActorDaemonCoordinator {
         false
     }
 
-    fn trace_command_participates_in_family_sequencer(primary_command: Option<&str>) -> bool {
-        matches!(
-            primary_command,
-            Some(
-                "branch"
-                    | "checkout"
-                    | "cherry-pick"
-                    | "commit"
-                    | "fetch"
-                    | "merge"
-                    | "pull"
-                    | "push"
-                    | "rebase"
-                    | "remote"
-                    | "reset"
-                    | "revert"
-                    | "stash"
-                    | "switch"
-                    | "tag"
-                    | "update-ref"
-                    | "worktree"
+    fn trace_invocation_participates_in_family_sequencer(
+        primary_command: Option<&str>,
+        argv: &[String],
+    ) -> bool {
+        primary_command.is_some_and(|cmd| {
+            crate::git::command_classification::git_invocation_participates_in_family_sequencer(
+                cmd,
+                &trace_invocation_command_args(Some(cmd), argv),
             )
-        )
+        })
     }
 
     fn append_pending_root_entry(
@@ -2508,7 +2355,10 @@ impl ActorDaemonCoordinator {
         let argv = trace_payload_effective_argv(payload);
         let primary_command =
             trace_payload_primary_command(payload).or_else(|| trace_argv_primary_command(&argv));
-        if !Self::trace_command_participates_in_family_sequencer(primary_command.as_deref()) {
+        if !Self::trace_invocation_participates_in_family_sequencer(
+            primary_command.as_deref(),
+            &argv,
+        ) {
             return Ok(());
         }
 
@@ -3228,9 +3078,8 @@ impl ActorDaemonCoordinator {
         };
         let effective_primary =
             early_primary.or_else(|| trace_argv_primary_command(&effective_argv));
-        let command_mutates_refs = effective_primary
-            .as_deref()
-            .is_some_and(|primary| trace_command_may_mutate_refs(Some(primary)));
+        let command_mutates_refs =
+            trace_invocation_may_mutate_refs(effective_primary.as_deref(), &effective_argv);
         if let Some(primary) = effective_primary.as_deref() {
             ingress
                 .root_mutating
@@ -4070,14 +3919,14 @@ impl ActorDaemonCoordinator {
                     &new_tip,
                     rebase_onto.as_deref(),
                 )?;
-                let _ = repo.storage.rename_working_log(&original_head, &new_tip);
+                repo.storage.rename_working_log(&original_head, &new_tip)?;
                 let conflict_base = rebase_onto.clone();
                 process_conflict_resolution_working_logs(
                     &repo,
                     &new_tip,
                     conflict_base.as_deref(),
                     &mappings,
-                );
+                )?;
             }
             return Ok(());
         }
@@ -4103,7 +3952,7 @@ impl ActorDaemonCoordinator {
                 new_tip,
                 rewrite_onto.as_deref(),
             )?;
-            let _ = repo.storage.rename_working_log(old_tip, new_tip);
+            repo.storage.rename_working_log(old_tip, new_tip)?;
             if is_rebase_cmd {
                 let conflict_base = rewrite_onto.clone().or_else(|| onto_hint.clone());
                 process_conflict_resolution_working_logs(
@@ -4111,7 +3960,7 @@ impl ActorDaemonCoordinator {
                     new_tip,
                     conflict_base.as_deref(),
                     &mappings,
-                );
+                )?;
             }
         }
 
@@ -4252,15 +4101,8 @@ impl ActorDaemonCoordinator {
                 Some("checkout" | "switch" | "branch" | "stash")
             )
         };
-        if !skip_non_ff
-            && cmd.exit_code == 0
-            && let Err(e) = self.detect_and_handle_non_ff_rewrites(cmd)
-        {
-            tracing::debug!(
-                sid = %cmd.root_sid,
-                %e,
-                "non-ff rewrite detection failed (non-fatal)"
-            );
+        if !skip_non_ff && cmd.exit_code == 0 {
+            self.detect_and_handle_non_ff_rewrites(cmd)?;
         }
 
         if cmd.exit_code != 0 {
@@ -4332,14 +4174,18 @@ impl ActorDaemonCoordinator {
                     let new_commits = cherry_pick_destination_commits(cmd);
                     if !new_commits.is_empty() && !cmd.cherry_pick_source_oids.is_empty() {
                         let repo = find_repository_in_path(&worktree.to_string_lossy())?;
-                        if let Some(original_head) = cherry_pick_original_head(cmd) {
-                            let _ = apply_cherry_pick_complete_rewrite(
-                                &repo,
-                                &original_head,
-                                &cmd.cherry_pick_source_oids,
-                                &new_commits,
-                            );
-                        }
+                        let original_head = cherry_pick_original_head(cmd).ok_or_else(|| {
+                            GitAiError::Generic(format!(
+                                "cherry-pick completed commits without original HEAD sid={}",
+                                cmd.root_sid
+                            ))
+                        })?;
+                        apply_cherry_pick_complete_rewrite(
+                            &repo,
+                            &original_head,
+                            &cmd.cherry_pick_source_oids,
+                            &new_commits,
+                        )?;
                     }
                     let remaining = cmd
                         .cherry_pick_source_oids
@@ -4402,27 +4248,21 @@ impl ActorDaemonCoordinator {
             for event in events {
                 match event {
                     crate::daemon::domain::SemanticEvent::CloneCompleted { .. } => {
-                        if let Err(e) = apply_clone_notes_sync_side_effect(&worktree) {
-                            tracing::debug!(
-                                %e,
-                                %worktree,
-                                "clone notes side effect failed"
-                            );
-                        }
+                        apply_clone_notes_sync_side_effect(&worktree)?;
                     }
                     crate::daemon::domain::SemanticEvent::PullCompleted { .. } => {
-                        let _ = apply_pull_notes_sync_side_effect(
+                        apply_pull_notes_sync_side_effect(
                             &worktree,
                             cmd.invoked_command.as_deref(),
                             &cmd.invoked_args,
-                        );
+                        )?;
                     }
                     crate::daemon::domain::SemanticEvent::PushCompleted { .. } => {
-                        let _ = apply_push_side_effect(
+                        apply_push_side_effect(
                             &worktree,
                             cmd.invoked_command.as_deref(),
                             &cmd.invoked_args,
-                        );
+                        )?;
                     }
                     crate::daemon::domain::SemanticEvent::CherryPickComplete {
                         original_head,
@@ -4448,12 +4288,18 @@ impl ActorDaemonCoordinator {
                                 new_commits.clone()
                             };
                             if original_head != new_head {
-                                let _ = apply_cherry_pick_complete_rewrite(
+                                if original_head.is_empty() {
+                                    return Err(GitAiError::Generic(format!(
+                                        "cherry-pick complete missing original HEAD sid={}",
+                                        cmd.root_sid
+                                    )));
+                                }
+                                apply_cherry_pick_complete_rewrite(
                                     &repo,
                                     original_head,
                                     &sources,
                                     &destinations,
-                                );
+                                )?;
                             }
                         }
                     }
@@ -4497,10 +4343,9 @@ impl ActorDaemonCoordinator {
                                         stash_base_head(&repo, stash_sha).or_else(|| head.clone());
                                     if let Some(head_sha) = push_head.as_deref() {
                                         let pathspecs = Self::stash_pathspecs_from_command(cmd);
-                                        let _ =
-                                            crate::authorship::rewrite_stash::handle_stash_create(
-                                                &repo, stash_sha, head_sha, pathspecs,
-                                            );
+                                        crate::authorship::rewrite_stash::handle_stash_create(
+                                            &repo, stash_sha, head_sha, pathspecs,
+                                        )?;
                                     }
                                 }
                             }
@@ -4508,10 +4353,9 @@ impl ActorDaemonCoordinator {
                                 if let Some(stash_sha) = resolve_stash_sha(cmd) {
                                     let base_head = stash_base_head(&repo, stash_sha);
                                     let target_head = head.as_deref().or(base_head.as_deref());
-                                    let _ =
-                                        crate::authorship::rewrite_stash::handle_stash_pop_or_apply_with_head(
-                                            &repo, stash_sha, true, target_head,
-                                        );
+                                    crate::authorship::rewrite_stash::handle_stash_pop_or_apply_with_head(
+                                        &repo, stash_sha, true, target_head,
+                                    )?;
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Apply
@@ -4530,17 +4374,16 @@ impl ActorDaemonCoordinator {
                                         .as_deref()
                                         .or(head.as_deref())
                                         .or(base_head.as_deref());
-                                    let _ =
-                                        crate::authorship::rewrite_stash::handle_stash_pop_or_apply_with_head(
-                                            &repo, stash_sha, false, target_head,
-                                        );
+                                    crate::authorship::rewrite_stash::handle_stash_pop_or_apply_with_head(
+                                        &repo, stash_sha, false, target_head,
+                                    )?;
                                 }
                             }
                             crate::daemon::domain::StashOpKind::Drop => {
                                 if let Some(stash_sha) = resolve_stash_sha(cmd) {
-                                    let _ = crate::authorship::rewrite_stash::handle_stash_drop(
+                                    crate::authorship::rewrite_stash::handle_stash_drop(
                                         &repo, stash_sha,
-                                    );
+                                    )?;
                                 }
                             }
                             _ => {}
@@ -4587,9 +4430,7 @@ impl ActorDaemonCoordinator {
                                 // Reconstruct each destination from the matching HEAD transition
                                 // instead of treating the command as one final CommitCreated event.
                                 let repo = find_repository_in_path(&worktree)?;
-                                if let Err(e) = apply_revert_complete_rewrite(&repo, cmd) {
-                                    tracing::debug!(%e, "revert attribution transfer failed");
-                                }
+                                apply_revert_complete_rewrite(&repo, cmd)?;
                                 handled_revert_commits = true;
                             }
                         } else if !new_head.is_empty() {
@@ -4597,21 +4438,13 @@ impl ActorDaemonCoordinator {
                             let author = repo.git_author_identity().formatted_or_unknown();
                             let base_opt = base.clone().filter(|b| !b.is_empty() && b != "initial");
 
-                            if let Err(e) =
-                                crate::authorship::post_commit::post_commit_from_working_log(
-                                    &repo,
-                                    base_opt.clone(),
-                                    new_head.clone(),
-                                    author,
-                                    true,
-                                )
-                            {
-                                tracing::debug!(
-                                    %e,
-                                    %worktree,
-                                    "commit post-commit side effect failed"
-                                );
-                            }
+                            crate::authorship::post_commit::post_commit_from_working_log(
+                                &repo,
+                                base_opt.clone(),
+                                new_head.clone(),
+                                author,
+                                true,
+                            )?;
 
                             if cmd.primary_command.as_deref() == Some("commit")
                                 && let Some(pending) = self
@@ -4620,11 +4453,11 @@ impl ActorDaemonCoordinator {
                                     )?
                             {
                                 if base.as_deref().is_some_and(|base| base == pending.head) {
-                                    let _ = apply_cherry_pick_no_commit_rewrite(
+                                    apply_cherry_pick_no_commit_rewrite(
                                         &repo,
                                         &pending.source_commits,
                                         new_head,
-                                    );
+                                    )?;
                                 } else {
                                     self.set_pending_cherry_pick_no_commit_for_worktree(
                                         worktree.as_ref(),
@@ -4646,15 +4479,9 @@ impl ActorDaemonCoordinator {
                         {
                             let repo = find_repository_in_path(&worktree)?;
                             let author = repo.git_author_identity().formatted_or_unknown();
-                            if let Err(e) = crate::authorship::post_commit::post_commit_amend(
+                            crate::authorship::post_commit::post_commit_amend(
                                 &repo, old_head, new_head, author,
-                            ) {
-                                tracing::debug!(
-                                    %e,
-                                    %worktree,
-                                    "commit amend side effect failed"
-                                );
-                            }
+                            )?;
                         }
                     }
                     crate::daemon::domain::SemanticEvent::Reset {
@@ -4666,23 +4493,22 @@ impl ActorDaemonCoordinator {
                             let repo = find_repository_in_path(&worktree)?;
                             match kind {
                                 crate::daemon::domain::ResetKind::Hard => {
-                                    let _ =
-                                        repo.storage.delete_working_log_for_base_commit(old_head);
+                                    repo.storage.delete_working_log_for_base_commit(old_head)?;
                                 }
                                 _ => {
                                     if is_ancestor_commit(&repo, new_head, old_head) {
-                                        let _ = crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
+                                        crate::authorship::rewrite_reset::reconstruct_working_log_after_backward_reset(
                                             &repo, old_head, new_head,
-                                        );
+                                        )?;
                                     } else if !is_ancestor_commit(&repo, old_head, new_head) {
-                                        let _ = crate::authorship::rewrite::handle_rewrite_event(
+                                        crate::authorship::rewrite::handle_rewrite_event(
                                             &repo,
                                             crate::authorship::rewrite::RewriteEvent::NonFastForward {
                                                 old_tip: old_head.to_string(),
                                                 new_tip: new_head.to_string(),
                                                 onto: None,
                                             },
-                                        );
+                                        )?;
                                     }
                                 }
                             }
@@ -4711,17 +4537,15 @@ impl ActorDaemonCoordinator {
 
         if saw_pull_event && let Some(worktree) = cmd.worktree.as_ref() {
             let (old_head, new_head) = Self::resolve_heads_for_command(cmd);
-            if !old_head.is_empty()
-                && !new_head.is_empty()
-                && old_head != new_head
-                && let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy())
-                && repo_is_ancestor(&repo, &old_head, &new_head)
-            {
-                apply_pull_fast_forward_working_log_side_effect(
-                    &worktree.to_string_lossy(),
-                    &old_head,
-                    &new_head,
-                )?;
+            if !old_head.is_empty() && !new_head.is_empty() && old_head != new_head {
+                let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+                if repo_is_ancestor(&repo, &old_head, &new_head) {
+                    apply_pull_fast_forward_working_log_side_effect(
+                        &worktree.to_string_lossy(),
+                        &old_head,
+                        &new_head,
+                    )?;
+                }
             }
         }
 
@@ -4746,38 +4570,36 @@ impl ActorDaemonCoordinator {
                     {
                         continue;
                     }
-                    if let Ok(repo) = find_repository_in_path(&worktree.to_string_lossy()) {
-                        if repo_is_ancestor(&repo, old, new) {
-                            let affects_checked_out_branch = reference == "HEAD"
-                                || cmd.ref_changes.iter().any(|change| {
-                                    change.reference == "HEAD"
-                                        && change.old == *old
-                                        && change.new == *new
-                                });
-                            if affects_checked_out_branch {
-                                if repo.storage.has_working_log(old) {
-                                    let author = repo.git_author_identity().formatted_or_unknown();
-                                    let _ =
-                                        crate::authorship::post_commit::post_commit_from_working_log(
-                                            &repo,
-                                            Some(old.to_string()),
-                                            new.to_string(),
-                                            author,
-                                            true,
-                                        );
-                                }
-                                let _ = repo.storage.rename_working_log(old, new);
+                    let repo = find_repository_in_path(&worktree.to_string_lossy())?;
+                    if repo_is_ancestor(&repo, old, new) {
+                        let affects_checked_out_branch = reference == "HEAD"
+                            || cmd.ref_changes.iter().any(|change| {
+                                change.reference == "HEAD"
+                                    && change.old == *old
+                                    && change.new == *new
+                            });
+                        if affects_checked_out_branch {
+                            if repo.storage.has_working_log(old) {
+                                let author = repo.git_author_identity().formatted_or_unknown();
+                                crate::authorship::post_commit::post_commit_from_working_log(
+                                    &repo,
+                                    Some(old.to_string()),
+                                    new.to_string(),
+                                    author,
+                                    true,
+                                )?;
                             }
-                        } else {
-                            let _ = crate::authorship::rewrite::handle_rewrite_event(
-                                &repo,
-                                crate::authorship::rewrite::RewriteEvent::NonFastForward {
-                                    old_tip: old.to_string(),
-                                    new_tip: new.to_string(),
-                                    onto: None,
-                                },
-                            );
+                            repo.storage.rename_working_log(old, new)?;
                         }
+                    } else {
+                        crate::authorship::rewrite::handle_rewrite_event(
+                            &repo,
+                            crate::authorship::rewrite::RewriteEvent::NonFastForward {
+                                old_tip: old.to_string(),
+                                new_tip: new.to_string(),
+                                onto: None,
+                            },
+                        )?;
                     }
                 }
             }
@@ -4889,16 +4711,17 @@ impl ActorDaemonCoordinator {
                         .maybe_apply_side_effects_for_applied_command(Some(&family), &applied)
                         .await;
                     let _ = self.end_family_effect(&family);
-                    if let Err(error) = result {
-                        let _ = self.record_side_effect_error(&family, applied.seq, &error);
+                    if let Err(error) = &result {
+                        let _ = self.record_side_effect_error(&family, applied.seq, error);
                         tracing::error!(
                             %error,
                             %family,
                             seq = applied.seq,
                             "async side-effect error"
                         );
-                    } else if let Err(error) =
-                        self.append_command_completion_log(&family, &applied, &Ok(()), applied.seq)
+                    }
+                    if let Err(error) =
+                        self.append_command_completion_log(&family, &applied, &result, applied.seq)
                     {
                         let _ = self.record_side_effect_error(&family, applied.seq, &error);
                         tracing::error!(
@@ -6530,6 +6353,7 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::ffi::OsString;
+    use std::io::Write;
 
     struct EnvVarGuard {
         key: &'static str,
@@ -6597,6 +6421,101 @@ mod tests {
                 metadata: std::collections::HashMap::new(),
             }),
         }
+    }
+
+    fn run_git_for_test(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("git {:?} failed to spawn: {}", args, error));
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git stdout should be utf8")
+            .trim()
+            .to_string()
+    }
+
+    fn run_git_stdin_for_test(repo: &Path, args: &[&str], stdin: &str) -> String {
+        let mut child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|error| panic!("git {:?} failed to spawn: {}", args, error));
+        child
+            .stdin
+            .take()
+            .expect("stdin should be piped")
+            .write_all(stdin.as_bytes())
+            .expect("write git stdin");
+        let output = child
+            .wait_with_output()
+            .unwrap_or_else(|error| panic!("git {:?} failed to wait: {}", args, error));
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git stdout should be utf8")
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn conflict_resolution_note_read_errors_are_not_silently_ignored() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo_path = temp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        run_git_for_test(&repo_path, &["init"]);
+        run_git_for_test(&repo_path, &["config", "user.name", "Test User"]);
+        run_git_for_test(&repo_path, &["config", "user.email", "test@example.com"]);
+
+        std::fs::write(repo_path.join("file.txt"), "onto\n").unwrap();
+        run_git_for_test(&repo_path, &["add", "file.txt"]);
+        run_git_for_test(&repo_path, &["commit", "-m", "onto"]);
+        let onto = run_git_for_test(&repo_path, &["rev-parse", "HEAD"]);
+
+        std::fs::write(repo_path.join("file.txt"), "onto\nnew\n").unwrap();
+        run_git_for_test(&repo_path, &["add", "file.txt"]);
+        run_git_for_test(&repo_path, &["commit", "-m", "new"]);
+        let new_tip = run_git_for_test(&repo_path, &["rev-parse", "HEAD"]);
+
+        let missing_blob = "2222222222222222222222222222222222222222";
+        let prefix = &new_tip[..2];
+        let suffix = &new_tip[2..];
+        let leaf_tree = run_git_stdin_for_test(
+            &repo_path,
+            &["mktree", "--missing"],
+            &format!("100644 blob {missing_blob}\t{suffix}\n"),
+        );
+        let root_tree = run_git_stdin_for_test(
+            &repo_path,
+            &["mktree"],
+            &format!("040000 tree {leaf_tree}\t{prefix}\n"),
+        );
+        run_git_for_test(&repo_path, &["update-ref", "refs/notes/ai", &root_tree]);
+
+        let repo = crate::git::find_repository_in_path(repo_path.to_str().unwrap())
+            .expect("find test repository");
+        let result = process_conflict_resolution_working_logs(&repo, &new_tip, Some(&onto), &[]);
+        assert!(
+            result.is_err(),
+            "corrupt destination notes must fail closed instead of being treated as absent"
+        );
     }
 
     #[test]
@@ -6955,6 +6874,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn branch_show_current_start_event_is_not_enqueued() {
+        let coord = ActorDaemonCoordinator::new();
+        let mut payload = make_start_payload(&["git", "branch", "--show-current"]);
+        let should_enqueue = coord.prepare_trace_payload_for_ingest(&mut payload);
+        assert!(
+            !should_enqueue,
+            "branch --show-current start event should not be enqueued"
+        );
+        assert!(
+            payload.get(TRACE_INGEST_SEQ_FIELD).is_none(),
+            "branch --show-current must not receive an ingest sequence number"
+        );
+    }
+
+    #[tokio::test]
     async fn diff_numstat_start_event_is_not_enqueued() {
         let coord = ActorDaemonCoordinator::new();
         let mut payload = make_start_payload(&[
@@ -7289,6 +7223,58 @@ mod tests {
         )
         .await
         .expect("checkpoint fence should pass once the unidentified connection is resolved");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_fence_waits_for_open_branch_mutation_root() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let sid = "20260411T120000.000000-Psid1";
+        coord.trace_root_connection_opened(sid).unwrap();
+        let mut payload = make_start_payload(&["git", "branch", "-D", "feature"]);
+        assert!(
+            coord.prepare_trace_payload_for_ingest(&mut payload),
+            "branch delete start should be enqueued because it mutates refs"
+        );
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                coord.wait_for_trace_ingest_processed_through()
+            )
+            .await
+            .is_err(),
+            "checkpoint fence must not pass while an accepted branch mutation root is still open"
+        );
+
+        coord
+            .record_trace_connection_close(&[sid.to_string()])
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            coord.wait_for_trace_ingest_processed_through(),
+        )
+        .await
+        .expect("checkpoint fence should pass once the branch mutation root closes");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_fence_does_not_wait_for_open_branch_readonly_root() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let sid = "20260411T120000.000000-Psid-readonly-branch";
+        coord.trace_root_connection_opened(sid).unwrap();
+        let mut payload = make_start_payload(&["git", "branch", "--show-current"]);
+        payload["sid"] = serde_json::json!(sid);
+        assert!(
+            !coord.prepare_trace_payload_for_ingest(&mut payload),
+            "branch --show-current should be classified as read-only"
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            coord.wait_for_trace_ingest_processed_through(),
+        )
+        .await
+        .expect("checkpoint fence must not wait for an open read-only branch root");
     }
 
     #[tokio::test]

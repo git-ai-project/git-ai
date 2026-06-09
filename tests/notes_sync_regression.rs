@@ -40,6 +40,16 @@ fn read_note_from_worktree(repo_path: &Path, commit_sha: &str) -> Option<String>
     repos::test_repo::TestRepo::new_at_path(repo_path).read_authorship_note(commit_sha)
 }
 
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_string(),
+            Err(_) => "unknown panic payload".to_string(),
+        },
+    }
+}
+
 worktree_test_wrappers! {
     fn notes_sync_clone_fetches_authorship_notes_from_origin() {
 
@@ -91,6 +101,75 @@ worktree_test_wrappers! {
             cloned_note.is_some(),
             "cloned repository should have fetched authorship notes for commit {}",
             seed_sha
+        );
+    }
+}
+
+worktree_test_wrappers! {
+    fn notes_sync_clone_reports_local_note_update_failure() {
+        let (local, upstream) = TestRepo::new_with_remote();
+
+        fs::write(local.path().join("clone-locked-seed.txt"), "seed\n")
+            .expect("failed to write clone locked seed file");
+        local
+            .git_og(&["add", "clone-locked-seed.txt"])
+            .expect("add should succeed");
+        local
+            .git_og(&["commit", "-m", "clone locked seed commit"])
+            .expect("seed commit should succeed");
+
+        let seed_sha = local
+            .git_og(&["rev-parse", "HEAD"])
+            .expect("rev-parse should succeed")
+            .trim()
+            .to_string();
+
+        local
+            .git_og(&[
+                "notes",
+                "--ref=ai",
+                "add",
+                "-m",
+                "clone-locked-note",
+                seed_sha.as_str(),
+            ])
+            .expect("adding notes should succeed");
+        local
+            .git_og(&["push", "-u", "origin", "HEAD"])
+            .expect("pushing branch should succeed");
+        local
+            .git_og(&["push", "origin", "refs/notes/ai"])
+            .expect("pushing notes should succeed");
+
+        let template_dir = unique_temp_path("notes-sync-clone-template");
+        let template_notes_dir = template_dir.join("refs/notes");
+        fs::create_dir_all(&template_notes_dir).expect("template notes dir should be creatable");
+        fs::write(template_notes_dir.join("ai.lock"), "stale lock\n")
+            .expect("template notes lock should be writable");
+
+        let clone_dir = unique_temp_path("notes-sync-clone-locked");
+        let clone_dir_str = clone_dir.to_string_lossy().to_string();
+        let upstream_str = upstream.path().to_string_lossy().to_string();
+        let template_str = template_dir.to_string_lossy().to_string();
+        let _ = fs::remove_dir_all(&clone_dir);
+
+        let cloned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            local.git(&[
+                "clone",
+                "--template",
+                template_str.as_str(),
+                upstream_str.as_str(),
+                clone_dir_str.as_str(),
+            ])
+        }));
+        let panic_message = panic_payload_to_string(cloned.expect_err(
+            "clone target daemon sync must fail when notes import cannot update refs/notes/ai",
+        ));
+        assert!(
+            panic_message.contains("daemon completion log reported an error"),
+            "clone target daemon sync must report notes import failure instead of timing out or silently losing authorship for {}; got: {}",
+            seed_sha,
+            panic_message
         );
     }
 }
@@ -527,6 +606,210 @@ worktree_test_wrappers! {
             pulled_note.is_some(),
             "pull should import authorship note for remote commit {}",
             remote_sha
+        );
+    }
+}
+
+worktree_test_wrappers! {
+    fn notes_sync_pull_reports_local_note_update_failure() {
+        let (local, upstream) = TestRepo::new_with_remote();
+        let default_branch = local.current_branch();
+
+        fs::write(local.path().join("pull-base.txt"), "base\n")
+            .expect("failed to write pull base file");
+        local
+            .git_og(&["add", "pull-base.txt"])
+            .expect("add should succeed");
+        local
+            .git_og(&["commit", "-m", "base commit"])
+            .expect("base commit should succeed");
+        local
+            .git_og(&["push", "-u", "origin", "HEAD"])
+            .expect("initial push should succeed");
+
+        let remote_clone = unique_temp_path("notes-sync-pull-locked-remote");
+        let remote_clone_str = remote_clone.to_string_lossy().to_string();
+        let upstream_str = upstream.path().to_string_lossy().to_string();
+        let _ = fs::remove_dir_all(&remote_clone);
+
+        run_git(&["clone", upstream_str.as_str(), remote_clone_str.as_str()]);
+        run_git(&[
+            "-C",
+            remote_clone_str.as_str(),
+            "config",
+            "user.name",
+            "Test User",
+        ]);
+        run_git(&[
+            "-C",
+            remote_clone_str.as_str(),
+            "config",
+            "user.email",
+            "test@example.com",
+        ]);
+
+        fs::write(remote_clone.join("pull-locked.txt"), "remote\n")
+            .expect("failed to write remote pull file");
+        run_git(&["-C", remote_clone_str.as_str(), "add", "pull-locked.txt"]);
+        run_git(&[
+            "-C",
+            remote_clone_str.as_str(),
+            "commit",
+            "-m",
+            "remote pull commit with locked notes",
+        ]);
+
+        let remote_sha = run_git(&["-C", remote_clone_str.as_str(), "rev-parse", "HEAD"]);
+
+        run_git(&[
+            "-C",
+            remote_clone_str.as_str(),
+            "notes",
+            "--ref=ai",
+            "add",
+            "-m",
+            "pull-locked-note",
+            remote_sha.as_str(),
+        ]);
+        run_git(&[
+            "-C",
+            remote_clone_str.as_str(),
+            "push",
+            "origin",
+            default_branch.as_str(),
+        ]);
+        run_git(&[
+            "-C",
+            remote_clone_str.as_str(),
+            "push",
+            "origin",
+            "refs/notes/ai",
+        ]);
+
+        assert!(
+            local.read_authorship_note(&remote_sha).is_none(),
+            "local note should be absent before pull"
+        );
+
+        let notes_dir = local.path().join(".git/refs/notes");
+        fs::create_dir_all(&notes_dir).expect("notes dir should be creatable");
+        fs::write(notes_dir.join("ai.lock"), "stale lock\n")
+            .expect("notes lock should be writable");
+
+        local
+            .git(&["pull", "--ff-only", "origin", default_branch.as_str()])
+            .expect("pull --ff-only should succeed before daemon notes side effect runs");
+
+        let sync = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            local.sync_daemon_force();
+        }));
+        let panic_message = panic_payload_to_string(
+            sync.expect_err("daemon sync must fail when pull notes import cannot update refs/notes/ai"),
+        );
+        assert!(
+            panic_message.contains("daemon completion log reported an error"),
+            "daemon sync must report notes side-effect failure instead of silently losing authorship for {}; got: {}",
+            remote_sha,
+            panic_message
+        );
+    }
+}
+
+worktree_test_wrappers! {
+    fn notes_sync_push_reports_remote_note_update_failure() {
+        let (local, upstream) = TestRepo::new_with_remote();
+
+        fs::write(local.path().join("push-locked.txt"), "local\n")
+            .expect("failed to write push file");
+        local
+            .git_og(&["add", "push-locked.txt"])
+            .expect("add should succeed");
+        local
+            .git_og(&["commit", "-m", "push locked notes commit"])
+            .expect("commit should succeed");
+        let commit_sha = local
+            .git_og(&["rev-parse", "HEAD"])
+            .expect("rev-parse should succeed")
+            .trim()
+            .to_string();
+        local
+            .git_og(&[
+                "notes",
+                "--ref=ai",
+                "add",
+                "-m",
+                "push-locked-note",
+                commit_sha.as_str(),
+            ])
+            .expect("adding local note should succeed");
+
+        let remote_notes_dir = upstream.path().join("refs/notes");
+        fs::create_dir_all(&remote_notes_dir).expect("remote notes dir should be creatable");
+        fs::write(remote_notes_dir.join("ai.lock"), "stale lock\n")
+            .expect("remote notes lock should be writable");
+
+        local
+            .git(&["push", "-u", "origin", "HEAD"])
+            .expect("branch push should succeed before daemon notes side effect runs");
+
+        let sync = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            local.sync_daemon_force();
+        }));
+        let panic_message = panic_payload_to_string(
+            sync.expect_err("daemon sync must fail when notes push cannot update remote refs/notes/ai"),
+        );
+        assert!(
+            panic_message.contains("daemon completion log reported an error"),
+            "daemon sync must report notes push side-effect failure instead of silently leaving remote authorship missing for {}; got: {}",
+            commit_sha,
+            panic_message
+        );
+    }
+}
+
+worktree_test_wrappers! {
+    fn notes_sync_push_to_explicit_path_pushes_authorship_to_same_destination() {
+        let (local, _origin) = TestRepo::new_with_remote();
+        let explicit_destination = repos::test_repo::TestRepo::new_bare();
+
+        fs::write(local.path().join("push-explicit-path.txt"), "local\n")
+            .expect("failed to write explicit path push file");
+        local
+            .git_og(&["add", "push-explicit-path.txt"])
+            .expect("add should succeed");
+        local
+            .git_og(&["commit", "-m", "push explicit path notes commit"])
+            .expect("commit should succeed");
+        let commit_sha = local
+            .git_og(&["rev-parse", "HEAD"])
+            .expect("rev-parse should succeed")
+            .trim()
+            .to_string();
+        local
+            .git_og(&[
+                "notes",
+                "--ref=ai",
+                "add",
+                "-m",
+                "push-explicit-path-note",
+                commit_sha.as_str(),
+            ])
+            .expect("adding local note should succeed");
+
+        let explicit_destination_path = explicit_destination.path().to_string_lossy().to_string();
+        local
+            .git(&[
+                "push",
+                explicit_destination_path.as_str(),
+                "HEAD:refs/heads/main",
+            ])
+            .expect("branch push to explicit path should succeed");
+
+        let pushed_note = explicit_destination.read_authorship_note(&commit_sha);
+        assert!(
+            pushed_note.is_some(),
+            "git push to an explicit repository path must push authorship notes to that same destination for {}",
+            commit_sha
         );
     }
 }

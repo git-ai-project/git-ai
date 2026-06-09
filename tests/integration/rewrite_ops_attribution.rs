@@ -1,14 +1,15 @@
 /// Deterministic regression tests for attribution bugs found by the fuzzer
 /// on the rewrite-ops branch. Each test models a specific fuzzer failure pattern
 /// using explicit file writes and checkpoint calls.
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use git_ai::authorship::authorship_log_serialization::generate_session_id;
-use git_ai::config::{NotesBackendConfig, NotesBackendKind};
+use git_ai::authorship::attribution_tracker::LineAttribution;
+use git_ai::git::repo_storage::InitialAttributions;
 
 use crate::repos::test_file::ExpectedLineExt;
-use crate::repos::test_repo::{DaemonTestScope, TestRepo};
+use crate::repos::test_repo::TestRepo;
 use serde_json::json;
 
 // =============================================================================
@@ -76,6 +77,48 @@ fn test_raw_git_commit_before_traced_commit_does_not_poison_ref_cursor() {
 
     let mut ai_file = repo.filename("ai.txt");
     ai_file.assert_committed_lines(crate::lines!["ai tracked".ai()]);
+}
+
+#[test]
+fn test_daemon_reports_post_commit_side_effect_error() {
+    let repo = TestRepo::new();
+
+    let base_path = repo.path().join("base.txt");
+    fs::write(&base_path, "base\n").unwrap();
+    repo.git_ai(&["checkpoint", "mock_known_human", "base.txt"])
+        .unwrap();
+    repo.stage_all_and_commit("initial").unwrap();
+
+    let working_log = repo.current_working_logs();
+    let mut files = HashMap::new();
+    files.insert(
+        "broken.txt".to_string(),
+        vec![LineAttribution {
+            start_line: 1,
+            end_line: 1,
+            author_id: "missing-snapshot-ai".to_string(),
+            overrode: None,
+        }],
+    );
+    working_log
+        .write_initial(InitialAttributions {
+            files,
+            ..InitialAttributions::default()
+        })
+        .unwrap();
+
+    fs::write(repo.path().join("broken.txt"), "broken\n").unwrap();
+    repo.git(&["add", "broken.txt"]).unwrap();
+    repo.git(&["commit", "-m", "commit with broken initial"])
+        .unwrap();
+
+    let sync = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        repo.sync_daemon_force();
+    }));
+    assert!(
+        sync.is_err(),
+        "post-commit side-effect failure must be reported through daemon sync"
+    );
 }
 
 #[test]
@@ -184,11 +227,6 @@ fn claude_checkpoint(repo: &TestRepo, event: &str, file_path: &Path, session_id:
 
 struct DelayedAiCommit {
     repo: TestRepo,
-    prompt_id: String,
-}
-
-fn delayed_ai_commit_without_harness_sync() -> DelayedAiCommit {
-    delayed_ai_commit_without_harness_sync_with_delay(1000)
 }
 
 fn delayed_ai_commit_without_harness_sync_with_delay(delay_ms: u64) -> DelayedAiCommit {
@@ -204,15 +242,12 @@ fn delayed_ai_commit_without_harness_sync_with_delay(delay_ms: u64) -> DelayedAi
     repo.git_without_test_sync_for_test(&["commit", "-m", "delayed ai reader commit"], &[])
         .unwrap();
 
-    DelayedAiCommit {
-        repo,
-        prompt_id: generate_session_id("reader-session", "claude"),
-    }
+    DelayedAiCommit { repo }
 }
 
 #[test]
-fn test_immediate_show_syncs_pending_commit_authorship_side_effect() {
-    let fixture = delayed_ai_commit_without_harness_sync();
+fn test_production_show_does_not_hidden_sync_pending_commit_authorship_side_effect() {
+    let fixture = delayed_ai_commit_without_harness_sync_with_delay(5000);
 
     let output = fixture
         .repo
@@ -220,216 +255,8 @@ fn test_immediate_show_syncs_pending_commit_authorship_side_effect() {
         .expect("immediate show should succeed");
 
     assert!(
-        output.contains("\"tool\":\"claude\"") || output.contains("\"tool\": \"claude\""),
-        "show did not wait for pending commit authorship note:\n{output}"
-    );
-}
-
-#[test]
-fn test_immediate_log_syncs_pending_commit_authorship_side_effect() {
-    let fixture = delayed_ai_commit_without_harness_sync();
-
-    let output = fixture
-        .repo
-        .git_ai_without_pre_sync_for_test(&["log", "-1", "--format=%H%n%N"])
-        .expect("immediate log should succeed");
-
-    assert!(
-        output.contains("claude"),
-        "log did not wait for pending commit authorship note:\n{output}"
-    );
-}
-
-#[test]
-fn test_immediate_diff_syncs_pending_commit_authorship_side_effect() {
-    let fixture = delayed_ai_commit_without_harness_sync();
-
-    let output = fixture
-        .repo
-        .git_ai_without_pre_sync_for_test(&["diff", "HEAD", "--json", "--include-stats"])
-        .expect("immediate diff should succeed");
-    let value: serde_json::Value =
-        serde_json::from_str(&output).unwrap_or_else(|error| panic!("{error}: {output}"));
-    let ai_lines_added = value
-        .pointer("/commit_stats/ai_lines_added")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
-
-    assert!(
-        ai_lines_added > 0,
-        "diff did not wait for pending commit authorship note:\n{output}"
-    );
-}
-
-#[test]
-fn test_immediate_stats_syncs_pending_commit_authorship_side_effect() {
-    let fixture = delayed_ai_commit_without_harness_sync();
-
-    let output = fixture
-        .repo
-        .git_ai_without_pre_sync_for_test(&["stats", "--json"])
-        .expect("immediate stats should succeed");
-    let value: serde_json::Value =
-        serde_json::from_str(&output).unwrap_or_else(|error| panic!("{error}: {output}"));
-    let ai_additions = value
-        .get("ai_additions")
-        .and_then(|value| value.as_u64())
-        .unwrap_or(0);
-
-    assert!(
-        ai_additions > 0,
-        "stats did not wait for pending commit authorship note:\n{output}"
-    );
-}
-
-#[test]
-fn test_immediate_show_prompt_syncs_pending_commit_authorship_side_effect() {
-    let fixture = delayed_ai_commit_without_harness_sync();
-
-    let output = fixture
-        .repo
-        .git_ai_without_pre_sync_for_test(&["show-prompt", &fixture.prompt_id])
-        .expect("immediate show-prompt should succeed");
-
-    assert!(
-        output.contains("\"tool\": \"claude\""),
-        "show-prompt did not wait for pending commit authorship note:\n{output}"
-    );
-}
-
-#[test]
-fn test_immediate_blame_analysis_syncs_pending_commit_authorship_side_effect() {
-    let fixture = delayed_ai_commit_without_harness_sync();
-    let payload = json!({
-        "file_path": "reader.txt",
-        "options": { "json": true }
-    })
-    .to_string();
-
-    let output = fixture
-        .repo
-        .git_ai_without_pre_sync_for_test(&["blame-analysis", "--json", &payload])
-        .expect("immediate blame-analysis should succeed");
-
-    assert!(
-        output.contains("claude"),
-        "blame-analysis did not wait for pending commit authorship note:\n{output}"
-    );
-}
-
-#[test]
-fn test_immediate_notes_migrate_syncs_pending_commit_authorship_side_effect() {
-    let mut fixture = delayed_ai_commit_without_harness_sync();
-    let mut server = mockito::Server::new();
-    let upload = server
-        .mock("POST", "/worker/notes/upload")
-        .match_header("x-api-key", "test-key")
-        .with_status(200)
-        .with_body(r#"{"success_count":1,"failure_count":0}"#)
-        .create();
-
-    fixture.repo.patch_git_ai_config(|patch| {
-        patch.notes_backend = Some(NotesBackendConfig {
-            kind: NotesBackendKind::Http,
-            backend_url: Some(server.url()),
-        });
-    });
-
-    let output = fixture
-        .repo
-        .git_ai_with_env_without_pre_sync_for_test(
-            &["notes", "migrate"],
-            &[("GIT_AI_API_KEY", "test-key")],
-        )
-        .expect("immediate notes migrate should succeed");
-
-    upload.assert();
-    assert!(
-        output.contains("Migration complete: 1 note(s) uploaded successfully."),
-        "notes migrate did not upload the pending authorship note:\n{output}"
-    );
-}
-
-#[test]
-fn test_immediate_fetch_notes_syncs_pending_commit_authorship_side_effect() {
-    let fixture = delayed_ai_commit_without_harness_sync_with_delay(3000);
-    let upstream = TestRepo::new_bare_with_daemon_scope(DaemonTestScope::NoDaemon);
-    let upstream_path = upstream.path().to_string_lossy().to_string();
-    fixture
-        .repo
-        .git_og(&["remote", "add", "origin", &upstream_path])
-        .expect("adding origin should succeed");
-    fixture
-        .repo
-        .git_og(&["push", "origin", "HEAD:main"])
-        .expect("pushing branch should succeed");
-    let head = fixture
-        .repo
-        .git_og(&["rev-parse", "HEAD"])
-        .expect("rev-parse HEAD should succeed")
-        .trim()
-        .to_string();
-
-    let output = fixture
-        .repo
-        .git_ai_without_pre_sync_for_test(&["fetch-notes", "origin", "--json"])
-        .expect("immediate fetch-notes should succeed");
-
-    assert!(
-        output.contains(r#""status":"not_found""#),
-        "fetch-notes should report missing remote notes, got:\n{output}"
-    );
-    let local_note = fixture
-        .repo
-        .git_og(&["notes", "--ref=ai", "show", &head])
-        .ok()
-        .filter(|note| !note.trim().is_empty());
-    assert!(
-        local_note
-            .as_deref()
-            .is_some_and(|note| note.contains("claude")),
-        "fetch-notes did not wait for pending local authorship note before mutating notes refs; local note: {local_note:?}"
-    );
-}
-
-#[test]
-fn test_immediate_push_authorship_notes_syncs_pending_commit_authorship_side_effect() {
-    let fixture = delayed_ai_commit_without_harness_sync_with_delay(3000);
-    let upstream = TestRepo::new_bare_with_daemon_scope(DaemonTestScope::NoDaemon);
-    let upstream_path = upstream.path().to_string_lossy().to_string();
-    fixture
-        .repo
-        .git_og(&["remote", "add", "origin", &upstream_path])
-        .expect("adding origin should succeed");
-    fixture
-        .repo
-        .git_og(&["push", "origin", "HEAD:main"])
-        .expect("pushing branch should succeed");
-    let head = fixture
-        .repo
-        .git_og(&["rev-parse", "HEAD"])
-        .expect("rev-parse HEAD should succeed")
-        .trim()
-        .to_string();
-    let request = json!({ "remote_name": "origin" }).to_string();
-
-    fixture
-        .repo
-        .git_ai_with_env_without_pre_sync_for_test(
-            &["push-authorship-notes", "--json", &request],
-            &[],
-        )
-        .expect("immediate push-authorship-notes should succeed");
-
-    let remote_note = upstream
-        .git_og(&["notes", "--ref=ai", "show", &head])
-        .ok()
-        .filter(|note| !note.trim().is_empty());
-    assert!(
-        remote_note
-            .as_deref()
-            .is_some_and(|note| note.contains("claude")),
-        "push-authorship-notes did not wait for pending commit authorship note; remote note: {remote_note:?}"
+        !output.contains("\"tool\":\"claude\"") && !output.contains("\"tool\": \"claude\""),
+        "production show performed a hidden daemon sync before rendering:\n{output}"
     );
 }
 
@@ -693,18 +520,6 @@ What did the ocean say to the beach?,Nothing it just waved
     repo.git(&["add", "jokes-animals.csv"]).unwrap();
     repo.git_without_test_sync_for_test(&["rebase", "--continue"], &[("GIT_EDITOR", "true")])
         .unwrap();
-
-    let immediate_blame = repo
-        .git_ai_without_pre_sync_for_test(&["blame", "jokes-animals.csv"])
-        .expect("immediate production-style blame should succeed");
-    let bull_line = immediate_blame
-        .lines()
-        .find(|line| line.contains("What do you call a sleeping bull?,A dozer"))
-        .unwrap_or_else(|| panic!("missing bull line in blame output:\n{immediate_blame}"));
-    assert!(
-        bull_line.contains("(claude"),
-        "immediate production-style blame lost feature-side AI attribution:\n{immediate_blame}"
-    );
 
     let mut animals = repo.filename("jokes-animals.csv");
     animals.assert_committed_lines(crate::lines![

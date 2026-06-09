@@ -150,6 +150,51 @@ fn test_fetch_and_push_authorship_notes_internal_commands_json() {
     assert_eq!(fetch_after_json["notes_existence"], "found");
 }
 
+#[test]
+fn test_fetch_authorship_notes_fails_when_local_notes_ref_cannot_update() {
+    let (mirror, _upstream) = TestRepo::new_with_remote();
+
+    fs::write(mirror.path().join("locked-notes.txt"), "locked notes\n")
+        .expect("should write locked notes file");
+    let commit = mirror
+        .stage_all_and_commit("create remote note source")
+        .expect("commit should succeed");
+
+    mirror
+        .git_og(&["push", "-u", "origin", "HEAD"])
+        .expect("branch push should succeed");
+    mirror
+        .git_og(&["push", "origin", "refs/notes/ai"])
+        .expect("notes push should succeed");
+
+    mirror
+        .git_og(&["update-ref", "-d", "refs/notes/ai"])
+        .expect("local note ref should be removable");
+    assert!(
+        mirror.read_authorship_note(&commit.commit_sha).is_none(),
+        "local note should be absent before fetch"
+    );
+
+    let notes_dir = mirror.path().join(".git/refs/notes");
+    fs::create_dir_all(&notes_dir).expect("notes dir should be creatable");
+    fs::write(notes_dir.join("ai.lock"), "stale lock\n").expect("notes lock should be writable");
+
+    let request = json!({
+        "remote_name": "origin"
+    })
+    .to_string();
+    let err = mirror
+        .git_ai(&["fetch-authorship-notes", "--json", &request])
+        .expect_err("fetch should fail when refs/notes/ai cannot be updated");
+    let parsed: serde_json::Value = serde_json::from_str(err.trim()).expect("error should be JSON");
+    let error = parsed["error"].as_str().expect("error should be a string");
+    assert!(
+        error.contains("fetch_authorship_notes failed"),
+        "unexpected error output: {}",
+        err
+    );
+}
+
 /// Helper to run a raw git command with stdin piped, returning trimmed stdout.
 fn git_plumbing(repo_path: &std::path::Path, args: &[&str], stdin_data: Option<&[u8]>) -> String {
     let git = real_git_executable();
@@ -210,8 +255,8 @@ fn test_push_authorship_notes_survives_corrupted_remote_notes_tree() {
         .stage_all_and_commit("initial commit")
         .expect("commit should succeed");
     mirror
-        .git(&["push", "origin", "main"])
-        .expect("push should succeed");
+        .git_og(&["push", "origin", "main"])
+        .expect("setup branch push should succeed");
     let commit_sha = commit.commit_sha;
 
     // 2. Create a corrupted notes tree on upstream with NO common merge base
@@ -315,7 +360,9 @@ fn test_push_authorship_notes_retries_on_concurrent_push() {
     let commit1 = mirror
         .stage_all_and_commit("first commit")
         .expect("commit1");
-    mirror.git(&["push", "origin", "main"]).expect("push main");
+    mirror
+        .git_og(&["push", "origin", "main"])
+        .expect("setup branch push should succeed");
 
     // 2. Ensure mirror's initial notes are present on upstream. The preceding
     // branch push can already push authorship notes through the normal push

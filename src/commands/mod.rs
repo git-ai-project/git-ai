@@ -3,7 +3,6 @@ pub mod checkpoint_agent;
 pub mod ci_handlers;
 pub mod config;
 pub mod daemon;
-pub(crate) mod daemon_sync;
 pub mod debug;
 pub mod diff;
 pub mod exchange_nonce;

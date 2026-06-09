@@ -63,16 +63,12 @@ pub fn handle_git(args: &[String]) {
 
     let parsed = parse_git_cli_args(args);
 
-    // Use is_definitely_read_only_invocation (not is_definitely_read_only_command)
-    // so that subcommand-gated read-only calls like `git stash list` and
-    // `git worktree list` are also suppressed — these account for thousands
-    // of Zed IDE invocations per session.
-    let is_read_only = {
-        let subcommand = parsed.command_args.first().map(String::as_str);
-        parsed.command.as_deref().is_some_and(|cmd| {
-            crate::git::command_classification::is_definitely_read_only_invocation(cmd, subcommand)
-        })
-    };
+    let is_read_only = parsed.command.as_deref().is_some_and(|cmd| {
+        crate::git::command_classification::is_definitely_read_only_git_invocation(
+            cmd,
+            &parsed.command_args,
+        )
+    });
 
     if is_read_only {
         let exit_status = proxy_to_git(args, false);
@@ -306,9 +302,11 @@ fn proxy_to_git(args: &[String], exit_on_completion: bool) -> std::process::Exit
     // with events that can never produce meaningful state changes.
     let suppress_trace2 = {
         let parsed = parse_git_cli_args(args);
-        let subcommand = parsed.command_args.first().map(String::as_str);
         parsed.command.as_deref().is_some_and(|cmd| {
-            crate::git::command_classification::is_definitely_read_only_invocation(cmd, subcommand)
+            crate::git::command_classification::is_definitely_read_only_git_invocation(
+                cmd,
+                &parsed.command_args,
+            )
         })
     };
 

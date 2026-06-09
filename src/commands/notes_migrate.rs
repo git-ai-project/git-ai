@@ -10,7 +10,6 @@
 
 use crate::api::client::{ApiClient, ApiContext};
 use crate::api::types::{NoteEntry, NotesUploadRequest};
-use crate::commands::daemon_sync::sync_daemon_family_for_repo_or_exit;
 use crate::config::{Config, NotesBackendKind};
 use crate::error::GitAiError;
 use crate::git::find_repository;
@@ -85,8 +84,6 @@ pub fn handle_notes_migrate(args: &[String]) {
         eprintln!("error: not authenticated. Log in first with `git-ai login` or set an API key.");
         std::process::exit(1);
     }
-
-    sync_daemon_family_for_repo_or_exit(&repo, "notes migrate");
 
     eprintln!("Listing notes from refs/notes/ai ...");
 

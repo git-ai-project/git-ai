@@ -6,6 +6,7 @@ use git_ai::authorship::working_log::AgentId;
 use git_ai::git::refs::notes_add;
 use std::collections::HashMap;
 use std::fs;
+use std::path::PathBuf;
 
 /// Test cherry-picking a single AI-authored commit
 #[test]
@@ -827,6 +828,81 @@ fn test_cherry_pick_from_remote_without_prefetched_notes() {
     target_file.assert_lines_and_blame(crate::lines!["base".ai(), "AI line".ai(),]);
 }
 
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_string(),
+            Err(_) => "unknown panic payload".to_string(),
+        },
+    }
+}
+
+fn git_common_dir(repo: &TestRepo) -> PathBuf {
+    let raw = repo
+        .git_og(&["rev-parse", "--git-common-dir"])
+        .expect("rev-parse --git-common-dir should succeed");
+    let common_dir = PathBuf::from(raw.trim());
+    if common_dir.is_absolute() {
+        common_dir
+    } else {
+        repo.path().join(common_dir)
+    }
+}
+
+#[test]
+fn test_cherry_pick_from_remote_reports_notes_import_failure() {
+    let source_repo = TestRepo::new();
+    let mut source_file = source_repo.filename("file.txt");
+    source_file.set_contents(crate::lines!["base"]);
+    source_repo.stage_all_and_commit("initial").unwrap();
+    source_file.insert_at(1, crate::lines!["AI line".ai()]);
+    source_repo.stage_all_and_commit("AI commit").unwrap();
+    let ai_commit = source_repo
+        .git(&["rev-parse", "HEAD"])
+        .unwrap()
+        .trim()
+        .to_string();
+
+    let target_repo = TestRepo::new();
+    let mut target_file = target_repo.filename("file.txt");
+    target_file.set_contents(crate::lines!["base"]);
+    target_repo.stage_all_and_commit("initial").unwrap();
+
+    target_repo
+        .git(&[
+            "remote",
+            "add",
+            "source",
+            source_repo.path().to_str().unwrap(),
+        ])
+        .unwrap();
+    target_repo
+        .git(&["fetch", "source", "refs/heads/*:refs/remotes/source/*"])
+        .unwrap();
+    let _ = target_repo.git(&["update-ref", "-d", "refs/notes/ai"]);
+    let _ = target_repo.git(&["update-ref", "-d", "refs/notes/ai-remote/source"]);
+
+    let notes_dir = git_common_dir(&target_repo).join("refs/notes");
+    fs::create_dir_all(&notes_dir).expect("notes dir should be creatable");
+    fs::write(notes_dir.join("ai.lock"), "stale lock\n").expect("notes lock should be writable");
+
+    target_repo.git(&["cherry-pick", &ai_commit]).unwrap();
+
+    let sync = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        target_repo.sync_daemon_force();
+    }));
+    let panic_message = panic_payload_to_string(
+        sync.expect_err("daemon sync must fail when cherry-pick source notes cannot be imported"),
+    );
+    assert!(
+        panic_message.contains("daemon completion log reported an error"),
+        "daemon sync must report notes import failure instead of silently dropping cherry-pick attribution for {}; got: {}",
+        ai_commit,
+        panic_message
+    );
+}
+
 #[test]
 fn test_cherry_pick_no_commit_defers_to_final_commit_tree() {
     let repo = TestRepo::new();
@@ -873,5 +949,6 @@ crate::reuse_tests_in_worktree!(
     test_cherry_pick_bad_args_dont_corrupt_subsequent_attribution,
     test_cherry_pick_skip_preserves_subsequent_attribution,
     test_cherry_pick_from_remote_without_prefetched_notes,
+    test_cherry_pick_from_remote_reports_notes_import_failure,
     test_cherry_pick_no_commit_defers_to_final_commit_tree,
 );

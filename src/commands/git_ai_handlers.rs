@@ -3,10 +3,6 @@ use crate::authorship::internal_db::InternalDatabase;
 use crate::authorship::range_authorship;
 use crate::authorship::stats::stats_command;
 use crate::commands;
-use crate::commands::daemon_sync::{
-    sync_daemon_family_for_current_repo_if_present, sync_daemon_family_for_current_repo_or_exit,
-    sync_daemon_family_for_repo_or_exit,
-};
 use crate::config;
 use crate::daemon::ControlRequest;
 use crate::git::find_repository;
@@ -113,13 +109,9 @@ pub fn handle_git_ai(args: &[String]) {
             handle_stats(&args[1..]);
         }
         "status" => {
-            sync_daemon_family_for_current_repo_or_exit("status");
             commands::status::handle_status(&args[1..]);
         }
         "show" => {
-            if args.len() == 2 {
-                sync_daemon_family_for_current_repo_or_exit("show");
-            }
             commands::show::handle_show(&args[1..]);
         }
         "checkpoint" => {
@@ -132,7 +124,6 @@ pub fn handle_git_ai(args: &[String]) {
             handle_checkpoint(&args[1..]);
         }
         "log" => {
-            sync_daemon_family_for_current_repo_if_present("log");
             let status = commands::log::handle_log(&args[1..]);
             if is_interactive_terminal() {
                 log_message("log", "info", None)
@@ -206,9 +197,6 @@ pub fn handle_git_ai(args: &[String]) {
             commands::personal_dashboard::handle_personal_dashboard(&args[1..]);
         }
         "show-prompt" => {
-            if args.len() > 1 {
-                sync_daemon_family_for_current_repo_or_exit("show-prompt");
-            }
             commands::show_prompt::handle_show_prompt(&args[1..]);
         }
         "fetch-notes" => {
@@ -712,8 +700,6 @@ pub(crate) fn handle_blame_analysis_internal(args: &[String]) {
     let repo = find_repository(&Vec::<String>::new())
         .unwrap_or_else(|e| emit_machine_json_error(format!("Failed to find repository: {}", e)));
 
-    sync_daemon_family_for_repo_or_exit(&repo, "blame-analysis");
-
     let analysis = repo
         .blame_analysis(&request.file_path, &request.options)
         .unwrap_or_else(|e| emit_machine_json_error(format!("blame_analysis failed: {}", e)));
@@ -727,8 +713,6 @@ pub(crate) fn handle_blame_analysis_internal(args: &[String]) {
 pub(crate) fn handle_fetch_authorship_notes_internal(args: &[String]) {
     disable_debug_logs_for_machine_command();
     let (repo, request) = parse_authorship_remote_request(args, "fetch-authorship-notes");
-
-    sync_daemon_family_for_repo_or_exit(&repo, "fetch-authorship-notes");
 
     let notes_existence = fetch_authorship_notes(&repo, &request.remote_name).unwrap_or_else(|e| {
         emit_machine_json_error(format!("fetch_authorship_notes failed: {}", e))
@@ -746,8 +730,6 @@ pub(crate) fn handle_fetch_authorship_notes_internal(args: &[String]) {
 pub(crate) fn handle_push_authorship_notes_internal(args: &[String]) {
     disable_debug_logs_for_machine_command();
     let (repo, request) = parse_authorship_remote_request(args, "push-authorship-notes");
-
-    sync_daemon_family_for_repo_or_exit(&repo, "push-authorship-notes");
 
     push_authorship_notes(&repo, &request.remote_name).unwrap_or_else(|e| {
         emit_machine_json_error(format!("push_authorship_notes failed: {}", e))
@@ -842,8 +824,6 @@ fn handle_ai_blame(args: &[String]) {
         file_path
     };
 
-    sync_daemon_family_for_repo_or_exit(&repo, "blame");
-
     if let Err(e) = repo.blame(&file_path, &options) {
         eprintln!("Blame failed: {}", e);
         std::process::exit(1);
@@ -862,8 +842,6 @@ fn handle_ai_diff(args: &[String]) {
             std::process::exit(1);
         }
     };
-    sync_daemon_family_for_repo_or_exit(&repo, "diff");
-
     if let Err(e) = commands::diff::handle_diff(&repo, args) {
         eprintln!("Diff failed: {}", e);
         std::process::exit(1);
@@ -959,7 +937,6 @@ fn handle_stats(args: &[String]) {
     }
 
     let effective_patterns = effective_ignore_patterns(&repo, &ignore_patterns, &[]);
-    sync_daemon_family_for_repo_or_exit(&repo, "stats");
 
     // Handle commit range if detected
     if let Some(range) = commit_range {
