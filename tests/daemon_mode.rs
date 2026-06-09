@@ -1450,6 +1450,85 @@ fn daemon_trace_listener_partial_line_does_not_block_later_trace_connections() {
 
 #[test]
 #[cfg(not(windows))]
+fn daemon_trace_connection_close_without_atexit_does_not_block_later_trace() {
+    let repo = TestRepo::new_dedicated_daemon();
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let worktree = repo_workdir_string(&repo);
+    let git_dir = repo.path().join(".git").to_string_lossy().to_string();
+
+    send_trace_frames(
+        &trace_socket,
+        &[
+            json!({
+                "event": "start",
+                "sid": "closed-before-atexit",
+                "argv": ["git", "commit", "-m", "incomplete"],
+                "time_ns": 9_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "closed-before-atexit",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 9_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "closed-before-atexit",
+                "code": 0,
+                "time_ns": 9_100u64,
+            }),
+        ],
+    );
+
+    let session = repos::test_repo::new_daemon_test_sync_session_id();
+    let session_arg = format!("git-ai.testSyncSession={session}");
+    let worktree = repo_workdir_string(&repo);
+    let git_dir = repo.path().join(".git").to_string_lossy().to_string();
+
+    send_trace_frames(
+        &trace_socket,
+        &[
+            json!({
+                "event": "start",
+                "sid": "complete-after-closed-root",
+                "argv": ["git", "-c", session_arg, "commit", "-m", "synthetic"],
+                "time_ns": 10_000u64,
+            }),
+            json!({
+                "event": "def_repo",
+                "sid": "complete-after-closed-root",
+                "worktree": worktree,
+                "repo": git_dir,
+                "time_ns": 10_001u64,
+            }),
+            json!({
+                "event": "exit",
+                "sid": "complete-after-closed-root",
+                "code": 0,
+                "time_ns": 10_100u64,
+            }),
+            trace_atexit_frame("complete-after-closed-root", 0, 10_101u64),
+        ],
+    );
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        if repo
+            .daemon_completion_entries()
+            .iter()
+            .any(|entry| entry.test_sync_session.as_deref() == Some(session.as_str()))
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    panic!("daemon did not process a later trace after a mutating root closed before atexit");
+}
+
+#[test]
+#[cfg(not(windows))]
 fn daemon_control_listener_stalled_connection_does_not_block_later_control_requests() {
     let repo = TestRepo::new_dedicated_daemon();
     let control_socket = daemon_control_socket_path(&repo);
