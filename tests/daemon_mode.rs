@@ -3031,13 +3031,9 @@ fn daemon_pure_trace_socket_pull_fast_forward_tracks_pull_command() {
     repo.git_og_with_env(&["commit", "-m", "base"], &env_refs)
         .expect("base commit should succeed");
 
-    let root = repo
-        .path()
-        .parent()
-        .expect("test repo path should have parent")
-        .to_path_buf();
-    let bare_remote = root.join("origin.git");
-    let remote_clone = root.join("origin-work");
+    let remote_root = tempfile::tempdir().expect("remote tempdir should be created");
+    let bare_remote = remote_root.path().join("origin.git");
+    let remote_clone = remote_root.path().join("origin-work");
     let bare_remote_str = bare_remote.to_string_lossy().to_string();
     let remote_clone_str = remote_clone.to_string_lossy().to_string();
     let _ = fs::remove_dir_all(&bare_remote);

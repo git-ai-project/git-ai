@@ -4926,8 +4926,12 @@ impl ActorDaemonCoordinator {
         let repo_work_dir = request.files[0].repo_work_dir.clone();
         let family = self.backend.resolve_family(&repo_work_dir)?;
 
-        self.append_checkpoint_to_family_sequencer(&family.0, request, None)
+        let (respond_to, response) = oneshot::channel();
+        self.append_checkpoint_to_family_sequencer(&family.0, request, Some(respond_to))
             .await?;
+        response
+            .await
+            .map_err(|_| GitAiError::Generic("checkpoint response channel closed".to_string()))??;
         Ok(ControlResponse::ok(None, None))
     }
 
@@ -6231,8 +6235,8 @@ fn checkpoint_control_response_timeout(
         // Queued checkpoint requests can block behind trace-ingest ordering. In
         // CI/test we allow the longer budget so replay-heavy daemon tests don't
         // tear down captured state mid-request. Product mode keeps the short
-        // control timeout for fire-and-forget checkpoint requests to preserve
-        // responsiveness.
+        // control timeout so a wedged prior Git root fails the checkpoint rather
+        // than making the caller wait indefinitely.
         ControlRequest::CheckpointRun { .. } if use_ci_or_test_budget => {
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         }
@@ -7130,6 +7134,76 @@ mod tests {
         )
         .await
         .expect("checkpoint fence should pass once the mutating trace root closes");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_control_request_waits_while_blocked_behind_pending_root() {
+        use crate::commands::checkpoint_agent::orchestrator::{BaseCommit, CheckpointFile};
+
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .arg("init")
+            .output()
+            .expect("git init should run");
+        assert!(
+            init.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        std::fs::write(repo.join("test.txt"), "checkpoint content\n").unwrap();
+
+        let family = coord.backend.resolve_family(&repo).unwrap().0;
+        let root_sid = "20260411T120000.000000-Psid-blocking-root";
+        coord
+            .append_pending_root_entry(&family, root_sid, 1)
+            .unwrap();
+
+        let request = CheckpointRequest {
+            trace_id: "blocked-checkpoint".to_string(),
+            checkpoint_kind: CheckpointKind::Human,
+            agent_id: None,
+            files: vec![CheckpointFile {
+                path: PathBuf::from("test.txt"),
+                content: Some("checkpoint content\n".to_string()),
+                repo_work_dir: repo.clone(),
+                base_commit: BaseCommit::Initial,
+            }],
+            path_role: PreparedPathRole::Edited,
+            stream_source: None,
+            metadata: HashMap::new(),
+        };
+
+        let mut checkpoint = {
+            let coord = coord.clone();
+            tokio::spawn(async move { coord.ingest_checkpoint_payload(request).await })
+        };
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut checkpoint)
+                .await
+                .is_err(),
+            "checkpoint control request must not complete before its sequenced side effect runs"
+        );
+
+        coord
+            .replace_pending_root_entry(root_sid, FamilySequencerEntry::Canceled)
+            .await
+            .unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(1), checkpoint)
+            .await
+            .expect("checkpoint should finish once the prior root is released")
+            .expect("checkpoint task should not panic")
+            .expect("checkpoint request should succeed");
+        assert!(
+            response.ok,
+            "checkpoint response should be ok: {response:?}"
+        );
     }
 
     #[tokio::test]
