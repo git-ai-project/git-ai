@@ -331,6 +331,29 @@ fn test_cold_repo_first_traced_stash_pop_is_processed() {
     );
 }
 
+#[test]
+fn test_cold_repo_traced_stash_after_raw_stash_history_preserves_current_ai_attribution() {
+    let mut repo = cold_repo();
+    raw_commit_file(&repo, "stash.txt", "base\n", "raw base");
+    write_file(&repo, "stash.txt", "base\nold raw stash\n");
+    raw_git(&repo, &["stash", "push", "-m", "old raw stash"]);
+    assert_eq!(read_file(&repo, "stash.txt"), "base\n");
+
+    start_cold_daemon(&mut repo);
+    write_file(&repo, "stash.txt", "base\ncurrent ai stash\n");
+    repo.git_ai(&["checkpoint", "mock_ai", "stash.txt"])
+        .unwrap_or_else(|error| panic!("mock_ai checkpoint failed: {}", error));
+    run_traced_git(&repo, &["stash", "push", "-m", "current ai stash"]);
+    assert_eq!(read_file(&repo, "stash.txt"), "base\n");
+
+    run_traced_git(&repo, &["stash", "pop"]);
+    repo.stage_all_and_commit("apply current ai stash")
+        .expect("apply current ai stash commit should succeed");
+
+    let mut file = repo.filename("stash.txt");
+    file.assert_lines_and_blame(crate::lines!["base".human(), "current ai stash".ai(),]);
+}
+
 crate::reuse_tests_in_worktree!(
     test_cold_repo_first_traced_commit_is_processed,
     test_cold_repo_first_traced_amend_is_processed,
@@ -340,4 +363,5 @@ crate::reuse_tests_in_worktree!(
     test_cold_repo_first_traced_squash_merge_is_processed,
     test_cold_repo_first_traced_merge_is_processed,
     test_cold_repo_first_traced_stash_pop_is_processed,
+    test_cold_repo_traced_stash_after_raw_stash_history_preserves_current_ai_attribution,
 );

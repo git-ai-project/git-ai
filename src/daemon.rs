@@ -744,6 +744,13 @@ fn resolve_stash_sha(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<&
     })
 }
 
+fn stash_base_head(repo: &Repository, stash_sha: &str) -> Option<String> {
+    repo.find_commit(stash_sha.to_string())
+        .ok()
+        .and_then(|commit| commit.parent(0).ok())
+        .map(|parent| parent.id().to_string())
+}
+
 /// After a rebase completes, check if any newly-rebased commits were created
 /// from conflict resolution with AI checkpoints. If so, merge those resolution
 /// checkpoints into the already-shifted source authorship note for the new commit.
@@ -4399,12 +4406,8 @@ impl ActorDaemonCoordinator {
                                         })
                                     });
                                 if let Some(stash_sha) = resolved_stash {
-                                    let push_head = repo
-                                        .find_commit(stash_sha.to_string())
-                                        .ok()
-                                        .and_then(|c| c.parent(0).ok())
-                                        .map(|p| p.id().to_string())
-                                        .or_else(|| head.clone());
+                                    let push_head =
+                                        stash_base_head(&repo, stash_sha).or_else(|| head.clone());
                                     if let Some(head_sha) = push_head.as_deref() {
                                         let pathspecs = Self::stash_pathspecs_from_command(cmd);
                                         let _ =
@@ -4416,9 +4419,11 @@ impl ActorDaemonCoordinator {
                             }
                             crate::daemon::domain::StashOpKind::Pop => {
                                 if let Some(stash_sha) = resolve_stash_sha(cmd) {
+                                    let base_head = stash_base_head(&repo, stash_sha);
+                                    let target_head = head.as_deref().or(base_head.as_deref());
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply_with_head(
-                                            &repo, stash_sha, true, head.as_deref(),
+                                            &repo, stash_sha, true, target_head,
                                         );
                                 }
                             }
@@ -4429,14 +4434,15 @@ impl ActorDaemonCoordinator {
                                         kind,
                                         crate::daemon::domain::StashOpKind::Branch
                                     ) {
-                                        repo.find_commit(stash_sha.to_string())
-                                            .ok()
-                                            .and_then(|c| c.parent(0).ok())
-                                            .map(|p| p.id().to_string())
+                                        stash_base_head(&repo, stash_sha)
                                     } else {
                                         None
                                     };
-                                    let target_head = effective_head.as_deref().or(head.as_deref());
+                                    let base_head = stash_base_head(&repo, stash_sha);
+                                    let target_head = effective_head
+                                        .as_deref()
+                                        .or(head.as_deref())
+                                        .or(base_head.as_deref());
                                     let _ =
                                         crate::authorship::rewrite_stash::handle_stash_pop_or_apply_with_head(
                                             &repo, stash_sha, false, target_head,

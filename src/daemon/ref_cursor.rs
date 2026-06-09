@@ -524,8 +524,7 @@ impl RefCursor {
         }
 
         if matches!(kind, "push" | "save") {
-            let expected = ExpectedTransition::default();
-            if let Some(entry) = self.find_common_ref_entry("refs/stash", expected, &[])? {
+            if let Some(entry) = self.find_stash_push_entry(stash_args, kind)? {
                 self.consume_entry(&entry)?;
                 self.apply_stash_ref_entry(kind, &entry);
                 cmd.ref_changes.push(entry_to_ref_change(&entry));
@@ -650,7 +649,7 @@ impl RefCursor {
         }
 
         self.consume_common_refs_matching_transition(&old, &new, &mut changes)?;
-        self.consume_common_refs_with_new(&new, &["rebase"], &mut changes)?;
+        self.consume_rebase_finish_branch_ref(cmd.worktree.as_deref(), &new, state, &mut changes)?;
         dedup_ref_changes(&mut changes);
         cmd.ref_changes = changes;
         Ok(())
@@ -818,7 +817,7 @@ impl RefCursor {
     fn consume_pull_head_span_for_action(
         &mut self,
         cmd: &mut NormalizedCommand,
-        _state: &FamilyState,
+        state: &FamilyState,
         message_prefixes: &[&str],
         expected: ExpectedTransition,
         action: &str,
@@ -859,7 +858,14 @@ impl RefCursor {
         }
 
         self.consume_common_refs_matching_transition(&old, &new, &mut changes)?;
-        self.consume_common_refs_with_new(&new, message_prefixes, &mut changes)?;
+        self.consume_pull_finish_branch_ref(
+            cmd.worktree.as_deref(),
+            &new,
+            state,
+            action,
+            message_prefixes,
+            &mut changes,
+        )?;
         dedup_ref_changes(&mut changes);
         cmd.ref_changes = changes;
         Ok(())
@@ -970,6 +976,25 @@ impl RefCursor {
         )
     }
 
+    fn find_stash_push_entry(
+        &mut self,
+        stash_args: &[String],
+        kind: &str,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        let expected_message = stash_push_message_from_args(stash_args, kind);
+        let path = self.common_dir().join("logs").join("refs/stash");
+        let key = common_key("refs/stash");
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key, &path, "refs/stash", start)?;
+
+        Ok(entries.into_iter().find(|entry| {
+            !self.entry_consumed(entry)
+                && expected_message
+                    .as_deref()
+                    .is_none_or(|message| stash_reflog_message_matches(&entry.message, message))
+        }))
+    }
+
     fn find_entry_in_log(
         &mut self,
         key: String,
@@ -1011,28 +1036,93 @@ impl RefCursor {
         Ok(())
     }
 
-    fn consume_common_refs_with_new(
+    fn consume_rebase_finish_branch_ref(
         &mut self,
+        worktree: Option<&Path>,
         new: &str,
+        state: &FamilyState,
+        out: &mut Vec<RefChange>,
+    ) -> Result<(), GitAiError> {
+        self.consume_finish_branch_ref(
+            worktree,
+            new,
+            state,
+            &["rebase"],
+            |message| rebase_finish_returned_branch(message).map(ToOwned::to_owned),
+            out,
+        )
+    }
+
+    fn consume_pull_finish_branch_ref(
+        &mut self,
+        worktree: Option<&Path>,
+        new: &str,
+        state: &FamilyState,
+        action: &str,
         message_prefixes: &[&str],
         out: &mut Vec<RefChange>,
     ) -> Result<(), GitAiError> {
-        let refs = self.discover_common_refs()?;
-        for reference in refs {
-            if reference == "HEAD" || reference == "ORIG_HEAD" || reference == "refs/stash" {
-                continue;
-            }
-            let expected = ExpectedTransition {
-                old_oids: HashSet::new(),
+        self.consume_finish_branch_ref(
+            worktree,
+            new,
+            state,
+            message_prefixes,
+            |message| pull_finish_returned_branch(message, action),
+            out,
+        )
+    }
+
+    fn consume_finish_branch_ref<F>(
+        &mut self,
+        worktree: Option<&Path>,
+        new: &str,
+        state: &FamilyState,
+        message_prefixes: &[&str],
+        branch_from_message: F,
+        out: &mut Vec<RefChange>,
+    ) -> Result<(), GitAiError>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let Some(worktree) = worktree else {
+            return Ok(());
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(());
+        };
+        let key = head_key(&git_dir);
+        let path = git_dir.join("logs").join("HEAD");
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries_including_noops(key, &path, "HEAD", start)?;
+        let Some(finish) = entries
+            .into_iter()
+            .find(|entry| entry.new == new && branch_from_message(&entry.message).is_some())
+        else {
+            return Ok(());
+        };
+        let Some(branch_ref) = branch_from_message(&finish.message) else {
+            return Ok(());
+        };
+
+        self.advance_cursor_to_entry(&finish);
+        let old_oids = state
+            .refs
+            .get(&branch_ref)
+            .filter(|oid| valid_non_zero_oid(oid))
+            .cloned()
+            .into_iter()
+            .collect();
+        if let Some(entry) = self.find_common_ref_entry(
+            &branch_ref,
+            ExpectedTransition {
+                old_oids,
                 new_oid: Some(new.to_string()),
                 messages: HashSet::new(),
-            };
-            if let Some(entry) =
-                self.find_common_ref_entry(&reference, expected, message_prefixes)?
-            {
-                self.consume_entry(&entry)?;
-                out.push(entry_to_ref_change(&entry));
-            }
+            },
+            message_prefixes,
+        )? {
+            self.consume_entry(&entry)?;
+            out.push(entry_to_ref_change(&entry));
         }
         Ok(())
     }
@@ -1829,8 +1919,18 @@ fn rebase_finish_returns_to_branch(message: &str, branch_ref: &str) -> bool {
     message == format!("rebase (finish): returning to {}", branch_ref)
 }
 
+fn rebase_finish_returned_branch(message: &str) -> Option<&str> {
+    message.strip_prefix("rebase (finish): returning to ")
+}
+
 fn rebase_branch_finish_message_is(message: &str, branch_ref: &str) -> bool {
     message.starts_with(&format!("rebase (finish): {}", branch_ref))
+}
+
+fn pull_finish_returned_branch(message: &str, action: &str) -> Option<String> {
+    message
+        .strip_prefix(&format!("{action} (finish): returning to "))
+        .map(ToOwned::to_owned)
 }
 
 fn latest_rebase_finish_for_branch<'a>(
@@ -2412,6 +2512,43 @@ fn stash_command_args(args: &[String]) -> &[String] {
     }
 }
 
+fn stash_push_message_from_args(args: &[String], kind: &str) -> Option<String> {
+    if kind == "save" {
+        let message = args
+            .iter()
+            .skip(1)
+            .filter(|arg| !arg.starts_with('-'))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        return (!message.is_empty()).then_some(message);
+    }
+
+    let mut idx = if kind == "push" { 1 } else { 0 };
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "-m" | "--message" => {
+                return args.get(idx + 1).filter(|value| !value.is_empty()).cloned();
+            }
+            value if value.starts_with("--message=") => {
+                return value
+                    .strip_prefix("--message=")
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned);
+            }
+            _ => idx += 1,
+        }
+    }
+    None
+}
+
+fn stash_reflog_message_matches(reflog_message: &str, stash_message: &str) -> bool {
+    reflog_message == stash_message
+        || reflog_message
+            .strip_suffix(stash_message)
+            .is_some_and(|prefix| prefix.ends_with(": "))
+}
+
 fn stash_target_index(target: Option<&String>) -> Option<usize> {
     let target = target.map(String::as_str).unwrap_or("stash@{0}");
     if matches!(target, "stash" | "refs/stash") {
@@ -2924,6 +3061,59 @@ mod tests {
     }
 
     #[test]
+    fn rebase_does_not_attach_unrelated_branch_with_same_new_tip() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs/refs/heads")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (B, C, "rebase (start): checkout topic-1"),
+                (C, D, "rebase (pick): Topic 2"),
+            ],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/topic-2",
+            &[(B, D, "rebase (finish): refs/heads/topic-2 onto topic-1")],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/unrelated",
+            &[(E, D, "rebase (finish): refs/heads/unrelated onto topic-1")],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["rebase", "topic-1"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/topic-2".to_string(),
+                    old: B.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn rebase_prefers_start_entry_when_expected_state_matches_pick() {
         let temp = tempfile::tempdir().unwrap();
         let worktree = temp.path().join("repo");
@@ -3129,5 +3319,63 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn cold_stash_push_uses_message_to_skip_raw_stash_history() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(
+            temp.path(),
+            "refs/stash",
+            &[
+                (A, B, "On main: old raw stash"),
+                (B, C, "On main: current ai stash"),
+            ],
+        );
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command(&family, &["stash", "push", "-m", "current ai stash"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "refs/stash".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+        assert_eq!(cursor.stash_stack, vec![C.to_string()]);
+    }
+
+    #[test]
+    fn cold_stash_save_uses_message_to_skip_raw_stash_history() {
+        let temp = tempfile::tempdir().unwrap();
+        append_reflog(
+            temp.path(),
+            "refs/stash",
+            &[
+                (A, B, "On main: old raw stash"),
+                (B, C, "On main: current save stash"),
+            ],
+        );
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command(&family, &["stash", "save", "current", "save", "stash"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "refs/stash".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+        assert_eq!(cursor.stash_stack, vec![C.to_string()]);
     }
 }
