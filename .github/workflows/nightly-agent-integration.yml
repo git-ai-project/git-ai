@@ -37,6 +37,11 @@ jobs:
     outputs:
       matrix: ${{ steps.build-matrix.outputs.matrix }}
     steps:
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.5.2
+          run_install: false
+
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: '22'
@@ -73,17 +78,17 @@ jobs:
           for agent, info in agents.items():
               try:
                   stable_ver = subprocess.check_output(
-                      ["npm", "view", info["pkg"], "version"],
+                      ["pnpm", "view", info["pkg"], "version"],
                       text=True, stderr=subprocess.DEVNULL
                   ).strip()
                   # Try the "next" dist-tag for a pre-release; fall back to stable
                   # to avoid doubling CI cost when no canary exists
                   try:
                       latest_ver = subprocess.check_output(
-                          ["npm", "view", info["pkg"], "dist-tags.next"],
+                          ["pnpm", "view", info["pkg"], "dist-tags.next"],
                           text=True, stderr=subprocess.DEVNULL
                       ).strip()
-                      # npm 10+ exits 0 with empty output or "undefined" when the
+                      # pnpm view may exit 0 with empty output or "undefined" when the
                       # dist-tag doesn't exist, so CalledProcessError is not raised
                       if not latest_ver or latest_ver == "undefined":
                           latest_ver = stable_ver
@@ -100,23 +105,23 @@ jobs:
                   # stable — no additional coverage, just wastes CI resources
                   if channel == "latest" and latest_ver == stable_ver:
                       continue
-                  npm_pkg = f"{info['pkg']}@{ver}" if channel == "stable" else f"{info['pkg']}@next"
+                  package_spec = f"{info['pkg']}@{ver}" if channel == "stable" else f"{info['pkg']}@next"
                   matrix["include"].append({
                       "agent":       agent,
                       "channel":     channel,
-                      "npm_pkg":     npm_pkg,
+                      "package_spec": package_spec,
                       "version":     ver,
                       "api_key_var": info["key"],
                       "headless_cmd": headless_cmds[agent],
                   })
 
-          # Droid uses curl installer (latest only, no npm version pinning)
+          # Droid uses curl installer (latest only, no registry version pinning)
           # Respect AGENTS_FILTER so an explicit agents=claude excludes droid
           if not agents_filter or agents_filter == "all" or "droid" in {a.strip() for a in agents_filter.split(",")}:
               matrix["include"].append({
                   "agent":       "droid",
                   "channel":     "latest",
-                  "npm_pkg":     "",
+                  "package_spec": "",
                   "version":     "latest",
                   "api_key_var": "FACTORY_API_KEY",
                   "headless_cmd": "droid exec --auto high",
@@ -164,13 +169,18 @@ jobs:
         with:
           node-version: '22'
 
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.5.2
+          run_install: false
+
       - name: Install agent CLI — ${{ matrix.agent }} (${{ matrix.channel }})
         run: |
           if [ "${{ matrix.agent }}" = "droid" ]; then
             curl -fsSL https://app.factory.ai/cli | sh
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           else
-            npm install -g "${{ matrix.npm_pkg }}"
+            pnpm add --global "${{ matrix.package_spec }}"
           fi
 
       - name: Verify agent binary is present
@@ -272,13 +282,18 @@ jobs:
         with:
           node-version: '22'
 
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.5.2
+          run_install: false
+
       - name: Install agent CLI — ${{ matrix.agent }} (${{ matrix.channel }})
         run: |
           if [ "${{ matrix.agent }}" = "droid" ]; then
             curl -fsSL https://app.factory.ai/cli | sh
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           else
-            npm install -g "${{ matrix.npm_pkg }}"
+            pnpm add --global "${{ matrix.package_spec }}"
           fi
 
       - name: Create test repository

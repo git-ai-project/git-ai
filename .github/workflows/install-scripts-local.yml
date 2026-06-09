@@ -46,13 +46,13 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         agent:
           - name: claude
-            npm_pkg: "@anthropic-ai/claude-code"
+            package_spec: "@anthropic-ai/claude-code"
           - name: codex
-            npm_pkg: "@openai/codex"
+            package_spec: "@openai/codex"
           - name: gemini
-            npm_pkg: "@google/gemini-cli"
+            package_spec: "@google/gemini-cli"
           - name: opencode
-            npm_pkg: "opencode-ai"
+            package_spec: "opencode-ai"
 
     steps:
       - name: Checkout code
@@ -72,8 +72,13 @@ jobs:
         with:
           node-version: '22'
 
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.5.2
+          run_install: false
+
       - name: Install agent CLI — ${{ matrix.agent.name }}
-        run: npm install -g "${{ matrix.agent.npm_pkg }}"
+        run: pnpm add --global "${{ matrix.agent.package_spec }}"
 
       - name: Prepare test home
         run: |
@@ -192,13 +197,13 @@ jobs:
       matrix:
         agent:
           - name: claude
-            npm_pkg: "@anthropic-ai/claude-code"
+            package_spec: "@anthropic-ai/claude-code"
           - name: codex
-            npm_pkg: "@openai/codex"
+            package_spec: "@openai/codex"
           - name: gemini
-            npm_pkg: "@google/gemini-cli"
+            package_spec: "@google/gemini-cli"
           - name: opencode
-            npm_pkg: "opencode-ai"
+            package_spec: "opencode-ai"
 
     steps:
       - name: Checkout code
@@ -218,8 +223,13 @@ jobs:
         with:
           node-version: '22'
 
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.5.2
+          run_install: false
+
       - name: Install agent CLI — ${{ matrix.agent.name }}
-        run: npm install -g "${{ matrix.agent.npm_pkg }}"
+        run: pnpm add --global "${{ matrix.agent.package_spec }}"
 
       - name: Prepare test home
         shell: pwsh
