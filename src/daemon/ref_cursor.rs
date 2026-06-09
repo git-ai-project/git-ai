@@ -5,7 +5,7 @@ use crate::git::cli_parser::{
     explicit_rebase_branch_arg, parse_git_cli_args, summarize_rebase_args,
 };
 use crate::git::find_repository_in_path;
-use crate::git::repo_state::{git_dir_for_worktree, is_valid_git_oid};
+use crate::git::repo_state::{common_dir_for_worktree, git_dir_for_worktree, is_valid_git_oid};
 use crate::git::repository::exec_git_stdin;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -107,6 +107,10 @@ impl RefCursor {
         state: &FamilyState,
     ) -> Result<(), GitAiError> {
         cmd.ref_changes.clear();
+        self.apply_command_reflog_start_offsets(
+            cmd.primary_command.as_deref(),
+            &cmd.reflog_start_offsets,
+        );
 
         if cmd.exit_code != 0 && !command_can_move_refs_on_nonzero(cmd.primary_command.as_deref()) {
             return Ok(());
@@ -165,6 +169,30 @@ impl RefCursor {
             cmd.confidence = Confidence::High;
         }
         Ok(())
+    }
+
+    fn apply_command_reflog_start_offsets(
+        &mut self,
+        primary: Option<&str>,
+        offsets: &HashMap<String, u64>,
+    ) {
+        if primary != Some("stash") {
+            return;
+        }
+        let key = common_key("refs/stash");
+        let Some(offset) = offsets.get(&key) else {
+            return;
+        };
+        if self
+            .offsets
+            .get(&key)
+            .is_none_or(|existing| existing < offset)
+        {
+            self.offsets.insert(key.clone(), *offset);
+            self.anchors.remove(&key);
+            self.consumed_offsets.remove(&key);
+            self.consumed_anchors.remove(&key);
+        }
     }
 
     fn enrich_commit(
@@ -1412,6 +1440,21 @@ impl RefCursor {
         self.consumed_offsets.remove(key);
         self.consumed_anchors.remove(key);
     }
+}
+
+pub(crate) fn capture_stash_reflog_start_offset_for_worktree(
+    worktree: &Path,
+) -> HashMap<String, u64> {
+    let mut offsets = HashMap::new();
+
+    let Some(common_dir) = common_dir_for_worktree(worktree) else {
+        return offsets;
+    };
+    let path = common_dir.join("logs/refs/stash");
+    if let Ok(metadata) = fs::metadata(&path) {
+        offsets.insert(common_key("refs/stash"), metadata.len());
+    }
+    offsets
 }
 
 impl From<&CursorEntry> for ReflogAnchor {
@@ -2702,6 +2745,7 @@ mod tests {
             exit_code: 0,
             started_at_ns: 1,
             finished_at_ns: 2,
+            reflog_start_offsets: HashMap::new(),
             stash_target_oid: None,
             cherry_pick_source_oids: Vec::new(),
             revert_source_oids: Vec::new(),
@@ -3336,6 +3380,35 @@ mod tests {
         let state = family_state(&family);
         let mut cursor = RefCursor::new(family.clone());
         let mut cmd = command(&family, &["stash", "push", "-m", "current ai stash"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "refs/stash".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }]
+        );
+        assert_eq!(cursor.stash_stack, vec![C.to_string()]);
+    }
+
+    #[test]
+    fn cold_stash_push_uses_command_reflog_boundary_without_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let old_line = format!("{A} {B} Test User <test@example.com> 0 +0000\tWIP on main\n");
+        let old_history_len = old_line.len() as u64;
+        let current_line = format!("{B} {C} Test User <test@example.com> 0 +0000\tWIP on main\n");
+        let path = temp.path().join("logs/refs/stash");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("{old_line}{current_line}")).unwrap();
+        let family = FamilyKey::new(temp.path().to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command(&family, &["stash", "push"]);
+        cmd.reflog_start_offsets
+            .insert(common_key("refs/stash"), old_history_len);
 
         cursor.enrich_command(&mut cmd, &state).unwrap();
 

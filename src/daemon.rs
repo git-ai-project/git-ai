@@ -74,6 +74,7 @@ const PID_META_FILE: &str = "daemon.pid.json";
 const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
 const TRACE_ROOT_ARGV_FIELD: &str = "git_ai_root_argv";
 const TRACE_ROOT_STARTED_AT_NS_FIELD: &str = "git_ai_root_started_at_ns";
+pub(crate) const TRACE_ROOT_REFLOG_START_OFFSETS_FIELD: &str = "git_ai_root_reflog_start_offsets";
 const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_CHECKPOINT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -2059,6 +2060,7 @@ struct TraceIngressState {
     root_families: HashMap<String, String>,
     root_argv: HashMap<String, Vec<String>>,
     root_started_at_ns: HashMap<String, u128>,
+    root_reflog_start_offsets: HashMap<String, HashMap<String, u64>>,
     root_mutating: HashMap<String, bool>,
     root_target_repo_only: HashMap<String, bool>,
     root_last_activity_ns: HashMap<String, u64>,
@@ -3139,6 +3141,7 @@ impl ActorDaemonCoordinator {
 
         let root = trace_root_sid(&sid).to_string();
         let argv = trace_payload_argv(payload);
+        let worktree_hint = trace_payload_worktree_hint(payload);
         let started_at_ns = trace_payload_time_ns(payload);
         let early_primary =
             trace_payload_primary_command(payload).or_else(|| trace_argv_primary_command(&argv));
@@ -3161,7 +3164,7 @@ impl ActorDaemonCoordinator {
                 .or_insert(started_at_ns);
         }
 
-        if let Some(worktree) = trace_payload_worktree_hint(payload) {
+        if let Some(worktree) = worktree_hint.clone() {
             if let Some(common_dir) = common_dir_for_worktree(&worktree) {
                 let family = common_dir.canonicalize().unwrap_or(common_dir);
                 ingress
@@ -3178,10 +3181,6 @@ impl ActorDaemonCoordinator {
             }
         }
 
-        let inherited = (
-            ingress.root_argv.get(&root).cloned(),
-            ingress.root_started_at_ns.get(&root).copied(),
-        );
         let effective_argv = if argv.is_empty() {
             ingress.root_argv.get(&root).cloned().unwrap_or_default()
         } else {
@@ -3189,12 +3188,15 @@ impl ActorDaemonCoordinator {
         };
         let effective_primary =
             early_primary.or_else(|| trace_argv_primary_command(&effective_argv));
+        let command_mutates_refs = effective_primary
+            .as_deref()
+            .is_some_and(|primary| trace_command_may_mutate_refs(Some(primary)));
+        let command_needs_stash_reflog_start_offset = effective_primary.as_deref() == Some("stash");
         if let Some(primary) = effective_primary.as_deref() {
-            let mutating = trace_command_may_mutate_refs(Some(primary));
             ingress
                 .root_mutating
                 .entry(root.clone())
-                .or_insert(mutating);
+                .or_insert(command_mutates_refs);
             let target_repo_only = trace_command_uses_target_repo_context_only(Some(primary));
             ingress
                 .root_target_repo_only
@@ -3202,13 +3204,36 @@ impl ActorDaemonCoordinator {
                 .or_insert(target_repo_only);
         }
 
+        let terminal = is_terminal_root_trace_event(&event, &sid, &root);
+        if command_needs_stash_reflog_start_offset
+            && command_mutates_refs
+            && !terminal
+            && !ingress.root_reflog_start_offsets.contains_key(&root)
+            && let Some(worktree) = worktree_hint
+                .clone()
+                .or_else(|| ingress.root_worktrees.get(&root).cloned())
+        {
+            let offsets = crate::daemon::ref_cursor::capture_stash_reflog_start_offset_for_worktree(
+                &worktree,
+            );
+            ingress
+                .root_reflog_start_offsets
+                .insert(root.clone(), offsets);
+        }
+
         let read_only_root =
             event_is_read_only || ingress.root_definitely_read_only.contains(&root);
-        if is_terminal_root_trace_event(&event, &sid, &root) {
+        let inherited = (
+            ingress.root_argv.get(&root).cloned(),
+            ingress.root_started_at_ns.get(&root).copied(),
+            ingress.root_reflog_start_offsets.get(&root).cloned(),
+        );
+        if terminal {
             ingress.root_worktrees.remove(&root);
             ingress.root_families.remove(&root);
             ingress.root_argv.remove(&root);
             ingress.root_started_at_ns.remove(&root);
+            ingress.root_reflog_start_offsets.remove(&root);
             ingress.root_mutating.remove(&root);
             ingress.root_target_repo_only.remove(&root);
             ingress.root_last_activity_ns.remove(&root);
@@ -3230,6 +3255,14 @@ impl ActorDaemonCoordinator {
                 object.insert(
                     TRACE_ROOT_STARTED_AT_NS_FIELD.to_string(),
                     json!(started_at_ns),
+                );
+            }
+            if object.get(TRACE_ROOT_REFLOG_START_OFFSETS_FIELD).is_none()
+                && let Some(offsets) = inherited.2
+            {
+                object.insert(
+                    TRACE_ROOT_REFLOG_START_OFFSETS_FIELD.to_string(),
+                    json!(offsets),
                 );
             }
         }
@@ -4067,6 +4100,23 @@ impl ActorDaemonCoordinator {
         let events = &applied.analysis.events;
 
         let primary = cmd.primary_command.as_deref().unwrap_or("unknown");
+
+        #[cfg(feature = "test-support")]
+        if let Ok(spec) = std::env::var("GIT_AI_TEST_DELAY_SIDE_EFFECT_MS_FOR_COMMAND") {
+            for entry in spec.split(',') {
+                let Some((command, delay_ms)) = entry.split_once('=') else {
+                    continue;
+                };
+                if command == primary
+                    && let Ok(delay_ms) = delay_ms.parse::<u64>()
+                    && delay_ms > 0
+                {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    break;
+                }
+            }
+        }
+
         let is_write_op = matches!(
             primary,
             "commit"
@@ -6131,7 +6181,7 @@ fn checkpoint_control_response_timeout(
         ControlRequest::SyncFamily { .. } if use_ci_or_test_budget => {
             DAEMON_CHECKPOINT_RESPONSE_TIMEOUT
         }
-        ControlRequest::SyncFamily { .. } => DAEMON_CONTROL_RESPONSE_TIMEOUT,
+        ControlRequest::SyncFamily { .. } => DAEMON_CHECKPOINT_RESPONSE_TIMEOUT,
         ControlRequest::SnapshotWatermarks { .. } => Duration::from_millis(500),
         _ => DAEMON_CONTROL_RESPONSE_TIMEOUT,
     }
@@ -6564,6 +6614,7 @@ mod tests {
             exit_code: 0,
             started_at_ns: 1,
             finished_at_ns: 2,
+            reflog_start_offsets: HashMap::new(),
             stash_target_oid: None,
             cherry_pick_source_oids: Vec::new(),
             revert_source_oids: Vec::new(),
@@ -6937,6 +6988,34 @@ mod tests {
             "enqueue must allocate an ingest sequence number"
         );
         coord.request_shutdown();
+    }
+
+    #[tokio::test]
+    async fn stash_trace_payload_captures_stash_reflog_start_offset() {
+        let coord = ActorDaemonCoordinator::new();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let stash_log = repo.join(".git/logs/refs/stash");
+        std::fs::create_dir_all(stash_log.parent().unwrap()).unwrap();
+        let old_reflog = b"old stash reflog entry\n";
+        std::fs::write(&stash_log, old_reflog).unwrap();
+        let mut payload = serde_json::json!({
+            "event": "start",
+            "sid": "20260411T120000.000000-Psid-reflog",
+            "argv": ["git", "stash", "push"],
+            "worktree": repo,
+        });
+
+        assert!(coord.prepare_trace_payload_for_ingest(&mut payload));
+
+        let offsets = payload
+            .get(TRACE_ROOT_REFLOG_START_OFFSETS_FIELD)
+            .and_then(Value::as_object)
+            .expect("mutating trace payload should include reflog start offsets");
+        assert_eq!(
+            offsets.get("common:refs/stash").and_then(Value::as_u64),
+            Some(old_reflog.len() as u64)
+        );
     }
 
     #[tokio::test]

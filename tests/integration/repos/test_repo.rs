@@ -980,7 +980,16 @@ fn parse_checkpoint_request_count(stdout: &str) -> u64 {
 fn git_ai_command_requires_daemon_sync(args: &[&str]) -> bool {
     matches!(
         git_ai_primary_command(args),
-        Some("blame" | "continue" | "diff" | "prompts" | "search" | "stats")
+        Some(
+            "blame"
+                | "blame-analysis"
+                | "diff"
+                | "log"
+                | "show"
+                | "show-prompt"
+                | "stats"
+                | "status"
+        )
     )
 }
 
@@ -2342,8 +2351,57 @@ impl TestRepo {
         self.git_ai_with_env(args, &[])
     }
 
+    pub fn git_ai_without_pre_sync_for_test(&self, args: &[&str]) -> Result<String, String> {
+        self.git_ai_with_env_inner(args, &[], false)
+    }
+
+    pub fn git_ai_with_env_without_pre_sync_for_test(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Result<String, String> {
+        self.git_ai_with_env_inner(args, envs, false)
+    }
+
     pub fn git(&self, args: &[&str]) -> Result<String, String> {
         self.git_with_env(args, &[], None)
+    }
+
+    pub fn git_without_test_sync_for_test(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Result<String, String> {
+        let mut command = Command::new(real_git_executable());
+        command.arg("-C").arg(&self.path).args(args);
+        self.configure_command_env(&mut command);
+
+        if let Some(patch) = &self.config_patch
+            && let Ok(patch_json) = serde_json::to_string(patch)
+        {
+            command.env("GIT_AI_TEST_CONFIG_PATCH", patch_json);
+        }
+        command.env("GIT_AI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        command.env("GITAI_TEST_DB_PATH", self.test_db_path.to_str().unwrap());
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+
+        let output = run_command_output(&mut command, &format!("git-no-test-sync {:?}", args))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let combined = if stdout.is_empty() {
+            stderr
+        } else if stderr.is_empty() {
+            stdout
+        } else {
+            format!("{}{}", stdout, stderr)
+        };
+        if output.status.success() {
+            Ok(combined)
+        } else {
+            Err(combined)
+        }
     }
 
     /// Run a git command from a working directory (without using -C flag)
@@ -2693,7 +2751,16 @@ impl TestRepo {
     }
 
     pub fn git_ai_with_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Result<String, String> {
-        if git_ai_command_requires_daemon_sync(args) {
+        self.git_ai_with_env_inner(args, envs, true)
+    }
+
+    fn git_ai_with_env_inner(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        sync_before_read: bool,
+    ) -> Result<String, String> {
+        if sync_before_read && git_ai_command_requires_daemon_sync(args) {
             self.sync_daemon_force();
         }
 

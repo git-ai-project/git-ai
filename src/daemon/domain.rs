@@ -51,6 +51,8 @@ pub struct NormalizedCommand {
     pub exit_code: i32,
     pub started_at_ns: u128,
     pub finished_at_ns: u128,
+    #[serde(default)]
+    pub reflog_start_offsets: HashMap<String, u64>,
     pub stash_target_oid: Option<String>,
     pub cherry_pick_source_oids: Vec<String>,
     pub revert_source_oids: Vec<String>,

@@ -180,6 +180,7 @@ mod tests {
             exit_code: 0,
             started_at_ns: seq,
             finished_at_ns: seq + 1,
+            reflog_start_offsets: std::collections::HashMap::new(),
             stash_target_oid: None,
             cherry_pick_source_oids: Vec::new(),
             revert_source_oids: Vec::new(),

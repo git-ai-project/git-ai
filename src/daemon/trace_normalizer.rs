@@ -24,6 +24,7 @@ pub struct PendingTraceCommand {
     pub started_at_ns: u128,
     pub exit_code: Option<i32>,
     pub finished_at_ns: Option<u128>,
+    pub reflog_start_offsets: HashMap<String, u64>,
     pub saw_def_repo: bool,
 }
 
@@ -303,6 +304,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             started_at_ns,
             exit_code: None,
             finished_at_ns: None,
+            reflog_start_offsets: payload_reflog_start_offsets(payload),
             saw_def_repo: false,
         };
         trace_debug_lifecycle(&format!(
@@ -418,6 +420,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
                 .insert(root_sid.to_string(), family.clone());
         }
         if let Some(pending) = self.state.pending.get_mut(root_sid) {
+            merge_reflog_start_offsets_from_payload(pending, payload);
             pending.saw_def_repo = true;
             pending.worktree = Some(repo);
             if let Some(family) = family.as_ref() {
@@ -446,6 +449,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
 
         if sid == root_sid {
             if let Some(pending) = self.state.pending.get_mut(root_sid) {
+                merge_reflog_start_offsets_from_payload(pending, payload);
                 pending.root_cmd_name = Some(cmd);
             } else {
                 self.state
@@ -479,6 +483,10 @@ impl<B: GitBackend> TraceNormalizer<B> {
         }
         if self.is_completed_root(root_sid) {
             return Ok(None);
+        }
+
+        if let Some(pending) = self.state.pending.get_mut(root_sid) {
+            merge_reflog_start_offsets_from_payload(pending, payload);
         }
 
         let exit_code = payload
@@ -684,6 +692,7 @@ impl<B: GitBackend> TraceNormalizer<B> {
             exit_code,
             started_at_ns: pending.started_at_ns,
             finished_at_ns,
+            reflog_start_offsets: pending.reflog_start_offsets,
             stash_target_oid: None,
             cherry_pick_source_oids: Vec::new(),
             revert_source_oids: Vec::new(),
@@ -758,6 +767,25 @@ fn payload_cwd(payload: &Value) -> Option<PathBuf> {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .map(|path| worktree_root_for_path(&path).unwrap_or(path))
+}
+
+fn payload_reflog_start_offsets(payload: &Value) -> HashMap<String, u64> {
+    payload
+        .get(crate::daemon::TRACE_ROOT_REFLOG_START_OFFSETS_FIELD)
+        .and_then(Value::as_object)
+        .map(|object| {
+            object
+                .iter()
+                .filter_map(|(key, value)| value.as_u64().map(|offset| (key.clone(), offset)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn merge_reflog_start_offsets_from_payload(pending: &mut PendingTraceCommand, payload: &Value) {
+    for (key, offset) in payload_reflog_start_offsets(payload) {
+        pending.reflog_start_offsets.entry(key).or_insert(offset);
+    }
 }
 
 fn worktree_from_def_repo_repo(repo: &Path) -> Option<PathBuf> {
@@ -1170,6 +1198,41 @@ mod tests {
         assert_eq!(cmd.root_sid, "s1");
         assert_eq!(cmd.primary_command.as_deref(), Some("status"));
         assert_eq!(cmd.exit_code, 0);
+    }
+
+    #[test]
+    fn normalizer_preserves_reflog_start_offsets_from_def_repo() {
+        let backend = Arc::new(MockBackend::default());
+        backend.set_family("/repo", "/repo/.git");
+        let mut normalizer = TraceNormalizer::new(backend);
+
+        let start = serde_json::json!({
+            "event":"start",
+            "sid":"s-reflog-offsets",
+            "ts":1,
+            "argv":["git","stash","push"],
+            "worktree":"/repo"
+        });
+        let mut def_repo = serde_json::json!({
+            "event":"def_repo",
+            "sid":"s-reflog-offsets",
+            "ts":2,
+            "worktree":"/repo"
+        });
+        def_repo.as_object_mut().unwrap().insert(
+            crate::daemon::TRACE_ROOT_REFLOG_START_OFFSETS_FIELD.to_string(),
+            serde_json::json!({"common:refs/stash": 123_u64}),
+        );
+        let atexit = atexit_payload("s-reflog-offsets", 3);
+
+        assert!(normalizer.ingest_payload(&start).unwrap().is_none());
+        assert!(normalizer.ingest_payload(&def_repo).unwrap().is_none());
+        let cmd = normalizer.ingest_payload(&atexit).unwrap().unwrap();
+
+        assert_eq!(
+            cmd.reflog_start_offsets.get("common:refs/stash"),
+            Some(&123)
+        );
     }
 
     #[test]

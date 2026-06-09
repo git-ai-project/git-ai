@@ -336,14 +336,14 @@ fn test_cold_repo_traced_stash_after_raw_stash_history_preserves_current_ai_attr
     let mut repo = cold_repo();
     raw_commit_file(&repo, "stash.txt", "base\n", "raw base");
     write_file(&repo, "stash.txt", "base\nold raw stash\n");
-    raw_git(&repo, &["stash", "push", "-m", "old raw stash"]);
+    raw_git(&repo, &["stash", "push"]);
     assert_eq!(read_file(&repo, "stash.txt"), "base\n");
 
     start_cold_daemon(&mut repo);
     write_file(&repo, "stash.txt", "base\ncurrent ai stash\n");
     repo.git_ai(&["checkpoint", "mock_ai", "stash.txt"])
         .unwrap_or_else(|error| panic!("mock_ai checkpoint failed: {}", error));
-    run_traced_git(&repo, &["stash", "push", "-m", "current ai stash"]);
+    run_traced_git(&repo, &["stash", "push"]);
     assert_eq!(read_file(&repo, "stash.txt"), "base\n");
 
     run_traced_git(&repo, &["stash", "pop"]);

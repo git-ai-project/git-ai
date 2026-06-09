@@ -1,3 +1,4 @@
+use crate::commands::daemon_sync::sync_daemon_family_for_repo_or_exit;
 use crate::config::NotesBackendKind;
 use crate::error::GitAiError;
 use crate::git::find_repository;
@@ -85,6 +86,8 @@ pub fn handle_fetch_notes(args: &[String]) {
             }
         },
     };
+
+    sync_daemon_family_for_repo_or_exit(&repo, "fetch-notes");
 
     if !json_output {
         eprint!("Fetching authorship notes from '{}'...", remote_name);
