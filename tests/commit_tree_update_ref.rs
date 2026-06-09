@@ -157,6 +157,48 @@ fn raw_traced_git_stdin(repo: &TestRepo, args: &[&str], stdin: &str) -> String {
     combined_output(stdout, stderr)
 }
 
+fn raw_traced_git_with_session(repo: &TestRepo, args: &[&str], session: &str) -> String {
+    let session_arg = format!("git-ai.testSyncSession={session}");
+    let mut command = Command::new(real_git_executable());
+    command
+        .arg("-C")
+        .arg(repo.path())
+        .arg("-c")
+        .arg(&session_arg)
+        .args(args);
+    command.env("HOME", repo.test_home_path());
+    command.env(
+        "GIT_CONFIG_GLOBAL",
+        repo.test_home_path().join(".gitconfig"),
+    );
+    command.env("XDG_CONFIG_HOME", repo.test_home_path().join(".config"));
+    command.env("GIT_CONFIG_NOSYSTEM", "1");
+    command.env(
+        "GIT_TRACE2_EVENT",
+        git_ai::daemon::DaemonConfig::trace2_event_target_for_path(
+            &repo.daemon_trace_socket_path(),
+        ),
+    );
+    command.env(
+        "GIT_TRACE2_EVENT_NESTING",
+        std::env::var("GIT_AI_TEST_TRACE2_NESTING").unwrap_or_else(|_| "10".to_string()),
+    );
+
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run raw traced git {:?}: {}", args, error));
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        output.status.success(),
+        "raw traced git {:?} failed\nstdout: {}\nstderr: {}",
+        args,
+        stdout,
+        stderr
+    );
+    combined_output(stdout, stderr)
+}
+
 fn raw_untraced_git(repo: &TestRepo, args: &[&str]) -> String {
     repo.git_og_with_env(args, &[("GIT_TRACE2_EVENT", "0")])
         .unwrap_or_else(|error| panic!("raw untraced git {:?} failed: {}", args, error))
@@ -342,12 +384,22 @@ fn test_soft_reset_amend_then_branch_move_preserves_squashed_child_attribution()
         .expect("child commit 2 should succeed");
 
     repo.sync_daemon();
-    let baseline = repo.daemon_total_completion_count();
+    let reset_session = new_daemon_test_sync_session_id();
+    let amend_session = new_daemon_test_sync_session_id();
+    let switch_session = new_daemon_test_sync_session_id();
 
-    raw_traced_git(&repo, &["reset", "--soft", &child_one.commit_sha]);
-    raw_traced_git(&repo, &["commit", "--amend", "-m", "squashed child"]);
-    raw_traced_git(&repo, &["switch", "-C", "parent", "HEAD"]);
-    repo.wait_for_daemon_total_completion_count(baseline, baseline + 3);
+    raw_traced_git_with_session(
+        &repo,
+        &["reset", "--soft", &child_one.commit_sha],
+        &reset_session,
+    );
+    raw_traced_git_with_session(
+        &repo,
+        &["commit", "--amend", "-m", "squashed child"],
+        &amend_session,
+    );
+    raw_traced_git_with_session(&repo, &["switch", "-C", "parent", "HEAD"], &switch_session);
+    repo.sync_daemon_external_completion_sessions(&[reset_session, amend_session, switch_session]);
 
     parent_file.assert_lines_and_blame(lines!["parent line 1".human(), "parent line 2".human(),]);
     child_file.assert_lines_and_blame(lines!["child ai 1".ai(), "child ai 2".ai()]);

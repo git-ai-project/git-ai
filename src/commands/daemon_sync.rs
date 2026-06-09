@@ -5,7 +5,7 @@ use crate::git::repository::Repository;
 fn daemon_sync_available_for_git_ai_command() -> bool {
     #[cfg(any(test, feature = "test-support"))]
     {
-        let Some(path) = std::env::var("GIT_AI_DAEMON_CONTROL_SOCKET")
+        let Some(_path) = std::env::var("GIT_AI_DAEMON_CONTROL_SOCKET")
             .ok()
             .filter(|path| !path.trim().is_empty())
         else {
@@ -18,7 +18,7 @@ fn daemon_sync_available_for_git_ai_command() -> bool {
         }
         #[cfg(not(windows))]
         {
-            std::path::Path::new(&path).exists()
+            std::path::Path::new(&_path).exists()
         }
     }
     #[cfg(not(any(test, feature = "test-support")))]
