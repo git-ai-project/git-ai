@@ -127,7 +127,7 @@ jobs:
 
       # Upload the Kover report to CodeCov
       - name: Upload Code Coverage Report
-        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         continue-on-error: true  # Coverage report may not exist if no tests
         with:
           files: ${{ github.workspace }}/agent-support/intellij/build/reports/kover/report.xml
