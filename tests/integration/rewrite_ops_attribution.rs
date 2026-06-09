@@ -200,7 +200,6 @@ fn delayed_ai_commit_without_harness_sync_with_delay(delay_ms: u64) -> DelayedAi
     let file_path = repo.path().join("reader.txt");
     fs::write(&file_path, "AI reader line\n").unwrap();
     claude_checkpoint(&repo, "PostToolUse", &file_path, "reader-session");
-    repo.sync_daemon_force();
     repo.git(&["add", "reader.txt"]).unwrap();
     repo.git_without_test_sync_for_test(&["commit", "-m", "delayed ai reader commit"], &[])
         .unwrap();
@@ -2329,9 +2328,6 @@ fn test_cherry_pick_no_commit_preserves_attribution() {
     // Cherry-pick with --no-commit (stages content without creating commit)
     repo.git(&["cherry-pick", "--no-commit", &feature_sha])
         .unwrap();
-
-    // Ensure daemon has processed the cherry-pick event (writes INITIAL)
-    repo.sync_daemon_force();
 
     // Now commit (attribution should be preserved from source commit's note)
     repo.commit("cherry-picked content").unwrap();

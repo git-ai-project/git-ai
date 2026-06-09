@@ -64,16 +64,19 @@ fn start_cold_daemon(repo: &mut TestRepo) {
 }
 
 fn run_traced_git(repo: &TestRepo, args: &[&str]) -> String {
+    let output = run_traced_git_without_sync(repo, args);
+    repo.sync_daemon_force();
+    output
+}
+
+fn run_traced_git_without_sync(repo: &TestRepo, args: &[&str]) -> String {
     assert!(
         repo.git_command_affects_daemon_for_tracking(args, None),
         "git {:?} should be tracked by daemon test sync",
         args
     );
-    let output = repo
-        .git(args)
-        .unwrap_or_else(|error| panic!("traced git {:?} failed: {}", args, error));
-    repo.sync_daemon_force();
-    output
+    repo.git(args)
+        .unwrap_or_else(|error| panic!("traced git {:?} failed: {}", args, error))
 }
 
 fn assert_no_ai_authorship_for_commit(repo: &TestRepo, commit_sha: &str) {
@@ -444,7 +447,7 @@ fn test_cold_repo_first_traced_squash_merge_is_processed() {
     raw_commit_file(&repo, "main.txt", "main\n", "raw main advance");
 
     start_cold_daemon(&mut repo);
-    run_traced_git(&repo, &["merge", "--squash", "feature"]);
+    run_traced_git_without_sync(&repo, &["merge", "--squash", "feature"]);
     let staged = raw_git(&repo, &["diff", "--cached", "--name-only"]);
     assert!(
         staged.lines().any(|line| line == "feature.txt"),
@@ -518,10 +521,10 @@ fn test_cold_repo_traced_stash_after_raw_stash_history_preserves_current_ai_attr
     write_file(&repo, "stash.txt", "base\ncurrent ai stash\n");
     repo.git_ai(&["checkpoint", "mock_ai", "stash.txt"])
         .unwrap_or_else(|error| panic!("mock_ai checkpoint failed: {}", error));
-    run_traced_git(&repo, &["stash", "push"]);
+    run_traced_git_without_sync(&repo, &["stash", "push"]);
     assert_eq!(read_file(&repo, "stash.txt"), "base\n");
 
-    run_traced_git(&repo, &["stash", "pop"]);
+    run_traced_git_without_sync(&repo, &["stash", "pop"]);
     repo.stage_all_and_commit("apply current ai stash")
         .expect("apply current ai stash commit should succeed");
 
