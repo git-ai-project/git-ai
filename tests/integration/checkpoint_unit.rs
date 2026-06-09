@@ -1135,6 +1135,105 @@ fn test_checkpoint_crlf_blob_vs_lf_working_tree_stats_not_inflated() {
 }
 
 #[test]
+fn test_checkpoint_crlf_to_lf_with_deletion_stats_not_inflated() {
+    // Regression test for the sub-diff fix in Replace blocks.
+    // When CRLF→LF conversion co-occurs with a deletion in the middle,
+    // a naive positional comparison within Replace blocks would misalign
+    // lines after the deletion and count them as changed.
+    // Example: "a\r\nb\r\nc\r\n" → "a\nc\n" (delete "b", convert CRLF→LF)
+    // Without the sub-diff fix, stats would show additions=1, deletions=2
+    // instead of the correct additions=0, deletions=1.
+    let repo = TestRepo::new();
+    let crlf_content = "aaa\r\nbbb\r\nccc\r\nddd\r\neee\r\n";
+    std::fs::write(repo.path().join("test.txt"), crlf_content).unwrap();
+    repo.git(&["add", "test.txt"]).unwrap();
+    repo.stage_all_and_commit("initial commit with CRLF")
+        .unwrap();
+
+    // Delete "bbb" and "ddd" from the middle, convert to LF
+    let lf_with_deletions = "aaa\nccc\neee\n";
+    std::fs::write(repo.path().join("test.txt"), lf_with_deletions).unwrap();
+
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
+
+    let gitai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("Repository should exist");
+    let base_commit = gitai_repo
+        .head()
+        .ok()
+        .and_then(|head| head.target().ok())
+        .unwrap_or_else(|| "initial".to_string());
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit(&base_commit)
+        .unwrap();
+    let checkpoints = working_log.read_all_checkpoints().unwrap();
+    let latest = checkpoints
+        .last()
+        .expect("Should have at least one checkpoint");
+
+    // Only 2 lines were deleted (bbb, ddd). No lines were added.
+    // A broken positional comparison would show ~3 additions + ~4 deletions.
+    assert_eq!(
+        latest.line_stats.additions, 0,
+        "Should have 0 additions, got {} (positional comparison inflated stats)",
+        latest.line_stats.additions
+    );
+    assert_eq!(
+        latest.line_stats.deletions, 2,
+        "Should have 2 deletions (bbb, ddd), got {} (positional comparison inflated stats)",
+        latest.line_stats.deletions
+    );
+}
+
+#[test]
+fn test_checkpoint_crlf_to_lf_with_insertion_and_deletion_stats_correct() {
+    // Regression test: CRLF→LF with both an insertion and a deletion.
+    // "a\r\nb\r\nc\r\n" → "a\nx\nc\n" (replace "b" with "x", convert CRLF→LF)
+    // Expected: 1 addition (x), 1 deletion (b)
+    let repo = TestRepo::new();
+    let crlf_content = "alpha\r\nbeta\r\ngamma\r\ndelta\r\n";
+    std::fs::write(repo.path().join("test.txt"), crlf_content).unwrap();
+    repo.git(&["add", "test.txt"]).unwrap();
+    repo.stage_all_and_commit("initial commit with CRLF")
+        .unwrap();
+
+    // Replace "beta" with "new_line", delete "delta", convert to LF
+    let lf_edited = "alpha\nnew_line\ngamma\n";
+    std::fs::write(repo.path().join("test.txt"), lf_edited).unwrap();
+
+    repo.git_ai(&["checkpoint", "mock_ai", "test.txt"]).unwrap();
+
+    let gitai_repo =
+        find_repository_in_path(repo.path().to_str().unwrap()).expect("Repository should exist");
+    let base_commit = gitai_repo
+        .head()
+        .ok()
+        .and_then(|head| head.target().ok())
+        .unwrap_or_else(|| "initial".to_string());
+    let working_log = gitai_repo
+        .storage
+        .working_log_for_base_commit(&base_commit)
+        .unwrap();
+    let checkpoints = working_log.read_all_checkpoints().unwrap();
+    let latest = checkpoints
+        .last()
+        .expect("Should have at least one checkpoint");
+
+    // "beta" → "new_line" is 1 addition + 1 deletion; "delta" removed is 1 deletion
+    assert_eq!(
+        latest.line_stats.additions, 1,
+        "Should have 1 addition (new_line replacing beta), got {}",
+        latest.line_stats.additions
+    );
+    assert_eq!(
+        latest.line_stats.deletions, 2,
+        "Should have 2 deletions (beta replaced + delta removed), got {}",
+        latest.line_stats.deletions
+    );
+}
+
+#[test]
 fn test_checkpoint_crlf_blob_vs_lf_working_tree_no_changes_skipped() {
     // When the only difference is CRLF→LF (no actual content change),
     // the checkpoint should skip the file entirely — content_eq_normalized
