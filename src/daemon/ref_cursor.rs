@@ -667,6 +667,9 @@ impl RefCursor {
             else {
                 break;
             };
+            if rebase_reflog_action_is(&next.message, "start") {
+                break;
+            }
             new = next.new.clone();
             consumed_finish = rebase_reflog_action_is(&next.message, "finish");
             self.consume_entry(&next)?;
@@ -2190,6 +2193,9 @@ fn read_reflog_records(
     for raw_line in bytes.split_inclusive(|byte| *byte == b'\n') {
         let line_start = offset;
         offset = offset.saturating_add(raw_line.len() as u64);
+        if !raw_line.ends_with(b"\n") {
+            continue;
+        }
         let line = String::from_utf8_lossy(raw_line);
         let line = line.trim_end_matches(['\r', '\n']);
         let Some(entry) = parse_reflog_line(line, offset) else {
@@ -2216,6 +2222,14 @@ fn read_reflog_record_ending_at(
     };
     let byte_len = file.metadata().map_err(GitAiError::IoError)?.len();
     if end_offset > byte_len {
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(end_offset.saturating_sub(1)))
+        .map_err(GitAiError::IoError)?;
+    let mut terminator = [0; 1];
+    file.read_exact(&mut terminator)
+        .map_err(GitAiError::IoError)?;
+    if terminator[0] != b'\n' {
         return Ok(None);
     }
 
@@ -3057,6 +3071,94 @@ mod tests {
             ));
         }
         fs::write(path, text).unwrap();
+    }
+
+    fn reflog_line(old: &str, new: &str, message: &str) -> String {
+        format!("{old} {new} Test User <test@example.com> 0 +0000\t{message}")
+    }
+
+    #[test]
+    fn reflog_reader_ignores_trailing_unterminated_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("HEAD");
+        let complete = format!("{}\n", reflog_line(A, B, "commit: complete"));
+        let partial = reflog_line(B, C, "commit: partial");
+        fs::write(&path, format!("{complete}{partial}")).unwrap();
+
+        let records = read_reflog_records(&path, None).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].old, A);
+        assert_eq!(records[0].new, B);
+
+        fs::write(&path, format!("{complete}{partial}\n")).unwrap();
+        let records = read_reflog_records(&path, None).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].old, B);
+        assert_eq!(records[1].new, C);
+    }
+
+    #[test]
+    fn reflog_anchor_rejects_non_newline_end_offset() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("HEAD");
+        let complete = format!("{}\n", reflog_line(A, B, "commit: complete"));
+        let partial = reflog_line(B, C, "commit: partial");
+        fs::write(&path, format!("{complete}{partial}")).unwrap();
+
+        let complete_record = read_reflog_record_ending_at(&path, complete.len() as u64)
+            .unwrap()
+            .expect("complete newline-terminated record should be readable");
+        assert_eq!(complete_record.old, A);
+        assert_eq!(complete_record.new, B);
+
+        let partial_end = (complete.len() + partial.len()) as u64;
+        assert!(
+            read_reflog_record_ending_at(&path, partial_end)
+                .unwrap()
+                .is_none(),
+            "an offset inside an unterminated reflog record must not become an anchor"
+        );
+    }
+
+    #[test]
+    fn rebase_span_stops_at_new_rebase_start_before_finish() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (B, C, "rebase (start): checkout main"),
+                (C, D, "rebase (pick): First rebase commit"),
+                (D, E, "rebase (start): checkout other"),
+                (E, F, "rebase (pick): Later rebase commit"),
+            ],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let state = family_state(&family);
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["rebase", "main"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
     }
 
     #[test]

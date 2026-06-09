@@ -75,6 +75,7 @@ const TRACE_INGEST_SEQ_FIELD: &str = "git_ai_ingest_seq";
 const TRACE_ROOT_ARGV_FIELD: &str = "git_ai_root_argv";
 const TRACE_ROOT_STARTED_AT_NS_FIELD: &str = "git_ai_root_started_at_ns";
 pub(crate) const TRACE_ROOT_REFLOG_START_OFFSETS_FIELD: &str = "git_ai_root_reflog_start_offsets";
+const TRACE_CONNECTION_CLOSED_EVENT: &str = "git_ai_connection_closed";
 const DAEMON_CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const DAEMON_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_CHECKPOINT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -2069,6 +2070,7 @@ struct TraceIngressState {
     root_definitely_read_only: HashSet<String>,
     root_open_connections: HashMap<String, usize>,
     unidentified_open_connections: usize,
+    root_close_markers_enqueued: HashSet<String>,
 }
 
 #[doc(hidden)]
@@ -2698,22 +2700,68 @@ impl ActorDaemonCoordinator {
         Ok(())
     }
 
-    fn record_trace_connection_close(&self, roots: &[String]) -> Result<(), GitAiError> {
-        {
-            let mut ingress = self.trace_ingress_state.lock().map_err(|_| {
-                GitAiError::Generic("trace ingress state lock poisoned".to_string())
-            })?;
-            for root_sid in roots {
-                if let Some(count) = ingress.root_open_connections.get_mut(root_sid) {
-                    if *count > 1 {
-                        *count -= 1;
-                        continue;
-                    }
-                    ingress.root_open_connections.remove(root_sid);
+    fn trace_root_needs_close_marker(ingress: &TraceIngressState, root_sid: &str) -> bool {
+        if ingress.root_definitely_read_only.contains(root_sid) {
+            return false;
+        }
+        ingress
+            .root_mutating
+            .get(root_sid)
+            .copied()
+            .unwrap_or(false)
+            || ingress.root_reflog_start_offsets.contains_key(root_sid)
+    }
+
+    fn clear_trace_ingress_root_locked(ingress: &mut TraceIngressState, root_sid: &str) {
+        ingress.root_worktrees.remove(root_sid);
+        ingress.root_families.remove(root_sid);
+        ingress.root_argv.remove(root_sid);
+        ingress.root_started_at_ns.remove(root_sid);
+        ingress.root_reflog_start_offsets.remove(root_sid);
+        ingress.root_mutating.remove(root_sid);
+        ingress.root_target_repo_only.remove(root_sid);
+        ingress.root_last_activity_ns.remove(root_sid);
+        ingress.root_definitely_read_only.remove(root_sid);
+        ingress.root_open_connections.remove(root_sid);
+        ingress.root_close_markers_enqueued.remove(root_sid);
+    }
+
+    fn record_trace_connection_close(&self, roots: &[String]) -> Result<Vec<String>, GitAiError> {
+        let mut close_marker_candidates = Vec::new();
+        let mut ingress = self
+            .trace_ingress_state
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
+        for root_sid in roots {
+            if let Some(count) = ingress.root_open_connections.get_mut(root_sid) {
+                if *count > 1 {
+                    *count -= 1;
+                    continue;
                 }
+                ingress.root_open_connections.remove(root_sid);
             }
+            if !Self::trace_root_needs_close_marker(&ingress, root_sid) {
+                Self::clear_trace_ingress_root_locked(&mut ingress, root_sid);
+                continue;
+            }
+            if ingress.root_close_markers_enqueued.contains(root_sid) {
+                continue;
+            }
+            ingress.root_close_markers_enqueued.insert(root_sid.clone());
+            close_marker_candidates.push(root_sid.clone());
         }
         self.trace_ingest_progress_notify.notify_waiters();
+        Ok(close_marker_candidates)
+    }
+
+    fn enqueue_trace_connection_close_markers(&self, roots: Vec<String>) -> Result<(), GitAiError> {
+        for root_sid in roots {
+            self.enqueue_trace_payload(json!({
+                "event": TRACE_CONNECTION_CLOSED_EVENT,
+                "sid": root_sid,
+                "time_ns": now_unix_nanos() as u64,
+            }))?;
+        }
         Ok(())
     }
 
@@ -2786,15 +2834,7 @@ impl ActorDaemonCoordinator {
             let mut ingress = self.trace_ingress_state.lock().map_err(|_| {
                 GitAiError::Generic("trace ingress state lock poisoned".to_string())
             })?;
-            ingress.root_worktrees.remove(root_sid);
-            ingress.root_families.remove(root_sid);
-            ingress.root_argv.remove(root_sid);
-            ingress.root_started_at_ns.remove(root_sid);
-            ingress.root_mutating.remove(root_sid);
-            ingress.root_target_repo_only.remove(root_sid);
-            ingress.root_last_activity_ns.remove(root_sid);
-            ingress.root_definitely_read_only.remove(root_sid);
-            ingress.root_open_connections.remove(root_sid);
+            Self::clear_trace_ingress_root_locked(&mut ingress, root_sid);
         }
         let mut queued = self.queued_trace_payloads_by_root.lock().map_err(|_| {
             GitAiError::Generic("queued trace payloads by root lock poisoned".to_string())
@@ -4761,13 +4801,34 @@ impl ActorDaemonCoordinator {
         &self,
         payload: Value,
     ) -> Result<TracePayloadApplyOutcome, GitAiError> {
-        self.maybe_append_pending_root_from_trace_payload(&payload)?;
         let payload_root_sid = Self::trace_payload_root_sid(&payload);
         let event = payload
             .get("event")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        if event == TRACE_CONNECTION_CLOSED_EVENT {
+            let Some(root_sid) = payload_root_sid.as_deref() else {
+                return Ok(TracePayloadApplyOutcome::None);
+            };
+            {
+                let mut normalizer = self.normalizer.lock().await;
+                let _ = normalizer.sweep_orphans_for_roots(&[root_sid.to_string()]);
+            }
+            let outcome = if self
+                .replace_pending_root_entry(root_sid, FamilySequencerEntry::Canceled)
+                .await?
+                .is_some()
+            {
+                TracePayloadApplyOutcome::QueuedFamily
+            } else {
+                TracePayloadApplyOutcome::None
+            };
+            self.clear_trace_root_tracking(root_sid)?;
+            return Ok(outcome);
+        }
+
+        self.maybe_append_pending_root_from_trace_payload(&payload)?;
         let emitted = {
             let mut normalizer = self.normalizer.lock().await;
             normalizer.ingest_payload(&payload)?
@@ -5678,7 +5739,8 @@ fn finalize_trace_connection_roots(
     }
 
     let roots = observed_roots.into_iter().collect::<Vec<_>>();
-    coordinator.record_trace_connection_close(&roots)
+    let close_marker_roots = coordinator.record_trace_connection_close(&roots)?;
+    coordinator.enqueue_trace_connection_close_markers(close_marker_roots)
 }
 
 /// Git environment variables that must not leak into the daemon process.
@@ -7068,6 +7130,65 @@ mod tests {
         )
         .await
         .expect("checkpoint fence should pass once the mutating trace root closes");
+    }
+
+    #[tokio::test]
+    async fn trace_connection_close_without_atexit_cancels_pending_root() {
+        let coord = Arc::new(ActorDaemonCoordinator::new());
+        coord.start_trace_ingest_worker().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        std::fs::create_dir_all(git_dir.join("logs")).unwrap();
+
+        let sid = "20260411T120000.000000-Psid-close";
+        coord.trace_root_connection_opened(sid).unwrap();
+        let mut start = serde_json::json!({
+            "event": "start",
+            "sid": sid,
+            "argv": ["git", "commit", "-m", "test commit"],
+            "worktree": worktree,
+            "time_ns": 1u64,
+        });
+        assert!(coord.prepare_trace_payload_for_ingest(&mut start));
+        coord.enqueue_trace_payload(start).unwrap();
+
+        finalize_trace_connection_roots(coord.clone(), [sid.to_string()].into_iter().collect())
+            .unwrap();
+        coord.wait_for_trace_ingest_processed_through().await;
+
+        assert!(
+            !coord
+                .pending_root_slots_by_root
+                .lock()
+                .unwrap()
+                .contains_key(sid),
+            "closing the trace stream without root atexit must not leave the family sequencer wedged"
+        );
+        coord.request_shutdown();
+    }
+
+    #[tokio::test]
+    async fn readonly_trace_connection_close_without_atexit_clears_tracking() {
+        let coord = ActorDaemonCoordinator::new();
+        let sid = "20260411T120000.000000-Psid-readonly-close";
+        coord.trace_root_connection_opened(sid).unwrap();
+        let mut start = make_start_payload(&["git", "status", "--short"]);
+        start["sid"] = serde_json::json!(sid);
+        assert!(!coord.prepare_trace_payload_for_ingest(&mut start));
+
+        let close_marker_roots = coord
+            .record_trace_connection_close(&[sid.to_string()])
+            .unwrap();
+
+        assert!(
+            close_marker_roots.is_empty(),
+            "read-only roots should not enqueue synthetic close markers"
+        );
+        let ingress = coord.trace_ingress_state.lock().unwrap();
+        assert!(!ingress.root_argv.contains_key(sid));
+        assert!(!ingress.root_definitely_read_only.contains(sid));
+        assert!(!ingress.root_open_connections.contains_key(sid));
     }
 
     #[tokio::test]
