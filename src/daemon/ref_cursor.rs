@@ -7,7 +7,7 @@ use crate::git::cli_parser::{
 use crate::git::find_repository_in_path;
 use crate::git::repo_state::{git_dir_for_worktree, is_valid_git_oid};
 use crate::git::repository::exec_git_stdin;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -677,7 +677,7 @@ impl RefCursor {
         Ok(entries.into_iter().find(|entry| {
             !self.entry_consumed(entry)
                 && rebase_reflog_action_is(&entry.message, "start")
-                && expected.matches_rebase_start(entry)
+                && expected.matches_span_boundary(entry)
                 && target
                     .as_deref()
                     .is_none_or(|target| rebase_start_message_targets(&entry.message, target))
@@ -740,13 +740,8 @@ impl RefCursor {
         let action = pull_reflog_action(cmd);
         let prefixes = pull_reflog_message_prefixes(&action);
         let prefix_refs = prefixes.iter().map(String::as_str).collect::<Vec<_>>();
-        self.consume_pull_head_span_for_action(
-            cmd,
-            state,
-            &prefix_refs,
-            ExpectedTransition::from_state_and_working_logs(cmd, state),
-            &action,
-        )
+        let expected = ExpectedTransition::from_state_and_working_logs(cmd, state);
+        self.consume_pull_head_span_for_action(cmd, state, &prefix_refs, expected, &action)
     }
 
     fn consume_head_transition_for_command(
@@ -783,8 +778,12 @@ impl RefCursor {
         if limit == 0 {
             return Ok(());
         }
-        let Some(first) =
-            self.find_head_entry(cmd.worktree.as_deref(), message_prefixes, expected)?
+        let Some(first) = self.find_head_span_start_entry(
+            cmd.worktree.as_deref(),
+            message_prefixes,
+            expected,
+            limit,
+        )?
         else {
             return Ok(());
         };
@@ -824,9 +823,11 @@ impl RefCursor {
         expected: ExpectedTransition,
         action: &str,
     ) -> Result<(), GitAiError> {
-        let Some(first) =
-            self.find_head_entry(cmd.worktree.as_deref(), message_prefixes, expected)?
-        else {
+        let first = match self.find_pull_start_entry(cmd, expected.clone(), action)? {
+            Some(entry) => Some(entry),
+            None => self.find_head_entry(cmd.worktree.as_deref(), message_prefixes, expected)?,
+        };
+        let Some(first) = first else {
             return Ok(());
         };
 
@@ -862,6 +863,73 @@ impl RefCursor {
         dedup_ref_changes(&mut changes);
         cmd.ref_changes = changes;
         Ok(())
+    }
+
+    fn find_pull_start_entry(
+        &mut self,
+        cmd: &NormalizedCommand,
+        expected: ExpectedTransition,
+        action: &str,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        let Some(worktree) = cmd.worktree.as_deref() else {
+            return Ok(None);
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(None);
+        };
+        let key = head_key(&git_dir);
+        let path = git_dir.join("logs").join("HEAD");
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key, &path, "HEAD", start)?;
+
+        Ok(entries.into_iter().find(|entry| {
+            !self.entry_consumed(entry)
+                && pull_reflog_action_is(&entry.message, action, "start")
+                && expected.matches_span_boundary(entry)
+        }))
+    }
+
+    fn find_head_span_start_entry(
+        &mut self,
+        worktree: Option<&Path>,
+        message_prefixes: &[&str],
+        expected: ExpectedTransition,
+        limit: usize,
+    ) -> Result<Option<CursorEntry>, GitAiError> {
+        let Some(worktree) = worktree else {
+            return Ok(None);
+        };
+        let Some(git_dir) = git_dir_for_worktree(worktree) else {
+            return Ok(None);
+        };
+        let path = git_dir.join("logs").join("HEAD");
+        let key = head_key(&git_dir);
+        let start = self.reflog_start_offset(&key, &path)?;
+        let entries = read_reflog_entries(key, &path, "HEAD", start)?;
+        let mut contiguous = VecDeque::<CursorEntry>::new();
+
+        for entry in entries {
+            if self.entry_consumed(&entry) || !message_matches(&entry.message, message_prefixes) {
+                contiguous.clear();
+                continue;
+            }
+            if contiguous
+                .back()
+                .is_some_and(|previous| previous.new != entry.old)
+            {
+                contiguous.clear();
+            }
+            let matches = expected.matches(&entry);
+            contiguous.push_back(entry);
+            while contiguous.len() > limit {
+                contiguous.pop_front();
+            }
+            if matches {
+                return Ok(contiguous.front().cloned());
+            }
+        }
+
+        Ok(None)
     }
 
     fn find_head_entry(
@@ -1333,7 +1401,7 @@ impl ExpectedTransition {
         true
     }
 
-    fn matches_rebase_start(&self, entry: &CursorEntry) -> bool {
+    fn matches_span_boundary(&self, entry: &CursorEntry) -> bool {
         if !valid_ref_transition(&entry.old, &entry.new) {
             return false;
         }
@@ -2901,6 +2969,161 @@ mod tests {
                 },
                 RefChange {
                     reference: "refs/heads/topic-3".to_string(),
+                    old: B.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cherry_pick_span_starts_at_first_pick_when_expected_state_matches_second_pick() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (B, C, "cherry-pick: Pick one"),
+                (C, D, "cherry-pick: Pick two"),
+            ],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), C.to_string());
+        state
+            .refs
+            .insert("refs/heads/intermediate".to_string(), C.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        cursor.pending_cherry_pick_source_oids = vec![A.to_string(), E.to_string()];
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["cherry-pick", "--continue"]);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn revert_span_starts_at_first_revert_when_expected_state_matches_second_revert() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[(B, C, "revert: Revert one"), (C, D, "revert: Revert two")],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), C.to_string());
+        state
+            .refs
+            .insert("refs/heads/intermediate".to_string(), C.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["revert", A, E]);
+        let expected = ExpectedTransition::from_state_and_working_logs(&cmd, &state);
+
+        cursor
+            .consume_head_span_for_command_limited(&mut cmd, &state, &["revert:"], expected, 2)
+            .unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn pull_rebase_span_starts_at_start_entry_when_expected_state_matches_pick() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        fs::create_dir_all(git_dir.join("logs/refs/heads")).unwrap();
+        append_reflog(
+            &git_dir,
+            "HEAD",
+            &[
+                (
+                    B,
+                    C,
+                    "pull --rebase origin main (start): checkout origin/main",
+                ),
+                (C, D, "pull --rebase origin main (pick): Local commit"),
+                (
+                    D,
+                    D,
+                    "pull --rebase origin main (finish): returning to refs/heads/main",
+                ),
+            ],
+        );
+        append_reflog(
+            &git_dir,
+            "refs/heads/main",
+            &[(
+                B,
+                D,
+                "pull --rebase origin main (finish): refs/heads/main onto origin/main",
+            )],
+        );
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), C.to_string());
+        state
+            .refs
+            .insert("refs/heads/main".to_string(), C.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(
+            &family,
+            Some(worktree),
+            &["pull", "--rebase", "origin", "main"],
+        );
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: B.to_string(),
+                    new: C.to_string(),
+                },
+                RefChange {
+                    reference: "HEAD".to_string(),
+                    old: C.to_string(),
+                    new: D.to_string(),
+                },
+                RefChange {
+                    reference: "refs/heads/main".to_string(),
                     old: B.to_string(),
                     new: D.to_string(),
                 },

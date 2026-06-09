@@ -741,6 +741,67 @@ fn test_delayed_cherry_pick_trace_replay_preserves_picked_commit_attribution() {
 }
 
 #[test]
+fn test_delayed_multi_cherry_pick_trace_replay_starts_at_first_pick_when_intermediate_ref_known() {
+    let repo = TestRepo::new();
+    let mut file = repo.filename("multi-picked.txt");
+
+    file.set_contents(lines!["base"]);
+    let base = repo.stage_all_and_commit("base").unwrap();
+    let default_branch = repo.current_branch();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.set_contents(lines!["base", "first picked ai".ai()]);
+    repo.stage_all_and_commit("first picked ai").unwrap();
+    let source_one = head_sha(&repo);
+    file.set_contents(lines![
+        "base",
+        "first picked ai".ai(),
+        "second picked ai".ai(),
+    ]);
+    repo.stage_all_and_commit("second picked ai").unwrap();
+    let source_two = head_sha(&repo);
+
+    repo.git(&["checkout", &default_branch]).unwrap();
+    repo.sync_daemon();
+
+    let trace_dir = tempfile::tempdir().expect("trace temp dir");
+    let cherry_pick_trace = trace_dir.path().join("multi-cherry-pick.trace2");
+    let session = new_daemon_test_sync_session_id();
+    let session_arg = format!("git-ai.testSyncSession={session}");
+    raw_git_trace_to_file(
+        &repo,
+        &["-c", &session_arg, "cherry-pick", &source_one, &source_two],
+        &cherry_pick_trace,
+    );
+    let picked_commits = repo
+        .git_og(&[
+            "rev-list",
+            "--reverse",
+            &format!("{}..HEAD", base.commit_sha),
+        ])
+        .expect("rev-list picked commits should succeed")
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(picked_commits.len(), 2);
+
+    repo.git(&["branch", "known-intermediate-pick", &picked_commits[0]])
+        .expect("creating intermediate branch should succeed");
+    repo.sync_daemon();
+
+    replay_trace_file_to_daemon(&repo, &cherry_pick_trace);
+    repo.sync_daemon_external_completion_sessions(&[session]);
+
+    assert_note_has_ai_for_file(&repo, &picked_commits[0], "multi-picked.txt");
+    assert_note_has_ai_for_file(&repo, &picked_commits[1], "multi-picked.txt");
+    file.assert_committed_lines(lines![
+        "base".human(),
+        "first picked ai".ai(),
+        "second picked ai".ai(),
+    ]);
+}
+
+#[test]
 fn test_delayed_failed_cherry_pick_with_unresolved_source_does_not_consume_later_pick() {
     let repo = TestRepo::new();
     let mut file = repo.filename("file.txt");
@@ -795,6 +856,142 @@ fn test_delayed_failed_cherry_pick_with_unresolved_source_does_not_consume_later
 
     assert_note_has_ai_for_file(&repo, &picked_commit, "file.txt");
     file.assert_committed_lines(lines!["base line".ai(), "AI line 1".ai()]);
+}
+
+#[test]
+fn test_delayed_pull_rebase_trace_replay_starts_at_start_when_intermediate_ref_known() {
+    let (local, _upstream) = TestRepo::new_with_remote();
+    let mut file = local.filename("pull-rebase-picked.txt");
+
+    file.set_contents(lines!["base"]);
+    let initial = local.stage_all_and_commit("initial").unwrap();
+    local
+        .git(&["push", "-u", "origin", "HEAD"])
+        .expect("push initial commit should succeed");
+
+    file.set_contents(lines!["base", "first local ai".ai()]);
+    local.stage_all_and_commit("first local ai").unwrap();
+    file.set_contents(lines![
+        "base",
+        "first local ai".ai(),
+        "second local ai".ai(),
+    ]);
+    let local_tip = local.stage_all_and_commit("second local ai").unwrap();
+    let branch = local.current_branch();
+
+    local
+        .git(&["reset", "--hard", &initial.commit_sha])
+        .expect("reset to initial should succeed");
+    let mut upstream_file = local.filename("pull-rebase-upstream.txt");
+    upstream_file.set_contents(lines!["upstream"]);
+    let upstream_tip = local.stage_all_and_commit("upstream").unwrap();
+    local
+        .git(&["push", "--force", "origin", &format!("HEAD:{}", branch)])
+        .expect("push upstream divergence should succeed");
+    local
+        .git(&["reset", "--hard", &local_tip.commit_sha])
+        .expect("reset to local tip should succeed");
+    local.sync_daemon();
+
+    let trace_dir = tempfile::tempdir().expect("trace temp dir");
+    let pull_trace = trace_dir.path().join("pull-rebase.trace2");
+    let session = new_daemon_test_sync_session_id();
+    let session_arg = format!("git-ai.testSyncSession={session}");
+    raw_git_trace_to_file(
+        &local,
+        &["-c", &session_arg, "pull", "--rebase", "origin", &branch],
+        &pull_trace,
+    );
+    let rebased_commits = local
+        .git_og(&[
+            "rev-list",
+            "--reverse",
+            &format!("{}..HEAD", upstream_tip.commit_sha),
+        ])
+        .expect("rev-list rebased commits should succeed")
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(rebased_commits.len(), 2);
+
+    local
+        .git(&[
+            "branch",
+            "known-pull-rebase-intermediate",
+            &rebased_commits[0],
+        ])
+        .expect("creating intermediate pull branch should succeed");
+    local.sync_daemon();
+
+    replay_trace_file_to_daemon(&local, &pull_trace);
+    local.sync_daemon_external_completion_sessions(&[session]);
+
+    assert_note_has_ai_for_file(&local, &rebased_commits[0], "pull-rebase-picked.txt");
+    assert_note_has_ai_for_file(&local, &rebased_commits[1], "pull-rebase-picked.txt");
+    file.assert_committed_lines(lines![
+        "base".human(),
+        "first local ai".ai(),
+        "second local ai".ai(),
+    ]);
+}
+
+#[test]
+fn test_delayed_multi_revert_trace_replay_starts_at_first_revert_when_intermediate_ref_known() {
+    let repo = TestRepo::new();
+    let mut first_file = repo.filename("multi-reverted-first.txt");
+    let mut second_file = repo.filename("multi-reverted-second.txt");
+
+    first_file.set_contents(lines!["first revert-restored ai".ai()]);
+    let first_ai = repo.stage_all_and_commit("first ai").unwrap();
+    first_file.set_contents(lines!["first human replacement"]);
+    let replace_first = repo.stage_all_and_commit("replace first ai").unwrap();
+    second_file.set_contents(lines!["second revert-restored ai".ai()]);
+    let second_ai = repo.stage_all_and_commit("second ai").unwrap();
+    second_file.set_contents(lines!["second human replacement"]);
+    let replace_second = repo.stage_all_and_commit("replace second ai").unwrap();
+    assert_note_has_ai_for_file(&repo, &first_ai.commit_sha, "multi-reverted-first.txt");
+    assert_note_has_ai_for_file(&repo, &second_ai.commit_sha, "multi-reverted-second.txt");
+    repo.sync_daemon();
+
+    let trace_dir = tempfile::tempdir().expect("trace temp dir");
+    let revert_trace = trace_dir.path().join("multi-revert.trace2");
+    let session = new_daemon_test_sync_session_id();
+    let session_arg = format!("git-ai.testSyncSession={session}");
+    raw_git_trace_to_file(
+        &repo,
+        &[
+            "-c",
+            &session_arg,
+            "revert",
+            "--no-edit",
+            &replace_second.commit_sha,
+            &replace_first.commit_sha,
+        ],
+        &revert_trace,
+    );
+    let revert_commits = repo
+        .git_og(&[
+            "rev-list",
+            "--reverse",
+            &format!("{}..HEAD", replace_second.commit_sha),
+        ])
+        .expect("rev-list revert commits should succeed")
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(revert_commits.len(), 2);
+
+    repo.git(&["branch", "known-intermediate-revert", &revert_commits[0]])
+        .expect("creating intermediate revert branch should succeed");
+    repo.sync_daemon();
+
+    replay_trace_file_to_daemon(&repo, &revert_trace);
+    repo.sync_daemon_external_completion_sessions(&[session]);
+
+    assert_note_has_ai_for_file(&repo, &revert_commits[0], "multi-reverted-second.txt");
+    assert_note_has_ai_for_file(&repo, &revert_commits[1], "multi-reverted-first.txt");
+    first_file.assert_committed_lines(lines!["first revert-restored ai".ai()]);
+    second_file.assert_committed_lines(lines!["second revert-restored ai".ai()]);
 }
 
 #[test]

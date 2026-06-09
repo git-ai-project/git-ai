@@ -1505,6 +1505,37 @@ fn cherry_pick_original_head(cmd: &crate::daemon::domain::NormalizedCommand) -> 
         .map(|change| change.old.clone())
 }
 
+fn revert_destination_changes(
+    cmd: &crate::daemon::domain::NormalizedCommand,
+) -> Vec<&crate::daemon::domain::RefChange> {
+    cmd.ref_changes
+        .iter()
+        .filter(|change| {
+            change.reference == "HEAD"
+                && is_valid_oid(&change.old)
+                && !is_zero_oid(&change.old)
+                && is_valid_oid(&change.new)
+                && !is_zero_oid(&change.new)
+                && change.old != change.new
+        })
+        .collect()
+}
+
+fn apply_revert_complete_rewrite(
+    repo: &crate::git::repository::Repository,
+    cmd: &crate::daemon::domain::NormalizedCommand,
+) -> Result<(), GitAiError> {
+    for (index, change) in revert_destination_changes(cmd).into_iter().enumerate() {
+        crate::authorship::rewrite_revert::handle_revert_commit(
+            repo,
+            &change.new,
+            Some(&change.old),
+            cmd.revert_source_oids.get(index).map(String::as_str),
+        )?;
+    }
+    Ok(())
+}
+
 fn apply_cherry_pick_complete_rewrite(
     repo: &crate::git::repository::Repository,
     original_head: &str,
@@ -4273,6 +4304,7 @@ impl ActorDaemonCoordinator {
 
         if let Some(worktree) = cmd.worktree.as_ref() {
             let worktree = worktree.to_string_lossy().to_string();
+            let mut handled_revert_commits = false;
             for event in events {
                 match event {
                     crate::daemon::domain::SemanticEvent::CloneCompleted { .. } => {
@@ -4457,20 +4489,15 @@ impl ActorDaemonCoordinator {
                         } else if !new_head.is_empty()
                             && cmd.primary_command.as_deref() == Some("revert")
                         {
-                            // For git revert, reconstruct attribution for re-introduced lines.
-                            // The revert undoes a commit, re-adding lines that existed before.
-                            // Those lines' attribution comes from the state at the revert's parent
-                            // (which is the reverted commit itself — blaming the parent gives us
-                            // the original attribution for lines that existed before the reverted
-                            // commit's changes).
-                            let repo = find_repository_in_path(&worktree)?;
-                            if let Err(e) = crate::authorship::rewrite_revert::handle_revert_commit(
-                                &repo,
-                                new_head,
-                                base.as_deref(),
-                                cmd.revert_source_oids.first().map(String::as_str),
-                            ) {
-                                tracing::debug!(%e, "revert attribution transfer failed");
+                            if !handled_revert_commits {
+                                // A single `git revert A B` creates one commit per source.
+                                // Reconstruct each destination from the matching HEAD transition
+                                // instead of treating the command as one final CommitCreated event.
+                                let repo = find_repository_in_path(&worktree)?;
+                                if let Err(e) = apply_revert_complete_rewrite(&repo, cmd) {
+                                    tracing::debug!(%e, "revert attribution transfer failed");
+                                }
+                                handled_revert_commits = true;
                             }
                         } else if !new_head.is_empty() {
                             let repo = find_repository_in_path(&worktree)?;
