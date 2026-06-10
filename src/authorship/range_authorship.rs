@@ -169,7 +169,6 @@ pub fn range_authorship(
 }
 
 /// Create an in-memory authorship log for a commit range by treating it as a squash
-/// Similar to rewrite_authorship_after_squash_or_rebase but tailored for ranges
 fn create_authorship_log_for_range(
     repo: &Repository,
     start_sha: &str,

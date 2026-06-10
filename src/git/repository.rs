@@ -1,11 +1,9 @@
-use crate::authorship::rebase_authorship::rewrite_authorship_if_needed;
 use crate::config;
 use crate::error::GitAiError;
 use crate::git::repo_state::{
     common_dir_for_git_dir, git_dir_for_worktree, worktree_root_for_path,
 };
 use crate::git::repo_storage::RepoStorage;
-use crate::git::rewrite_log::RewriteLogEvent;
 use crate::git::status::MAX_PATHSPEC_ARGS;
 use crate::git::sync_authorship::push_authorship_notes;
 #[cfg(windows)]
@@ -16,6 +14,7 @@ use gix_index::entry::Stage;
 use regex::Regex;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1027,43 +1026,6 @@ impl Repository {
             let refname = head_ref.name().map(|n| n.to_string());
             self.pre_command_base_commit = Some(target_string);
             self.pre_command_refname = refname;
-        }
-    }
-
-    pub fn handle_rewrite_log_event(
-        &mut self,
-        rewrite_log_event: RewriteLogEvent,
-        commit_author: String,
-        supress_output: bool,
-        apply_side_effects: bool,
-    ) {
-        let log = self
-            .storage
-            .append_rewrite_event(rewrite_log_event.clone())
-            .expect("Error writing .git/ai/rewrite_log");
-
-        if apply_side_effects
-            && let Err(error) = rewrite_authorship_if_needed(
-                self,
-                &rewrite_log_event,
-                commit_author,
-                &log,
-                supress_output,
-            )
-        {
-            tracing::debug!(
-                "rewrite_authorship_if_needed failed for {:?}: {}",
-                rewrite_log_event,
-                error
-            );
-            crate::observability::log_error(
-                &error,
-                Some(serde_json::json!({
-                    "component": "repository",
-                    "operation": "handle_rewrite_log_event",
-                    "rewrite_event": rewrite_log_event,
-                })),
-            );
         }
     }
 
@@ -2616,12 +2578,29 @@ pub fn exec_git_allow_nonzero_with_profile(
     args: &[String],
     profile: InternalGitProfile,
 ) -> Result<Output, GitAiError> {
+    exec_git_allow_nonzero_with_profile_and_env(args, profile, &[])
+}
+
+pub fn exec_git_allow_nonzero_with_env(
+    args: &[String],
+    envs: &[(&str, &OsStr)],
+) -> Result<Output, GitAiError> {
+    exec_git_allow_nonzero_with_profile_and_env(args, InternalGitProfile::General, envs)
+}
+
+fn exec_git_allow_nonzero_with_profile_and_env(
+    args: &[String],
+    profile: InternalGitProfile,
+    envs: &[(&str, &OsStr)],
+) -> Result<Output, GitAiError> {
     let effective_args =
         args_with_internal_git_profile(&args_with_disabled_hooks_if_needed(args), profile);
     let mut cmd = Command::new(config::Config::get().git_cmd());
     cmd.args(&effective_args);
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
+    apply_internal_git_env(&mut cmd);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
 
     #[cfg(windows)]
     {
@@ -2631,6 +2610,16 @@ pub fn exec_git_allow_nonzero_with_profile(
     }
 
     cmd.output().map_err(GitAiError::IoError)
+}
+
+fn apply_internal_git_env(cmd: &mut Command) {
+    cmd.env_remove("GIT_EXTERNAL_DIFF");
+    cmd.env_remove("GIT_DIFF_OPTS");
+    cmd.env_remove("GIT_TRACE");
+    cmd.env_remove("GIT_TRACE2");
+    cmd.env_remove("GIT_TRACE2_BRIEF");
+    cmd.env_remove("GIT_TRACE2_PERF");
+    cmd.env("GIT_TRACE2_EVENT", "0");
 }
 
 /// Helper to execute a git command with an explicit internal profile.
@@ -2674,8 +2663,7 @@ pub fn exec_git_stdin_with_profile(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    cmd.env_remove("GIT_EXTERNAL_DIFF");
-    cmd.env_remove("GIT_DIFF_OPTS");
+    apply_internal_git_env(&mut cmd);
 
     #[cfg(windows)]
     {
@@ -2718,6 +2706,70 @@ pub fn exec_git_stdin_with_profile(
     }
 
     Ok(output)
+}
+
+pub(crate) fn batch_read_paths_at_treeishes(
+    repo: &Repository,
+    requests: &[(String, String)],
+) -> Result<HashMap<(String, String), String>, GitAiError> {
+    if requests.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut args = repo.global_args_for_exec();
+    args.extend([
+        "cat-file".to_string(),
+        "--batch-check=%(objectname) %(objecttype)".to_string(),
+    ]);
+
+    let stdin_data = requests
+        .iter()
+        .map(|(treeish, path)| format!("{treeish}:{path}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let output = exec_git_stdin(&args, stdin_data.as_bytes())?;
+    let stdout = String::from_utf8(output.stdout)?;
+    let lines: Vec<&str> = stdout.lines().collect();
+    if lines.len() != requests.len() {
+        return Err(GitAiError::Generic(format!(
+            "git cat-file returned {} records for {} path requests",
+            lines.len(),
+            requests.len()
+        )));
+    }
+
+    let mut request_blob_oids: HashMap<(String, String), String> = HashMap::new();
+    let mut unique_blob_oids = Vec::new();
+    let mut seen_blob_oids = HashSet::new();
+
+    for (request, line) in requests.iter().zip(lines) {
+        let mut parts = line.split_whitespace();
+        let Some(oid) = parts.next() else {
+            continue;
+        };
+        if parts.next() != Some("blob") {
+            continue;
+        }
+        let oid = oid.to_string();
+        request_blob_oids.insert(request.clone(), oid.clone());
+        if seen_blob_oids.insert(oid.clone()) {
+            unique_blob_oids.push(oid);
+        }
+    }
+
+    let blob_contents = crate::git::authorship_traversal::batch_read_blobs_with_oids(
+        &repo.global_args_for_exec(),
+        &unique_blob_oids,
+    )?;
+
+    let mut contents = HashMap::new();
+    for (request, blob_oid) in request_blob_oids {
+        if let Some(content) = blob_contents.get(&blob_oid) {
+            contents.insert(request, content.clone());
+        }
+    }
+    Ok(contents)
 }
 
 /// Parse git version string (e.g., "git version 2.39.3 (Apple Git-146)") to extract major, minor, patch.

@@ -55,27 +55,79 @@ tasks:
   test:base:
     internal: true
     cmds:
-      - cargo test {{.CARGO_TEST_ARGS}} {{.TEST_FILTER}} -- --test-threads {{.TEST_THREADS}} {{.TEST_BINARY_ARGS}}
+      - cargo test {{.CARGO_TEST_ARGS}} {{.TEST_FILTER}} -- --test-threads {{.TEST_THREADS}} {{.TEST_BINARY_ARGS}} {{.SUBTASK_BINARY_ARGS}}
     env:
-      GIT_AI_TEST_GIT_MODE: "{{.GIT_AI_TEST_GIT_MODE}}"
       GIT_AI_TEST_SHARED_DAEMON_POOL_SIZE: "{{.TEST_THREADS}}"
 
   test:
-    desc: Run unit tests (daemon mode by default)
+    desc: Run tests
     cmds:
       - task: test:base
-        vars:
-          GIT_AI_TEST_GIT_MODE: daemon
 
-  test:wrapper-daemon:
-    desc: |
-      Run unit tests in wrapper-daemon mode. Wrapper-daemon mode is where we simulate `git` pointing to the git-ai-wrapped git, but
-      all git-ai processing is still done in the shared daemon with some extra context from the wrapper that is passed over the control
-      socket. Do not use this test mode unless explicitly requested, use `task test` for normal testing purposes.
+  test:fuzz:
+    desc: Run the attribution fuzzer (fixed seeds only)
     cmds:
       - task: test:base
         vars:
-          GIT_AI_TEST_GIT_MODE: wrapper-daemon
+          TEST_FILTER: fuzz_standard_seed_
+
+  test:fuzz:all:
+    desc: Run all fuzzer tests including random seed and heavy variants
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_
+
+  test:fuzz:heavy:
+    desc: Run all fuzzer tests with verbose output
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_
+          SUBTASK_BINARY_ARGS: "--nocapture"
+
+  test:fuzz:partial:
+    desc: Run partial staging fuzzer tests
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_partial_stage_
+
+  test:fuzz:destructive:
+    desc: Run destructive ops fuzzer tests (resets, stash, checkouts)
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_destructive_
+
+  test:fuzz:squash:
+    desc: Run squash-heavy fuzzer tests (targets attribution holes post-squash)
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_squash_
+
+  test:fuzz:combined:
+    desc: Run combined ops fuzzer tests (cherry-pick, branch merge, squash combos)
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_combined_
+
+  test:fuzz:workflow:
+    desc: Run workflow fuzzer tests (plumbing, fixup, cherry-pick ranges, rebase --onto)
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_workflow_
+
+  test:fuzz:marathon:
+    desc: Run marathon fuzzer tests (150-200 ops, very long running)
+    cmds:
+      - task: test:base
+        vars:
+          TEST_FILTER: fuzz_marathon_
+          SUBTASK_BINARY_ARGS: "--ignored"
 
   lint:
     desc: Run cargo check and clippy with warnings as errors

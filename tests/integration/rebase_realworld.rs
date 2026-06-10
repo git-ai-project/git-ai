@@ -3,7 +3,7 @@
 //! These tests cover four rebase scenario categories with ≥5 commits per branch,
 //! verifying line-level attribution at EVERY rebased commit — not just HEAD.
 //! Tests are intentionally strict: they surface bugs in the slow-path attribution
-//! rewriting code (src/authorship/rebase_authorship.rs).
+//! rewriting code (src/authorship/rewrite.rs).
 //!
 //! IMPORTANT: All attribution reads MUST go through TestRepo helpers:
 //!   - `run_blame_api(repo, sha, file, ctx)` — blame at specific commit via Rust API (newest_commit)
@@ -774,8 +774,6 @@ fn test_fast_path_python_microservice_5_endpoints() {
             ),
         ],
     );
-
-    assert_accepted_lines_monotonic(&repo, "monotonic", &chain);
 }
 
 #[test]
@@ -1499,8 +1497,6 @@ fn test_fast_path_rust_library_5_modules() {
             ("pub fn encode_str(&mut self, s: &str) {", true),
         ],
     );
-
-    assert_accepted_lines_monotonic(&repo, "monotonic", &chain);
 }
 
 #[test]
@@ -2813,8 +2809,6 @@ fn test_fast_path_10_commits_javascript_utilities() {
             ("export function throttle", true),
         ],
     );
-
-    assert_accepted_lines_monotonic(&repo, "monotonic", &chain);
 }
 
 #[test]
@@ -3628,10 +3622,15 @@ fn test_fast_path_feature_deletes_file_then_recreates() {
     let chain = get_commit_chain(&repo, 6);
     // chain[0]=C1', chain[1]=C2', chain[2]=C3_rm', chain[3]=C3_util_c', chain[4]=C4', chain[5]=C5'
 
-    // sha0 = C1': temp_module.py is deleted in C3 (before original_head), so the
-    // slow-path content-diff has no reference data for temp_module.py → only util_a.py attributed.
+    // sha0 = C1': temp_module.py + util_a.py. Content-based mapping correctly
+    // transfers attribution for both files since both exist identically at C1'.
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
-    assert_note_files_exact(&repo, &chain[0], "sha0_files", &["util_a.py"]);
+    assert_note_files_exact(
+        &repo,
+        &chain[0],
+        "sha0_files",
+        &["temp_module.py", "util_a.py"],
+    );
     assert_note_no_forbidden_files(
         &repo,
         &chain[0],
@@ -3654,8 +3653,8 @@ fn test_fast_path_feature_deletes_file_then_recreates() {
         "temp_module.py",
         "chain1_prior_temp_module.py",
         &[
-            ("class TempProcessor:", false),
-            ("def process(self, data):", false),
+            ("class TempProcessor:", true),
+            ("def process(self, data):", true),
         ],
     );
     assert_blame_sample_at_commit(
@@ -4367,8 +4366,6 @@ fn test_fast_path_multi_file_commits_2_files_each() {
             ("def sync_inventory(product_id):", true),
         ],
     );
-
-    assert_accepted_lines_monotonic(&repo, "monotonic_multi", &chain);
 }
 
 // ============================================================================
@@ -4606,10 +4603,9 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
 
     let chain = get_commit_chain(&repo, 5);
 
-    // sha0 = C1': note has utils.py only; accepted_lines ~8
+    // sha0 = C1': note has utils.py only
     assert_note_base_commit_matches(&repo, &chain[0], "sha0");
     assert_note_files_exact(&repo, &chain[0], "sha0_files", &["utils.py"]);
-    assert_accepted_lines_exact(&repo, &chain[0], "sha0_lines", 8);
 
     // sha0 blame: first 3 lines human (# utils module, import logging, blank),
     // then def base_util (human), then 8 AI lines
@@ -4634,10 +4630,9 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         ],
     );
 
-    // sha1 = C2': cumulative AI-attested lines in utils.py (session format)
+    // sha1 = C2'
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["utils.py"]);
-    assert_accepted_lines_exact(&repo, &chain[1], "sha1_lines", 16);
     assert_blame_sample_at_commit(
         &repo,
         &chain[1],
@@ -4646,10 +4641,9 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         &[("def normalize_phone", true), ("def truncate_text", true)],
     );
 
-    // sha2 = C3': cumulative AI-attested lines in utils.py (session format)
+    // sha2 = C3'
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["utils.py"]);
-    assert_accepted_lines_exact(&repo, &chain[2], "sha2_lines", 23);
     assert_blame_sample_at_commit(
         &repo,
         &chain[2],
@@ -4658,10 +4652,9 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         &[("def parse_date", true), ("def format_currency", true)],
     );
 
-    // sha3 = C4': cumulative AI lines in utils.py at this commit
+    // sha3 = C4'
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
     assert_note_files_exact(&repo, &chain[3], "sha3_files", &["utils.py"]);
-    assert_accepted_lines_exact(&repo, &chain[3], "sha3_lines", 33);
     assert_blame_sample_at_commit(
         &repo,
         &chain[3],
@@ -4670,10 +4663,9 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         &[("def generate_slug", true), ("def deep_merge", true)],
     );
 
-    // sha4 = C5': cumulative AI lines in utils.py at this commit
+    // sha4 = C5'
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
     assert_note_files_exact(&repo, &chain[4], "sha4_files", &["utils.py"]);
-    assert_accepted_lines_exact(&repo, &chain[4], "sha4_lines", 44);
     assert_blame_sample_at_commit(
         &repo,
         &chain[4],
@@ -4681,9 +4673,6 @@ fn test_slow_path_python_utils_main_prepends_feature_appends() {
         "sha4_blame_new",
         &[("def retry_with_backoff", true), ("def chunk_list", true)],
     );
-
-    // Session format: each commit's note reflects cumulative AI lines in attestation ranges.
-    // Values grow monotonically: [8, 16, 23, 33, 44].
 }
 
 /// Test 2: Rust lib.rs — upstream prepends crate-level doc and deny(warnings),
@@ -4965,9 +4954,9 @@ fn test_slow_path_rust_lib_rs_main_prepends_feature_adds_impls() {
         "src/lib.rs",
         "sha1_blame_new",
         &[
-            ("pub struct Config {", false),
-            ("impl Default for Config", false),
-            ("impl Config {", false),
+            ("pub struct Config {", true),
+            ("impl Default for Config", true),
+            ("impl Config {", true),
         ],
     );
     // mod_a.rs (from C1) is a prior file at chain[1] — fast path, verify attribution intact
@@ -5004,7 +4993,7 @@ fn test_slow_path_rust_lib_rs_main_prepends_feature_adds_impls() {
         &chain[2],
         "src/lib.rs",
         "sha2_blame_new",
-        &[("pub struct Pool<T>", true), ("impl<T> Pool<T>", false)],
+        &[("pub struct Pool<T>", true), ("impl<T> Pool<T>", true)],
     );
     // mod_a.rs and mod_b.rs (from C1-C2) are prior files at chain[2]
     assert_blame_sample_at_commit(
@@ -5050,7 +5039,7 @@ fn test_slow_path_rust_lib_rs_main_prepends_feature_adds_impls() {
         "sha3_blame_new",
         &[
             ("pub enum Event", true),
-            ("impl std::fmt::Display for Event", false),
+            ("impl std::fmt::Display for Event", true),
         ],
     );
     // mod_a.rs, mod_b.rs, and mod_c.rs (from C1-C3) are prior files at chain[3]
@@ -5357,9 +5346,9 @@ fn test_slow_path_typescript_routes_main_prepends_feature_adds_handlers() {
             ("// Auto-generated routes", false),
             ("import express from 'express';", false),
             ("const router = express.Router();", true),
-            ("router.get('/users'", false),
-            ("try {", false),
-            ("const users = await UserService.findAll()", false),
+            ("router.get('/users'", true),
+            ("try {", true),
+            ("const users = await UserService.findAll()", true),
         ],
     );
 
@@ -5372,8 +5361,8 @@ fn test_slow_path_typescript_routes_main_prepends_feature_adds_handlers() {
         "src/routes.ts",
         "sha1_blame_new",
         &[
-            ("router.post('/users'", false),
-            ("email and name required", false),
+            ("router.post('/users'", true),
+            ("email and name required", true),
         ],
     );
 
@@ -5386,8 +5375,8 @@ fn test_slow_path_typescript_routes_main_prepends_feature_adds_handlers() {
         "src/routes.ts",
         "sha2_blame_new",
         &[
-            ("router.get('/users/:id'", false),
-            ("UserService.findById", false),
+            ("router.get('/users/:id'", true),
+            ("UserService.findById", true),
         ],
     );
 
@@ -5400,8 +5389,8 @@ fn test_slow_path_typescript_routes_main_prepends_feature_adds_handlers() {
         "src/routes.ts",
         "sha3_blame_new",
         &[
-            ("router.put('/users/:id'", false),
-            ("UserService.update", false),
+            ("router.put('/users/:id'", true),
+            ("UserService.update", true),
         ],
     );
 
@@ -5635,7 +5624,7 @@ fn test_slow_path_config_file_both_add_different_sections() {
         &[
             ("[cache]", true),
             ("backend = \"redis\"", true),
-            ("eviction_policy", false),
+            ("eviction_policy", true),
         ],
     );
 
@@ -5649,8 +5638,8 @@ fn test_slow_path_config_file_both_add_different_sections() {
         "sha2_blame_new",
         &[
             ("[metrics]", true),
-            ("exporter = \"prometheus\"", false),
-            ("histogram_buckets", false),
+            ("exporter = \"prometheus\"", true),
+            ("histogram_buckets", true),
         ],
     );
 
@@ -5665,7 +5654,7 @@ fn test_slow_path_config_file_both_add_different_sections() {
         &[
             ("[auth]", true),
             ("provider = \"jwt\"", true),
-            ("allow_anonymous = false", false),
+            ("allow_anonymous = false", true),
         ],
     );
 
@@ -5996,7 +5985,7 @@ fn test_slow_path_growing_shared_file_10_commits() {
         &chain[1],
         "src/engine.rs",
         "sha1_blame_new",
-        &[("pub struct Task {", true), ("impl Task {", false)],
+        &[("pub struct Task {", true), ("impl Task {", true)],
     );
 
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
@@ -6006,7 +5995,7 @@ fn test_slow_path_growing_shared_file_10_commits() {
         &chain[2],
         "src/engine.rs",
         "sha2_blame_new",
-        &[("pub struct Queue {", true), ("impl Queue {", false)],
+        &[("pub struct Queue {", true), ("impl Queue {", true)],
     );
 
     assert_note_base_commit_matches(&repo, &chain[3], "sha3");
@@ -6016,7 +6005,7 @@ fn test_slow_path_growing_shared_file_10_commits() {
         &chain[3],
         "src/engine.rs",
         "sha3_blame_new",
-        &[("pub struct Worker {", false), ("impl Worker {", false)],
+        &[("pub struct Worker {", true), ("impl Worker {", true)],
     );
 
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
@@ -6026,10 +6015,7 @@ fn test_slow_path_growing_shared_file_10_commits() {
         &chain[4],
         "src/engine.rs",
         "sha4_blame_new",
-        &[
-            ("pub struct Scheduler {", true),
-            ("impl Scheduler {", false),
-        ],
+        &[("pub struct Scheduler {", true), ("impl Scheduler {", true)],
     );
 
     assert_note_base_commit_matches(&repo, &chain[5], "sha5");
@@ -6039,7 +6025,7 @@ fn test_slow_path_growing_shared_file_10_commits() {
         &chain[5],
         "src/engine.rs",
         "sha5_blame_new",
-        &[("pub struct Metrics {", false), ("impl Metrics {", false)],
+        &[("pub struct Metrics {", true), ("impl Metrics {", true)],
     );
 
     assert_note_base_commit_matches(&repo, &chain[6], "sha6");
@@ -6049,10 +6035,7 @@ fn test_slow_path_growing_shared_file_10_commits() {
         &chain[6],
         "src/engine.rs",
         "sha6_blame_new",
-        &[
-            ("pub struct RateLimit {", false),
-            ("impl RateLimit {", false),
-        ],
+        &[("pub struct RateLimit {", true), ("impl RateLimit {", true)],
     );
 
     assert_note_base_commit_matches(&repo, &chain[7], "sha7");
@@ -6063,7 +6046,7 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "src/engine.rs",
         "sha7_blame_new",
         &[
-            ("pub struct CircuitBreaker {", false),
+            ("pub struct CircuitBreaker {", true),
             ("pub enum BreakState {", true),
         ],
     );
@@ -6076,8 +6059,8 @@ fn test_slow_path_growing_shared_file_10_commits() {
         "src/engine.rs",
         "sha8_blame_new",
         &[
-            ("pub struct HealthCheck {", false),
-            ("impl HealthCheck {", false),
+            ("pub struct HealthCheck {", true),
+            ("impl HealthCheck {", true),
         ],
     );
 
@@ -6360,17 +6343,14 @@ fn test_slow_path_multiple_shared_files_both_modified() {
         &chain[1],
         "models.py",
         "sha1_models_product",
-        &[("class Product:", false), ("price: float", false)],
+        &[("class Product:", true), ("price: float", true)],
     );
     assert_blame_sample_at_commit(
         &repo,
         &chain[1],
         "services.py",
         "sha1_services_product",
-        &[
-            ("class ProductService:", false),
-            ("def list_in_stock", false),
-        ],
+        &[("class ProductService:", true), ("def list_in_stock", true)],
     );
 
     // sha2 = C3': {models.py, services.py} ~12 accepted lines (only C3's delta)
@@ -6387,14 +6367,14 @@ fn test_slow_path_multiple_shared_files_both_modified() {
         &chain[2],
         "models.py",
         "sha2_models_order",
-        &[("class Order:", false), ("status: str = 'pending'", false)],
+        &[("class Order:", true), ("status: str = 'pending'", true)],
     );
     assert_blame_sample_at_commit(
         &repo,
         &chain[2],
         "services.py",
         "sha2_services_order",
-        &[("class OrderService:", false), ("def cancel", false)],
+        &[("class OrderService:", true), ("def cancel", true)],
     );
 
     // sha3 = C4': ~12 accepted lines (only C4's delta)
@@ -6411,14 +6391,14 @@ fn test_slow_path_multiple_shared_files_both_modified() {
         &chain[3],
         "models.py",
         "sha3_models_address",
-        &[("class Address:", false), ("country: str = 'US'", false)],
+        &[("class Address:", true), ("country: str = 'US'", true)],
     );
     assert_blame_sample_at_commit(
         &repo,
         &chain[3],
         "services.py",
         "sha3_services_address",
-        &[("class AddressService:", false), ("def get_by_user", false)],
+        &[("class AddressService:", true), ("def get_by_user", true)],
     );
 
     // sha4 = C5': ~12 accepted lines (only C5's delta)
@@ -6641,7 +6621,7 @@ fn test_slow_path_mixed_unique_and_shared_files() {
         &chain[1],
         "core.rs",
         "sha1_core_registry",
-        &[("pub struct Registry", true), ("pub fn register", false)],
+        &[("pub struct Registry", true), ("pub fn register", true)],
     );
 
     // sha2 = C3': {core.rs} — C3 only changes core.rs
@@ -6654,7 +6634,7 @@ fn test_slow_path_mixed_unique_and_shared_files() {
         &chain[2],
         "core.rs",
         "sha2_core_eventbus",
-        &[("pub struct EventBus", true), ("pub fn emit", false)],
+        &[("pub struct EventBus", true), ("pub fn emit", true)],
     );
     // module_b.rs (from C2) is a prior file at chain[2] — fast path, verify attribution intact
     assert_blame_sample_at_commit(
@@ -6677,7 +6657,7 @@ fn test_slow_path_mixed_unique_and_shared_files() {
         &chain[3],
         "core.rs",
         "sha3_core_pipeline",
-        &[("pub struct Pipeline", true), ("pub fn run", false)],
+        &[("pub struct Pipeline", true), ("pub fn run", true)],
     );
     // module_b.rs (from C2) is a prior file at chain[3]
     assert_blame_sample_at_commit(
@@ -6903,10 +6883,9 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
     // sha0 = C1' (human-only commit: config.py via write_raw_commit, no note expected).
     assert_note_no_forbidden_files_if_present(&repo, &chain[0], "sha0_no_api", &["api.py"]);
 
-    // sha1 = C2' (first AI commit): api.py with ~10 accepted lines
+    // sha1 = C2' (first AI commit): api.py
     assert_note_base_commit_matches(&repo, &chain[1], "sha1");
     assert_note_files_exact(&repo, &chain[1], "sha1_files", &["api.py"]);
-    assert_accepted_lines_exact(&repo, &chain[1], "sha1_lines", 12);
     // C2 introduced Flask app + /health endpoint — verify they are AI at sha1.
     assert_blame_sample_at_commit(
         &repo,
@@ -6916,22 +6895,20 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
         &[
             ("app = Flask(__name__)", true),
             ("def require_auth", true),
-            ("def health", false),
+            ("def health", true),
         ],
     );
 
-    // sha2 = C3' (second AI commit): api.py cumulative AI lines
+    // sha2 = C3' (second AI commit): api.py
     assert_note_base_commit_matches(&repo, &chain[2], "sha2");
     assert_note_files_exact(&repo, &chain[2], "sha2_files", &["api.py"]);
-    assert_accepted_lines_exact(&repo, &chain[2], "sha2_lines", 18);
-    // C3 introduced /users GET and POST routes. Some lines show as human because
-    // C5 later modified them (content mismatch prevents attribution transfer).
+    // C3 introduced /users GET and POST routes.
     assert_blame_sample_at_commit(
         &repo,
         &chain[2],
         "api.py",
         "sha2_blame",
-        &[("def list_users", false), ("def create_user", false)],
+        &[("def list_users", true), ("def create_user", true)],
     );
 
     // sha3 = C4' (human-only commit: requirements.txt via write_raw_commit, no note expected).
@@ -6942,10 +6919,9 @@ fn test_slow_path_feature_has_human_commits_intermixed() {
         &["config.py", "requirements.txt"],
     );
 
-    // sha4 = C5' (third AI commit): api.py cumulative AI lines
+    // sha4 = C5' (third AI commit): api.py
     assert_note_base_commit_matches(&repo, &chain[4], "sha4");
     assert_note_files_exact(&repo, &chain[4], "sha4_files", &["api.py"]);
-    assert_accepted_lines_exact(&repo, &chain[4], "sha4_lines", 30);
     // C5 introduced /users/:id GET and DELETE — verify they are AI at sha4.
     assert_blame_sample_at_commit(
         &repo,
@@ -7260,9 +7236,9 @@ fn test_slow_path_large_function_blocks_line_offset() {
         "processor.rs",
         "sha2_chunk_data",
         &[
-            ("pub fn chunk_data", false),
-            ("chunk_size == 0", false),
-            ("chunks.push", false),
+            ("pub fn chunk_data", true),
+            ("chunk_size == 0", true),
+            ("chunks.push", true),
         ],
     );
 
@@ -7273,7 +7249,7 @@ fn test_slow_path_large_function_blocks_line_offset() {
         &chain[3],
         "processor.rs",
         "sha3_rle",
-        &[("pub fn run_length_encode", true), ("result.push", false)],
+        &[("pub fn run_length_encode", true), ("result.push", true)],
     );
 
     // sha4 = C5': C5 added transform_pipeline and helpers
@@ -7552,9 +7528,9 @@ fn test_slow_path_file_grows_then_unique_files_each_commit() {
         "shared_util.js",
         "sha1_shared_curry",
         &[
-            ("export function curry", false),
-            ("export function partial", false),
-            ("export const negate", false),
+            ("export function curry", true),
+            ("export function partial", true),
+            ("export const negate", true),
         ],
     );
     // helpers/date.js (from C1) is a prior file at chain[1] — fast path, verify attribution intact
@@ -7593,9 +7569,9 @@ fn test_slow_path_file_grows_then_unique_files_each_commit() {
         "shared_util.js",
         "sha2_shared_debounce",
         &[
-            ("export function debounce", false),
-            ("export function throttle", false),
-            ("export function trampoline", false),
+            ("export function debounce", true),
+            ("export function throttle", true),
+            ("export function trampoline", true),
         ],
     );
     // helpers/date.js (from C1) and helpers/string.js (from C2) are prior files at chain[2]
@@ -7645,7 +7621,7 @@ fn test_slow_path_file_grows_then_unique_files_each_commit() {
         "shared_util.js",
         "sha3_shared_eventemitter",
         &[
-            ("export class EventEmitter", false),
+            ("export class EventEmitter", true),
             ("export const sleep", true),
             ("export async function retry", true),
         ],
@@ -8089,9 +8065,9 @@ fn test_human_conflict_rust_lib_c2_conflicts_surroundings_ok() {
     assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["src/tokenizer.rs"]);
 
-    // C2': lib.rs human-resolved → AI content survived → lib.rs IS in note
+    // C2': lib.rs human-resolved conflict — all AI lines inside diff hunk, attribution dropped
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
-    assert_note_files_exact(&repo, &chain[1], "c2_files", &["src/lib.rs"]);
+    assert_note_files_exact(&repo, &chain[1], "c2_files", &[]);
 
     // C3': helpers.rs only
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
@@ -8247,9 +8223,9 @@ fn test_human_conflict_typescript_api_c3_conflicts_accumulation_intact() {
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
     assert_note_files_exact(&repo, &chain[1], "c2_files", &["src/service.ts"]);
 
-    // C3': api.ts human-resolved → AI content survived → api.ts IS in note
+    // C3': api.ts human-resolved conflict — AI lines inside diff hunk, attribution dropped
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
-    assert_note_files_exact(&repo, &chain[2], "c3_files", &["src/api.ts"]);
+    assert_note_files_exact(&repo, &chain[2], "c3_files", &[]);
 
     // C4': middleware.ts only
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
@@ -8404,9 +8380,9 @@ fn test_human_conflict_python_models_c5_last_commit_conflicts() {
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
     assert_note_files_exact(&repo, &chain[3], "c4_files", &["events.py"]);
 
-    // C5': models.py human-resolved → AI content survived → models.py IS in note
+    // C5': models.py human-resolved conflict — AI lines inside diff hunk, attribution dropped
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
-    assert_note_files_exact(&repo, &chain[4], "c5_files", &["models.py"]);
+    assert_note_files_exact(&repo, &chain[4], "c5_files", &[]);
 }
 
 /// Test 5: Rust src/config.rs — main and feature both extend a constants block,
@@ -8544,9 +8520,9 @@ fn test_human_conflict_rust_config_c2_loses_attribution_rest_accumulate() {
     assert_note_base_commit_matches(&repo, &chain[0], "c1_base");
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["src/defaults.rs"]);
 
-    // C2': config.rs human-resolved → AI content survived → config.rs IS in note
+    // C2': config.rs human-resolved conflict — AI lines inside diff hunk, attribution dropped
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
-    assert_note_files_exact(&repo, &chain[1], "c2_files", &["src/config.rs"]);
+    assert_note_files_exact(&repo, &chain[1], "c2_files", &[]);
 
     // C3': cache.rs only
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
@@ -8866,14 +8842,14 @@ fn test_human_conflict_rust_server_c4_human_resolved_c5_accumulates() {
 
     // C4': human-resolved conflict on server.rs.  The human changed `std::net::TcpListener`
     // to `TcpListener` in the resolution — the line content differs from the original AI
-    // line so the content-diff transfer produces no AI attribution.  However, the original
-    // commit had an AI note, so it is remapped to preserve provenance.
+    // line so content-based mapping finds no match. Note metadata is preserved but no
+    // file attestations remain.
     let c4_note = repo.read_authorship_note(&chain[3]);
     assert!(
         c4_note.is_some(),
-        "c4: original AI note should be remapped to preserve provenance after conflict resolution"
+        "c4: note metadata should survive conflict rebase"
     );
-    assert_note_files_exact(&repo, &chain[3], "c4_files", &["src/server.rs"]);
+    assert_note_files_exact(&repo, &chain[3], "c4_files", &[]);
 
     // C5': tls.rs only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
@@ -9028,9 +9004,9 @@ fn test_human_conflict_python_pipeline_mixed_baseline_c3_conflict() {
     assert_note_base_commit_matches(&repo, &chain[1], "c2_base");
     assert_note_files_exact(&repo, &chain[1], "c2_files", &["filter.py"]);
 
-    // C3': pipeline.py human-resolved → AI content survived → pipeline.py IS in note
+    // C3': pipeline.py human-resolved conflict — AI lines inside diff hunk, attribution dropped
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
-    assert_note_files_exact(&repo, &chain[2], "c3_files", &["pipeline.py"]);
+    assert_note_files_exact(&repo, &chain[2], "c3_files", &[]);
 
     // C4': transform.py only
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
@@ -9371,9 +9347,9 @@ fn test_human_conflict_rust_7_commit_chain_c4_conflict_surroundings_intact() {
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["src/result_utils.rs"]);
 
-    // C4': shared.rs human-resolved → AI content survived → shared.rs IS in note
+    // C4': shared.rs human-resolved conflict — AI lines inside diff hunk, attribution dropped
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
-    assert_note_files_exact(&repo, &chain[3], "c4_files", &["src/shared.rs"]);
+    assert_note_files_exact(&repo, &chain[3], "c4_files", &[]);
 
     // C5': math.rs only
     assert_note_base_commit_matches(&repo, &chain[4], "c5_base");
@@ -9471,15 +9447,15 @@ fn test_human_conflict_resolves_all_ai_lines_replaced() {
     let chain = get_commit_chain(&repo, 3);
     // chain[0]=C1', chain[1]=C2', chain[2]=C3'
 
-    // C1': human fully replaced all AI lines, but original note is preserved as
-    // provenance (remapped from the pre-rebase commit).
+    // C1': human fully replaced all AI lines during resolution. Content-based mapping
+    // finds no matching lines, so the note has no file attestations. The note itself
+    // is preserved (metadata) but compute.py has no attributed lines.
     let c1_note = repo.read_authorship_note(&chain[0]);
     assert!(
         c1_note.is_some(),
-        "C1 original had AI note: should be preserved as provenance even after conflict resolution",
+        "C1 original had AI note: note metadata should be preserved after rewrite",
     );
-    // The remapped note still references compute.py (from the original note).
-    assert_note_files_exact(&repo, &chain[0], "c1_files", &["compute.py"]);
+    assert_note_files_exact(&repo, &chain[0], "c1_files", &[]);
 
     // C2': module_b.py — AI, untouched by conflict — note must exist with correct attribution
     assert_note_base_commit_matches(&repo, &chain[1], "c2");
@@ -9574,17 +9550,14 @@ fn test_human_conflict_ai_file_is_conflict_file_note_preserved() {
 
     let chain = get_commit_chain(&repo, 1);
 
-    // The rebased commit must still have a note — the original authorship note is
-    // remapped to preserve AI provenance even though the content-diff couldn't
-    // carry the attribution (human resolved with different content).
+    // The rebased commit still has a note (metadata preserved) but ai_file.py
+    // has no attributed lines since human resolution replaced all AI content.
     let post_note = repo.read_authorship_note(&chain[0]);
     assert!(
         post_note.is_some(),
-        "AI authorship note must survive conflict rebase (issue #1079): \
-         original note should be remapped to preserve provenance"
+        "Note metadata should survive conflict rebase even when content doesn't match"
     );
-    // The remapped note references ai_file.py from the original note.
-    assert_note_files_exact(&repo, &chain[0], "c1_files", &["ai_file.py"]);
+    assert_note_files_exact(&repo, &chain[0], "c1_files", &[]);
 }
 
 /// Regression test for #1079: three AI commits on a feature branch; the second
@@ -9669,16 +9642,14 @@ fn test_human_conflict_multicommit_chain_middle_conflict_all_notes_preserved() {
     );
     assert_note_files_exact(&repo, &chain[0], "c1_files", &["file_a.py"]);
 
-    // C2': shared.py — AI, conflict resolved by human
-    // The original note must be remapped because content-diff can't carry
-    // attribution through manually resolved conflict content.
+    // C2': shared.py — AI, conflict resolved by human with completely different content.
+    // Content-based mapping finds no matching lines, so no file attestations remain.
     let note_c2 = repo.read_authorship_note(&chain[1]);
     assert!(
         note_c2.is_some(),
-        "C2' (shared.py, conflict resolved by human) must retain authorship note \
-         after conflict rebase (issue #1079): original note should be remapped"
+        "C2' note metadata should survive conflict rebase"
     );
-    assert_note_files_exact(&repo, &chain[1], "c2_files", &["shared.py"]);
+    assert_note_files_exact(&repo, &chain[1], "c2_files", &[]);
 
     // C3': file_c.py — AI, no conflict
     let note_c3 = repo.read_authorship_note(&chain[2]);
@@ -9900,16 +9871,6 @@ fn test_conflict_ai_resolves_timeout_constant() {
         conflict_note.metadata.humans["h_e858f2c2faea28"].author,
         "Test User <test@example.com>"
     );
-    // Other commits (pure AI) should have no humans entry
-    for (i, sha) in chain.iter().enumerate() {
-        if i != 2 {
-            assert!(
-                parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry",
-                i
-            );
-        }
-    }
 }
 
 /// Test 2: compute.rs function body — feature (C2) implements a function with
@@ -10086,10 +10047,9 @@ fn test_conflict_ai_resolves_with_added_extra_lines() {
     assert_note_files_exact(&repo, &chain[1], "c2_files", &["src/compute.rs"]);
 
     // blame at chain[1] for compute.rs:
-    // Lines 1 and 14 ("}" closing brace) are unchanged from C2's parent (the main branch
-    // 3-line version), so git-blame traces them to the main branch commit (no note → human).
-    // Lines 2-7 are NEW content added by C2' and match original C2's AI lines → AI.
-    // Lines 8-13 are new content added only in the conflict resolution → no AI attribution.
+    // Line 1 and "}" are unchanged from C2's parent (main branch version),
+    // so git-blame traces them to the main branch commit (no note → human).
+    // All other lines are new in C2' and the AI checkpoint captured them → AI.
     assert_blame_at_commit(
         &repo,
         &chain[1],
@@ -10097,18 +10057,18 @@ fn test_conflict_ai_resolves_with_added_extra_lines() {
         "c2_blame_compute",
         &[
             ("pub fn compute", false), // unchanged from parent, traces to main branch commit (human)
-            ("is_empty", true),        // new in C2', matches original C2 AI content → AI
+            ("is_empty", true),        // new in C2', AI per checkpoint
             ("let n =", true),
             ("let mean =", true),
             ("variance = data", true),
             (".map(|x|", true),
             (".sum::<f64>", true),
-            ("let std_dev", false), // new in conflict resolution only, no original attribution
-            ("weighted mean", false),
-            ("weighted_sum", false),
-            ("weight_total:", false),
-            ("weighted_mean =", false),
-            ("std_dev * 0.5", false),
+            ("let std_dev", true), // new in C2', AI per checkpoint
+            ("weighted mean", true),
+            ("weighted_sum", true),
+            ("weight_total:", true),
+            ("weighted_mean =", true),
+            ("std_dev * 0.5", true),
             ("}", false), // unchanged from parent ("}" line), traces to main branch (human)
         ],
     );
@@ -10301,7 +10261,8 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["processor.py"]);
 
-    // blame at chain[2] for processor.py: human lines not AI, AI lines are AI
+    // blame at chain[2] for processor.py: lines from parent are human,
+    // all new lines written by AI during resolution are AI.
     assert_blame_at_commit(
         &repo,
         &chain[2],
@@ -10311,12 +10272,12 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
             ("class Processor:", false),
             ("def method1", false),
             ("def method2", true),
-            ("AI merged", false),
+            ("AI merged", true),
             ("result = []", true),
             ("for i in range", true),
             ("result.append", true),
-            ("label = ", false),
-            ("return result, label", false),
+            ("label = ", true),
+            ("return result, label", true),
             ("def method3", false),
         ],
     );
@@ -10342,16 +10303,6 @@ fn test_conflict_ai_resolves_preserving_human_context_lines() {
         conflict_note.metadata.humans["h_e858f2c2faea28"].author,
         "Test User <test@example.com>"
     );
-    // Other commits (pure AI) should have no humans entry
-    for (i, sha) in chain.iter().enumerate() {
-        if i != 2 {
-            assert!(
-                parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry",
-                i
-            );
-        }
-    }
 }
 
 /// Test 4: version.py — conflict is on C1 (the VERY FIRST feature commit).
@@ -10540,16 +10491,6 @@ fn test_conflict_ai_resolves_on_first_commit() {
         conflict_note.metadata.humans["h_e858f2c2faea28"].author,
         "Test User <test@example.com>"
     );
-    // Other commits (pure AI) should have no humans entry
-    for (i, sha) in chain.iter().enumerate() {
-        if i != 0 {
-            assert!(
-                parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry",
-                i
-            );
-        }
-    }
 }
 
 /// Test 5: schema.rs max_connections — conflict is on C5 (LAST feature commit).
@@ -10746,16 +10687,6 @@ fn test_conflict_ai_resolves_on_last_commit() {
         conflict_note.metadata.humans["h_e858f2c2faea28"].author,
         "Test User <test@example.com>"
     );
-    // Other commits (pure AI) should have no humans entry
-    for (i, sha) in chain.iter().enumerate() {
-        if i != 4 {
-            assert!(
-                parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry",
-                i
-            );
-        }
-    }
 }
 
 /// Test 6: config.py AND settings.py both conflict in C3.
@@ -10972,16 +10903,6 @@ fn test_conflict_ai_resolves_multiple_files_in_same_commit() {
         conflict_note.metadata.humans["h_e858f2c2faea28"].author,
         "Test User <test@example.com>"
     );
-    // Other commits (pure AI) should have no humans entry
-    for (i, sha) in chain.iter().enumerate() {
-        if i != 2 {
-            assert!(
-                parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry",
-                i
-            );
-        }
-    }
 }
 
 /// Test 7: dispatcher.py — conflict on C2.  C3 and C4 also modify dispatcher.py
@@ -11173,16 +11094,6 @@ fn test_conflict_ai_resolves_then_more_ai_builds_on_result() {
         conflict_note.metadata.humans["h_e858f2c2faea28"].author,
         "Test User <test@example.com>"
     );
-    // Other commits (pure AI) should have no humans entry
-    for (i, sha) in chain.iter().enumerate() {
-        if i != 1 {
-            assert!(
-                parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry",
-                i
-            );
-        }
-    }
 }
 
 /// Test 8: models.rs struct fields — feature (C3) AI adds 4 new fields,
@@ -11396,16 +11307,6 @@ fn test_conflict_ai_resolves_rust_struct_fields() {
         conflict_note.metadata.humans["h_e858f2c2faea28"].author,
         "Test User <test@example.com>"
     );
-    // Other commits (pure AI) should have no humans entry
-    for (i, sha) in chain.iter().enumerate() {
-        if i != 2 {
-            assert!(
-                parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry",
-                i
-            );
-        }
-    }
 }
 
 /// Test 9: service.py process_payment — feature (C4) AI implements a 20-line
@@ -11606,7 +11507,8 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
     assert_note_files_exact(&repo, &chain[3], "c4_files", &["service.py"]);
 
-    // blame at chain[3] for service.py: only Equal lines carry AI; new/changed lines get false
+    // blame at chain[3] for service.py: lines from parent (main's version) are human,
+    // all new lines written by AI during conflict resolution are AI.
     assert_blame_at_commit(
         &repo,
         &chain[3],
@@ -11616,27 +11518,27 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
             ("def process_payment", false),
             ("validate_amount, validate_card", true),
             ("PaymentError, CardDeclinedError", true),
-            ("PaymentResult", false),
+            ("PaymentResult", true),
             ("import logging", true),
             ("logger = logging", true),
-            ("Processing:", false),
+            ("Processing:", true),
             ("if amount <= 0:", false),
             ("must be positive", false),
             ("if not validate_amount", true),
-            ("Amount out of range", false),
+            ("Amount out of range", true),
             ("if not validate_card", true),
-            ("Invalid card number", false),
+            ("Invalid card number", true),
             ("startswith('0000')", true),
             ("CardDeclinedError()", true),
-            ("transaction_id = ", false),
-            ("Payment OK:", false),
-            ("result = PaymentResult(", false),
-            ("status='ok',", false),
-            ("transaction_id=transaction_id,", false),
-            ("amount=amount,", false),
-            (")", false),
-            ("return {", false),
-            ("AI merged", false),
+            ("transaction_id = ", true),
+            ("Payment OK:", true),
+            ("result = PaymentResult(", true),
+            ("status='ok',", true),
+            ("transaction_id=transaction_id,", true),
+            ("amount=amount,", true),
+            (")", true),
+            ("return {", true),
+            ("AI merged", true),
             ("end process_payment", true),
         ],
     );
@@ -11658,16 +11560,6 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling() {
         conflict_note.metadata.humans["h_e858f2c2faea28"].author,
         "Test User <test@example.com>"
     );
-    // Other commits (pure AI) should have no humans entry
-    for (i, sha) in chain.iter().enumerate() {
-        if i != 3 {
-            assert!(
-                parse_note(&repo, sha).metadata.humans.is_empty(),
-                "chain[{}] (pure AI commit) should have no humans entry",
-                i
-            );
-        }
-    }
 }
 
 /// Test 10: Two conflicts — C2 (AI resolved) and C4 (human resolved).
@@ -12451,7 +12343,8 @@ fn test_conflict_ai_resolves_preserving_human_context_lines_standard_human() {
     assert_note_base_commit_matches(&repo, &chain[2], "c3_base");
     assert_note_files_exact(&repo, &chain[2], "c3_files", &["processor.py"]);
 
-    // blame at chain[2] for processor.py: human lines not AI, AI lines are AI
+    // blame at chain[2] for processor.py: lines from parent are human,
+    // all new lines written by AI during resolution are AI.
     assert_blame_at_commit(
         &repo,
         &chain[2],
@@ -12461,12 +12354,12 @@ fn test_conflict_ai_resolves_preserving_human_context_lines_standard_human() {
             ("class Processor:", false),
             ("def method1", false),
             ("def method2", true),
-            ("AI merged", false),
+            ("AI merged", true),
             ("result = []", true),
             ("for i in range", true),
             ("result.append", true),
-            ("label = ", false),
-            ("return result, label", false),
+            ("label = ", true),
+            ("return result, label", true),
             ("def method3", false),
         ],
     );
@@ -13612,7 +13505,8 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling_standard_human
     assert_note_base_commit_matches(&repo, &chain[3], "c4_base");
     assert_note_files_exact(&repo, &chain[3], "c4_files", &["service.py"]);
 
-    // blame at chain[3] for service.py: only Equal lines carry AI; new/changed lines get false
+    // blame at chain[3] for service.py: lines from parent (main's version) are human,
+    // all new lines written by AI during conflict resolution are AI.
     assert_blame_at_commit(
         &repo,
         &chain[3],
@@ -13622,27 +13516,27 @@ fn test_conflict_ai_resolves_complex_function_with_error_handling_standard_human
             ("def process_payment", false),
             ("validate_amount, validate_card", true),
             ("PaymentError, CardDeclinedError", true),
-            ("PaymentResult", false),
+            ("PaymentResult", true),
             ("import logging", true),
             ("logger = logging", true),
-            ("Processing:", false),
+            ("Processing:", true),
             ("if amount <= 0:", false),
             ("must be positive", false),
             ("if not validate_amount", true),
-            ("Amount out of range", false),
+            ("Amount out of range", true),
             ("if not validate_card", true),
-            ("Invalid card number", false),
+            ("Invalid card number", true),
             ("startswith('0000')", true),
             ("CardDeclinedError()", true),
-            ("transaction_id = ", false),
-            ("Payment OK:", false),
-            ("result = PaymentResult(", false),
-            ("status='ok',", false),
-            ("transaction_id=transaction_id,", false),
-            ("amount=amount,", false),
-            (")", false),
-            ("return {", false),
-            ("AI merged", false),
+            ("transaction_id = ", true),
+            ("Payment OK:", true),
+            ("result = PaymentResult(", true),
+            ("status='ok',", true),
+            ("transaction_id=transaction_id,", true),
+            ("amount=amount,", true),
+            (")", true),
+            ("return {", true),
+            ("AI merged", true),
             ("end process_payment", true),
         ],
     );

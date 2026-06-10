@@ -44,7 +44,7 @@ pub fn fetch_remote_from_args(
 
     // 2) Fetch authorship refs from the appropriate remote
     // Try to detect remote (named remote, URL, or local path) from args first
-    let positional_remote = extract_remote_from_fetch_args(&parsed_args.command_args);
+    let positional_remote = extract_repository_arg_from_args(&parsed_args.command_args);
     let specified_remote = positional_remote.or_else(|| {
         parsed_args
             .command_args
@@ -67,41 +67,87 @@ pub fn fetch_remote_from_args(
     })
 }
 
-/// Try to fetch authorship notes from all remotes for source commits that are missing
-/// local notes.  This is a best-effort operation used before cherry-pick attribution
-/// rewriting to ensure notes from remote repos are available locally.
-///
-/// Uses the safe fetch pattern (tracking ref + merge with `-s ours`) so local notes
-/// are never overwritten.  Silently ignores any fetch errors.
-pub fn fetch_missing_notes_for_commits(repository: &Repository, source_commits: &[String]) {
-    use std::collections::HashSet;
-
-    // Fetch the full set of locally-noted commits in one subprocess call.
-    // `git notes --ref=refs/notes/ai list` outputs "<note-sha> <commit-sha>" per line.
-    let mut args = repository.global_args_for_exec();
-    args.extend(
-        ["notes", "--ref=refs/notes/ai", "list"]
-            .iter()
-            .map(|s| s.to_string()),
-    );
-    let noted_commits: HashSet<String> = exec_git(&args)
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter_map(|line| line.split_whitespace().nth(1).map(|s| s.to_string()))
+pub fn push_remote_from_args(
+    repository: &Repository,
+    parsed_args: &ParsedGitInvocation,
+) -> Result<String, GitAiError> {
+    let remotes = repository.remotes().ok();
+    let remote_names: Vec<String> = remotes
+        .as_ref()
+        .map(|r| {
+            (0..r.len())
+                .filter_map(|i| r.get(i).map(|s| s.to_string()))
                 .collect()
         })
         .unwrap_or_default();
 
+    let specified_remote =
+        extract_repository_arg_from_args(&parsed_args.command_args).or_else(|| {
+            parsed_args
+                .command_args
+                .iter()
+                .find(|a| remote_names.iter().any(|r| r == *a))
+                .cloned()
+        });
+
+    let remote = specified_remote
+        .or_else(|| repository.upstream_remote().ok().flatten())
+        .or_else(|| repository.get_default_remote().ok().flatten());
+
+    remote.map(|r| r.to_string()).ok_or_else(|| {
+        GitAiError::Generic(
+            "Could not determine a remote for push operation. \
+                 No remote was specified in args, no upstream is configured, \
+                 and no default remote was found."
+                .to_string(),
+        )
+    })
+}
+
+/// Try to fetch authorship notes from all remotes for source commits that are missing
+/// local notes. Used before rewrite attribution so remote source notes are available
+/// locally before we copy/shift them.
+///
+/// Uses the safe fetch pattern (tracking ref + merge with `-s ours`) so local notes
+/// are never overwritten. If one or more fetches fail, keep trying the remaining
+/// remotes; only return an error if the requested source notes are still missing
+/// afterward.
+pub fn fetch_missing_notes_for_commits(
+    repository: &Repository,
+    source_commits: &[String],
+) -> Result<(), GitAiError> {
+    use std::collections::HashSet;
+
+    fn noted_commits(repository: &Repository) -> HashSet<String> {
+        // Fetch the full set of locally-noted commits in one subprocess call.
+        // `git notes --ref=refs/notes/ai list` outputs "<note-sha> <commit-sha>" per line.
+        let mut args = repository.global_args_for_exec();
+        args.extend(
+            ["notes", "--ref=refs/notes/ai", "list"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        exec_git(&args)
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|line| line.split_whitespace().nth(1).map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    let noted_before_fetch = noted_commits(repository);
+
     let missing: Vec<&String> = source_commits
         .iter()
-        .filter(|sha| !noted_commits.contains(sha.as_str()))
+        .filter(|sha| !noted_before_fetch.contains(sha.as_str()))
         .collect();
 
     if missing.is_empty() {
-        return;
+        return Ok(());
     }
 
     tracing::debug!(
@@ -109,19 +155,37 @@ pub fn fetch_missing_notes_for_commits(repository: &Repository, source_commits: 
         missing
     );
 
+    let mut first_fetch_error: Option<GitAiError> = None;
     if let Ok(remotes) = repository.remotes_with_urls() {
         for (remote_name, _) in remotes {
             tracing::debug!("Attempting safe notes fetch from remote {}", remote_name);
             match fetch_authorship_notes(repository, &remote_name) {
                 Ok(_) => tracing::debug!("Fetched and merged notes from remote {}", remote_name),
-                Err(e) => tracing::debug!(
-                    "Notes fetch from remote {} failed (best-effort): {}",
-                    remote_name,
-                    e
-                ),
+                Err(e) => {
+                    tracing::debug!("Notes fetch from remote {} failed: {}", remote_name, e);
+                    if first_fetch_error.is_none() {
+                        first_fetch_error = Some(e);
+                    }
+                }
             }
         }
     }
+
+    if let Some(error) = first_fetch_error {
+        let noted_after_fetch = noted_commits(repository);
+        let still_missing: Vec<&String> = source_commits
+            .iter()
+            .filter(|sha| !noted_after_fetch.contains(sha.as_str()))
+            .collect();
+        if !still_missing.is_empty() {
+            return Err(GitAiError::Generic(format!(
+                "failed to fetch authorship notes for source commits {:?}: {}",
+                still_missing, error
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 // for use with post-fetch and post-pull and post-clone hooks
@@ -195,6 +259,7 @@ pub fn fetch_authorship_notes(
                 // Fallback: manually merge notes when git notes merge crashes
                 if let Err(e2) = fallback_merge_notes_ours(repository, &tracking_ref) {
                     tracing::debug!("fallback merge also failed: {}", e2);
+                    return Err(e2);
                 }
             }
         } else {
@@ -206,7 +271,7 @@ pub fn fetch_authorship_notes(
             );
             if let Err(e) = copy_ref(repository, &tracking_ref, local_notes_ref) {
                 tracing::debug!("notes copy failed: {}", e);
-                // Don't fail on copy errors, just log and continue
+                return Err(e);
             }
         }
     } else {
@@ -340,7 +405,7 @@ fn is_non_fast_forward_error(error: &GitAiError) -> bool {
     stderr.contains("non-fast-forward")
 }
 
-fn extract_remote_from_fetch_args(args: &[String]) -> Option<String> {
+fn extract_repository_arg_from_args(args: &[String]) -> Option<String> {
     let mut after_double_dash = false;
 
     for arg in args {
@@ -457,6 +522,28 @@ mod tests {
                 .any(|pair| pair[0] == "-c" && pair[1] == disabled_hooks)
         );
         assert!(args.contains(&"push".to_string()));
+    }
+
+    #[test]
+    fn repository_arg_extractor_recognizes_explicit_paths_and_urls() {
+        assert_eq!(
+            extract_repository_arg_from_args(&[
+                "/tmp/remote.git".to_string(),
+                "HEAD:refs/heads/main".to_string()
+            ]),
+            Some("/tmp/remote.git".to_string())
+        );
+        assert_eq!(
+            extract_repository_arg_from_args(&[
+                "https://example.com/repo.git".to_string(),
+                "main".to_string()
+            ]),
+            Some("https://example.com/repo.git".to_string())
+        );
+        assert_eq!(
+            extract_repository_arg_from_args(&["HEAD:refs/heads/main".to_string()]),
+            None
+        );
     }
 
     #[test]
