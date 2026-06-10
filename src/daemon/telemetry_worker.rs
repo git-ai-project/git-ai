@@ -329,10 +329,19 @@ fn flush_metrics(events: &[MetricEvent]) {
     for chunk in events.chunks(MAX_METRICS_PER_ENVELOPE) {
         if should_upload && !upload_failed && std::time::Instant::now() < deadline {
             let batch = MetricsBatch::new(chunk.to_vec());
-            if client.upload_metrics(&batch).is_ok() {
-                continue;
+            match client.upload_metrics(&batch) {
+                Ok(response) if response.errors.is_empty() => continue,
+                Ok(_) => {
+                    // Server returned 200 but reported partial errors — stash the
+                    // whole chunk so flush_metrics_db can replay it. Without this,
+                    // events are permanently lost: the daemon treats any 200 as
+                    // success and never writes to SQLite.
+                    upload_failed = true;
+                }
+                Err(_) => {
+                    upload_failed = true;
+                }
             }
-            upload_failed = true;
         }
         store_metrics_in_db(chunk);
     }
