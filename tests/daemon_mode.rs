@@ -3,9 +3,14 @@
 mod repos;
 
 use git_ai::authorship::working_log::CheckpointKind;
+use git_ai::commands::checkpoint_agent::orchestrator::{
+    BaseCommit, CheckpointFile, CheckpointRequest,
+};
+use git_ai::daemon::checkpoint::PreparedPathRole;
 use git_ai::daemon::{
     ControlRequest, DaemonConfig, DaemonLock, local_socket_connects_with_timeout,
     open_local_socket_stream_with_timeout, read_daemon_pid, send_control_request,
+    send_control_request_with_timeout,
 };
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{
@@ -1380,6 +1385,132 @@ fn daemon_trace_listener_stalled_connection_does_not_block_later_trace_connectio
 
     panic!(
         "daemon did not process a later trace connection while an earlier trace socket was stalled"
+    );
+}
+
+#[test]
+#[cfg(not(windows))]
+fn daemon_stalled_unidentified_trace_connection_does_not_block_checkpoint_control_request() {
+    let repo = TestRepo::new_dedicated_daemon();
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let control_socket = daemon_control_socket_path(&repo);
+
+    let _stalled_stream =
+        open_local_socket_stream_with_timeout(&trace_socket, DAEMON_TEST_PROBE_TIMEOUT)
+            .expect("failed to open stalled trace socket");
+    thread::sleep(Duration::from_millis(150));
+
+    let file_path = repo.path().join("checkpoint-after-stalled-trace.txt");
+    fs::write(&file_path, "checkpoint content\n").unwrap();
+
+    let request = CheckpointRequest {
+        trace_id: "checkpoint-after-stalled-trace".to_string(),
+        checkpoint_kind: CheckpointKind::Human,
+        agent_id: None,
+        files: vec![CheckpointFile {
+            path: PathBuf::from("checkpoint-after-stalled-trace.txt"),
+            content: Some("checkpoint content\n".to_string()),
+            repo_work_dir: repo.path().to_path_buf(),
+            base_commit: BaseCommit::Initial,
+        }],
+        path_role: PreparedPathRole::Edited,
+        stream_source: None,
+        metadata: Default::default(),
+    };
+
+    let response = send_control_request_with_timeout(
+        &control_socket,
+        &ControlRequest::CheckpointRun {
+            request: Box::new(request),
+        },
+        Duration::from_millis(500),
+    )
+    .expect("checkpoint control request should not block on unidentified trace sockets");
+
+    assert!(
+        response.ok,
+        "checkpoint control request should succeed: {:?}",
+        response
+    );
+}
+
+#[test]
+#[cfg(not(windows))]
+fn daemon_stalled_unidentified_trace_connection_does_not_block_sync_control_request() {
+    let repo = TestRepo::new_dedicated_daemon();
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let control_socket = daemon_control_socket_path(&repo);
+
+    let _stalled_stream =
+        open_local_socket_stream_with_timeout(&trace_socket, DAEMON_TEST_PROBE_TIMEOUT)
+            .expect("failed to open stalled trace socket");
+    thread::sleep(Duration::from_millis(150));
+
+    let response = send_control_request_with_timeout(
+        &control_socket,
+        &ControlRequest::SyncFamily {
+            repo_working_dir: repo_workdir_string(&repo),
+        },
+        Duration::from_millis(500),
+    )
+    .expect("sync control request should not block on unidentified trace sockets");
+
+    assert!(
+        response.ok,
+        "sync control request should succeed: {:?}",
+        response
+    );
+}
+
+#[test]
+#[cfg(not(windows))]
+fn daemon_partial_trace_line_does_not_block_checkpoint_control_request() {
+    let repo = TestRepo::new_dedicated_daemon();
+    let trace_socket = daemon_trace_socket_path(&repo);
+    let control_socket = daemon_control_socket_path(&repo);
+
+    let mut stalled_stream =
+        open_local_socket_stream_with_timeout(&trace_socket, DAEMON_TEST_PROBE_TIMEOUT)
+            .expect("failed to open stalled trace socket");
+    stalled_stream
+        .write_all(br#"{"event":"start""#)
+        .expect("failed to write partial trace frame");
+    stalled_stream
+        .flush()
+        .expect("failed to flush partial trace frame");
+    thread::sleep(Duration::from_millis(150));
+
+    let file_path = repo.path().join("checkpoint-after-partial-trace.txt");
+    fs::write(&file_path, "checkpoint content\n").unwrap();
+
+    let request = CheckpointRequest {
+        trace_id: "checkpoint-after-partial-trace".to_string(),
+        checkpoint_kind: CheckpointKind::Human,
+        agent_id: None,
+        files: vec![CheckpointFile {
+            path: PathBuf::from("checkpoint-after-partial-trace.txt"),
+            content: Some("checkpoint content\n".to_string()),
+            repo_work_dir: repo.path().to_path_buf(),
+            base_commit: BaseCommit::Initial,
+        }],
+        path_role: PreparedPathRole::Edited,
+        stream_source: None,
+        metadata: Default::default(),
+    };
+
+    let response = send_control_request_with_timeout(
+        &control_socket,
+        &ControlRequest::CheckpointRun {
+            request: Box::new(request),
+        },
+        Duration::from_millis(500),
+    )
+    .expect("checkpoint control request should not block on incomplete trace frames");
+
+    assert!(
+        response.ok,
+        "checkpoint control request should succeed: {:?}",
+        response
     );
 }
 

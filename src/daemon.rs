@@ -2804,12 +2804,11 @@ impl ActorDaemonCoordinator {
         let Ok(ingress) = self.trace_ingress_state.lock() else {
             return false;
         };
-        ingress.unidentified_open_connections > 0
-            || ingress.root_open_connections.iter().any(|(root, count)| {
-                *count > 0
-                    && !ingress.root_definitely_read_only.contains(root)
-                    && ingress.root_mutating.get(root).copied().unwrap_or(true)
-            })
+        ingress.root_open_connections.iter().any(|(root, count)| {
+            *count > 0
+                && !ingress.root_definitely_read_only.contains(root)
+                && ingress.root_mutating.get(root).copied().unwrap_or(true)
+        })
     }
 
     fn next_trace_ingest_seq(&self) -> u64 {
@@ -3055,10 +3054,14 @@ impl ActorDaemonCoordinator {
     }
 
     /// Waits until all trace payloads enqueued up to now have been processed
-    /// by the ingest worker, and any observed trace connection that may mutate
-    /// refs has closed. This is a causal drain fence: it guarantees that trace2
-    /// data already visible to the daemon for prior mutating git operations
-    /// has reached the family sequencer before returning.
+    /// by the ingest worker, and any identified trace root that may mutate refs
+    /// has closed. This is a causal drain fence: it guarantees that trace2 data
+    /// already visible to the daemon for prior mutating git operations has
+    /// reached the family sequencer before returning.
+    ///
+    /// Accepted sockets with no complete trace2 root are not causal evidence for
+    /// any repository family. They are tracked for connection cleanup, but must
+    /// not globally block checkpoint/sync control requests.
     ///
     /// Used by checkpoint entry to ensure ordering: a checkpoint must not be
     /// processed until all causally-prior git operations have been ingested
@@ -7403,19 +7406,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_fence_waits_for_unidentified_trace_connection() {
+    async fn checkpoint_fence_does_not_wait_for_unidentified_trace_connection() {
         let coord = Arc::new(ActorDaemonCoordinator::new());
         coord.trace_unidentified_connection_opened().unwrap();
 
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(50),
-                coord.wait_for_trace_ingest_processed_through()
-            )
-            .await
-            .is_err(),
-            "checkpoint fence must not pass while an accepted trace connection has no root yet"
-        );
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            coord.wait_for_trace_ingest_processed_through(),
+        )
+        .await
+        .expect("checkpoint fence must not wait for an accepted trace connection with no root");
 
         coord
             .trace_unidentified_connection_identified_or_closed()
