@@ -80,14 +80,31 @@ impl AgentPreset for CursorPreset {
         // Extract the edited path from Cursor file-edit tool input.
         let file_path = cursor_file_path_from_tool_input(data.get("tool_input"));
 
+        // For ApplyPatch, extract file paths from patch text if no direct file_path.
+        let patch_paths = if file_path.is_empty() && tool_name == "ApplyPatch" {
+            extract_paths_from_patch(data.get("tool_input"))
+        } else {
+            vec![]
+        };
+
         // Resolve cwd: match file_path to workspace root, or fall back to first root.
         // For Shell tools `file_path` is empty, so this returns workspace_roots[0].
-        let cwd = resolve_repo_cwd(&file_path, &workspace_roots).ok_or_else(|| {
+        let first_path = if !file_path.is_empty() {
+            &file_path
+        } else {
+            patch_paths.first().map(|s| s.as_str()).unwrap_or("")
+        };
+        let cwd = resolve_repo_cwd(first_path, &workspace_roots).ok_or_else(|| {
             GitAiError::PresetError("No workspace root found in hook_input".to_string())
         })?;
 
         let file_paths = if !file_path.is_empty() {
             vec![parse::resolve_absolute(&file_path, &cwd)]
+        } else if !patch_paths.is_empty() {
+            patch_paths
+                .iter()
+                .map(|p| parse::resolve_absolute(p, &cwd))
+                .collect()
         } else {
             vec![]
         };
@@ -175,6 +192,33 @@ fn normalize_cursor_path(path: &str) -> String {
 #[cfg(not(windows))]
 fn normalize_cursor_path(path: &str) -> String {
     path.to_string()
+}
+
+/// Extract file paths from an ApplyPatch tool_input's patch text.
+/// Parses `*** Update File:`, `*** Add File:`, `*** Delete File:`, and `*** Move to:` prefixes.
+fn extract_paths_from_patch(tool_input: Option<&serde_json::Value>) -> Vec<String> {
+    let mut paths = Vec::new();
+    let patch_text = tool_input.and_then(|ti| {
+        ti.as_str()
+            .or_else(|| ti.get("patch").and_then(|v| v.as_str()))
+    });
+    if let Some(text) = patch_text {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            let maybe_path = trimmed
+                .strip_prefix("*** Update File: ")
+                .or_else(|| trimmed.strip_prefix("*** Add File: "))
+                .or_else(|| trimmed.strip_prefix("*** Delete File: "))
+                .or_else(|| trimmed.strip_prefix("*** Move to: "));
+            if let Some(path) = maybe_path {
+                let path = path.trim();
+                if !path.is_empty() && !paths.iter().any(|existing: &String| existing == path) {
+                    paths.push(path.to_string());
+                }
+            }
+        }
+    }
+    paths
 }
 
 fn cursor_file_path_from_tool_input(tool_input: Option<&serde_json::Value>) -> String {
@@ -509,6 +553,91 @@ mod tests {
                 assert_eq!(e.tool_use_id, "bash");
             }
             _ => panic!("Expected PreBashCall"),
+        }
+    }
+
+    #[test]
+    fn test_cursor_apply_patch_pre_file_edit() {
+        let input = json!({
+            "conversation_id": "conv-patch",
+            "workspace_roots": ["/home/user/project"],
+            "hook_event_name": "preToolUse",
+            "tool_name": "ApplyPatch",
+            "model": "claude-3-5-sonnet",
+            "tool_input": {
+                "patch": "*** Begin Patch\n*** Update File: src/example.rs\n@@\n-old\n+new\n*** End Patch\n"
+            }
+        })
+        .to_string();
+        let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert_eq!(e.context.agent_id.tool, "cursor");
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/example.rs")]
+                );
+            }
+            _ => panic!("Expected PreFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_cursor_apply_patch_post_file_edit() {
+        let input = json!({
+            "conversation_id": "conv-patch",
+            "workspace_roots": ["/home/user/project"],
+            "hook_event_name": "postToolUse",
+            "tool_name": "ApplyPatch",
+            "model": "claude-3-5-sonnet",
+            "transcript_path": "/home/user/.cursor/transcripts/conv-patch.jsonl",
+            "tool_input": {
+                "patch": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old line\n+new line\n*** Add File: src/new.rs\n@@\n+content\n*** End Patch\n"
+            }
+        })
+        .to_string();
+        let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ParsedHookEvent::PostFileEdit(e) => {
+                assert_eq!(e.context.agent_id.tool, "cursor");
+                assert_eq!(e.file_paths.len(), 2);
+                assert_eq!(
+                    e.file_paths[0],
+                    PathBuf::from("/home/user/project/src/main.rs")
+                );
+                assert_eq!(
+                    e.file_paths[1],
+                    PathBuf::from("/home/user/project/src/new.rs")
+                );
+                assert!(e.transcript_source.is_some());
+            }
+            _ => panic!("Expected PostFileEdit"),
+        }
+    }
+
+    #[test]
+    fn test_cursor_apply_patch_with_absolute_path_in_patch() {
+        let input = json!({
+            "conversation_id": "conv-patch",
+            "workspace_roots": ["/home/user/project"],
+            "hook_event_name": "preToolUse",
+            "tool_name": "ApplyPatch",
+            "tool_input": {
+                "patch": "*** Update File: /home/user/project/src/lib.rs\nsome diff"
+            }
+        })
+        .to_string();
+        let events = CursorPreset.parse(&input, "t_test123456789a").unwrap();
+        match &events[0] {
+            ParsedHookEvent::PreFileEdit(e) => {
+                assert_eq!(
+                    e.file_paths,
+                    vec![PathBuf::from("/home/user/project/src/lib.rs")]
+                );
+            }
+            _ => panic!("Expected PreFileEdit"),
         }
     }
 
