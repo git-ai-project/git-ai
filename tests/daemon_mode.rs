@@ -853,6 +853,19 @@ fn daemon_start_spawns_detached_run_process() {
 }
 
 #[test]
+#[should_panic(expected = "pending daemon sync work")]
+fn dedicated_daemon_restart_rejects_pending_traced_command_for_test() {
+    let mut repo = TestRepo::new_dedicated_daemon();
+
+    repo.git(&["commit", "--allow-empty", "-m", "base"])
+        .expect("base commit should succeed");
+    repo.git(&["branch", "pending-before-restart"])
+        .expect("branch creation should succeed");
+
+    repo.restart_dedicated_daemon_for_test();
+}
+
+#[test]
 #[serial]
 fn checkpoint_delegate_autostarts_daemon_when_unavailable() {
     // Test builds disable daemon auto-spawning from ensure_daemon_running to

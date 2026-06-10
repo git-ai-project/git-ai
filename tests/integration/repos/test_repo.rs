@@ -839,6 +839,23 @@ impl DaemonSyncRegistry {
     fn mark_synced_through(&mut self, family_key: &str, completion_count: u64) {
         self.advance_last_synced_completion_count(family_key, completion_count);
     }
+
+    fn pending_work_summary(&self, family_key: &str) -> Option<String> {
+        let pending_sessions = self.pending_sessions(family_key);
+        let expected_checkpoints = self.expected_checkpoint_count(family_key);
+        let last_synced_checkpoints = self.last_synced_checkpoint_count(family_key);
+        let pending_checkpoints = expected_checkpoints.saturating_sub(last_synced_checkpoints);
+
+        if pending_sessions.is_empty() && pending_checkpoints == 0 {
+            return None;
+        }
+
+        Some(format!(
+            "{} pending command session(s), {} pending checkpoint completion(s)",
+            pending_sessions.len(),
+            pending_checkpoints
+        ))
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1692,6 +1709,19 @@ impl TestRepo {
             self.daemon_scope,
             DaemonTestScope::Dedicated,
             "restart_dedicated_daemon_for_test requires a dedicated daemon repo"
+        );
+        let family_key = self.daemon_family_key();
+        let pending_summary = {
+            let registry = daemon_sync_registry()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            registry.pending_work_summary(&family_key)
+        };
+        assert!(
+            pending_summary.is_none(),
+            "cannot restart dedicated daemon with pending daemon sync work for family {}: {}",
+            family_key,
+            pending_summary.unwrap_or_default()
         );
         if let Some(daemon) = self.daemon_process.take() {
             daemon.shutdown();

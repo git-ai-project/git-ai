@@ -314,7 +314,7 @@ fn test_cold_repo_mid_rebase_continue_preserves_ai_conflict_resolution() {
     repo.git(&["checkout", "main"]).unwrap();
     traced_ai_commit_file(&repo, "conflict.txt", "main\n", "ai main");
 
-    repo.git(&["checkout", "feature"]).unwrap();
+    raw_git(&repo, &["checkout", "feature"]);
     let rebase = raw_git_result(&repo, &["rebase", "main"]);
     assert!(
         rebase.is_err(),
