@@ -651,21 +651,6 @@ fn matches_any_pathspec(file: &str, pathspecs: &[String]) -> bool {
     })
 }
 
-fn tracked_working_log_files(
-    repo: &Repository,
-    base_commit: &str,
-) -> Result<HashSet<String>, GitAiError> {
-    if base_commit.trim().is_empty() || !repo.storage.has_working_log(base_commit) {
-        return Ok(HashSet::new());
-    }
-
-    let working_log = repo.storage.working_log_for_base_commit(base_commit)?;
-    let initial = working_log.read_initial_attributions();
-    let mut files: HashSet<String> = initial.files.keys().cloned().collect();
-    files.extend(working_log.all_touched_files()?);
-    Ok(files)
-}
-
 fn resolve_stash_sha(cmd: &crate::daemon::domain::NormalizedCommand) -> Option<&str> {
     cmd.stash_target_oid.as_deref().or_else(|| {
         cmd.ref_changes
@@ -1160,12 +1145,23 @@ fn apply_checkout_switch_working_log_side_effect(
     }
 
     if is_merge {
-        let tracked_files = tracked_working_log_files(&repo, &old_head)?;
-        if tracked_files.is_empty() {
+        let final_state =
+            crate::authorship::virtual_attribution::checkout_merge_final_state_snapshot(
+                &repo, &old_head, &new_head,
+            )?;
+        if final_state.is_empty() {
             repo.storage.delete_working_log_for_base_commit(&old_head)?;
             return Ok(());
         }
-        repo.storage.rename_working_log(&old_head, &new_head)?;
+        let author = repo.git_author_identity().formatted_or_unknown();
+        crate::authorship::virtual_attribution::restore_working_log_carryover(
+            &repo,
+            &old_head,
+            &new_head,
+            final_state,
+            Some(author),
+        )?;
+        repo.storage.delete_working_log_for_base_commit(&old_head)?;
         return Ok(());
     }
 

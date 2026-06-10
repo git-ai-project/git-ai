@@ -782,9 +782,9 @@ fn test_delayed_stash_pop_trace_replay_preserves_popped_stash_attribution() {
     second.assert_committed_lines(lines!["second stash ai".ai()]);
 }
 
-#[test]
-#[ignore = "stock trace2 does not record final uncommitted worktree bytes for switch --merge"]
-fn test_delayed_switch_merge_trace_replay_does_not_attribute_later_uncheckpointed_edit() {
+fn delayed_checkout_switch_merge_trace_replay_does_not_attribute_later_uncheckpointed_edit(
+    command: &[&str],
+) {
     let repo = TestRepo::new();
     let mut file = repo.filename("merge-carry.txt");
 
@@ -804,16 +804,16 @@ fn test_delayed_switch_merge_trace_replay_does_not_attribute_later_uncheckpointe
     let baseline = repo.daemon_total_completion_count();
 
     let trace_dir = tempfile::tempdir().expect("trace temp dir");
-    let switch_trace = trace_dir.path().join("switch-merge.trace2");
+    let trace = trace_dir.path().join("checkout-switch-merge.trace2");
 
-    raw_git_trace_to_file(&repo, &["switch", "--merge", "feature"], &switch_trace);
+    raw_git_trace_to_file(&repo, command, &trace);
     fs::write(
         repo.path().join("merge-carry.txt"),
         "one feature\ntwo ai\nlater untracked\n",
     )
     .unwrap();
 
-    replay_trace_file_to_daemon(&repo, &switch_trace);
+    replay_trace_file_to_daemon(&repo, &trace);
     repo.wait_for_daemon_total_completion_count(baseline, baseline + 1);
 
     repo.stage_all_and_commit("commit carried merge").unwrap();
@@ -825,7 +825,20 @@ fn test_delayed_switch_merge_trace_replay_does_not_attribute_later_uncheckpointe
 }
 
 #[test]
-#[ignore = "stock trace2 does not record checkout/switch old and new HEAD oids when replayed after refs moved"]
+fn test_delayed_switch_merge_trace_replay_does_not_attribute_later_uncheckpointed_edit() {
+    delayed_checkout_switch_merge_trace_replay_does_not_attribute_later_uncheckpointed_edit(&[
+        "switch", "--merge", "feature",
+    ]);
+}
+
+#[test]
+fn test_delayed_checkout_merge_trace_replay_does_not_attribute_later_uncheckpointed_edit() {
+    delayed_checkout_switch_merge_trace_replay_does_not_attribute_later_uncheckpointed_edit(&[
+        "checkout", "--merge", "feature",
+    ]);
+}
+
+#[test]
 fn test_delayed_switch_trace_replay_renames_working_log_for_uncommitted_attribution() {
     let repo = TestRepo::new();
     setup_initial_commit(&repo);
@@ -896,7 +909,6 @@ fn test_delayed_rebase_trace_replay_preserves_rebased_commit_attribution() {
 }
 
 #[test]
-#[ignore = "symbolic reset revs like HEAD~1 are not resolvable from delayed stock trace2 after refs move"]
 fn test_delayed_reset_trace_replay_reconstructs_reset_working_log_attribution() {
     let repo = TestRepo::new();
     setup_initial_commit(&repo);

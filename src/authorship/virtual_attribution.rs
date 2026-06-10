@@ -1545,6 +1545,247 @@ fn merged_carryover_content(
     git_merge_file_contents(&parent_content, &committed_content, observed_content)
 }
 
+fn mapped_line_range(
+    base_to_target: &[Option<usize>],
+    old_index: usize,
+    old_len: usize,
+) -> Option<(usize, usize)> {
+    if old_len == 0 {
+        return mapped_insertion_point(base_to_target, old_index);
+    }
+    let first = base_to_target.get(old_index).copied().flatten()?;
+    for offset in 0..old_len {
+        if base_to_target.get(old_index + offset).copied().flatten()? != first + offset {
+            return None;
+        }
+    }
+    Some((first, first + old_len))
+}
+
+fn mapped_conflict_range(
+    target_changes: &[(usize, usize, usize, usize)],
+    old_index: usize,
+    old_len: usize,
+) -> Option<(usize, usize)> {
+    if old_len == 0 {
+        return None;
+    }
+    let old_end = old_index.saturating_add(old_len);
+    let mut target_start = usize::MAX;
+    let mut target_end = 0usize;
+    for (change_old_start, change_old_end, change_target_start, change_target_end) in target_changes
+    {
+        if *change_old_start < old_end && old_index < *change_old_end {
+            target_start = target_start.min(*change_target_start);
+            target_end = target_end.max(*change_target_end);
+        }
+    }
+    if target_start == usize::MAX {
+        None
+    } else {
+        Some((target_start, target_end))
+    }
+}
+
+fn mapped_insertion_point(
+    base_to_target: &[Option<usize>],
+    old_index: usize,
+) -> Option<(usize, usize)> {
+    if base_to_target.is_empty() {
+        return Some((0, 0));
+    }
+    if old_index > 0
+        && let Some(Some(previous)) = base_to_target.get(old_index - 1)
+    {
+        let point = previous + 1;
+        return Some((point, point));
+    }
+    if let Some(Some(next)) = base_to_target.get(old_index) {
+        return Some((*next, *next));
+    }
+    None
+}
+
+fn line_without_terminator(line: &str) -> &str {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line)
+}
+
+fn fill_line_ending_only_mappings(
+    base_lines: &[&str],
+    target_lines: &[&str],
+    base_to_target: &mut [Option<usize>],
+) {
+    let mut used_targets = vec![false; target_lines.len()];
+    for target_index in base_to_target.iter().flatten() {
+        if let Some(used) = used_targets.get_mut(*target_index) {
+            *used = true;
+        }
+    }
+
+    let mut search_start = 0usize;
+    for (base_index, base_line) in base_lines.iter().enumerate() {
+        if let Some(target_index) = base_to_target[base_index] {
+            search_start = search_start.max(target_index.saturating_add(1));
+            continue;
+        }
+
+        let base_text = line_without_terminator(base_line);
+        if let Some(target_index) = (search_start..target_lines.len()).find(|target_index| {
+            !used_targets[*target_index]
+                && line_without_terminator(target_lines[*target_index]) == base_text
+        }) {
+            base_to_target[base_index] = Some(target_index);
+            used_targets[target_index] = true;
+            search_start = target_index.saturating_add(1);
+        }
+    }
+}
+
+fn checkout_merge_rebased_content(
+    base_content: &str,
+    target_content: &str,
+    observed_content: &str,
+) -> String {
+    if base_content == target_content {
+        return observed_content.to_string();
+    }
+    if base_content == observed_content {
+        return target_content.to_string();
+    }
+
+    let base_lines = split_lines_preserving_terminators(base_content);
+    let target_lines = split_lines_preserving_terminators(target_content);
+    let observed_lines = split_lines_preserving_terminators(observed_content);
+
+    let mut base_to_target = vec![None; base_lines.len()];
+    let mut target_changes = Vec::new();
+    for op in crate::authorship::imara_diff_utils::capture_diff_slices(&base_lines, &target_lines) {
+        match op {
+            crate::authorship::imara_diff_utils::DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } => {
+                for offset in 0..len {
+                    base_to_target[old_index + offset] = Some(new_index + offset);
+                }
+            }
+            crate::authorship::imara_diff_utils::DiffOp::Delete {
+                old_index,
+                old_len,
+                new_index,
+            } => {
+                target_changes.push((old_index, old_index + old_len, new_index, new_index));
+            }
+            crate::authorship::imara_diff_utils::DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => {
+                target_changes.push((
+                    old_index,
+                    old_index + old_len,
+                    new_index,
+                    new_index + new_len,
+                ));
+            }
+            crate::authorship::imara_diff_utils::DiffOp::Insert { .. } => {}
+        }
+    }
+    fill_line_ending_only_mappings(&base_lines, &target_lines, &mut base_to_target);
+
+    let mut edits = Vec::<(usize, usize, Vec<String>)>::new();
+    for op in crate::authorship::imara_diff_utils::capture_diff_slices(&base_lines, &observed_lines)
+    {
+        match op {
+            crate::authorship::imara_diff_utils::DiffOp::Equal { .. } => {}
+            crate::authorship::imara_diff_utils::DiffOp::Insert {
+                old_index,
+                new_index,
+                new_len,
+            } => {
+                if let Some((start, end)) = mapped_line_range(&base_to_target, old_index, 0) {
+                    edits.push((
+                        start,
+                        end,
+                        observed_lines[new_index..new_index + new_len]
+                            .iter()
+                            .map(|line| (*line).to_string())
+                            .collect(),
+                    ));
+                }
+            }
+            crate::authorship::imara_diff_utils::DiffOp::Delete {
+                old_index, old_len, ..
+            } => {
+                if let Some((start, end)) = mapped_line_range(&base_to_target, old_index, old_len)
+                    .or_else(|| mapped_conflict_range(&target_changes, old_index, old_len))
+                {
+                    edits.push((start, end, Vec::new()));
+                }
+            }
+            crate::authorship::imara_diff_utils::DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => {
+                if let Some((start, end)) = mapped_line_range(&base_to_target, old_index, old_len)
+                    .or_else(|| mapped_conflict_range(&target_changes, old_index, old_len))
+                {
+                    edits.push((
+                        start,
+                        end,
+                        observed_lines[new_index..new_index + new_len]
+                            .iter()
+                            .map(|line| (*line).to_string())
+                            .collect(),
+                    ));
+                }
+            }
+        }
+    }
+
+    edits.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    let mut rebased = target_lines
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect::<Vec<_>>();
+    for (start, end, replacement) in edits {
+        if start <= end && end <= rebased.len() {
+            rebased.splice(start..end, replacement);
+        }
+    }
+    rebased.concat()
+}
+
+pub fn checkout_merge_final_state_snapshot(
+    repo: &Repository,
+    old_head: &str,
+    new_head: &str,
+) -> Result<HashMap<String, String>, GitAiError> {
+    if old_head.is_empty() || new_head.is_empty() || old_head == new_head {
+        return Ok(HashMap::new());
+    }
+    if !repo.storage.has_working_log(old_head) {
+        return Ok(HashMap::new());
+    }
+
+    let working_log = repo.storage.working_log_for_base_commit(old_head)?;
+    let observed_snapshot = working_log.observed_file_snapshot()?;
+    let mut final_state = HashMap::new();
+    for (file_path, observed_content) in observed_snapshot {
+        let base_content = get_file_content_at_commit(repo, old_head, &file_path)?;
+        let target_content = get_file_content_at_commit(repo, new_head, &file_path)?;
+        let content =
+            checkout_merge_rebased_content(&base_content, &target_content, &observed_content);
+        final_state.insert(file_path, content);
+    }
+    Ok(final_state)
+}
+
 fn build_carryover_snapshot(
     repo: &Repository,
     parent_sha: &str,
@@ -3030,4 +3271,49 @@ pub fn restore_virtual_attribution_carryover(
         initial_attributions.sessions,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkout_merge_rebased_content_preserves_clean_local_hunk_on_target_edit() {
+        let base = "one\ntwo\n";
+        let target = "one feature\ntwo\n";
+        let observed = "one\ntwo ai\n";
+
+        assert_eq!(
+            checkout_merge_rebased_content(base, target, observed),
+            "one feature\ntwo ai\n"
+        );
+    }
+
+    #[test]
+    fn checkout_merge_rebased_content_maps_eof_newline_only_target_line() {
+        let base = "one\ntwo";
+        let target = "one feature\ntwo\n";
+        let observed = "one\ntwo ai\n";
+
+        assert_eq!(
+            checkout_merge_rebased_content(base, target, observed),
+            "one feature\ntwo ai\n"
+        );
+    }
+
+    #[test]
+    fn checkout_merge_rebased_content_uses_observed_when_target_unchanged() {
+        assert_eq!(
+            checkout_merge_rebased_content("base\n", "base\n", "ai\n"),
+            "ai\n"
+        );
+    }
+
+    #[test]
+    fn checkout_merge_rebased_content_preserves_local_side_for_overlapping_conflict() {
+        assert_eq!(
+            checkout_merge_rebased_content("shared\n", "THEIRS\n", "AI_CONTENT\n"),
+            "AI_CONTENT\n"
+        );
+    }
 }
