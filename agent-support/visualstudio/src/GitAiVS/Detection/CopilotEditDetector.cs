@@ -58,6 +58,7 @@ namespace GitAiVS.Detection
                     "GitHub.Copilot",
                     "Microsoft.VisualStudio.Copilot",
                     "Microsoft.VisualStudio.Conversations.UI.Internal.Copilot",
+                    "Microsoft.VisualStudio.Editor.Implementation.SuggestionService.AcceptSuggestionCommandHandler",
                 },
                 classKeywords: new[] { "copilot" }
             ),
