@@ -161,6 +161,117 @@ impl CodexInstaller {
         Ok(format!("sha256:{hex}"))
     }
 
+    fn json_to_toml(value: &JsonValue) -> Result<TomlValue, GitAiError> {
+        match value {
+            JsonValue::Null => Err(GitAiError::Generic(
+                "Codex hooks.json contains null, which cannot be migrated to config.toml"
+                    .to_string(),
+            )),
+            JsonValue::Bool(value) => Ok(TomlValue::Boolean(*value)),
+            JsonValue::Number(value) => {
+                if let Some(value) = value.as_i64() {
+                    Ok(TomlValue::Integer(value))
+                } else if let Some(value) = value.as_f64() {
+                    Ok(TomlValue::Float(value))
+                } else {
+                    Err(GitAiError::Generic(
+                        "Codex hooks.json contains a number that cannot be migrated to config.toml"
+                            .to_string(),
+                    ))
+                }
+            }
+            JsonValue::String(value) => Ok(TomlValue::String(value.clone())),
+            JsonValue::Array(values) => values
+                .iter()
+                .map(Self::json_to_toml)
+                .collect::<Result<Vec<_>, _>>()
+                .map(TomlValue::Array),
+            JsonValue::Object(values) => {
+                let mut table = Map::new();
+                for (key, value) in values {
+                    table.insert(key.clone(), Self::json_to_toml(value)?);
+                }
+                Ok(TomlValue::Table(table))
+            }
+        }
+    }
+
+    fn migrate_hooks_json_entries_into_config(
+        config: &TomlValue,
+        hooks_json: &JsonValue,
+    ) -> Result<(TomlValue, bool), GitAiError> {
+        let Some(hooks_obj) = hooks_json.get("hooks").and_then(|value| value.as_object()) else {
+            return Ok((config.clone(), false));
+        };
+
+        let mut converted_by_event = Vec::new();
+        for (event_name, blocks) in hooks_obj {
+            let Some(blocks) = blocks.as_array() else {
+                continue;
+            };
+
+            let mut converted_blocks = Vec::new();
+            for block in blocks {
+                let converted = Self::json_to_toml(block)?;
+                if !converted.is_table() {
+                    return Err(GitAiError::Generic(format!(
+                        "Codex hooks.json entry for {event_name} must be an object"
+                    )));
+                }
+                converted_blocks.push(converted);
+            }
+
+            if !converted_blocks.is_empty() {
+                converted_by_event.push((event_name.clone(), converted_blocks));
+            }
+        }
+
+        if converted_by_event.is_empty() {
+            return Ok((config.clone(), false));
+        }
+
+        let mut merged = config.clone();
+        let root = merged
+            .as_table_mut()
+            .ok_or_else(|| GitAiError::Generic("Codex config root must be a table".to_string()))?;
+        let hooks_table = root
+            .entry("hooks")
+            .or_insert_with(|| TomlValue::Table(Map::new()));
+        if !hooks_table.is_table() {
+            *hooks_table = TomlValue::Table(Map::new());
+        }
+        let hooks_obj = hooks_table.as_table_mut().ok_or_else(|| {
+            GitAiError::Generic("Codex config hooks field must be a table".to_string())
+        })?;
+
+        let mut changed = false;
+        for (event_name, converted_blocks) in converted_by_event {
+            let blocks_entry = hooks_obj
+                .entry(event_name)
+                .or_insert_with(|| TomlValue::Array(Vec::new()));
+            if !blocks_entry.is_array() {
+                *blocks_entry = TomlValue::Array(Vec::new());
+            }
+            let blocks = blocks_entry.as_array_mut().ok_or_else(|| {
+                GitAiError::Generic("Codex config hook event must be an array".to_string())
+            })?;
+            let existing_blocks = blocks.clone();
+
+            for block in converted_blocks {
+                if !existing_blocks.contains(&block) {
+                    blocks.push(block);
+                    changed = true;
+                }
+            }
+        }
+
+        Ok((merged, changed))
+    }
+
+    fn hooks_json_has_hooks_key(hooks_json: &JsonValue) -> bool {
+        hooks_json.get("hooks").is_some()
+    }
+
     fn config_hooks_feature_enabled(config: &TomlValue) -> bool {
         let features = config.get("features");
         let new_flag = features
@@ -630,15 +741,33 @@ impl HookInstaller for CodexInstaller {
             TomlValue::Table(Map::new())
         };
 
-        let desired_config = Self::config_with_installed_hooks(&config, &params.binary_path)?;
+        let hooks_json = if Self::hooks_json_path().exists() {
+            Some(Self::parse_hooks_json(&fs::read_to_string(
+                Self::hooks_json_path(),
+            )?)?)
+        } else {
+            None
+        };
+        let has_legacy_git_ai_hooks_json = hooks_json
+            .as_ref()
+            .map(Self::hooks_json_has_git_ai_entries)
+            .unwrap_or(false);
+        let has_legacy_hooks_json_config = hooks_json
+            .as_ref()
+            .map(Self::hooks_json_has_hooks_key)
+            .unwrap_or(false);
+        let config_with_legacy_hooks = if let Some(hooks_json) = &hooks_json {
+            let (cleaned_hooks_json, _) = Self::remove_codex_hooks_from_json(hooks_json)?;
+            Self::migrate_hooks_json_entries_into_config(&config, &cleaned_hooks_json)?.0
+        } else {
+            config.clone()
+        };
+        let desired_config =
+            Self::config_with_installed_hooks(&config_with_legacy_hooks, &params.binary_path)?;
         let has_inline_hooks = Self::config_has_inline_hooks(&config);
-        let has_legacy_hooks_json = Self::hooks_json_path().exists()
-            && Self::parse_hooks_json(&fs::read_to_string(Self::hooks_json_path())?)
-                .map(|json| Self::hooks_json_has_git_ai_entries(&json))
-                .unwrap_or(false);
         let hooks_installed = Self::config_hooks_feature_enabled(&config)
-            && (has_inline_hooks || has_legacy_hooks_json);
-        let hooks_up_to_date = config == desired_config && !has_legacy_hooks_json;
+            && (has_inline_hooks || has_legacy_git_ai_hooks_json);
+        let hooks_up_to_date = config == desired_config && !has_legacy_hooks_json_config;
 
         Ok(HookCheckResult {
             tool_installed: true,
@@ -666,20 +795,29 @@ impl HookInstaller for CodexInstaller {
         };
 
         let existing_config = Self::parse_config_toml(&existing_config_content)?;
-        let merged_config =
-            Self::config_with_installed_hooks(&existing_config, &params.binary_path)?;
 
-        // Check if legacy hooks.json needs migration
-        let (hooks_json_changed, existing_hooks_content) = if hooks_json_path.exists() {
+        let (config_with_legacy_hooks, hooks_json_update) = if hooks_json_path.exists() {
             let content = fs::read_to_string(&hooks_json_path)?;
             let existing_hooks = Self::parse_hooks_json(&content)?;
-            let (_cleaned_hooks, changed) = Self::remove_codex_hooks_from_json(&existing_hooks)?;
-            (changed, content)
+            let (cleaned_hooks, _) = Self::remove_codex_hooks_from_json(&existing_hooks)?;
+            let (config_with_legacy_hooks, _) =
+                Self::migrate_hooks_json_entries_into_config(&existing_config, &cleaned_hooks)?;
+            (
+                config_with_legacy_hooks,
+                Some((Self::hooks_json_has_hooks_key(&existing_hooks), content)),
+            )
         } else {
-            (false, String::new())
+            (existing_config.clone(), None)
         };
 
+        let merged_config =
+            Self::config_with_installed_hooks(&config_with_legacy_hooks, &params.binary_path)?;
+
         let config_changed = existing_config != merged_config;
+        let hooks_json_changed = hooks_json_update
+            .as_ref()
+            .map(|(has_hooks_key, _)| *has_hooks_key)
+            .unwrap_or(false);
         if !config_changed && !hooks_json_changed {
             return Ok(None);
         }
@@ -701,25 +839,14 @@ impl HookInstaller for CodexInstaller {
             }
         }
 
-        // THEN clean up legacy hooks.json (safe: config.toml already has the hooks)
+        // THEN remove legacy hooks.json entirely (safe: config.toml already has the hooks).
+        // Leaving the file in place causes Codex to warn about loading two hook config sources.
         if hooks_json_changed {
-            let existing_hooks = Self::parse_hooks_json(&existing_hooks_content)?;
-            let (cleaned_hooks, _) = Self::remove_codex_hooks_from_json(&existing_hooks)?;
-            if Self::hooks_json_has_any_entries(&cleaned_hooks) {
-                let new_hooks_content = serde_json::to_string_pretty(&cleaned_hooks)?;
-                diff_output.push(generate_diff(
-                    &hooks_json_path,
-                    &existing_hooks_content,
-                    &new_hooks_content,
-                ));
-                if !dry_run {
-                    write_atomic(&hooks_json_path, new_hooks_content.as_bytes())?;
-                }
-            } else {
-                diff_output.push(generate_diff(&hooks_json_path, &existing_hooks_content, ""));
-                if !dry_run {
-                    fs::remove_file(&hooks_json_path)?;
-                }
+            let (_has_hooks_key, existing_hooks_content) =
+                hooks_json_update.as_ref().expect("hooks_json_update set");
+            diff_output.push(generate_diff(&hooks_json_path, existing_hooks_content, ""));
+            if !dry_run {
+                fs::remove_file(&hooks_json_path)?;
             }
         }
 
@@ -1569,7 +1696,7 @@ codex_hooks = true
 
     #[test]
     #[serial]
-    fn test_install_hooks_migrates_hooks_json_preserves_non_git_ai_entries() {
+    fn test_install_hooks_migrates_hooks_json_entries_to_inline_toml() {
         with_temp_home(|home| {
             let codex_dir = home.join(".codex");
             fs::create_dir_all(&codex_dir).unwrap();
@@ -1605,34 +1732,51 @@ codex_hooks = true
                 .expect("install should succeed");
 
             assert!(
-                hooks_json_path.exists(),
-                "hooks.json should be preserved when non-git-ai entries remain"
+                !hooks_json_path.exists(),
+                "hooks.json should be removed after migrating legacy entries to config.toml"
             );
-            let hooks_content = fs::read_to_string(&hooks_json_path).unwrap();
-            let hooks_json: serde_json::Value = serde_json::from_str(&hooks_content).unwrap();
-            let pre_blocks = hooks_json["hooks"]["PreToolUse"].as_array().unwrap();
+            let config_content = fs::read_to_string(&config_path).unwrap();
+            let parsed = CodexInstaller::parse_config_toml(&config_content).unwrap();
+            let pre_blocks = parsed["hooks"]["PreToolUse"].as_array().unwrap();
+            assert!(
+                CodexInstaller::config_has_inline_hooks(&parsed),
+                "config.toml should contain current git-ai hooks"
+            );
             assert!(
                 pre_blocks.iter().any(|block| {
-                    block["hooks"].as_array().is_some_and(|hooks| {
-                        hooks
-                            .iter()
-                            .any(|hook| hook["command"].as_str() == Some("echo keep"))
-                    })
+                    block
+                        .get("hooks")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|hook| {
+                                hook.get("command").and_then(|v| v.as_str()) == Some("echo keep")
+                            })
+                        })
                 }),
-                "non-git-ai hooks should be preserved in hooks.json"
+                "non-git-ai hooks should be preserved in config.toml"
             );
             assert!(
                 !pre_blocks.iter().any(|block| {
-                    block["hooks"].as_array().is_some_and(|hooks| {
-                        hooks.iter().any(|hook| {
-                            hook["command"]
-                                .as_str()
-                                .map(CodexInstaller::is_git_ai_codex_command)
-                                .unwrap_or(false)
+                    block
+                        .get("hooks")
+                        .and_then(|v| v.as_array())
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|hook| {
+                                hook.get("command").and_then(|v| v.as_str())
+                                    == Some("/old/git-ai checkpoint codex --hook-input stdin")
+                            })
                         })
-                    })
                 }),
-                "git-ai hooks should be removed from hooks.json"
+                "stale git-ai hooks from hooks.json should not be migrated"
+            );
+
+            let check = installer
+                .check_hooks(&params)
+                .expect("check should succeed after migration");
+            assert!(check.hooks_installed);
+            assert!(
+                check.hooks_up_to_date,
+                "migrated config should be reported up to date"
             );
         });
     }
