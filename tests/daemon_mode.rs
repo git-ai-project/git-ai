@@ -3,14 +3,17 @@
 mod repos;
 
 use git_ai::authorship::working_log::CheckpointKind;
+#[cfg(not(windows))]
 use git_ai::commands::checkpoint_agent::orchestrator::{
     BaseCommit, CheckpointFile, CheckpointRequest,
 };
+#[cfg(not(windows))]
 use git_ai::daemon::checkpoint::PreparedPathRole;
+#[cfg(not(windows))]
+use git_ai::daemon::send_control_request_with_timeout;
 use git_ai::daemon::{
     ControlRequest, DaemonConfig, DaemonLock, local_socket_connects_with_timeout,
     open_local_socket_stream_with_timeout, read_daemon_pid, send_control_request,
-    send_control_request_with_timeout,
 };
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{
