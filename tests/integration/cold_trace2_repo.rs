@@ -462,6 +462,46 @@ fn test_cold_repo_first_traced_squash_merge_is_processed() {
 }
 
 #[test]
+fn test_cold_daemon_first_traced_squash_merge_preserves_source_ai_authorship() {
+    let mut repo = TestRepo::new_dedicated_daemon();
+    let mut file = repo.filename("document.txt");
+
+    file.set_contents(crate::lines![
+        "section 1".unattributed_human(),
+        "section 2".unattributed_human(),
+        "section 3".unattributed_human()
+    ]);
+    repo.stage_all_and_commit("initial document").unwrap();
+    repo.git(&["branch", "-M", "main"]).unwrap();
+
+    repo.git(&["checkout", "-b", "feature"]).unwrap();
+    file.insert_at(3, crate::lines!["// AI feature addition at end".ai()]);
+    repo.stage_all_and_commit("AI adds feature").unwrap();
+
+    repo.git(&["checkout", "main"]).unwrap();
+    let mut file = repo.filename("document.txt");
+    file.insert_at(
+        0,
+        crate::lines!["// Master update at top".unattributed_human()],
+    );
+    repo.stage_all_and_commit("out-of-band main update")
+        .unwrap();
+
+    repo.restart_dedicated_daemon_for_test();
+    repo.git(&["merge", "--squash", "feature"]).unwrap();
+    repo.stage_all_and_commit("squashed feature").unwrap();
+
+    let mut file = repo.filename("document.txt");
+    file.assert_committed_lines(crate::lines![
+        "// Master update at top".human(),
+        "section 1".human(),
+        "section 2".human(),
+        "section 3".ai(),
+        "// AI feature addition at end".ai()
+    ]);
+}
+
+#[test]
 fn test_cold_repo_first_traced_merge_is_processed() {
     let mut repo = cold_repo();
     raw_commit_file(&repo, "base.txt", "base\n", "raw base");
@@ -544,6 +584,7 @@ crate::reuse_tests_in_worktree!(
     test_cold_repo_mid_merge_commit_preserves_ai_conflict_resolution,
     test_cold_repo_first_traced_cherry_pick_is_processed,
     test_cold_repo_first_traced_squash_merge_is_processed,
+    test_cold_daemon_first_traced_squash_merge_preserves_source_ai_authorship,
     test_cold_repo_first_traced_merge_is_processed,
     test_cold_repo_first_traced_stash_pop_is_processed,
     test_cold_repo_traced_stash_after_raw_stash_history_preserves_current_ai_attribution,

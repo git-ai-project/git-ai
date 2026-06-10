@@ -10,8 +10,43 @@ pub fn reduce_family_command(
     cmd: NormalizedCommand,
     analyzers: &AnalyzerRegistry,
 ) -> Result<(AppliedCommand, AnalysisResult), GitAiError> {
+    reduce_family_command_with_ref_snapshot(
+        state,
+        cmd,
+        analyzers,
+        &std::collections::HashMap::new(),
+    )
+}
+
+pub fn reduce_family_command_with_ref_snapshot(
+    state: &mut FamilyState,
+    cmd: NormalizedCommand,
+    analyzers: &AnalyzerRegistry,
+    command_start_refs: &std::collections::HashMap<String, String>,
+) -> Result<(AppliedCommand, AnalysisResult), GitAiError> {
     // Analyze against pre-command state so history/ref analyzers can infer old->new correctly.
-    let analysis = analyzers.analyze(&cmd, AnalysisView { refs: &state.refs })?;
+    let refs_for_analysis;
+    let analysis_refs = if command_start_refs.is_empty() {
+        &state.refs
+    } else {
+        refs_for_analysis = state
+            .refs
+            .iter()
+            .map(|(reference, oid)| (reference.clone(), oid.clone()))
+            .chain(
+                command_start_refs
+                    .iter()
+                    .map(|(reference, oid)| (reference.clone(), oid.clone())),
+            )
+            .collect();
+        &refs_for_analysis
+    };
+    let analysis = analyzers.analyze(
+        &cmd,
+        AnalysisView {
+            refs: analysis_refs,
+        },
+    )?;
     apply_ref_changes(state, &cmd);
     apply_worktree_state(state, &cmd);
 

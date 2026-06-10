@@ -107,19 +107,21 @@ impl RefCursor {
         &mut self,
         cmd: &mut NormalizedCommand,
         state: &FamilyState,
-    ) -> Result<(), GitAiError> {
+    ) -> Result<HashMap<String, String>, GitAiError> {
         cmd.ref_changes.clear();
         self.initialize_from_command_reflog_start_offsets(cmd)?;
+        let command_start_refs =
+            refs_at_reflog_start_offsets(&self.family, &cmd.reflog_start_offsets)?;
 
         if cmd.exit_code != 0 && !command_can_move_refs_on_nonzero(cmd.primary_command.as_deref()) {
-            return Ok(());
+            return Ok(command_start_refs);
         }
 
         let Some(primary) = cmd.primary_command.as_deref() else {
-            return Ok(());
+            return Ok(command_start_refs);
         };
         if !command_uses_ref_cursor(primary) {
-            return Ok(());
+            return Ok(command_start_refs);
         }
 
         match primary {
@@ -167,7 +169,7 @@ impl RefCursor {
         if !cmd.ref_changes.is_empty() {
             cmd.confidence = Confidence::High;
         }
-        Ok(())
+        Ok(command_start_refs)
     }
 
     fn initialize_from_command_reflog_start_offsets(
@@ -1722,6 +1724,47 @@ pub(crate) fn capture_reflog_start_offsets_for_worktree(worktree: &Path) -> Hash
         }
     }
     offsets
+}
+
+pub(crate) fn refs_at_reflog_start_offsets(
+    family: &FamilyKey,
+    offsets: &HashMap<String, u64>,
+) -> Result<HashMap<String, String>, GitAiError> {
+    let common_dir = PathBuf::from(&family.0);
+    let mut refs = HashMap::new();
+
+    for (key, offset) in offsets {
+        if *offset == 0 {
+            continue;
+        }
+        let Some((reference, path)) = reflog_reference_and_path_for_key(&common_dir, key) else {
+            continue;
+        };
+        let Some(record) = read_reflog_record_ending_at(&path, *offset)? else {
+            continue;
+        };
+        if valid_non_zero_oid(&record.new) {
+            refs.insert(reference, record.new);
+        }
+    }
+
+    Ok(refs)
+}
+
+fn reflog_reference_and_path_for_key(common_dir: &Path, key: &str) -> Option<(String, PathBuf)> {
+    if let Some(reference) = key.strip_prefix("common:") {
+        return Some((
+            reference.to_string(),
+            common_dir.join("logs").join(reference),
+        ));
+    }
+    let git_dir = key
+        .strip_prefix("worktree:")
+        .and_then(|value| value.strip_suffix(":HEAD"))?;
+    Some((
+        "HEAD".to_string(),
+        PathBuf::from(git_dir).join("logs").join("HEAD"),
+    ))
 }
 
 impl From<&CursorEntry> for ReflogAnchor {
