@@ -444,6 +444,81 @@ fn test_soft_reset_amend_then_branch_move_preserves_squashed_child_attribution()
 }
 
 #[test]
+fn test_delayed_soft_reset_amend_then_branch_move_preserves_squashed_child_attribution() {
+    let repo = TestRepo::new();
+    setup_initial_commit(&repo);
+
+    repo.git(&["checkout", "-b", "parent"])
+        .expect("checkout parent should succeed");
+    let mut parent_file = repo.filename("delayed_csf_parent.txt");
+    parent_file.set_contents(lines!["parent line 1", "parent line 2"]);
+    repo.stage_all_and_commit("parent")
+        .expect("parent commit should succeed");
+
+    repo.git(&["checkout", "-b", "child"])
+        .expect("checkout child should succeed");
+    let mut child_file = repo.filename("delayed_csf_child.txt");
+    child_file.set_contents(lines!["child ai 1".ai()]);
+    let child_one = repo
+        .stage_all_and_commit("child commit 1")
+        .expect("child commit 1 should succeed");
+
+    child_file.set_contents(lines!["child ai 1".ai(), "child ai 2".ai()]);
+    repo.stage_all_and_commit("child commit 2")
+        .expect("child commit 2 should succeed");
+
+    repo.sync_daemon();
+
+    let trace_dir = tempfile::tempdir().expect("trace temp dir");
+    let reset_trace = trace_dir.path().join("soft-reset.trace2");
+    let amend_trace = trace_dir.path().join("amend.trace2");
+    let switch_trace = trace_dir.path().join("switch.trace2");
+    let reset_session = new_daemon_test_sync_session_id();
+    let amend_session = new_daemon_test_sync_session_id();
+    let switch_session = new_daemon_test_sync_session_id();
+    let reset_session_arg = format!("git-ai.testSyncSession={reset_session}");
+    let amend_session_arg = format!("git-ai.testSyncSession={amend_session}");
+    let switch_session_arg = format!("git-ai.testSyncSession={switch_session}");
+
+    raw_git_trace_to_file(
+        &repo,
+        &[
+            "-c",
+            &reset_session_arg,
+            "reset",
+            "--soft",
+            &child_one.commit_sha,
+        ],
+        &reset_trace,
+    );
+    raw_git_trace_to_file(
+        &repo,
+        &[
+            "-c",
+            &amend_session_arg,
+            "commit",
+            "--amend",
+            "-m",
+            "squashed child",
+        ],
+        &amend_trace,
+    );
+    raw_git_trace_to_file(
+        &repo,
+        &["-c", &switch_session_arg, "switch", "-C", "parent", "HEAD"],
+        &switch_trace,
+    );
+
+    replay_trace_file_to_daemon(&repo, &reset_trace);
+    replay_trace_file_to_daemon(&repo, &amend_trace);
+    replay_trace_file_to_daemon(&repo, &switch_trace);
+    repo.sync_daemon_external_completion_sessions(&[reset_session, amend_session, switch_session]);
+
+    parent_file.assert_lines_and_blame(lines!["parent line 1".human(), "parent line 2".human(),]);
+    child_file.assert_lines_and_blame(lines!["child ai 1".ai(), "child ai 2".ai()]);
+}
+
+#[test]
 fn test_split_trace_metadata_still_sequences_amend_authorship() {
     let repo = TestRepo::new();
     setup_initial_commit(&repo);

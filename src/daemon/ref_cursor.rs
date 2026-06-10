@@ -127,12 +127,17 @@ impl RefCursor {
         match primary {
             "commit" => self.enrich_commit(cmd, state),
             "revert" => self.enrich_revert(cmd, state),
-            "reset" => self.consume_head_transition_for_command(
-                cmd,
-                state,
-                &["reset:"],
-                self.head_expected_transition(cmd, state),
-            ),
+            "reset" => {
+                let args = command_args(cmd);
+                let mut expected = self.head_expected_transition(cmd, state);
+                let reset_messages = reset_reflog_messages(&args);
+                if !reset_messages.is_empty() {
+                    expected = expected
+                        .without_old_oid_constraint()
+                        .with_reflog_messages(reset_messages);
+                }
+                self.consume_head_transition_for_command(cmd, state, &["reset:"], expected)
+            }
             "checkout" => {
                 if checkout_is_path_checkout(cmd) {
                     Ok(())
@@ -1906,6 +1911,31 @@ fn commit_reflog_messages(args: &[String], amend: bool) -> HashSet<String> {
         .collect()
 }
 
+fn reset_reflog_messages(args: &[String]) -> HashSet<String> {
+    let Some(target) = reset_target_arg(args) else {
+        return HashSet::new();
+    };
+    [format!("reset: moving to {target}")].into_iter().collect()
+}
+
+fn reset_target_arg(args: &[String]) -> Option<String> {
+    let mut idx = if args.first().is_some_and(|arg| arg == "reset") {
+        1
+    } else {
+        0
+    };
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--" => return None,
+            "--pathspec-from-file" => idx += 2,
+            value if value.starts_with("--pathspec-from-file=") => idx += 1,
+            value if value.starts_with('-') => idx += 1,
+            value => return Some(value.to_string()),
+        }
+    }
+    None
+}
+
 fn commit_subject_from_args(args: &[String]) -> Option<String> {
     let mut idx = if args.first().is_some_and(|arg| arg == "commit") {
         1
@@ -3260,7 +3290,7 @@ mod tests {
             format!("{A} {B} Test User <test@example.com> 0 +0000\treset: moving to old\n");
         let start_offset = old_line.len() as u64;
         let current_line =
-            format!("{C} {D} Test User <test@example.com> 0 +0000\treset: moving to current\n");
+            format!("{C} {D} Test User <test@example.com> 0 +0000\treset: moving to {D}\n");
         fs::write(&head_log, format!("{old_line}{current_line}")).unwrap();
 
         let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
@@ -3270,6 +3300,41 @@ mod tests {
         let mut cmd = command_with_worktree(&family, Some(worktree), &["reset", "--hard", D]);
         cmd.reflog_start_offsets
             .insert(head_key(&git_dir), start_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: C.to_string(),
+                new: D.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn reset_late_reflog_offset_uses_command_message_not_stale_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let head_log = git_dir.join("logs/HEAD");
+        fs::create_dir_all(head_log.parent().unwrap()).unwrap();
+
+        let stale_line =
+            format!("{A} {B} Test User <test@example.com> 0 +0000\treset: moving to stale\n");
+        let current_line =
+            format!("{C} {D} Test User <test@example.com> 0 +0000\treset: moving to {D}\n");
+        let late_offset = (stale_line.len() + current_line.len()) as u64;
+        fs::write(&head_log, format!("{stale_line}{current_line}")).unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), A.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        let mut cmd = command_with_worktree(&family, Some(worktree), &["reset", "--soft", D]);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), late_offset);
 
         cursor.enrich_command(&mut cmd, &state).unwrap();
 
