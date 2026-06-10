@@ -283,6 +283,38 @@ fn replay_trace_payloads_to_daemon(repo: &TestRepo, payloads: &[Value]) {
     stream.flush().expect("flush trace payloads");
 }
 
+fn open_unfinished_mutating_trace_root(
+    repo: &TestRepo,
+    sid: &str,
+) -> git_ai::daemon::DaemonClientStream {
+    let mut stream = open_local_socket_stream_with_timeout(
+        &repo.daemon_trace_socket_path(),
+        Duration::from_secs(2),
+    )
+    .expect("connect unfinished trace root to daemon");
+    let line = serde_json::to_string(&json!({
+        "event": "start",
+        "sid": sid,
+        "argv": ["git", "commit", "-m", "unfinished earlier command"],
+        "time_ns": 1u64,
+    }))
+    .expect("serialize unfinished trace start");
+    stream
+        .write_all(line.as_bytes())
+        .expect("write unfinished trace start");
+    stream
+        .write_all(b"\n")
+        .expect("write unfinished trace newline");
+    stream.flush().expect("flush unfinished trace start");
+    stream
+}
+
+fn daemon_completed_session(repo: &TestRepo, session: &str) -> bool {
+    repo.daemon_completion_entries()
+        .iter()
+        .any(|entry| entry.test_sync_session.as_deref() == Some(session))
+}
+
 fn current_reflog_offsets(repo: &TestRepo) -> serde_json::Map<String, Value> {
     let git_dir = repo.path().join(".git").canonicalize().unwrap();
     let mut offsets = serde_json::Map::new();
@@ -1772,6 +1804,68 @@ fn test_delayed_current_branch_update_ref_trace_preserves_new_commit_attribution
     assert_note_has_ai_for_file(&repo, &commit_sha, "delayed-branch-plumbing.txt");
     let mut feature_file = repo.filename("delayed-branch-plumbing.txt");
     feature_file.assert_lines_and_blame(lines!["branch ai".ai()]);
+}
+
+#[test]
+fn test_update_ref_side_effect_waits_for_prior_open_trace_root_without_family() {
+    let repo = TestRepo::new();
+    setup_initial_commit(&repo);
+
+    repo.git(&["checkout", "-b", "feature"])
+        .expect("checkout feature should succeed");
+
+    fs::write(
+        repo.path().join("sequenced-branch-plumbing.txt"),
+        "sequenced branch ai\n",
+    )
+    .unwrap();
+    repo.git_ai(&["checkpoint", "mock_ai", "sequenced-branch-plumbing.txt"])
+        .unwrap();
+    raw_untraced_git(&repo, &["add", "-A"]);
+    repo.sync_daemon();
+
+    let parent_sha = head_sha(&repo);
+    let tree_sha = raw_untraced_git(&repo, &["write-tree"]).trim().to_string();
+    let commit_sha = raw_untraced_git(
+        &repo,
+        &[
+            "commit-tree",
+            &tree_sha,
+            "-p",
+            &parent_sha,
+            "-m",
+            "sequenced branch plumbing commit",
+        ],
+    )
+    .trim()
+    .to_string();
+
+    let unfinished_trace =
+        open_unfinished_mutating_trace_root(&repo, "20260411T120000.000000-Punfinished-root");
+    std::thread::sleep(Duration::from_millis(100));
+
+    let session = new_daemon_test_sync_session_id();
+    raw_traced_git_with_session(
+        &repo,
+        &["update-ref", "refs/heads/feature", &commit_sha, &parent_sha],
+        &session,
+    );
+
+    let start = std::time::Instant::now();
+    while start.elapsed() < Duration::from_millis(500) {
+        assert!(
+            !daemon_completed_session(&repo, &session),
+            "update-ref side effect completed while an earlier mutating trace root was still open without family metadata"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    drop(unfinished_trace);
+    repo.sync_daemon_external_completion_sessions(&[session]);
+
+    assert_note_has_ai_for_file(&repo, &commit_sha, "sequenced-branch-plumbing.txt");
+    let mut feature_file = repo.filename("sequenced-branch-plumbing.txt");
+    feature_file.assert_lines_and_blame(lines!["sequenced branch ai".ai()]);
 }
 
 #[test]

@@ -2413,6 +2413,37 @@ impl ActorDaemonCoordinator {
             .await
     }
 
+    async fn drain_ready_family_sequencer_entries(&self, family: &str) -> Result<(), GitAiError> {
+        let exec_lock = self.side_effect_exec_lock(family)?;
+        let _guard = exec_lock.lock().await;
+        self.drain_ready_family_sequencer_entries_locked(family)
+            .await
+    }
+
+    async fn drain_all_ready_family_sequencers(&self) -> Result<(), GitAiError> {
+        let families = {
+            let map = self.family_sequencers_by_family.lock().map_err(|_| {
+                GitAiError::Generic("family sequencer map lock poisoned".to_string())
+            })?;
+            map.keys().cloned().collect::<Vec<_>>()
+        };
+        for family in families {
+            self.drain_ready_family_sequencer_entries(&family).await?;
+        }
+        Ok(())
+    }
+
+    async fn drain_ready_family_sequencers_after_root_cleared(
+        &self,
+        family: Option<String>,
+    ) -> Result<(), GitAiError> {
+        if let Some(family) = family {
+            self.drain_ready_family_sequencer_entries(&family).await
+        } else {
+            self.drain_all_ready_family_sequencers().await
+        }
+    }
+
     async fn replace_pending_root_entry(
         &self,
         root_sid: &str,
@@ -2455,6 +2486,47 @@ impl ActorDaemonCoordinator {
         self.drain_ready_family_sequencer_entries_locked(&family)
             .await?;
         Ok(Some(family))
+    }
+
+    fn family_entry_blocked_by_prior_open_trace_root(
+        &self,
+        family: &str,
+        started_at_ns: u128,
+        entry_root_sid: Option<&str>,
+    ) -> Result<bool, GitAiError> {
+        let ingress = self
+            .trace_ingress_state
+            .lock()
+            .map_err(|_| GitAiError::Generic("trace ingress state lock poisoned".to_string()))?;
+
+        for (root_sid, open_count) in &ingress.root_open_connections {
+            if *open_count == 0 || entry_root_sid == Some(root_sid.as_str()) {
+                continue;
+            }
+            if ingress.root_definitely_read_only.contains(root_sid) {
+                continue;
+            }
+            if !ingress.root_mutating.get(root_sid).copied().unwrap_or(true) {
+                continue;
+            }
+            if ingress
+                .root_started_at_ns
+                .get(root_sid)
+                .copied()
+                .is_some_and(|root_started| root_started > started_at_ns)
+            {
+                continue;
+            }
+            if ingress
+                .root_families
+                .get(root_sid)
+                .is_none_or(|root_family| root_family == family)
+            {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     fn record_side_effect_error(
@@ -3272,6 +3344,17 @@ impl ActorDaemonCoordinator {
                 });
             while let Some(first_entry) = state.entries.first_entry() {
                 if matches!(first_entry.get(), FamilySequencerEntry::PendingRoot) {
+                    break;
+                }
+                let entry_root_sid = match first_entry.get() {
+                    FamilySequencerEntry::ReadyCommand(command) => Some(command.root_sid.as_str()),
+                    _ => None,
+                };
+                if self.family_entry_blocked_by_prior_open_trace_root(
+                    family,
+                    first_entry.key().started_at_ns,
+                    entry_root_sid,
+                )? {
                     break;
                 }
                 let (order, entry) = first_entry.remove_entry();
@@ -4682,16 +4765,17 @@ impl ActorDaemonCoordinator {
                 let mut normalizer = self.normalizer.lock().await;
                 let _ = normalizer.sweep_orphans_for_roots(&[root_sid.to_string()]);
             }
-            let outcome = if self
+            let replaced_family = self
                 .replace_pending_root_entry(root_sid, FamilySequencerEntry::Canceled)
-                .await?
-                .is_some()
-            {
+                .await?;
+            let outcome = if replaced_family.is_some() {
                 TracePayloadApplyOutcome::QueuedFamily
             } else {
                 TracePayloadApplyOutcome::None
             };
             self.clear_trace_root_tracking(root_sid)?;
+            self.drain_ready_family_sequencers_after_root_cleared(replaced_family)
+                .await?;
             return Ok(outcome);
         }
 
@@ -4714,13 +4798,15 @@ impl ActorDaemonCoordinator {
                     .await?
             {
                 self.clear_trace_root_tracking(root_sid)?;
-                let _ = family;
+                self.drain_ready_family_sequencers_after_root_cleared(Some(family))
+                    .await?;
                 return Ok(TracePayloadApplyOutcome::QueuedFamily);
             }
             return Ok(TracePayloadApplyOutcome::None);
         };
         let root_sid = command.root_sid.clone();
 
+        let mut family_to_drain_after_clear = None;
         let outcome = if let Some(family) = self
             .replace_pending_root_entry(
                 &root_sid,
@@ -4728,7 +4814,7 @@ impl ActorDaemonCoordinator {
             )
             .await?
         {
-            let _ = family;
+            family_to_drain_after_clear = Some(family);
             TracePayloadApplyOutcome::QueuedFamily
         } else if let Some(family) = command.family_key.as_ref().map(|family| family.0.clone())
             && Self::trace_invocation_participates_in_family_sequencer(
@@ -4737,6 +4823,7 @@ impl ActorDaemonCoordinator {
             )
         {
             self.append_ready_command_entry(&family, command).await?;
+            family_to_drain_after_clear = Some(family);
             TracePayloadApplyOutcome::QueuedFamily
         } else {
             match self.coordinator.route_command(command).await {
@@ -4748,6 +4835,8 @@ impl ActorDaemonCoordinator {
             }
         };
         self.clear_trace_root_tracking(&root_sid)?;
+        self.drain_ready_family_sequencers_after_root_cleared(family_to_drain_after_clear)
+            .await?;
         Ok(outcome)
     }
 
