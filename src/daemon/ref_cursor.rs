@@ -1457,19 +1457,14 @@ impl RefCursor {
         key: &str,
         offset: u64,
     ) -> Result<bool, GitAiError> {
-        // A command-start reflog offset only seeds a *fresh* cursor. When a cursor
-        // already exists it was established by prior in-order command processing
-        // (or a checkpoint boundary) and precisely marks where this family's next
-        // unconsumed reflog entry begins. Daemon-ingress offsets are captured
-        // asynchronously and may race ahead of the command's own reflog entry, so
-        // letting one advance an existing cursor would skip this command's entry
-        // (losing attribution) or, if behind, re-consume already-attributed
-        // entries. The in-order cursor always wins.
-        if self.offsets.contains_key(key) {
+        let Some(existing) = self.offsets.get(key).copied() else {
+            if key.starts_with("common:") {
+                return Ok(true);
+            }
+            return self.reflog_has_records_after_offset(key, offset);
+        };
+        if existing >= offset {
             return Ok(false);
-        }
-        if key.starts_with("common:") {
-            return Ok(true);
         }
         self.reflog_has_records_after_offset(key, offset)
     }
@@ -3204,70 +3199,6 @@ mod tests {
                 old: B.to_string(),
                 new: C.to_string(),
             }]
-        );
-    }
-
-    #[test]
-    fn late_ingress_offset_does_not_advance_in_order_cursor_past_own_commit() {
-        // Regression for the graphite/gt-create flake: the family actor keeps one
-        // RefCursor across commands. A prior command (e.g. a `switch`) advanced the
-        // HEAD cursor to exactly before this command's commit entry. The async
-        // daemon-ingress offset capture then races and reads the reflog AFTER git
-        // appended both the commit entry and a following switch entry, producing a
-        // `reflog_start_offsets` hint that points PAST this commit's own entry.
-        //
-        // The in-order cursor is authoritative for where this command's entries
-        // begin; a racy ingress hint must never advance it forward, or the commit's
-        // own reflog entry is skipped and the commit loses attribution.
-        let temp = tempfile::tempdir().unwrap();
-        let worktree = temp.path().join("repo");
-        let git_dir = worktree.join(".git");
-        let head_log = git_dir.join("logs/HEAD");
-        fs::create_dir_all(head_log.parent().unwrap()).unwrap();
-
-        // A→B: the prior switch onto the new branch (already consumed; cursor sits
-        // at end of this line). B→C: this command's commit. C→D: the subsequent
-        // switch-back that gt issues right after committing.
-        let switch_line =
-            format!("{A} {B} Test User <test@example.com> 0 +0000\tcheckout: moving to branch\n");
-        let commit_line =
-            format!("{B} {C} Test User <test@example.com> 0 +0000\tcommit: gt create\n");
-        let switch_back_line =
-            format!("{C} {D} Test User <test@example.com> 0 +0000\tcheckout: moving back\n");
-        let in_order_offset = switch_line.len() as u64;
-        // Ingress captured the reflog late: after the commit entry was written but
-        // before the switch-back, so the hint points just PAST this commit's own
-        // entry while a later record (the switch-back) still exists. That later
-        // record is what makes the stale hint look "authoritative".
-        let late_offset = (switch_line.len() + commit_line.len()) as u64;
-        fs::write(
-            &head_log,
-            format!("{switch_line}{commit_line}{switch_back_line}"),
-        )
-        .unwrap();
-
-        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
-        let mut state = family_state(&family);
-        state.refs.insert("HEAD".to_string(), B.to_string());
-        let mut cursor = RefCursor::new(family.clone());
-        // The prior command established the authoritative in-order boundary.
-        cursor.initialize_reflog_cursor(&head_key(&git_dir), in_order_offset).unwrap();
-
-        let mut cmd =
-            command_with_worktree(&family, Some(worktree), &["commit", "-m", "gt create"]);
-        cmd.reflog_start_offsets
-            .insert(head_key(&git_dir), late_offset);
-
-        cursor.enrich_command(&mut cmd, &state).unwrap();
-
-        assert_eq!(
-            cmd.ref_changes,
-            vec![RefChange {
-                reference: "HEAD".to_string(),
-                old: B.to_string(),
-                new: C.to_string(),
-            }],
-            "late ingress offset must not advance the in-order cursor past the commit's own entry"
         );
     }
 

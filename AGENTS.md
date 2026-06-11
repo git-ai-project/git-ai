@@ -40,7 +40,7 @@ When opening a PR, make sure to monitor the ubuntu-based CI jobs first. They are
 A single binary serves two roles based on `argv[0]`:
 - **`argv[0] == "git"`** --> `commands::git_handlers::handle_git()` -- proxies to real git with pre/post hooks per subcommand
 - **`argv[0] == "git-ai"`** --> `commands::git_ai_handlers::handle_git_ai()` -- direct subcommands (checkpoint, blame, diff, status, search, etc.)
-- **Debug-only shortcut**: When `cfg!(debug_assertions)` and `GIT_AI=git` env var is set, forces git proxy mode regardless of binary name. Most integration tests no longer rely on this: they run the real git binary with trace2 wired to a per-test daemon (production-like), using the proxy env only in a few special cases.
+- **Debug-only shortcut**: When `cfg!(debug_assertions)` and `GIT_AI=git` env var is set, forces git proxy mode regardless of binary name. This is how integration tests invoke the binary as a git proxy without symlinking.
 
 ### Core data flow: checkpoint --> working log --> authorship note
 
@@ -51,19 +51,19 @@ A single binary serves two roles based on `argv[0]`:
 
 2. **Working log**: Checkpoint data is written to `.git/ai/working_logs/<base_commit>/` as JSON files. Each working log entry records per-file line attributions (which ranges are AI vs known human vs untracked (legacy human)) and session metadata.
 
-3. **Post-commit authorship**: After `git commit`, the daemon reads working logs, generates an `AuthorshipLog` (schema version `authorship/3.0.0`), and stores it as a Git Note under `refs/notes/ai`. The authorship log contains attestation entries (hash --> line ranges) and a metadata section with prompt records.
+3. **Post-commit hook**: On `git commit`, the post-commit hook reads working logs, generates an `AuthorshipLog` (schema version `authorship/3.0.0`), and stores it as a Git Note under `refs/notes/ai`. The authorship log contains attestation entries (hash --> line ranges) and a metadata section with prompt records.
 
-4. **Rewrite tracking**: The daemon ingests git trace2 event streams to learn which git commands ran, establishes exact ref transitions via a reflog cursor model (`src/daemon/ref_cursor.rs`), and migrates authorship notes/working logs through `src/authorship/rewrite.rs` (`RewriteEvent` + `handle_rewrite_event`) plus the per-operation modules (`rewrite_reset.rs`, `rewrite_stash.rs`, `rewrite_revert.rs`, `rewrite_cherry_pick.rs`). See `docs/rewrite-ops-spec.md` and `docs/daemon-trace2-ingestion-spec.md`.
+4. **Rewrite tracking**: The `rewrite_log` (`.git/ai/rewrite_log`) records history-rewriting git operations (rebase, cherry-pick, reset, merge, stash, amend). Post-hooks for these commands use `rebase_authorship.rs` to rewrite authorship notes so attribution follows code through history rewrites.
 
-### Daemon trace2 ingestion (src/daemon.rs, src/daemon/)
+### Git proxy hook architecture (src/commands/hooks/)
 
-The git proxy is a thin passthrough (`src/commands/git_handlers.rs`); all attribution side effects run in the shared daemon, driven by trace2:
-
-- Socket listener receives trace2 JSON frames; definitely-read-only roots are filtered out
-- `TraceNormalizer` (src/daemon/trace_normalizer.rs) groups frames by root sid into a `NormalizedCommand`
-- A per-repo-family actor (src/daemon/family_actor.rs) sequences commands and checkpoints in order
-- `RefCursor::enrich_command` (src/daemon/ref_cursor.rs) consumes cursor-bounded reflog entries to fill exact `ref_changes`; commands without a cursor or immutable argv OIDs fail closed for attribution
-- Analyzers (src/daemon/analyzers/history.rs) classify enriched commands into semantic events that drive post-commit authorship and rewrite-note migration
+Each git subcommand has dedicated pre/post hooks:
+- `commit_hooks` -- pre: captures virtual attributions; post: generates authorship note
+- `rebase_hooks` -- pre: records original HEAD/onto; post: rewrites authorship notes for rebased commits
+- `cherry_pick_hooks` -- post: copies/adapts authorship from source commit
+- `reset_hooks` -- post: reconstructs working logs when commits are un-done
+- `stash_hooks` -- preserves uncommitted AI attributions across stash/pop
+- `merge_hooks`, `checkout_hooks`, `switch_hooks`, `fetch_hooks`, `push_hooks`, `clone_hooks`
 
 Signal forwarding: On Unix, the git proxy installs signal handlers (SIGTERM, SIGINT, SIGHUP, SIGQUIT) that forward to the child git process group.
 
@@ -71,7 +71,7 @@ Signal forwarding: On Unix, the git proxy installs signal handlers (SIGTERM, SIG
 
 `Config` is a global `OnceLock` singleton accessed via `Config::get()`. It reads from `~/.git-ai/config.json`. In tests, `GIT_AI_TEST_CONFIG_PATCH` env var allows overriding specific config fields without a real config file. Feature flags follow precedence: environment vars (`GIT_AI_*` prefix via `envy`) > config file > defaults.
 
-Feature flags have separate debug/release defaults defined via the `define_feature_flags!` macro in `src/feature_flags.rs`. Currently: `auth_keyring` (false/false), `transcript_streaming` (true/true), `transcript_sweep` (true/true), `checkpoint_debug_log` (false/false).
+Feature flags have separate debug/release defaults defined via the `define_feature_flags!` macro in `src/feature_flags.rs`. Currently: `rewrite_stash` (true/true), `auth_keyring` (false/false).
 
 ### Error handling
 
@@ -79,15 +79,15 @@ Feature flags have separate debug/release defaults defined via the `define_featu
 
 ## Test Infrastructure
 
-### Integration test framework (tests/integration/repos/)
+### Integration test framework (tests/repos/)
 
-Tests create real git repositories and run against a shared test daemon pool (trace2-driven, like production). The test framework has three key files:
+Tests create real git repositories. The test framework has three key files:
 
-- **`tests/integration/repos/test_repo.rs`** -- `TestRepo` struct: creates temp git repos, runs git/git-ai commands as subprocesses wired to a per-test daemon (control + trace sockets), and provides explicit daemon sync before assertions. Uses `get_binary_path()` which auto-compiles the binary via a `OnceLock`.
+- **`tests/repos/test_repo.rs`** -- `TestRepo` struct: creates temp git repos, runs git-ai commands as subprocess. Uses `get_binary_path()` which auto-compiles the binary via a `OnceLock`. Tests invoke the binary with `GIT_AI=git` env var to trigger git proxy mode.
 
-- **`tests/integration/repos/test_file.rs`** -- `TestFile` fluent API for setting file contents with attribution expectations. The `lines!` macro + `.ai()` / `.human()` / `.unattributed_human()` trait methods create `ExpectedLine` vectors. `assert_lines_and_blame()` validates both content and AI/human attribution.
+- **`tests/repos/test_file.rs`** -- `TestFile` fluent API for setting file contents with attribution expectations. The `lines!` macro + `.ai()` / `.human()` trait methods create `ExpectedLine` vectors. `assert_lines_and_blame()` validates both content and AI/human attribution.
 
-- **`tests/integration/repos/mod.rs`** -- `subdir_test_variants!` macro auto-generates two test variants: one from a subdirectory and one using `-C` flag, to verify repository discovery works from any CWD.
+- **`tests/repos/mod.rs`** -- `subdir_test_variants!` macro auto-generates two test variants: one from a subdirectory and one using `-C` flag, to verify repository discovery works from any CWD.
 
 Simple test pattern (using all standard helpers):
 ```rust
@@ -201,7 +201,7 @@ Another AI line
 
 ### Snapshot tests
 
-Uses `insta` crate. Snapshots live in `tests/integration/snapshots/` and `tests/integration/repos/snapshots/`. Run `cargo insta review` to update.
+Uses `insta` crate. Snapshots live in `tests/snapshots/` and `tests/repos/snapshots/`. Run `cargo insta review` to update.
 
 ## Key Conventions
 
@@ -217,7 +217,7 @@ Uses `insta` crate. Snapshots live in `tests/integration/snapshots/` and `tests/
 
 - **Test binary auto-compilation**: Integration tests trigger `cargo build --bin git-ai` on first test run via `OnceLock`. If you change code and run tests, the test harness recompiles. This can cause confusion if you're debugging -- the test binary is always a debug build at `target/debug/git-ai`.
 
-- **argv[0] dispatch is load-bearing**: The binary's behavior is entirely determined by how it's invoked. In production, symlinking as `git` makes it a proxy. The `GIT_AI=git` env var forces proxy mode (debug builds only). Breaking this dispatch breaks everything.
+- **argv[0] dispatch is load-bearing**: The binary's behavior is entirely determined by how it's invoked. In production, symlinking as `git` makes it a proxy. In tests, `GIT_AI=git` env var forces proxy mode (debug builds only). Breaking this dispatch breaks everything.
 
 - **Feature flag debug/release divergence**: Some flags have different debug/release defaults (see `define_feature_flags!` macro). Tests run debug builds, so a test passing in debug may behave differently in release if it depends on a flag that diverges.
 

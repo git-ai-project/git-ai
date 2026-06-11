@@ -1,252 +1,435 @@
-# Rewrite Operations Attribution Spec
+# Rewrite Ops Attribution Spec
 
-Status: authoritative spec for how git-ai migrates authorship attribution
-across history-rewriting git operations. Companion docs:
+Status: current design and implementation notes for the rewrite-ops work on
+`feat/attr-fuzzer-v2`.
 
-- `docs/daemon-trace2-ingestion-spec.md` — how the daemon learns *which*
-  operation ran and its exact ref transitions.
-- `docs/attribution-fuzzer-spec.md` — how correctness is pressured beyond the
-  deterministic suite.
+This document covers the rewrite-ops rewrite: what the system is trying to
+guarantee, how the current code works, which parts look solid, and which parts
+remain sensitive. It intentionally does not cover the fuzzer or daemon trace2
+ingestion in depth; those live in separate docs.
 
-## The problem
+Related docs:
 
-Authorship attribution lives in two places:
+- `docs/attribution-fuzzer-spec.md`
+- `docs/daemon-trace2-ingestion-spec.md`
 
-1. **Authorship notes** (`refs/notes/ai`, one note per commit): per-file
-   attestation ranges proven by checkpoints, plus prompt metadata. A note is
-   addressed by the commit it describes, so any operation that *replaces* a
-   commit (rebase, amend, cherry-pick, squash, restack) strands the note on the
-   dead commit.
-2. **Working logs** (`.git/ai/working_logs/<base_commit>/`): uncommitted
-   attribution keyed by the HEAD commit at checkpoint time. Any operation that
-   *moves HEAD without committing the work* (reset, stash, checkout/switch with
-   dirty tree) strands the working log under the wrong base.
+## Summary
 
-Rewrite handling is the machinery that moves this data so attribution follows
-the code. It must never *invent* attribution and must never *lose* attribution
-for content that verifiably survived.
+The rewrite-ops rewrite is based on one core rule: attribution should follow
+immutable Git object data, not the live worktree. For committed history, the
+source of truth is commit SHAs, tree SHAs, blob contents, Git notes, persisted
+working-log snapshots, and exact command-owned ref transitions.
 
-## Invariants (first principles)
+The rewrite core is in good shape conceptually:
 
-**I1 — Evidence rule.** A line is attributed to an actor only on checkpoint
-evidence (a working-log checkpoint) or on prior committed evidence (an
-authorship note) connected to the new location by immutable git object data.
-No inference from similarity, timestamps, or "probably the same line".
+- commit-note migration flows through one small event type
+- line movement is derived from Git diffs
+- modified hunks are invalidated rather than guessed
+- conflict-resolution checkpoints are merged explicitly
+- notes and tree diffs are batched
+- reset and stash paths avoid the original "read live worktree later" race
 
-**I2 — Conservation rule.** If a line's content survives a rewrite unchanged
-*as established by git's own tree diff*, its attribution survives with it
-(including across file renames). If git's diff says a region changed, the old
-attribution there is dropped — new content needs new evidence (I1).
+The main caveat is not the note-shift algorithm. The main caveat is whether the
+daemon has exact `old_tip`, `new_tip`, `onto`, source, and destination facts for
+each Git operation. That boundary is documented in
+`docs/daemon-trace2-ingestion-spec.md`.
 
-**I3 — Immutability rule.** Every input to a rewrite decision must be
-immutable at decision time: commit SHAs, tree SHAs, blob contents, notes,
-persisted working-log snapshots, and exact command-owned ref transitions. The
-live worktree is a valid input only inside checkpoint processing, at
-checkpoint time. A daemon side effect that runs after git exits must never
-read `workdir/path` and treat it as the state from the earlier command — the
-user may already have changed it. (This rule killed the historical
-mtime-guarded snapshot and live-worktree stash-restore races.)
+## First Principles
 
-**I4 — Fail-closed rule.** When the facts required by I1–I3 are not available
-(e.g. the exact old/new tips of a delayed rewrite cannot be established), the
-correct output is *no migration* — attribution gaps are acceptable;
-misattribution is not.
+### Git object data is the source of truth
 
-## Architecture
+Committed attribution must be derived from:
 
+- source commit notes
+- destination commit/tree data
+- Git's diff between immutable trees
+- persisted working logs written by checkpoints
+
+The live worktree is valid only at checkpoint time. If a daemon side effect runs
+after Git exits, it must not open `repo.workdir()/path` and treat that as the
+state from the earlier Git command. The user or test may already have changed
+the file.
+
+### Git's diff is reality
+
+For rewrite operations, Git's tree diff is the formal relationship between old
+and new content. The attribution rule is intentionally simple:
+
+- unchanged lines outside diff hunks retain attribution and shift line numbers
+- file renames preserve attribution under the new path
+- lines inside changed hunks are not assumed to preserve attribution
+- new conflict-resolution content needs checkpoint evidence
+
+This is stricter than trying to infer intent from similar text, but it is much
+safer. A line rewritten during conflict resolution is new work.
+
+### Working-log snapshots are command inputs, not fallbacks
+
+Checkpoint working logs are the durable record of uncommitted attribution. They
+are expected inputs for:
+
+- normal post-commit authorship
+- amend
+- squash commit resolution
+- conflict resolution
+- reset soft/mixed reconstruction
+- stash save/restore
+
+They should not be reconstructed from current filesystem content after the fact.
+
+## Public Rewrite Event API
+
+The current rewrite core is centered on `src/authorship/rewrite.rs`:
+
+```rust
+pub enum RewriteEvent {
+    NonFastForward {
+        old_tip: String,
+        new_tip: String,
+        onto: Option<String>,
+    },
+    CherryPickComplete {
+        sources: Vec<String>,
+        new_commits: Vec<String>,
+    },
+    SquashMerge {
+        source_head: String,
+        squash_commit: String,
+        onto: String,
+    },
+}
+
+pub fn handle_rewrite_event(repo: &Repository, event: RewriteEvent) -> Result<(), GitAiError>
 ```
-daemon (trace2 ingestion, see companion doc)
-  └─ exact ref transitions + operation classification
-       └─ RewriteEvent  ──►  handle_rewrite_event()      src/authorship/rewrite.rs
-             ├─ NonFastForward { old_tip, new_tip, onto }   rebase, amend, restack, branch -f
-             ├─ CherryPickComplete { sources, new_commits }
-             └─ SquashMerge { source_head, squash_commit, onto }
-       └─ non-event paths (same module family):
-             ├─ backward reset  → rewrite_reset.rs   (working-log reconstruction)
-             ├─ stash save/apply/pop → rewrite_stash.rs
-             └─ revert → rewrite_revert.rs
-```
 
-One event type, one entry point. The daemon normalizes every flavor of
-history rewrite (rebase, `pull --rebase`, amend, `commit-tree`+`update-ref`
-restacks, squashes) into these events with *exact* commit SHAs. The rewrite
-core never guesses what operation happened; that is the ingestion layer's job.
+This is the right shape. Daemon command detection should normalize Git commands
+into these events, and commit-note migration should flow through this one
+entrypoint.
 
-## Core note-shift algorithm
+## Core Note-Shift Algorithm
 
-Given a set of `(source_commit, destination_commit)` mappings:
+For each `(source_commit, destination_commit)` mapping:
 
-1. Batch-read all source and destination notes (`notes_api::read_notes_batch`).
-2. Resolve every unique commit SHA to its tree SHA in one `git rev-parse`.
-3. Run one `git diff-tree --stdin -p -U0 -M -r` over all tree pairs.
-4. Parse hunks and renames per pair.
-5. Compute preserved segments (regions outside all hunks) with cumulative
-   line-number offsets (`hunk_shift.rs::build_preserved_segments`).
-6. Shift attestation ranges that fall in preserved segments; renames carry
-   attribution to the new path; ranges overlapping any hunk are dropped (I2).
-7. Merge with any existing destination note (conflict-resolution checkpoints
-   may have already written attribution there); attestations dedupe by
-   `(file_path, hash)` with range union; metadata merges first-wins.
-8. Update `metadata.base_commit_sha` to the destination commit.
-9. Batch-write destination notes (`notes_api::write_notes_batch`).
+1. Batch-read source and destination notes with `notes_api::read_notes_batch`.
+2. Resolve all unique commit SHAs to tree SHAs in one `git rev-parse` call.
+3. Run one `git diff-tree --stdin -p -U0 -M --no-color -r` for all pairs.
+4. Parse hunks and renames.
+5. Shift attribution ranges that survive outside diff hunks.
+6. Drop attribution ranges inside changed hunks.
+7. Update `metadata.base_commit_sha` to the destination commit.
+8. Batch-write destination notes with `notes_api::write_notes_batch`.
 
-Performance contract: the number of spawned git processes per rewrite batch is
-O(1), not O(commits) or O(files). Work proportional to history size happens
-*inside* single git invocations (`diff-tree --stdin`, `range-diff`,
-`rev-list`, `log --stdin` + `patch-id --stable`), which is the floor git
-itself imposes.
+What is good:
 
-Known, intentional limitation: the algorithm is line-based. Content rewritten
-inside a hunk loses old attribution even if a human would call it "the same
-line, reworded". Fuzzy matching is a heuristic layer banned by I1.
+- The algorithm is object-based.
+- It avoids per-pair `diff-tree` spawns.
+- It avoids per-note Git note reads/writes.
+- It handles file renames.
+- It does not pretend changed hunks are preserved.
+- It can merge existing target notes when conflict-resolution checkpoints have
+  already written destination attribution.
 
-## Per-operation semantics
+Known limitation:
 
-### Non-fast-forward (rebase, amend, interactive restack, branch -f)
+- The algorithm is line-based. If a user expects semantically "same" content
+  with changed spelling, punctuation, or formatting to retain attribution, this
+  algorithm will not do that unless Git's diff keeps the line outside a hunk.
+  That is intentional for now because fuzzy semantic matching would be a new
+  heuristic layer.
 
-Input: exact `old_tip`, `new_tip`, optional `onto`.
+## Non-Fast-Forward Rewrites
 
-1. `merge_base(old_tip, new_tip)`:
-   - `base == old_tip` → fast-forward; nothing to migrate.
-   - `base == new_tip` → backward reset; go to the reset path below.
-   - otherwise → genuine rewrite.
-2. `git range-diff` over `base..old_tip` vs `base..new_tip` yields
-   old→new commit mappings, representing reorders, edits, drops, splits, and
-   squashes (multiple old → one new).
-3. Merge commits are mapped by parent-list correspondence.
-4. Run the core note-shift over the mappings.
+`RewriteEvent::NonFastForward` handles rebases, amended histories, restacks, and
+other branch rewrites where an old tip is replaced by a new tip.
 
-Conflict resolution during rebase:
+Implementation path:
 
-- Lines preserved from either side keep that side's attribution (I2 over the
-  appropriate source).
-- Rewritten conflict-region lines are attributed only via resolution
-  checkpoints: AI checkpoint → AI; known-human checkpoint → known human; no
-  checkpoint → unattributed (I1). The destination-note merge in step 7 above
-  is where checkpoint-derived resolution attribution and migrated source
-  attribution combine.
-- `rebase --continue` resolution is handled by the same path: the daemon
-  reports the final exact transition; resolution checkpoints recorded during
-  the stopped rebase supply the new-content evidence.
+1. Find merge base of `old_tip` and `new_tip`.
+2. If `base == new_tip`, this is a backward reset; reconstruct the working log
+   rather than migrating notes.
+3. If `base == old_tip`, this is a fast-forward; no rewrite note migration is
+   needed.
+4. Otherwise, run `git range-diff` over the old and new ranges.
+5. Parse range-diff output into `(old_commit, new_commit)` mappings.
+6. Add merge-commit mappings where needed.
+7. Shift notes for the mappings.
 
-### Cherry-pick
+What is good:
 
-Input: exact source commit list, exact created commit list.
+- It uses Git's own range comparison rather than inventing a rebase matcher.
+- It can represent reordered, modified, dropped, and squashed commits.
+- Squashed/dropped source commits can map into a later destination commit.
+- Once `old_tip` and `new_tip` are exact, mapping is based on immutable commits.
 
-Pairing: compute `git patch-id --stable` for both sides in batch; pair equal
-patch-ids first; pair the remainder positionally in order. Positional
-gap-fill is sound only because both sequences are exact and ordered
-(ownership was established upstream); it must never compensate for unknown
-ownership. Skipped sources pair with nothing.
+Sensitive boundary:
 
-`--no-commit` creates no commits; there is nothing to migrate at the commit
-layer, and the index/worktree changes only become attributable via
-checkpoints or the eventual commit.
+- `range-diff` is correct only after the daemon has exact old/new ranges.
+- Guessing `old_tip`, `new_tip`, or `onto` from latest repo state is not valid.
+- The daemon must not use stale rebase reflog history from unrelated prior
+  commands.
 
-### Reset (soft / mixed, backward)
+## Rebase
 
-A backward reset un-commits work. The relevant uncommitted content after
-`reset --soft|--mixed` is the *old tip's tree*, not the live worktree at
-daemon processing time (I3).
+Rebase handling is split between daemon detection and rewrite-note migration.
 
-1. List undone commits `new_tip..old_tip`; batch-read their notes.
-2. Shift each note's attributions into old-tip coordinate space (core
-   algorithm), merging chronologically.
-3. Batch-read file contents at `old_tip` and `new_tip` trees; keep files whose
-   content differs.
-4. Write the result as INITIAL working-log data under `new_tip`.
-5. Never clear `checkpoints.jsonl` — checkpoints appended between the reset
-   and daemon processing are real evidence and must survive.
+The daemon should provide:
 
-`reset --hard` discards the work; discarded content gets no reconstruction.
-Pathspec reset (`git reset -- path`) only unstages; it does not move HEAD and
-needs no note migration.
+- original branch tip
+- final rebased branch tip
+- onto/base hint when exactly known
+- conflict-resolution checkpoint data if any
 
-### Stash
+The rewrite core then:
 
-Stash is a working-log migration, not a note rewrite.
+- maps old commits to new commits with range-diff
+- shifts preserved attribution
+- merges resolution checkpoint attribution into destination notes
 
-- **Save**: persist stash metadata keyed by the stash commit SHA (base commit,
-  pathspecs); copy the relevant working-log data into `.git/ai/stashes`;
-  remove stashed paths from the live working log.
-- **Apply/pop onto the same base**: restore the saved working-log data under
-  the target head.
-- **Apply/pop onto a different base**: reconstruct the applied content from
-  the stash commit's trees plus the target head using
-  `VirtualAttributions` and content mapping over immutable blobs
-  (`batch_read_paths_at_treeishes`) — never the user's live worktree (I3).
-- Stash identity is the stash *commit SHA*. `stash@{N}` is mutable and may
-  only be resolved inside a cursor-bounded command boundary (ingestion doc).
+Conflict-resolution semantics:
 
-### Squash merge
+- Preserved source-side lines retain source attribution.
+- Preserved target-side lines retain target attribution.
+- Keeping both sides should preserve both sets of source attribution.
+- AI-resolved rewritten lines should get AI attribution from the resolution
+  checkpoint.
+- Human-resolved rewritten lines should get known-human attribution if known
+  human checkpointed, otherwise remain unattributed.
+- Uncheckpointed resolution content must not be attributed to old source commits
+  just because it appears in the rebased commit.
 
-Input: exact `source_head`, created `squash_commit`, exact `onto`.
+What currently works according to tests:
 
-1. `merge_base(source_head, onto)` → list source commits.
-2. Batch-read all source notes; shift intermediate notes into source-head
-   coordinates; merge into one log (many-to-one).
-3. Shift the merged log from `source_head` to `squash_commit`.
-4. Merge with any existing squash-commit note (conflict-resolution
-   checkpoints), and with the working log on `onto` if one exists (the squash
-   commit also commits any locally checkpointed resolution work).
+- normal rebase preservation
+- multi-commit rebase preservation
+- pull --rebase preservation
+- pull --rebase --autostash preservation
+- several real-world conflict cases
+- cold mid-rebase continue where the daemon starts after the failed raw rebase
+  and sees the resolution checkpoints plus `rebase --continue`
 
-`merge --squash <immutable-oid>` is exactly recoverable even cold. `merge
---squash <branch>` delayed-and-cold is recoverable only with a cursor (I4
-otherwise).
+What remains sensitive:
 
-### Revert
+- `rebase --continue` can look like a fast-forward from onto to final tip.
+  Correct handling needs pending original-head state from the failed rebase or
+  a current exact in-progress command boundary.
+- Reading `.git/rebase-merge` or `.git/rebase-apply` after a completed delayed
+  command is mutable-state recovery and should be avoided.
 
-A revert can resurrect previously deleted lines. Restored lines recover the
-attribution they had when they last existed: shift the reverted commit's
-parent-side attribution through the diff onto the revert commit, clipped to
-lines the revert actually re-introduced. Uncheckpointed *novel* lines in a
-conflicted revert remain unattributed (I1).
+## Cherry-Pick
 
-### Amend
+`RewriteEvent::CherryPickComplete` maps source commits to newly created picked
+commits.
 
-Amend is a 1→1 non-fast-forward: `old_tip = HEAD@{1}`, `new_tip = HEAD`,
-mapped directly (range-diff degenerates to one pair). The amended commit's
-note merges migrated attribution with the working log's new checkpoint
-evidence via the normal post-commit path.
+Current pairing logic in `rewrite_cherry_pick.rs`:
 
-### commit-tree / update-ref restacks (graphite-style)
+- compute stable patch IDs for source and destination commits in batch
+- pair identical patches first
+- pair remaining unmatched commits positionally
+- skipped sources produce no destination pair
 
-Tools like Graphite rewrite stacks with plumbing: `git commit-tree` +
-`git update-ref refs/heads/X <new>`. There are no porcelain hooks to observe;
-the ingestion layer recognizes the update-ref transition (old tip → new tip on
-a branch ref) and emits `NonFastForward`. `git merge-tree` is read-only tree
-arithmetic and never triggers migration by itself; only the subsequent
-`update-ref`/`commit` does.
+What is good:
 
-## What was removed (and must stay removed)
+- Patch-id anchoring handles clean picks better than pure positional matching.
+- The final note migration reuses the same batched shift core.
+- Conflicted cherry-pick resolution can merge destination checkpoint notes.
 
-The legacy machinery is deleted, not deprecated:
+What is not perfect:
 
-- `src/authorship/rebase_authorship.rs` (monolithic per-op rewriter)
-- `src/git/rewrite_log.rs` and `.git/ai/rewrite_log` (pre/post-hook event journal)
-- `src/commands/hooks/{rebase,stash,push}_hooks.rs` (wrapper pre/post hooks for
-  rewrite ops — superseded by daemon trace2 ownership)
-- `src/commands/squash_authorship.rs`
-- `src/git/diff_tree_to_tree.rs` (per-pair diff spawning)
-- mtime-guarded worktree snapshots and any live-worktree read in rewrite or
-  post-commit side effects
+- Symbolic source refs are mutable if resolved after delay.
+- Source refs are exact only when they are immutable OIDs or resolved at a
+  trusted command boundary.
+- `--no-commit` changes the index/worktree, not commits. It must not synthesize
+  committed attribution from a delayed current index unless the exact index/tree
+  created by the command is captured as stable data.
+- Positional gap-fill is acceptable only after exact source and destination
+  sequences are known. It must not compensate for unknown command ownership.
 
-Any reappearance of these patterns — per-commit git spawns in a rewrite loop,
-live-worktree reads in delayed side effects, mutable `.git/rebase-*` reads for
-completed commands — is a regression against this spec.
+## Reset
 
-## Test obligations
+Backward reset reconstructs working-log attribution instead of writing notes.
 
-- Deterministic coverage per operation family lives in
-  `tests/integration/rewrite_ops_attribution.rs`, `tests/integration/reset.rs`,
-  `tests/integration/stash_attribution.rs`, `tests/integration/squash_merge.rs`,
-  `tests/integration/pull_rebase_ff.rs`, `tests/integration/rebase*.rs`,
-  `tests/commit_tree_update_ref.rs`, plus unit tests in `rewrite.rs` and
-  `hunk_shift.rs`.
-- Every conflict-resolution mode (keep-ours, keep-theirs, keep-both in both
-  orders, AI rewrite, known-human rewrite, uncheckpointed rewrite, delete-both)
-  must have a deterministic test asserting all three attribution classes.
-- Line-level attribution is asserted after every commit in every test
-  (`assert_committed_lines` / `assert_lines_and_blame`).
-- The attribution fuzzer (companion doc) pressures the composition of these
-  operations; every fuzzer find becomes a minimized deterministic regression.
+Current implementation in `rewrite_reset.rs`:
+
+1. List commits being undone: `new_tip..old_tip`.
+2. Batch-read authorship notes for those commits.
+3. Shift intermediate commit attributions into old-tip coordinate space.
+4. Batch-read file contents from `old_tip` and `new_tip` trees.
+5. Keep only files whose old-tip content differs from the reset target.
+6. Write `INITIAL` working-log data under `new_tip`.
+7. Preserve any checkpoint log appended after the reset by not clearing
+   `checkpoints.jsonl`.
+8. Delete the old working-log base directory when appropriate.
+
+This is a first-principles fix for the reset race class. After `reset --soft` or
+`reset --mixed`, the relevant uncommitted content is the old tip's tree content,
+not the user's current worktree at daemon processing time.
+
+What works:
+
+- soft reset attribution preservation
+- mixed reset attribution preservation
+- multiple undone commits
+- new files from undone commits
+- mixed AI/human attribution
+- reset from subdirectories
+
+What remains sensitive:
+
+- reset pathspec behavior is separate from branch-tip reset behavior
+- hard reset should not reconstruct uncommitted attribution that no longer
+  exists
+
+## Squash Merge
+
+Squash merge is a many-to-one rewrite from source commits into a single
+destination commit.
+
+Current implementation:
+
+1. Receive `source_head`, `squash_commit`, and `onto`.
+2. Find merge base of source and onto.
+3. List source commits from base to source head.
+4. Fetch/read all source notes.
+5. Shift each source note into source-head coordinate space if needed.
+6. Merge source logs.
+7. Shift merged source log from source head to squash commit.
+8. Merge with an existing squash-commit resolution note if one exists.
+9. If there is a working log on `onto`, post the squash resolution working log
+   with a transform that merges source attribution.
+
+What is good:
+
+- It handles many-to-one source attribution.
+- It uses batched notes and diffs.
+- It can merge preserved source attribution with conflict/resolution
+  attribution on the squash commit.
+- It supports an exact cold-start case when the command is
+  `merge --squash <immutable-oid>`.
+
+Known limitation:
+
+- `merge --squash feature` is not exactly recoverable in a cold delayed command
+  if `feature` can move before daemon processing. That must fail closed unless
+  a cursor existed before the command.
+
+## Stash
+
+Stash is not a commit-note rewrite. It migrates working-log attribution across
+stash create/apply/pop/drop.
+
+Current implementation direction in `rewrite_stash.rs`:
+
+- On stash create, save metadata keyed by stash SHA:
+  - base commit
+  - timestamp as metadata only
+  - pathspecs
+- Copy relevant working-log data into `.git/ai/stashes`.
+- Clean stashed paths from the original working log.
+- On apply/pop, restore copied working-log data to the target head.
+- If the stash was created on a different base, reconstruct applied content
+  using an isolated temporary index/worktree from stash object plus target head.
+- Read the resulting content through a produced tree and
+  `batch_read_paths_at_treeishes`, not from the user's live worktree.
+
+This addresses the earlier race where stash restoration read files from the
+current worktree after `stash pop/apply`.
+
+Remaining caution:
+
+- The isolated temp worktree must remain isolated from user hooks and daemon
+  trace2 side effects.
+- `stash@{N}` targets are mutable and must be resolved at a cursor-bounded
+  command boundary.
+
+## Revert
+
+Revert is handled separately in `rewrite_revert.rs`.
+
+Model:
+
+- A revert can restore lines deleted by an earlier commit.
+- Restored lines should recover the attribution they had when they previously
+  existed.
+- The implementation uses source/base commit data and note shifting rather than
+  treating restored lines as human.
+
+Tests cover:
+
+- reverting an older deletion restores AI attribution
+- line-number shifts before the revert do not lose restored attribution
+
+## Performance Model
+
+The rewrite core has been optimized away from the worst non-constant Git spawn
+patterns:
+
+- note reads use batch APIs
+- note writes use batch APIs
+- tree diffs use one `diff-tree --stdin` call for all pairs in a rewrite batch
+- tree/blob reads use batch helpers where possible
+
+There are still Git operations whose work scales with the number of commits or
+files because Git itself must inspect those inputs:
+
+- `range-diff` over old/new ranges
+- `rev-list` for source ranges
+- `log -p --stdin` plus `patch-id --stable` for cherry-pick pairing
+- `diff-tree --stdin` over all mapped pairs
+
+That scaling is acceptable if it is done with fixed batches rather than
+spawning once per commit/file/note.
+
+## Current Test Evidence
+
+Representative coverage:
+
+- `tests/integration/rewrite_ops_attribution.rs`
+- `tests/integration/pull_rebase_ff.rs`
+- `tests/integration/rebase_realworld.rs`
+- `tests/integration/subdirs.rs`
+- `tests/commit_tree_update_ref.rs`
+- unit tests in `src/authorship/rewrite.rs`
+- unit tests in `src/authorship/hunk_shift.rs`
+
+Recent focused runs during this work showed `commit_tree_update_ref` and several
+rewrite/cold focused tests passing. This should not be treated as full proof
+until the broader daemon suite and full `task test` are green.
+
+## What Looks Good
+
+- The rewrite event API is small.
+- The note shift algorithm is shared.
+- The core uses immutable Git objects.
+- Modified hunks are invalidated rather than guessed.
+- Conflict resolution is represented through checkpoints, not hidden inference.
+- Reset reconstruction no longer reads live worktree state.
+- Stash shifted restore no longer reads live user worktree state.
+- Batched Git calls significantly reduce process-spawn pressure.
+
+## Remaining Risks
+
+- Correctness still depends on daemon-side exact command facts.
+- Symbolic refs after delay remain dangerous unless cursor-bounded.
+- `--no-commit` cherry-pick should stay conservative unless exact index/tree
+  state is available.
+- Conflict resolution needs broader deterministic coverage for keep-ours,
+  keep-theirs, keep-both, AI rewrite, human rewrite, and uncheckpointed rewrite.
+- Any lingering path that reads mutable `.git/rebase-*` or live worktree state
+  for a completed delayed command should be treated as suspect.
+
+## Completion Requirements
+
+Before calling rewrite ops complete:
+
+1. All rewrite side effects use immutable commits/trees/notes or persisted
+   working logs.
+2. No mtime-based worktree snapshot remains in rewrite/post-commit handling.
+3. Reset soft/mixed/hard/pathspec semantics are covered.
+4. Stash push/apply/pop/drop/pathspec semantics are covered.
+5. Squash merge handles immutable source OIDs and fails closed for unrecoverable
+   symbolic cold sources.
+6. Rebase and cherry-pick conflict resolution modes are covered.
+7. Partial staging carryover is covered through TestRepo, not manual working-log
+   writes.
+8. Focused rewrite suites pass.
+9. `task test` passes.

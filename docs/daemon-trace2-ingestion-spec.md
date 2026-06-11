@@ -1,234 +1,417 @@
-# Daemon Trace2 Ingestion Spec
+# Daemon Trace2 Ingestion Spec and Postmortem
 
-Status: authoritative spec for how the git-ai daemon establishes exact
-ownership of git ref transitions from trace2 event streams. Companion docs:
+Status: current design notes and postmortem for daemon trace2 ingestion work on
+`feat/attr-fuzzer-v2`.
 
-- `docs/rewrite-ops-spec.md` — what happens once exact transitions are known.
-- `docs/attribution-fuzzer-spec.md` — correctness pressure.
+This document covers the daemon trace2 path, ref cursor model, cold-start
+behavior, and failed approaches explored during the rewrite-ops work. Rewrite
+semantics are documented in `docs/rewrite-ops-spec.md`; fuzzer design is
+documented in `docs/attribution-fuzzer-spec.md`.
 
-## The problem: exact command ownership
+## Summary
 
-The daemon learns about git commands asynchronously: git writes trace2 events
-to a socket, the daemon reads them later. Git mutates refs synchronously
-inside the git process. By the time the daemon processes a command, the repo
-may have moved on — more commands, user edits, other worktrees.
+The daemon trace2 ingestion problem is exact command ownership. The daemon sees
+trace2 roots asynchronously, while Git mutates refs synchronously inside the Git
+process. For attribution to be correct, the daemon must know which ref/log
+entries belong to which command.
 
-Stock trace2 does not include created commit SHAs or complete ref-update OIDs
-for most commands. A delayed trace2 root saying "git commit ran in repo X
-with argv Y, exit 0" identifies *that a command ran*, not *which reflog
-entries it produced*. Attribution requires the latter.
+The correct boundary is a pre-command ref cursor:
 
-**Ownership rule.** A ref-moving command's transitions are exact if and only
-if at least one of:
+- If the daemon had a cursor before a ref-moving command, it can consume reflog
+  entries appended after that cursor.
+- If the command itself contains immutable OIDs sufficient to identify the
+  operation, those OIDs are exact for that operation.
+- If neither is true, stock Git trace2 does not provide enough information to
+  recover the command's ref transition after delay.
+- The correct behavior for that command is to fail closed, then observe the
+  current reflog end as a baseline for future commands.
 
-1. **Pre-command cursor** — the daemon held a reflog cursor (byte offset +
-   anchor) for the relevant ref from *before* the command; entries appended
-   after the cursor, matching the command's expected transition shape, belong
-   to it.
-2. **Immutable argv OIDs** — the command line itself contains full OIDs
-   sufficient to identify the operation (e.g. `merge --squash <sha>`,
-   `update-ref ref <new> <old>`, `cherry-pick <sha1> <sha2>`).
+This is stricter than some earlier approaches, but it is the only model that is
+not heuristic.
 
-Otherwise the command is **not exact**: the daemon must fail closed for
-attribution (no guessed authorship, no note migration) and may only use the
-command as a *future baseline* — observe the current reflog ends so the *next*
-command is exact.
+## First Principles
 
-Banned as ownership proof (each was tried and failed; see Postmortem):
-reflog timestamps (seconds-resolution, not causally tied to a trace2 root),
-commit/reflog message matching (messages collide), latest-HEAD guessing, and
-daemon-ingress "start" offsets captured after the fact.
+### Trace2 is event data, not a ref transaction log
 
-## Data path
+Stock Git trace2 records command lifecycle events such as start, def_repo,
+cmd_name, exit, and atexit. It does not reliably include the created commit SHA
+or complete ref update OIDs for normal `git commit` and many other commands.
 
-```
-git (trace2 socket target)
-  → socket listener (src/daemon.rs)
-      prepare_trace_payload_for_ingest: filters definitely-read-only roots,
-      enqueues mutating roots with sequence numbers
-  → TraceNormalizer (src/daemon/trace_normalizer.rs)
-      groups frames by root sid; terminal event → NormalizedCommand
-  → coordinator → family actor (one actor per repo family = common git dir)
-      owns ordered state for the family, including the RefCursor
-  → RefCursor::enrich_command (src/daemon/ref_cursor.rs)
-      consumes cursor-bounded reflog entries → cmd.ref_changes
-  → analyzers (src/daemon/analyzers/history.rs)
-      classified semantic events → rewrite/post-commit side effects
+Therefore a delayed trace2 root that says "git commit ran" is not enough to
+identify the exact reflog line if the daemon did not already know where the
+reflog was before the command.
+
+### Reflog order is useful; timestamps are not proof
+
+Raw reflog entries include timestamps:
+
+```text
+<old> <new> <author> <timestamp> <tz>\t<message>
 ```
 
-Separation of concerns:
+But reflog timestamps are seconds-resolution and are not causally linked to a
+trace2 root. Multiple commands can share a timestamp. Commit messages also
+collide. Timestamp/message matching is therefore not exact.
 
-- The **normalizer** parses trace2/argv facts only. It never reads mutable
-  repo state to synthesize missing command facts.
-- The **family actor** owns all ordered, stateful reasoning: the ref cursor,
-  the stash stack, pending operation state. Commands and checkpoints for one
-  repo family are processed in arrival order.
-- **Side effects** run only after enrichment, on exact data.
+The useful reflog facts are:
 
-### NormalizedCommand
+- append order
+- byte offsets
+- complete line boundaries
+- `old` and `new` OIDs
+- an anchor proving a saved offset still belongs to the same reflog generation
 
-Facts: family/scope, worktree, root sid, raw argv, primary command, observed
-child commands, exit code, trace start/finish timestamps, optional
-`reflog_start_offsets`, operation-specific immutable OIDs from argv
-(stash target, cherry-pick sources, revert sources), `ref_changes` (output of
-enrichment), confidence.
+### The live worktree is not command history
 
-`reflog_start_offsets` carries *claimed* command-start reflog positions.
-Trust is decided at the cursor, not at ingress (see below).
+Daemon side effects must not reconstruct past Git state by reading the current
+worktree. That was the original post-commit carryover race and also appeared in
+stash handling. The live worktree can change after Git exits and before daemon
+processing.
 
-## Ref cursor model
+The only valid live-worktree snapshot point is an explicit checkpoint.
 
-Per family, the cursor stores per-ref-key:
+## Current Data Path
 
-- byte offset into the reflog file (always at a line boundary)
-- anchor: the full reflog record ending at that offset (old/new OIDs,
-  message) proving the offset still belongs to the same reflog generation
-- consumed offsets/anchors (entries already owned by earlier commands)
-- in-memory stash stack and pending cherry-pick source OIDs
+Trace2 ingestion currently flows through these layers:
 
-Ref keys distinguish `worktree:<git_dir>:HEAD` (per-worktree HEAD reflogs)
-from `common:<ref>` (shared refs like `refs/heads/main`, `refs/stash`).
+1. The trace2 socket listener accepts JSON frames.
+2. `prepare_trace_payload_for_ingest` filters definitely read-only roots.
+3. Mutating roots are enqueued with a sequence number.
+4. `TraceNormalizer` groups frames by root sid.
+5. Terminal root events produce a `NormalizedCommand`.
+6. The coordinator sequences commands per repository family.
+7. `RefCursor::enrich_command` consumes cursor-bounded reflog entries and fills
+   `cmd.ref_changes`.
+8. The side-effect layer applies post-commit, rewrite, stash, pull/push, and
+   other behavior.
 
-Robustness requirements (all implemented and tested):
+The important architectural split:
 
-- incomplete trailing reflog lines are ignored (a writer may be mid-append)
-- a saved offset is honored only if it lands on a newline and its anchor
-  matches the record ending there; otherwise the cursor is cleared
-- offset beyond file length (pruned/truncated reflog) clears the cursor
-- branch delete/recreate clears the stale cursor
-- expiry/`reflog expire` invalidates via anchor mismatch
+- normalizer parses trace2/argv facts
+- family actor owns ordered repo-family state
+- ref cursor belongs to the family actor
+- side effects run after command enrichment
 
-### Consumption
+The normalizer should not read mutable repo state to synthesize missing command
+facts.
 
-`enrich_command` consumes reflog entries appended after the cursor that match
-the command's *expected transition shape* — per-command message-prefix
-families (`commit`, `commit (amend):`, `rebase`, `reset:`, `checkout:`, ...)
-and expected old/new OID constraints derived from family state and argv.
-Matched entries move into the consumed set so the next command cannot claim
-them. Multi-entry operations (rebase, multi-pick) consume contiguous spans
-where each entry's `old` equals the previous entry's `new`. Message prefixes
-and timestamps may *narrow* an already-exact candidate set; they are never
-the proof of ownership by themselves.
+## `NormalizedCommand`
 
-If nothing matches: `ref_changes` stays empty, confidence stays low, side
-effects skip attribution (fail closed), and the cursor advances to the
-current reflog end as a baseline for future commands only.
+Current command data includes:
 
-### Seeding
+- scope/family
+- worktree
+- root sid
+- raw argv
+- primary command
+- invoked command/args
+- observed child commands
+- exit code
+- trace start/finish timestamps
+- optional `reflog_start_offsets`
+- stash target OID
+- cherry-pick source OIDs
+- revert source OIDs
+- `ref_changes`
+- confidence
 
-Cursors come into existence at trusted observation points:
+The risky field is `reflog_start_offsets`. It is exact only if it came from a
+trusted command-start boundary. It is not exact if captured by the daemon after
+the daemon asynchronously noticed a trace2 frame.
 
-1. **Trace ingress capture** (best-effort): when the daemon sees a *live*,
-   non-terminal trace2 frame for a mutating command, it captures current
-   reflog ends and attaches them to the root as claimed start offsets. Because
-   delivery is asynchronous, these claims may already be post-append;
-   `command_start_offset_is_authoritative` only accepts a claimed offset if
-   records exist after it and it does not move an existing cursor backward.
-   An accepted-but-late offset can only shrink the window a command may claim
-   (it can lose attribution, never steal another command's entries) — late
-   capture is *conservative*, satisfying fail-closed.
-2. **Checkpoints**: a checkpoint arriving at the family actor is a real,
-   ordered causal observation; processing it establishes family state (and
-   hence expected-transition inputs) for subsequent commands.
-3. **Command completion**: after any command is processed — resolved or not —
-   the cursor observes the current reflog ends as the baseline for the next
-   command.
+## Ref Cursor Model
 
-### Cold start
+`RefCursor` stores:
 
-"Cold" = the repo was set up without trace2 (or before the daemon existed),
-so no cursor predates the first traced command.
+- per-ref byte offsets
+- per-ref anchors
+- consumed offsets and anchors
+- in-memory stash stack
+- pending cherry-pick source OIDs
 
-- The first traced command must process without crash, deadlock, or state
-  poisoning.
-- If it lacks immutable argv OIDs and no cursor existed, it fails closed for
-  attribution and seeds the baseline.
-- Subsequent commands are exact.
-- Special case: first traced command whose argv contains sufficient immutable
-  OIDs (e.g. `merge --squash <sha>`) is exact even cold.
+Cursor keys distinguish:
 
-## Operation-specific ownership notes
+- worktree-specific `HEAD` reflogs
+- common-dir refs such as `refs/heads/main`
+- `refs/stash`
 
-- **commit / amend**: expected HEAD transition with `commit`/`commit (amend):`
-  message family; branch ref entry consumed alongside HEAD when they describe
-  the same transition.
-- **rebase**: consumes the contiguous HEAD span from original tip through
-  final tip; `rebase --continue` of an in-progress rebase relies on
-  family-actor pending state from the failed command's consumed prefix, never
-  on reading `.git/rebase-merge` after the fact.
-- **cherry-pick / revert**: source OIDs from argv when immutable; symbolic
-  sources resolved only at a cursor-bounded boundary; pending source state
-  carries across conflicted stop/continue.
-- **stash**: the in-memory stash stack mirrors `refs/stash` mutations observed
-  through consumed entries; `stash@{N}` resolves against that stack, not
-  against the live ref at processing time.
-- **reset**: `reset:` message family, old-OID constraint relaxed (reset can
-  move from any state); backward-reset detection happens downstream from the
-  exact transition.
-- **update-ref**: argv carries ref name and usually both OIDs (immutable);
-  used by graphite-style restacks (`commit-tree` + `update-ref`). Multiple
-  same-command ref updates are correlated by OID first, with the command's
-  time window only narrowing candidates.
-- **pull**: decomposes into fetch + merge/rebase; ownership follows the
-  underlying HEAD/branch transitions.
-- **merge-tree / commit-tree alone**: create objects, move no refs — no
-  transition to own; nothing happens until a ref moves.
-- **push / fetch / clone**: notes-sync side effects keyed off argv remotes;
-  missing `refs/notes/ai` is a no-op, not an error.
+The cursor must handle:
 
-## Reads must not sync
+- missing reflog files
+- partial trailing reflog lines
+- reflog truncation/pruning
+- branch delete/recreate
+- common refs and per-worktree HEAD refs
+- stale consumed offsets
 
-Production read commands (`show`, `blame`, `status`, ...) must not trigger a
-hidden daemon sync or barrier. Tests use explicit sync immediately before
-assertions; a barrier in production would hide races instead of fixing them
-and cannot create missing command-start data anyway.
+Important behavior:
 
-## Postmortem: rejected approaches
+- `read_reflog_records` ignores incomplete trailing lines.
+- `read_reflog_record_ending_at` validates a saved offset ends at a newline.
+- A saved offset is reused only if its anchor still matches.
+- If an offset is beyond file length, the cursor is cleared.
+- If the anchor does not match, the cursor is cleared.
+- After an unresolved command, the daemon may observe the current end as a
+  future baseline, not as evidence for the unresolved command.
 
-These were implemented, found unsound, and removed. Do not reintroduce.
+## Exact Command Ownership Rules
 
-1. **mtime-guarded worktree snapshots** (post-commit carryover): read the live
-   worktree after git exited, guarded by `mtime <= git_finish_time`.
-   Filesystem clocks are coarse; later writes land in the same quantum; the
-   snapshot can capture the *next* operation's content. Replaced by persisted
-   working logs + committed tree data.
-2. **Live-worktree stash restore**: same race, same fix — reconstruct from
-   stash objects + target head in isolation.
-3. **Daemon-ingress offsets as proof**: a captured "start" offset may actually
-   be post-command. Demoted from proof to conservative, validated hint (see
-   Seeding); never primary evidence.
-4. **Trace2 barrier / hidden read sync**: hides races; doesn't create data.
-5. **Reflog timestamp matching as proof**: seconds-resolution, collides;
-   allowed only to narrow already-exact candidate sets.
-6. **Message matching without a cursor**: duplicate commit messages are
-   ubiquitous; cold duplicate-message commands fail closed instead.
+For ref-moving commands, command ownership is exact only when at least one of
+these is true:
 
-## Test obligations
+1. A pre-command cursor existed for the relevant reflog.
+2. The command payload contains exact trusted command-start reflog offsets.
+3. The command argv contains immutable OIDs sufficient for the specific
+   operation.
 
-Deterministic tests must cover, at minimum:
+Otherwise, the daemon must not attribute the command.
 
-1. delayed duplicate-message commits without a cursor fail closed
-2. checkpoint-then-commit attributes exactly
-3. cold first traced commit does not guess; seeds baseline only
-4. partial trailing reflog line ignored; partial and full prune clear cursor
-5. branch delete/recreate clears cursor state
-6. symbolic ref movement after a delayed command does not corrupt attribution
-7. immutable argv OIDs work cold (squash, cherry-pick, update-ref)
-8. live worktree edits after commit/stash-pop do not leak into attribution
-9. symlink/canonical path variants map to one repo family
-10. no hidden sync before `show`/`blame`
-11. daemon survives partial trace roots, socket close ordering, child trace
-    traffic, and never deadlocks checkpoints behind unidentified sockets
+Examples:
 
-Primary suites: `tests/daemon_mode.rs`, `tests/commit_tree_update_ref.rs`,
-`tests/integration/rewrite_ops_attribution.rs`, ref-cursor unit tests in
-`src/daemon/ref_cursor.rs`.
+- Commit after a checkpoint cursor: exact.
+- Commit with no cursor and duplicate commit messages nearby: not exact.
+- `merge --squash <sha>`: source is exact because argv contains immutable OID.
+- `merge --squash feature` in a cold delayed command: not exact because feature
+  can move.
+- `stash pop stash@{0}` after later stash operations: not exact unless the stash
+  stack was resolved at a cursor-bounded command boundary.
 
-## Bottom line
+## Cold-Start Behavior
 
-Exactness is structural, not heuristic: cursor, or immutable argv OIDs, or
-fail closed. The unavoidable consequence — git-ai cannot attribute the very
-first delayed write command in a cold repo from stock trace2 alone — is
-missing information, not a bug. Every mechanism that tried to paper over that
-gap (timestamps, messages, latest-state guesses, post-hoc offsets) produced
-misattribution and was removed.
+"Cold" means repo setup happened without trace2 or before the daemon knew the
+repo, so the daemon has no cursor.
+
+Correct cold behavior:
+
+- The first traced command should be processed as a Git operation.
+- The daemon should not crash, deadlock, or poison future state.
+- If the first traced command lacks exact attribution evidence and no cursor
+  existed before it, the daemon must fail closed for attribution.
+- After that command, the daemon can observe current reflog ends and future
+  commands can be exact.
+
+Examples:
+
+- First traced plain commit in a cold repo: no guessed authorship.
+- First traced rebase in a cold repo: command can run, but rewrite attribution
+  depends on exact old/new/source facts.
+- First traced squash with immutable source SHA: source attribution can be
+  preserved.
+- First traced squash with symbolic branch source: fail closed unless a cursor
+  existed.
+
+## Checkpoint Ordering
+
+Checkpoint processing is a real causal observation point. When a checkpoint
+reaches the family actor, it can seed cursor boundaries for:
+
+- worktree HEAD
+- current branch ref
+- common refs
+- stash ref
+
+Then a later ref-moving command can be matched exactly from that boundary.
+
+This is not a hidden read-command sync. It is part of checkpoint sequencing:
+the checkpoint itself is an explicit write/snapshot event in Git AI's model.
+
+## Failed and Rejected Approaches
+
+### mtime-guarded worktree snapshots
+
+The original carryover snapshot race read mutable worktree files after Git
+exited and guarded them with `mtime <= git_finish_time`.
+
+Why it failed:
+
+- filesystem clocks can be coarse
+- later writes can land in the same timestamp quantum
+- daemon processing is asynchronous
+- the snapshot can capture content from the next operation
+
+Rejected conclusion:
+
+- post-commit carryover must use persisted working logs and committed tree data,
+  not live worktree reads plus mtime guards
+
+### Live worktree stash restore
+
+Earlier stash restoration read current worktree files after `stash pop/apply`.
+
+Why it failed:
+
+- a later edit can occur before daemon processing
+- attribution can be shifted onto newer content
+- this is the same mutable-state race as post-commit carryover
+
+Current direction:
+
+- save stash working-log data
+- reconstruct applied stash content from stash object plus target head in an
+  isolated environment
+- write attribution to the target working log
+
+### Daemon-ingress synthetic reflog offsets
+
+An attempted fix captured reflog offsets in daemon ingress when the daemon first
+saw a trace2 frame.
+
+Why it failed:
+
+- trace2 frames reach the daemon asynchronously
+- Git may already have appended the reflog entry by the time the daemon reads
+  the reflog
+- the captured "start" offset may actually be a post-command offset
+- tests using those offsets can model a capability stock trace2 does not provide
+
+Rejected conclusion:
+
+- daemon ingress must not synthesize command-start reflog offsets
+- tests that inject `git_ai_root_reflog_start_offsets` must be treated as
+  synthetic-boundary tests, not stock trace2 behavior
+
+### Trace2 barrier / hidden read-command sync
+
+A trace2 barrier was explored to force production read commands to wait for
+prior trace traffic.
+
+Why it was wrong:
+
+- production reads should not secretly sync the daemon
+- tests already have explicit syncs immediately before assertions
+- barriers can hide races instead of proving correctness
+- a barrier does not create missing command-start data
+
+Rejected conclusion:
+
+- no hidden daemon sync in production read commands such as `show` or `blame`
+- explicit sync remains a test/assertion tool
+
+### Reflog timestamp matching
+
+Reflog timestamps are seconds-resolution. They cannot distinguish same-second
+commands and are not linked to trace2 root identity.
+
+Rejected conclusion:
+
+- timestamps can be diagnostics or secondary correlation inside an already
+  exact candidate set
+- timestamps must not be primary ownership proof
+
+### Message matching without a cursor
+
+Commit/reflog messages collide. Duplicate commit messages are common.
+
+Rejected conclusion:
+
+- message matching without a cursor is heuristic
+- duplicate-message cold tests should fail closed rather than choosing one
+
+## Known Good Pieces
+
+The current design direction is good in these areas:
+
+- family actor owns cursor state
+- cursor uses offsets plus anchors
+- incomplete trailing reflog lines are ignored
+- truncation/pruning invalidates stale cursors
+- branch delete/recreate is tested
+- checkpoint can seed future cursor boundaries
+- unresolved commands can seed only future baselines
+- daemon-ingress offset synthesis has been removed from production direction
+- hidden read-command sync/barrier has been rejected
+
+## Current Incomplete or Risky Pieces
+
+### Dirty/in-progress state
+
+At the time this doc was written, the worktree had in-progress code/test changes
+around cursor fail-closed behavior. Some focused suites had passed in earlier
+runs, but `daemon_mode` still had known failures after those changes. The branch
+should not be called proven until those are resolved.
+
+### Synthetic offset artifacts
+
+Some tests still inject `git_ai_root_reflog_start_offsets`. These should be
+removed, quarantined, or explicitly labeled as tests for a hypothetical trusted
+command-start boundary.
+
+### Remaining timestamp use
+
+`src/daemon/ref_cursor.rs` still parses reflog timestamps and uses them in some
+direct update-ref correlation paths. Each use needs audit:
+
+- acceptable only if old/new OIDs and cursor-bounded windows already make the
+  candidate set exact
+- not acceptable as primary proof
+
+### Symbolic refs
+
+Any delayed resolution of symbolic refs is suspect:
+
+- branch names
+- `HEAD~1`
+- `stash@{0}`
+- remote-tracking names
+
+These are exact only if resolved at command time or inside a cursor-bounded
+state model.
+
+### Pull notes push when no notes exist
+
+Recent daemon-mode failures included note-push paths treating missing
+`refs/notes/ai` as an error. If there are no notes, pushing notes should be a
+no-op, not a daemon failure.
+
+## Test Requirements
+
+Required deterministic tests:
+
+1. delayed duplicate commit messages fail closed without cursor
+2. checkpoint cursor preserves later commit attribution
+3. no-cursor first traced commit does not guess ownership
+4. no-cursor first traced command seeds future baseline only
+5. reflog partial trailing line is ignored
+6. reflog partially pruned clears invalid cursor
+7. reflog fully pruned clears invalid cursor
+8. branch delete/recreate clears stale cursor state
+9. symbolic source ref movement after command does not corrupt attribution
+10. immutable source OID remains usable for squash
+11. live worktree edit after commit does not affect committed attribution
+12. live worktree edit after stash pop does not affect stash restoration
+13. symlink/canonical path variants map to the same repo family
+14. no hidden production read sync before `show` or `blame`
+15. daemon does not deadlock on partial trace2 roots or socket close ordering
+
+## Operational Completion Requirements
+
+Before calling trace2 ingestion complete:
+
+1. Ref-moving command ownership uses cursor, exact immutable OIDs, or fails
+   closed.
+2. No daemon-ingress reflog offset synthesis remains in production code.
+3. No mtime guard remains for committed/rewrite attribution.
+4. No hidden production read-command sync remains.
+5. Reflog parser handles incomplete lines.
+6. Reflog pruning/truncation is tested.
+7. Branch lifecycle cursor invalidation is tested.
+8. Symbolic refs after delay are not resolved as if they were command-time data.
+9. Cold-start semantics are explicit and tested.
+10. Focused daemon/ref-cursor tests pass.
+11. `tests/daemon_mode.rs` passes.
+12. `task test` passes.
+
+## Bottom Line
+
+The exact trace2 ingestion answer is strict:
+
+- use a real cursor if one existed before the command
+- use immutable OIDs when the command itself contains them
+- otherwise fail closed
+
+That means Git AI cannot always attribute the first delayed write command in a
+cold repo using stock trace2 alone. That is not a bug in the fail-closed model;
+it is missing information. The alternative is to introduce a real trusted
+command-start boundary. Anything based on latest HEAD, timestamps, messages, or
+daemon-observed "start" offsets is heuristic and should not be used for
+mission-critical attribution correctness.
