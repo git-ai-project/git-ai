@@ -4,7 +4,7 @@ use std::fs;
 
 use crate::repos::test_repo::TestRepo;
 
-use super::helpers::{is_ai_author_name, parse_blame_line};
+use super::helpers::{BlameClass, classify_show_prompt_author, parse_blame_line};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineAttribution {
@@ -19,6 +19,16 @@ impl fmt::Display for LineAttribution {
             LineAttribution::Ai => write!(f, "Ai"),
             LineAttribution::KnownHuman => write!(f, "KnownHuman"),
             LineAttribution::Untracked => write!(f, "Untracked"),
+        }
+    }
+}
+
+impl LineAttribution {
+    fn expected_blame_class(self) -> BlameClass {
+        match self {
+            LineAttribution::Ai => BlameClass::Ai,
+            LineAttribution::KnownHuman => BlameClass::KnownHuman,
+            LineAttribution::Untracked => BlameClass::Untracked,
         }
     }
 }
@@ -122,7 +132,10 @@ impl FileModel {
             return;
         }
 
-        let blame_output = match repo.git_ai(&["blame", &self.filename]) {
+        // --show-prompt surfaces all three attribution classes in the author
+        // column: agent tool name for AI, h_-prefixed hash for known-human, plain
+        // git author for untracked. Plain blame collapses the latter two.
+        let blame_output = match repo.git_ai(&["blame", "--show-prompt", &self.filename]) {
             Ok(output) => output,
             Err(e) => {
                 panic!(
@@ -160,16 +173,16 @@ impl FileModel {
         {
             let line_num = i + 1;
             let (author, _content) = parse_blame_line(blame_line);
-            let actual_is_ai = is_ai_author_name(&author);
-            let expected_is_ai = matches!(expected_attr, LineAttribution::Ai);
+            let actual_class = classify_show_prompt_author(&author);
+            let expected_class = expected_attr.expected_blame_class();
 
-            if expected_is_ai != actual_is_ai {
+            if expected_class != actual_class {
                 panic!(
                     "Attribution mismatch on line {} of '{}'\n\
                      Seed: {}\n\
                      Char: '{}'\n\
-                     Model says: {:?} (expected_is_ai={})\n\
-                     Blame shows: author='{}' (actual_is_ai={})\n\
+                     Model says: {:?} (expected class {:?})\n\
+                     Blame shows: author='{}' (actual class {:?})\n\
                      Blame line: {}\n\
                      Full blame:\n{}\n\
                      Op log:\n{}\n\
@@ -179,9 +192,9 @@ impl FileModel {
                     seed,
                     self.lines[i],
                     expected_attr,
-                    expected_is_ai,
+                    expected_class,
                     author,
-                    actual_is_ai,
+                    actual_class,
                     blame_line,
                     blame_output,
                     op_log.join("\n"),
