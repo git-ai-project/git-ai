@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>git-ai</AssemblyName>
+    <RootNamespace>GitAi.NotepadPlusPlus</RootNamespace>
+    <Platforms>x64;x86</Platforms>
+    <OutputType>Library</OutputType>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- NppPlugin.NET provides the Notepad++ plugin API wrapper -->
+    <PackageReference Include="NppPlugin.NET" Version="0.94.00" />
+  </ItemGroup>
+</Project>
