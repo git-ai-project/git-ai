@@ -684,8 +684,7 @@ impl CiContext {
     ) -> Vec<String> {
         let mut commits = Vec::new();
         // Resolve to a full SHA up front so the entries are comparable to the
-        // full 40-char SHAs produced by `git rev-list` (the #1473 `retain` filter
-        // in `run_with_options` compares against such a set). Callers like
+        // full 40-char SHAs produced by `git rev-list`. Callers like
         // `git-ai ci local merge` may pass an abbreviated `merge_commit_sha`; the
         // remaining entries already come from parent ids, which are full.
         let mut current_sha = self
