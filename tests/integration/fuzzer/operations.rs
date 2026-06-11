@@ -301,3 +301,79 @@ pub fn cherry_pick(
     model.reconcile(repo);
     model.assert_blame(repo, op_log, seed);
 }
+
+/// Soft-reset the last commit and immediately re-commit the same content.
+///
+/// First principles: `reset --soft HEAD~1` un-commits the tip but leaves the
+/// tree and index untouched. git-ai must reconstruct the undone commit's
+/// attribution into the working log (rewrite_reset.rs), so re-committing the
+/// identical tree must reproduce identical blame. The model is unchanged by a
+/// soft-reset+recommit round trip, so we assert it is byte-for-byte preserved.
+///
+/// Skips when HEAD has no parent (nothing to un-commit).
+pub fn soft_reset_recommit(
+    model: &mut FileModel,
+    registry: &AttrRegistry,
+    repo: &TestRepo,
+    op_log: &mut Vec<String>,
+    seed: u64,
+) {
+    if repo.git(&["rev-parse", "HEAD~1"]).is_err() {
+        op_log.push("soft_reset_recommit(skipped: no parent)".to_string());
+        return;
+    }
+
+    repo.git(&["reset", "--soft", "HEAD~1"])
+        .unwrap_or_else(|e| panic!("reset --soft failed: {}", e));
+    op_log.push("reset --soft HEAD~1".to_string());
+
+    // Tree/index are intact; re-commit reproduces the same content.
+    repo.git(&["commit", "-m", "soft reset recommit", "--allow-empty"])
+        .unwrap_or_else(|e| panic!("recommit after soft reset failed: {}", e));
+    op_log.push("commit(\"soft reset recommit\")".to_string());
+
+    model.sync_from_disk(repo, registry);
+    model.reconcile(repo);
+    model.assert_blame(repo, op_log, seed);
+}
+
+/// Stash all uncommitted changes, pop them back, then commit and assert.
+///
+/// First principles: a stash push/pop round trip must preserve the attribution
+/// of uncommitted lines without reading the live worktree after the fact
+/// (rewrite_stash.rs). git-ai blame only materializes attribution for committed
+/// content (uncommitted lines always show "Not Committed Yet"), so the round
+/// trip is followed by a commit before asserting — the model is unchanged by
+/// push+pop, so committed blame must match it exactly.
+pub fn stash_roundtrip(
+    model: &mut FileModel,
+    registry: &mut AttrRegistry,
+    repo: &TestRepo,
+    alloc: &mut CharAllocator,
+    rng: &mut impl Rng,
+    op_log: &mut Vec<String>,
+    seed: u64,
+) {
+    // Produce a checkpointed-AI uncommitted change to stash.
+    let chars = random_edit(model, registry, repo, alloc, rng, 2);
+    checkpoint_ai(model, registry, repo, &chars, op_log);
+
+    // Nothing to stash if the worktree is clean relative to HEAD.
+    let status = repo.git(&["status", "--porcelain"]).unwrap_or_default();
+    if status.trim().is_empty() {
+        op_log.push("stash_roundtrip(skipped: clean worktree)".to_string());
+        return;
+    }
+
+    repo.git(&["stash", "push", "-m", "fuzz stash"])
+        .unwrap_or_else(|e| panic!("stash push failed: {}", e));
+    op_log.push("stash push".to_string());
+
+    repo.git(&["stash", "pop"])
+        .unwrap_or_else(|e| panic!("stash pop failed: {}", e));
+    op_log.push("stash pop".to_string());
+
+    // Commit so blame can render the restored attribution, then assert.
+    model.sync_from_disk(repo, registry);
+    commit(model, repo, op_log, seed, "stash roundtrip commit");
+}
