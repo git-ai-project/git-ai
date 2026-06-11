@@ -3,6 +3,7 @@
 //! Runs inside the daemon process using tokio. Accumulates telemetry envelopes
 //! and CAS payloads, then flushes them to their destinations every 3 seconds.
 
+use crate::api::metrics::MetricsUploadError;
 use crate::api::{ApiClient, ApiContext, CasObject, CasUploadRequest};
 use crate::config::{Config, get_or_create_distinct_id};
 use crate::daemon::control_api::{CasSyncPayload, TelemetryEnvelope};
@@ -331,12 +332,19 @@ fn flush_metrics(events: &[MetricEvent]) {
             let batch = MetricsBatch::new(chunk.to_vec());
             match client.upload_metrics(&batch) {
                 Ok(response) if response.errors.is_empty() => continue,
-                Ok(_) => {
-                    // Server returned 200 but reported partial errors — stash the
-                    // whole chunk so flush_metrics_db can replay it. Without this,
-                    // events are permanently lost: the daemon treats any 200 as
-                    // success and never writes to SQLite.
-                    upload_failed = true;
+                Ok(response) => {
+                    // Server returned 200 but reported partial errors. Stash only
+                    // the failed events so flush_metrics_db can replay them once;
+                    // that replay path treats remaining validation errors as
+                    // terminal to avoid retrying bad events forever.
+                    if let Some(failed_events) =
+                        failed_metric_events_for_retry(chunk, &response.errors)
+                    {
+                        store_metrics_in_db(&failed_events);
+                    } else {
+                        store_metrics_in_db(chunk);
+                    }
+                    continue;
                 }
                 Err(_) => {
                     upload_failed = true;
@@ -345,6 +353,33 @@ fn flush_metrics(events: &[MetricEvent]) {
         }
         store_metrics_in_db(chunk);
     }
+}
+
+fn failed_metric_events_for_retry(
+    events: &[MetricEvent],
+    errors: &[MetricsUploadError],
+) -> Option<Vec<MetricEvent>> {
+    let mut seen_indices = std::collections::HashSet::with_capacity(errors.len());
+    let mut failed_events = Vec::with_capacity(errors.len().min(events.len()));
+
+    for error in errors {
+        if !seen_indices.insert(error.index) {
+            continue;
+        }
+
+        let Some(event) = events.get(error.index) else {
+            tracing::warn!(
+                error_index = error.index,
+                batch_len = events.len(),
+                "telemetry: metrics upload response referenced out-of-range event index"
+            );
+            return None;
+        };
+
+        failed_events.push(event.clone());
+    }
+
+    Some(failed_events)
 }
 
 fn store_metrics_in_db(events: &[MetricEvent]) {
@@ -773,5 +808,53 @@ impl SentryClient {
         } else {
             Err(format!("Sentry returned status {}", status).into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metric_event(event_id: u16) -> MetricEvent {
+        MetricEvent {
+            timestamp: event_id as u32,
+            event_id,
+            values: Default::default(),
+            attrs: Default::default(),
+        }
+    }
+
+    fn upload_error(index: usize) -> MetricsUploadError {
+        MetricsUploadError {
+            index,
+            error: "failed".to_string(),
+        }
+    }
+
+    #[test]
+    fn failed_metric_events_for_retry_selects_only_failed_indices() {
+        let events = vec![metric_event(1), metric_event(2), metric_event(3)];
+        let failed = failed_metric_events_for_retry(&events, &[upload_error(2), upload_error(0)])
+            .expect("valid indices");
+
+        let event_ids: Vec<u16> = failed.iter().map(|event| event.event_id).collect();
+        assert_eq!(event_ids, vec![3, 1]);
+    }
+
+    #[test]
+    fn failed_metric_events_for_retry_deduplicates_indices() {
+        let events = vec![metric_event(1), metric_event(2), metric_event(3)];
+        let failed = failed_metric_events_for_retry(&events, &[upload_error(1), upload_error(1)])
+            .expect("valid indices");
+
+        let event_ids: Vec<u16> = failed.iter().map(|event| event.event_id).collect();
+        assert_eq!(event_ids, vec![2]);
+    }
+
+    #[test]
+    fn failed_metric_events_for_retry_returns_none_for_invalid_index() {
+        let events = vec![metric_event(1), metric_event(2)];
+
+        assert!(failed_metric_events_for_retry(&events, &[upload_error(2)]).is_none());
     }
 }
