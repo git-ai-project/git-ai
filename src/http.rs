@@ -1,4 +1,6 @@
-use std::io::Read;
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -64,6 +66,29 @@ pub fn send(request: ureq::Request) -> Result<Response, String> {
 /// Execute a ureq request with a string body.
 pub fn send_with_body(request: ureq::Request, body: &str) -> Result<Response, String> {
     match request.send_string(body) {
+        Ok(response) => read_ureq_response(response),
+        Err(ureq::Error::Status(_code, response)) => read_ureq_response(response),
+        Err(ureq::Error::Transport(err)) => Err(err.to_string()),
+    }
+}
+
+/// Gzip-compress the given bytes.
+fn gzip_compress(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(data)
+        .map_err(|e| format!("gzip compression failed: {}", e))?;
+    encoder
+        .finish()
+        .map_err(|e| format!("gzip compression failed: {}", e))
+}
+
+/// Execute a ureq request with a gzip-compressed body.
+/// Sets `Content-Encoding: gzip` so the server knows the payload is compressed.
+pub fn send_with_gzip_body(request: ureq::Request, body: &[u8]) -> Result<Response, String> {
+    let compressed = gzip_compress(body)?;
+    let request = request.set("Content-Encoding", "gzip");
+    match request.send_bytes(&compressed) {
         Ok(response) => read_ureq_response(response),
         Err(ureq::Error::Status(_code, response)) => read_ureq_response(response),
         Err(ureq::Error::Transport(err)) => Err(err.to_string()),
