@@ -19,6 +19,13 @@ pub struct RefCursor {
     anchors: HashMap<String, ReflogAnchor>,
     consumed_offsets: HashMap<String, HashSet<u64>>,
     consumed_anchors: HashMap<String, HashMap<u64, ReflogAnchor>>,
+    /// Per-command soft hints from the daemon-ingress reflog offset capture.
+    /// Populated at the start of each command's enrichment and cleared when the
+    /// next command's enrichment begins. Unlike `offsets` (the authoritative
+    /// in-order cursor), these are captured asynchronously and may race ahead of
+    /// or behind the command's own reflog entry, so they only *bias* entry
+    /// selection — they never move the cursor. See `select_entry_for_hint`.
+    command_start_hints: HashMap<String, u64>,
     stash_stack: Vec<String>,
     pending_cherry_pick_source_oids: Vec<String>,
 }
@@ -32,6 +39,7 @@ struct CursorEntry {
     new: String,
     message: String,
     timestamp_secs: Option<i64>,
+    start_offset: u64,
     end_offset: u64,
 }
 
@@ -79,6 +87,7 @@ struct ReflogRecord {
     new: String,
     message: String,
     timestamp_secs: Option<i64>,
+    start_offset: u64,
     end_offset: u64,
 }
 
@@ -98,6 +107,7 @@ impl RefCursor {
             anchors: HashMap::new(),
             consumed_offsets: HashMap::new(),
             consumed_anchors: HashMap::new(),
+            command_start_hints: HashMap::new(),
             stash_stack: Vec::new(),
             pending_cherry_pick_source_oids: Vec::new(),
         }
@@ -181,6 +191,10 @@ impl RefCursor {
         &mut self,
         cmd: &NormalizedCommand,
     ) -> Result<(), GitAiError> {
+        // Each command's enrichment starts fresh: a prior command's ingress hint
+        // must never bias this command's entry selection.
+        self.command_start_hints.clear();
+
         if cmd.reflog_start_offsets.is_empty() {
             return Ok(());
         }
@@ -191,7 +205,20 @@ impl RefCursor {
             .map(|(key, offset)| (key.clone(), *offset))
             .collect::<Vec<_>>();
         for (key, offset) in offsets {
-            if self.command_start_offset_is_authoritative(&key, offset)? {
+            if self.offsets.contains_key(&key) {
+                // An authoritative in-order cursor already exists (established by
+                // prior command processing or a checkpoint boundary). The ingress
+                // offset is captured asynchronously and can race ahead of the
+                // command's own reflog entry; letting it advance the cursor would
+                // skip that entry and lose attribution (the graphite/gt-create
+                // flake). Keep the in-order cursor as the floor and remember the
+                // ingress offset only as a soft selection hint for disambiguating
+                // colliding entries (e.g. an untraced commit sharing a message).
+                self.command_start_hints.insert(key, offset);
+            } else if self.command_start_offset_is_authoritative(&key, offset)? {
+                // No cursor yet (cold start / first traced command). The ingress
+                // offset is the only command-start boundary we have, so it seeds a
+                // fresh cursor.
                 self.initialize_reflog_cursor(&key, offset)?;
             }
         }
@@ -1199,11 +1226,50 @@ impl RefCursor {
     ) -> Result<Option<CursorEntry>, GitAiError> {
         let start = self.reflog_start_offset(&key, path)?;
         let entries = read_reflog_entries(key.clone(), path, reference, start)?;
-        Ok(entries.into_iter().find(|entry| {
+        let candidates = entries.into_iter().filter(|entry| {
             !self.entry_consumed(entry)
                 && expected.matches(entry)
                 && message_matches(&entry.message, message_prefixes)
-        }))
+        });
+        Ok(self.select_candidate_with_hint(&key, candidates))
+    }
+
+    /// Choose among reflog entries that match a command's expected transition,
+    /// biased by the soft command-start hint (the daemon-ingress reflog offset).
+    ///
+    /// The in-order cursor already bounds `candidates` to unconsumed entries. The
+    /// hint disambiguates *which* matching entry is this command's: an untraced
+    /// commit can share a message with the traced one, and the hint — captured at
+    /// the command's true start — sits after the untraced entry but before the
+    /// traced entry, so we prefer the first match at/after it.
+    ///
+    /// But the hint is captured asynchronously and can also race *behind* git,
+    /// landing after the command's own entry (the graphite/gt-create flake). In
+    /// that case no match exists at/after the hint, so we fall back to the first
+    /// match overall — the in-order cursor's earliest unconsumed match, which is
+    /// the command's own entry. Either way the in-order cursor is the floor and
+    /// the hint only biases selection within it.
+    fn select_candidate_with_hint<I>(&self, key: &str, candidates: I) -> Option<CursorEntry>
+    where
+        I: IntoIterator<Item = CursorEntry>,
+    {
+        let hint = self.command_start_hints.get(key).copied();
+        let mut first_match: Option<CursorEntry> = None;
+        for entry in candidates {
+            // An entry "at/after the hint" is one whose start offset is >= the
+            // hint. Prefer the first such entry (skips an untraced collision the
+            // hint was captured after); otherwise remember the earliest match as
+            // the fallback for when the hint raced past the command's own entry.
+            if let Some(hint) = hint
+                && entry.start_offset >= hint
+            {
+                return Some(entry);
+            }
+            if first_match.is_none() {
+                first_match = Some(entry);
+            }
+        }
+        first_match
     }
 
     fn consume_common_refs_matching_transition(
@@ -2380,6 +2446,7 @@ fn read_reflog_entries(
             new: record.new,
             message: record.message,
             timestamp_secs: record.timestamp_secs,
+            start_offset: record.start_offset,
             end_offset: record.end_offset,
         })
         .collect())
@@ -2402,6 +2469,7 @@ fn read_reflog_entries_including_noops(
             new: record.new,
             message: record.message,
             timestamp_secs: record.timestamp_secs,
+            start_offset: record.start_offset,
             end_offset: record.end_offset,
         })
         .collect())
@@ -2437,7 +2505,7 @@ fn read_reflog_records(
         }
         let line = String::from_utf8_lossy(raw_line);
         let line = line.trim_end_matches(['\r', '\n']);
-        let Some(entry) = parse_reflog_line(line, offset) else {
+        let Some(entry) = parse_reflog_line(line, line_start, offset) else {
             continue;
         };
         if entry.end_offset > line_start {
@@ -2494,9 +2562,8 @@ fn read_reflog_record_ending_at(
             line.extend_from_slice(&suffix);
             let line = String::from_utf8_lossy(&line);
             let line = line.trim_end_matches(['\r', '\n']);
-            return Ok(
-                parse_reflog_line(line, end_offset).filter(|record| record.end_offset > line_start)
-            );
+            return Ok(parse_reflog_line(line, line_start, end_offset)
+                .filter(|record| record.end_offset > line_start));
         }
 
         let mut line = chunk;
@@ -2505,13 +2572,15 @@ fn read_reflog_record_ending_at(
         if chunk_start == 0 {
             let line = String::from_utf8_lossy(&suffix);
             let line = line.trim_end_matches(['\r', '\n']);
-            return Ok(parse_reflog_line(line, end_offset).filter(|record| record.end_offset > 0));
+            return Ok(
+                parse_reflog_line(line, 0, end_offset).filter(|record| record.end_offset > 0)
+            );
         }
         cursor = chunk_start;
     }
 }
 
-fn parse_reflog_line(line: &str, end_offset: u64) -> Option<ReflogRecord> {
+fn parse_reflog_line(line: &str, start_offset: u64, end_offset: u64) -> Option<ReflogRecord> {
     let (head, message) = line.split_once('\t').unwrap_or((line, ""));
     let mut parts = head.split_whitespace();
     let old = parts.next()?.trim();
@@ -2524,6 +2593,7 @@ fn parse_reflog_line(line: &str, end_offset: u64) -> Option<ReflogRecord> {
         new: new.to_string(),
         message: message.to_string(),
         timestamp_secs: parse_reflog_timestamp_secs(head),
+        start_offset,
         end_offset,
     })
 }
@@ -3168,6 +3238,126 @@ mod tests {
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
         }
+    }
+
+    #[test]
+    fn late_ingress_offset_does_not_advance_in_order_cursor_past_own_commit() {
+        // Regression for the graphite/gt-create flake. The family actor keeps one
+        // RefCursor across commands. A prior command (e.g. a `switch`) advanced the
+        // in-order HEAD cursor to exactly before this command's commit entry. The
+        // async daemon-ingress offset capture then races and reads the reflog AFTER
+        // git appended both the commit entry and a following switch entry, so the
+        // `reflog_start_offsets` hint points PAST this commit's own entry.
+        //
+        // The in-order cursor is the authoritative floor; the late hint finds no
+        // matching entry at/after it, so selection falls back to the cursor's first
+        // match — this commit's own entry. The commit keeps its attribution.
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let head_log = git_dir.join("logs/HEAD");
+        fs::create_dir_all(head_log.parent().unwrap()).unwrap();
+
+        // A→B: prior switch onto the new branch (already consumed; cursor sits at
+        // end of this line). B→C: this command's commit. C→D: the switch-back gt
+        // issues right after committing.
+        let switch_line =
+            format!("{A} {B} Test User <test@example.com> 0 +0000\tcheckout: moving to branch\n");
+        let commit_line =
+            format!("{B} {C} Test User <test@example.com> 0 +0000\tcommit: gt create\n");
+        let switch_back_line =
+            format!("{C} {D} Test User <test@example.com> 0 +0000\tcheckout: moving back\n");
+        let in_order_offset = switch_line.len() as u64;
+        // Ingress captured the reflog late: after the commit entry was written but
+        // before the switch-back, so the hint points just PAST this commit's entry
+        // while a later record (the switch-back) still exists.
+        let late_offset = (switch_line.len() + commit_line.len()) as u64;
+        fs::write(
+            &head_log,
+            format!("{switch_line}{commit_line}{switch_back_line}"),
+        )
+        .unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), B.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        cursor
+            .initialize_reflog_cursor(&head_key(&git_dir), in_order_offset)
+            .unwrap();
+
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["commit", "-m", "gt create"]);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), late_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }],
+            "late ingress offset must not skip the commit's own entry"
+        );
+    }
+
+    #[test]
+    fn ingress_offset_hint_skips_untraced_duplicate_message_commit() {
+        // The dual of the graphite case: an UNTRACED commit sharing a message sits
+        // between the in-order cursor and this command's own commit. Here the
+        // ingress offset was captured at the command's true start — after the
+        // untraced commit — so it correctly biases selection to the later (traced)
+        // entry. The hint must be honored, not ignored.
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let head_log = git_dir.join("logs/HEAD");
+        fs::create_dir_all(head_log.parent().unwrap()).unwrap();
+
+        // A→B: prior traced base (consumed; cursor at end). B→C: an untraced commit
+        // the daemon never saw, sharing the message. C→D: this command's commit.
+        let base_line =
+            format!("{A} {B} Test User <test@example.com> 0 +0000\tcommit: traced base\n");
+        let untraced_line =
+            format!("{B} {C} Test User <test@example.com> 0 +0000\tcommit: same message\n");
+        let traced_line =
+            format!("{C} {D} Test User <test@example.com> 0 +0000\tcommit: same message\n");
+        let in_order_offset = base_line.len() as u64;
+        // Hint captured at the true command start: after the untraced commit.
+        let hint_offset = (base_line.len() + untraced_line.len()) as u64;
+        fs::write(
+            &head_log,
+            format!("{base_line}{untraced_line}{traced_line}"),
+        )
+        .unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), B.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+        cursor
+            .initialize_reflog_cursor(&head_key(&git_dir), in_order_offset)
+            .unwrap();
+
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["commit", "-m", "same message"]);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), hint_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: C.to_string(),
+                new: D.to_string(),
+            }],
+            "ingress hint must skip the untraced duplicate-message commit"
+        );
     }
 
     #[test]
