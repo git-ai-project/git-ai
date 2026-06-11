@@ -73,6 +73,33 @@ pub fn is_ai_author_name(author: &str) -> bool {
         .any(|&ai_name| name_lower.contains(ai_name))
 }
 
+/// The three attribution classes the fuzzer asserts, derived from a
+/// `git-ai blame --show-prompt` author column. That mode prints:
+///   - an agent tool name with a session hash for AI lines (e.g. `mock_ai [s_..]`),
+///   - an `h_`-prefixed hash for known-human attestations,
+///   - a plain git author name for everything else (untracked).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlameClass {
+    Ai,
+    KnownHuman,
+    Untracked,
+}
+
+/// Classify the author column of one `--show-prompt` blame line into one of the
+/// three attribution classes. `author` is the already-extracted author string
+/// (see `parse_blame_line`).
+pub fn classify_show_prompt_author(author: &str) -> BlameClass {
+    if is_ai_author_name(author) {
+        return BlameClass::Ai;
+    }
+    // Known-human attestations surface as the `h_`-prefixed identity hash in
+    // --show-prompt mode. Untracked lines surface as a plain git author name.
+    if author.split_whitespace().any(|tok| tok.starts_with("h_")) {
+        return BlameClass::KnownHuman;
+    }
+    BlameClass::Untracked
+}
+
 pub fn note_covers_line_as_ai(note: &str, filename: &str, line_num: u32) -> bool {
     let valid_sessions = extract_metadata_sessions(note);
     let mut in_target_file = false;
