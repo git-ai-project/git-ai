@@ -88,7 +88,7 @@ cleanup_shell_config() {
     fi
 
     if grep -q '[^[:space:]]' "$tmp"; then
-        mv "$tmp" "$rc_file"
+        cat "$tmp" > "$rc_file" && rm -f "$tmp"
         info "Updated $rc_file"
     else
         rm -f "$tmp" "$rc_file"
