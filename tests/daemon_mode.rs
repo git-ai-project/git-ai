@@ -17,7 +17,8 @@ use git_ai::daemon::{
 };
 use repos::test_file::ExpectedLineExt;
 use repos::test_repo::{
-    DaemonTestCompletionLogEntry, DaemonTestScope, TestRepo, get_binary_path, real_git_executable,
+    DAEMON_SPAWN_LOADER_RETRY_ATTEMPTS, DaemonTestCompletionLogEntry, DaemonTestScope, TestRepo,
+    get_binary_path, is_windows_loader_init_failure, real_git_executable,
 };
 use serde_json::Value;
 use serde_json::json;
@@ -33,6 +34,13 @@ use std::thread;
 use std::time::Duration;
 
 const DAEMON_TEST_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Outcome of a failed `DaemonGuard` readiness wait: a transient Windows loader
+/// hiccup (respawn) versus a genuine failure (fail loudly).
+enum DaemonReadyOutcome {
+    LoaderInitFailure(String),
+    Fatal(String),
+}
 
 fn daemon_control_socket_path(repo: &TestRepo) -> PathBuf {
     repo.daemon_control_socket_path()
@@ -428,25 +436,54 @@ impl DaemonGuard {
             &trace_socket_path,
         );
 
-        let child = command.spawn().expect("failed to spawn git-ai subprocess");
-        let mut daemon = Self {
-            child,
-            control_socket_path,
-            trace_socket_path,
-            repo_working_dir: repo_workdir_string(repo),
-        };
-        daemon.wait_until_ready();
-        daemon
+        // Respawn loop: a Windows `STATUS_DLL_INIT_FAILED` exit means the OS
+        // loader never started the daemon process (a hosted-Windows-runner
+        // hiccup), so retry. Any other early exit / timeout panics immediately.
+        let mut attempt = 0;
+        loop {
+            let child = command.spawn().expect("failed to spawn git-ai subprocess");
+            let mut daemon = Self {
+                child,
+                control_socket_path: control_socket_path.clone(),
+                trace_socket_path: trace_socket_path.clone(),
+                repo_working_dir: repo_workdir_string(repo),
+            };
+            match daemon.wait_until_ready() {
+                Ok(()) => return daemon,
+                Err(DaemonReadyOutcome::LoaderInitFailure(message)) => {
+                    let _ = daemon.child.kill();
+                    let _ = daemon.child.wait();
+                    attempt += 1;
+                    if attempt < DAEMON_SPAWN_LOADER_RETRY_ATTEMPTS {
+                        eprintln!(
+                            "[test-harness] daemon loader init failed (attempt {}/{}), respawning: {}",
+                            attempt, DAEMON_SPAWN_LOADER_RETRY_ATTEMPTS, message
+                        );
+                        continue;
+                    }
+                    panic!("{}", message);
+                }
+                Err(DaemonReadyOutcome::Fatal(message)) => {
+                    let _ = daemon.child.kill();
+                    let _ = daemon.child.wait();
+                    panic!("{}", message);
+                }
+            }
+        }
     }
 
-    fn wait_until_ready(&mut self) {
+    fn wait_until_ready(&mut self) -> Result<(), DaemonReadyOutcome> {
         for _ in 0..200 {
             if let Some(status) = self
                 .child
                 .try_wait()
                 .expect("failed to poll daemon process status")
             {
-                panic!("daemon exited before becoming ready: {}", status);
+                let message = format!("daemon exited before becoming ready: {}", status);
+                if is_windows_loader_init_failure(&status) {
+                    return Err(DaemonReadyOutcome::LoaderInitFailure(message));
+                }
+                return Err(DaemonReadyOutcome::Fatal(message));
             }
             let status = send_control_request(
                 &self.control_socket_path,
@@ -461,14 +498,14 @@ impl DaemonGuard {
                 )
                 .is_ok()
             {
-                return;
+                return Ok(());
             }
             thread::sleep(Duration::from_millis(25));
         }
-        panic!(
+        Err(DaemonReadyOutcome::Fatal(format!(
             "daemon did not become ready at {}",
             self.control_socket_path.display()
-        );
+        )))
     }
 
     fn shutdown(&mut self) {
@@ -4251,7 +4288,6 @@ use std::process::Output;
 fn daemon_shutdown_hard_kills_process() {
     let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
     let mut guard = DaemonGuard::start(&repo);
-    guard.wait_until_ready();
 
     let config = DaemonConfig::from_home(&repo.daemon_home_path());
     let pid = read_daemon_pid(&config).expect("should read daemon pid");
@@ -4292,7 +4328,6 @@ fn daemon_shutdown_hard_kills_process() {
 fn daemon_restart_brings_up_new_process() {
     let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
     let mut guard = DaemonGuard::start(&repo);
-    guard.wait_until_ready();
 
     let config = DaemonConfig::from_home(&repo.daemon_home_path());
     let old_pid = read_daemon_pid(&config).expect("should read daemon pid");
@@ -4336,7 +4371,6 @@ fn daemon_restart_brings_up_new_process() {
 fn daemon_restart_hard_kills_and_restarts() {
     let repo = TestRepo::new_with_daemon_scope(DaemonTestScope::NoDaemon);
     let mut guard = DaemonGuard::start(&repo);
-    guard.wait_until_ready();
 
     let config = DaemonConfig::from_home(&repo.daemon_home_path());
     let old_pid = read_daemon_pid(&config).expect("should read daemon pid");

@@ -207,80 +207,116 @@ impl DaemonProcess {
             .open(&stderr_log_path)
             .expect("failed to create daemon stderr log");
 
-        let mut command = Command::new(get_binary_path());
-        command
-            .arg("bg")
-            .arg("run")
-            .current_dir(test_home)
-            .env("GIT_AI_TEST_DB_PATH", test_db_path)
-            .env("GITAI_TEST_DB_PATH", test_db_path)
-            .env("GIT_AI_DAEMON_HOME", test_home)
-            .env("GIT_AI_DAEMON_CONTROL_SOCKET", &control_socket_path)
-            .env("GIT_AI_DAEMON_TRACE_SOCKET", &trace_socket_path)
-            .stdout(Stdio::null())
-            .stderr(
-                stderr_log
-                    .try_clone()
-                    .expect("failed to clone daemon stderr log file"),
-            );
-        for (key, value) in extra_env {
-            command.env(key, value);
-        }
-        configure_test_home_env(&mut command, test_home);
-
-        let mut child = command
-            .spawn()
-            .expect("failed to spawn git-ai subprocess for test mode");
-        let pid = child.id();
-        assign_daemon_to_test_job(pid);
-
-        let daemon = Self {
-            pid,
-            daemon_home: test_home.to_path_buf(),
-            test_db_path: test_db_path.to_path_buf(),
-            control_socket_path,
-            trace_socket_path,
-            stderr_log_path,
+        // Build the daemon spawn command once; we may run it more than once if
+        // the Windows loader fails to start the process image (see below).
+        let spawn_daemon = || {
+            let mut command = Command::new(get_binary_path());
+            command
+                .arg("bg")
+                .arg("run")
+                .current_dir(test_home)
+                .env("GIT_AI_TEST_DB_PATH", test_db_path)
+                .env("GITAI_TEST_DB_PATH", test_db_path)
+                .env("GIT_AI_DAEMON_HOME", test_home)
+                .env("GIT_AI_DAEMON_CONTROL_SOCKET", &control_socket_path)
+                .env("GIT_AI_DAEMON_TRACE_SOCKET", &trace_socket_path)
+                .stdout(Stdio::null())
+                .stderr(
+                    stderr_log
+                        .try_clone()
+                        .expect("failed to clone daemon stderr log file"),
+                );
+            for (key, value) in extra_env {
+                command.env(key, value);
+            }
+            configure_test_home_env(&mut command, test_home);
+            command
+                .spawn()
+                .expect("failed to spawn git-ai subprocess for test mode")
         };
-        if let Err(error) = daemon.wait_until_ready(repo_path, &mut child) {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("{}", error);
+
+        // Respawn loop: a `STATUS_DLL_INIT_FAILED` exit means the OS loader
+        // never started the daemon (a hosted-Windows-runner hiccup), so retry.
+        // Any other failure panics immediately.
+        let mut attempt = 0;
+        loop {
+            let mut child = spawn_daemon();
+            let pid = child.id();
+            assign_daemon_to_test_job(pid);
+
+            let daemon = Self {
+                pid,
+                daemon_home: test_home.to_path_buf(),
+                test_db_path: test_db_path.to_path_buf(),
+                control_socket_path: control_socket_path.clone(),
+                trace_socket_path: trace_socket_path.clone(),
+                stderr_log_path: stderr_log_path.clone(),
+            };
+            match daemon.wait_until_ready(repo_path, &mut child) {
+                Ok(()) => {
+                    drop(child);
+                    return daemon;
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    attempt += 1;
+                    if matches!(error, DaemonReadyError::LoaderInitFailure(_))
+                        && attempt < DAEMON_SPAWN_LOADER_RETRY_ATTEMPTS
+                    {
+                        eprintln!(
+                            "[test-harness] daemon loader init failed (attempt {}/{}), respawning: {}",
+                            attempt,
+                            DAEMON_SPAWN_LOADER_RETRY_ATTEMPTS,
+                            error.message()
+                        );
+                        continue;
+                    }
+                    panic!("{}", error.message());
+                }
+            }
         }
-        drop(child);
-        daemon
     }
 
-    fn wait_until_ready(&self, repo_path: &Path, child: &mut Child) -> Result<(), String> {
+    fn wait_until_ready(
+        &self,
+        repo_path: &Path,
+        child: &mut Child,
+    ) -> Result<(), DaemonReadyError> {
         let repo_working_dir = repo_path.to_string_lossy().to_string();
         let mut last_status_error: Option<String> = None;
         let start = Instant::now();
         while start.elapsed() < DAEMON_TEST_READY_TOTAL_TIMEOUT {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|e| format!("failed polling daemon child status: {}", e))?
-            {
+            if let Some(status) = child.try_wait().map_err(|e| {
+                DaemonReadyError::Fatal(format!("failed polling daemon child status: {}", e))
+            })? {
                 let stderr_tail = self.read_stderr_tail();
-                return Err(format!(
+                let message = format!(
                     "daemon exited before becoming ready (pid {}, status {}): sockets {} {}{}",
                     self.pid,
                     status,
                     self.control_socket_path.display(),
                     self.trace_socket_path.display(),
                     stderr_tail
-                ));
+                );
+                if is_windows_loader_init_failure(&status) {
+                    return Err(DaemonReadyError::LoaderInitFailure(message));
+                }
+                return Err(DaemonReadyError::Fatal(message));
             }
 
             #[cfg(unix)]
             {
                 if !is_process_alive(self.pid) {
                     let stderr_tail = self.read_stderr_tail();
-                    return Err(format!(
-                        "daemon exited before becoming ready (pid {}): sockets {} {}",
-                        self.pid,
-                        self.control_socket_path.display(),
-                        self.trace_socket_path.display()
-                    ) + &stderr_tail);
+                    return Err(DaemonReadyError::Fatal(
+                        format!(
+                            "daemon exited before becoming ready (pid {}): sockets {} {}",
+                            self.pid,
+                            self.control_socket_path.display(),
+                            self.trace_socket_path.display()
+                        ) + &stderr_tail,
+                    ));
                 }
             }
 
@@ -309,7 +345,8 @@ impl DaemonProcess {
                             repo_path,
                             &repo_working_dir,
                             baseline_seq,
-                        )?;
+                        )
+                        .map_err(DaemonReadyError::Fatal)?;
                         return Ok(());
                     }
                 }
@@ -321,13 +358,15 @@ impl DaemonProcess {
         }
 
         let stderr_tail = self.read_stderr_tail();
-        Err(format!(
-            "daemon did not become ready within {:?} at {} (trace socket: {}, last_status_error={})",
-            DAEMON_TEST_READY_TOTAL_TIMEOUT,
-            self.control_socket_path.display(),
-            self.trace_socket_path.display(),
-            last_status_error.as_deref().unwrap_or("none")
-        ) + &stderr_tail)
+        Err(DaemonReadyError::Fatal(
+            format!(
+                "daemon did not become ready within {:?} at {} (trace socket: {}, last_status_error={})",
+                DAEMON_TEST_READY_TOTAL_TIMEOUT,
+                self.control_socket_path.display(),
+                self.trace_socket_path.display(),
+                last_status_error.as_deref().unwrap_or("none")
+            ) + &stderr_tail,
+        ))
     }
 
     fn wait_until_trace_pipeline_ready(
@@ -633,6 +672,49 @@ static TEST_SYNC_SESSION_COUNTER: AtomicUsize = AtomicUsize::new(0);
 pub(crate) fn new_daemon_test_sync_session_id() -> String {
     let id = TEST_SYNC_SESSION_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
     format!("test-sync-{}-{}", std::process::id(), id)
+}
+
+/// Number of times a daemon spawn is retried when the Windows OS loader fails
+/// to even start the process image (see [`is_windows_loader_init_failure`]).
+pub(crate) const DAEMON_SPAWN_LOADER_RETRY_ATTEMPTS: usize = 5;
+
+/// Outcome of a failed daemon-readiness wait, distinguishing a transient
+/// Windows loader hiccup (respawn) from a genuine failure (fail loudly).
+enum DaemonReadyError {
+    /// The Windows loader aborted process startup; safe to respawn.
+    LoaderInitFailure(String),
+    /// Any other failure — the daemon started and misbehaved, or timed out.
+    Fatal(String),
+}
+
+impl DaemonReadyError {
+    fn message(&self) -> &str {
+        match self {
+            DaemonReadyError::LoaderInitFailure(m) | DaemonReadyError::Fatal(m) => m,
+        }
+    }
+}
+
+/// Returns `true` when `status` indicates the Windows process loader failed to
+/// initialize the process image *before any of our code ran* — i.e. the daemon
+/// never had a chance to start, as opposed to starting and then failing.
+///
+/// On the GitHub-hosted Windows runners, spawning many short-lived processes
+/// concurrently occasionally trips `STATUS_DLL_INIT_FAILED` (0xC0000142) or
+/// `STATUS_DLL_NOT_FOUND` (0xC0000135): the loader aborts during DLL
+/// initialization and the process exits before `main`. This is an environment
+/// hiccup, not a daemon defect, so the test harness respawns rather than
+/// failing. The match is intentionally narrow — any *other* nonzero exit
+/// (including a daemon that starts and then crashes) is still a hard failure.
+pub(crate) fn is_windows_loader_init_failure(status: &std::process::ExitStatus) -> bool {
+    if !cfg!(windows) {
+        return false;
+    }
+    // ExitStatus::code() returns the raw NTSTATUS as i32 on Windows.
+    matches!(
+        status.code(),
+        Some(code) if (code as u32) == 0xC000_0142 || (code as u32) == 0xC000_0135
+    )
 }
 
 fn shared_daemon_pool_size() -> usize {
