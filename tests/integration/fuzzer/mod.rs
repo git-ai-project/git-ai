@@ -55,6 +55,9 @@ fn fuzz_random() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos() as u64;
+    // Print the seed unconditionally so a CI failure is always reproducible by
+    // pinning a fixed-seed config to this value (see attribution-fuzzer-spec.md).
+    eprintln!("fuzz_random: seed={seed} (reproduce with FuzzerConfig::standard({seed}, 20))");
     run_fuzzer(FuzzerConfig::standard(seed, 20));
 }
 

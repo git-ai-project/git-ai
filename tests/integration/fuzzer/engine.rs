@@ -162,6 +162,26 @@ pub fn run_fuzzer(config: FuzzerConfig) {
                     config.seed,
                 );
             }
+            Op::SoftResetRecommit => {
+                operations::soft_reset_recommit(
+                    &mut model,
+                    &registry,
+                    &repo,
+                    &mut op_log,
+                    config.seed,
+                );
+            }
+            Op::StashRoundtrip => {
+                operations::stash_roundtrip(
+                    &mut model,
+                    &mut registry,
+                    &repo,
+                    &mut alloc,
+                    &mut rng,
+                    &mut op_log,
+                    config.seed,
+                );
+            }
         }
     }
 }
@@ -174,6 +194,8 @@ enum Op {
     Amend,
     Rebase,
     CherryPick,
+    SoftResetRecommit,
+    StashRoundtrip,
 }
 
 fn pick_operation(rng: &mut impl Rng, config: &FuzzerConfig) -> Op {
@@ -190,10 +212,12 @@ fn pick_operation(rng: &mut impl Rng, config: &FuzzerConfig) -> Op {
             _ => Op::EditCommitUntracked,
         }
     } else {
-        match rng.random_range(0..3) {
+        match rng.random_range(0..5) {
             0 => Op::Amend,
             1 => Op::Rebase,
-            _ => Op::CherryPick,
+            2 => Op::CherryPick,
+            3 => Op::SoftResetRecommit,
+            _ => Op::StashRoundtrip,
         }
     }
 }
