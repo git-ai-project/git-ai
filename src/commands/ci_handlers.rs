@@ -102,8 +102,11 @@ fn handle_ci_github(args: &[String]) {
                     std::process::exit(1);
                 }
                 Ok(None) => {
-                    eprintln!("No GitHub CI context found");
-                    std::process::exit(1);
+                    // Not an actionable event (e.g. a `synchronize` that is not a
+                    // rebased-PR-head sync). With the workflow now firing on every
+                    // `synchronize`, this must be a graceful no-op, not a failure.
+                    println!("No GitHub CI context found; nothing to do");
+                    std::process::exit(0);
                 }
             }
         }
@@ -289,6 +292,80 @@ fn handle_ci_local(args: &[String]) {
                 Ok(result) => {
                     tracing::debug!("Local CI result: {:?}", result);
                     print_ci_result(&result, "Local CI (merge)");
+                }
+                Err(e) => {
+                    eprintln!("Error running local CI: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            std::process::exit(0);
+        }
+        "sync" | "rebase" => {
+            let skip_fetch_all = has_bool_flag("--skip-fetch");
+            let skip_fetch_notes = skip_fetch_all || has_bool_flag("--skip-fetch-notes");
+            let skip_fetch_sync_refs = skip_fetch_all || has_bool_flag("--skip-fetch-sync-refs");
+            let skip_push = has_bool_flag("--skip-push");
+
+            let previous_head_sha = match flag("--previous-head-sha") {
+                Some(v) => v,
+                None => {
+                    eprintln!("--previous-head-sha is required");
+                    std::process::exit(1);
+                }
+            };
+
+            let previous_base_sha = flag("--previous-base-sha");
+
+            let head_sha = match flag("--head-sha") {
+                Some(v) => v,
+                None => {
+                    eprintln!("--head-sha is required");
+                    std::process::exit(1);
+                }
+            };
+
+            let base_sha = flag("--base-sha").unwrap_or_default();
+
+            let base_ref = match flag("--base-ref") {
+                Some(v) => v,
+                None => {
+                    if !base_sha.is_empty() {
+                        base_sha.clone()
+                    } else {
+                        eprintln!("--base-ref is required");
+                        std::process::exit(1);
+                    }
+                }
+            };
+
+            let previous_head_fetch_remote =
+                flag("--previous-head-fetch-remote").or_else(|| flag("--remote"));
+
+            let ctx = CiContext {
+                repo,
+                event: CiEvent::Sync {
+                    previous_head_sha,
+                    head_sha,
+                    base_ref,
+                    base_sha,
+                    previous_base_sha,
+                    previous_head_fetch_remote,
+                },
+                // Not used for local runs; teardown not invoked
+                temp_dir: std::path::PathBuf::from("."),
+            };
+
+            tracing::debug!("Local CI context: {:?}", ctx);
+            match ctx.run_with_options(CiRunOptions {
+                skip_fetch_notes,
+                skip_fetch_base: true,
+                skip_fetch_fork_notes: false,
+                skip_fetch_sync_refs,
+                skip_push,
+            }) {
+                Ok(result) => {
+                    tracing::debug!("Local CI result: {:?}", result);
+                    print_ci_result(&result, "Local CI (sync)");
                 }
                 Err(e) => {
                     eprintln!("Error running local CI: {}", e);
