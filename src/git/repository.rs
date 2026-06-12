@@ -2295,6 +2295,10 @@ fn no_exec_global_config_paths() -> Vec<(PathBuf, gix_config::Source)> {
                 PathBuf::from("/etc/gitconfig"),
                 gix_config::Source::System,
             );
+            #[cfg(windows)]
+            for path in windows_system_config_paths_from_env() {
+                push_existing_config_path(&mut paths, path, gix_config::Source::System);
+            }
         }
     }
 
@@ -2369,6 +2373,33 @@ fn windows_home_dir_from_values(
     }
 
     env_path_from_value(userprofile)
+}
+
+#[cfg(windows)]
+fn windows_system_config_paths_from_env() -> Vec<PathBuf> {
+    windows_system_config_paths_from_values(
+        std::env::var_os("PROGRAMW6432"),
+        std::env::var_os("PROGRAMFILES"),
+        std::env::var_os("ProgramFiles(x86)"),
+    )
+}
+
+#[cfg(windows)]
+fn windows_system_config_paths_from_values(
+    program_w6432: Option<OsString>,
+    program_files: Option<OsString>,
+    program_files_x86: Option<OsString>,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for root in [program_w6432, program_files, program_files_x86] {
+        if let Some(root) = env_path_from_value(root) {
+            let path = root.join("Git").join("etc").join("gitconfig");
+            if !paths.iter().any(|existing| existing == &path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
 }
 
 fn push_existing_config_path(
@@ -3151,6 +3182,39 @@ mod tests {
         );
 
         assert_eq!(home, Some(PathBuf::from(r"D:\Users\fallback")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_system_config_paths_include_git_for_windows_locations() {
+        let paths = windows_system_config_paths_from_values(
+            Some(OsString::from(r"C:\Program Files")),
+            None,
+            Some(OsString::from(r"C:\Program Files (x86)")),
+        );
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from(r"C:\Program Files\Git\etc\gitconfig"),
+                PathBuf::from(r"C:\Program Files (x86)\Git\etc\gitconfig"),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_system_config_paths_deduplicate_program_files_aliases() {
+        let paths = windows_system_config_paths_from_values(
+            Some(OsString::from(r"C:\Program Files")),
+            Some(OsString::from(r"C:\Program Files")),
+            None,
+        );
+
+        assert_eq!(
+            paths,
+            vec![PathBuf::from(r"C:\Program Files\Git\etc\gitconfig")]
+        );
     }
 
     #[test]
