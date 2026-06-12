@@ -90,7 +90,6 @@ impl InstallResult {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_warning(mut self, warning: impl Into<String>) -> Self {
         self.warnings.push(warning.into());
         self

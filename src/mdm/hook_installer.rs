@@ -15,7 +15,6 @@ pub struct HookCheckResult {
     /// Whether hooks are installed
     pub hooks_installed: bool,
     /// Whether hooks are up to date
-    #[allow(dead_code)]
     pub hooks_up_to_date: bool,
 }
 

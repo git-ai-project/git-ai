@@ -48,7 +48,6 @@ pub fn log_performance(
 }
 
 /// Log a message to Sentry (info, warning, etc.) (via daemon telemetry worker)
-#[allow(dead_code)]
 pub fn log_message(message: &str, level: &str, context: Option<serde_json::Value>) {
     let envelope = crate::daemon::TelemetryEnvelope::Message {
         timestamp: chrono::Utc::now().to_rfc3339(),
