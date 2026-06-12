@@ -25,6 +25,11 @@ fn stashes_dir(repo: &Repository) -> PathBuf {
 
 fn path_matches_any(path: &str, pathspecs: &[String]) -> bool {
     pathspecs.iter().any(|spec| {
+        // Trailing-`*` prefix glob (e.g. `src/foo*`, or a bare `*`), matching
+        // the pathspec semantics the pre-rewrite stash matcher supported.
+        if let Some(prefix) = spec.strip_suffix('*') {
+            return path.starts_with(prefix);
+        }
         let normalized = spec.trim_end_matches('/');
         path == spec || path == normalized || {
             let prefix = format!("{}/", normalized);
@@ -149,7 +154,7 @@ fn save_stash_attributions(
     repo: &Repository,
     stash_sha: &str,
     head_sha: &str,
-    _pathspecs: &[String],
+    pathspecs: &[String],
 ) -> Result<(), GitAiError> {
     if !repo.storage.has_working_log(head_sha) {
         return Ok(());
@@ -163,6 +168,85 @@ fn save_stash_attributions(
         let _ = copy_dir_recursive(&src_dir, &stash_log_dir);
     }
 
+    // A partial `git stash push -- <pathspec>` only stashes the matching paths,
+    // so the saved attribution must be scoped to them too. Otherwise the stash
+    // carries checkpoints/INITIAL entries for files that were never stashed,
+    // and a later (cross-branch / shifted) pop resurrects their attribution.
+    // The realistic AI flow keeps attribution in checkpoints.jsonl (INITIAL is
+    // often absent), so we filter both. Orphan content blobs left in blobs/ are
+    // harmless -- restore only reads blobs referenced by surviving checkpoints.
+    if !pathspecs.is_empty() {
+        filter_stash_checkpoints_to_pathspecs(&stash_log_dir.join("checkpoints.jsonl"), pathspecs)?;
+        filter_stash_initial_to_pathspecs(&stash_log_dir.join("INITIAL"), pathspecs)?;
+    }
+
+    Ok(())
+}
+
+/// Retain only checkpoint entries whose file matches one of `pathspecs`,
+/// dropping checkpoints left with no entries. Round-trips each JSONL line
+/// through serde_json::Value so all non-`entries` fields are preserved exactly.
+fn filter_stash_checkpoints_to_pathspecs(
+    path: &std::path::Path,
+    pathspecs: &[String],
+) -> Result<(), GitAiError> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return Ok(());
+    };
+
+    let mut kept_lines: Vec<String> = Vec::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+            // Preserve any line we can't parse rather than silently dropping it.
+            kept_lines.push(line.to_string());
+            continue;
+        };
+        if let Some(entries) = value.get_mut("entries").and_then(|e| e.as_array_mut()) {
+            entries.retain(|entry| {
+                entry
+                    .get("file")
+                    .and_then(|f| f.as_str())
+                    .is_some_and(|f| path_matches_any(f, pathspecs))
+            });
+            if entries.is_empty() {
+                continue;
+            }
+        }
+        kept_lines.push(serde_json::to_string(&value)?);
+    }
+
+    let mut out = kept_lines.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    fs::write(path, out)?;
+    Ok(())
+}
+
+/// Retain only INITIAL `files`/`file_blobs` whose path matches one of
+/// `pathspecs` (inverse of clean_working_log_for_stash, which drops them).
+fn filter_stash_initial_to_pathspecs(
+    path: &std::path::Path,
+    pathspecs: &[String],
+) -> Result<(), GitAiError> {
+    use crate::git::repo_storage::InitialAttributions;
+
+    let Ok(content) = fs::read_to_string(path) else {
+        return Ok(());
+    };
+    let Ok(mut initial) = serde_json::from_str::<InitialAttributions>(&content) else {
+        return Ok(());
+    };
+
+    initial.files.retain(|p, _| path_matches_any(p, pathspecs));
+    initial
+        .file_blobs
+        .retain(|p, _| path_matches_any(p, pathspecs));
+
+    fs::write(path, serde_json::to_string(&initial)?)?;
     Ok(())
 }
 
@@ -566,6 +650,19 @@ mod tests {
     fn test_path_matches_any_empty_specs() {
         let specs: Vec<String> = vec![];
         assert!(!path_matches_any("anything", &specs));
+    }
+
+    #[test]
+    fn test_path_matches_any_trailing_glob() {
+        // Regression (#5): the pre-rewrite matcher honored a trailing `*`
+        // prefix-glob; path_matches_any dropped it, so `git stash push --
+        // 'src/foo*'` no longer matched src/foobar.txt.
+        let specs = vec!["src/foo*".to_string()];
+        assert!(path_matches_any("src/foobar.txt", &specs));
+        assert!(path_matches_any("src/foo.rs", &specs));
+        assert!(!path_matches_any("src/bar.rs", &specs));
+        // A bare `*` matches anything.
+        assert!(path_matches_any("anything/at/all.txt", &["*".to_string()]));
     }
 
     #[test]

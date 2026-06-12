@@ -1210,6 +1210,67 @@ fn test_stash_apply_shift_uses_final_commit_tree_after_later_edit() {
     ]);
 }
 
+/// Regression (#5): `git stash push -- <pathspec>` must only save attribution
+/// for the stashed paths. save_stash_attributions used to copy the entire
+/// working log into the stash, so the stash carried checkpoints for files that
+/// were never stashed (here b.txt). On a later cross-branch/shifted pop this
+/// resurrects attribution for an unstashed file.
+#[test]
+fn test_stash_push_pathspec_excludes_unstashed_file_from_stash_log() {
+    let repo = TestRepo::new();
+    let mut readme = repo.filename("README.md");
+    readme.set_contents(vec!["# Test Repo".to_string()]);
+    repo.stage_all_and_commit("initial commit").unwrap();
+
+    let mut a = repo.filename("a.txt");
+    a.set_contents(vec!["a line 1".ai(), "a line 2".ai()]);
+    let mut b = repo.filename("b.txt");
+    b.set_contents(vec!["b line 1".ai(), "b line 2".ai()]);
+    repo.git_ai(&["checkpoint", "mock_ai"]).unwrap();
+
+    repo.git(&["stash", "push", "--", "a.txt"]).unwrap();
+    repo.sync_daemon_force();
+
+    // Collect every file referenced by the stash worklog's checkpoints.jsonl.
+    let stashes = repo.path().join(".git").join("ai").join("stashes");
+    let mut stashed_files = std::collections::BTreeSet::new();
+    let worklog_dir = std::fs::read_dir(&stashes)
+        .expect("stashes dir exists")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.ends_with("_worklog"))
+        })
+        .expect("a *_worklog dir should exist after stash");
+    let checkpoints = worklog_dir.join("checkpoints.jsonl");
+    if let Ok(content) = std::fs::read_to_string(&checkpoints) {
+        for line in content.lines().filter(|l| !l.trim().is_empty()) {
+            let v: serde_json::Value = serde_json::from_str(line).expect("valid checkpoint json");
+            if let Some(entries) = v.get("entries").and_then(|e| e.as_array()) {
+                for entry in entries {
+                    if let Some(f) = entry.get("file").and_then(|f| f.as_str()) {
+                        stashed_files.insert(f.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        stashed_files.contains("a.txt"),
+        "stash should carry the stashed file a.txt, got {:?}",
+        stashed_files
+    );
+    assert!(
+        !stashed_files.contains("b.txt"),
+        "stash must NOT carry the unstashed file b.txt, got {:?}",
+        stashed_files
+    );
+}
+
 crate::reuse_tests_in_worktree!(
     test_stash_pop_with_ai_attribution,
     test_stash_apply_with_ai_attribution,
