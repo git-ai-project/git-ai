@@ -89,31 +89,13 @@ impl CommittedValues {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn human_additions_null(mut self) -> Self {
-        self.human_additions = Some(None);
-        self
-    }
-
     pub fn git_diff_deleted_lines(mut self, value: u32) -> Self {
         self.git_diff_deleted_lines = Some(Some(value));
         self
     }
 
-    #[allow(dead_code)]
-    pub fn git_diff_deleted_lines_null(mut self) -> Self {
-        self.git_diff_deleted_lines = Some(None);
-        self
-    }
-
     pub fn git_diff_added_lines(mut self, value: u32) -> Self {
         self.git_diff_added_lines = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn git_diff_added_lines_null(mut self) -> Self {
-        self.git_diff_added_lines = Some(None);
         self
     }
 
@@ -124,31 +106,13 @@ impl CommittedValues {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn tool_model_pairs_null(mut self) -> Self {
-        self.tool_model_pairs = Some(None);
-        self
-    }
-
     pub fn ai_additions(mut self, value: Vec<u32>) -> Self {
         self.ai_additions = Some(Some(value));
         self
     }
 
-    #[allow(dead_code)]
-    pub fn ai_additions_null(mut self) -> Self {
-        self.ai_additions = Some(None);
-        self
-    }
-
     pub fn ai_accepted(mut self, value: Vec<u32>) -> Self {
         self.ai_accepted = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn ai_accepted_null(mut self) -> Self {
-        self.ai_accepted = Some(None);
         self
     }
 
@@ -494,20 +458,8 @@ impl CheckpointValues {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn checkpoint_ts_null(mut self) -> Self {
-        self.checkpoint_ts = Some(None);
-        self
-    }
-
     pub fn kind(mut self, value: impl Into<String>) -> Self {
         self.kind = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn kind_null(mut self) -> Self {
-        self.kind = Some(None);
         self
     }
 
@@ -516,20 +468,8 @@ impl CheckpointValues {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn file_path_null(mut self) -> Self {
-        self.file_path = Some(None);
-        self
-    }
-
     pub fn lines_added(mut self, value: u32) -> Self {
         self.lines_added = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn lines_added_null(mut self) -> Self {
-        self.lines_added = Some(None);
         self
     }
 
@@ -538,20 +478,8 @@ impl CheckpointValues {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn lines_deleted_null(mut self) -> Self {
-        self.lines_deleted = Some(None);
-        self
-    }
-
     pub fn lines_added_sloc(mut self, value: u32) -> Self {
         self.lines_added_sloc = Some(Some(value));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn lines_added_sloc_null(mut self) -> Self {
-        self.lines_added_sloc = Some(None);
         self
     }
 
@@ -560,31 +488,13 @@ impl CheckpointValues {
         self
     }
 
-    #[allow(dead_code)]
-    pub fn lines_deleted_sloc_null(mut self) -> Self {
-        self.lines_deleted_sloc = Some(None);
-        self
-    }
-
     pub fn external_tool_use_id(mut self, value: impl Into<String>) -> Self {
         self.external_tool_use_id = Some(Some(value.into()));
         self
     }
 
-    #[allow(dead_code)]
-    pub fn external_tool_use_id_null(mut self) -> Self {
-        self.external_tool_use_id = Some(None);
-        self
-    }
-
     pub fn edit_kind(mut self, value: impl Into<String>) -> Self {
         self.edit_kind = Some(Some(value.into()));
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn edit_kind_null(mut self) -> Self {
-        self.edit_kind = Some(None);
         self
     }
 }
@@ -761,18 +671,6 @@ mod tests {
     }
 
     #[test]
-    fn test_committed_values_null_fields() {
-        let values = CommittedValues::new()
-            .human_additions_null()
-            .git_diff_deleted_lines_null()
-            .tool_model_pairs_null();
-
-        assert_eq!(values.human_additions, Some(None));
-        assert_eq!(values.git_diff_deleted_lines, Some(None));
-        assert_eq!(values.tool_model_pairs, Some(None));
-    }
-
-    #[test]
     fn test_committed_values_with_commit_info() {
         let values = CommittedValues::new()
             .human_additions(10)
@@ -800,8 +698,7 @@ mod tests {
         let original = CommittedValues::new()
             .human_additions(25)
             .first_checkpoint_ts(1700000000)
-            .commit_subject("Test commit")
-            .commit_body_null();
+            .commit_subject("Test commit");
 
         let sparse = PosEncoded::to_sparse(&original);
         let restored = <CommittedValues as PosEncoded>::from_sparse(&sparse);
@@ -812,7 +709,7 @@ mod tests {
             restored.commit_subject,
             Some(Some("Test commit".to_string()))
         );
-        assert_eq!(restored.commit_body, Some(None));
+        assert_eq!(restored.commit_body, None);
     }
 
     #[test]
@@ -959,20 +856,6 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_values_with_nulls() {
-        let values = CheckpointValues::new()
-            .checkpoint_ts_null()
-            .kind_null()
-            .file_path_null()
-            .lines_added_null();
-
-        assert_eq!(values.checkpoint_ts, Some(None));
-        assert_eq!(values.kind, Some(None));
-        assert_eq!(values.file_path, Some(None));
-        assert_eq!(values.lines_added, Some(None));
-    }
-
-    #[test]
     fn test_checkpoint_values_to_sparse() {
         use super::PosEncoded;
 
@@ -1041,13 +924,6 @@ mod tests {
     }
 
     #[test]
-    fn test_committed_values_array_nulls() {
-        let values = CommittedValues::new().ai_accepted_null();
-
-        assert_eq!(values.ai_accepted, Some(None));
-    }
-
-    #[test]
     fn test_checkpoint_values_with_external_tool_use_id() {
         let values = CheckpointValues::new()
             .checkpoint_ts(1704067200)
@@ -1060,16 +936,6 @@ mod tests {
             values.external_tool_use_id,
             Some(Some("tool-use-123".to_string()))
         );
-    }
-
-    #[test]
-    fn test_checkpoint_values_external_tool_use_id_null() {
-        let values = CheckpointValues::new()
-            .checkpoint_ts(1704067200)
-            .kind("human")
-            .external_tool_use_id_null();
-
-        assert_eq!(values.external_tool_use_id, Some(None));
     }
 
     #[test]
@@ -1125,27 +991,6 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_values_roundtrip_with_external_tool_use_id() {
-        use super::PosEncoded;
-
-        let original = CheckpointValues::new()
-            .checkpoint_ts(1700000000)
-            .kind("ai_agent")
-            .file_path("src/lib.rs")
-            .lines_added(50)
-            .external_tool_use_id_null();
-
-        let sparse = PosEncoded::to_sparse(&original);
-        let restored = <CheckpointValues as PosEncoded>::from_sparse(&sparse);
-
-        assert_eq!(restored.checkpoint_ts, Some(Some(1700000000)));
-        assert_eq!(restored.kind, Some(Some("ai_agent".to_string())));
-        assert_eq!(restored.file_path, Some(Some("src/lib.rs".to_string())));
-        assert_eq!(restored.lines_added, Some(Some(50)));
-        assert_eq!(restored.external_tool_use_id, Some(None)); // explicitly null
-    }
-
-    #[test]
     fn test_checkpoint_values_external_tool_use_id_not_set() {
         use super::PosEncoded;
 
@@ -1168,16 +1013,6 @@ mod tests {
             .edit_kind("file_edit");
 
         assert_eq!(values.edit_kind, Some(Some("file_edit".to_string())));
-    }
-
-    #[test]
-    fn test_checkpoint_values_edit_kind_null() {
-        let values = CheckpointValues::new()
-            .checkpoint_ts(1704067200)
-            .kind("ai_agent")
-            .edit_kind_null();
-
-        assert_eq!(values.edit_kind, Some(None));
     }
 
     #[test]
