@@ -1,12 +1,22 @@
 use crate::auth::{AuthState, collect_auth_status, format_unix_timestamp};
 use crate::config;
+use crate::diagnostics::{DiagnosticCheckResult, GitDiagnosticTarget};
 use crate::git::find_repository_in_path;
+use crate::process_timeout::{TimedCommandOutput, run_command_with_timeout};
 use std::env;
 use std::fmt::Write as _;
-use std::process::Command;
-
-#[cfg(target_os = "linux")]
 use std::fs;
+use std::path::Path;
+use std::time::Duration;
+
+const MIN_GIT_VERSION: GitVersion = GitVersion {
+    major: 2,
+    minor: 22,
+    patch: 0,
+};
+const MIN_GIT_VERSION_DISPLAY: &str = "2.22.0";
+const DEBUG_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
+const DEBUG_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub fn handle_debug(args: &[String]) {
     if args
@@ -38,14 +48,19 @@ fn print_debug_help() {
 fn build_debug_report() -> String {
     let config = config::Config::get();
     let git_cmd = config.git_cmd().to_string();
+    let git_cmd_realpath = realpath_for_display(&git_cmd);
+    let shell_git_lookup = collect_shell_git_lookup();
+    let daemon_diagnostics = crate::diagnostics::prepare_daemon_for_debug_self_checks(&git_cmd);
+    let git_diagnostics = collect_git_diagnostics(&git_cmd);
     let git_version = run_command_capture(&git_cmd, &["--version"]);
+    let shell_git_version = run_command_capture("git", &["--version"]);
     let git_config = collect_git_config_dump(&git_cmd);
     let git_ai_config = collect_git_ai_config_dump();
     let platform_info = collect_platform_info();
     let hardware_info = collect_hardware_info();
     let repository_info = collect_repository_info();
     let auth_info = collect_auth_status();
-    let env_overrides = collect_git_ai_env_overrides();
+    let git_environment = collect_git_environment();
 
     let mut out = String::new();
     let _ = writeln!(out, "git-ai debug report");
@@ -70,12 +85,48 @@ fn build_debug_report() -> String {
             .unwrap_or_else(|e| format!("<unavailable: {}>", e))
     );
     let _ = writeln!(out, "Git binary path: {}", git_cmd);
-    match git_version {
+    let _ = writeln!(out, "Git binary realpath: {}", git_cmd_realpath);
+    let _ = writeln!(
+        out,
+        "Shell git lookup command: {}",
+        shell_git_lookup.command
+    );
+    match shell_git_lookup.path {
+        Ok(ref path) => {
+            let _ = writeln!(out, "Shell git path: {}", path);
+            let _ = writeln!(out, "Shell git realpath: {}", realpath_for_display(path));
+        }
+        Err(ref err) => {
+            let _ = writeln!(out, "Shell git path: <error: {}>", err);
+            let _ = writeln!(out, "Shell git realpath: <unavailable>");
+        }
+    }
+    match &git_version {
         Ok(version) => {
             let _ = writeln!(out, "Git version: {}", version);
+            append_git_version_check(&mut out, "Git version check", version);
         }
         Err(err) => {
             let _ = writeln!(out, "Git version: <error: {}>", err);
+            let _ = writeln!(
+                out,
+                "Git version check: <error: unable to verify minimum version {}>",
+                MIN_GIT_VERSION_DISPLAY
+            );
+        }
+    }
+    match &shell_git_version {
+        Ok(version) => {
+            let _ = writeln!(out, "Shell git version: {}", version);
+            append_git_version_check(&mut out, "Shell git version check", version);
+        }
+        Err(err) => {
+            let _ = writeln!(out, "Shell git version: <error: {}>", err);
+            let _ = writeln!(
+                out,
+                "Shell git version check: <error: unable to verify minimum version {}>",
+                MIN_GIT_VERSION_DISPLAY
+            );
         }
     }
     let _ = writeln!(out);
@@ -177,6 +228,9 @@ fn build_debug_report() -> String {
     }
     let _ = writeln!(out);
 
+    append_git_diagnostics(&mut out, &daemon_diagnostics, &git_diagnostics);
+    let _ = writeln!(out);
+
     let _ = writeln!(out, "== Git Config ==");
     let _ = writeln!(out, "Command: {}", git_config.command);
     match git_config.output {
@@ -273,17 +327,268 @@ fn build_debug_report() -> String {
     }
     let _ = writeln!(out);
 
-    let _ = writeln!(out, "== Git AI Environment ==");
-    if env_overrides.is_empty() {
-        let _ = writeln!(out, "No GIT_AI_* environment variables are set.");
+    let _ = writeln!(out, "== Git Environment ==");
+    if git_environment.is_empty() {
+        let _ = writeln!(
+            out,
+            "No GIT_AI_*, GITAI_*, or GIT_* environment variables are set."
+        );
     } else {
-        let _ = writeln!(out, "GIT_AI_* variables set:");
-        for entry in env_overrides {
+        let _ = writeln!(out, "GIT_AI_*, GITAI_*, and GIT_* variables set:");
+        for entry in git_environment {
             let _ = writeln!(out, "  {}", entry);
         }
     }
 
     out
+}
+
+struct GitDebugDiagnostics {
+    target: GitDiagnosticTarget,
+    trace2_config: DiagnosticCheckResult,
+    attribution: DiagnosticCheckResult,
+    trace2: DiagnosticCheckResult,
+}
+
+fn collect_git_diagnostics(configured_git: &str) -> Vec<GitDebugDiagnostics> {
+    let targets = vec![
+        GitDiagnosticTarget::new("configured git", configured_git),
+        GitDiagnosticTarget::new("terminal git", "git"),
+    ];
+
+    targets
+        .into_iter()
+        .map(|target| {
+            let trace2_config = crate::diagnostics::check_trace2_global_config(&target);
+            let attribution = crate::diagnostics::run_attribution_self_check(&target);
+            let trace2 = crate::diagnostics::run_trace2_file_self_check(&target);
+            GitDebugDiagnostics {
+                target,
+                trace2_config,
+                attribution,
+                trace2,
+            }
+        })
+        .collect()
+}
+
+fn append_git_diagnostics(
+    out: &mut String,
+    daemon: &DiagnosticCheckResult,
+    diagnostics: &[GitDebugDiagnostics],
+) {
+    let _ = writeln!(out, "== Git Self Checks ==");
+    let _ = writeln!(out, "daemon");
+    append_diagnostic_check(out, "Daemon check", daemon, false);
+    for diagnostic in diagnostics {
+        let _ = writeln!(
+            out,
+            "{} (program: {})",
+            diagnostic.target.label, diagnostic.target.program
+        );
+        append_diagnostic_check(out, "Trace2 config check", &diagnostic.trace2_config, false);
+        append_diagnostic_check(
+            out,
+            "Attribution self-check",
+            &diagnostic.attribution,
+            false,
+        );
+        append_diagnostic_check(out, "Trace2 file self-check", &diagnostic.trace2, true);
+    }
+}
+
+fn append_diagnostic_check(
+    out: &mut String,
+    label: &str,
+    check: &DiagnosticCheckResult,
+    always_show_trace2: bool,
+) {
+    let _ = writeln!(
+        out,
+        "  {}: {} - {}",
+        label,
+        check.status.as_str(),
+        check.summary
+    );
+    for detail in &check.details {
+        let _ = writeln!(out, "    {}", detail);
+    }
+
+    if always_show_trace2 && let Some(trace2_json) = check.trace2_json.as_ref() {
+        let _ = writeln!(out, "    trace2 JSON received:");
+        append_indented_block_with_prefix(out, trace2_json, "      ");
+    }
+
+    if check.status == crate::diagnostics::DiagnosticStatus::Failed {
+        let _ = writeln!(out, "    command log:");
+        for command in &check.commands {
+            let _ = writeln!(out, "      $ {}", command.command);
+            if let Some(cwd) = &command.cwd {
+                let _ = writeln!(out, "        cwd: {}", cwd);
+            }
+            let _ = writeln!(
+                out,
+                "        status: {}",
+                if command.timed_out {
+                    "<timeout>".to_string()
+                } else {
+                    command
+                        .status
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "<unavailable>".to_string())
+                }
+            );
+            if command.timed_out {
+                let _ = writeln!(out, "        timed out: yes");
+            }
+            if !command.stdout.trim().is_empty() {
+                let _ = writeln!(out, "        stdout:");
+                append_indented_block_with_prefix(out, &command.stdout, "          ");
+            }
+            if !command.stderr.trim().is_empty() {
+                let _ = writeln!(out, "        stderr:");
+                append_indented_block_with_prefix(out, &command.stderr, "          ");
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct GitVersion {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+impl std::fmt::Display for GitVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+fn append_git_version_check(out: &mut String, label: &str, version_output: &str) {
+    match parse_git_version(version_output) {
+        Some(version) if version >= MIN_GIT_VERSION => {
+            let _ = writeln!(
+                out,
+                "{}: version meets or exceeds minimum version of {}",
+                label, MIN_GIT_VERSION_DISPLAY
+            );
+        }
+        Some(version) => {
+            let _ = writeln!(
+                out,
+                "{}: ERROR: detected Git version {} is below minimum version {}",
+                label, version, MIN_GIT_VERSION_DISPLAY
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "{}: <error: could not parse Git version from '{}'; minimum version is {}>",
+                label, version_output, MIN_GIT_VERSION_DISPLAY
+            );
+        }
+    }
+}
+
+fn parse_git_version(output: &str) -> Option<GitVersion> {
+    output.split_whitespace().find_map(parse_git_version_token)
+}
+
+fn parse_git_version_token(token: &str) -> Option<GitVersion> {
+    let token = token.trim_start_matches('v');
+    let mut parts = token.split('.');
+    let major = parse_leading_u32(parts.next()?)?;
+    let minor = parse_leading_u32(parts.next()?)?;
+    let patch = parts.next().map(parse_leading_u32).unwrap_or(Some(0))?;
+
+    Some(GitVersion {
+        major,
+        minor,
+        patch,
+    })
+}
+
+fn parse_leading_u32(value: &str) -> Option<u32> {
+    let digits = value
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+struct ShellGitLookup {
+    command: String,
+    path: Result<String, String>,
+}
+
+fn collect_shell_git_lookup() -> ShellGitLookup {
+    #[cfg(windows)]
+    {
+        collect_windows_shell_git_lookup()
+    }
+
+    #[cfg(not(windows))]
+    {
+        collect_unix_shell_git_lookup()
+    }
+}
+
+#[cfg(not(windows))]
+fn collect_unix_shell_git_lookup() -> ShellGitLookup {
+    let shell = env::var("SHELL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "sh".to_string());
+    let command = format!("{} -lc 'which git'", shell);
+    let path = run_command_capture(&shell, &["-lc", "which git"])
+        .and_then(|output| select_lookup_path(&output));
+
+    ShellGitLookup { command, path }
+}
+
+#[cfg(windows)]
+fn collect_windows_shell_git_lookup() -> ShellGitLookup {
+    let comspec = env::var("ComSpec")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "cmd.exe".to_string());
+    let command = format!("{} /C where git", comspec);
+    let path = run_command_capture(&comspec, &["/C", "where git"])
+        .and_then(|output| select_lookup_path(&output));
+
+    ShellGitLookup { command, path }
+}
+
+fn select_lookup_path(output: &str) -> Result<String, String> {
+    let mut first_non_empty = None;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if first_non_empty.is_none() {
+            first_non_empty = Some(trimmed.to_string());
+        }
+
+        if Path::new(trimmed).exists() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    first_non_empty.ok_or_else(|| "empty output".to_string())
+}
+
+fn realpath_for_display(path: &str) -> String {
+    fs::canonicalize(path)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|e| format!("<error: {}>", e))
 }
 
 fn append_indented_block(out: &mut String, content: &str) {
@@ -296,17 +601,58 @@ fn append_indented_block(out: &mut String, content: &str) {
     }
 }
 
-fn run_command_capture(program: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("failed to execute '{}': {}", program, e))?;
+fn append_indented_block_with_prefix(out: &mut String, content: &str, prefix: &str) {
+    if content.trim().is_empty() {
+        let _ = writeln!(out, "{}<empty>", prefix);
+        return;
+    }
+    for line in content.lines() {
+        let _ = writeln!(out, "{}{}", prefix, line);
+    }
+}
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+fn run_command_capture(program: &str, args: &[&str]) -> Result<String, String> {
+    run_command_capture_with_timeout(program, args, DEBUG_COMMAND_TIMEOUT)
+}
+
+fn run_command_capture_with_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, String> {
+    let command = format_command_for_error(program, args);
+    let output = run_command_with_timeout(
+        program,
+        args,
+        None,
+        timeout,
+        DEBUG_COMMAND_POLL_INTERVAL,
+        &[],
+    )
+    .map_err(|e| {
+        format!(
+            "failed to execute '{}': {}",
+            program,
+            strip_execute_prefix(&e)
+        )
+    })?;
+
+    if output.timed_out {
+        return Err(format_timeout_capture_error(&command, timeout, output));
+    }
+    if output.wait_error.is_some() {
+        return Err(format_wait_capture_error(&command, output));
+    }
+
+    command_output_to_result(output)
+}
+
+fn command_output_to_result(output: TimedCommandOutput) -> Result<String, String> {
+    if output.status != Some(0) {
+        let mut stderr = output.stderr.trim().to_string();
+        append_debug_diagnostics(&mut stderr, &output.diagnostics);
         let code = output
             .status
-            .code()
             .map(|c| c.to_string())
             .unwrap_or_else(|| "signal".to_string());
         if stderr.is_empty() {
@@ -315,7 +661,85 @@ fn run_command_capture(program: &str, args: &[&str]) -> Result<String, String> {
         return Err(format!("exit code {}: {}", code, stderr));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(output.stdout)
+}
+
+fn format_timeout_capture_error(
+    command: &str,
+    timeout: Duration,
+    output: TimedCommandOutput,
+) -> String {
+    let mut message = format!(
+        "timed out after {:.1}s running '{}'",
+        timeout.as_secs_f64(),
+        command
+    );
+    append_debug_diagnostics(&mut message, &output.diagnostics);
+    if let Some(wait_error) = output.wait_error {
+        message.push_str(&format!("; failed while waiting: {}", wait_error));
+    }
+    if !output.stdout.trim().is_empty() {
+        message.push_str(&format!(
+            "; stdout before timeout: {}",
+            output.stdout.trim()
+        ));
+    }
+    if !output.stderr.trim().is_empty() {
+        message.push_str(&format!(
+            "; stderr before timeout: {}",
+            output.stderr.trim()
+        ));
+    }
+    message
+}
+
+fn format_wait_capture_error(command: &str, output: TimedCommandOutput) -> String {
+    let wait_error = output.wait_error.as_deref().unwrap_or("unknown wait error");
+    let mut message = format!("failed while waiting for '{}': {}", command, wait_error);
+    append_debug_diagnostics(&mut message, &output.diagnostics);
+    if !output.stdout.trim().is_empty() {
+        message.push_str(&format!(
+            "; stdout before wait failure: {}",
+            output.stdout.trim()
+        ));
+    }
+    if !output.stderr.trim().is_empty() {
+        message.push_str(&format!(
+            "; stderr before wait failure: {}",
+            output.stderr.trim()
+        ));
+    }
+    message
+}
+
+fn append_debug_diagnostics(message: &mut String, diagnostics: &[String]) {
+    for diagnostic in diagnostics {
+        message.push_str("; ");
+        message.push_str(diagnostic);
+    }
+}
+
+fn strip_execute_prefix(error: &str) -> &str {
+    error.strip_prefix("failed to execute: ").unwrap_or(error)
+}
+
+fn format_command_for_error(program: &str, args: &[&str]) -> String {
+    std::iter::once(program)
+        .chain(args.iter().copied())
+        .map(shell_quote_for_error)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote_for_error(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || "-_./:=@".contains(ch))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 #[derive(Default)]
@@ -660,9 +1084,17 @@ fn collect_git_ai_config_dump() -> Result<String, String> {
     Ok(out)
 }
 
-fn collect_git_ai_env_overrides() -> Vec<String> {
-    let mut entries: Vec<(String, String)> = env::vars()
-        .filter(|(k, _)| k.starts_with("GIT_AI_"))
+fn collect_git_environment() -> Vec<String> {
+    collect_git_environment_entries(env::vars())
+}
+
+fn collect_git_environment_entries<I>(entries: I) -> Vec<String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut entries: Vec<(String, String)> = entries
+        .into_iter()
+        .filter(|(key, _)| is_debug_git_env_key(key))
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -670,6 +1102,10 @@ fn collect_git_ai_env_overrides() -> Vec<String> {
         .into_iter()
         .map(|(key, value)| format!("{}={}", key, redact_env_value(&key, &value)))
         .collect()
+}
+
+fn is_debug_git_env_key(key: &str) -> bool {
+    key.starts_with("GIT_AI_") || key.starts_with("GITAI_") || key.starts_with("GIT_")
 }
 
 fn redact_env_value(key: &str, value: &str) -> String {
@@ -698,6 +1134,26 @@ fn redact_env_value(key: &str, value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(windows))]
+    fn stdout_stderr_sleep_command() -> (&'static str, Vec<&'static str>) {
+        (
+            "sh",
+            vec!["-c", "printf out; printf err >&2; exec sleep 60"],
+        )
+    }
+
+    #[cfg(windows)]
+    fn stdout_stderr_sleep_command() -> (&'static str, Vec<&'static str>) {
+        (
+            "powershell.exe",
+            vec![
+                "-NoProfile",
+                "-Command",
+                "[Console]::Out.Write('out'); [Console]::Error.Write('err'); Start-Sleep -Seconds 60",
+            ],
+        )
+    }
 
     #[test]
     fn test_redact_git_config_line_redacts_sensitive_key() {
@@ -739,5 +1195,106 @@ mod tests {
     #[test]
     fn test_format_bytes() {
         assert_eq!(format_bytes(1024), "1.00 KB (1024 bytes)");
+    }
+
+    #[test]
+    fn test_is_debug_git_env_key_matches_git_prefixes() {
+        assert!(is_debug_git_env_key("GIT_AI_DEBUG"));
+        assert!(is_debug_git_env_key("GITAI_TEST_DB_PATH"));
+        assert!(is_debug_git_env_key("GIT_DIR"));
+        assert!(is_debug_git_env_key("GIT_TRACE2_EVENT"));
+        assert!(!is_debug_git_env_key("GITHUB_TOKEN"));
+        assert!(!is_debug_git_env_key("PATH"));
+    }
+
+    #[test]
+    fn test_collect_git_environment_entries_sorts_and_redacts() {
+        let entries = collect_git_environment_entries(vec![
+            ("OTHER".to_string(), "ignored".to_string()),
+            ("GIT_DIR".to_string(), ".git".to_string()),
+            ("GITAI_TEST_DB_PATH".to_string(), "/tmp/db".to_string()),
+            ("GIT_AI_API_KEY".to_string(), "secret".to_string()),
+        ]);
+
+        assert_eq!(
+            entries,
+            vec![
+                "GITAI_TEST_DB_PATH=/tmp/db",
+                "GIT_AI_API_KEY=[REDACTED]",
+                "GIT_DIR=.git",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_git_version_handles_platform_suffixes() {
+        assert_eq!(
+            parse_git_version("git version 2.54.0.windows.1"),
+            Some(GitVersion {
+                major: 2,
+                minor: 54,
+                patch: 0
+            })
+        );
+        assert_eq!(
+            parse_git_version("git version 2.39.5 (Apple Git-154)"),
+            Some(GitVersion {
+                major: 2,
+                minor: 39,
+                patch: 5
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_git_version_accepts_minimum_version() {
+        assert!(parse_git_version("git version 2.22.0").unwrap() >= MIN_GIT_VERSION);
+        assert!(parse_git_version("git version 2.21.9").unwrap() < MIN_GIT_VERSION);
+    }
+
+    #[test]
+    fn test_select_lookup_path_prefers_existing_path() {
+        let exe = env::current_exe().unwrap();
+        let output = format!("/definitely/not/git\n{}\n", exe.display());
+
+        assert_eq!(
+            select_lookup_path(&output).unwrap(),
+            exe.display().to_string()
+        );
+    }
+
+    #[test]
+    fn test_select_lookup_path_falls_back_to_first_non_empty_line() {
+        assert_eq!(
+            select_lookup_path("\n git: aliased to hub \n").unwrap(),
+            "git: aliased to hub"
+        );
+    }
+
+    #[test]
+    fn test_realpath_for_display_canonicalizes_existing_path() {
+        let exe = env::current_exe().unwrap();
+        let expected = fs::canonicalize(&exe).unwrap();
+
+        assert_eq!(
+            realpath_for_display(&exe.display().to_string()),
+            expected.display().to_string()
+        );
+    }
+
+    #[test]
+    fn test_run_command_capture_with_timeout_reports_partial_output() {
+        let (program, args) = stdout_stderr_sleep_command();
+        let err = run_command_capture_with_timeout(program, &args, Duration::from_millis(300))
+            .unwrap_err();
+
+        assert!(err.contains("timed out after"), "{err}");
+        assert!(
+            err.contains("sent kill to child process")
+                || err.contains("failed to kill child process"),
+            "{err}"
+        );
+        assert!(err.contains("stdout before timeout: out"), "{err}");
+        assert!(err.contains("stderr before timeout: err"), "{err}");
     }
 }

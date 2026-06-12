@@ -274,6 +274,14 @@ impl Config {
         &self,
         remotes: Option<&Vec<(String, String)>>,
     ) -> bool {
+        if remotes.is_some_and(|remotes| {
+            remotes.iter().any(|(_, remote_url)| {
+                crate::diagnostic_sentinels::is_debug_self_check_remote_url(remote_url)
+            })
+        }) {
+            return true;
+        }
+
         // First check if repository is in exclusion list - exclusions take precedence
         if !self.exclude_repositories.is_empty()
             && let Some(remotes) = remotes

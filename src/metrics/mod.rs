@@ -49,9 +49,25 @@ pub fn record<V: EventValues>(values: V, attrs: EventAttributes) {
     if attrs.tool == Some(Some("mock_ai".to_string())) {
         return;
     }
+    if should_ignore_debug_self_check_event(&attrs) {
+        return;
+    }
     let event = MetricEvent::new(&values, attrs.to_sparse());
     // Write directly to observability log
     crate::observability::log_metrics(vec![event]);
+}
+
+fn should_ignore_debug_self_check_event(attrs: &EventAttributes) -> bool {
+    if attrs.repo_url.as_ref().is_some_and(|repo_url| {
+        repo_url
+            .as_ref()
+            .is_some_and(|url| crate::diagnostic_sentinels::is_debug_self_check_remote_url(url))
+    }) {
+        return true;
+    }
+
+    std::env::current_dir()
+        .is_ok_and(|cwd| crate::diagnostic_sentinels::path_is_in_debug_self_check_root(&cwd))
 }
 
 #[cfg(test)]
@@ -89,6 +105,13 @@ mod tests {
         // side since log_metrics is a no-op in tests, but the guard is exercised.
         let values = events::AgentUsageValues::new();
         record(values, attrs);
+    }
+
+    #[test]
+    fn test_debug_self_check_repo_url_is_ignored() {
+        let attrs = EventAttributes::with_version("1.0.0")
+            .repo_url(crate::diagnostic_sentinels::DEBUG_SELF_CHECK_NORMALIZED_REMOTE_URL);
+        assert!(should_ignore_debug_self_check_event(&attrs));
     }
 
     /// Verify that a Committed event whose tool_model_pairs contain "mock_ai::unknown"
