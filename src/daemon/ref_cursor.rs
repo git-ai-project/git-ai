@@ -217,13 +217,97 @@ impl RefCursor {
                 self.command_start_hints.insert(key, offset);
             } else if self.command_start_offset_is_authoritative(&key, offset)? {
                 // No cursor yet (cold start / first traced command). The ingress
-                // offset is the only command-start boundary we have, so it seeds a
-                // fresh cursor.
-                self.initialize_reflog_cursor(&key, offset)?;
+                // offset is the command-start boundary used to skip genuinely
+                // prior untraced history, so it seeds the fresh cursor.
+                //
+                // But the capture is asynchronous and can race AHEAD of git,
+                // landing past the command's own entry (concurrent-worktree-burst
+                // / rebase-patch-stack flake). Seeding at such a late offset makes
+                // it a hard floor and silently drops the command's own entry. To
+                // stay safe we clamp the seed back to the START of the command's
+                // own matching entry when that entry lies before the offset, and
+                // also keep the offset as a soft selection hint so genuinely prior
+                // untraced history is still skipped.
+                let seed = self.clamp_seed_to_own_entry(&key, offset, cmd)?;
+                if seed != offset {
+                    self.command_start_hints.insert(key.clone(), offset);
+                }
+                self.initialize_reflog_cursor(&key, seed)?;
             }
         }
 
         Ok(())
+    }
+
+    /// Clamp a cold-start seed offset so it never lands past the command's own
+    /// matching reflog entry. Returns the start offset of the earliest entry
+    /// at/before `offset` that matches this command (by expected transition and
+    /// message prefixes); if no such entry precedes the offset, returns `offset`
+    /// unchanged (the offset legitimately skips only prior, non-matching
+    /// history).
+    fn clamp_seed_to_own_entry(
+        &self,
+        key: &str,
+        offset: u64,
+        cmd: &NormalizedCommand,
+    ) -> Result<u64, GitAiError> {
+        if offset == 0 {
+            return Ok(0);
+        }
+        let Some(path) = self.reflog_path_for_key(key) else {
+            return Ok(offset);
+        };
+        let Some((expected, prefixes)) = self.cold_seed_match_spec(cmd) else {
+            // No command-specific matcher (e.g. update-ref --stdin / stash that
+            // match by transition only): keep the offset as the boundary to
+            // preserve existing first-observed-boundary semantics.
+            return Ok(offset);
+        };
+        let reference = if let Some(reference) = key.strip_prefix("common:") {
+            reference.to_string()
+        } else {
+            "HEAD".to_string()
+        };
+        let entries = read_reflog_entries(key.to_string(), &path, &reference, None)?;
+        let earliest_own = entries
+            .into_iter()
+            .filter(|entry| {
+                entry.start_offset < offset
+                    && expected.matches(entry)
+                    && message_matches(&entry.message, &prefixes)
+            })
+            .map(|entry| entry.start_offset)
+            .min();
+        Ok(earliest_own.unwrap_or(offset))
+    }
+
+    /// The expected transition + reflog message prefixes used to recognize a
+    /// command's OWN entry during cold-start seed clamping. Returns None for
+    /// commands matched by transition alone (no message discriminator), where
+    /// clamping must not change the seed (update-ref --stdin, stash, etc.).
+    fn cold_seed_match_spec(
+        &self,
+        cmd: &NormalizedCommand,
+    ) -> Option<(ExpectedTransition, Vec<&'static str>)> {
+        // Only commit/amend entries carry a message specific enough to identify
+        // the command's own entry unambiguously (both on HEAD and on the branch
+        // ref it moves). These are exactly the attribution-critical cases the
+        // concurrent-burst / rebase-patch-stack flake hits.
+        let args = command_args(cmd);
+        match cmd.primary_command.as_deref()? {
+            "commit" => {
+                let amend = args.iter().any(|arg| arg == "--amend");
+                let prefixes: Vec<&'static str> = if amend {
+                    vec!["commit (amend):"]
+                } else {
+                    vec!["commit", "commit (initial):"]
+                };
+                let expected = ExpectedTransition::default()
+                    .with_reflog_messages(commit_reflog_messages(&args, amend));
+                Some((expected, prefixes))
+            }
+            _ => None,
+        }
     }
 
     fn enrich_commit(
@@ -3262,6 +3346,119 @@ mod tests {
             ref_changes: Vec::new(),
             confidence: Confidence::Low,
         }
+    }
+
+    #[test]
+    fn cold_start_late_ingress_offset_does_not_skip_commit_on_uninitialized_head_cursor() {
+        // Regression for the concurrent-burst / rebase-patch-stack flake. Unlike
+        // the initialized-cursor case below, here the worktree HEAD cursor is
+        // COLD (first traced commit on a fresh linked worktree — the worktree's
+        // own HEAD reflog was never seeded by a prior command in this family).
+        //
+        // The async ingress offset is captured LATE: after git appended this
+        // commit's HEAD entry, with a trailing entry after it (so the offset is
+        // NOT at EOF). Cold-start seeding used `command_start_offset_is_authoritative`
+        // -> records-exist-after-offset == true -> seed the cursor at the late
+        // offset, positioning it PAST the commit's own entry. find_entry_in_log
+        // then reads from the late cursor, never sees the commit -> empty
+        // ref_changes -> head_change None -> no CommitCreated -> AI attribution
+        // silently lost.
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let head_log = git_dir.join("logs/HEAD");
+        fs::create_dir_all(head_log.parent().unwrap()).unwrap();
+
+        // A→B: the worktree's creation checkout (untraced by this family's cursor).
+        // B→C: this command's commit. C→D: a trailing entry (e.g. a later op) so
+        // the late offset lands mid-reflog rather than at EOF.
+        let create_line =
+            format!("{A} {B} Test User <test@example.com> 0 +0000\tcheckout: moving to wt\n");
+        let commit_line =
+            format!("{B} {C} Test User <test@example.com> 0 +0000\tcommit: burst commit\n");
+        let trailing_line =
+            format!("{C} {D} Test User <test@example.com> 0 +0000\tcheckout: moving back\n");
+        let late_offset = (create_line.len() + commit_line.len()) as u64;
+        fs::write(
+            &head_log,
+            format!("{create_line}{commit_line}{trailing_line}"),
+        )
+        .unwrap();
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), B.to_string());
+        // Cold: cursor NOT initialized.
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["commit", "-m", "burst commit"]);
+        cmd.reflog_start_offsets
+            .insert(head_key(&git_dir), late_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        assert_eq!(
+            cmd.ref_changes,
+            vec![RefChange {
+                reference: "HEAD".to_string(),
+                old: B.to_string(),
+                new: C.to_string(),
+            }],
+            "cold-start late ingress offset must not seed the cursor past the commit's own entry"
+        );
+    }
+
+    #[test]
+    fn cold_start_late_ingress_offset_does_not_skip_commit_on_uninitialized_common_ref() {
+        // Variant of the above for a `common:` branch ref (e.g. the branch a
+        // linked worktree commits on). command_start_offset_is_authoritative
+        // returns true UNCONDITIONALLY for cold `common:` keys, so a late offset
+        // (captured after git appended the branch's commit entry) seeds the
+        // branch-ref cursor at EOF, past the commit's branch entry. The commit's
+        // branch transition is then never found.
+        let temp = tempfile::tempdir().unwrap();
+        let worktree = temp.path().join("repo");
+        let git_dir = worktree.join(".git");
+        let reference = "refs/heads/feature";
+        let head_log = git_dir.join("logs/HEAD");
+        let branch_log = git_dir.join("logs").join(reference);
+        fs::create_dir_all(head_log.parent().unwrap()).unwrap();
+        fs::create_dir_all(branch_log.parent().unwrap()).unwrap();
+
+        // HEAD records the commit normally (B→C), found from offset 0.
+        let head_commit_line =
+            format!("{B} {C} Test User <test@example.com> 0 +0000\tcommit: feature commit\n");
+        fs::write(&head_log, &head_commit_line).unwrap();
+
+        // The branch ref also records B→C for the commit. The late ingress offset
+        // points at EOF (after the commit's branch entry).
+        let branch_commit_line =
+            format!("{B} {C} Test User <test@example.com> 0 +0000\tcommit: feature commit\n");
+        fs::write(&branch_log, &branch_commit_line).unwrap();
+        let late_branch_offset = branch_commit_line.len() as u64;
+
+        let family = FamilyKey::new(git_dir.to_string_lossy().to_string());
+        let mut state = family_state(&family);
+        state.refs.insert("HEAD".to_string(), B.to_string());
+        state.refs.insert(reference.to_string(), B.to_string());
+        let mut cursor = RefCursor::new(family.clone());
+
+        let mut cmd =
+            command_with_worktree(&family, Some(worktree), &["commit", "-m", "feature commit"]);
+        cmd.reflog_start_offsets
+            .insert(common_key(reference), late_branch_offset);
+
+        cursor.enrich_command(&mut cmd, &state).unwrap();
+
+        // The branch ref change must be present (not skipped by the late cold seed).
+        assert!(
+            cmd.ref_changes
+                .iter()
+                .any(|change| change.reference == reference && change.old == B && change.new == C),
+            "cold-start late ingress offset on a common branch ref must not skip the commit's branch entry; got {:?}",
+            cmd.ref_changes
+        );
     }
 
     #[test]
