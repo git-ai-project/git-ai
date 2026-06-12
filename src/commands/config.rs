@@ -111,7 +111,7 @@ fn print_config_help() {
         MAX_UPGRADE_JITTER_SECONDS
     );
     println!(
-        "  minimum_package_upgrade_age_seconds  Minimum release age before upgrading (seconds)"
+        "  minimum_package_upgrade_age_seconds  Minimum release age before upgrading (seconds; requires release created_at metadata)"
     );
     println!("  feature_flags                Feature flags (object)");
     println!("  api_key                      API key for X-API-Key header");
