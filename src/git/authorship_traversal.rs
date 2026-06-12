@@ -16,7 +16,7 @@ pub async fn load_ai_touched_files_for_commits(
 ) -> Result<HashSet<String>, GitAiError> {
     let repo = repo.clone();
 
-    smol::unblock(move || {
+    crate::tokio_runtime::spawn_blocking_result(move || {
         if commit_shas.is_empty() {
             return Ok(HashSet::new());
         }
@@ -195,95 +195,89 @@ mod tests {
     use crate::git::{find_repository_in_path, sync_authorship::fetch_authorship_notes};
     use std::time::Instant;
 
-    #[test]
-    fn test_load_ai_touched_files_for_specific_commits() {
-        smol::block_on(async {
-            let repo = find_repository_in_path(".").unwrap();
+    #[tokio::test]
+    async fn test_load_ai_touched_files_for_specific_commits() {
+        let repo = find_repository_in_path(".").unwrap();
 
-            fetch_authorship_notes(&repo, "origin").unwrap();
+        fetch_authorship_notes(&repo, "origin").unwrap();
 
-            // Get all notes to find commits that have notes attached
-            let global_args = repo.global_args_for_exec();
-            let all_notes = get_notes_list(&global_args).unwrap();
+        // Get all notes to find commits that have notes attached
+        let global_args = repo.global_args_for_exec();
+        let all_notes = get_notes_list(&global_args).unwrap();
 
-            if all_notes.len() < 3 {
-                println!(
-                    "Skipping test: only {} notes available, need at least 3",
-                    all_notes.len()
-                );
-                return;
-            }
-
-            // Pick 3 commits that have notes
-            let selected_commits: Vec<String> = all_notes
-                .iter()
-                .take(3)
-                .map(|(_, commit_sha)| commit_sha.clone())
-                .collect();
-
-            println!("Testing with commits: {:?}", selected_commits);
-
-            let start = Instant::now();
-            let files = load_ai_touched_files_for_commits(&repo, selected_commits.clone())
-                .await
-                .unwrap();
-            let elapsed = start.elapsed();
-
+        if all_notes.len() < 3 {
             println!(
-                "Found {} unique AI-touched files from 3 commits in {:?}",
-                files.len(),
-                elapsed
+                "Skipping test: only {} notes available, need at least 3",
+                all_notes.len()
             );
+            return;
+        }
 
-            // Show the files found
-            let mut sorted_files: Vec<_> = files.iter().collect();
-            sorted_files.sort();
-            for file in sorted_files.iter() {
-                println!("  {}", file);
-            }
+        // Pick 3 commits that have notes
+        let selected_commits: Vec<String> = all_notes
+            .iter()
+            .take(3)
+            .map(|(_, commit_sha)| commit_sha.clone())
+            .collect();
 
-            // Verify we got some results (since we picked commits with notes)
-            assert!(
-                !files.is_empty(),
-                "Should find files from commits with notes"
-            );
-        });
+        println!("Testing with commits: {:?}", selected_commits);
+
+        let start = Instant::now();
+        let files = load_ai_touched_files_for_commits(&repo, selected_commits.clone())
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        println!(
+            "Found {} unique AI-touched files from 3 commits in {:?}",
+            files.len(),
+            elapsed
+        );
+
+        // Show the files found
+        let mut sorted_files: Vec<_> = files.iter().collect();
+        sorted_files.sort();
+        for file in sorted_files.iter() {
+            println!("  {}", file);
+        }
+
+        // Verify we got some results (since we picked commits with notes)
+        assert!(
+            !files.is_empty(),
+            "Should find files from commits with notes"
+        );
     }
 
-    #[test]
-    fn test_load_ai_touched_files_for_nonexistent_commit() {
-        smol::block_on(async {
-            let repo = find_repository_in_path(".").unwrap();
+    #[tokio::test]
+    async fn test_load_ai_touched_files_for_nonexistent_commit() {
+        let repo = find_repository_in_path(".").unwrap();
 
-            // Use a fake SHA that doesn't exist
-            let fake_commits = vec![
-                "0000000000000000000000000000000000000000".to_string(),
-                "1111111111111111111111111111111111111111".to_string(),
-            ];
+        // Use a fake SHA that doesn't exist
+        let fake_commits = vec![
+            "0000000000000000000000000000000000000000".to_string(),
+            "1111111111111111111111111111111111111111".to_string(),
+        ];
 
-            let files = load_ai_touched_files_for_commits(&repo, fake_commits)
-                .await
-                .unwrap();
+        let files = load_ai_touched_files_for_commits(&repo, fake_commits)
+            .await
+            .unwrap();
 
-            // Should return empty set, not crash
-            assert!(
-                files.is_empty(),
-                "Should return empty set for non-existent commits"
-            );
-        });
+        // Should return empty set, not crash
+        assert!(
+            files.is_empty(),
+            "Should return empty set for non-existent commits"
+        );
     }
 
-    #[test]
-    fn test_load_ai_touched_files_empty_commits() {
-        smol::block_on(async {
-            let repo = find_repository_in_path(".").unwrap();
+    #[tokio::test]
+    async fn test_load_ai_touched_files_empty_commits() {
+        let repo = find_repository_in_path(".").unwrap();
 
-            let files = load_ai_touched_files_for_commits(&repo, vec![])
-                .await
-                .unwrap();
+        let files = load_ai_touched_files_for_commits(&repo, vec![])
+            .await
+            .unwrap();
 
-            assert!(files.is_empty(), "Should return empty set for empty input");
-        });
+        assert!(files.is_empty(), "Should return empty set for empty input");
     }
 
     #[test]

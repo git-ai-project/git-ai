@@ -31,7 +31,7 @@ impl Spinner {
 
     #[allow(dead_code)]
     pub async fn wait_for(&self, duration_ms: u64) {
-        smol::Timer::after(std::time::Duration::from_millis(duration_ms)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(duration_ms)).await;
     }
 
     pub fn success(&self, message: &str) {

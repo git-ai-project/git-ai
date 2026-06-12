@@ -263,7 +263,7 @@ fn execute_resolved_checkpoint(
     let trace_id = checkpoint_request.trace_id.clone();
 
     let entries_start = Instant::now();
-    let (entries, file_stats) = smol::block_on(get_checkpoint_entries(
+    let (entries, file_stats) = crate::tokio_runtime::block_on(get_checkpoint_entries(
         kind,
         author,
         repo,
@@ -438,21 +438,24 @@ fn save_current_file_states(
 
     let blobs_dir = working_log.dir.join("blobs");
     let dirty_files = working_log.dirty_files.clone();
+    let files = files.to_vec();
 
-    let file_content_hashes = smol::block_on(async {
-        let semaphore = Arc::new(smol::lock::Semaphore::new(8));
+    let file_content_hashes = crate::tokio_runtime::block_on(async {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(8));
         let blobs_dir = Arc::new(blobs_dir);
         let dirty_files = Arc::new(dirty_files);
 
-        let futures = files.iter().map(|file_path| {
-            let file_path = file_path.clone();
+        let mut futures = Vec::with_capacity(files.len());
+        for file_path in files {
             let blobs_dir = Arc::clone(&blobs_dir);
             let dirty_files = Arc::clone(&dirty_files);
             let semaphore = Arc::clone(&semaphore);
 
-            async move {
-                // Acquire semaphore permit
-                let _permit = semaphore.acquire().await;
+            futures.push(async move {
+                let _permit = semaphore
+                    .acquire_owned()
+                    .await
+                    .expect("file state semaphore was closed");
 
                 // Read file content - check dirty_files first, then filesystem
                 let content = if let Some(ref dirty_map) = *dirty_files {
@@ -467,21 +470,24 @@ fn save_current_file_states(
                     ))
                 })?;
 
-                // Create SHA256 hash of the content
-                let mut hasher = Sha256::new();
-                hasher.update(content.as_bytes());
-                let sha = format!("{:x}", hasher.finalize());
+                crate::tokio_runtime::spawn_blocking_result(move || {
+                    // Create SHA256 hash of the content
+                    let mut hasher = Sha256::new();
+                    hasher.update(content.as_bytes());
+                    let sha = format!("{:x}", hasher.finalize());
 
-                // Ensure blobs directory exists
-                std::fs::create_dir_all(&*blobs_dir)?;
+                    // Ensure blobs directory exists
+                    std::fs::create_dir_all(&*blobs_dir)?;
 
-                // Write content to blob file
-                let blob_path = blobs_dir.join(&sha);
-                std::fs::write(blob_path, content)?;
+                    // Write content to blob file
+                    let blob_path = blobs_dir.join(&sha);
+                    std::fs::write(blob_path, content)?;
 
-                Ok::<(String, String), GitAiError>((file_path, sha))
-            }
-        });
+                    Ok::<(String, String), GitAiError>((file_path, sha))
+                })
+                .await
+            });
+        }
 
         // Collect results from all concurrent operations
         let results: Vec<Result<(String, String), GitAiError>> =
@@ -840,7 +846,7 @@ async fn get_checkpoint_entries(
     const MAX_CONCURRENT: usize = 30;
 
     // Create a semaphore to limit concurrent tasks
-    let semaphore = Arc::new(smol::lock::Semaphore::new(MAX_CONCURRENT));
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
 
     // Move other repeated allocations outside the loop
     let previous_file_state_by_file = Arc::new(previous_file_state_by_file);
@@ -870,12 +876,13 @@ async fn get_checkpoint_entries(
         let initial_snapshot_contents = Arc::clone(&initial_snapshot_contents);
         let semaphore = Arc::clone(&semaphore);
 
-        let task = smol::spawn(async move {
-            // Acquire semaphore permit to limit concurrency
-            let _permit = semaphore.acquire().await;
+        let task = async move {
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .expect("checkpoint entry semaphore was closed");
 
-            // Wrap all the blocking git operations in smol::unblock
-            smol::unblock(move || {
+            crate::tokio_runtime::spawn_blocking_result(move || {
                 get_checkpoint_entry_for_file(
                     file_path,
                     kind,
@@ -892,7 +899,7 @@ async fn get_checkpoint_entries(
                 )
             })
             .await
-        });
+        };
 
         tasks.push(task);
     }
